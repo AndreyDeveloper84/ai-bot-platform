@@ -1,0 +1,37 @@
+# Runbooks
+
+Operational playbooks for the platform. Each runbook follows a 7-section template (see [`_template.md`](_template.md) — TBD) so on-call can scan a familiar structure under pressure.
+
+## Why skeletons now (Sprint 0)?
+
+When the time comes to actually run a procedure (rolling back the canary at 02:30, debugging a replay diff before launch, onboarding tenant #2), nobody has time to *also* design the procedure document. Skeleton = 80% structure already there; the remaining 20% is the muscle memory of the engineer who fills it in. Writing the skeleton now also forces us to predict every step — and discover the missing tools.
+
+## Index
+
+| Runbook | Status | Filled in sprint | Owner |
+|---|---|---|---|
+| [`tenant-onboarding.md`](tenant-onboarding.md) | skeleton | Sprint 9 | Lead |
+| [`replay-debugging.md`](replay-debugging.md) | skeleton | Sprint 5 | Dev1 |
+| [`incident-response.md`](incident-response.md) | skeleton | Sprint 9 (on-call rotation) | Lead |
+| [`rollback-procedure.md`](rollback-procedure.md) | skeleton | Sprint 8 (shadow mode) | Lead |
+| [`security-incident.md`](security-incident.md) | partial — reporting flow filled now | Sprint 9 (full IR plan) | Lead |
+
+`status` values:
+
+- **skeleton** — sections exist, content is TBD markers tied to a future sprint
+- **partial** — at least one section is real, the rest are still TBD
+- **draft** — all sections written but not exercised in a real incident
+- **complete** — survived at least one real exercise (game day or live incident)
+
+## When you fill a skeleton
+
+1. Drop the TBD blocks for sections you're filling.
+2. Bump status in this README.
+3. Add a "Last exercised" line near the top (date + link to incident / game-day notes).
+4. Keep a *Changelog* at the bottom — every meaningful edit a one-liner.
+
+## When you run a runbook
+
+1. Open it on one screen, terminal on the other. Follow it literally.
+2. Note any deviation as you go (sticky note / Slack DM to yourself).
+3. After the dust settles, write a one-line *Post-mortem* in the runbook's Changelog plus a full incident report if anything broke.
