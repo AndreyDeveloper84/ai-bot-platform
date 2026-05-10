@@ -30,11 +30,20 @@ dependencies = [
     "openai>=1.50",
     "httpx>=0.27",
     "django-cryptography-django5==2.2",
-    "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0",
     "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
+
+# ayla-ai-core is a separate private repo. Pulling it requires GitHub
+# auth (locally via ssh, in CI via a GH_DEPLOY_TOKEN secret). It's split
+# off into its own extra so plain `uv sync --extra dev` works without
+# auth — CI uses that. Local dev that touches AI integration uses
+# `uv sync --extra dev --extra ai-core`.
+ai-core = [
+    "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0",
+]
+
 dev = [
     "pytest>=8",
     "pytest-django>=4.11",

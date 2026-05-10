@@ -13,7 +13,6 @@ name = "ai-bot-platform"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "ayla-ai-core" },
     { name = "celery", extra = ["redis"] },
     { name = "chromadb" },
     { name = "django" },
@@ -27,6 +26,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+ai-core = [
+    { name = "ayla-ai-core" },
+]
 dev = [
     { name = "django-stubs", extra = ["compatible-mypy"] },
     { name = "model-bakery" },
@@ -41,7 +43,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ayla-ai-core", git = "https://github.com/AndreyDeveloper84/ayla-ai-core.git?rev=v0.6.0" },
+    { name = "ayla-ai-core", marker = "extra == 'ai-core'", git = "https://github.com/AndreyDeveloper84/ayla-ai-core.git?rev=v0.6.0" },
     { name = "celery", extras = ["redis"], specifier = ">=5.4" },
     { name = "chromadb", specifier = ">=0.5" },
     { name = "django", specifier = ">=5.2,<6.0" },
@@ -62,7 +64,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["ai-core", "dev"]
 
 [[package]]
 name = "amqp"

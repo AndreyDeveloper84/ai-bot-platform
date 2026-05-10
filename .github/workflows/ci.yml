@@ -73,13 +73,12 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      # NOTE: `--no-install-package ayla-ai-core` is a Sprint 0 workaround.
-      # ai-bot-platform repo can't pull from the private ayla-ai-core repo
-      # without a GH_DEPLOY_TOKEN secret. Once that secret is configured
-      # (followed by `git config url.<token>@github.com.insteadOf github.com`
-      # step before sync), drop the flag.
-      - name: uv sync (skip ayla-ai-core until deploy token is set)
-        run: uv sync --extra dev --frozen --no-install-package ayla-ai-core
+      # CI installs only `--extra dev`. The `ai-core` extra (ayla-ai-core
+      # from a private git repo) requires a GH_DEPLOY_TOKEN secret which
+      # is not configured yet. Once added, the workflow can opt in with
+      # `--extra ai-core` and a `git config insteadOf` step.
+      - name: uv sync
+        run: uv sync --extra dev --frozen
 
       - name: ruff check
         run: uv run ruff check .
