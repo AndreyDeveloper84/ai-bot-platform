@@ -1,0 +1,46 @@
+# Pre-commit hooks for ai-bot-platform.
+#
+# Setup once after clone:
+#   uv run pre-commit install
+#
+# Run on demand:
+#   uv run pre-commit run --all-files
+#
+# Hooks run on staged files automatically before each `git commit`.
+# Defends against trivial mistakes that should never reach CI:
+# style drift, accidental secret commits, broken yaml/json, trailing
+# whitespace, missing newlines at EOF.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+        exclude: ^docker-compose.*\.yml$  # uses GitHub Actions ${{ }} which yamllint flags
+      - id: check-json
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-toml
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: |
+          (?x)^(
+            \.secrets\.baseline|
+            uv\.lock|
+            .*\.lock|
+            tests/fixtures/.*
+          )$

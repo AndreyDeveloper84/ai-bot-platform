@@ -56,18 +56,47 @@ The 20 apps and the sprint that puts code in each:
 ## Quickstart (Sprint 0)
 
 ```powershell
-# 1. Create venv and install minimal deps
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+# 1. Install deps (uv expected on PATH — see "Install uv" below)
+uv sync --extra dev
 
-# 2. Verify the scaffold
-python manage.py check
-python manage.py migrate
-pytest tests/smoke/
+# 2. Install pre-commit hooks (one-time per clone)
+uv run pre-commit install
+
+# 3. Verify the scaffold
+uv run python manage.py check
+uv run python manage.py migrate
+uv run pytest tests/smoke/
 ```
 
-Full Postgres / Redis / chromadb / MinIO stack arrives in Sprint 0 / A2 (`DRF-404`). For now SQLite is enough.
+Full Postgres / Redis / chromadb / MinIO stack lives in Sprint 0 / A2 (`docker compose up`). The host-side flow above uses SQLite.
+
+### Install uv
+
+uv is the project's package manager (PEP 735, deterministic locks). It must live outside `.venv` because it creates the venv:
+
+```powershell
+# Astral installer (preferred):
+irm https://astral.sh/uv/install.ps1 | iex
+
+# Or via pipx:
+pipx install uv
+
+# Or via system Python:
+python -m pip install --user uv
+```
+
+### Pre-commit hooks
+
+After `uv run pre-commit install`, every `git commit` runs locally:
+- `ruff check` + `ruff format`
+- `detect-secrets` (block accidental token commits — bypass with `pragma: allowlist secret` if false positive)
+- `check-yaml`, `check-toml`, `check-json`, `trailing-whitespace`, `end-of-file-fixer`, `check-merge-conflict`, `check-added-large-files`
+
+To run all hooks against the whole repo on demand:
+
+```powershell
+uv run pre-commit run --all-files
+```
 
 ## Migration context
 
