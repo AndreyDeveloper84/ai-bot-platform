@@ -1,0 +1,36 @@
+# Sprint 0 / B4 — skeleton placeholder.
+#
+# Replay infrastructure (golden / adversarial / voice fixtures) lands in
+# Sprint 5 (DRF-XXX) per docs/architecture.md and ADR-0001..0006.
+# This workflow will eventually:
+#   - download fixtures from S3 (MinIO/replay-bucket)
+#   - rehydrate ReplayTrace via apps.replay
+#   - re-run the pipeline against pinned model versions
+#   - diff the responses + fail the build on regression
+#
+# For Sprint 0 it just demonstrates that the workflow is registered.
+
+name: replay
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run nightly placeholder so `gh workflow list` always shows recent runs.
+    # Disabled in Sprint 5 once real replay logic ships and we move to
+    # PR-triggered runs.
+    - cron: "37 3 * * *"
+
+jobs:
+  placeholder:
+    name: replay (skeleton)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print replay plan
+        run: |
+          echo "::notice::Sprint 0 placeholder — no replay performed."
+          echo "Real replay machinery lands in Sprint 5 (apps.replay)."
+          echo "Fixture types: golden, adversarial, voice."

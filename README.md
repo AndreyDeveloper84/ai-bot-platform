@@ -1,5 +1,7 @@
 # ai-bot-platform
 
+[![ci](https://github.com/AndreyDeveloper84/ai-bot-platform/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AndreyDeveloper84/ai-bot-platform/actions/workflows/ci.yml)
+
 Multi-tenant AI bot platform — Phase 0.
 
 > Status: **Sprint 0 / A1 scaffold.** Not production-ready. Boots Django with 20 empty apps. Real implementation lands sprint-by-sprint over weeks 1–22.

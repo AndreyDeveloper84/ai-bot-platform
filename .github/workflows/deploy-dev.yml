@@ -1,0 +1,34 @@
+# Sprint 0 / B4 — skeleton placeholder.
+#
+# Real deploy machinery lands in Sprint 9 (DRF-XXX) once we know the
+# target host (formula_tela_dev box vs new server) and the rollout
+# strategy (shadow → canary 10% → 50% → 100%). For now this workflow
+# only confirms the trigger graph and prints what *would* happen.
+
+name: deploy-dev
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  placeholder:
+    name: deploy-dev (skeleton)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print deploy plan
+        run: |
+          echo "::notice::Sprint 0 placeholder — no deploy performed."
+          echo "Triggered by ${{ github.event_name }} on ${{ github.ref }}."
+          echo "Real deploy steps land in Sprint 9 (shadow + canary)."
+          echo "Carry-over reference: mysite/.github/workflows/deploy.yml"

@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - "feat/**"
+      - "fix/**"
+      - "chore/**"
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + ruff + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ai_bot_platform
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d ai_bot_platform"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_bot_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      REDIS_URL: redis://localhost:6379/0
+      OPENAI_API_KEY: ci-fake-key-not-real
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.12"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      # NOTE: `--no-install-package ayla-ai-core` is a Sprint 0 workaround.
+      # ai-bot-platform repo can't pull from the private ayla-ai-core repo
+      # without a GH_DEPLOY_TOKEN secret. Once that secret is configured
+      # (followed by `git config url.<token>@github.com.insteadOf github.com`
+      # step before sync), drop the flag.
+      - name: uv sync (skip ayla-ai-core until deploy token is set)
+        run: uv sync --extra dev --frozen --no-install-package ayla-ai-core
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format check
+        run: uv run ruff format --check .
+
+      - name: Django manage.py check
+        run: uv run python manage.py check
+
+      - name: pytest tests/smoke/
+        run: uv run pytest tests/smoke/ -v
+
+      # mypy is a soft gate in Sprint 0 — strict=False, no type errors expected
+      # on empty AppConfigs. Tightens up sprint-by-sprint as code lands.
+      - name: mypy (advisory)
+        run: uv run mypy apps config tests || echo "::warning::mypy advisory failures (non-blocking in Sprint 0)"
