@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 
-from celery import Celery  # type: ignore[import-not-found]
+from celery import Celery  # type: ignore[import-untyped]
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.local")
 

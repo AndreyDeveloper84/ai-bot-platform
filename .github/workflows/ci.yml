@@ -92,7 +92,9 @@ jobs:
       - name: pytest tests/smoke/
         run: uv run pytest tests/smoke/ -v
 
-      # mypy is a soft gate in Sprint 0 — strict=False, no type errors expected
-      # on empty AppConfigs. Tightens up sprint-by-sprint as code lands.
-      - name: mypy (advisory)
-        run: uv run mypy apps config tests || echo "::warning::mypy advisory failures (non-blocking in Sprint 0)"
+      # mypy is blocking. `strict=False` keeps the bar reasonable while
+      # apps/ are mostly empty AppConfigs; tighten to strict per-package
+      # as real code lands. New untyped imports must add stubs or
+      # `# type: ignore[<code>]` rather than slip through.
+      - name: mypy
+        run: uv run mypy apps config tests
