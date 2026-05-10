@@ -4,6 +4,7 @@ Sprint 0 / A1 ships a placeholder. Wired up in Sprint 1 with broker URL,
 acks_late + reject_on_worker_lost, and per-task time limits per
 docs/architecture.md ADR-0004 + carry-over of mysite Celery hardening.
 """
+
 from __future__ import annotations
 
 import os

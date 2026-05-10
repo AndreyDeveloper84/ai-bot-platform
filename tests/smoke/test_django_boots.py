@@ -9,6 +9,7 @@ Boundary contract for Sprint 0:
 Heavier integration smokes (DB connectivity, Celery roundtrip, channels
 ingress) land sprint-by-sprint per docs/architecture.md.
 """
+
 from __future__ import annotations
 
 import pytest
