@@ -90,13 +90,28 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
-# SQLite in Sprint 0 — Postgres lands in Sprint 0 / A2 (DRF-404, docker compose).
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+# Database routing:
+#   - When POSTGRES_HOST is set (docker compose / staging / prod) → Postgres.
+#   - Otherwise SQLite for fast local boot without docker.
+# Full DATABASE_URL parsing lands in Sprint 9 (production hardening).
+if os.environ.get("POSTGRES_HOST"):
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_DB", "ai_bot_platform"),
+            "USER": os.environ.get("POSTGRES_USER", "platform"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "platform"),
+            "HOST": os.environ["POSTGRES_HOST"],
+            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
