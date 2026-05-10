@@ -1,0 +1,60 @@
+# CODEOWNERS for ai-bot-platform.
+#
+# Format: <pattern> <owner1> <owner2> ...
+# GitHub uses the LAST matching pattern that applies.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Owners listed here are auto-requested as reviewers on every PR that
+# touches a matching path. Whether their review is *required* before
+# merge depends on the branch protection rules — set those in GitHub
+# UI (Settings → Branches → Branch protection rule for `main`).
+#
+# Multi-reviewer rules (Dev1 / Dev2) will be added once their GitHub
+# usernames are confirmed. Until then everything routes to the Lead.
+
+# Default — every PR routes to Lead until team is set up.
+* @AndreyDeveloper84
+
+# ---------------------------------------------------------------------
+# Critical paths — Lead review mandatory
+# ---------------------------------------------------------------------
+# These directories carry blast-radius risk that justifies tightest
+# review. Adding sub-owners here is a deliberate, project-level
+# decision (see docs/adr/).
+
+# Tenancy: tenant_id propagation, scope enforcement (ADR-0001/0003).
+# Bug here cross-contaminates tenants → contractual breach.
+apps/tenancy/                @AndreyDeveloper84
+apps/tenancy/**              @AndreyDeveloper84
+
+# Orchestrator safety: rate limits, circuit breakers, prompt
+# injection defences. Bug here = uncontrolled LLM cost or unsafe
+# behaviour reaching users.
+apps/orchestrator/safety/    @AndreyDeveloper84
+apps/orchestrator/safety/**  @AndreyDeveloper84
+
+# Replay: PII redaction lives here. Mistake = leak of user data
+# into fixtures / S3 / debugging artefacts.
+apps/replay/                 @AndreyDeveloper84
+apps/replay/**               @AndreyDeveloper84
+
+# Migrations everywhere — irreversible in prod, ordering-sensitive,
+# tenancy-aware. Lead must review every schema change.
+**/migrations/               @AndreyDeveloper84
+**/migrations/**             @AndreyDeveloper84
+
+# CI / CD / secrets / settings — anything that affects how the
+# platform builds, deploys, or boots.
+.github/                     @AndreyDeveloper84
+.github/**                   @AndreyDeveloper84
+config/settings/             @AndreyDeveloper84
+config/settings/**           @AndreyDeveloper84
+Dockerfile                   @AndreyDeveloper84
+docker-compose.yml           @AndreyDeveloper84
+pyproject.toml               @AndreyDeveloper84
+uv.lock                      @AndreyDeveloper84
+
+# ADRs and architecture docs — decisions that bind future work.
+docs/adr/                    @AndreyDeveloper84
+docs/adr/**                  @AndreyDeveloper84
+docs/architecture.md         @AndreyDeveloper84
