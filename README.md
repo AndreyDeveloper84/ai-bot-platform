@@ -1,2 +1,10 @@
 # ai-bot-platform
-Multi-tenant AI bot platform for beauty/wellness salons. Skills, tools, tenants, RAG, memory, safety, analytics, integrations. Depends on ayla-ai-core.
+ai-bot-platform — отдельный backend-сервис для AI-бота салона/платформы.
+
+Сервис отвечает за:
+- AI-консультации;
+- маршрутизацию намерений пользователя;
+- RAG по базе знаний;
+- интеграции с MAX, сайтом, YClients и будущим мобильным приложением;
+- хранение диалогового состояния;
+- аналитику сценариев.
