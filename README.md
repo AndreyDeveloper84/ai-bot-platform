@@ -76,3 +76,5 @@ This repo replaces `formula_tela/mysite/maxbot/` (frozen since 2026-05-09 — se
 ## Linear
 
 [`ai-bot-platform Phase 0`](https://linear.app/drfproject/project/ai-bot-platform-phase-0-87eeee7605dd)
+
+<!-- B5 acceptance probe — CODEOWNERS for README.md only (default rule) -->
