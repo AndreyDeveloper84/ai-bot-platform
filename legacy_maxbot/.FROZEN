@@ -1,0 +1,51 @@
+# mysite/maxbot/ is FROZEN as migration source-of-truth
+
+**Date frozen:** 2026-05-09
+**Reason:** Code is being migrated to `github.com/AndreyDeveloper84/ai-bot-platform`
+**Linked Linear project:** https://linear.app/drfproject/project/ai-bot-platform-phase-0-87eeee7605dd
+**Migration plan:** `mysite/docs/arch/PHASE0_DESIGN.md` v2 §2
+
+---
+
+## Freeze Policy
+
+This directory is a snapshot used by `ai-bot-platform/legacy_maxbot/` as the AS-IS reference for the migration. Drift between `mysite/maxbot/` and `legacy_maxbot/` defeats the purpose of the freeze.
+
+### What is allowed
+
+- **Critical security fixes only.** A security fix MUST be cherry-picked into `ai-bot-platform/legacy_maxbot/` in the same PR window (within 24 hours).
+- **Configuration adjustments** that are pure-data (env vars, feature flags, BotUser admin actions) — these don't need cherry-pick.
+
+### What is FORBIDDEN
+
+- New features
+- Refactoring (even small)
+- New tests for existing behavior
+- Dependency upgrades (besides security)
+- New tools / handlers / skills
+- Changes to ai_concierge.py / ai_tools.py / ai_action_service.py / ai_context.py
+- Changes to handlers/* (the 9 routers)
+- Changes to services/nutrition_client.py beyond critical bug-fixes
+
+### Why
+
+Phase 0 builds `ai-bot-platform` over **20 weeks** (see [PHASE0_DESIGN.md](../../docs/arch/PHASE0_DESIGN.md) §2.3). During those 20 weeks, `mysite/maxbot/` is the production source until Sprint 8 shadow mode + Sprint 9-10 cutover. New work in this directory creates drift that has to be re-migrated.
+
+### Process for emergency changes
+
+1. **Open Linear ticket** explaining why this can't wait until Phase 0 cutover.
+2. **Tag tech lead** in PR for review.
+3. **PR title format:** `[FROZEN-EXEMPT] <change description>`.
+4. **PR body MUST include:**
+   - Why this can't wait (incident link / security advisory).
+   - Cherry-pick plan: which commit will land in `ai-bot-platform/legacy_maxbot/`.
+   - Risk assessment.
+5. **Merge requires tech lead approval** (CODEOWNERS enforces this).
+
+### Lifting the freeze
+
+The freeze is lifted when **Sprint 10 (week 21-22) completes** and 100% MAX traffic runs on `ai-bot-platform`. At that point `mysite/maxbot/` becomes archive-only and can be deleted in a subsequent cleanup PR.
+
+---
+
+**TL;DR:** No new code in `mysite/maxbot/`. Build new things in `ai-bot-platform/`. If you absolutely must change something here, cherry-pick to `legacy_maxbot/` same PR.

@@ -75,11 +75,15 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# legacy_*/ are AS-IS migration sources — they follow the source repo's
+# style, not the platform's. Drained sprint-by-sprint into apps/.
+extend-exclude = ["legacy_maxbot", "legacy_formulatela_mcp", "legacy_notifications"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = false
 plugins = ["mypy_django_plugin.main"]
+exclude = ["^legacy_maxbot/", "^legacy_formulatela_mcp/", "^legacy_notifications/"]
 
 [tool.django-stubs]
 django_settings_module = "config.settings.local"

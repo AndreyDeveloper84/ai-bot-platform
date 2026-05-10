@@ -42,5 +42,8 @@ repos:
             \.secrets\.baseline|
             uv\.lock|
             .*\.lock|
-            tests/fixtures/.*
+            tests/fixtures/.*|
+            legacy_maxbot/.*|
+            legacy_formulatela_mcp/.*|
+            legacy_notifications/.*
           )$

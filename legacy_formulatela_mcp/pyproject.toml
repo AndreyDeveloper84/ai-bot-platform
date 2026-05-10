@@ -1,0 +1,25 @@
+[project]
+name = "formulatela-mcp"
+version = "0.1.0"
+description = "MCP server для AI-помощника MAX-бота formulatela58.ru — FAQ search via RAG, услуги, мастера, запись"
+requires-python = ">=3.10"
+authors = [{name = "Formula Tela"}]
+dependencies = [
+    # mcp использует semver. Актуальная стабильная серия 1.27 (на 2026-04-25).
+    # Pin <2.0 чтобы поймать breaking-changes в major-релизе.
+    "mcp[cli]>=1.20.0,<2.0",
+    "chromadb>=0.5.0,<2.0",
+    "openai>=1.50.0,<3.0",
+    # Django ORM импортируется через django.setup() из основного проекта,
+    # сама Django УЖЕ установлена в .venv312 родительского репо.
+]
+
+[project.scripts]
+formulatela-mcp = "formulatela_mcp.main:cli"
+
+[build-system]
+requires = ["setuptools>=68.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
