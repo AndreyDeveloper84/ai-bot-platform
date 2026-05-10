@@ -70,6 +70,20 @@ include = ["config*", "apps*"]
 DJANGO_SETTINGS_MODULE = "config.settings.local"
 python_files = ["test_*.py", "*_test.py"]
 testpaths = ["tests"]
+# Defence in depth: testpaths already restricts collection to tests/,
+# but norecursedirs guarantees pytest never wanders into legacy_*
+# even if someone passes a wider path.
+norecursedirs = [
+    "legacy_maxbot",
+    "legacy_formulatela_mcp",
+    "legacy_notifications",
+    ".venv",
+    ".git",
+    "node_modules",
+    "*.egg",
+    "build",
+    "dist",
+]
 addopts = "-q"
 
 [tool.ruff]
@@ -78,6 +92,18 @@ target-version = "py312"
 # legacy_*/ are AS-IS migration sources — they follow the source repo's
 # style, not the platform's. Drained sprint-by-sprint into apps/.
 extend-exclude = ["legacy_maxbot", "legacy_formulatela_mcp", "legacy_notifications"]
+
+[tool.ruff.lint]
+# TID251 = banned-api / banned-module-level-imports. Stops apps/ from
+# accidentally pulling legacy_* code while migration is in flight.
+# Override per-line with `# noqa: TID251` only for transitional glue
+# documented in legacy_*/MIGRATION_NOTICE.md (must include `# TODO(sprint N)`).
+extend-select = ["TID"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"legacy_maxbot".msg = "legacy_maxbot is read-only migration reference. Build new code in apps/. Transitional glue requires `# noqa: TID251` + `# TODO(sprint N)` per legacy_maxbot/MIGRATION_NOTICE.md."
+"legacy_formulatela_mcp".msg = "legacy_formulatela_mcp is read-only migration reference. New code goes in apps/kb/."
+"legacy_notifications".msg = "legacy_notifications is read-only migration reference. New code goes in apps/channels/."
 
 [tool.mypy]
 python_version = "3.12"
