@@ -183,6 +183,37 @@ class TestTraceIdPropagation:
         assert sent_event.trace_id == str(trace)
 
 
+class TestIdempotencyDedup:
+    """Sprint 2.5 H4 regression: handler wrap in with_idempotency prevents
+    duplicate Message rows / outbound sends when the consumer's PEL
+    retries the same event (e.g. handler crashed mid-send).
+    """
+
+    def test_same_channel_message_id_twice_dedup(self, tenant_a, mock_send, fake_redis, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        trace = uuid4()
+        with tenant_scope(tenant_a), trace_id_scope(str(trace)):
+            # First call — full pipeline runs.
+            max_handler.handle_max_event(_payload(text="hi", mid="same-mid-1"))
+            # Second call with same mid — must short-circuit on AlreadyClaimed.
+            max_handler.handle_max_event(_payload(text="hi", mid="same-mid-1"))
+
+        # Exactly 1 BotUser + 1 Conversation + 2 Messages (user + assistant).
+        # Second call did NOT add another set of rows.
+        assert BotUser.all_tenants.count() == 1
+        assert Conversation.all_tenants.count() == 1
+        assert Message.all_tenants.count() == 2
+
+        # Outbound send called once, not twice.
+        assert len(mock_send) == 1
+
+        # Dedup event emitted.
+        dedup_events = Event.objects.filter(
+            tenant=tenant_a, event_type="channels.max.handler.dedup"
+        )
+        assert dedup_events.exists()
+
+
 class TestOutboundFailure:
     def test_max_api_error_propagates_after_persisting_assistant_message(
         self, tenant_a, fake_redis, settings, monkeypatch

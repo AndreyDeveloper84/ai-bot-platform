@@ -70,6 +70,7 @@ from apps.conversations.services import record_message, resolve_active_conversat
 from apps.events.services import emit
 from apps.identity.services import resolve_or_create_bot_user
 from apps.orchestrator.memory import short_term
+from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,15 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
       trace_id: optional explicit trace identifier (the consumer
                 normally sets `current_trace_id()` ContextVar; this
                 arg is for direct-call testing).
+
+    Idempotency (Sprint 2.5 H4):
+      Wrapped in `with_idempotency` keyed on
+      `webhook:max:{channel_message_id}`. Under PEL retries (consumer
+      crash / handler exception), the second invocation hits
+      `AlreadyClaimed` and short-circuits — preventing duplicate
+      Message rows, duplicate memory appends, and duplicate outbound
+      sends. The first invocation's outbound MaxAPIError still
+      propagates (retry policy on MAX API side, not ours).
     """
 
     event = parse_max_webhook(payload)
@@ -124,6 +134,28 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
         len(event.text),
         len(event.attachments),
     )
+
+    idempotency_key = f"webhook:max:{event.channel_message_id or event.channel_user_id}"
+    try:
+        with with_idempotency(idempotency_key, ttl_seconds=86_400):
+            _handle_max_event_inner(event, trace_id)
+    except AlreadyClaimed:
+        logger.info(
+            "channels.max.handler.dedup_short_circuit channel_message_id=%s",
+            event.channel_message_id,
+        )
+        emit(
+            "channels.max.handler.dedup",
+            payload={
+                "channel_message_id": event.channel_message_id,
+                "idempotency_key": idempotency_key,
+            },
+        )
+        return
+
+
+def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
+    """Inner pipeline — parse-already-done caller. Side-effects only."""
 
     bot_user = resolve_or_create_bot_user(
         channel=event.channel,
