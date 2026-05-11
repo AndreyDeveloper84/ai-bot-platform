@@ -54,9 +54,16 @@ EXCLUDED_PATH_PREFIXES = (
 )
 
 # Paths that REQUIRE a tenant header when STRICT_TENANT_SCOPE="strict".
-# /api/v1/auth/* is the only opt-out: registration handshake is pre-tenant.
+# Opt-outs are paths that resolve tenancy from a non-header source
+# (channel-token mapping in ingress, registration handshake in auth).
 STRICT_REQUIRED_PREFIXES = ("/api/v1/",)
-STRICT_OPT_OUT_PREFIXES = ("/api/v1/auth/",)
+STRICT_OPT_OUT_PREFIXES = (
+    "/api/v1/auth/",
+    # Sprint 2 / D4: webhook receivers resolve tenant from
+    # channel-token → tenant mapping (apps.ingress.services._resolve_tenant)
+    # before any view code runs. The X-Tenant header is never present.
+    "/api/v1/ingress/",
+)
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.
 VALID_SCOPE_MODES = ("audit", "strict", "off")

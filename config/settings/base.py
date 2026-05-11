@@ -93,6 +93,22 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "90"))
 IDEMPOTENCY_KEY_RETENTION_DAYS = int(os.environ.get("IDEMPOTENCY_KEY_RETENTION_DAYS", "7"))
 
+# Sprint 2 / C1 — short-term Redis memory window depth + TTL.
+# Caller (apps/orchestrator/memory/short_term.py) reads these on every
+# append; runtime-changeable via settings override in tests.
+SHORT_TERM_MEMORY_DEPTH = int(os.environ.get("SHORT_TERM_MEMORY_DEPTH", "20"))
+SHORT_TERM_MEMORY_TTL_SECONDS = int(os.environ.get("SHORT_TERM_MEMORY_TTL_SECONDS", str(24 * 3600)))
+
+# Sprint 2 / D2 + D4 — MAX channel configuration.
+MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
+MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
+MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
+
+# Sprint 1 / C1 channel token map. Format env CHANNEL_TOKEN_TO_TENANT_SLUG:
+# ``"token1=tenant-a,token2=tenant-b"``. Sprint 4 replaces with
+# encrypted-on-tenant lookup (ADR-0006).
+CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", "")
+
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [
