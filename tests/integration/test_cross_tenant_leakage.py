@@ -334,6 +334,32 @@ def test_scanner_finds_expected_sprint3_models():
     )
 
 
+def test_scanner_finds_expected_sprint4_models():
+    """Sanity: Sprint 4 lands 6 new tenant-scoped models.
+
+    - PromptVersion / ThresholdConfig / DisclaimerLibrary (A1+A2+A3 promptreg)
+    - Experiment / UserAssignment / Holdout (B1 experiments)
+
+    Each carries tenant FK + TenantScopedManager, so auto-discovery
+    must surface all 6. Per Sprint 4 / G2 (DRF-495).
+    """
+
+    names = {m.__name__ for m in SCANNED_MODELS}
+    sprint4_expected = {
+        "PromptVersion",
+        "ThresholdConfig",
+        "DisclaimerLibrary",
+        "Experiment",
+        "UserAssignment",
+        "Holdout",
+    }
+    sprint4_missing = sprint4_expected - names
+    assert not sprint4_missing, (
+        f"Sprint 4 expected scanner to find {sprint4_expected}; "
+        f"missing: {sprint4_missing}. Got: {names}."
+    )
+
+
 @pytest.mark.parametrize("model", SCANNED_MODELS, ids=lambda m: m.__name__)
 class TestEveryScopedModel:
     """Each tenant-scoped model honors the same three-mode contract."""
