@@ -80,17 +80,39 @@ def with_idempotency(
             )
     except IntegrityError:
         # Someone else won the race or a prior call already claimed.
-        existing = IdempotencyKey.objects.get(key=key)
-        if existing.expires_at > timezone.now():
-            raise AlreadyClaimed(existing) from None
-        # Expired claim — reset it (rare path: post-TTL retry).
+        # Sprint 2.5 H2: previous implementation did `existing.delete() +
+        # objects.create()` on the expired branch, which races: two
+        # concurrent retries whose key just expired both passed the check
+        # and both tried `delete + create` — the loser hit IntegrityError
+        # outside the try block and propagated a 500. Replaced with
+        # `select_for_update` + atomic reset so the loser blocks on the
+        # row lock and exits with `AlreadyClaimed` against the winner's
+        # fresh row.
         with transaction.atomic():
-            existing.delete()
-            row = IdempotencyKey.objects.create(
-                key=key,
-                tenant=tenant,
-                expires_at=expires_at,
-                payload=payload or {},
-            )
+            try:
+                existing = IdempotencyKey.objects.select_for_update().get(key=key)
+            except IdempotencyKey.DoesNotExist:
+                # Winner's row got deleted between the IntegrityError
+                # and our lock-acquire. Retry the original create.
+                row = IdempotencyKey.objects.create(
+                    key=key,
+                    tenant=tenant,
+                    expires_at=expires_at,
+                    payload=payload or {},
+                )
+            else:
+                if existing.expires_at > timezone.now():
+                    raise AlreadyClaimed(existing) from None
+                # Expired claim — reset in-place inside the row lock.
+                # Use .update() not .save() so the timestamp bump is a
+                # single statement and we don't race against a parallel
+                # caller who already passed the expires_at check.
+                IdempotencyKey.objects.filter(pk=existing.pk).update(
+                    tenant=tenant,
+                    expires_at=expires_at,
+                    payload=payload or {},
+                )
+                existing.refresh_from_db()
+                row = existing
 
     yield row

@@ -112,28 +112,44 @@ def _prune_old_failures(core: _BreakerCore, now: float) -> None:
 def _record_success(core: _BreakerCore) -> None:
     """A successful call — reset failure count and close half-open if needed."""
 
+    transition_pair: tuple[State, State, int] | None = None
     with core.lock:
         if core.state == State.HALF_OPEN:
-            _transition(core, State.CLOSED)
+            transition_pair = _transition(core, State.CLOSED)
         core.failures.clear()
+    if transition_pair is not None:
+        _alert_after_lock(core.name, transition_pair)
 
 
 def _record_failure(core: _BreakerCore) -> None:
     """A failed call — increment count; may trip from closed → open."""
 
     now = _now()
+    transition_pair: tuple[State, State, int] | None = None
     with core.lock:
         _prune_old_failures(core, now)
         core.failures.append(now)
         if core.state == State.HALF_OPEN:
             # Half-open probe failed → re-open immediately.
-            _transition(core, State.OPEN, now=now)
+            transition_pair = _transition(core, State.OPEN, now=now)
         elif core.state == State.CLOSED and len(core.failures) >= core.threshold:
-            _transition(core, State.OPEN, now=now)
+            transition_pair = _transition(core, State.OPEN, now=now)
+    if transition_pair is not None:
+        _alert_after_lock(core.name, transition_pair)
 
 
-def _transition(core: _BreakerCore, new_state: State, *, now: float | None = None) -> None:
-    """Move to ``new_state``. Caller holds core.lock."""
+def _transition(
+    core: _BreakerCore, new_state: State, *, now: float | None = None
+) -> tuple[State, State, int]:
+    """Move to ``new_state``. Caller holds core.lock.
+
+    Returns the (old_state, new_state, failures_count) tuple so the
+    caller can fire the Telegram alert AFTER releasing the lock — per
+    Sprint 2.5 H8: alert delivery latency must not block other callers
+    holding `core.lock`. The alert path imports legacy_notifications
+    via importlib, which does network I/O; the lock would gate every
+    concurrent LLM caller on that I/O latency.
+    """
 
     old = core.state
     core.state = new_state
@@ -149,33 +165,46 @@ def _transition(core: _BreakerCore, new_state: State, *, now: float | None = Non
         new_state.value,
         len(core.failures),
     )
+    return old, new_state, len(core.failures)
 
-    # E2 — fire-and-forget Telegram alert on every state transition.
-    # The alert helper is best-effort (never raises) and short-circuits
-    # when `ADMIN_MAX_CHAT_ID` is unset (dev/CI default). We import
-    # lazily to keep the breaker module free of Django settings
-    # coupling at import time.
+
+def _alert_after_lock(name: str, transition_pair: tuple[State, State, int]) -> None:
+    """Fire Telegram alert outside the breaker's `core.lock`.
+
+    Sprint 2.5 H8: the alert helper is best-effort (never raises) and
+    short-circuits when `ADMIN_MAX_CHAT_ID` is unset (dev/CI default).
+    Calling this OUTSIDE the lock means a slow Telegram send doesn't
+    block other LLM callers waiting on `_record_success` /
+    `_record_failure`. Import is lazy to keep this module free of
+    Django settings coupling at import time.
+    """
+
+    old, new_state, failures = transition_pair
     try:
         from apps.orchestrator.llm.telegram_alert import send_breaker_alert
 
         send_breaker_alert(
-            provider=core.name,
+            provider=name,
             transition=f"{old.value} → {new_state.value}",
-            details={"failures": len(core.failures)},
+            details={"failures": failures},
         )
     except Exception:  # noqa: BLE001 — alerting must NEVER break breaker
-        logger.exception("llm.breaker.alert_failed name=%s", core.name)
+        logger.exception("llm.breaker.alert_failed name=%s", name)
 
 
 def _check_state(core: _BreakerCore) -> State:
     """Look at the current state, auto-promoting open → half-open after cooldown."""
 
+    transition_pair: tuple[State, State, int] | None = None
     with core.lock:
         if core.state == State.OPEN:
             assert core.opened_at is not None
             if _now() - core.opened_at >= core.cooldown_seconds:
-                _transition(core, State.HALF_OPEN)
-        return core.state
+                transition_pair = _transition(core, State.HALF_OPEN)
+        state = core.state
+    if transition_pair is not None:
+        _alert_after_lock(core.name, transition_pair)
+    return state
 
 
 async def with_circuit_breaker(
@@ -219,11 +248,15 @@ async def with_circuit_breaker(
     # (b) reserve the single probe slot in HALF_OPEN so concurrent
     # callers are short-circuited. Releasing before the upstream call
     # would let N callers all grab the same probe slot.
+    # Sprint 2.5 H8: capture transition for post-lock alert. We can't
+    # fire the alert inside the lock because the alert path does I/O
+    # that would block other callers waiting on `core.lock`.
+    pending_transition: tuple[State, State, int] | None = None
     with core.lock:
         if core.state == State.OPEN:
             assert core.opened_at is not None
             if _now() - core.opened_at >= core.cooldown_seconds:
-                _transition(core, State.HALF_OPEN)
+                pending_transition = _transition(core, State.HALF_OPEN)
         if core.state == State.OPEN:
             logger.info("llm.breaker.short_circuit name=%s state=open", name)
             raise BreakerOpenError(
@@ -242,6 +275,11 @@ async def with_circuit_breaker(
             is_probe = True
         else:
             is_probe = False
+
+    # Fire the OPEN → HALF_OPEN auto-promotion alert outside the lock
+    # (Sprint 2.5 H8: alert I/O must not block other LLM callers).
+    if pending_transition is not None:
+        _alert_after_lock(core.name, pending_transition)
 
     try:
         result = await fn(*args, **kwargs)
