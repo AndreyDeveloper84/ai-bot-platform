@@ -90,6 +90,9 @@ norecursedirs = [
 # with @pytest.mark.asyncio (no implicit auto-collection of async funcs).
 asyncio_mode = "strict"
 addopts = "-q"
+markers = [
+    "e2e: end-to-end test requiring real Redis + Postgres (CI services or docker compose locally). Skipped automatically when backing services aren't reachable.",
+]
 
 [tool.ruff]
 line-length = 100

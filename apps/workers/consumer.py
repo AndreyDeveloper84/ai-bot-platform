@@ -25,6 +25,7 @@ from typing import Iterable
 from apps.events.services import emit
 from apps.ingress import streams as ingress_streams
 from apps.ingress.streams import DEFAULT_GROUP_NAME
+from apps.tenancy.context import tenant_scope, trace_id_scope
 from apps.workers.registry import lookup, registered_streams
 
 logger = logging.getLogger(__name__)
@@ -105,22 +106,44 @@ def consume_once(
                 )
                 for k, v in raw_entry.items()
             }
-            emit(
-                "worker.consumed",
-                payload={
-                    "stream": stream_name,
-                    "entry_id": entry_id,
-                    "handler": type(handler).__name__,
-                },
-            )
-            try:
-                handler(decoded)
-            except Exception:  # noqa: BLE001 — handler logged + emitted; consumer continues
-                logger.exception(
-                    "workers.handler_raised stream=%s entry_id=%s",
-                    stream_name,
-                    entry_id,
+
+            # Enter tenant + trace scope BEFORE emitting worker.consumed
+            # so the event row carries the same trace_id as the rest of
+            # the pipeline. Without this, the consumer emit happens
+            # outside ContextVar scope and the event is "orphan" (empty
+            # trace_id) — Sprint 5 replay can't reconstruct the timeline.
+            from apps.tenancy.models import Tenant  # local import
+
+            tenant_id_raw = decoded.get("resolved_tenant_id", "")
+            tenant_for_scope = None
+            if tenant_id_raw:
+                try:
+                    tenant_for_scope = Tenant.all_objects.get(id=tenant_id_raw)
+                except (Tenant.DoesNotExist, ValueError):
+                    tenant_for_scope = None
+            trace = decoded.get("trace_id") or None
+
+            handler_failed = False
+            with tenant_scope(tenant_for_scope), trace_id_scope(trace):
+                emit(
+                    "worker.consumed",
+                    payload={
+                        "stream": stream_name,
+                        "entry_id": entry_id,
+                        "handler": type(handler).__name__,
+                    },
                 )
+                try:
+                    handler(decoded)
+                except Exception:  # noqa: BLE001 — handler logged + emitted; consumer continues
+                    logger.exception(
+                        "workers.handler_raised stream=%s entry_id=%s",
+                        stream_name,
+                        entry_id,
+                    )
+                    handler_failed = True
+
+            if handler_failed:
                 # Do NOT XACK on failure. Entry stays in PEL for retry
                 # / manual claim. Consumer moves on to the next entry.
                 continue

@@ -30,7 +30,7 @@ from django.conf import settings
 import redis
 
 from apps.events.services import emit
-from apps.tenancy.context import current_trace_id
+from apps.tenancy.context import current_tenant, current_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,7 @@ def enqueue(
     channel: str,
     payload: dict[str, Any],
     *,
+    tenant_id: str | None = None,
     group: str = DEFAULT_GROUP_NAME,
 ) -> str:
     """XADD a payload to ``ingress:<channel>`` for downstream consumers.
@@ -86,9 +87,10 @@ def enqueue(
     Args:
       channel: Channel slug used as the stream suffix
                (``ingress:max``, etc.).
-      payload: Dict serialised to JSON in the stream entry. Must
-               include ``resolved_tenant_id`` (or empty string) and the
-               webhook journal id so the consumer can correlate.
+      payload: Dict serialised to JSON in the stream entry's ``data`` field.
+      tenant_id: Explicit tenant id (str(UUID)) to promote to a top-level
+                 entry field. If omitted, reads ``current_tenant()`` from
+                 ContextVar. If still None, the field is "" (system event).
       group: Consumer group name. Default ``consumers``. Override only
              for specialised pipelines (e.g. ``replay`` in Sprint 5).
 
@@ -97,20 +99,31 @@ def enqueue(
 
     Side effects:
       - Ensures the consumer group exists.
-      - Emits an ``ingress.enqueued`` event row with trace_id.
+      - Emits an ``ingress.enqueued`` event row with trace_id + tenant_id.
+
+    Why top-level tenant_id + trace_id (not nested in ``data``):
+      Redis Streams indexes by flat field. Sprint 5 replay tools query
+      the stream directly (XRANGE/XREVRANGE) and filter by tenant_id
+      without parsing the JSON body of every entry. Consumer's
+      TenantAwareTask reads from the top-level entry field too.
     """
 
     stream = f"{_stream_prefix()}:{channel}"
     client = _client()
     _ensure_group(client, stream, group)
 
-    # Stream entries are flat string-keyed dicts. Wrap the payload
-    # under "data" so we always know how to deserialise. trace_id is
-    # promoted to a top-level field for fast indexing by Sprint 5
-    # replay tools without parsing the JSON body.
+    resolved_tenant_id = tenant_id
+    if resolved_tenant_id is None:
+        current = current_tenant()
+        resolved_tenant_id = str(current.id) if current is not None else ""
+
+    # Stream entries are flat string-keyed dicts. ``data`` carries the
+    # full payload; ``trace_id`` + ``resolved_tenant_id`` are top-level
+    # for indexing without JSON parsing.
     entry = {
         "data": json.dumps(payload, ensure_ascii=False, default=str),
         "trace_id": current_trace_id() or str(uuid.uuid4()),
+        "resolved_tenant_id": resolved_tenant_id,
     }
     entry_id = client.xadd(stream, entry)  # type: ignore[arg-type]
     if isinstance(entry_id, bytes):
@@ -123,6 +136,7 @@ def enqueue(
             "stream": stream,
             "entry_id": entry_id,
             "channel": channel,
+            "resolved_tenant_id": resolved_tenant_id,
         },
     )
     logger.info(
