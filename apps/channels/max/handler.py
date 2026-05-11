@@ -199,6 +199,19 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             has_attachments=bool(event.attachments),
         )
     )
+
+    # Silent path (Sprint 3 / D3): conversation is mid-handoff. Dispatcher
+    # returns SkillResult(should_send=False) → we record nothing, send
+    # nothing, log the silence + return. Operator drives until
+    # resolve_admin_task flips state back.
+    if skill_result is not None and not skill_result.should_send:
+        logger.info(
+            "channels.max.handler.silenced conversation=%s reason=%s",
+            conversation.id,
+            (skill_result.meta or {}).get("silenced_by", "skill_request"),
+        )
+        return
+
     reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
 
     # Persist the assistant turn BEFORE sending — if send fails, we

@@ -83,11 +83,35 @@ def reset_registry_cache() -> None:
 def dispatch(context: "SkillContext") -> "SkillResult | None":
     """Return the first matching skill's result, or None if no match.
 
-    Iterates skills in registration order. The first ``matches()``
-    returning True wins; ``handle()`` is called once. Exceptions from
-    a skill's ``handle()`` bubble — telemetry hooks at the caller side
-    decide whether to swallow.
+    HUMAN_HANDOFF guard (Sprint 3 / D3): when the conversation is
+    currently mid-handoff, the bot stays silent. We return a SkillResult
+    with ``should_send=False`` (and an empty reply) so the channel
+    handler's outbound path short-circuits cleanly. The operator drives
+    the conversation through the admin until they call
+    ``resolve_admin_task`` (which flips state back to IDLE).
+
+    Otherwise: iterates skills in registration order. The first
+    ``matches()`` returning True wins; ``handle()`` is called once.
+    Exceptions from a skill's ``handle()`` bubble — telemetry hooks
+    at the caller side decide whether to swallow.
     """
+
+    # Late import to dodge cycles — registry sits near the root of
+    # the skills graph, so model-import-on-import would propagate
+    # widely.
+    from apps.conversations.models import Conversation
+    from apps.skills.base import SkillResult
+
+    if context.conversation.state == Conversation.State.HUMAN_HANDOFF:
+        logger.info(
+            "skills.dispatch.silenced_by_handoff conversation=%s",
+            context.conversation.id,
+        )
+        return SkillResult(
+            reply_text="",
+            should_send=False,
+            meta={"silenced_by": "human_handoff"},
+        )
 
     for skill in _skills:
         try:
