@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from celery.schedules import crontab  # type: ignore[import-untyped]
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 SECRET_KEY = os.environ.get(
@@ -103,6 +105,41 @@ SHORT_TERM_MEMORY_TTL_SECONDS = int(os.environ.get("SHORT_TERM_MEMORY_TTL_SECOND
 MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
+
+# Sprint 2 / E2 — admin chat for breaker state-transition alerts.
+# Empty (default) → telegram_alert is a no-op. Set to the operator's
+# MAX chat id to receive 🚨 messages on breaker open/close.
+ADMIN_MAX_CHAT_ID = os.environ.get("ADMIN_MAX_CHAT_ID", "")
+
+# Sprint 2 / E3 — Celery broker + beat schedule for retention tasks.
+# CELERY_BROKER_URL falls through to REDIS_URL so dev/prod share one
+# Redis instance for both queue + cache + streams.
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL",
+    os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+)
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "")
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# Beat schedule — keep retention tasks on separate cadences per the
+# 6A-split rule (AuditLog 90d daily sweep vs IdempotencyKey 7d hourly
+# sweep). Cron times in UTC; the Django Celery beat runs in
+# `apps/audit` and `apps/tools` modules.
+CELERY_BEAT_SCHEDULE = {
+    "cleanup_old_audit_logs": {
+        "task": "apps.audit.tasks.cleanup_old_audit_logs",
+        # Daily 03:00 UTC — quiet hour for the formula-tela tenant.
+        "schedule": crontab(hour="3", minute="0"),
+    },
+    "cleanup_old_idempotency_keys": {
+        "task": "apps.tools.tasks.cleanup_old_idempotency_keys",
+        # Hourly :15 — offset from on-the-hour spikes (webhook bursts,
+        # cron jobs from other systems often fire at :00).
+        "schedule": crontab(minute="15"),
+    },
+}
 
 # Sprint 1 / C1 channel token map. Format env CHANNEL_TOKEN_TO_TENANT_SLUG:
 # ``"token1=tenant-a,token2=tenant-b"``. Sprint 4 replaces with

@@ -150,6 +150,22 @@ def _transition(core: _BreakerCore, new_state: State, *, now: float | None = Non
         len(core.failures),
     )
 
+    # E2 — fire-and-forget Telegram alert on every state transition.
+    # The alert helper is best-effort (never raises) and short-circuits
+    # when `ADMIN_MAX_CHAT_ID` is unset (dev/CI default). We import
+    # lazily to keep the breaker module free of Django settings
+    # coupling at import time.
+    try:
+        from apps.orchestrator.llm.telegram_alert import send_breaker_alert
+
+        send_breaker_alert(
+            provider=core.name,
+            transition=f"{old.value} → {new_state.value}",
+            details={"failures": len(core.failures)},
+        )
+    except Exception:  # noqa: BLE001 — alerting must NEVER break breaker
+        logger.exception("llm.breaker.alert_failed name=%s", core.name)
+
 
 def _check_state(core: _BreakerCore) -> State:
     """Look at the current state, auto-promoting open → half-open after cooldown."""

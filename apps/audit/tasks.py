@@ -15,12 +15,14 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
 
+@shared_task(name="apps.audit.tasks.cleanup_old_audit_logs")
 def cleanup_old_audit_logs() -> int:
     """Delete AuditLog rows older than the retention cutoff.
 
