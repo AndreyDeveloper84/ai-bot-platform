@@ -72,14 +72,44 @@ SCANNED_MODELS = _discover_tenant_scoped_models()
 # (or the model itself should have sensible defaults for every non-tenant
 # field). The factory only fills NOT-NULL columns that have no default —
 # scanner tests don't care about field *values*, only that we can insert.
+#
+# Values can be:
+#   * a static string  → used as-is (with ``-{suffix}`` appended when suffix is given)
+#   * an empty string  → replaced by the suffix
+#   * a callable       → ``factory(tenant, suffix)`` returns the field value
+#                        (used when the value is itself a model instance —
+#                        e.g. Conversation needs a BotUser FK target)
 _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
     "AuditLog": {"action": "scanner.test"},
     # BotUser carries `(channel, channel_user_id)` as the natural key; both
     # are NOT NULL CharFields without defaults. Generate a unique
-    # channel_user_id per row to dodge the unique_together constraint when
-    # tests create one row per tenant.
+    # channel_user_id per row to dodge the unique_together constraint.
     "BotUser": {"channel": "max", "channel_user_id": ""},
+    # Conversation requires a non-null bot_user FK. Lazy-import inside
+    # the factory so the test module imports stay clean when identity
+    # isn't yet in INSTALLED_APPS during early Sprint 2 development.
+    "Conversation": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
+    },
 }
+
+
+def _make_bot_user_for_scanner(tenant, suffix: str):
+    """Inline BotUser factory for the Conversation row factory.
+
+    Imported lazily so this module loads even before identity migrations
+    have run in development. Uses ``all_tenants`` to bypass the
+    tenant-scoped manager (the scanner sets up fixtures outside a
+    tenant_scope).
+    """
+
+    from apps.identity.models import BotUser
+
+    return BotUser.all_tenants.create(
+        tenant=tenant,
+        channel="max",
+        channel_user_id=f"scanner-{suffix or 'x'}",
+    )
 
 
 def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> models.Model:
@@ -92,7 +122,9 @@ def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> model
     kwargs = {"tenant": tenant}
     extras = _MODEL_REQUIRED_FIELDS.get(model.__name__, {})
     for field_name, base_value in extras.items():
-        if isinstance(base_value, str) and suffix:
+        if callable(base_value):
+            kwargs[field_name] = base_value(tenant, suffix)
+        elif isinstance(base_value, str) and suffix:
             kwargs[field_name] = f"{base_value}-{suffix}" if base_value else suffix
         else:
             kwargs[field_name] = base_value
