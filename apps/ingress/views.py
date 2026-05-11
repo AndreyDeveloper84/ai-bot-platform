@@ -38,10 +38,10 @@ on every inbound. See `apps/tenancy/middleware.py` exemption list.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import logging
-import uuid
 from typing import Any
 
 from django.conf import settings
@@ -128,11 +128,13 @@ def _extract_external_event_id(payload: dict[str, Any]) -> str:
     """Find the channel's own dedup ID inside the MAX payload.
 
     MAX webhooks vary: `update_id` at the top level is most common,
-    but some events use `message.body.mid`. We try in order and fall
-    back to a synthesised UUID — the WebhookJournal unique constraint
-    still catches true replays (the channel sends the same payload
-    bytes, but our UUID would differ; this only matters for replays
-    that we won't see in practice).
+    but some events use `message.body.mid` / `.seq`. We try in order;
+    if all three are absent, fall back to a **deterministic** hash of
+    the payload (Sprint 2.5 review H5) so true replays of the same
+    payload still dedup against `WebhookJournal.unique_together`.
+    Before the fix, the fallback used `uuid.uuid4()` which guaranteed
+    a fresh value on every retry, defeating the dedup contract for
+    MAX events that omit all idempotency hints.
     """
 
     for candidate in (
@@ -142,4 +144,8 @@ def _extract_external_event_id(payload: dict[str, Any]) -> str:
     ):
         if candidate:
             return str(candidate)
-    return f"synth-{uuid.uuid4()}"
+    # Deterministic fallback — same payload bytes always produce the
+    # same id. Use json.dumps with sort_keys for stable serialization.
+    payload_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    digest = hashlib.sha256(payload_bytes).hexdigest()[:32]
+    return f"synth-{digest}"

@@ -145,6 +145,21 @@ def record_webhook(
                     "tenant_resolved": tenant is not None,
                 },
             )
+            # Sprint 2.5 review M7: write an audit row on the success
+            # path too, not only on the failure ("unknown_tenant")
+            # branch. Sprint 5 replay needs an AuditLog for every
+            # webhook receipt — without this, the audit trail is
+            # silently incomplete for the common happy case.
+            write_audit(
+                "ingress.webhook_received",
+                target="WebhookJournal",
+                target_id=row.id,
+                payload={
+                    "channel": channel,
+                    "external_event_id": external_event_id,
+                    "tenant_resolved": tenant is not None,
+                },
+            )
             if tenant is None and channel_token:
                 write_audit(
                     "ingress.webhook_unknown_tenant",
