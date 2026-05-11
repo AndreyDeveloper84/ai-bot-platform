@@ -162,3 +162,125 @@ class Conversation(models.Model):
         self.is_active = False
         self.deleted_at = timezone.now()
         self.save(update_fields=["is_active", "deleted_at"])
+
+
+class Message(models.Model):
+    """A single turn inside a Conversation (DRF-452 / Sprint 2 / B2).
+
+    Persists every turn — user, assistant, tool, system. Ported from
+    `Ayla origin/dev:ai/models.py::Message` shape with two additions
+    per PHASE0_DESIGN.md §3.3:
+
+    1. **`rendered_text`** — the canonical text the client actually saw
+       after channel-specific rendering (markdown stripped, buttons
+       converted to inline text on channels without button UI, etc.).
+       The `content` field is the source-of-truth from the LLM /
+       handler; `rendered_text` is what the user can quote back to
+       support staff.
+
+    2. **`trace_id`** — propagates from `current_trace_id()` via B3's
+       `record_message()`. Links this message to its WebhookJournal
+       row, Redis Stream entry, AuditLog rows, and Events. Sprint 5
+       replay reconstructs the per-turn pipeline by indexing on this.
+
+    ### Denormalised `tenant` FK
+
+    `Message.tenant` mirrors `Message.conversation.tenant` on every
+    insert. Two reasons:
+
+    1. The cross-tenant leakage scanner (E1 from Sprint 1) operates
+       per-model via `TenantScopedManager`; a model without a direct
+       `tenant` FK doesn't participate in the scanner. Putting `tenant`
+       on Message gives us the same guarantee here as on Conversation.
+
+    2. Per-tenant analytics queries (`Message.objects.filter(role=...)`
+       under `tenant_scope`) become a single index scan instead of a
+       join through Conversation.
+
+    The invariant `Message.tenant_id == Message.conversation.tenant_id`
+    is enforced at write-time in B3's `record_message()` — there is no
+    DB-level constraint because Django doesn't express cross-FK
+    equality without a trigger. A drift would require a manual write
+    path that bypasses `record_message()`; B3's tests pin the contract.
+    """
+
+    class Role(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+        TOOL = "tool", "Tool"
+        SYSTEM = "system", "System"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="messages",
+        help_text="Denormalised from conversation.tenant. B3 service "
+        "enforces the mirror invariant on every record_message() call.",
+    )
+    role = models.CharField(max_length=16, choices=Role.choices)
+    content = models.TextField(
+        blank=True,
+        default="",
+        help_text="Source-of-truth message body from the LLM / handler. "
+        "Markdown / structured. Rendering for the channel happens "
+        "downstream and is captured in `rendered_text`.",
+    )
+    rendered_text = models.TextField(
+        blank=True,
+        default="",
+        help_text="Channel-rendered text — what the user actually saw. "
+        "Captured for support / forensic replay.",
+    )
+    action_type = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Action namespace attached to this assistant message: "
+        "show_masters / show_slots / confirm_booking / etc. Sprint 3+.",
+    )
+    action_data = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Structured payload backing the UI action (see action_type). Never raw PII.",
+    )
+    tool_call = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Raw OpenAI tool_call object for forensic audit.",
+    )
+    tool_call_id = models.CharField(max_length=64, blank=True, default="")
+    trace_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="From current_trace_id() via record_message(). Links "
+        "this row to the WebhookJournal / Redis Stream / AuditLog / "
+        "Event chain for the same pipeline turn.",
+    )
+    tokens_in = models.IntegerField(default=0)
+    tokens_out = models.IntegerField(default=0)
+    latency_ms = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Message"
+        verbose_name_plural = "Messages"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["conversation", "created_at"]),
+            models.Index(fields=["tenant", "-created_at"]),
+            models.Index(fields=["role", "action_type"]),
+        ]
+
+    def __str__(self) -> str:
+        preview = (self.content or self.rendered_text)[:40]
+        return f"Message[{self.role}]({preview!r})"

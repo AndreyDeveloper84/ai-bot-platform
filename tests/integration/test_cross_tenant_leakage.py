@@ -91,6 +91,10 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
     "Conversation": {
         "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
     },
+    "Message": {
+        "conversation": lambda tenant, suffix: _make_conversation_for_scanner(tenant, suffix),
+        "role": "user",
+    },
 }
 
 
@@ -110,6 +114,15 @@ def _make_bot_user_for_scanner(tenant, suffix: str):
         channel="max",
         channel_user_id=f"scanner-{suffix or 'x'}",
     )
+
+
+def _make_conversation_for_scanner(tenant, suffix: str):
+    """Inline Conversation factory for the Message row factory."""
+
+    from apps.conversations.models import Conversation
+
+    bot_user = _make_bot_user_for_scanner(tenant, suffix)
+    return Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
 
 
 def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> models.Model:
