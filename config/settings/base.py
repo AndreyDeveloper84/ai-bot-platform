@@ -95,6 +95,16 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "90"))
 IDEMPOTENCY_KEY_RETENTION_DAYS = int(os.environ.get("IDEMPOTENCY_KEY_RETENTION_DAYS", "7"))
 
+# Sprint 3 / B4 — event fanout adapter registry. Each entry is the
+# dotted import path of an :class:`apps.events.fanout.EventFanout`
+# implementation. Default is the no-op adapter — Phase 0 keeps events
+# in DB only. Phase 1 adds MixpanelFanout / GA4Fanout / WarehouseFanout.
+EVENT_FANOUTS: list[str] = [
+    p.strip()
+    for p in os.environ.get("EVENT_FANOUTS", "apps.events.fanout.NoopFanout").split(",")
+    if p.strip()
+]
+
 # Sprint 2 / C1 — short-term Redis memory window depth + TTL.
 # Caller (apps/orchestrator/memory/short_term.py) reads these on every
 # append; runtime-changeable via settings override in tests.

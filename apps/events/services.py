@@ -42,7 +42,9 @@ import logging
 import uuid
 from typing import Any
 
+from apps.events.fanout import fanout_all
 from apps.events.models import Event
+from apps.events.schema import EventEnvelope
 from apps.events.vocabulary import CANONICAL_EVENTS
 from apps.tenancy.context import current_tenant, current_trace_id
 
@@ -129,3 +131,19 @@ def emit(
             tenant.id if tenant else None,
             trace_id,
         )
+        # If the DB insert failed we still try to fan out — destinations
+        # may be independently reachable (e.g. analytics warehouse).
+        # fanout_all swallows per-adapter errors.
+
+    # Fanout after DB insert (or attempt thereof). Default registry is
+    # NoopFanout — no external calls in Phase 0.
+    fanout_all(
+        EventEnvelope(
+            event_name=event_name,
+            distinct_id=distinct_id,
+            tenant_id=tenant.id if tenant else None,
+            dialog_id=dialog_id,
+            properties=canonical_props,
+            trace_id=trace_id,
+        )
+    )
