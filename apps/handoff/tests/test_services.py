@@ -182,3 +182,35 @@ class TestResolveAdminTask:
         assert AuditLog.all_tenants.filter(
             tenant=tenant, action="handoff.resolved", target_id=task.id
         ).exists()
+
+
+class TestCrossTenantIsolation:
+    """C4 / DRF-467 — services must respect tenant boundaries."""
+
+    def test_create_in_tenant_a_invisible_from_tenant_b(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        tenant_a = Tenant.objects.create(slug="hs-iso-a", name="IA")
+        tenant_b = Tenant.objects.create(slug="hs-iso-b", name="IB")
+
+        bu_a = BotUser.all_tenants.create(tenant=tenant_a, channel="max", channel_user_id="iso-a")
+        bu_b = BotUser.all_tenants.create(tenant=tenant_b, channel="max", channel_user_id="iso-b")
+        conv_a = Conversation.all_tenants.create(tenant=tenant_a, bot_user=bu_a)
+        conv_b = Conversation.all_tenants.create(tenant=tenant_b, bot_user=bu_b)
+
+        with tenant_scope(tenant_a):
+            task_a = create_admin_task(conv_a, task_type=AdminTask.TaskType.HANDOFF)
+        with tenant_scope(tenant_b):
+            task_b = create_admin_task(conv_b, task_type=AdminTask.TaskType.MANUAL)
+
+        # Operator in tenant A sees only their task — TenantScopedManager.
+        with tenant_scope(tenant_a):
+            assert AdminTask.objects.count() == 1
+            assert AdminTask.objects.first().id == task_a.id
+
+        with tenant_scope(tenant_b):
+            assert AdminTask.objects.count() == 1
+            assert AdminTask.objects.first().id == task_b.id
+
+        # Cross-check at the all_tenants level.
+        assert AdminTask.all_tenants.count() == 2
