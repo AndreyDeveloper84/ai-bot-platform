@@ -45,6 +45,7 @@ LOCAL_APPS = [
     "apps.consent",  # Sprint 3 / A1 — ConsentRecord first-class
     # apps.handoff was scaffolded in Sprint 0; Sprint 3 / C1 lands AdminTask model.
     # apps.promptreg was scaffolded in Sprint 0; Sprint 4 / A1 lands PromptVersion model.
+    # apps.experiments was scaffolded in Sprint 0; Sprint 4 / B1 lands Experiment + UserAssignment + Holdout.
     "apps.audit",
     "apps.events",
     "apps.experiments",

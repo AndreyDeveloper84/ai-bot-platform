@@ -138,6 +138,25 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "text": "scanner disclaimer",
         "version": 1,
     },
+    # Sprint 4 / B1: Experiment — slug name (per-row variant) + variants list.
+    "Experiment": {
+        "name": lambda tenant, suffix: f"scanner-exp-{suffix or 'x'}",
+        "hypothesis": "scanner test",
+        "primary_kpi": "test_kpi",
+        "variants": [{"name": "control", "weight": 50}, {"name": "v2", "weight": 50}],
+    },
+    # Sprint 4 / B1: UserAssignment — needs a (bot_user, experiment) pair.
+    "UserAssignment": {
+        "bot_user": lambda tenant, suffix: _make_experiment_pair(tenant, suffix)[0],
+        "experiment": lambda tenant, suffix: _make_experiment_pair(tenant, suffix)[1],
+        "variant": "control",
+    },
+    # Sprint 4 / B1: Holdout — OneToOne bot_user. Need a fresh bot_user.
+    "Holdout": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"holdout-{suffix or 'x'}"
+        ),
+    },
 }
 
 
@@ -181,6 +200,35 @@ def _make_user_for_scanner(suffix: str):
 
     User = get_user_model()  # noqa: N806
     return User.objects.create_user(username=f"scanner-user-{suffix or 'x'}")
+
+
+_EXPERIMENT_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}
+
+
+def _make_experiment_pair(tenant, suffix: str):
+    """Return a shared (BotUser, Experiment) pair for a UserAssignment row.
+
+    Cached per (tenant.id, suffix) so the (bot_user, experiment) unique
+    constraint stays intact when the same suffix is used for both FK
+    factories within the same _create_row call.
+    """
+
+    from apps.experiments.models import Experiment
+
+    key = (str(tenant.id), suffix)
+    cached = _EXPERIMENT_PAIRS.get(key)
+    if cached is not None:
+        return cached
+    bot_user = _make_bot_user_for_scanner(tenant, f"ua-{suffix or 'x'}")
+    experiment = Experiment.all_tenants.create(
+        tenant=tenant,
+        name=f"scanner-ua-{suffix or 'x'}",
+        hypothesis="ua scanner",
+        primary_kpi="test",
+        variants=[{"name": "control", "weight": 100}],
+    )
+    _EXPERIMENT_PAIRS[key] = (bot_user, experiment)
+    return bot_user, experiment
 
 
 def _make_admin_task_pair(tenant, suffix: str):
