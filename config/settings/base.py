@@ -85,6 +85,11 @@ MIDDLEWARE = [
 #            fully disabled (none today).
 STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 
+# Audit-trail retention (per 6A-split decision in plan-eng-review 2026-05-11).
+# Audit logs are forensic data — kept long; idempotency keys are short-lived.
+# Different lifecycles, separate settings, separate cleanup tasks.
+AUDIT_LOG_RETENTION_DAYS = int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "90"))
+
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [

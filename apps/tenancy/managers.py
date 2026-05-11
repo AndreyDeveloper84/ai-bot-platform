@@ -74,12 +74,16 @@ def _mode() -> str:
 def _audit_log(action: str, **extra: Any) -> None:
     """Best-effort audit log for tenant-scope violations.
 
-    Sprint 1 ships a structured log line. When ``apps.audit.write_audit``
-    lands (DRF-426 / B1) this swaps to call it directly — the call site
-    is centralised here so the upgrade is one diff.
+    Wired to ``apps.audit.services.write_audit`` per the B1 swap. Keeps
+    a fallback structured log line so failures in the audit path are
+    visible even when AuditLog is unavailable.
     """
 
-    # TODO(B1): replace with from apps.audit.services import write_audit
+    # Local import — apps.audit imports apps.tenancy, so we defer to
+    # avoid the load-order cycle.
+    from apps.audit.services import write_audit
+
+    write_audit(f"tenancy.scope.{action}", payload=extra)
     logger.warning("tenancy.scope.%s extra=%r", action, extra)
 
 
