@@ -49,7 +49,7 @@ Outcomes are set only on conversation close (cleanup task in Sprint 1 retention 
 
 ## Consequences
 
-- **Sprint 3 adds**: BOOKING_FLOW, AWAITING_CONFIRMATION, HUMAN_HANDOFF — each as a migration that grows the choices tuple. Three migrations total in Sprint 3, all trivial.
+- **Sprint 3 adds**: HUMAN_HANDOFF (landed 2026-05-11 in DRF-466 / C3 via `0004_conversation_state_human_handoff.py`). BOOKING_FLOW + AWAITING_CONFIRMATION still deferred — booking pipeline pushed past Phase 0.
 - **Sprint 4+ adds**: FOOD_LOGGING — when nutrition skill lands.
 - **Code paths never reference states that don't exist**. The `Conversation.state` field defaults to `"idle"` and writer code is grep-able by the literal value, not by enum member access. If `state.BOOKING_FLOW` doesn't exist in choices, the writer doesn't exist either.
 - **Choice display in admin stays honest**. Five unused choices in the dropdown would mislead operators about what the platform actually does today.

@@ -61,6 +61,10 @@ class Conversation(models.Model):
         IDLE = "idle", "IDLE"
         CONSULTING = "consulting", "CONSULTING"
         ESCALATED = "escalated", "ESCALATED"
+        # Added Sprint 3 / C3 (DRF-466). Set by handoff.services.create_admin_task;
+        # cleared back to IDLE by handoff.services.resolve_admin_task. D4 dispatcher
+        # short-circuits skill execution when state == HUMAN_HANDOFF.
+        HUMAN_HANDOFF = "human_handoff", "HUMAN_HANDOFF"
 
     class Outcome(models.TextChoices):
         SUCCESS = "success", "Success"
