@@ -185,9 +185,9 @@ def test_scanner_finds_expected_sprint2_models():
     names = {m.__name__ for m in SCANNED_MODELS}
     expected = {"AuditLog", "BotUser", "Conversation", "Message"}
     missing = expected - names
-    assert (
-        not missing
-    ), f"Sprint 2 expected scanner to find {expected}; missing: {missing}. Got: {names}."
+    assert not missing, (
+        f"Sprint 2 expected scanner to find {expected}; missing: {missing}. Got: {names}."
+    )
 
 
 @pytest.mark.parametrize("model", SCANNED_MODELS, ids=lambda m: m.__name__)
