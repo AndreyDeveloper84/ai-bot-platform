@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from apps.events.models import Event
 from apps.tenancy.context import current_tenant, current_trace_id
 
 logger = logging.getLogger(__name__)
@@ -35,9 +36,6 @@ def emit(event_type: str, payload: dict[str, Any] | None = None) -> None:
       - Reads ``current_tenant()`` and ``current_trace_id()`` from ContextVar.
       - Swallows all exceptions; logs for Sentry visibility.
     """
-
-    # Local import — avoid Django app-load order issues.
-    from apps.events.models import Event
 
     tenant = current_tenant()
     trace_id = current_trace_id() or ""

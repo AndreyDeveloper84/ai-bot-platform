@@ -47,11 +47,13 @@ class BrandVoiceConfig(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.OneToOneField(
         "tenancy.Tenant",
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="brand_voice",
-        help_text="The tenant this configuration belongs to. CASCADE — "
-        "if a tenant is hard-deleted (rare; usually deactivated), its "
-        "persona config goes too.",
+        help_text="The tenant this configuration belongs to. PROTECT for "
+        "consistency with every other Tenant FK in the platform "
+        "(audit/events/conversations/messages/bot_users/idempotency/"
+        "webhooks). Tenant deletes are an operational event blocked by "
+        "design — soft-deactivate via Tenant.is_active=False instead.",
     )
     tone = models.CharField(
         max_length=100,

@@ -26,6 +26,7 @@ from apps.events.services import emit
 from apps.ingress import streams as ingress_streams
 from apps.ingress.streams import DEFAULT_GROUP_NAME
 from apps.tenancy.context import tenant_scope, trace_id_scope
+from apps.workers.base import resolve_tenant_by_id_string
 from apps.workers.registry import lookup, registered_streams
 
 logger = logging.getLogger(__name__)
@@ -112,15 +113,9 @@ def consume_once(
             # the pipeline. Without this, the consumer emit happens
             # outside ContextVar scope and the event is "orphan" (empty
             # trace_id) — Sprint 5 replay can't reconstruct the timeline.
-            from apps.tenancy.models import Tenant  # local import
-
-            tenant_id_raw = decoded.get("resolved_tenant_id", "")
-            tenant_for_scope = None
-            if tenant_id_raw:
-                try:
-                    tenant_for_scope = Tenant.all_objects.get(id=tenant_id_raw)
-                except (Tenant.DoesNotExist, ValueError):
-                    tenant_for_scope = None
+            # Per Sprint 2.5 review M3: one resolver, used by both the
+            # consumer and TenantAwareTask, so they cannot diverge.
+            tenant_for_scope = resolve_tenant_by_id_string(decoded.get("resolved_tenant_id", ""))
             trace = decoded.get("trace_id") or None
 
             handler_failed = False

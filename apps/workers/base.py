@@ -37,8 +37,39 @@ from uuid import UUID
 
 from apps.events.services import emit
 from apps.tenancy.context import tenant_scope, trace_id_scope
+from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_tenant_by_id_string(tenant_id_raw: str):
+    """Look up Tenant by UUID string, or None if empty/invalid/unknown.
+
+    Module-level so the consumer loop (`apps.workers.consumer`) and
+    every TenantAwareTask subclass share exactly one resolver
+    implementation. Per Sprint 2.5 review M3: prevents divergence
+    between consumer.py's inline lookup and `TenantAwareTask._resolve_tenant`.
+
+    Uses ``all_objects`` (not the active-filtered ``objects``) so a
+    queued webhook for a tenant that was deactivated between enqueue
+    and consume still resolves — the consumer drains the queue then
+    the handler can decide whether to act based on tenant state. The
+    middleware uses ``objects`` for HTTP requests (strict ingress
+    gate); this two-tier visibility is intentional, see docstring at
+    bottom of `apps/tenancy/models.py`.
+    """
+
+    if not tenant_id_raw:
+        return None
+    try:
+        tenant_uuid = UUID(tenant_id_raw)
+    except (ValueError, AttributeError):
+        return None
+
+    try:
+        return Tenant.all_objects.get(id=tenant_uuid)
+    except Tenant.DoesNotExist:
+        return None
 
 
 class TenantAwareTask(ABC):
@@ -107,18 +138,7 @@ class TenantAwareTask(ABC):
     def _resolve_tenant(tenant_id_raw: str):
         """Look up Tenant by UUID string, or None if empty/invalid/unknown."""
 
-        if not tenant_id_raw:
-            return None
-        try:
-            tenant_uuid = UUID(tenant_id_raw)
-        except ValueError:
-            return None
-        from apps.tenancy.models import Tenant
-
-        try:
-            return Tenant.all_objects.get(id=tenant_uuid)
-        except Tenant.DoesNotExist:
-            return None
+        return resolve_tenant_by_id_string(tenant_id_raw)
 
     @staticmethod
     def _extract_payload(raw_entry: dict[str, Any]) -> dict[str, Any]:

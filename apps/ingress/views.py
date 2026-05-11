@@ -38,6 +38,7 @@ on every inbound. See `apps/tenancy/middleware.py` exemption list.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import uuid
@@ -75,7 +76,13 @@ def max_webhook(request: HttpRequest) -> HttpResponse:
 
     secret_expected = getattr(settings, "MAX_WEBHOOK_SECRET", "")
     secret_got = request.headers.get("X-Max-Bot-Api-Secret", "")
-    if not secret_expected or secret_got != secret_expected:
+    # Constant-time comparison: a `!=` compare leaks the matching prefix
+    # length via response timing; `hmac.compare_digest` is timing-safe.
+    # The empty-secret short-circuit stays — when MAX_WEBHOOK_SECRET is
+    # unset (dev / CI), every request is unauthorized regardless of header.
+    if not secret_expected or not hmac.compare_digest(
+        secret_got.encode("utf-8"), secret_expected.encode("utf-8")
+    ):
         # Don't leak whether the secret is missing or wrong; both → 401.
         logger.warning("channels.max.webhook.unauthorized header_present=%s", bool(secret_got))
         return JsonResponse({"error": "unauthorized"}, status=401)
