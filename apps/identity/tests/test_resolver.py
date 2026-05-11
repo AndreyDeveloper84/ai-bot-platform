@@ -129,6 +129,50 @@ class TestResolverPiiSafety:
         assert ev.payload["phone_present"] is True
 
 
+class TestDeleteBotUserData:
+    """Sprint 2.5 H1 regression: PROTECT on Conversation.bot_user means a
+    stray `BotUser.delete()` raises; the safe path goes through
+    `delete_bot_user_data()` which clears Conversations first.
+    """
+
+    def test_bare_botuser_delete_blocked_by_protect_when_conversations_exist(
+        self, tenant_a, settings
+    ):
+        from apps.conversations.models import Conversation
+        from django.db.models.deletion import ProtectedError
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            user = resolve_or_create_bot_user(channel="max", channel_user_id="700")
+            Conversation.objects.create(tenant=tenant_a, bot_user=user)
+
+        # Stray .delete() must raise — soft-delete invariant.
+        with pytest.raises(ProtectedError):
+            user.delete()
+
+    def test_delete_bot_user_data_clears_conversations_first(self, tenant_a, settings):
+        from apps.conversations.models import Conversation
+        from apps.identity.services import delete_bot_user_data
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            user = resolve_or_create_bot_user(channel="max", channel_user_id="800")
+            Conversation.objects.create(tenant=tenant_a, bot_user=user)
+            count = delete_bot_user_data(user)
+
+        # Conversation removed + BotUser gone.
+        assert count >= 1
+        assert not BotUser.all_tenants.filter(channel_user_id="800").exists()
+        # Audit trail preserved — the privacy flow's whole point.
+        from apps.audit.models import AuditLog
+
+        actions = list(
+            AuditLog.all_tenants.filter(tenant=tenant_a).values_list("action", flat=True)
+        )
+        assert "identity.bot_user.delete_started" in actions
+        assert "identity.bot_user.delete_finished" in actions
+
+
 class TestResolverLastSeenTouch:
     def test_resolve_bumps_last_seen(self, tenant_a, settings):
         settings.STRICT_TENANT_SCOPE = "strict"

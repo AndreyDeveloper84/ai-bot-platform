@@ -141,3 +141,59 @@ def resolve_or_create_bot_user(
         channel,
     )
     return bot_user
+
+
+def delete_bot_user_data(bot_user) -> int:
+    """Soft-delete a BotUser's conversations + hard-delete the BotUser.
+
+    Single entry point for the 152-ФЗ "удалить мои данные" workflow
+    (Sprint 3 PrivacyConsentSkill calls this) and any future admin
+    "wipe this user" action.
+
+    Per Sprint 2.5 review H1: `Conversation.bot_user` is now PROTECT,
+    so a stray `BotUser.delete()` raises ProtectedError instead of
+    silently cascading away conversation history. This function is
+    the only legitimate caller — it soft-deletes Conversations first
+    (preserving forensic Messages via mark_deleted), then hard-deletes
+    the BotUser row.
+
+    Returns:
+      Number of conversations soft-deleted (excludes Messages — those
+      stay in DB tied to the now-soft-deleted Conversation).
+    """
+
+    from apps.audit.services import write_audit
+    from apps.conversations.models import Conversation
+    from django.db import transaction
+
+    write_audit(
+        "identity.bot_user.delete_started",
+        target="BotUser",
+        target_id=bot_user.id,
+        payload={"channel": bot_user.channel},
+    )
+
+    soft_deleted = 0
+    with transaction.atomic():
+        # Use `Conversation.all_tenants.filter(bot_user=...)` — reverse
+        # related-manager `bot_user.conversations` is a Django auto-built
+        # RelatedManager which doesn't carry our custom escape hatch.
+        conversations = Conversation.all_tenants.filter(bot_user=bot_user)
+        # First: mark every active conversation as soft-deleted (audit
+        # trail breadcrumb for the legal flow).
+        for conv in conversations:
+            if conv.is_active or conv.deleted_at is None:
+                conv.mark_deleted()
+                soft_deleted += 1
+        # Now hard-delete: cascades through Messages. Sprint 3
+        # PrivacyConsentSkill writes its own audit BEFORE this call.
+        conversations.delete()
+        bot_user.delete()
+
+    write_audit(
+        "identity.bot_user.delete_finished",
+        target="BotUser",
+        target_id=bot_user.id,
+        payload={"conversations_deleted": soft_deleted},
+    )
+    return soft_deleted

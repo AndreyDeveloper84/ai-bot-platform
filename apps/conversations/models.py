@@ -79,9 +79,14 @@ class Conversation(models.Model):
     )
     bot_user = models.ForeignKey(
         "identity.BotUser",
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="conversations",
-        help_text="The channel-scoped identity who owns this thread.",
+        help_text="The channel-scoped identity who owns this thread. "
+        "PROTECT (Sprint 2.5 H1): a stray `bot_user.delete()` previously "
+        "cascaded → Conversation → Message hard-delete, bypassing the "
+        "soft-delete invariant + leaving no audit trail. Forces callers "
+        "through `apps.identity.services.delete_bot_user_data()` which "
+        "soft-deletes conversations first, then deletes the BotUser.",
     )
     state = models.CharField(
         max_length=16,
