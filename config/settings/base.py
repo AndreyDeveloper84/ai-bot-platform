@@ -25,13 +25,15 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 ALLOWED_HOSTS: list[str] = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
 ALLOWED_HOSTS = [h.strip() for h in ALLOWED_HOSTS if h.strip()]
 
-# 20 platform apps scaffolded in Sprint 0. Each is empty (just AppConfig);
-# models / views / migrations land sprint-by-sprint per docs/architecture.md.
+# 20 platform apps scaffolded in Sprint 0 + apps.persona added in Sprint 2 / E1.
+# Each is empty (just AppConfig); models / views / migrations land
+# sprint-by-sprint per docs/architecture.md.
 LOCAL_APPS = [
     "apps.tenancy",
     "apps.identity",
     "apps.conversations",
     "apps.orchestrator",
+    "apps.persona",
     "apps.skills",
     "apps.tools",
     "apps.kb",

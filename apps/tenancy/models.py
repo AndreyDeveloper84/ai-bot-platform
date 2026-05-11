@@ -71,6 +71,35 @@ class Tenant(models.Model):
             "mode)."
         ),
     )
+    # Sprint 2 / E1 — Sprint-1-debt fields per PHASE0_DESIGN.md §3.1.
+    # All have safe defaults so the migration is backward-compatible
+    # for the single existing tenant (formula-tela).
+    features = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Per-tenant feature flags JSON. Sprint 4+ consumers "
+        "read entries like {'voice_input': true}; missing keys default "
+        "to False at the call site.",
+    )
+    plan = models.CharField(
+        max_length=32,
+        default="free",
+        help_text="Billing plan tier. Free during Phase 0; Sprint 9+ "
+        "billing module will gate features by this value.",
+    )
+    timezone = models.CharField(
+        max_length=64,
+        default="Europe/Moscow",
+        help_text="IANA timezone for tenant-local rendering of times in "
+        "messages (e.g. 'завтра в 10:00'). Falls back to UTC if invalid.",
+    )
+    locale = models.CharField(
+        max_length=16,
+        default="ru-RU",
+        help_text="BCP-47 locale tag for tenant-default language. "
+        "Per-BotUser overrides land alongside personalisation work.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
