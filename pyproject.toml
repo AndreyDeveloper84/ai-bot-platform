@@ -69,10 +69,11 @@ include = ["config*", "apps*"]
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.local"
 python_files = ["test_*.py", "*_test.py"]
-testpaths = ["tests"]
-# Defence in depth: testpaths already restricts collection to tests/,
-# but norecursedirs guarantees pytest never wanders into legacy_*
-# even if someone passes a wider path.
+# Tests live in two places by design:
+#   tests/              — cross-cutting (smoke, integration, e2e, contract, leakage scanner)
+#   apps/<name>/tests/  — per-app unit tests (live next to the code)
+testpaths = ["tests", "apps"]
+# Defence in depth: never wander into legacy_*/ or other build artefacts.
 norecursedirs = [
     "legacy_maxbot",
     "legacy_formulatela_mcp",
@@ -84,6 +85,9 @@ norecursedirs = [
     "build",
     "dist",
 ]
+# pytest-asyncio: explicit marker mode. Coroutine tests must be decorated
+# with @pytest.mark.asyncio (no implicit auto-collection of async funcs).
+asyncio_mode = "strict"
 addopts = "-q"
 
 [tool.ruff]

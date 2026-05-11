@@ -69,7 +69,21 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Tenant context: resolves X-Tenant header → request.tenant + ContextVar.
+    # Must sit after AuthenticationMiddleware (some auth paths inform tenant
+    # resolution in later sprints). See ADR-0001 + ADR-0003.
+    "apps.tenancy.middleware.TenantContextMiddleware",
 ]
+
+# Multi-tenant scope enforcement. Tri-value:
+#   audit  — default in prod/staging. Missing X-Tenant header → request.tenant=None,
+#            audit-log the miss for analysis. Tolerant during rollout.
+#   strict — fail-fast. Missing/unknown header on /api/v1/* (except /auth/*) → 400.
+#            Used in tests via tests/conftest.py autouse fixture; flipped on in
+#            prod after Sprint 8 shadow soak per ADR-0001.
+#   off    — no tenant resolution. Reserved for environments with multi-tenancy
+#            fully disabled (none today).
+STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 
 ROOT_URLCONF = "config.urls"
 
