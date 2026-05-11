@@ -112,6 +112,14 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "conversation": lambda tenant, suffix: _make_admin_task_pair(tenant, suffix)[1],
         "task_type": "handoff",
     },
+    # Sprint 4 / A1: PromptVersion needs skill_name + body + version + created_by.
+    # created_by is an auth.User FK — the scanner creates one per row.
+    "PromptVersion": {
+        "skill_name": "scanner-test",
+        "body": "scanner body",
+        "version": 1,
+        "created_by": lambda tenant, suffix: _make_user_for_scanner(suffix),
+    },
 }
 
 
@@ -146,6 +154,15 @@ def _make_conversation_for_scanner(tenant, suffix: str):
 # Scoped via the dict so the same FK target is reused inside a single
 # `_create_row` call (which invokes both lambdas with the same suffix).
 _ADMIN_TASK_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}
+
+
+def _make_user_for_scanner(suffix: str):
+    """Inline auth.User factory for PromptVersion.created_by FK."""
+
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()  # noqa: N806
+    return User.objects.create_user(username=f"scanner-user-{suffix or 'x'}")
 
 
 def _make_admin_task_pair(tenant, suffix: str):
