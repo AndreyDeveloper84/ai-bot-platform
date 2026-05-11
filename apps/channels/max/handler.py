@@ -66,6 +66,7 @@ import uuid
 
 from apps.channels.max.outbound import send_message
 from apps.channels.max.parser import CanonicalEvent, parse_max_webhook
+from apps.conversations.models import Conversation
 from apps.conversations.services import record_message, resolve_active_conversation
 from apps.events.services import emit
 from apps.identity.services import resolve_or_create_bot_user
@@ -213,6 +214,8 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         return
 
     reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
+    action_type = skill_result.action_type if skill_result is not None else ""
+    action_data = skill_result.action_data if skill_result is not None else None
 
     # Persist the assistant turn BEFORE sending — if send fails, we
     # still have the intended reply on record. The send failure causes
@@ -224,6 +227,8 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         role="assistant",
         content=reply_text,
         rendered_text=reply_text,
+        action_type=action_type,
+        action_data=action_data,
         trace_id=trace_id,
     )
     short_term.append(
@@ -231,6 +236,15 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         role="assistant",
         content=reply_text,
     )
+
+    # Sprint 3 / D4: persist skill-requested state transition. The
+    # update is a single UPDATE keyed on pk so concurrent state writes
+    # from other turns can't trample. handoff_initiated already flipped
+    # state inside C2's create_admin_task; this branch covers any
+    # future skill that requests a transition without that side-effect.
+    if skill_result is not None and skill_result.new_state is not None:
+        Conversation.all_tenants.filter(pk=conversation.pk).update(state=skill_result.new_state)
+        conversation.state = skill_result.new_state
 
     # Outbound — MaxAPIError propagates up (handler does not swallow).
     send_message(chat_id=event.chat_id, text=reply_text)
