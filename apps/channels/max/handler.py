@@ -180,8 +180,26 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         content=event.text,
     )
 
-    # Sprint 2 echo decision — single function, no skill dispatch yet.
-    reply_text = _echo_text(event)
+    # Sprint 3 / D1 — dispatch through the skill registry. Lazy import
+    # of skills.registry breaks the echo-skill ↔ handler.py module-load
+    # cycle (echo skill needs the legacy welcome/fallback strings that
+    # live up here). The EchoSkill is the final catch-all in registration
+    # order so dispatch() always returns a SkillResult under normal load;
+    # the `_echo_text` fallback below stays only for the defensive
+    # "registry empty" edge case (e.g. tests that reset the registry).
+    from apps.skills.base import SkillContext
+    from apps.skills.registry import dispatch as skill_dispatch
+
+    skill_result = skill_dispatch(
+        SkillContext(
+            conversation=conversation,
+            bot_user=bot_user,
+            message_text=event.text,
+            trace_id=str(trace_id) if trace_id else "",
+            has_attachments=bool(event.attachments),
+        )
+    )
+    reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
 
     # Persist the assistant turn BEFORE sending — if send fails, we
     # still have the intended reply on record. The send failure causes
