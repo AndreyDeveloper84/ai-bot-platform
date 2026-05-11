@@ -102,6 +102,16 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "consent_type": "personal_data",
         "source": "scanner-test",
     },
+    # Sprint 3 / C1: AdminTask needs bot_user + conversation + task_type.
+    # The same BotUser must back both FKs — Conversation already owns one,
+    # and inventing a second bot_user-per-AdminTask collides on the
+    # (tenant, channel, channel_user_id) unique constraint. The factory below
+    # returns a shared (bot_user, conversation) pair via a per-call cache.
+    "AdminTask": {
+        "bot_user": lambda tenant, suffix: _make_admin_task_pair(tenant, suffix)[0],
+        "conversation": lambda tenant, suffix: _make_admin_task_pair(tenant, suffix)[1],
+        "task_type": "handoff",
+    },
 }
 
 
@@ -130,6 +140,33 @@ def _make_conversation_for_scanner(tenant, suffix: str):
 
     bot_user = _make_bot_user_for_scanner(tenant, suffix)
     return Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
+
+
+# Cache per (model __name__, tenant.id, suffix) → (bot_user, conversation).
+# Scoped via the dict so the same FK target is reused inside a single
+# `_create_row` call (which invokes both lambdas with the same suffix).
+_ADMIN_TASK_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}
+
+
+def _make_admin_task_pair(tenant, suffix: str):
+    """Return a shared (BotUser, Conversation) pair for an AdminTask row.
+
+    Both AdminTask FKs (bot_user + conversation) need to reference the
+    *same* BotUser — Conversation already owns one, and creating a second
+    one trips the (tenant, channel, channel_user_id) unique constraint.
+    Cached per (tenant.id, suffix) for the duration of a single row build.
+    """
+
+    from apps.conversations.models import Conversation
+
+    key = (str(tenant.id), suffix)
+    cached = _ADMIN_TASK_PAIRS.get(key)
+    if cached is not None:
+        return cached
+    bot_user = _make_bot_user_for_scanner(tenant, suffix or "at")
+    conversation = Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
+    _ADMIN_TASK_PAIRS[key] = (bot_user, conversation)
+    return bot_user, conversation
 
 
 def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> models.Model:
@@ -206,7 +243,7 @@ def test_scanner_finds_expected_sprint3_models():
     """
 
     names = {m.__name__ for m in SCANNED_MODELS}
-    sprint3_expected = {"ConsentRecord"}  # AdminTask added when C1 lands
+    sprint3_expected = {"ConsentRecord", "AdminTask"}  # C1 added 2026-05-11
     sprint3_missing = sprint3_expected - names
     assert not sprint3_missing, (
         f"Sprint 3 expected scanner to find {sprint3_expected}; "
