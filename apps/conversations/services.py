@@ -29,6 +29,7 @@ import logging
 import uuid
 from typing import Any
 
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 
@@ -93,7 +94,41 @@ def resolve_active_conversation(
     if not create_if_missing:
         return None
 
-    conversation = Conversation.objects.create(tenant=tenant, bot_user=bot_user)
+    # Sprint 2.5 H3: two concurrent webhook turns from the same
+    # bot_user both pass the existing-row check and both try to
+    # create. The partial unique constraint
+    # `(bot_user, tenant) WHERE is_active AND deleted_at IS NULL`
+    # raises IntegrityError on the loser, which previously
+    # propagated as an uncaught 500 and forced a PEL retry. Wrap
+    # the create in atomic + IntegrityError handler so the loser
+    # re-fetches the winner's row and returns it cleanly.
+    try:
+        with transaction.atomic():
+            conversation = Conversation.objects.create(tenant=tenant, bot_user=bot_user)
+    except IntegrityError:
+        # Race winner already created the active conversation; re-fetch.
+        existing = (
+            Conversation.objects.filter(
+                bot_user=bot_user,
+                is_active=True,
+                deleted_at__isnull=True,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if existing is None:
+            # Extremely unlikely — winner's row would have to be
+            # rolled back between IntegrityError and re-fetch. Surface
+            # the original IntegrityError context for debugging.
+            raise
+        logger.info(
+            "conversations.conversation.race_lost bot_user=%s tenant=%s — returning winner %s",
+            bot_user.id,
+            tenant.id,
+            existing.id,
+        )
+        return existing
+
     emit(
         "conversations.conversation.created",
         payload={
@@ -180,37 +215,48 @@ def record_message(
     elif isinstance(trace_id, str):
         trace_id = uuid.UUID(trace_id)
 
-    message = Message.objects.create(
-        conversation=conversation,
-        tenant=tenant,
-        role=role,
-        content=content,
-        rendered_text=rendered_text,
-        action_type=action_type,
-        action_data=action_data,
-        tool_call=tool_call,
-        tool_call_id=tool_call_id,
-        trace_id=trace_id,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        latency_ms=latency_ms,
-    )
-
-    # Atomic UPDATE — never a model .save() — so concurrent appends
-    # from racing webhook turns don't overwrite each other. Refresh the
-    # passed-in instance so callers can read .last_message_at.
+    # Sprint 2.5 M1: wrap Message INSERT + Conversation UPDATE in a
+    # single transaction so a failure between the two doesn't leave
+    # last_message_at stale relative to the new Message row. Emit the
+    # event via `transaction.on_commit` so Sprint 5 replay subscribers
+    # never see Messages without the matching Conversation update.
     now = timezone.now()
-    Conversation.all_tenants.filter(pk=conversation.pk).update(last_message_at=now)
+    with transaction.atomic():
+        message = Message.objects.create(
+            conversation=conversation,
+            tenant=tenant,
+            role=role,
+            content=content,
+            rendered_text=rendered_text,
+            action_type=action_type,
+            action_data=action_data,
+            tool_call=tool_call,
+            tool_call_id=tool_call_id,
+            trace_id=trace_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            latency_ms=latency_ms,
+        )
+        # Atomic UPDATE (not .save()) — so concurrent appends from
+        # racing webhook turns don't overwrite each other's
+        # last_message_at value.
+        Conversation.all_tenants.filter(pk=conversation.pk).update(last_message_at=now)
     conversation.last_message_at = now
 
-    emit(
-        "conversations.message.stored",
-        payload={
-            "message_id": str(message.id),
-            "conversation_id": str(conversation.id),
-            "role": role,
-            "has_action": bool(action_type),
-        },
+    # `on_commit` defers the event emit until after the outer
+    # transaction commits — guarantees subscribers see the Message row
+    # in DB before the event arrives. If we're not inside a wider
+    # transaction (typical Django autocommit), this fires immediately.
+    transaction.on_commit(
+        lambda: emit(
+            "conversations.message.stored",
+            payload={
+                "message_id": str(message.id),
+                "conversation_id": str(conversation.id),
+                "role": role,
+                "has_action": bool(action_type),
+            },
+        )
     )
     logger.info(
         "conversations.message.stored id=%s conversation=%s role=%s",
