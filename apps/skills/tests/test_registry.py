@@ -240,6 +240,46 @@ class TestEchoSkill:
         assert EchoSkill().matches(context) is True
 
 
+class TestHandoffGuard:
+    """D5 (DRF-472) — HUMAN_HANDOFF state silences any dispatch.
+
+    The full happy-path coverage lives in D3
+    (apps/skills/human_handoff/tests/test_skill.py). This test fixes
+    the dispatcher-level contract to the registry test suite for
+    cross-reference: the guard works even when registered skills WOULD
+    match, the silenced result is observable, no skill's handle()
+    fires when the guard short-circuits.
+    """
+
+    def test_silenced_when_conversation_in_human_handoff(self, context):
+        @register
+        class WouldMatchButShouldNotRun:
+            name: ClassVar[str] = "loud"
+
+            def matches(self, ctx):
+                return True
+
+            def handle(self, ctx):
+                raise AssertionError("handle() must not run in silenced state")
+
+        # Flip the conversation to HUMAN_HANDOFF state via direct write
+        # (the C2 services would normally do this, but the dispatcher
+        # only reads conversation.state — we're testing the guard, not
+        # the state-change path).
+        from apps.conversations.models import Conversation
+
+        Conversation.all_tenants.filter(pk=context.conversation.pk).update(
+            state=Conversation.State.HUMAN_HANDOFF
+        )
+        context.conversation.refresh_from_db()
+
+        result = dispatch(context)
+        assert result is not None
+        assert result.should_send is False
+        assert result.reply_text == ""
+        assert (result.meta or {}).get("silenced_by") == "human_handoff"
+
+
 def test_reset_registry_cache_clears():
     @register
     class X:
