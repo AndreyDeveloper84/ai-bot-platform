@@ -58,19 +58,53 @@ class BrandVoiceConfig(models.Model):
     tone = models.CharField(
         max_length=100,
         default="friendly",
-        help_text="Placeholder for Sprint 2 — replaced by structured tone fields in Sprint 4.",
+        help_text="Sprint 2 placeholder — kept for backward compat. "
+        "Sprint 4+ readers should use the structured `tone_vector` JSON.",
     )
     voice_examples = models.JSONField(
         default=list,
         blank=True,
-        help_text="In-context learning samples for the LLM. Sprint 4 "
-        "populates from the operator's tone-of-voice guide.",
+        help_text="In-context learning samples for the LLM (populated Sprint 4 / C1).",
     )
     disclaimers = models.JSONField(
         default=dict,
         blank=True,
-        help_text="Per-tenant legal / safety wording attached to "
-        "responses. Sprint 4 populates from operator config.",
+        help_text="Sprint 2 placeholder. Sprint 4 / A3 moved per-tenant "
+        "disclaimers into `apps.promptreg.DisclaimerLibrary` — this "
+        "field is dead weight kept for back-compat; cleanup in Sprint 5.",
+    )
+    # Sprint 4 / C1 (DRF-488) — structured voice config per PHASE0_DESIGN §3.5.
+    persona = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Structured persona: {"name": "Alina", "role": "consultant", '
+        '"age": 32, "traits": ["warm", "professional"]}. Sprint 4 ships the '
+        "schema; Phase 1 wires it through `ayla-ai-core` voice utils.",
+    )
+    tone_vector = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Numeric tone axes 0..1: {"warmth": 0.8, "formality": 0.5, '
+        '"energy": 0.6}. LLM prompt composition reads these to bias style.',
+    )
+    forbidden_phrases = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of regex patterns. C4 voice_check validates outbound "
+        "text against these and emits `safety_triggered` on match.",
+    )
+    tone_modulations = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Conditional tone overrides by context. Example: "
+        '{"risk_level=high": {"formality": 0.9, "warmth": 0.4}, '
+        '"sentiment=frustrated": {"warmth": 0.95}}.',
+    )
+    version = models.IntegerField(
+        default=1,
+        help_text="Bumped on every operator save — loaders use it as the "
+        "cache key tail so config changes invalidate without explicit "
+        "pub/sub plumbing.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
