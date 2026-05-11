@@ -111,3 +111,74 @@ class PromptVersion(models.Model):
     def __str__(self) -> str:
         flag = "*" if self.is_active else " "
         return f"PromptVersion[{self.skill_name}/v{self.version}{flag}]"
+
+
+class ThresholdConfig(models.Model):
+    """Per-tenant tunable numeric thresholds (DRF-478 / Sprint 4 / A2).
+
+    Examples: ``intent_confidence_min = 0.65``, ``food_scan_min = 0.7``.
+    Operators tune these without code change; A4 + A6 cache makes them
+    cheap to read on every turn.
+
+    The ``applied_to`` field scopes a threshold to a specific skill (or
+    "" for global / fallback). Resolution order at read time:
+      1. ``applied_to == skill_name`` match
+      2. fall back to ``applied_to == ""``
+      3. KeyError
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="threshold_configs",
+        help_text="Owning tenant.",
+    )
+    key = models.CharField(
+        max_length=64,
+        help_text="Threshold identifier — by convention snake_case noun.",
+    )
+    value = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        help_text="Numeric value. Decimal not float — exactness matters when "
+        "operators tune to 0.65 etc.",
+    )
+    applied_to = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text='Skill name the threshold applies to. Empty string ("") = global / fallback.',
+    )
+    version = models.IntegerField(
+        default=1,
+        help_text="Monotonic per (tenant, key, applied_to). Lets operators "
+        "publish a new value without losing the old.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Currently-served threshold. Default True (different from "
+        "PromptVersion which defaults False) — most threshold edits are "
+        "in-place tuning rather than canary rollouts.",
+    )
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Threshold config"
+        verbose_name_plural = "Threshold configs"
+        ordering = ["-version"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "key", "applied_to", "version"],
+                name="promptreg_threshold_unique_tenant_key_applied_version",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "key", "applied_to", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        scope = self.applied_to or "*"
+        return f"ThresholdConfig[{self.key}@{scope}={self.value}]"

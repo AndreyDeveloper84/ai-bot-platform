@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from apps.promptreg.models import PromptVersion
+from apps.promptreg.models import PromptVersion, ThresholdConfig
 
 
 @admin.register(PromptVersion)
@@ -32,3 +32,15 @@ class PromptVersionAdmin(admin.ModelAdmin):
     def get_queryset(self, request):  # type: ignore[override]
         # Admin spans tenants — surface every row to superusers.
         return PromptVersion.all_tenants.all()
+
+
+@admin.register(ThresholdConfig)
+class ThresholdConfigAdmin(admin.ModelAdmin):
+    list_display = ("key", "applied_to", "value", "is_active", "version", "tenant")
+    list_filter = ("is_active", "key", "tenant")
+    search_fields = ("key", "applied_to")
+    list_editable = ("is_active",)
+    ordering = ("tenant", "key", "-version")
+
+    def get_queryset(self, request):  # type: ignore[override]
+        return ThresholdConfig.all_tenants.all()

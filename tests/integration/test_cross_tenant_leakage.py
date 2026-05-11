@@ -120,6 +120,17 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "version": 1,
         "created_by": lambda tenant, suffix: _make_user_for_scanner(suffix),
     },
+    # Sprint 4 / A2: ThresholdConfig — key + value + version + applied_to.
+    # `applied_to` differs per row to dodge unique_together on the multi-tenant
+    # variant.
+    "ThresholdConfig": {
+        "key": "scanner_threshold",
+        # Callable so the scanner's suffix-append doesn't corrupt the
+        # Decimal-parseable string.
+        "value": lambda tenant, suffix: "0.5",
+        "applied_to": lambda tenant, suffix: f"skill-{suffix or 'x'}",
+        "version": 1,
+    },
 }
 
 
