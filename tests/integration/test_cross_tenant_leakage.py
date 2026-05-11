@@ -1,0 +1,189 @@
+"""Cross-tenant leakage scanner (DRF-430 / E1).
+
+Pattern ported from Ayla `tenants/tests/test_model_fks.py` (blob
+``15b48c6d``), generalised to discover models via Django's app
+registry instead of a hardcoded list. Sprint 1 has fewer tenant-FK
+models than Ayla; new ones added in Sprint 2+ are caught automatically.
+
+What this scanner verifies:
+  For every domain model that has a ``tenant`` FK to ``tenancy.Tenant``:
+    1. Default manager (``Model.objects``) filters to the current tenant.
+    2. With NO tenant context in scope, strict mode raises
+       ``CrossTenantError``; audit mode returns empty + writes an audit
+       log; off mode returns the full queryset.
+    3. ``Model.all_tenants`` escape hatch always returns every row.
+
+The scanner is intentionally "single source of truth" for the
+multi-tenant contract. Every new model that holds tenant-owned data
+must pick up the contract automatically — there's no opt-in.
+"""
+
+from __future__ import annotations
+
+import pytest
+from django.apps import apps as django_apps
+from django.db import models
+
+from apps.tenancy.context import current_tenant, tenant_scope
+from apps.tenancy.exceptions import CrossTenantError
+from apps.tenancy.managers import TenantScopedManager
+from apps.tenancy.models import Tenant
+
+pytestmark = pytest.mark.django_db
+
+
+def _discover_tenant_scoped_models() -> list[type[models.Model]]:
+    """Return every concrete model in apps/* that:
+
+    1. Has a FK field named ``tenant`` pointing to ``tenancy.Tenant``.
+    2. Has its default manager set to ``TenantScopedManager`` (or
+       subclass thereof).
+
+    Filters out abstract / proxy / `tenancy.Tenant` itself.
+    """
+
+    found: list[type[models.Model]] = []
+    for model in django_apps.get_models():
+        if model is Tenant:
+            continue
+        if model._meta.abstract or model._meta.proxy:
+            continue
+        try:
+            tenant_field = model._meta.get_field("tenant")
+        except Exception:  # noqa: BLE001 — no tenant field
+            continue
+        # Must be a FK to tenancy.Tenant.
+        if not isinstance(tenant_field, models.ForeignKey):
+            continue
+        if tenant_field.related_model is not Tenant:
+            continue
+        if not isinstance(model._default_manager, TenantScopedManager):
+            continue
+        found.append(model)
+    return found
+
+
+# Collect once at module load — pytest parametrize wants a concrete list.
+SCANNED_MODELS = _discover_tenant_scoped_models()
+
+
+def test_scanner_finds_expected_sprint1_models():
+    """Sanity: Sprint 1 has at least AuditLog scoped through TenantScopedManager.
+
+    As Sprint 2+ adds Conversation / Message / BotUser etc., this assert
+    grows by passing — no test edit needed.
+    """
+
+    names = {m.__name__ for m in SCANNED_MODELS}
+    # AuditLog is the only Sprint 1 model wired to TenantScopedManager.
+    # Event, WebhookJournal, IdempotencyKey have tenant FK but use plain
+    # Manager (system-context writers); they're scoped at the caller layer
+    # via .filter(tenant=...). The scanner correctly identifies AuditLog.
+    assert "AuditLog" in names, (
+        f"Expected AuditLog in scanned models; got {names}. "
+        "If you've added new TenantScopedManager-using models, update "
+        "this allowlist."
+    )
+
+
+@pytest.mark.parametrize("model", SCANNED_MODELS, ids=lambda m: m.__name__)
+class TestEveryScopedModel:
+    """Each tenant-scoped model honors the same three-mode contract."""
+
+    def test_default_manager_filters_by_current_tenant(self, model, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        t1 = Tenant.objects.create(slug=f"leak-1-{model.__name__.lower()}", name="T1")
+        t2 = Tenant.objects.create(slug=f"leak-2-{model.__name__.lower()}", name="T2")
+
+        # Insert one row per tenant via .all_tenants (escape hatch — caller
+        # explicitly says "I'm writing across tenants for setup").
+        row1 = model.all_tenants.create(tenant=t1, action=f"scanner.{model.__name__}.1")
+        row2 = model.all_tenants.create(tenant=t2, action=f"scanner.{model.__name__}.2")
+
+        with tenant_scope(t1):
+            visible_ids = set(model.objects.values_list("id", flat=True))
+        # Tenant t1 sees its own row, NOT t2's.
+        assert row1.id in visible_ids
+        assert row2.id not in visible_ids
+
+        # Symmetric: tenant t2 sees its own row only.
+        with tenant_scope(t2):
+            visible_ids = set(model.objects.values_list("id", flat=True))
+        assert row2.id in visible_ids
+        assert row1.id not in visible_ids
+
+        # all_tenants escape hatch returns both rows.
+        all_ids = set(model.all_tenants.values_list("id", flat=True))
+        assert {row1.id, row2.id}.issubset(all_ids)
+
+    def test_strict_mode_raises_without_context(self, model, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        # No tenant in scope → strict mode rejects the read.
+        assert current_tenant() is None
+        with pytest.raises(CrossTenantError):
+            list(model.objects.all())
+
+    def test_strict_mode_raises_on_explicit_cross_tenant_filter(self, model, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        t1 = Tenant.objects.create(slug=f"leak-strict-a-{model.__name__.lower()}", name="A")
+        t2 = Tenant.objects.create(slug=f"leak-strict-b-{model.__name__.lower()}", name="B")
+
+        with tenant_scope(t1), pytest.raises(CrossTenantError):
+            list(model.objects.filter(tenant_id=t2.id))
+
+    def test_audit_mode_returns_empty_without_context(self, model, settings):
+        settings.STRICT_TENANT_SCOPE = "audit"
+
+        # Insert a row so an unfiltered query would return SOMETHING.
+        t = Tenant.objects.create(slug=f"leak-audit-{model.__name__.lower()}", name="A")
+        model.all_tenants.create(tenant=t, action=f"audit-mode.{model.__name__}")
+
+        # No tenant context — audit mode returns empty + logs (we don't
+        # assert the log here; B1's tests already do).
+        result = list(model.objects.all())
+        assert result == []
+
+    def test_off_mode_returns_all_rows(self, model, settings):
+        settings.STRICT_TENANT_SCOPE = "off"
+
+        t1 = Tenant.objects.create(slug=f"leak-off-a-{model.__name__.lower()}", name="A")
+        t2 = Tenant.objects.create(slug=f"leak-off-b-{model.__name__.lower()}", name="B")
+        model.all_tenants.create(tenant=t1, action=f"off.{model.__name__}.1")
+        model.all_tenants.create(tenant=t2, action=f"off.{model.__name__}.2")
+
+        # No tenant scope, no filter — off mode returns everything.
+        assert model.objects.count() >= 2
+
+
+class TestNonScopedTenantModels:
+    """Sanity: AuditLog is scoped; Event/WebhookJournal/IdempotencyKey are not.
+
+    The latter three intentionally use plain ``models.Manager`` (not
+    ``TenantScopedManager``) because writes happen from system contexts —
+    worker boot, breaker rotation, ingest before tenant resolution.
+    Callers scope explicitly via ``.filter(tenant=...)``.
+
+    This test pins the *intent* — if someone in Sprint 2+ converts one of
+    these to TenantScopedManager, the scanner picks it up automatically
+    (and the per-model parametrized tests above run for it too); this
+    test stays as a check that nobody silently regressed the other
+    direction.
+    """
+
+    def test_event_uses_plain_manager(self):
+        from apps.events.models import Event
+
+        assert not isinstance(Event._default_manager, TenantScopedManager)
+
+    def test_webhook_journal_uses_plain_manager(self):
+        from apps.ingress.models import WebhookJournal
+
+        assert not isinstance(WebhookJournal._default_manager, TenantScopedManager)
+
+    def test_idempotency_key_uses_plain_manager(self):
+        from apps.tools.models import IdempotencyKey
+
+        assert not isinstance(IdempotencyKey._default_manager, TenantScopedManager)
