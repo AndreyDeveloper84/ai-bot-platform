@@ -151,20 +151,43 @@ def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> model
 def test_scanner_finds_expected_sprint1_models():
     """Sanity: Sprint 1 has at least AuditLog scoped through TenantScopedManager.
 
-    As Sprint 2+ adds Conversation / Message / BotUser etc., this assert
-    grows by passing — no test edit needed.
+    Event, WebhookJournal, IdempotencyKey have tenant FK but use plain
+    Manager (system-context writers); they're scoped at the caller layer
+    via `.filter(tenant=...)`. The scanner correctly identifies AuditLog
+    as the only Sprint 1 model wired to TenantScopedManager.
     """
 
     names = {m.__name__ for m in SCANNED_MODELS}
-    # AuditLog is the only Sprint 1 model wired to TenantScopedManager.
-    # Event, WebhookJournal, IdempotencyKey have tenant FK but use plain
-    # Manager (system-context writers); they're scoped at the caller layer
-    # via .filter(tenant=...). The scanner correctly identifies AuditLog.
     assert "AuditLog" in names, (
         f"Expected AuditLog in scanned models; got {names}. "
         "If you've added new TenantScopedManager-using models, update "
         "this allowlist."
     )
+
+
+def test_scanner_finds_expected_sprint2_models():
+    """Sanity: Sprint 2 added BotUser + Conversation + Message — each
+    must be picked up by the scanner via the TenantScopedManager
+    isinstance check. Per Sprint 2 / G2 (DRF-450).
+
+    If a new Sprint 2+ model with a tenant FK doesn't show up here,
+    either:
+      (a) its default manager isn't TenantScopedManager (Sprint 2
+          design rule for domain models — see model docstrings), or
+      (b) the FK doesn't point to apps.tenancy.Tenant.
+
+    Either case is a leak waiting to happen — the parametrized
+    contract tests below won't catch it because the model isn't
+    enumerated. Pin the expected set here so a regression in either
+    direction (forget the manager / forget the FK) trips this test.
+    """
+
+    names = {m.__name__ for m in SCANNED_MODELS}
+    expected = {"AuditLog", "BotUser", "Conversation", "Message"}
+    missing = expected - names
+    assert (
+        not missing
+    ), f"Sprint 2 expected scanner to find {expected}; missing: {missing}. Got: {names}."
 
 
 @pytest.mark.parametrize("model", SCANNED_MODELS, ids=lambda m: m.__name__)
