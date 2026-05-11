@@ -42,7 +42,7 @@ LOCAL_APPS = [
     "apps.channels",
     "apps.ingress",
     "apps.workers",
-    "apps.consent",
+    "apps.consent",  # Sprint 3 / A1 — ConsentRecord first-class
     "apps.audit",
     "apps.events",
     "apps.experiments",

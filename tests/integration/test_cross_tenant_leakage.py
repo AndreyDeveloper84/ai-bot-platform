@@ -95,6 +95,13 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "conversation": lambda tenant, suffix: _make_conversation_for_scanner(tenant, suffix),
         "role": "user",
     },
+    # Sprint 3 / A1: ConsentRecord needs bot_user FK + non-blank
+    # consent_type + non-blank source.
+    "ConsentRecord": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
+        "consent_type": "personal_data",
+        "source": "scanner-test",
+    },
 }
 
 
@@ -187,6 +194,23 @@ def test_scanner_finds_expected_sprint2_models():
     missing = expected - names
     assert not missing, (
         f"Sprint 2 expected scanner to find {expected}; missing: {missing}. Got: {names}."
+    )
+
+
+def test_scanner_finds_expected_sprint3_models():
+    """Sanity: Sprint 3 lands ConsentRecord (A1) and AdminTask (C1).
+
+    Per Sprint 3 / G2 (DRF-474). Both models carry tenant FK +
+    TenantScopedManager, so they must be picked up by auto-discovery.
+    The assertion grows as each ships: this test sets the floor at A1.
+    """
+
+    names = {m.__name__ for m in SCANNED_MODELS}
+    sprint3_expected = {"ConsentRecord"}  # AdminTask added when C1 lands
+    sprint3_missing = sprint3_expected - names
+    assert not sprint3_missing, (
+        f"Sprint 3 expected scanner to find {sprint3_expected}; "
+        f"missing: {sprint3_missing}. Got: {names}."
     )
 
 
