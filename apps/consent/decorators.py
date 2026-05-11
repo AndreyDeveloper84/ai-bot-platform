@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from apps.consent.exceptions import ConsentDenied
 from apps.consent.services import has_consent
 from apps.events.services import emit
+from apps.events.vocabulary import SAFETY_TRIGGERED
 
 if TYPE_CHECKING:
     from apps.identity.models import BotUser
@@ -78,7 +79,7 @@ def consent_required(consent_type: str) -> Callable[[F], F]:
             bot_user = _extract_bot_user(args, kwargs)
             if not has_consent(bot_user, consent_type):
                 emit(
-                    "safety_triggered",
+                    SAFETY_TRIGGERED,
                     payload={
                         "reason": "consent_denied",
                         "consent_type": consent_type,

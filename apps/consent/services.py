@@ -40,6 +40,7 @@ from django.utils import timezone
 from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
 from apps.events.services import emit
+from apps.events.vocabulary import CONSENT_GRANTED, CONSENT_WITHDRAWN
 from apps.tenancy.context import current_tenant
 
 if TYPE_CHECKING:
@@ -94,7 +95,7 @@ def grant(
     # ConsentRecord row in DB.
     def _emit_grant() -> None:
         emit(
-            "consent_granted",
+            CONSENT_GRANTED,
             payload={
                 "bot_user_id": str(bot_user.id),
                 "consent_type": consent_type,
@@ -187,7 +188,7 @@ def withdraw(
 
     def _emit_withdraw() -> None:
         emit(
-            "consent_withdrawn",
+            CONSENT_WITHDRAWN,
             payload={
                 "bot_user_id": str(bot_user.id),
                 "consent_type": consent_type,
