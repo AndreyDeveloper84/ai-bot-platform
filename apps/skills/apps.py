@@ -7,7 +7,9 @@ class SkillsConfig(AppConfig):
 
     def ready(self) -> None:
         # Importing each skill module fires the `@register` decorator
-        # so the registry is populated on Django boot. New skills are
-        # added to this list as they ship — Sprint 3 / D1 ships echo
-        # only; D2 + D3 add privacy_consent + human_handoff.
+        # so the registry is populated on Django boot. ORDER MATTERS —
+        # the dispatcher walks the registry in declaration order and
+        # the first matches() returning True wins. Echo MUST be last
+        # because it always matches.
+        from apps.skills.privacy_consent import skill as _privacy  # noqa: F401
         from apps.skills.echo import skill as _echo  # noqa: F401
