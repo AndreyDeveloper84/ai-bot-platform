@@ -67,6 +67,38 @@ def _discover_tenant_scoped_models() -> list[type[models.Model]]:
 SCANNED_MODELS = _discover_tenant_scoped_models()
 
 
+# Minimum required fields per scoped model to satisfy NOT-NULL constraints.
+# When a new tenant-scoped model lands and trips this scanner, add a row here
+# (or the model itself should have sensible defaults for every non-tenant
+# field). The factory only fills NOT-NULL columns that have no default —
+# scanner tests don't care about field *values*, only that we can insert.
+_MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
+    "AuditLog": {"action": "scanner.test"},
+    # BotUser carries `(channel, channel_user_id)` as the natural key; both
+    # are NOT NULL CharFields without defaults. Generate a unique
+    # channel_user_id per row to dodge the unique_together constraint when
+    # tests create one row per tenant.
+    "BotUser": {"channel": "max", "channel_user_id": ""},
+}
+
+
+def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> models.Model:
+    """Create one row for ``model`` under ``tenant``, satisfying required fields.
+
+    ``suffix`` disambiguates rows created in the same test (e.g. one per
+    tenant) so unique_together constraints don't trip the scanner.
+    """
+
+    kwargs = {"tenant": tenant}
+    extras = _MODEL_REQUIRED_FIELDS.get(model.__name__, {})
+    for field_name, base_value in extras.items():
+        if isinstance(base_value, str) and suffix:
+            kwargs[field_name] = f"{base_value}-{suffix}" if base_value else suffix
+        else:
+            kwargs[field_name] = base_value
+    return model.all_tenants.create(**kwargs)
+
+
 def test_scanner_finds_expected_sprint1_models():
     """Sanity: Sprint 1 has at least AuditLog scoped through TenantScopedManager.
 
@@ -98,8 +130,8 @@ class TestEveryScopedModel:
 
         # Insert one row per tenant via .all_tenants (escape hatch — caller
         # explicitly says "I'm writing across tenants for setup").
-        row1 = model.all_tenants.create(tenant=t1, action=f"scanner.{model.__name__}.1")
-        row2 = model.all_tenants.create(tenant=t2, action=f"scanner.{model.__name__}.2")
+        row1 = _create_row(model, tenant=t1, suffix=f"{model.__name__}-1")
+        row2 = _create_row(model, tenant=t2, suffix=f"{model.__name__}-2")
 
         with tenant_scope(t1):
             visible_ids = set(model.objects.values_list("id", flat=True))
@@ -139,7 +171,7 @@ class TestEveryScopedModel:
 
         # Insert a row so an unfiltered query would return SOMETHING.
         t = Tenant.objects.create(slug=f"leak-audit-{model.__name__.lower()}", name="A")
-        model.all_tenants.create(tenant=t, action=f"audit-mode.{model.__name__}")
+        _create_row(model, tenant=t, suffix=f"audit-{model.__name__}")
 
         # No tenant context — audit mode returns empty + logs (we don't
         # assert the log here; B1's tests already do).
@@ -151,8 +183,8 @@ class TestEveryScopedModel:
 
         t1 = Tenant.objects.create(slug=f"leak-off-a-{model.__name__.lower()}", name="A")
         t2 = Tenant.objects.create(slug=f"leak-off-b-{model.__name__.lower()}", name="B")
-        model.all_tenants.create(tenant=t1, action=f"off.{model.__name__}.1")
-        model.all_tenants.create(tenant=t2, action=f"off.{model.__name__}.2")
+        _create_row(model, tenant=t1, suffix=f"off-{model.__name__}-1")
+        _create_row(model, tenant=t2, suffix=f"off-{model.__name__}-2")
 
         # No tenant scope, no filter — off mode returns everything.
         assert model.objects.count() >= 2
