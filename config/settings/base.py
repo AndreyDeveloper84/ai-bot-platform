@@ -89,6 +89,7 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 # Audit logs are forensic data — kept long; idempotency keys are short-lived.
 # Different lifecycles, separate settings, separate cleanup tasks.
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "90"))
+IDEMPOTENCY_KEY_RETENTION_DAYS = int(os.environ.get("IDEMPOTENCY_KEY_RETENTION_DAYS", "7"))
 
 ROOT_URLCONF = "config.urls"
 
