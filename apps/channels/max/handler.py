@@ -216,35 +216,49 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
     action_type = skill_result.action_type if skill_result is not None else ""
     action_data = skill_result.action_data if skill_result is not None else None
+    closing = skill_result is not None and skill_result.should_close_conversation
 
     # Persist the assistant turn BEFORE sending — if send fails, we
     # still have the intended reply on record. The send failure causes
     # PEL retention via the consumer, retry will re-send (idempotent
     # at the MAX API level via channel_message_id deduplication, which
     # is on MAX's side, not ours).
-    record_message(
-        conversation,
-        role="assistant",
-        content=reply_text,
-        rendered_text=reply_text,
-        action_type=action_type,
-        action_data=action_data,
-        trace_id=trace_id,
-    )
-    short_term.append(
-        conversation.id,
-        role="assistant",
-        content=reply_text,
-    )
+    #
+    # When the skill requested close_conversation (e.g. PrivacyConsentSkill
+    # data_delete), the Conversation row has been wiped during dispatch.
+    # Writing an assistant Message into it would violate the FK. We send
+    # the reply (chat_id-based, doesn't need a Conversation), log the
+    # closing path, and skip the persistence step.
+    if not closing:
+        record_message(
+            conversation,
+            role="assistant",
+            content=reply_text,
+            rendered_text=reply_text,
+            action_type=action_type,
+            action_data=action_data,
+            trace_id=trace_id,
+        )
+        short_term.append(
+            conversation.id,
+            role="assistant",
+            content=reply_text,
+        )
 
-    # Sprint 3 / D4: persist skill-requested state transition. The
-    # update is a single UPDATE keyed on pk so concurrent state writes
-    # from other turns can't trample. handoff_initiated already flipped
-    # state inside C2's create_admin_task; this branch covers any
-    # future skill that requests a transition without that side-effect.
-    if skill_result is not None and skill_result.new_state is not None:
-        Conversation.all_tenants.filter(pk=conversation.pk).update(state=skill_result.new_state)
-        conversation.state = skill_result.new_state
+        # Sprint 3 / D4: persist skill-requested state transition. The
+        # update is a single UPDATE keyed on pk so concurrent state writes
+        # from other turns can't trample. handoff_initiated already flipped
+        # state inside C2's create_admin_task; this branch covers any
+        # future skill that requests a transition without that side-effect.
+        if skill_result is not None and skill_result.new_state is not None:
+            Conversation.all_tenants.filter(pk=conversation.pk).update(state=skill_result.new_state)
+            conversation.state = skill_result.new_state
+    else:
+        logger.info(
+            "channels.max.handler.closing_conversation conversation=%s reply_len=%d",
+            conversation.id,
+            len(reply_text),
+        )
 
     # Outbound — MaxAPIError propagates up (handler does not swallow).
     send_message(chat_id=event.chat_id, text=reply_text)
