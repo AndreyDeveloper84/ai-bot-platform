@@ -63,6 +63,7 @@ if TYPE_CHECKING:
 
 
 _TENANT: ContextVar["Tenant | None"] = ContextVar("tenant", default=None)
+_TRACE_ID: ContextVar[str | None] = ContextVar("trace_id", default=None)
 
 
 def current_tenant() -> "Tenant | None":
@@ -120,3 +121,36 @@ def tenant_scope(tenant: "Tenant | None") -> Iterator["Tenant | None"]:
         yield tenant
     finally:
         reset_tenant(token)
+
+
+def current_trace_id() -> str | None:
+    """Return the current trace_id, or None if no trace context is in scope.
+
+    Per review revision 1A (replay-first emission from Sprint 1): every
+    code path inside a request or worker job runs under a trace_id set
+    by ingress. Used by ``apps.events.emit()`` to correlate events
+    across the pipeline. Sprint 5 replay infrastructure rehydrates the
+    full call graph from these trace IDs.
+    """
+
+    return _TRACE_ID.get()
+
+
+@contextmanager
+def trace_id_scope(trace_id: str | None) -> Iterator[str | None]:
+    """Context manager: set trace_id for the scope, reset on exit.
+
+    Pair with ``tenant_scope`` in middleware and worker consumers. Both
+    contexts must be set together — emitted events without trace_id are
+    orphans for replay.
+
+    Example:
+        with tenant_scope(t), trace_id_scope("abc123"):
+            do_pipeline_work()
+    """
+
+    token = _TRACE_ID.set(trace_id)
+    try:
+        yield trace_id
+    finally:
+        _TRACE_ID.reset(token)

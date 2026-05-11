@@ -29,6 +29,16 @@ def _on_sqlite() -> bool:
     return connections["default"].vendor == "sqlite"
 
 
+@pytest.mark.skipif(
+    _on_sqlite(),
+    reason=(
+        "SQLite serializes writes — flaky 'database table is locked' under "
+        "concurrent INSERT. Postgres (prod + CI service) uses MVCC and handles "
+        "this cleanly. Unique-constraint enforcement is already covered by "
+        "test_idempotency.py::test_second_caller_within_ttl_raises_already_claimed; "
+        "the race tests assert thread-level semantics that need Postgres."
+    ),
+)
 def test_concurrent_acquire_exactly_one_winner():
     """Two threads acquire the same key — one wins, one gets AlreadyClaimed."""
 
