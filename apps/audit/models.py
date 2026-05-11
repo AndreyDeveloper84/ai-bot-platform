@@ -65,7 +65,7 @@ class AuditLog(models.Model):
     payload = models.JSONField(
         default=dict,
         blank=True,
-        help_text="Extra structured data. Never store raw PII; " "store IDs and hashes.",
+        help_text="Extra structured data. Never store raw PII; store IDs and hashes.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
