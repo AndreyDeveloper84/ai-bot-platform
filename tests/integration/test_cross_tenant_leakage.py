@@ -131,6 +131,13 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "applied_to": lambda tenant, suffix: f"skill-{suffix or 'x'}",
         "version": 1,
     },
+    # Sprint 4 / A3: DisclaimerLibrary needs category + risk_level + text.
+    "DisclaimerLibrary": {
+        "category": "general",
+        "risk_level": "low",
+        "text": "scanner disclaimer",
+        "version": 1,
+    },
 }
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from apps.promptreg.models import PromptVersion, ThresholdConfig
+from apps.promptreg.models import DisclaimerLibrary, PromptVersion, ThresholdConfig
 
 
 @admin.register(PromptVersion)
@@ -44,3 +44,22 @@ class ThresholdConfigAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):  # type: ignore[override]
         return ThresholdConfig.all_tenants.all()
+
+
+@admin.register(DisclaimerLibrary)
+class DisclaimerLibraryAdmin(admin.ModelAdmin):
+    list_display = (
+        "category",
+        "risk_level",
+        "version",
+        "is_active",
+        "withdrawn_at",
+        "tenant",
+    )
+    list_filter = ("category", "risk_level", "is_active", "tenant")
+    search_fields = ("category", "text")
+    list_editable = ("is_active",)
+    ordering = ("tenant", "category", "risk_level", "-version")
+
+    def get_queryset(self, request):  # type: ignore[override]
+        return DisclaimerLibrary.all_tenants.all()
