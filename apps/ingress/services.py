@@ -22,7 +22,7 @@ from django.db import IntegrityError, transaction
 from apps.audit.services import write_audit
 from apps.events.services import emit
 from apps.ingress.models import WebhookJournal
-from apps.tenancy.context import current_trace_id
+from apps.tenancy.context import current_trace_id, tenant_scope
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,24 @@ def _channel_token_map() -> dict[str, str]:
         pair = pair.strip()
         if not pair:
             continue
+        # Defensive: a malformed env value (e.g. ``"token1=tenant-a,bad-token"``)
+        # must not crash every ingest. Log + skip the bad pair, keep going.
+        if "=" not in pair:
+            logger.warning(
+                "ingress.channel_token_map.malformed_pair pair=%r",
+                pair,
+            )
+            continue
         token, slug = pair.split("=", 1)
-        out[token.strip()] = slug.strip()
+        token = token.strip()
+        slug = slug.strip()
+        if not token or not slug:
+            logger.warning(
+                "ingress.channel_token_map.empty_field pair=%r",
+                pair,
+            )
+            continue
+        out[token] = slug
     return out
 
 
@@ -115,35 +131,40 @@ def record_webhook(
         row = WebhookJournal.objects.get(channel=channel, external_event_id=external_event_id)
         created = False
 
-    if created:
-        emit(
-            "ingress.webhook_received",
-            payload={
-                "channel": channel,
-                "external_event_id": external_event_id,
-                "tenant_resolved": tenant is not None,
-            },
-        )
-        if tenant is None and channel_token:
-            write_audit(
-                "ingress.webhook_unknown_tenant",
-                target="WebhookJournal",
-                target_id=row.id,
+    # Wrap emit / write_audit in tenant_scope(tenant) so the resolved
+    # tenant ends up on the Event + AuditLog rows. Without this scope,
+    # emit() reads current_tenant() == None and the (tenant, -created_at)
+    # index Sprint 5 replay depends on is full of NULLs for ingress.
+    with tenant_scope(tenant):
+        if created:
+            emit(
+                "ingress.webhook_received",
                 payload={
                     "channel": channel,
                     "external_event_id": external_event_id,
-                    "token_prefix": channel_token[:8] + "..."
-                    if len(channel_token) > 8
-                    else channel_token,
+                    "tenant_resolved": tenant is not None,
                 },
             )
-    else:
-        emit(
-            "ingress.webhook_duplicate",
-            payload={
-                "channel": channel,
-                "external_event_id": external_event_id,
-            },
-        )
+            if tenant is None and channel_token:
+                write_audit(
+                    "ingress.webhook_unknown_tenant",
+                    target="WebhookJournal",
+                    target_id=row.id,
+                    payload={
+                        "channel": channel,
+                        "external_event_id": external_event_id,
+                        "token_prefix": channel_token[:8] + "..."
+                        if len(channel_token) > 8
+                        else channel_token,
+                    },
+                )
+        else:
+            emit(
+                "ingress.webhook_duplicate",
+                payload={
+                    "channel": channel,
+                    "external_event_id": external_event_id,
+                },
+            )
 
     return row, created

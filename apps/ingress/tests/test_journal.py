@@ -148,6 +148,78 @@ class TestEventsEmitted:
         assert dup.count() == 1
 
 
+class TestEventTenantFK:
+    """Regression test for fix #1 (post-review): emit() must persist
+    the resolved tenant on Event rows. Without tenant_scope() wrapping
+    in record_webhook, the (tenant, -created_at) index built in E0 is
+    full of NULLs and per-tenant replay timelines break.
+    """
+
+    def test_event_has_tenant_fk_when_resolved(self, settings):
+        from apps.events.models import Event
+
+        t = Tenant.objects.create(slug="evfk-a", name="A")
+        _set_token_map(settings, {"tok-evfk": "evfk-a"})
+        record_webhook(
+            channel="max",
+            external_event_id="evt-fk-1",
+            raw_payload={},
+            channel_token="tok-evfk",
+        )
+        received = Event.objects.get(event_type="ingress.webhook_received")
+        assert received.tenant_id == t.id
+
+    def test_audit_has_tenant_fk_none_for_unknown_tenant(self, settings):
+        # When tenant is None (unknown token), the audit row still has
+        # tenant=None — but the wrap in tenant_scope(None) is correct
+        # behaviour, just keeps the contract honest.
+        _set_token_map(settings, {})
+        record_webhook(
+            channel="max",
+            external_event_id="evt-fk-2",
+            raw_payload={},
+            channel_token="ghost-token",
+        )
+        audit = AuditLog.all_tenants.get(action="ingress.webhook_unknown_tenant")
+        assert audit.tenant is None
+
+
+class TestMalformedEnvVar:
+    """Regression test for fix #4 (post-review): malformed token map
+    entries (typos, missing '=') must NOT crash record_webhook. Log +
+    skip the bad pair, keep good pairs working.
+    """
+
+    def test_malformed_pair_is_skipped(self, settings, caplog):
+        # 'bad-token' has no '='. 'tok-good=ch-good' is valid.
+        Tenant.objects.create(slug="ch-good", name="Good")
+        settings.CHANNEL_TOKEN_TO_TENANT_SLUG = "bad-token,tok-good=ch-good"
+        with caplog.at_level("WARNING", logger="apps.ingress.services"):
+            row, _ = record_webhook(
+                channel="max",
+                external_event_id="evt-mal-1",
+                raw_payload={},
+                channel_token="tok-good",
+            )
+        assert row.resolved_tenant is not None
+        assert row.resolved_tenant.slug == "ch-good"
+        assert any("malformed_pair" in rec.message for rec in caplog.records)
+
+    def test_empty_token_or_slug_is_skipped(self, settings, caplog):
+        # Each of these is malformed: empty token, empty slug.
+        settings.CHANNEL_TOKEN_TO_TENANT_SLUG = "=ch-broken,tok-empty=,valid=ok"
+        Tenant.objects.create(slug="ok", name="OK")
+        with caplog.at_level("WARNING", logger="apps.ingress.services"):
+            row, _ = record_webhook(
+                channel="max",
+                external_event_id="evt-mal-2",
+                raw_payload={},
+                channel_token="valid",
+            )
+        assert row.resolved_tenant.slug == "ok"
+        assert sum("empty_field" in rec.message for rec in caplog.records) >= 1
+
+
 class TestDedupUniqueConstraint:
     """Different channels with same external_event_id are NOT duplicates."""
 

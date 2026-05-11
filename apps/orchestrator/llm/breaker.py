@@ -65,6 +65,12 @@ class _BreakerCore:
     state: State = State.CLOSED
     failures: deque[float] = field(default_factory=deque)
     opened_at: float | None = None
+    # probe_in_flight = True between the moment HALF_OPEN admits one
+    # call and the moment that call resolves (success → CLOSED, fail →
+    # OPEN). Concurrent callers see probe_in_flight and short-circuit
+    # with BreakerOpenError, so the recovering upstream sees at most
+    # one probe at a time.
+    probe_in_flight: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -191,22 +197,51 @@ async def with_circuit_breaker(
     """
 
     core = _get_or_create(name, threshold, window_seconds, cooldown_seconds)
-    state = _check_state(core)
 
-    if state == State.OPEN:
-        logger.info("llm.breaker.short_circuit name=%s", name)
-        raise BreakerOpenError(
-            f"Circuit breaker {name!r} is open; refusing call. "
-            f"Cooldown {cooldown_seconds}s after open at {core.opened_at}.",
-        )
+    # Atomic transition + admission check. We hold the lock long enough
+    # to (a) auto-promote OPEN → HALF_OPEN if cooldown elapsed, and
+    # (b) reserve the single probe slot in HALF_OPEN so concurrent
+    # callers are short-circuited. Releasing before the upstream call
+    # would let N callers all grab the same probe slot.
+    with core.lock:
+        if core.state == State.OPEN:
+            assert core.opened_at is not None
+            if _now() - core.opened_at >= core.cooldown_seconds:
+                _transition(core, State.HALF_OPEN)
+        if core.state == State.OPEN:
+            logger.info("llm.breaker.short_circuit name=%s state=open", name)
+            raise BreakerOpenError(
+                f"Circuit breaker {name!r} is open; refusing call. "
+                f"Cooldown {cooldown_seconds}s after open at {core.opened_at}.",
+            )
+        if core.state == State.HALF_OPEN:
+            if core.probe_in_flight:
+                # Another caller already holds the probe slot.
+                logger.info("llm.breaker.short_circuit name=%s state=half_open_busy", name)
+                raise BreakerOpenError(
+                    f"Circuit breaker {name!r} is in half-open with a probe "
+                    "already in flight; refusing concurrent calls.",
+                )
+            core.probe_in_flight = True
+            is_probe = True
+        else:
+            is_probe = False
 
     try:
         result = await fn(*args, **kwargs)
     except Exception:
         _record_failure(core)
+        if is_probe:
+            # Failure released the slot when _record_failure transitioned
+            # back to OPEN; explicit clear is belt-and-braces.
+            with core.lock:
+                core.probe_in_flight = False
         raise
 
     _record_success(core)
+    if is_probe:
+        with core.lock:
+            core.probe_in_flight = False
     return result
 
 

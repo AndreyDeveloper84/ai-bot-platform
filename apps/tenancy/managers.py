@@ -139,7 +139,12 @@ class TenantScopedManager(models.Manager):
                 if isinstance(tenant_kwarg, models.Model)
                 else None
             )
-            if requested is not None and requested != tenant.id:
+            # Normalise to string before equality. Django accepts both
+            # ``tenant_id=uuid_instance`` and ``tenant_id=str(uuid)`` in
+            # ORM filters, so we must too. Without normalisation,
+            # ``str(uuid)`` != ``UUID(uuid)`` and legitimate callers
+            # trip a false cross-tenant detection.
+            if requested is not None and str(requested) != str(tenant.id):
                 if mode == "strict":
                     raise CrossTenantError(
                         f"{self.model.__name__}.objects.filter(tenant_id={requested}) "

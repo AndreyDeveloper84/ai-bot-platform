@@ -209,6 +209,51 @@ class TestOffMode:
 # ---------------------------------------------------------------------------
 
 
+class TestStrUUIDNormalisation:
+    """Regression test for fix #3 (post-review): str(uuid) and UUID
+    instances must compare equal in the cross-tenant check. Django
+    accepts both shapes in ORM filters; the manager must too.
+    """
+
+    def test_filter_with_str_tenant_id_matching_current_passes(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        t = Tenant.objects.create(slug="t-str", name="T")
+        mgr = _bind_manager_to_mock_model()
+
+        with tenant_scope(t):
+            with patch.object(
+                TenantScopedManager.__bases__[0],
+                "filter",
+                return_value=MagicMock(name="filtered_qs"),
+            ) as base_filter:
+                # Caller passes str(uuid) — Django ORM normalises in SQL,
+                # the manager must accept it too without false trip.
+                mgr.filter(tenant_id=str(t.id))
+            base_filter.assert_called_once_with(tenant_id=str(t.id))
+
+    def test_filter_with_uuid_instance_still_passes(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        t = Tenant.objects.create(slug="t-uuid", name="T")
+        mgr = _bind_manager_to_mock_model()
+
+        with tenant_scope(t):
+            with patch.object(
+                TenantScopedManager.__bases__[0],
+                "filter",
+                return_value=MagicMock(name="filtered_qs"),
+            ):
+                mgr.filter(tenant_id=t.id)  # UUID instance
+
+    def test_filter_with_str_other_tenant_still_raises(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        t1 = Tenant.objects.create(slug="t-str-a", name="A")
+        t2 = Tenant.objects.create(slug="t-str-b", name="B")
+        mgr = _bind_manager_to_mock_model()
+
+        with tenant_scope(t1), pytest.raises(CrossTenantError):
+            mgr.filter(tenant_id=str(t2.id))
+
+
 class TestInvalidMode:
     def test_invalid_mode_falls_back_to_audit(self, settings, caplog):
         settings.STRICT_TENANT_SCOPE = "totally-bogus"

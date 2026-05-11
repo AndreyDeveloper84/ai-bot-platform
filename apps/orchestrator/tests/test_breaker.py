@@ -210,6 +210,86 @@ class TestHalfOpen:
 # ---------------------------------------------------------------------------
 
 
+class TestHalfOpenConcurrency:
+    """Regression test for fix #2 (post-review): half-open must admit
+    EXACTLY ONE probe. Concurrent callers that hit while a probe is in
+    flight get BreakerOpenError, not a second upstream call. Without
+    this, a recovering OpenAI endpoint gets hammered by every queued
+    request the moment cooldown elapses.
+    """
+
+    async def _trip_to_half_open(self, clock):
+        for _ in range(5):
+            with pytest.raises(RuntimeError):
+                await with_circuit_breaker(
+                    "test",
+                    _failure,
+                    threshold=5,
+                    window_seconds=60,
+                    cooldown_seconds=30,
+                )
+        clock.advance(31)
+        assert get_state("test") == State.HALF_OPEN
+
+    async def test_concurrent_probes_only_one_runs(self, clock):
+        await self._trip_to_half_open(clock)
+
+        call_count = 0
+        # The probe blocks on this event so we can launch a second call
+        # before the first finishes.
+        proceed = __import__("asyncio").Event()
+
+        async def slow_success() -> str:
+            nonlocal call_count
+            call_count += 1
+            await proceed.wait()
+            return "ok"
+
+        import asyncio
+
+        task1 = asyncio.create_task(
+            with_circuit_breaker(
+                "test",
+                slow_success,
+                threshold=5,
+                window_seconds=60,
+                cooldown_seconds=30,
+            )
+        )
+        # Yield to let task1 reserve the probe slot.
+        await asyncio.sleep(0)
+
+        # Now a concurrent caller must see "probe in flight" and bail.
+        with pytest.raises(BreakerOpenError, match="probe already in flight"):
+            await with_circuit_breaker(
+                "test",
+                slow_success,
+                threshold=5,
+                window_seconds=60,
+                cooldown_seconds=30,
+            )
+        assert call_count == 1  # only the first probe started the upstream call
+
+        # Let task1 finish — should close the breaker and free the slot.
+        proceed.set()
+        await task1
+        assert get_state("test") == State.CLOSED
+
+    async def test_probe_failure_releases_slot_and_reopens(self, clock):
+        await self._trip_to_half_open(clock)
+
+        with pytest.raises(RuntimeError):
+            await with_circuit_breaker(
+                "test",
+                _failure,
+                threshold=5,
+                window_seconds=60,
+                cooldown_seconds=30,
+            )
+        # Failure in half-open → back to OPEN, probe slot released.
+        assert get_state("test") == State.OPEN
+
+
 class TestIsolation:
     async def test_different_names_are_independent(self, clock):
         reset_breaker("alpha")
