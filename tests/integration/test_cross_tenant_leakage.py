@@ -96,7 +96,11 @@ def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> model
             kwargs[field_name] = f"{base_value}-{suffix}" if base_value else suffix
         else:
             kwargs[field_name] = base_value
-    return model.all_tenants.create(**kwargs)
+    # ``all_tenants`` is the escape-hatch manager declared on every
+    # TenantScopedManager-using model — verified at runtime by
+    # ``_discover_tenant_scoped_models``. mypy can't see the attribute
+    # on the generic ``type[Model]`` annotation, so suppress narrowly.
+    return model.all_tenants.create(**kwargs)  # type: ignore[attr-defined]
 
 
 def test_scanner_finds_expected_sprint1_models():
