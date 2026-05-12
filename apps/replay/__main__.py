@@ -55,61 +55,61 @@ def _setup_django() -> None:
     django.setup()
 
 
-def _build_default_pipeline_fn() -> Any:
-    """Default pipeline = thin wrapper around Sprint 3 skill dispatch.
+def _build_default_pipeline_fn(*, tenant_slug: str) -> Any:
+    """Default pipeline = thin wrapper around ``apps.orchestrator.pipeline.turn``.
 
-    Sprint 6 replaces this with ``apps.orchestrator.pipeline.turn``.
-    Used by ``run`` when no custom pipeline_fn is provided.
+    Sprint 6 / I3 (DRF-547) closes the Sprint 5 carry-over (DRF-525) —
+    the prior synthetic SkillContext wiring lived against Sprint 3
+    destructive skills (PrivacyConsentSkill.data_delete deleted the
+    BotUser between fixtures, HumanHandoffSkill flipped Conversation
+    state to HUMAN_HANDOFF and silenced everything afterwards). Sprint 6
+    O1 (DRF-535) shipped a real ``turn()`` with per-turn isolation, so
+    the CLI now drives REAL pipeline output for every fixture.
+
+    The CLI's ``--isolated`` flag (I4 / DRF-548) wraps each fixture in
+    a savepoint so per-fixture destructive side-effects don't leak —
+    use it when running against Sprint 3 stub skills.
+
+    ### Async ↔ sync bridging
+
+    ``turn()`` is async; the Sprint 5 runner protocol expects a sync
+    callable returning a trace dict. We bridge via ``asyncio.run`` —
+    each fixture spins a fresh event loop. Safe because the runner
+    invokes pipeline_fn serially.
     """
 
-    from apps.skills.base import SkillContext
-    from apps.skills.registry import dispatch as skill_dispatch
-    from apps.tenancy.context import current_tenant
-
     def pipeline_fn(input_dict: dict[str, Any]) -> dict[str, Any]:
-        # Build a minimal SkillContext from the fixture input. The
-        # dispatcher needs a Conversation + BotUser; for fixture runs
-        # we lazily build synthetic ones (or skip if the test wants
-        # pure assertion checks).
+        import asyncio
+        import uuid
+
+        from apps.orchestrator.pipeline import ChannelMessage, turn
+
         text = str(input_dict.get("text", ""))
-        tenant = current_tenant()
-        if tenant is None:
-            # CLI runs always wrap in tenant_scope; this is defensive.
-            raise RuntimeError("pipeline_fn called outside tenant_scope")
-        # Build synthetic conversation/bot_user lazily — only what
-        # the registry walk needs.
-        from apps.conversations.models import Conversation
-        from apps.identity.models import BotUser
+        channel = str(input_dict.get("channel", "max"))
 
-        bot_user = BotUser.all_tenants.filter(tenant=tenant).first()
-        if bot_user is None:
-            bot_user = BotUser.all_tenants.create(
-                tenant=tenant, channel="max", channel_user_id="replay-fixture"
-            )
-        conversation = Conversation.all_tenants.filter(bot_user=bot_user).first()
-        if conversation is None:
-            conversation = Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
-
-        ctx = SkillContext(
-            conversation=conversation,
-            bot_user=bot_user,
-            message_text=text,
+        message = ChannelMessage(
+            tenant_slug=tenant_slug,
+            channel=channel,
+            channel_user_id="replay-fixture-uid",
+            chat_id="replay-fixture-chat",
+            text=text,
+            display_name="Replay Fixture",
+            trace_id=str(uuid.uuid4()),
         )
-        result = skill_dispatch(ctx)
-        if result is None:
-            return {
-                "intent": "",
-                "skill_used": "",
-                "safety_decision": "allow",
-                "response_text": "",
-                "tool_calls": [],
-            }
+
+        result = asyncio.run(turn(message))
+
+        intent = result.intent
+        reply = result.reply
         return {
-            "intent": (result.meta or {}).get("intent", ""),
-            "skill_used": (result.meta or {}).get("skill", ""),
-            "safety_decision": "allow",
-            "response_text": result.reply_text,
+            "intent": intent.intent if intent is not None else "",
+            "skill_used": intent.skill if intent is not None else "",
+            "safety_decision": result.pre_check_verdict or "allow",
+            "response_text": reply.text if reply is not None else "",
             "tool_calls": [],
+            "trace_id": result.trace_id,
+            "ok": result.ok,
+            "short_circuited_at_step": result.short_circuited_at_step,
         }
 
     return pipeline_fn
@@ -146,12 +146,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     runner = Runner()
-    pipeline_fn = _build_default_pipeline_fn()
+    pipeline_fn = _build_default_pipeline_fn(tenant_slug=args.tenant)
     reports = []
     with tenant_scope(tenant):
         for fixture in fixtures:
-            report = runner.run(fixture, pipeline_fn=pipeline_fn)
-            reports.append(report)
+            if args.isolated:
+                # I4 / DRF-548 — per-fixture savepoint isolation.
+                # Sprint 3 stub skills have destructive side-effects
+                # (PrivacyConsentSkill.data_delete, HumanHandoffSkill
+                # state flip); savepoint rollback after each fixture
+                # keeps the next one starting from a clean slate.
+                from django.db import transaction
+
+                sid = transaction.savepoint()
+                try:
+                    report = runner.run(fixture, pipeline_fn=pipeline_fn)
+                finally:
+                    transaction.savepoint_rollback(sid)
+                reports.append(report)
+            else:
+                report = runner.run(fixture, pipeline_fn=pipeline_fn)
+                reports.append(report)
 
     return _render_reports(reports, args)
 
@@ -262,6 +277,16 @@ def _parser() -> argparse.ArgumentParser:
     pr.add_argument("--strict-must-pass", action="store_true")
     pr.add_argument("--strict-forbidden", action="store_true")
     pr.add_argument("--report", choices=["text", "json"], default="text")
+    pr.add_argument(
+        "--isolated",
+        action="store_true",
+        help=(
+            "Wrap each fixture in a DB savepoint that rolls back after the "
+            "run. Use when fixtures touch skills with destructive side "
+            "effects (privacy data_delete, handoff state flip) so per-"
+            "fixture state doesn't leak. Sprint 6 / I4."
+        ),
+    )
     pr.set_defaults(func=_cmd_run)
 
     pd = sub.add_parser("diff", help="Diff two captured traces")

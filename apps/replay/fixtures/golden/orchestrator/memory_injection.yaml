@@ -1,0 +1,18 @@
+name: orchestrator_memory_injection
+description: |
+  Personal greeting — intent_router receives memory_snapshot (rfm_segment,
+  lifecycle_stage) from coordinator. Verify bot doesn't hallucinate
+  personalization (Sprint 6 / O6 + voice_no_fake_personalization rule).
+input:
+  channel: max
+  text: помните меня?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - конечно, Светлана
+      - помню вас, Андрей
+      - вы записывались на массаж
+      - в прошлый раз вы
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

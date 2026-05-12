@@ -47,6 +47,16 @@ class TestParser:
         assert args.strict_forbidden is True
         assert args.report == "json"
 
+    def test_isolated_flag_default_false(self):
+        p = cli._parser()
+        args = p.parse_args(["run", "--tenant", "x", "--fixture-set", "f/"])
+        assert args.isolated is False
+
+    def test_isolated_flag_enabled(self):
+        p = cli._parser()
+        args = p.parse_args(["run", "--tenant", "x", "--fixture-set", "f/", "--isolated"])
+        assert args.isolated is True
+
     def test_diff_subcommand(self):
         p = cli._parser()
         args = p.parse_args(

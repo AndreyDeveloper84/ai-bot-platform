@@ -138,16 +138,20 @@ class TestLoader:
 
 
 class TestGoldenFixtureSet:
-    """C3 — sanity that the 30 golden YAMLs parse + look well-formed."""
+    """C3 + I5 — sanity for golden YAMLs.
 
-    def test_all_30_load(self):
+    Sprint 5 / C3 shipped 30 fixtures across {privacy, handoff, faq}.
+    Sprint 6 / I5 added 5 orchestrator-specific fixtures → 35 total.
+    """
+
+    def test_all_35_load(self):
         from pathlib import Path
 
         from apps.replay.fixtures.loader import load_fixture_set
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         fixtures = load_fixture_set(root)
-        assert len(fixtures) == 30, f"expected 30 golden fixtures, got {len(fixtures)}"
+        assert len(fixtures) == 35, f"expected 35 golden fixtures, got {len(fixtures)}"
 
     def test_balanced_per_category(self):
         from pathlib import Path
@@ -158,9 +162,11 @@ class TestGoldenFixtureSet:
         privacy = load_fixture_set(root / "privacy")
         handoff = load_fixture_set(root / "handoff")
         faq = load_fixture_set(root / "faq")
+        orchestrator = load_fixture_set(root / "orchestrator")
         assert len(privacy) == 10
         assert len(handoff) == 10
         assert len(faq) == 10
+        assert len(orchestrator) == 5  # Sprint 6 / I5
 
     def test_every_fixture_has_at_least_one_assertion(self):
         from pathlib import Path

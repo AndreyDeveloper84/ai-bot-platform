@@ -1,0 +1,18 @@
+name: orchestrator_tool_call_chain
+description: |
+  User requests booking — Phase 0 has no real booking tool yet; the
+  pipeline routes to FAQ stub or echo. Documents the EXPECTED state:
+  no tool_calls emitted yet, response is canned. Phase 1+ when real
+  booking tool registers, this fixture validates the tool-call chain.
+input:
+  channel: max
+  text: Хочу записаться на массаж завтра
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "tool_call_id"
+      - "function_call"
+      - "system error"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
