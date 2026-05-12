@@ -178,6 +178,12 @@ CELERY_BEAT_SCHEDULE = {
         # worker pool isn't slammed by both sweeps simultaneously.
         "schedule": crontab(hour="4", minute="0"),
     },
+    "recompute_profiles_daily": {
+        "task": "apps.identity.tasks.recompute_profiles_daily",
+        # Daily 03:30 UTC — between the 03:00 audit cleanup and the
+        # 04:00 replay cleanup; spike absorbed in tiers across the worker pool.
+        "schedule": crontab(hour="3", minute="30"),
+    },
 }
 
 # Sprint 1 / C1 channel token map. Format env CHANNEL_TOKEN_TO_TENANT_SLUG:
