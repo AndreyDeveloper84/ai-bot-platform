@@ -13,4 +13,5 @@ class SkillsConfig(AppConfig):
         # because it always matches.
         from apps.skills.privacy_consent import skill as _privacy  # noqa: F401
         from apps.skills.human_handoff import skill as _handoff  # noqa: F401
+        from apps.skills.faq import skill as _faq  # noqa: F401
         from apps.skills.echo import skill as _echo  # noqa: F401
