@@ -17,6 +17,8 @@ class ReplayTraceAdmin(admin.ModelAdmin):
     list_display = (
         "trace_id_short",
         "tenant",
+        "intent_summary",
+        "skill_summary",
         "redacted",
         "redaction_method",
         "captured_at",
@@ -39,6 +41,22 @@ class ReplayTraceAdmin(admin.ModelAdmin):
     @admin.display(description="trace_id")
     def trace_id_short(self, obj: ReplayTrace) -> str:
         return obj.trace_id[:12] + ("…" if len(obj.trace_id) > 12 else "")
+
+    @admin.display(description="intent")
+    def intent_summary(self, obj: ReplayTrace) -> str:
+        """First step's intent if present. Empty for echo/error traces."""
+        steps = obj.pipeline_steps or []
+        if not steps or not isinstance(steps[0], dict):
+            return "—"
+        return str(steps[0].get("intent") or "—")
+
+    @admin.display(description="skill")
+    def skill_summary(self, obj: ReplayTrace) -> str:
+        """First step's skill_used. Empty when no skill matched (echo fallback)."""
+        steps = obj.pipeline_steps or []
+        if not steps or not isinstance(steps[0], dict):
+            return "—"
+        return str(steps[0].get("skill_used") or "—")
 
     def get_queryset(self, request):  # type: ignore[override]
         # Admin spans tenants — surface every row to superusers.
