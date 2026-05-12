@@ -1,0 +1,11 @@
+name: faq_duration_session
+description: Question about session length.
+input:
+  channel: max
+  text: Сколько длится один сеанс?
+must_pass:
+  - response_contains_any:
+      - сеанс
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

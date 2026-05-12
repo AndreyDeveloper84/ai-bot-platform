@@ -1,0 +1,12 @@
+name: privacy_export_en_download
+description: English "download my data" — alternate verb maps to export.
+input:
+  channel: max
+  text: I want to download my data
+must_pass:
+  - intent: export
+  - skill_used: privacy_consent
+voice_check:
+  max_length: 20000
+  caps_lock: 0.5
+expected_action_type: privacy_export

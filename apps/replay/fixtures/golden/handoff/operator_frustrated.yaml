@@ -1,0 +1,14 @@
+name: handoff_operator_frustrated
+description: Frustrated user demands operator after bot confusion.
+input:
+  channel: max
+  text: Бот тупит, дайте оператора срочно!
+must_pass:
+  - skill_used: human_handoff
+forbidden:
+  - response_contains_any:
+      - извините за неудобства
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: human_handoff

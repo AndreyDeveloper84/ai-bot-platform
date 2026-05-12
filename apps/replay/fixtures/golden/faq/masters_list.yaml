@@ -1,0 +1,11 @@
+name: faq_masters_list
+description: Question about list of masters / specialists.
+input:
+  channel: max
+  text: Кто у вас работает массажистом?
+must_pass:
+  - response_contains_any:
+      - массаж
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

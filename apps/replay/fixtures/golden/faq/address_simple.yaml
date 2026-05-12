@@ -1,0 +1,14 @@
+name: faq_address_simple
+description: Question about salon address. Phase 0 echo, Sprint 6+ pulls from KB.
+input:
+  channel: max
+  text: Подскажите адрес салона
+must_pass:
+  - response_contains_any:
+      - адрес
+forbidden:
+  - response_contains_any:
+      - не знаю
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

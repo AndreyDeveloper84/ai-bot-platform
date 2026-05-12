@@ -1,0 +1,14 @@
+name: faq_price_general
+description: General price inquiry. Phase 0 echo, Sprint 6+ price lookup.
+input:
+  channel: max
+  text: Сколько стоит классический массаж?
+must_pass:
+  - response_contains_any:
+      - массаж
+forbidden:
+  - response_contains_any:
+      - бесплатно
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

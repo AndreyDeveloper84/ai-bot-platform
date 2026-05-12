@@ -1,0 +1,12 @@
+name: faq_children_allowed
+description: Question about whether children are allowed at the salon.
+input:
+  channel: max
+  text: Можно ли с ребёнком прийти?
+must_pass:
+  - response_contains_any:
+      - ребёнк
+      - ребенк
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

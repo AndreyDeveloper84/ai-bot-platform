@@ -1,0 +1,12 @@
+name: privacy_delete_en_short
+description: English "delete my data" — multilingual keyword set covers this.
+input:
+  channel: max
+  text: delete my data
+must_pass:
+  - intent: delete
+  - skill_used: privacy_consent
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: privacy_delete

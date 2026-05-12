@@ -1,0 +1,11 @@
+name: faq_certificate_gift
+description: Question about gift certificates.
+input:
+  channel: max
+  text: Можно купить подарочный сертификат?
+must_pass:
+  - response_contains_any:
+      - сертификат
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

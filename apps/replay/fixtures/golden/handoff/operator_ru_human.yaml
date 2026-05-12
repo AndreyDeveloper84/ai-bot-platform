@@ -1,0 +1,13 @@
+name: handoff_operator_ru_human
+description: Russian "связь с человеком" — explicit human request.
+input:
+  channel: max
+  text: Я хочу связь с человеком
+must_pass:
+  - skill_used: human_handoff
+  - response_contains_any:
+      - менеджеру
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: human_handoff

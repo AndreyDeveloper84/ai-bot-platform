@@ -1,0 +1,12 @@
+name: privacy_delete_ru_self
+description: Russian "delete me" form — alternate verb target, same intent.
+input:
+  channel: max
+  text: удалите меня
+must_pass:
+  - intent: delete
+  - skill_used: privacy_consent
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: privacy_delete

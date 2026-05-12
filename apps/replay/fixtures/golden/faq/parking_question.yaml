@@ -1,0 +1,11 @@
+name: faq_parking_question
+description: Question about parking near salon.
+input:
+  channel: max
+  text: Есть ли парковка рядом с салоном?
+must_pass:
+  - response_contains_any:
+      - парков
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

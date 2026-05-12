@@ -1,0 +1,11 @@
+name: handoff_operator_polite_long
+description: Polite long-form request — "agent" still detected as substring.
+input:
+  channel: max
+  text: Я бы хотел поговорить с настоящим человеком, agent желательно
+must_pass:
+  - skill_used: human_handoff
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: human_handoff

@@ -1,0 +1,17 @@
+name: privacy_delete_ru_polite
+description: Russian polite-form "delete my data" — PrivacyConsentSkill catches it.
+input:
+  channel: max
+  text: Пожалуйста, удалите мои данные.
+must_pass:
+  - intent: delete
+  - skill_used: privacy_consent
+  - response_contains_any:
+      - удалены
+forbidden:
+  - response_contains_any:
+      - не могу
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: privacy_delete

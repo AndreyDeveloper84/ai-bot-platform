@@ -1,0 +1,19 @@
+name: privacy_delete_ru_short
+description: Russian "delete my data" short form — PrivacyConsentSkill catches it.
+input:
+  channel: max
+  text: удали мои данные
+must_pass:
+  - intent: delete
+  - skill_used: privacy_consent
+  - response_contains_any:
+      - удалены
+      - Удалено
+forbidden:
+  - response_contains_any:
+      - ошибка
+      - не могу
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: privacy_delete

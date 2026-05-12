@@ -1,0 +1,11 @@
+name: faq_payment_methods
+description: Question about accepted payment methods.
+input:
+  channel: max
+  text: Какие способы оплаты у вас есть?
+must_pass:
+  - response_contains_any:
+      - оплат
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

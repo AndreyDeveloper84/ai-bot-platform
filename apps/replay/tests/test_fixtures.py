@@ -135,3 +135,49 @@ class TestLoader:
             load_fixture(p)
         assert str(p) in str(exc_info.value)
         assert "bogus" in str(exc_info.value)
+
+
+class TestGoldenFixtureSet:
+    """C3 — sanity that the 30 golden YAMLs parse + look well-formed."""
+
+    def test_all_30_load(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
+        fixtures = load_fixture_set(root)
+        assert len(fixtures) == 30, f"expected 30 golden fixtures, got {len(fixtures)}"
+
+    def test_balanced_per_category(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
+        privacy = load_fixture_set(root / "privacy")
+        handoff = load_fixture_set(root / "handoff")
+        faq = load_fixture_set(root / "faq")
+        assert len(privacy) == 10
+        assert len(handoff) == 10
+        assert len(faq) == 10
+
+    def test_every_fixture_has_at_least_one_assertion(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
+        for f in load_fixture_set(root):
+            assert (
+                f.must_pass or f.forbidden
+            ), f"{f.name}: golden fixture must have at least one must_pass or forbidden rule"
+
+    def test_every_fixture_has_voice_check(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
+        for f in load_fixture_set(root):
+            assert f.voice_check, f"{f.name}: golden fixture must have voice_check"

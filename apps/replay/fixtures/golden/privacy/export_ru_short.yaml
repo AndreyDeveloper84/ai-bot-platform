@@ -1,0 +1,17 @@
+name: privacy_export_ru_short
+description: Russian "export my data" short form — JSON archive reply.
+input:
+  channel: max
+  text: выгрузить мои данные
+must_pass:
+  - intent: export
+  - skill_used: privacy_consent
+  - response_contains_any:
+      - данные
+forbidden:
+  - response_contains_any:
+      - ошибка
+voice_check:
+  max_length: 20000
+  caps_lock: 0.5
+expected_action_type: privacy_export

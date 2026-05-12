@@ -1,0 +1,11 @@
+name: handoff_operator_ru_support
+description: Russian "поддержка живой" — variation of live support keyword.
+input:
+  channel: max
+  text: Подключите поддержка живой
+must_pass:
+  - skill_used: human_handoff
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: human_handoff

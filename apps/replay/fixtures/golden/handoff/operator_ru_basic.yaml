@@ -1,0 +1,18 @@
+name: handoff_operator_ru_basic
+description: Russian "оператор" — direct handoff request.
+input:
+  channel: max
+  text: Свяжите меня с оператором
+must_pass:
+  - skill_used: human_handoff
+  - response_contains_any:
+      - менеджеру
+      - менеджер
+forbidden:
+  - response_contains_any:
+      - бот не может
+      - не работает
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: human_handoff

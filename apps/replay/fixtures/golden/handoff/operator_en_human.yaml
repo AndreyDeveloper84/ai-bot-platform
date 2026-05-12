@@ -1,0 +1,11 @@
+name: handoff_operator_en_human
+description: English "human" keyword — handoff trigger.
+input:
+  channel: max
+  text: I need to talk to a human
+must_pass:
+  - skill_used: human_handoff
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: human_handoff

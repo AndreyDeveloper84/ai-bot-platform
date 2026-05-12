@@ -1,0 +1,11 @@
+name: handoff_operator_en_manager
+description: English "manager" keyword — escalation trigger.
+input:
+  channel: max
+  text: Please connect me with a manager
+must_pass:
+  - skill_used: human_handoff
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+expected_action_type: human_handoff

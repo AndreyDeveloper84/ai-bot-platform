@@ -1,0 +1,15 @@
+name: faq_hours_simple
+description: Plain question about working hours. Phase 0 — echo verbatim; Sprint 6+ FAQ skill answers properly.
+input:
+  channel: max
+  text: Когда вы работаете?
+must_pass:
+  - response_contains_any:
+      - работа
+forbidden:
+  - response_contains_any:
+      - "I don't know"
+      - не знаю
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

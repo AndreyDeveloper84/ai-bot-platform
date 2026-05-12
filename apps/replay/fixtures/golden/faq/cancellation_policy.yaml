@@ -1,0 +1,11 @@
+name: faq_cancellation_policy
+description: Question about cancellation policy.
+input:
+  channel: max
+  text: Как отменить запись на массаж?
+must_pass:
+  - response_contains_any:
+      - отмен
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
