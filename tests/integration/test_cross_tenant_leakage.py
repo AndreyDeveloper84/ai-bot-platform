@@ -157,6 +157,13 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
             tenant, f"holdout-{suffix or 'x'}"
         ),
     },
+    # Sprint 5 / A1: ReplayTrace — trace_id + pipeline_steps + expires_at required.
+    "ReplayTrace": {
+        "trace_id": lambda tenant, suffix: f"scanner-trace-{suffix or 'x'}",
+        "pipeline_steps": lambda tenant, suffix: [],
+        "redaction_method": "regex_v1",
+        "expires_at": lambda tenant, suffix: _future_datetime(),
+    },
 }
 
 
@@ -200,6 +207,16 @@ def _make_user_for_scanner(suffix: str):
 
     User = get_user_model()  # noqa: N806
     return User.objects.create_user(username=f"scanner-user-{suffix or 'x'}")
+
+
+def _future_datetime():
+    """Helper: future timestamp for ReplayTrace.expires_at."""
+
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    return timezone.now() + timedelta(days=30)
 
 
 _EXPERIMENT_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}
@@ -357,6 +374,22 @@ def test_scanner_finds_expected_sprint4_models():
     assert not sprint4_missing, (
         f"Sprint 4 expected scanner to find {sprint4_expected}; "
         f"missing: {sprint4_missing}. Got: {names}."
+    )
+
+
+def test_scanner_finds_expected_sprint5_models():
+    """Sanity: Sprint 5 lands ReplayTrace (A1) for replay infrastructure.
+
+    Per Sprint 5 / G1 (DRF-523). Tenant FK + TenantScopedManager →
+    auto-discovery.
+    """
+
+    names = {m.__name__ for m in SCANNED_MODELS}
+    sprint5_expected = {"ReplayTrace"}
+    sprint5_missing = sprint5_expected - names
+    assert not sprint5_missing, (
+        f"Sprint 5 expected scanner to find {sprint5_expected}; "
+        f"missing: {sprint5_missing}. Got: {names}."
     )
 
 
