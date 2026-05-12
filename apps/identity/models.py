@@ -132,3 +132,131 @@ class BotUser(models.Model):
     def __str__(self) -> str:
         label = self.display_name or self.client_name or self.channel_user_id
         return f"BotUser[{self.channel}:{label}]"
+
+
+class ClientProfile(models.Model):
+    """Computed RFM/LTV/risk/tier snapshot per bot_user (DRF-527 / Sprint 6 / P1).
+
+    Per PHASE0_DESIGN §3.2: source of truth for the values lives in Booking
+    facts (Phase 1+), not here — ClientProfile is a refresh-on-write cache
+    feeding the orchestrator. All fields are **derived** by services in
+    ``apps.identity.services`` (rfm/ltv/churn/tier/recompute), and the row
+    is recomputed daily by `recompute_profiles_daily` (P7) + on
+    `booking_completed` signal (P8).
+
+    ### Why OneToOne(primary_key=True)
+
+    A user has one profile, always. Using the BotUser FK as PK keeps the
+    table dense (no extra UUID) and makes the reverse relation
+    discoverable as ``bot_user.client_profile``.
+
+    ### tenant FK PROTECT — same rationale as ReplayTrace (Sprint 5)
+
+    Profiles are derived state but expensive to recompute (they embed
+    historical aggregates). Accidental tenant DROP must not nuke them.
+    PROTECT forces the operator to delete profiles explicitly first.
+    """
+
+    bot_user = models.OneToOneField(
+        BotUser,
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="client_profile",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="client_profiles",
+        help_text="Owning tenant. PROTECT — profile aggregates are derived "
+        "but expensive to recompute; accidental tenant drop must not vapourise them.",
+    )
+
+    # --- RFM ---
+    recency_days = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Days since last visit. NULL when no visits yet.",
+    )
+    frequency_visits = models.IntegerField(default=0)
+    monetary_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text="Sum of all visit amounts (lifetime).",
+    )
+    rfm_segment = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="champion | loyal | at_risk | hibernating | new (or empty pre-compute).",
+    )
+
+    # --- LTV ---
+    ltv = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text="Lifetime value to date. Alias for monetary_total in Phase 0; "
+        "kept separate so Phase 1 LTV models can diverge from raw sum.",
+    )
+    predicted_ltv_12m = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text="Predicted LTV over next 12 months. Phase 0 linear; Phase 1 ML.",
+    )
+
+    # --- Risk ---
+    churn_risk = models.FloatField(
+        default=0,
+        help_text="0..1 churn score. Phase 0 heuristic from recency / avg_visit_interval; Phase 1 ML.",
+    )
+    lifecycle_stage = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="new | active | lapsing | churned (or empty pre-compute).",
+    )
+
+    # --- Behavior ---
+    avg_visit_interval_days = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Average days between visits. NULL with <2 visits.",
+    )
+    favorite_service_id = models.CharField(max_length=64, blank=True, default="")
+    favorite_category_id = models.CharField(max_length=64, blank=True, default="")
+    preferred_master_id = models.CharField(max_length=64, blank=True, default="")
+
+    # --- Loyalty ---
+    loyalty_tier = models.CharField(
+        max_length=16,
+        default="bronze",
+        help_text="bronze | silver | gold | platinum.",
+    )
+
+    # --- Bookkeeping ---
+    last_recomputed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When recompute_profile last ran. NULL before first compute.",
+    )
+
+    # Default manager scopes to current_tenant(); use ``all_tenants`` for admin.
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Client profile"
+        verbose_name_plural = "Client profiles"
+        indexes = [
+            models.Index(fields=["tenant", "rfm_segment"]),
+            models.Index(fields=["tenant", "lifecycle_stage"]),
+            models.Index(fields=["tenant", "loyalty_tier"]),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"ClientProfile[{self.bot_user_id} "
+            f"seg={self.rfm_segment or '—'} tier={self.loyalty_tier}]"
+        )
