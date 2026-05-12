@@ -252,3 +252,58 @@ class TestAdversarialFixtureSet:
             assert not failures and not voice_failures, (
                 f"{f.name}: forbidden/voice clashes with echo baseline: {failures + voice_failures}"
             )
+
+
+class TestVoiceFixtureSet:
+    """C5 — 20 voice regression fixtures targeting brand-voice drift.
+
+    Each fixture pairs a benign user prompt with forbidden bot-voice phrases
+    (guarantees, corporate speak, clinical tone, fake personalization, etc.)
+    that must never appear in an outbound assistant reply. Patterns drawn
+    from legacy_maxbot/voice_examples.py + Sprint 4 / C4 brand voice config.
+    """
+
+    def test_all_load(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "voice"
+        fixtures = load_fixture_set(root)
+        assert len(fixtures) == 20, f"expected 20 voice fixtures, got {len(fixtures)}"
+
+    def test_all_have_forbidden_or_voice_check(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "voice"
+        for f in load_fixture_set(root):
+            has_forbidden = bool(f.forbidden) or bool(
+                (f.voice_check or {}).get("forbidden_phrases")
+            )
+            assert has_forbidden, (
+                f"{f.name}: voice fixture must declare at least one forbidden rule"
+            )
+
+    def test_all_pass_against_echo_baseline(self):
+        from pathlib import Path
+
+        from apps.replay.assertions import evaluate, evaluate_voice
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "voice"
+        for f in load_fixture_set(root):
+            text = f.input.get("text", "")
+            trace = {
+                "intent": "",
+                "skill_used": "",
+                "safety_decision": "allow",
+                "tool_calls": [],
+                "response_text": text,
+            }
+            failures = evaluate(trace, f.must_pass, f.forbidden)
+            voice_failures = evaluate_voice(text, f.voice_check)
+            assert not failures and not voice_failures, (
+                f"{f.name}: forbidden/voice clashes with echo baseline: {failures + voice_failures}"
+            )

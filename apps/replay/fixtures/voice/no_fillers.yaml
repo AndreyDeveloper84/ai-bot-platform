@@ -1,0 +1,16 @@
+name: voice_no_fillers
+description: |
+  Без вступлений типа "конечно, я могу помочь" — Алина сразу к делу.
+input:
+  channel: max
+  text: сколько стоит лимфодренажный массаж
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "конечно, я могу помочь"
+      - "разумеется, я отвечу"
+      - "я постараюсь ответить"
+      - "сейчас уточню для вас"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

@@ -1,0 +1,18 @@
+name: voice_no_corporate_speak
+description: Bot must avoid corporate boilerplate.
+input:
+  channel: max
+  text: Привет, как у вас можно записаться?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - Благодарим Вас за обращение
+      - В кратчайшие сроки
+      - Уважаемый клиент
+      - Ваше обращение принято
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+  forbidden_phrases:
+    - "(?i)благодарим вас за обращение"
+    - "(?i)уважаемый клиент"

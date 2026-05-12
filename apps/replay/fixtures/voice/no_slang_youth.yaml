@@ -1,0 +1,16 @@
+name: voice_no_slang_youth
+description: |
+  Бренд Алина — тёплый профессионал, не подросток. Без хайпового сленга.
+input:
+  channel: max
+  text: Что у вас крутого можно сделать?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "вайбово"
+      - "топчик"
+      - "красота космос"
+      - "шикардос"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

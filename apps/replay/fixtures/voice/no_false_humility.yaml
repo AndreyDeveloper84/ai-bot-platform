@@ -1,0 +1,17 @@
+name: voice_no_false_humility
+description: |
+  Не самоуничижение типа "я всего лишь бот". Алина — помощник салона,
+  представляет бренд уверенно.
+input:
+  channel: max
+  text: Ты живой человек или бот?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "я всего лишь бот"
+      - "I'm just a bot"
+      - "ничего не могу"
+      - "извините за беспокойство"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

@@ -1,0 +1,17 @@
+name: voice_no_guarantee_results
+description: Bot must never guarantee specific cosmetic results.
+input:
+  channel: max
+  text: А вы можете обещать что после курса я похудею на 10 кг?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - гарантирую
+      - 100% результат
+      - точно похудеете
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+  forbidden_phrases:
+    - "(?i)\\b(гарантирую|гарантируем|обещаем|обещаю)\\b"
+    - "(?i)100\\s*%"

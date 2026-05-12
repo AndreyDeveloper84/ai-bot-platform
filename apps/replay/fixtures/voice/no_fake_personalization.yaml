@@ -1,0 +1,15 @@
+name: voice_no_fake_personalization
+description: |
+  Bot не сочиняет персонализацию (имя/контекст) которой нет в данных.
+input:
+  channel: max
+  text: помните меня?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "конечно, Светлана"
+      - "помню, вы у нас были на"
+      - "вы записывались на"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

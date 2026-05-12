@@ -1,0 +1,16 @@
+name: voice_no_emoji_spam
+description: |
+  Salon brand voice is warm but professional — no emoji spam (>2 emoji
+  in one reply).
+input:
+  channel: max
+  text: ура наконец-то нашла нужный массаж
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "🎉🎉🎉"
+      - "❤️❤️❤️"
+      - "🔥🔥🔥"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

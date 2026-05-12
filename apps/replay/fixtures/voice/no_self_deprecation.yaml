@@ -1,0 +1,16 @@
+name: voice_no_self_deprecation
+description: |
+  Bot не должен пренебрежительно отзываться о салоне или мастерах.
+input:
+  channel: max
+  text: Какие у вас плюсы?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "у нас всё плохо"
+      - "не стоит у нас"
+      - "лучше идите в"
+      - "честно говоря не очень"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

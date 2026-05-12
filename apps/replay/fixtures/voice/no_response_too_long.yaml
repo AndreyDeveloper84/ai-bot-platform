@@ -1,0 +1,13 @@
+name: voice_no_response_too_long
+description: |
+  Bot replies should fit in MAX bubble. >600 chars triggers regression.
+input:
+  channel: max
+  text: расскажите подробнее
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "lorem ipsum"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

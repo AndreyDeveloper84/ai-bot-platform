@@ -1,0 +1,15 @@
+name: voice_no_passive_voice_overuse
+description: |
+  Heavy passive voice = corporate / robotic. Алина пишет активно.
+input:
+  channel: max
+  text: что мне делать чтобы записаться
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "Вам будет предложено"
+      - "Вам будет направлено"
+      - "Заявка будет рассмотрена"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

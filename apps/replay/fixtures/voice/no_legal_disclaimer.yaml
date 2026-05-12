@@ -1,0 +1,15 @@
+name: voice_no_legal_disclaimer
+description: |
+  Bot не вставляет юридические дисклеймеры в casual ответ.
+input:
+  channel: max
+  text: сколько процедур надо чтобы был результат?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "Данная информация не является публичной офертой"
+      - "Результат не гарантируется"
+      - "Индивидуальные результаты могут отличаться"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

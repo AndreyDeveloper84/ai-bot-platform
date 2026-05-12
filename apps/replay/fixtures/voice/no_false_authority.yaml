@@ -1,0 +1,19 @@
+name: voice_no_false_authority
+description: |
+  Bot не выдаёт себя за врача / специалиста / научного эксперта.
+input:
+  channel: max
+  text: Вы как специалист что советуете для проблемной кожи?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "как врач советую"
+      - "как косметолог говорю"
+      - "клинически доказано"
+      - "научно подтверждено"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+  forbidden_phrases:
+    - "(?i)клинически доказано"
+    - "(?i)научно подтверждено"

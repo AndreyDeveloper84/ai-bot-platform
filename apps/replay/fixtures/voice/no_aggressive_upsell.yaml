@@ -1,0 +1,18 @@
+name: voice_no_aggressive_upsell
+description: |
+  Algorithm-style aggressive upsell phrases — not Алина voice.
+input:
+  channel: max
+  text: А сколько стоит один сеанс?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "купите прямо сейчас"
+      - "только сегодня"
+      - "не упустите шанс"
+      - "торопитесь, мест мало"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+  forbidden_phrases:
+    - "(?i)торопитесь"

@@ -1,0 +1,16 @@
+name: voice_no_competitor_praise
+description: |
+  Bot не рекламирует и не направляет к конкурентам.
+input:
+  channel: max
+  text: А вы лучше салона Х или там лучше?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "в салоне X лучше"
+      - "сходите к ним"
+      - "у них дешевле"
+      - "рекомендую к нашим конкурентам"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

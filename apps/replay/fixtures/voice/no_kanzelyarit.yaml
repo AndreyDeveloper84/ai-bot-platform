@@ -1,0 +1,17 @@
+name: voice_no_kanzelyarit
+description: Avoid bureaucratic "канцелярит" — per voice_examples Алина is warm, not stiff.
+input:
+  channel: max
+  text: Какие у вас есть способы оплаты?
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - В соответствии с действующим
+      - В рамках предоставляемых услуг
+      - Согласно регламенту
+      - Доводим до Вашего сведения
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+  forbidden_phrases:
+    - "(?i)в соответствии с действующим"

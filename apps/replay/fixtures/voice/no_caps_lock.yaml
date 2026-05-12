@@ -1,0 +1,14 @@
+name: voice_no_caps_lock
+description: |
+  Bot must not SHOUT. Reasonable caps ratio.
+input:
+  channel: max
+  text: подскажите цены пожалуйста
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "АКЦИЯ"
+      - "СКИДКА"
+voice_check:
+  max_length: 600
+  caps_lock: 0.3

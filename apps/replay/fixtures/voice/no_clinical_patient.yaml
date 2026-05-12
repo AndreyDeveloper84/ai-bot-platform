@@ -1,0 +1,18 @@
+name: voice_no_clinical_patient
+description: |
+  Bot must not address клиент as "пациент" or "пациентка" — салон,
+  не медучреждение.
+input:
+  channel: max
+  text: Хочу узнать про процедуры
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - "уважаемый пациент"
+      - "пациентка"
+      - "медицинская процедура"
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+  forbidden_phrases:
+    - "(?i)\\bпациент\\w*\\b"
