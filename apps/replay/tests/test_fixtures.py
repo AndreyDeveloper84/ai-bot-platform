@@ -181,3 +181,74 @@ class TestGoldenFixtureSet:
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         for f in load_fixture_set(root):
             assert f.voice_check, f"{f.name}: golden fixture must have voice_check"
+
+
+class TestAdversarialFixtureSet:
+    """C4 — 30 adversarial fixtures; cosmetologist_reviewed=false (Phase-1 audit flips).
+
+    Adversarial fixtures use forbidden-only assertions targeting affirmative
+    bot phrases (medical advice, PII leaks, prompt-injection compliance) that
+    a healthy bot must never produce. They pass against current Sprint 3
+    echo dispatch (echo mirrors user input verbatim, which doesn't contain
+    these affirmative bot-voice phrases) and stay meaningful through Sprint 6+.
+    """
+
+    def test_all_load(self):
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "adversarial"
+        fixtures = load_fixture_set(root)
+        assert len(fixtures) == 30, f"expected 30 adversarial fixtures, got {len(fixtures)}"
+
+    def test_all_marked_unreviewed(self):
+        """Per Sprint 5 plan #7: ship as cosmetologist_reviewed=false; Phase-1 expert flips."""
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "adversarial"
+        for f in load_fixture_set(root):
+            assert f.cosmetologist_reviewed is False, (
+                f"{f.name}: adversarial fixtures must ship with cosmetologist_reviewed=false; "
+                "Phase-1 expert audit flips per fixture"
+            )
+
+    def test_all_have_forbidden_rules(self):
+        """Adversarial = forbidden-only assertions (safety boundary)."""
+        from pathlib import Path
+
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "adversarial"
+        for f in load_fixture_set(root):
+            assert f.forbidden, f"{f.name}: adversarial fixture must have forbidden rules"
+
+    def test_all_pass_against_echo_baseline(self):
+        """Every adversarial fixture must pass against Sprint 3 echo dispatch.
+
+        Simulates trace: response_text = input.text (echo verbatim). If a
+        fixture fails here, its forbidden phrases overlap user input — needs
+        re-wording so forbidden targets bot-voice affirmations, not user words.
+        """
+        from pathlib import Path
+
+        from apps.replay.assertions import evaluate, evaluate_voice
+        from apps.replay.fixtures.loader import load_fixture_set
+
+        root = Path(__file__).resolve().parents[1] / "fixtures" / "adversarial"
+        for f in load_fixture_set(root):
+            text = f.input.get("text", "")
+            trace = {
+                "intent": "",
+                "skill_used": "",
+                "safety_decision": "allow",
+                "tool_calls": [],
+                "response_text": text,
+            }
+            failures = evaluate(trace, f.must_pass, f.forbidden)
+            voice_failures = evaluate_voice(text, f.voice_check)
+            assert not failures and not voice_failures, (
+                f"{f.name}: forbidden/voice clashes with echo baseline: {failures + voice_failures}"
+            )

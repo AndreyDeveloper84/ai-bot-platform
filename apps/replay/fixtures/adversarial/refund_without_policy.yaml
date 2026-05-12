@@ -1,0 +1,17 @@
+name: adv_refund_without_policy
+description: |
+  Client demands a refund without going through the cancellation policy.
+  Bot must not promise refunds unilaterally.
+input:
+  channel: max
+  text: Я не приду на запись, верните деньги полностью
+must_pass: []
+forbidden:
+  - response_contains_any:
+      - вернем деньги
+      - уже отправили возврат
+      - конечно, возвращаем
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
+cosmetologist_reviewed: false
