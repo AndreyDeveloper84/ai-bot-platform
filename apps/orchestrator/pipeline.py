@@ -1,0 +1,514 @@
+"""Orchestrator pipeline — turn() (DRF-535 / Sprint 6 / O1).
+
+The 19-step contract that takes one inbound ChannelMessage from the
+ingress consumer and produces a fully-routed outbound reply. Per
+PHASE0_DESIGN §5.1. This is the FIRST sprint that wires every component
+sprints 1-5 built — without this, every previous deliverable is
+plumbing nobody calls.
+
+### The 19 steps
+
+ 1. Resolve tenant from ChannelMessage.tenant_slug + enter tenant_scope.
+ 2. resolve_or_create_bot_user (Sprint 2 / A2).
+ 3. resolve_or_create_conversation (Sprint 2 / B*).
+ 4. Save user Message (Sprint 2 + audit row).
+ 5. Load MemorySnapshot (O6 / DRF-540).
+ 6. Intent classification — gpt-4o-mini structured JSON (O2 / DRF-536).
+ 7. Safety pre-check — regex keyword guard (O3 / DRF-537).
+ 8. If verdict in {block, clarify} → respond canned, skip skill.
+ 9. If verdict == handoff → AdminTask + canned reply.
+10. Skill dispatch (Sprint 3 / D1 dispatcher).
+11. Tool invocation if skill emitted tool_calls (O7 / DRF-541).
+12. Safety post-check — outbound text (O4 / DRF-538).
+13. Composer → final text + UI keyboard (O5 / DRF-539).
+14. Save assistant Message.
+15. Update short-term memory.
+16. Emit message_sent event.
+17. Write audit row.
+18. Replay recorder.capture (Sprint 5 / A2 — refined by O8 / DRF-542).
+19. Channel outbound send (Sprint 2 + O9 / DRF-546 refinement).
+
+### Why one big function
+
+Each step IS small (one helper call). The reason they sit in one
+function instead of being scattered across many is that the ordering
++ short-circuit branches (block / handoff) ARE the contract. Splitting
+would obscure the flow and let bugs creep in through partial reorders.
+
+### Safety boundary
+
+Outer try/except wraps the entire body. ANY unhandled exception →
+emits `pipeline_error` event, returns a TurnResult with a fallback
+"sorry, something went wrong" reply. Webhook handler upstream returns
+200 regardless so MAX doesn't retry storm.
+
+### Performance budget per §5.2
+
+End-to-end p95 ≤ 4000ms goal (alert at 6000ms). Each step has its own
+sub-budget — covered by G4 latency SLO test (DRF-553).
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from dataclasses import dataclass, field
+from typing import Any
+
+from asgiref.sync import sync_to_async
+
+from apps.orchestrator.composer import ComposedReply, compose
+from apps.orchestrator.intent_router import IntentDecision, classify
+from apps.orchestrator.memory.coordinator import MemorySnapshot, load_snapshot
+from apps.orchestrator.safety.post_check import (
+    post_check,
+)
+from apps.orchestrator.safety.pre_check import SafetyVerdict, pre_check
+from apps.tenancy.context import tenant_scope
+from apps.tenancy.models import Tenant
+
+logger = logging.getLogger(__name__)
+
+
+# Canned text used when the pipeline can't route normally.
+_FALLBACK_BLOCK = (
+    "Извините, я не могу ответить на этот запрос. Передам менеджеру — ответит в течение 30 минут."
+)
+_FALLBACK_CLARIFY = (
+    "Не совсем понял, можете уточнить? Или напишите «оператор», и я свяжу с менеджером."
+)
+_FALLBACK_HANDOFF = "Передаю менеджеру — ответят в течение 30 минут."
+_FALLBACK_ERROR = "Извините, что-то пошло не так. Попробуйте позже или напишите «оператор»."
+
+
+@dataclass(frozen=True)
+class ChannelMessage:
+    """Inbound message from any channel — shaped uniformly by the channel
+    adapter at ingress (Sprint 2 / D-track).
+
+    Fields:
+      tenant_slug: routes to the owning Tenant (resolved in step 1).
+      channel: 'max' | 'telegram' | 'whatsapp' | 'web'.
+      channel_user_id: stable user id within the channel.
+      chat_id: outbound destination (may equal channel_user_id in DMs).
+      display_name: channel-reported display name (for resolve enrichment).
+      text: the user's message body.
+      trace_id: pipeline trace id (UUID7 string). Recorder + observability hooks.
+      raw: optional raw inbound payload for forensic / replay.
+    """
+
+    tenant_slug: str
+    channel: str
+    channel_user_id: str
+    chat_id: str
+    text: str
+    display_name: str = ""
+    trace_id: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TurnResult:
+    """Outcome of one pipeline turn. Returned to the ingress consumer
+    for observability + retry decisions. ``ok=False`` is an EXPECTED
+    failure (block, clarify, error fallback); only unhandled exceptions
+    bubble out of turn().
+    """
+
+    ok: bool
+    trace_id: str
+    reply: ComposedReply | None = None
+    intent: IntentDecision | None = None
+    pre_check_verdict: str = ""
+    post_check_verdict: str = ""
+    error: str = ""
+    short_circuited_at_step: int = 0  # 0 = ran to completion
+
+
+async def turn(message: ChannelMessage) -> TurnResult:
+    """Execute one full pipeline turn for ``message``.
+
+    Args:
+      message: parsed ChannelMessage from the ingress consumer.
+
+    Returns:
+      :class:`TurnResult` carrying the composed reply (when one was
+      produced), the intent decision, and short-circuit info.
+    """
+
+    trace_id = message.trace_id or str(uuid.uuid4())
+
+    try:
+        # --- Step 1: tenant resolution + scope ---
+        tenant = await sync_to_async(_resolve_tenant)(message.tenant_slug)
+        if tenant is None:
+            return _error_result(trace_id, "unknown_tenant", step=1)
+
+        return await _run_under_tenant(message, tenant, trace_id)
+
+    except Exception as exc:  # noqa: BLE001 — outer safety boundary
+        logger.exception("pipeline.turn.unhandled trace_id=%s err=%s", trace_id, exc)
+        await sync_to_async(_emit_pipeline_error, thread_sensitive=False)(trace_id, str(exc))
+        return _error_result(trace_id, f"unhandled: {exc}", step=0)
+
+
+async def _run_under_tenant(
+    message: ChannelMessage,
+    tenant: Tenant,
+    trace_id: str,
+) -> TurnResult:
+    """Steps 2-19. Entered after tenant_scope is established."""
+
+    # tenant_scope is a sync context manager. Async ORM calls happen
+    # inside sync_to_async wrappers below, which inherit ContextVar.
+    with tenant_scope(tenant):
+        # --- Step 2: resolve_or_create_bot_user ---
+        bot_user = await sync_to_async(_resolve_bot_user)(message)
+
+        # --- Step 3: resolve_or_create_conversation ---
+        conversation = await sync_to_async(_resolve_conversation)(bot_user)
+
+        # --- Step 4: save user Message ---
+        await sync_to_async(_save_user_message)(conversation, message.text, trace_id)
+
+        # --- Step 5: load memory snapshot ---
+        memory_snapshot = await sync_to_async(load_snapshot)(conversation)
+
+        # --- Step 6: intent classification ---
+        intent_decision = await classify(
+            message.text,
+            memory_snapshot=_memory_to_dict(memory_snapshot),
+            brand_voice=None,  # Sprint 6 doesn't read BrandVoiceConfig here; Sprint 7+
+        )
+
+        # --- Step 7: safety pre-check ---
+        pre_result = pre_check(message.text, intent_decision=intent_decision)
+
+        # --- Step 8: blocked / clarify short-circuit ---
+        if pre_result.verdict == SafetyVerdict.BLOCK:
+            reply = await sync_to_async(_canned_reply)(_FALLBACK_BLOCK)
+            await sync_to_async(_save_assistant)(conversation, reply.text, "block", trace_id)
+            return TurnResult(
+                ok=True,
+                trace_id=trace_id,
+                reply=reply,
+                intent=intent_decision,
+                pre_check_verdict=pre_result.verdict.value,
+                short_circuited_at_step=8,
+            )
+
+        if pre_result.verdict == SafetyVerdict.CLARIFY:
+            reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
+            await sync_to_async(_save_assistant)(conversation, reply.text, "clarify", trace_id)
+            return TurnResult(
+                ok=True,
+                trace_id=trace_id,
+                reply=reply,
+                intent=intent_decision,
+                pre_check_verdict=pre_result.verdict.value,
+                short_circuited_at_step=8,
+            )
+
+        # --- Step 9: handoff ---
+        if pre_result.verdict == SafetyVerdict.HANDOFF:
+            await sync_to_async(_create_handoff)(
+                conversation, reason=pre_result.reason or "pre_check_handoff"
+            )
+            reply = await sync_to_async(_canned_reply)(_FALLBACK_HANDOFF)
+            await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
+            return TurnResult(
+                ok=True,
+                trace_id=trace_id,
+                reply=reply,
+                intent=intent_decision,
+                pre_check_verdict=pre_result.verdict.value,
+                short_circuited_at_step=9,
+            )
+
+        # --- Step 10: skill dispatch ---
+        skill_result = await sync_to_async(_dispatch_skill)(
+            conversation, bot_user, message.text, trace_id
+        )
+        if skill_result is None:
+            # No skill matched + no echo fallback hit — pipeline fallback.
+            reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
+            await sync_to_async(_save_assistant)(conversation, reply.text, "no_skill", trace_id)
+            return TurnResult(
+                ok=False,
+                trace_id=trace_id,
+                reply=reply,
+                intent=intent_decision,
+                pre_check_verdict=pre_result.verdict.value,
+                error="no_skill_matched",
+                short_circuited_at_step=10,
+            )
+
+        # --- Step 11: tool invocation (Phase 0: skills don't emit tool_calls) ---
+        # Reserved for Sprint 7+ when skills start emitting tool_calls_made.
+
+        # --- Step 12: safety post-check ---
+        post_result = post_check(getattr(skill_result, "reply_text", ""))
+
+        # --- Step 13: compose ---
+        reply = compose(skill_result, post_check=post_result)
+
+        # --- Step 14: save assistant Message ---
+        await sync_to_async(_save_assistant)(
+            conversation,
+            reply.text,
+            getattr(skill_result, "action_type", "") or "skill_reply",
+            trace_id,
+        )
+
+        # --- Step 15: update short-term memory ---
+        await sync_to_async(_update_short_term)(conversation, reply.text, trace_id)
+
+        # --- Step 16: emit message_sent event ---
+        await sync_to_async(_emit_message_sent, thread_sensitive=False)(
+            bot_user, conversation, trace_id, intent_decision
+        )
+
+        # --- Step 17: write audit row (each layer already writes its own;
+        # final summary audit goes here) ---
+        await sync_to_async(_write_pipeline_audit, thread_sensitive=False)(
+            trace_id, intent_decision, pre_result.verdict.value, post_result.verdict.value
+        )
+
+        # --- Step 18: replay recorder.capture ---
+        await sync_to_async(_replay_capture, thread_sensitive=False)(
+            trace_id,
+            message,
+            intent_decision,
+            pre_result.verdict.value,
+            skill_result,
+            reply,
+        )
+
+        # --- Step 19: channel outbound send (O9 refinement — Phase 0 stub) ---
+        # Phase 0: outbound is the caller's responsibility (worker consumer
+        # picks up TurnResult and sends via apps.channels.<channel>.outbound).
+        # O9 will refactor to call outbound directly here with retry/DLQ.
+
+        return TurnResult(
+            ok=True,
+            trace_id=trace_id,
+            reply=reply,
+            intent=intent_decision,
+            pre_check_verdict=pre_result.verdict.value,
+            post_check_verdict=post_result.verdict.value,
+        )
+
+
+# --- Helpers (sync, called via sync_to_async from turn()) -------------------
+
+
+def _resolve_tenant(slug: str) -> Tenant | None:
+    """Step 1 helper."""
+    try:
+        return Tenant.objects.get(slug=slug)
+    except Tenant.DoesNotExist:
+        return None
+
+
+def _resolve_bot_user(message: ChannelMessage):
+    """Step 2 helper. Caller is already inside tenant_scope."""
+    from apps.identity.services import resolve_or_create_bot_user
+
+    return resolve_or_create_bot_user(
+        channel=message.channel,
+        channel_user_id=message.channel_user_id,
+        chat_id=message.chat_id,
+        display_name=message.display_name,
+    )
+
+
+def _resolve_conversation(bot_user):
+    """Step 3 helper. Find/create the one active Conversation for bot_user."""
+    from apps.conversations.models import Conversation
+
+    conv = (
+        Conversation.objects.filter(bot_user=bot_user, is_active=True)
+        .order_by("-created_at")
+        .first()
+    )
+    if conv is None:
+        conv = Conversation.objects.create(
+            tenant=bot_user.tenant,
+            bot_user=bot_user,
+        )
+    return conv
+
+
+def _save_user_message(conversation, text: str, trace_id: str):
+    """Step 4 helper."""
+    from apps.conversations.models import Message
+
+    Message.objects.create(
+        tenant=conversation.tenant,
+        conversation=conversation,
+        role="user",
+        content=text,
+        trace_id=_uuid_or_none(trace_id),
+    )
+
+
+def _save_assistant(conversation, text: str, action_type: str, trace_id: str):
+    """Step 14 helper."""
+    from apps.conversations.models import Message
+
+    Message.objects.create(
+        tenant=conversation.tenant,
+        conversation=conversation,
+        role="assistant",
+        content=text,
+        action_type=action_type,
+        trace_id=_uuid_or_none(trace_id),
+    )
+
+
+def _uuid_or_none(value: str):
+    """Coerce a string trace_id to UUID, return None on bad shape."""
+    if not value:
+        return None
+    try:
+        return uuid.UUID(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _canned_reply(text: str) -> ComposedReply:
+    """Build a fallback ComposedReply with no skill_result."""
+    return ComposedReply(text=text, final_send=True)
+
+
+def _create_handoff(conversation, *, reason: str):
+    """Step 9 helper."""
+    from apps.handoff.models import AdminTask
+    from apps.handoff.services import create_admin_task
+
+    create_admin_task(
+        conversation,
+        task_type=AdminTask.TaskType.HANDOFF,
+        reason=reason,
+    )
+
+
+def _dispatch_skill(conversation, bot_user, text: str, trace_id: str):
+    """Step 10 helper."""
+    from apps.skills.base import SkillContext
+    from apps.skills.registry import dispatch
+
+    ctx = SkillContext(
+        conversation=conversation,
+        bot_user=bot_user,
+        message_text=text,
+        trace_id=trace_id,
+    )
+    return dispatch(ctx)
+
+
+def _update_short_term(conversation, text: str, trace_id: str):
+    """Step 15 helper."""
+    from apps.orchestrator.memory import short_term
+
+    short_term.append(
+        conversation.id,
+        role="assistant",
+        content=text,
+        trace_id=trace_id,
+    )
+
+
+def _emit_message_sent(bot_user, conversation, trace_id: str, intent: IntentDecision):
+    """Step 16 helper."""
+    from apps.events.services import emit
+    from apps.events.vocabulary import MESSAGE_SENT
+
+    emit(
+        MESSAGE_SENT,
+        distinct_id=str(bot_user.id),
+        dialog_id=conversation.id,
+        properties={"trace_id": trace_id, "intent": intent.intent},
+    )
+
+
+def _write_pipeline_audit(
+    trace_id: str,
+    intent: IntentDecision,
+    pre_verdict: str,
+    post_verdict: str,
+):
+    """Step 17 helper."""
+    from apps.audit.services import write_audit
+
+    write_audit(
+        "pipeline.turn.completed",
+        payload={
+            "trace_id": trace_id,
+            "intent": intent.intent,
+            "skill": intent.skill,
+            "pre_check": pre_verdict,
+            "post_check": post_verdict,
+        },
+    )
+
+
+def _replay_capture(
+    trace_id: str,
+    message: ChannelMessage,
+    intent: IntentDecision,
+    pre_verdict: str,
+    skill_result,
+    reply: ComposedReply,
+):
+    """Step 18 helper. O8 will refine sampling + step shape."""
+    try:
+        from apps.replay.recorder import TraceRecorder
+
+        recorder = TraceRecorder()
+        recorder.capture(
+            trace_id,
+            [
+                {
+                    "intent": intent.intent,
+                    "skill_used": intent.skill,
+                    "safety_decision": pre_verdict,
+                    "response_text": reply.text,
+                    "tool_calls": [],
+                }
+            ],
+        )
+    except Exception:  # noqa: BLE001 — recorder is observability, must never break turn
+        logger.exception("pipeline.replay_capture_failed trace_id=%s", trace_id)
+
+
+def _emit_pipeline_error(trace_id: str, error: str):
+    """Outer-catch helper. Best-effort emit — error path can't itself raise."""
+    try:
+        from apps.events.services import emit
+
+        emit(
+            "pipeline_error",
+            properties={"trace_id": trace_id, "error": error[:500]},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("pipeline.emit_error_failed trace_id=%s", trace_id)
+
+
+def _memory_to_dict(snapshot: MemorySnapshot) -> dict[str, Any]:
+    return {
+        "history": list(snapshot.history),
+        "long_term": dict(snapshot.long_term),
+        "slot_state": dict(snapshot.slot_state),
+    }
+
+
+def _error_result(trace_id: str, error: str, *, step: int) -> TurnResult:
+    """Build a TurnResult for an outer-catch error path."""
+    return TurnResult(
+        ok=False,
+        trace_id=trace_id,
+        reply=ComposedReply(text=_FALLBACK_ERROR, final_send=True),
+        error=error,
+        short_circuited_at_step=step,
+    )
