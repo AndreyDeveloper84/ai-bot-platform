@@ -281,21 +281,26 @@ async def _run_under_tenant(
             intent_decision,
             pre_result.verdict.value,
             skill_result,
+            post_result.verdict.value,
             reply,
         )
 
-        # --- Step 19: channel outbound send (O9 refinement — Phase 0 stub) ---
-        # Phase 0: outbound is the caller's responsibility (worker consumer
-        # picks up TurnResult and sends via apps.channels.<channel>.outbound).
-        # O9 will refactor to call outbound directly here with retry/DLQ.
+        # --- Step 19: channel outbound send (Sprint 6 / O9 / DRF-546) ---
+        # Send the composed reply to the channel with retry-3x backoff.
+        # Permanent failure → AdminTask of type=MANUAL for operator triage
+        # (DLQ via tasks table — no separate queue infra in Phase 0).
+        outbound_ok = await sync_to_async(_send_outbound, thread_sensitive=False)(
+            message, reply, conversation, trace_id
+        )
 
         return TurnResult(
-            ok=True,
+            ok=outbound_ok,
             trace_id=trace_id,
             reply=reply,
             intent=intent_decision,
             pre_check_verdict=pre_result.verdict.value,
             post_check_verdict=post_result.verdict.value,
+            error="" if outbound_ok else "outbound_failed",
         )
 
 
@@ -459,25 +464,83 @@ def _replay_capture(
     intent: IntentDecision,
     pre_verdict: str,
     skill_result,
+    post_verdict: str,
     reply: ComposedReply,
 ):
-    """Step 18 helper. O8 will refine sampling + step shape."""
-    try:
-        from apps.replay.recorder import TraceRecorder
+    """Step 18 helper (refined by Sprint 6 / O8 / DRF-542).
 
-        recorder = TraceRecorder()
-        recorder.capture(
-            trace_id,
-            [
-                {
+    Per PHASE0_DESIGN §7.1 the recorder receives a LIST of step snapshots —
+    one entry per pipeline stage. Replay differ + assertion engine read
+    individual stages; a single collapsed dict loses the per-stage forensic
+    granularity.
+
+    Step shape:
+      [
+        {step: 'inbound',    payload: {text, channel, channel_user_id}},
+        {step: 'intent',     payload: {intent, skill, confidence, risk_level}},
+        {step: 'pre_check',  payload: {verdict}},
+        {step: 'skill',      payload: {name, reply_text, action_type}},
+        {step: 'post_check', payload: {verdict}},
+        {step: 'composer',   payload: {final_text, safety_revised, keyboard_size}},
+      ]
+
+    The redactor walks every step recursively, so PII in any field is
+    redacted before persistence. Recorder still honours sampling rate
+    (REPLAY_SAMPLE_RATE_PROD/STAGING/TEST) — sample miss → no row written.
+
+    Failures swallowed — recorder is observability, must never break the
+    turn. Sentry alert through logger.exception covers the diagnostic path.
+    """
+
+    try:
+        from apps.replay.recorder import capture as recorder_capture
+
+        steps = [
+            {
+                "step": "inbound",
+                "payload": {
+                    "text": message.text,
+                    "channel": message.channel,
+                    "channel_user_id": message.channel_user_id,
+                },
+            },
+            {
+                "step": "intent",
+                "payload": {
                     "intent": intent.intent,
-                    "skill_used": intent.skill,
-                    "safety_decision": pre_verdict,
-                    "response_text": reply.text,
-                    "tool_calls": [],
-                }
-            ],
-        )
+                    "skill": intent.skill,
+                    "confidence": intent.confidence,
+                    "risk_level": intent.risk_level,
+                },
+            },
+            {
+                "step": "pre_check",
+                "payload": {"verdict": pre_verdict},
+            },
+            {
+                "step": "skill",
+                "payload": {
+                    "name": getattr(skill_result, "name", ""),
+                    "reply_text": getattr(skill_result, "reply_text", "") or "",
+                    "action_type": getattr(skill_result, "action_type", "") or "",
+                },
+            },
+            {
+                "step": "post_check",
+                "payload": {"verdict": post_verdict},
+            },
+            {
+                "step": "composer",
+                "payload": {
+                    "final_text": reply.text,
+                    "safety_revised": reply.safety_revised,
+                    "keyboard_size": len(reply.ui_keyboard),
+                },
+            },
+        ]
+        # Module-level capture function honours settings sampling rate
+        # and emits REPLAY_CAPTURED event on success.
+        recorder_capture(trace_id, steps)
     except Exception:  # noqa: BLE001 — recorder is observability, must never break turn
         logger.exception("pipeline.replay_capture_failed trace_id=%s", trace_id)
 
@@ -512,3 +575,103 @@ def _error_result(trace_id: str, error: str, *, step: int) -> TurnResult:
         error=error,
         short_circuited_at_step=step,
     )
+
+
+# --- Step 19: outbound + retry/DLQ (Sprint 6 / O9 / DRF-546) ----------------
+
+# Retry config — exponential backoff. Tuned for the per-attempt 500ms
+# budget × 3 retries staying under the 4000ms total-turn p95 goal.
+_OUTBOUND_MAX_ATTEMPTS = 3
+_OUTBOUND_BACKOFF_SECONDS = (0.1, 0.3, 0.7)
+
+
+def _send_outbound(
+    message: ChannelMessage,
+    reply: ComposedReply,
+    conversation,
+    trace_id: str,
+) -> bool:
+    """Step 19 helper — send the composed reply with retry-3x.
+
+    Returns:
+      True if outbound succeeded (or skipped because reply.final_send=False).
+      False if all retries exhausted; AdminTask DLQ row is written before return.
+
+    Phase 0 = MAX only. Sprint 7+ generalises by dispatching on
+    message.channel — each channel module exposes a sync ``send_message``.
+    """
+
+    # Skill set should_send=False (e.g. handoff guard already handled
+    # outbound itself, or canned silence). No send, no retry.
+    if not reply.final_send or not reply.text:
+        return True
+
+    # Only MAX channel in Phase 0.
+    if message.channel != "max":
+        logger.warning(
+            "pipeline.outbound.unsupported_channel channel=%s trace_id=%s",
+            message.channel,
+            trace_id,
+        )
+        return True  # Treat as ok — Sprint 7+ adds the channel adapter
+
+    from apps.channels.max.outbound import MaxAPIError, send_message
+
+    last_error: str = ""
+    for attempt in range(_OUTBOUND_MAX_ATTEMPTS):
+        try:
+            send_message(chat_id=message.chat_id, text=reply.text)
+            return True
+        except MaxAPIError as exc:
+            last_error = f"MaxAPIError: {exc}"
+            logger.warning(
+                "pipeline.outbound.retry attempt=%d/%d trace_id=%s err=%s",
+                attempt + 1,
+                _OUTBOUND_MAX_ATTEMPTS,
+                trace_id,
+                exc,
+            )
+            if attempt < _OUTBOUND_MAX_ATTEMPTS - 1:
+                import time
+
+                time.sleep(_OUTBOUND_BACKOFF_SECONDS[attempt])
+        except Exception as exc:  # noqa: BLE001 — defensive; never let outbound break turn
+            last_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("pipeline.outbound.unexpected trace_id=%s", trace_id)
+            break  # Non-retriable, don't waste backoff window
+
+    # All attempts exhausted — DLQ via AdminTask.
+    _write_outbound_dlq(conversation, reply, trace_id, last_error)
+    return False
+
+
+def _write_outbound_dlq(
+    conversation,
+    reply: ComposedReply,
+    trace_id: str,
+    error: str,
+) -> None:
+    """Permanent outbound failure → AdminTask for operator triage.
+
+    Phase 0 reuses AdminTask.TaskType.MANUAL (no separate enum value) with
+    a descriptive reason. Operator sees the task in admin and reaches the
+    user out-of-band. Phase 1 may add a dedicated OUTBOUND_FAILED type.
+    """
+
+    try:
+        from apps.handoff.models import AdminTask
+        from apps.handoff.services import create_admin_task
+
+        # Truncate text in case it's huge.
+        snippet = reply.text[:200] + ("…" if len(reply.text) > 200 else "")
+        create_admin_task(
+            conversation,
+            task_type=AdminTask.TaskType.MANUAL,
+            reason=f"outbound_failed trace_id={trace_id} err={error[:200]} text={snippet!r}",
+        )
+    except Exception:  # noqa: BLE001 — DLQ is best-effort
+        logger.exception(
+            "pipeline.outbound.dlq_write_failed trace_id=%s err=%s",
+            trace_id,
+            error,
+        )
