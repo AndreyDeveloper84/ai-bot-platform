@@ -169,9 +169,9 @@ class TestGoldenFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         for f in load_fixture_set(root):
-            assert (
-                f.must_pass or f.forbidden
-            ), f"{f.name}: golden fixture must have at least one must_pass or forbidden rule"
+            assert f.must_pass or f.forbidden, (
+                f"{f.name}: golden fixture must have at least one must_pass or forbidden rule"
+            )
 
     def test_every_fixture_has_voice_check(self):
         from pathlib import Path
