@@ -85,6 +85,19 @@ def _stub_provider():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_outbound():
+    """Stub MAX outbound — MAX_BOT_TOKEN isn't set in test env (and we don't
+    want to hit the real API). Patched at import-site inside pipeline._send_outbound;
+    individual tests can re-patch with side_effect to test retry/DLQ.
+    """
+    with patch(
+        "apps.channels.max.outbound.send_message",
+        return_value={"ok": True},
+    ):
+        yield
+
+
 class TestHappyPath:
     async def test_returns_turn_result(self, tenant):
         result = await turn(_message())
@@ -236,6 +249,67 @@ class TestAuditTrail:
         match = await sync_to_async(_find)()
         assert match is not None
         assert match.payload["intent"] == "faq"
+
+
+class TestOutboundRetryDLQ:
+    """Sprint 6 / O9 — outbound retry + AdminTask DLQ."""
+
+    async def test_outbound_success_sets_ok_true(self, tenant):
+        result = await turn(_message(text="когда работаете"))
+        assert result.ok is True
+        assert result.error == ""
+
+    async def test_outbound_failure_after_retries_writes_dlq(self, tenant):
+        from apps.channels.max.outbound import MaxAPIError
+
+        with patch(
+            "apps.channels.max.outbound.send_message",
+            side_effect=MaxAPIError(502, "bad gateway"),
+        ):
+            result = await turn(_message(text="когда работаете"))
+
+        assert result.ok is False
+        assert result.error == "outbound_failed"
+
+        # AdminTask DLQ row created.
+        from apps.handoff.models import AdminTask
+
+        manual_tasks = await sync_to_async(
+            lambda: list(AdminTask.all_tenants.filter(task_type="manual"))
+        )()
+        outbound_dlq = [t for t in manual_tasks if "outbound_failed" in (t.reason or "")]
+        assert len(outbound_dlq) >= 1
+
+    async def test_outbound_retries_3_times(self, tenant):
+        from apps.channels.max.outbound import MaxAPIError
+
+        call_count = {"n": 0}
+
+        def flaky(**kwargs):
+            call_count["n"] += 1
+            raise MaxAPIError(502, "transient")
+
+        with patch("apps.channels.max.outbound.send_message", side_effect=flaky):
+            await turn(_message(text="когда работаете"))
+
+        assert call_count["n"] == 3  # Initial + 2 retries = 3 total attempts
+
+    async def test_outbound_succeeds_on_second_attempt(self, tenant):
+        from apps.channels.max.outbound import MaxAPIError
+
+        call_count = {"n": 0}
+
+        def flaky(**kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise MaxAPIError(502, "transient")
+            return {"ok": True}
+
+        with patch("apps.channels.max.outbound.send_message", side_effect=flaky):
+            result = await turn(_message(text="когда работаете"))
+
+        assert result.ok is True
+        assert call_count["n"] == 2
 
 
 class TestEventEmission:
