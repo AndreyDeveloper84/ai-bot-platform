@@ -99,6 +99,25 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "90"))
 IDEMPOTENCY_KEY_RETENTION_DAYS = int(os.environ.get("IDEMPOTENCY_KEY_RETENTION_DAYS", "7"))
 
+# Sprint 5 / A3 — Replay infrastructure config (PHASE0_DESIGN §7.1).
+# Per-env sample rate so prod/staging stay at 100% (1 tenant, low traffic;
+# ~30MB/30d retention) while tests default to 0 to avoid noisy row creation
+# from unrelated test runs. Test code that exercises the recorder explicitly
+# bumps `settings.REPLAY_SAMPLE_RATE_TEST = 1.0` in the test fixture.
+REPLAY_SAMPLE_RATE_PROD = float(os.environ.get("REPLAY_SAMPLE_RATE_PROD", "1.0"))
+REPLAY_SAMPLE_RATE_STAGING = float(os.environ.get("REPLAY_SAMPLE_RATE_STAGING", "1.0"))
+REPLAY_SAMPLE_RATE_TEST = float(os.environ.get("REPLAY_SAMPLE_RATE_TEST", "0.0"))
+
+# 30 days per design §7.1 expires_at; A4 cleanup task evicts past-expiry rows.
+REPLAY_RETENTION_DAYS = int(os.environ.get("REPLAY_RETENTION_DAYS", "30"))
+
+# Redaction allowlist — strings the regex layer should NOT replace. Useful for
+# brand / master / service names that look like phones or emails. Comma-
+# separated env var; B3 implements lookup.
+REPLAY_REDACTION_ALLOWLIST: list[str] = [
+    p.strip() for p in os.environ.get("REPLAY_REDACTION_ALLOWLIST", "").split(",") if p.strip()
+]
+
 # Sprint 3 / B4 — event fanout adapter registry. Each entry is the
 # dotted import path of an :class:`apps.events.fanout.EventFanout`
 # implementation. Default is the no-op adapter — Phase 0 keeps events
