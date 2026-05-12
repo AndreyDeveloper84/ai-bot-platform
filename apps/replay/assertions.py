@@ -90,18 +90,9 @@ def evaluate_voice(response_text: str, voice_check: dict[str, Any]) -> list[str]
 
     forbidden_phrases = voice_check.get("forbidden_phrases") or []
     if forbidden_phrases:
-        # Delegate to Sprint 4 / C4 — same regex engine as production
-        # voice validation. Build a transient voice dict; this function
-        # doesn't need allowlist or version metadata.
-        from apps.orchestrator.safety.voice_check import (
-            validate_voice as _validate,
-        )
-
-        # Wrap in a try since validate_voice may emit events that need
-        # tenant scope; assertion engine doesn't need that side effect
-        # for a YAML-defined check, so suppress event emission by
-        # passing voice dict with empty patterns OR running pattern
-        # match locally.
+        # Phase 0: pattern match locally to avoid touching the Sprint 4
+        # validate_voice() event-emission path (which needs tenant scope).
+        # Phase 1 may swap to validate_voice() if we add a no-emit mode.
         for pattern in forbidden_phrases:
             if _matches_pattern(response_text, pattern):
                 failures.append(f"voice_check.forbidden_phrase: {pattern!r} matched")

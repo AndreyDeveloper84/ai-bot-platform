@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from apps.replay.fixtures.schema import Fixture
 from apps.replay.runner import Runner
 
