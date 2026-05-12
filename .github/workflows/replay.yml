@@ -1,36 +1,133 @@
-# Sprint 0 / B4 — skeleton placeholder.
+# Replay regression gate (Sprint 5 / E1+E2 — DRF-521 + DRF-522).
 #
-# Replay infrastructure (golden / adversarial / voice fixtures) lands in
-# Sprint 5 (DRF-XXX) per docs/architecture.md and ADR-0001..0006.
-# This workflow will eventually:
-#   - download fixtures from S3 (MinIO/replay-bucket)
-#   - rehydrate ReplayTrace via apps.replay
-#   - re-run the pipeline against pinned model versions
-#   - diff the responses + fail the build on regression
+# Runs golden + adversarial + voice YAML fixtures through apps.replay
+# on every PR. Blocks merges that break the fixture set.
 #
-# For Sprint 0 it just demonstrates that the workflow is registered.
+# ### What this gate enforces
+#
+# 1. All 80 fixtures (30 golden + 30 adversarial + 20 voice) parse.
+# 2. Every adversarial / voice fixture passes the echo baseline — i.e.,
+#    forbidden phrases don't overlap user input (regression guard for
+#    future fixture authoring).
+# 3. The replay engine (recorder, redactor, assertions, differ, runner,
+#    CLI) is green under unit + integration test.
+#
+# When Sprint 6 lands apps.orchestrator.pipeline.turn, this workflow
+# upgrades to invoke `python -m apps.replay run --strict-must-pass
+# --strict-forbidden` against the real pipeline.
+#
+# ### Override mechanism (E2)
+#
+# A PR labeled `prompt-regression-accepted` skips the gate. This is an
+# explicit, audited bypass for intentional prompt/skill changes that
+# alter the fixture-validated behavior. Label-only humans-with-write-
+# access can apply (GitHub default). The label name is the audit trail.
+#
+# ### Failure budget
+#
+# Strict. Any fixture failure → red. There is no soft-fail mode.
+# If you need to ship a behavioral change, update the fixtures in the
+# same PR. The fixture diff IS the design review for AI changes.
 
 name: replay
 
 on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
   workflow_dispatch:
-  schedule:
-    # Run nightly placeholder so `gh workflow list` always shows recent runs.
-    # Disabled in Sprint 5 once real replay logic ships and we move to
-    # PR-triggered runs.
-    - cron: "37 3 * * *"
+
+concurrency:
+  group: replay-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  placeholder:
-    name: replay (skeleton)
+  fixtures:
+    name: replay fixtures (golden + adversarial + voice)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+
+    # E2 — `prompt-regression-accepted` label skips the gate.
+    # Pushes (not PRs) always run; the label only fires on pull_request.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(github.event.pull_request.labels.*.name, 'prompt-regression-accepted')
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ai_bot_platform
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d ai_bot_platform"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_bot_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      REDIS_URL: redis://localhost:6379/0
+      OPENAI_API_KEY: ci-fake-key-not-real
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Print replay plan
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.12"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: uv sync
+        run: uv sync --extra dev --frozen
+
+      - name: apps.replay unit + integration tests (strict)
+        run: uv run pytest apps/replay/ -v --tb=short
+
+      - name: Fixture set sanity (80 fixtures parse + baseline-clean)
+        run: uv run pytest apps/replay/tests/test_fixtures.py -v --tb=short
+
+  # E2 visibility — when the override label is present we still post a
+  # status check confirming the bypass is intentional.
+  bypassed:
+    name: replay (bypassed via prompt-regression-accepted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'prompt-regression-accepted')
+    steps:
+      - name: Print bypass notice
         run: |
-          echo "::notice::Sprint 0 placeholder — no replay performed."
-          echo "Real replay machinery lands in Sprint 5 (apps.replay)."
-          echo "Fixture types: golden, adversarial, voice."
+          echo "::warning::Replay gate skipped — 'prompt-regression-accepted' label present."
+          echo "Reviewer is responsible for ensuring fixtures are updated in this PR."
+          echo "PR: ${{ github.event.pull_request.html_url }}"
