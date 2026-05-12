@@ -45,7 +45,9 @@ class TestReadyzAllHealthy:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "ok"
-        assert set(body["checks"].keys()) == {"postgres", "redis", "chromadb", "minio"}
+        # Sprint 6 / G3 added pipeline component checks alongside the service probes.
+        expected = {"postgres", "redis", "chromadb", "minio", "intent_router", "skill_registry"}
+        assert set(body["checks"].keys()) == expected
         for check in body["checks"].values():
             assert check["ok"] is True
             assert check["error"] is None

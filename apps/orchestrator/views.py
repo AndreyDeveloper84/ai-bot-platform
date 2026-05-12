@@ -55,14 +55,23 @@ async def readyz(request) -> JsonResponse:
     is hung.
     """
 
-    checks = await asyncio.gather(
+    service_checks = await asyncio.gather(
         _check("postgres", _ping_postgres),
         _check("redis", _ping_redis),
         _check("chromadb", _ping_chromadb),
         _check("minio", _ping_minio),
         return_exceptions=False,
     )
-    result = dict(checks)
+    # Pipeline component health (Sprint 6 / G3). pipeline_health() is
+    # sync — wrap in sync_to_async so readyz stays a fully-async view.
+    from asgiref.sync import sync_to_async
+
+    from apps.orchestrator.health import pipeline_health
+
+    pipeline_checks = await sync_to_async(pipeline_health, thread_sensitive=False)()
+
+    result = dict(service_checks)
+    result.update(pipeline_checks)
     all_ok = all(check["ok"] for check in result.values())
     status_code = 200 if all_ok else 503
     return JsonResponse(
