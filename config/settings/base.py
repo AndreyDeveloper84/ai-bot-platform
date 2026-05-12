@@ -172,6 +172,12 @@ CELERY_BEAT_SCHEDULE = {
         # cron jobs from other systems often fire at :00).
         "schedule": crontab(minute="15"),
     },
+    "cleanup_expired_replay_traces": {
+        "task": "apps.replay.tasks.cleanup_expired_traces",
+        # Daily 04:00 UTC — offset from the 03:00 audit cleanup so the
+        # worker pool isn't slammed by both sweeps simultaneously.
+        "schedule": crontab(hour="4", minute="0"),
+    },
 }
 
 # Sprint 1 / C1 channel token map. Format env CHANNEL_TOKEN_TO_TENANT_SLUG:
