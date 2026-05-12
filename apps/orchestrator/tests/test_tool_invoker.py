@@ -35,7 +35,7 @@ def _make_tool(name: str, *, allowed_for: set[str], return_value=None, raises=No
         return return_value or ToolResult(ok=True, data={"echo": args})
 
     _Tool.invoke = invoke  # type: ignore[attr-defined]
-    registry.register(_Tool)
+    registry.register(_Tool)  # type: ignore[arg-type]
     return captured
 
 
