@@ -164,6 +164,14 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "redaction_method": "regex_v1",
         "expires_at": lambda tenant, suffix: _future_datetime(),
     },
+    # Sprint 6 / P1: ClientProfile — OneToOne(BotUser) PK + tenant FK PROTECT.
+    # All other fields have defaults, so the scanner only needs to supply
+    # the bot_user (which itself supplies the tenant).
+    "ClientProfile": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"profile-{suffix or 'x'}"
+        ),
+    },
 }
 
 
@@ -285,6 +293,19 @@ def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> model
             kwargs[field_name] = f"{base_value}-{suffix}" if base_value else suffix
         else:
             kwargs[field_name] = base_value
+    # ClientProfile is auto-created by a BotUser post_save signal (P1).
+    # The scanner's factory creates the BotUser via `bot_user` lambda above,
+    # which already triggers the signal — `all_tenants.create()` would then
+    # collide on the OneToOne UNIQUE. Use update_or_create scoped on
+    # bot_user to satisfy the scanner's "one row per tenant" expectation.
+    if model.__name__ == "ClientProfile":
+        bot_user = kwargs.pop("bot_user")
+        kwargs.pop("tenant", None)  # bot_user already carries tenant via FK
+        row, _ = model.all_tenants.update_or_create(  # type: ignore[attr-defined]
+            bot_user=bot_user,
+            defaults={"tenant": bot_user.tenant, **kwargs},
+        )
+        return row
     # ``all_tenants`` is the escape-hatch manager declared on every
     # TenantScopedManager-using model — verified at runtime by
     # ``_discover_tenant_scoped_models``. mypy can't see the attribute
@@ -393,6 +414,22 @@ def test_scanner_finds_expected_sprint5_models():
     )
 
 
+def test_scanner_finds_expected_sprint6_models():
+    """Sanity: Sprint 6 lands ClientProfile (P1) for RFM/LTV/tier infra.
+
+    Per Sprint 6 / G1 (DRF-550). OneToOne(BotUser, primary_key=True) +
+    tenant FK PROTECT + TenantScopedManager → auto-discovery.
+    """
+
+    names = {m.__name__ for m in SCANNED_MODELS}
+    sprint6_expected = {"ClientProfile"}
+    sprint6_missing = sprint6_expected - names
+    assert not sprint6_missing, (
+        f"Sprint 6 expected scanner to find {sprint6_expected}; "
+        f"missing: {sprint6_missing}. Got: {names}."
+    )
+
+
 @pytest.mark.parametrize("model", SCANNED_MODELS, ids=lambda m: m.__name__)
 class TestEveryScopedModel:
     """Each tenant-scoped model honors the same three-mode contract."""
@@ -409,20 +446,20 @@ class TestEveryScopedModel:
         row2 = _create_row(model, tenant=t2, suffix=f"{model.__name__}-2")
 
         with tenant_scope(t1):
-            visible_ids = set(model.objects.values_list("id", flat=True))
+            visible_ids = set(model.objects.values_list("pk", flat=True))
         # Tenant t1 sees its own row, NOT t2's.
-        assert row1.id in visible_ids
-        assert row2.id not in visible_ids
+        assert row1.pk in visible_ids
+        assert row2.pk not in visible_ids
 
         # Symmetric: tenant t2 sees its own row only.
         with tenant_scope(t2):
-            visible_ids = set(model.objects.values_list("id", flat=True))
-        assert row2.id in visible_ids
-        assert row1.id not in visible_ids
+            visible_ids = set(model.objects.values_list("pk", flat=True))
+        assert row2.pk in visible_ids
+        assert row1.pk not in visible_ids
 
         # all_tenants escape hatch returns both rows.
-        all_ids = set(model.all_tenants.values_list("id", flat=True))
-        assert {row1.id, row2.id}.issubset(all_ids)
+        all_pks = set(model.all_tenants.values_list("pk", flat=True))
+        assert {row1.pk, row2.pk}.issubset(all_pks)
 
     def test_strict_mode_raises_without_context(self, model, settings):
         settings.STRICT_TENANT_SCOPE = "strict"
