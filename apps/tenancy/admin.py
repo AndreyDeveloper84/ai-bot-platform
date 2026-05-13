@@ -22,12 +22,24 @@ from apps.tenancy.models import Tenant
 
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
-    list_display = ("name", "slug", "is_active", "created_at")
-    list_filter = ("is_active",)
+    list_display = ("name", "slug", "is_active", "shadow_mode", "created_at")
+    list_filter = ("is_active", "shadow_mode")
+    list_editable = ("shadow_mode",)
     search_fields = ("name", "slug")
     readonly_fields = ("id", "created_at", "updated_at")
     fieldsets = (
         (None, {"fields": ("id", "slug", "name", "is_active")}),
+        (
+            "Sprint 8 shadow-mode",
+            {
+                "fields": ("shadow_mode",),
+                "description": (
+                    "When checked, the orchestrator writes shadow rows but "
+                    "does NOT send outbound messages to the user. See "
+                    "docs/runbooks/shadow-mode-launch.md before flipping in prod."
+                ),
+            },
+        ),
         (
             "Системное",
             {
