@@ -39,6 +39,10 @@ dependencies = [
     "opentelemetry-api>=1.26,<2",
     "opentelemetry-sdk>=1.26,<2",
     "opentelemetry-exporter-otlp-proto-grpc>=1.26,<2",
+    # Sprint 8 / E1 (DRF-710) — Sentry error reporting with PII scrubber.
+    # Pinned to v2+ for the modern `before_send` semantics and
+    # CeleryIntegration's beat-aware tagging.
+    "sentry-sdk[django,celery]>=2.0,<3",
 ]
 
 [project.optional-dependencies]

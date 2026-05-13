@@ -217,6 +217,13 @@ OTEL_TRACES_SAMPLE_RATE = float(os.environ.get("OTEL_TRACES_SAMPLE_RATE", "0.05"
 DEPLOYMENT_ENVIRONMENT = os.environ.get("DJANGO_ENV", "local")
 SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "0.0.0")
 
+# Sprint 8 / E1 (DRF-710) — Sentry error reporting + PII scrubber.
+# Empty DSN = no-op (local dev + tests never ship events upstream).
+# Production fail-fast lives in config/settings/production.py.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+SENTRY_ENVIRONMENT = os.environ.get("SENTRY_ENVIRONMENT", "local")
+SENTRY_TRACES_SAMPLE_RATE = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.05"))
+
 # Sprint 7 / M4 (DRF-595) — ChromaDB authentication.
 # Sprint 7 ships the ChromaDB server behind a static Bearer token. The
 # `chromadb` service in docker-compose mounts `CHROMA_SERVER_AUTHN_*`

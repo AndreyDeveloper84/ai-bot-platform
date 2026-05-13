@@ -38,6 +38,19 @@ if not MYSITE_CATALOG_SERVICE_TOKEN:
     )
 
 
+# Sprint 8 / E1 (DRF-710) — Sentry. Production cannot ship without
+# error reporting wired; an unreported pipeline crash is invisible to
+# on-call. Fail fast on boot — there's no "later" we can defer this to
+# once traffic is on the platform.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if not SENTRY_DSN:
+    raise ImproperlyConfigured(
+        "SENTRY_DSN is required in production. Set it to the project's "
+        "Sentry DSN. Local dev + tests run with empty DSN (no-op); "
+        "production must report errors."
+    )
+
+
 # Sprint 7 / M4 (DRF-595) — ChromaDB authentication. ChromaDB stores
 # every tenant's KB embeddings; an unauthenticated server lets anyone
 # on the docker network read or wipe `tenant_<uuid>` collections. The
