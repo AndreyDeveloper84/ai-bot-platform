@@ -93,6 +93,14 @@ def max_webhook(request: HttpRequest) -> HttpResponse:
         logger.warning("channels.max.webhook.bad_json")
         return JsonResponse({"error": "invalid json"}, status=400)
 
+    # Sprint 8 / N2 (DRF-701) — edge nginx mirror sets `X-Shadow: 1` on the
+    # mirrored copy. We tag the enqueued payload with `_shadow: True` so
+    # the worker / orchestrator (S2 / DRF-717) can short-circuit step 19
+    # (outbound) without persisting to the primary Conversation. The `_`
+    # prefix marks an internal envelope key — MAX itself never sends it.
+    if request.headers.get("X-Shadow", "") == "1":
+        payload["_shadow"] = True
+
     external_event_id = _extract_external_event_id(payload)
 
     journal_row, created = record_webhook(
