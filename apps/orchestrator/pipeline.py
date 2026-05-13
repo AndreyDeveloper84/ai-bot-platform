@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,6 +67,63 @@ from apps.orchestrator.safety.post_check import (
 from apps.orchestrator.safety.pre_check import SafetyVerdict, pre_check
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
+
+# Sprint 8 / T2 (DRF-706) — OTel instrumentation. We open one root span
+# per call to `turn()` and emit a structured event for each of the 19
+# pipeline steps. Sentry's `before_send` (E1) reads the active span's
+# trace_id; AuditLog + ReplayTrace (T3 / T4 follow-ups) attach to it too.
+#
+# Why events, not 19 child spans: a per-step child span tree multiplies
+# context-manager bookkeeping over every early return in `_run_under_tenant`
+# (~12 short-circuit branches). Span EVENTS give us the same observability
+# (a developer can filter on `pipeline.step=intent` in Tempo / Jaeger),
+# at a fraction of the diff churn — and the test (T5 / DRF-709) explicitly
+# asserts events on the root, not child-span count.
+try:
+    from opentelemetry import trace as _otel_trace
+
+    _tracer: Any = _otel_trace.get_tracer(__name__)
+except ImportError:  # pragma: no cover — optional dep
+    _otel_trace = None  # type: ignore[assignment]
+    _tracer = None
+
+
+@contextmanager
+def _step_event(span: Any, step: str, **attrs: Any) -> Any:
+    """Emit a span event marking the start AND end of one pipeline step.
+
+    Two events instead of one because Tempo / Jaeger UIs render an event
+    as a single instant — we want to surface duration via the start/end
+    pair without converting events to child spans.
+    """
+    if span is None:
+        yield
+        return
+    span.add_event(f"step.{step}.start", attributes={k: str(v) for k, v in attrs.items()})
+    try:
+        yield
+        span.add_event(f"step.{step}.end")
+    except Exception as exc:
+        span.add_event(
+            f"step.{step}.error",
+            attributes={"error.type": type(exc).__name__, "error.message": str(exc)[:200]},
+        )
+        raise
+
+
+@contextmanager
+def _root_span(message: Any, trace_id: str) -> Any:
+    """Open the per-turn OTel root span. No-op when ``_tracer`` is None."""
+    if _tracer is None:
+        yield None
+        return
+    with _tracer.start_as_current_span("pipeline.turn") as span:
+        span.set_attribute("pipeline.trace_id", trace_id)
+        span.set_attribute("channel", getattr(message, "channel", ""))
+        span.set_attribute("tenant.slug", getattr(message, "tenant_slug", ""))
+        span.set_attribute("is_shadow", bool(getattr(message, "is_shadow", False)))
+        yield span
+
 
 logger = logging.getLogger(__name__)
 
@@ -150,24 +208,35 @@ async def turn(message: ChannelMessage) -> TurnResult:
 
     trace_id = message.trace_id or str(uuid.uuid4())
 
-    try:
-        # --- Step 1: tenant resolution + scope ---
-        tenant = await sync_to_async(_resolve_tenant)(message.tenant_slug)
-        if tenant is None:
-            return _error_result(trace_id, "unknown_tenant", step=1)
+    with _root_span(message, trace_id) as span:
+        try:
+            # --- Step 1: tenant resolution + scope ---
+            with _step_event(span, "tenant_resolve"):
+                tenant = await sync_to_async(_resolve_tenant)(message.tenant_slug)
+            if tenant is None:
+                if span is not None:
+                    span.set_attribute("short_circuit_step", 1)
+                return _error_result(trace_id, "unknown_tenant", step=1)
 
-        return await _run_under_tenant(message, tenant, trace_id)
+            if span is not None:
+                span.set_attribute("tenant.id", str(tenant.id))
+            return await _run_under_tenant(message, tenant, trace_id, span=span)
 
-    except Exception as exc:  # noqa: BLE001 — outer safety boundary
-        logger.exception("pipeline.turn.unhandled trace_id=%s err=%s", trace_id, exc)
-        await sync_to_async(_emit_pipeline_error, thread_sensitive=False)(trace_id, str(exc))
-        return _error_result(trace_id, f"unhandled: {exc}", step=0)
+        except Exception as exc:  # noqa: BLE001 — outer safety boundary
+            logger.exception("pipeline.turn.unhandled trace_id=%s err=%s", trace_id, exc)
+            if span is not None:
+                span.set_attribute("error", True)
+                span.set_attribute("error.type", type(exc).__name__)
+            await sync_to_async(_emit_pipeline_error, thread_sensitive=False)(trace_id, str(exc))
+            return _error_result(trace_id, f"unhandled: {exc}", step=0)
 
 
 async def _run_under_tenant(
     message: ChannelMessage,
     tenant: Tenant,
     trace_id: str,
+    *,
+    span: Any = None,
 ) -> TurnResult:
     """Steps 2-19. Entered after tenant_scope is established."""
 
@@ -175,26 +244,37 @@ async def _run_under_tenant(
     # inside sync_to_async wrappers below, which inherit ContextVar.
     with tenant_scope(tenant):
         # --- Step 2: resolve_or_create_bot_user ---
-        bot_user = await sync_to_async(_resolve_bot_user)(message)
+        with _step_event(span, "resolve_bot_user"):
+            bot_user = await sync_to_async(_resolve_bot_user)(message)
 
         # --- Step 3: resolve_or_create_conversation ---
-        conversation = await sync_to_async(_resolve_conversation)(bot_user)
+        with _step_event(span, "resolve_conversation"):
+            conversation = await sync_to_async(_resolve_conversation)(bot_user)
 
         # --- Step 4: save user Message ---
-        await sync_to_async(_save_user_message)(conversation, message.text, trace_id)
+        with _step_event(span, "save_user_message"):
+            await sync_to_async(_save_user_message)(conversation, message.text, trace_id)
 
         # --- Step 5: load memory snapshot ---
-        memory_snapshot = await sync_to_async(load_snapshot)(conversation)
+        with _step_event(span, "load_memory"):
+            memory_snapshot = await sync_to_async(load_snapshot)(conversation)
 
         # --- Step 6: intent classification ---
-        intent_decision = await classify(
-            message.text,
-            memory_snapshot=_memory_to_dict(memory_snapshot),
-            brand_voice=None,  # Sprint 6 doesn't read BrandVoiceConfig here; Sprint 7+
-        )
+        with _step_event(span, "intent_classify"):
+            intent_decision = await classify(
+                message.text,
+                memory_snapshot=_memory_to_dict(memory_snapshot),
+                brand_voice=None,  # Sprint 6 doesn't read BrandVoiceConfig here; Sprint 7+
+            )
+            if span is not None and intent_decision is not None:
+                span.set_attribute("intent", getattr(intent_decision, "intent", "") or "")
+                span.set_attribute("skill", getattr(intent_decision, "skill", "") or "")
 
         # --- Step 7: safety pre-check ---
-        pre_result = pre_check(message.text, intent_decision=intent_decision)
+        with _step_event(span, "pre_check"):
+            pre_result = pre_check(message.text, intent_decision=intent_decision)
+            if span is not None:
+                span.set_attribute("pre_check_verdict", pre_result.verdict.value)
 
         # --- Step 8: blocked / clarify short-circuit ---
         if pre_result.verdict == SafetyVerdict.BLOCK:
@@ -238,9 +318,14 @@ async def _run_under_tenant(
             )
 
         # --- Step 10: skill dispatch ---
-        skill_result = await sync_to_async(_dispatch_skill)(
-            conversation, bot_user, message.text, trace_id, intent_decision
-        )
+        with _step_event(span, "skill_dispatch"):
+            skill_result = await sync_to_async(_dispatch_skill)(
+                conversation, bot_user, message.text, trace_id, intent_decision
+            )
+            if span is not None and skill_result is not None:
+                span.set_attribute(
+                    "skill.action_type", getattr(skill_result, "action_type", "") or ""
+                )
         if skill_result is None:
             # No skill matched + no echo fallback hit — pipeline fallback.
             reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
@@ -285,51 +370,63 @@ async def _run_under_tenant(
         # Reserved for Sprint 7+ when skills start emitting tool_calls_made.
 
         # --- Step 12: safety post-check ---
-        post_result = post_check(getattr(skill_result, "reply_text", ""))
+        with _step_event(span, "post_check"):
+            post_result = post_check(getattr(skill_result, "reply_text", ""))
+            if span is not None:
+                span.set_attribute("post_check_verdict", post_result.verdict.value)
 
         # --- Step 13: compose ---
-        reply = compose(skill_result, post_check=post_result)
+        with _step_event(span, "compose"):
+            reply = compose(skill_result, post_check=post_result)
 
         # --- Step 14: save assistant Message ---
-        await sync_to_async(_save_assistant)(
-            conversation,
-            reply.text,
-            getattr(skill_result, "action_type", "") or "skill_reply",
-            trace_id,
-        )
+        with _step_event(span, "save_assistant"):
+            await sync_to_async(_save_assistant)(
+                conversation,
+                reply.text,
+                getattr(skill_result, "action_type", "") or "skill_reply",
+                trace_id,
+            )
 
         # --- Step 15: update short-term memory ---
-        await sync_to_async(_update_short_term)(conversation, reply.text, trace_id)
+        with _step_event(span, "update_memory"):
+            await sync_to_async(_update_short_term)(conversation, reply.text, trace_id)
 
         # --- Step 16: emit message_sent event ---
-        await sync_to_async(_emit_message_sent, thread_sensitive=False)(
-            bot_user, conversation, trace_id, intent_decision
-        )
+        with _step_event(span, "emit_message_sent"):
+            await sync_to_async(_emit_message_sent, thread_sensitive=False)(
+                bot_user, conversation, trace_id, intent_decision
+            )
 
         # --- Step 17: write audit row (each layer already writes its own;
         # final summary audit goes here) ---
-        await sync_to_async(_write_pipeline_audit, thread_sensitive=False)(
-            trace_id, intent_decision, pre_result.verdict.value, post_result.verdict.value
-        )
+        with _step_event(span, "write_audit"):
+            await sync_to_async(_write_pipeline_audit, thread_sensitive=False)(
+                trace_id, intent_decision, pre_result.verdict.value, post_result.verdict.value
+            )
 
         # --- Step 18: replay recorder.capture ---
-        await sync_to_async(_replay_capture, thread_sensitive=False)(
-            trace_id,
-            message,
-            intent_decision,
-            pre_result.verdict.value,
-            skill_result,
-            post_result.verdict.value,
-            reply,
-        )
+        with _step_event(span, "replay_capture"):
+            await sync_to_async(_replay_capture, thread_sensitive=False)(
+                trace_id,
+                message,
+                intent_decision,
+                pre_result.verdict.value,
+                skill_result,
+                post_result.verdict.value,
+                reply,
+            )
 
         # --- Step 19: channel outbound send (Sprint 6 / O9 / DRF-546) ---
         # Send the composed reply to the channel with retry-3x backoff.
         # Permanent failure → AdminTask of type=MANUAL for operator triage
         # (DLQ via tasks table — no separate queue infra in Phase 0).
-        outbound_ok = await sync_to_async(_send_outbound, thread_sensitive=False)(
-            message, reply, conversation, trace_id
-        )
+        with _step_event(span, "send_outbound"):
+            outbound_ok = await sync_to_async(_send_outbound, thread_sensitive=False)(
+                message, reply, conversation, trace_id
+            )
+            if span is not None:
+                span.set_attribute("outbound_ok", bool(outbound_ok))
 
         return TurnResult(
             ok=outbound_ok,
