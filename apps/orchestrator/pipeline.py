@@ -113,6 +113,12 @@ class TurnResult:
     for observability + retry decisions. ``ok=False`` is an EXPECTED
     failure (block, clarify, error fallback); only unhandled exceptions
     bubble out of turn().
+
+    ``short_circuited_at_step`` is a ``float`` because Sprint 7 / O2
+    (DRF-556) inserts step 10.5 (post-skill handoff) between the
+    Sprint 6 step 10 (dispatch) and step 11 (tool invocation stub).
+    Existing int values (0, 8, 9, 10) keep equality semantics:
+    ``8 == 8.0`` is True in Python.
     """
 
     ok: bool
@@ -122,7 +128,7 @@ class TurnResult:
     pre_check_verdict: str = ""
     post_check_verdict: str = ""
     error: str = ""
-    short_circuited_at_step: int = 0  # 0 = ran to completion
+    short_circuited_at_step: float = 0  # 0 = ran to completion
 
 
 async def turn(message: ChannelMessage) -> TurnResult:
@@ -241,6 +247,32 @@ async def _run_under_tenant(
                 pre_check_verdict=pre_result.verdict.value,
                 error="no_skill_matched",
                 short_circuited_at_step=10,
+            )
+
+        # --- Step 10.5: post-skill handoff (Sprint 7 / O2 / DRF-556) ---
+        # A KB-driven skill (e.g. FAQ on a low-confidence retrieval) can
+        # request handoff AFTER running. Sprint 6 only had pre-skill
+        # handoff at step 9 via SafetyVerdict.HANDOFF; this branch is the
+        # post-dispatch counterpart. We reuse _create_handoff (same one
+        # step 9 uses) so a single AdminTask flow handles both pre- and
+        # post-skill cases.
+        #
+        # The skill MAY have set its own ``reply_text`` (a softer
+        # "переключаю на менеджера…" line); we honour it when non-empty
+        # and fall back to the canned _FALLBACK_HANDOFF when blank.
+        if skill_result.should_handoff:
+            reason = skill_result.handoff_reason or "skill_requested_handoff"
+            await sync_to_async(_create_handoff)(conversation, reason=reason)
+            handoff_text = skill_result.reply_text or _FALLBACK_HANDOFF
+            reply = await sync_to_async(_canned_reply)(handoff_text)
+            await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
+            return TurnResult(
+                ok=True,
+                trace_id=trace_id,
+                reply=reply,
+                intent=intent_decision,
+                pre_check_verdict=pre_result.verdict.value,
+                short_circuited_at_step=10.5,
             )
 
         # --- Step 11: tool invocation (Phase 0: skills don't emit tool_calls) ---

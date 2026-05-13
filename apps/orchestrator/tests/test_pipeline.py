@@ -207,6 +207,79 @@ class TestSkillDispatch:
         assert "assistant" in roles
 
 
+class TestPostSkillHandoff:
+    """Step 10.5 — Sprint 7 / O2 (DRF-556).
+
+    The dispatched skill can ask the pipeline to escalate after running
+    (low-confidence retrieval, contraindication detected, etc.). The
+    branch reuses :func:`_create_handoff` so a single AdminTask flow
+    handles both pre-skill (step 9) and post-skill (10.5) cases.
+    """
+
+    async def _patched_dispatch(self, *, reply_text: str = "", reason: str = ""):
+        """Yield a context that overrides skill dispatch to return a
+        SkillResult requesting handoff. Returns the patcher so the test
+        can keep it active for the whole turn().
+        """
+        from apps.skills.base import SkillResult
+
+        result = SkillResult(
+            reply_text=reply_text,
+            should_handoff=True,
+            handoff_reason=reason,
+        )
+        return patch("apps.skills.registry.dispatch", return_value=result)
+
+    async def test_short_circuits_at_step_10_5(self, tenant):
+        with await self._patched_dispatch(reason="faq_low_confidence"):
+            result = await turn(_message(text="расскажите про вакуумно-роликовый"))
+        assert result.ok is True
+        assert result.short_circuited_at_step == 10.5
+
+    async def test_creates_admin_task(self, tenant):
+        with await self._patched_dispatch(reason="faq_low_confidence"):
+            result = await turn(_message(text="странный вопрос"))
+
+        from apps.handoff.models import AdminTask
+
+        rows = await sync_to_async(
+            lambda: list(AdminTask.all_tenants.filter(task_type="handoff"))
+        )()
+        # Latest task carries our reason.
+        matched = [r for r in rows if "faq_low_confidence" in (r.reason or "")]
+        assert matched, f"no AdminTask carried faq_low_confidence reason; got {rows}"
+        assert result.reply is not None
+
+    async def test_default_reason_when_skill_omits(self, tenant):
+        # Skill emits should_handoff=True but leaves handoff_reason="".
+        with await self._patched_dispatch(reason=""):
+            await turn(_message(text="неожиданное"))
+
+        from apps.handoff.models import AdminTask
+
+        rows = await sync_to_async(lambda: list(AdminTask.all_tenants.all()))()
+        # Pipeline fills in the fallback reason slug.
+        assert any("skill_requested_handoff" in (r.reason or "") for r in rows)
+
+    async def test_skill_reply_text_honoured_when_non_empty(self, tenant):
+        with await self._patched_dispatch(
+            reply_text="Извините, лучше уточнить у мастера — переключаю.",
+            reason="faq_low_confidence",
+        ):
+            result = await turn(_message(text="?"))
+
+        assert result.reply is not None
+        assert "уточнить у мастера" in result.reply.text
+
+    async def test_canned_fallback_when_skill_reply_blank(self, tenant):
+        with await self._patched_dispatch(reply_text="", reason="faq_low_confidence"):
+            result = await turn(_message(text="?"))
+
+        assert result.reply is not None
+        # _FALLBACK_HANDOFF — "Передаю менеджеру…"
+        assert "менеджер" in result.reply.text.lower()
+
+
 class TestErrorPath:
     async def test_unhandled_exception_returns_fallback(self, tenant):
         # Patch the intent classifier to raise mid-pipeline.
