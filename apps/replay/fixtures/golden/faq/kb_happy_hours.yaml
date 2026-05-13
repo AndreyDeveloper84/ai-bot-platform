@@ -1,0 +1,21 @@
+name: kb_happy_hours
+description: |
+  Sprint 7 / F2 — KB-driven happy path. Query "часы работы" → first LLM call
+  emits search_knowledge_base tool_call → F1 retrieves chunks → second LLM
+  call grounds answer on retrieved text. Must NOT hand off.
+input:
+  channel: max
+  text: какие часы работы?
+must_pass:
+  - response_contains_any:
+      - работа
+      - 10
+      - 22
+forbidden:
+  - response_contains_any:
+      - "I don't know"
+      - не знаю
+      - Traceback
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

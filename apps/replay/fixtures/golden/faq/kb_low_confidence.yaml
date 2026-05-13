@@ -1,0 +1,23 @@
+name: kb_low_confidence
+description: |
+  Sprint 7 / F2 — vague query whose top-3 chunk-score average falls below
+  the 0.5 threshold (Decision 5). F2 fires the low-confidence handoff
+  branch even though chunks were retrieved.
+input:
+  channel: max
+  text: как это вообще работает у вас там?
+must_pass:
+  - response_contains_any:
+      - менеджер
+      - уточн
+      - переключаю
+      - не уверена
+forbidden:
+  - response_contains_any:
+      - "100%"
+      - гарантирую
+      - лучшие в городе
+      - Traceback
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

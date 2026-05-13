@@ -1,0 +1,23 @@
+name: kb_happy_price
+description: |
+  Sprint 7 / F2 — KB-driven happy path on a service-catalog query. Query
+  triggers tool_call → mirrored Service rows from C-track catalog sync
+  feed back into the grounded answer.
+input:
+  channel: max
+  text: сколько стоит классический массаж?
+must_pass:
+  - response_contains_any:
+      - массаж
+      - руб
+      - стоит
+      - цена
+forbidden:
+  - response_contains_any:
+      - "I don't know"
+      - не знаю
+      - Traceback
+      - +79
+voice_check:
+  max_length: 800
+  caps_lock: 0.5
