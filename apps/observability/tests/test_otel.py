@@ -14,6 +14,7 @@ missing-SDK graceful path.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
 
@@ -23,7 +24,7 @@ from apps.observability import otel
 
 
 @pytest.fixture(autouse=True)
-def _reset_state() -> None:
+def _reset_state() -> Iterator[None]:
     """Each test starts from a clean `_CONFIGURED=False`."""
     otel.reset_otel_for_tests()
     yield
