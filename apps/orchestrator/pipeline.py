@@ -105,6 +105,12 @@ class ChannelMessage:
     display_name: str = ""
     trace_id: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    # Sprint 8 / N2 (DRF-701) — shadow-mode signalling from edge.
+    # nginx mirror sets `X-Shadow: 1` on the mirrored copy; the ingress
+    # view (apps/ingress/views.py::max_webhook) reads the header and
+    # threads it through. S2 (DRF-717) consumes this in step 19 to
+    # short-circuit outbound. Per-message override of `tenant.shadow_mode`.
+    is_shadow: bool = False
 
 
 @dataclass
