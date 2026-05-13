@@ -195,6 +195,15 @@ CELERY_BEAT_SCHEDULE = {
         # 04:00 replay cleanup; spike absorbed in tiers across the worker pool.
         "schedule": crontab(hour="3", minute="30"),
     },
+    # Sprint 8 / S4 (DRF-719) — daily shadow-delta sweep.
+    # 08:00 МСК = 05:00 UTC — runs AFTER the mysite CSV publisher's
+    # 04:00 МСК export window so the ground-truth file is on disk.
+    # Telegram digest at 09:00 МСК handled by the task itself (no separate
+    # beat entry — keeps the delta + digest atomic per day per tenant).
+    "compute_shadow_delta_daily": {
+        "task": "apps.observability.tasks.compute_shadow_delta",
+        "schedule": crontab(hour="5", minute="0"),
+    },
 }
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
