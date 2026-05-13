@@ -34,9 +34,9 @@ class TestEmptyContext:
     def test_no_context_yields_empty_strings(self) -> None:
         record = _make_record()
         ContextFilter().filter(record)
-        assert record.tenant_id == ""
-        assert record.trace_id == ""
-        assert record.span_id == ""
+        assert getattr(record, "tenant_id", None) == ""
+        assert getattr(record, "trace_id", None) == ""
+        assert getattr(record, "span_id", None) == ""
 
     def test_does_not_raise_when_imports_fail(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If apps.tenancy.context can't be imported (theoretical edge),
@@ -66,7 +66,7 @@ class TestTenantContext:
         with tenant_scope(tenant):
             record = _make_record()
             ContextFilter().filter(record)
-            assert record.tenant_id == str(tenant.id)
+            assert getattr(record, "tenant_id", None) == str(tenant.id)
 
 
 class TestOTelContext:
@@ -81,8 +81,8 @@ class TestOTelContext:
         with tracer.start_as_current_span("test-span"):
             ContextFilter().filter(record)
 
-        assert len(record.trace_id) == 32
-        assert len(record.span_id) == 16
+        assert len(str(getattr(record, "trace_id", "") or "")) == 32
+        assert len(str(getattr(record, "span_id", "") or "")) == 16
 
 
 class TestIntegrationWithFormatter:

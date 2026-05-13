@@ -171,8 +171,14 @@ class ContextFilter(logging.Filter):
         # Tenant context — read via the existing tenancy.context helper.
         # Import lazily so this module can be imported during Django
         # AppConfig.ready() before apps.tenancy itself is fully loaded.
-        record.tenant_id = _read_tenant_id()
-        record.trace_id, record.span_id = _read_otel_ids()
+        #
+        # ``LogRecord`` has no statically-declared `tenant_id` / `trace_id`
+        # / `span_id` attributes; we attach dynamically. ``setattr`` keeps
+        # mypy happy without per-line ignores.
+        trace_id, span_id = _read_otel_ids()
+        setattr(record, "tenant_id", _read_tenant_id())  # noqa: B010
+        setattr(record, "trace_id", trace_id)  # noqa: B010
+        setattr(record, "span_id", span_id)  # noqa: B010
         # Always pass — filter is for enrichment, not gatekeeping.
         return True
 
