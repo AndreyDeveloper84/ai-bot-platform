@@ -28,6 +28,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "chromadb>=0.5",
     "openai>=1.50",
+    "anthropic>=0.40",
     "httpx>=0.27",
     "django-cryptography-django5==2.2",
     "python-dotenv>=1.0",
