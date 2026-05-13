@@ -90,6 +90,49 @@ def reindex_tenant_kb(
     return _ingest_queryset(queryset, force=force, label="reindex")
 
 
+@shared_task(name="apps.kb.tasks.sync_catalog_to_kb")
+def sync_catalog_to_kb(tenant_id: str) -> dict[str, int]:
+    """Project catalog mirrors → KbDocument rows, then trigger ingest.
+
+    Sprint 7 / K7 (DRF-565). Two-phase:
+
+    1. **Project** — :func:`apps.kb.projectors.project_tenant_catalog`
+       walks each mirror table, upserts a matching KbDocument row,
+       and reports created / updated / unchanged counts.
+    2. **Re-embed** — projector touched only changed-content rows
+       (via the checksum diff). The follow-up
+       :func:`embed_pending_kb_documents` call picks those rows
+       (their ``updated_at`` advanced past ``embedded_at``); unchanged
+       rows skip on K4's checksum guard with no OpenAI spend.
+
+    Called from the C4 sync_catalog_for_all_tenants beat success
+    handler — chained via ``.delay(tenant_id)`` once a SyncResult
+    with ``ran=True`` lands. Sprint 7 wires the chain manually; Sprint
+    8 may flip to a Celery ``chord`` for atomic projection+ingest.
+
+    Returns merged counter dict: per-doc-type projection counts +
+    overall ingest counters.
+    """
+    from apps.kb.projectors import project_tenant_catalog
+
+    tenant = Tenant.objects.get(id=UUID(str(tenant_id)))
+    projection = project_tenant_catalog(tenant)
+
+    # Re-embed only the changed-content rows. The simpler path is to
+    # invoke embed_pending_kb_documents for the tenant — it already
+    # selects rows where embedded_at < updated_at, which matches the
+    # set the projector just touched (its UPDATE bumps updated_at via
+    # Django auto_now). Skip path covers unchanged rows for free.
+    embed_counters = embed_pending_kb_documents(tenant_id=str(tenant.id))
+
+    out: dict[str, int] = {f"embed_{k}": v for k, v in embed_counters.items()}
+    for doc_type, result in projection.items():
+        out[f"{doc_type}_created"] = result.created
+        out[f"{doc_type}_updated"] = result.updated
+        out[f"{doc_type}_unchanged"] = result.unchanged
+    return out
+
+
 @shared_task(name="apps.kb.tasks.embed_pending_kb_documents")
 def embed_pending_kb_documents(*, tenant_id: str | None = None) -> dict[str, int]:
     """Embed every row whose checksum has drifted since last ingest.
