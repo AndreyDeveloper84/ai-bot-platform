@@ -191,6 +191,18 @@ CELERY_BEAT_SCHEDULE = {
 # encrypted-on-tenant lookup (ADR-0006).
 CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", "")
 
+# Sprint 7 / C8 (DRF-578) — Catalog sync (mysite → platform mirror).
+# Sync service (C4 / DRF-575) pulls Service/Master/FAQ/HelpArticle from
+# `mysite/api/v1/catalog/*` via HTTP and upserts into apps.catalog
+# mirrors. Per-tenant Redis advisory lock guards against concurrent
+# runs; the TTL is intentionally ≥ 1.5× the 15-minute beat cadence so
+# a slow run can't race itself.
+MYSITE_CATALOG_BASE_URL = os.environ.get("MYSITE_CATALOG_BASE_URL", "https://formulatela58.ru")
+MYSITE_CATALOG_SERVICE_TOKEN = os.environ.get("MYSITE_CATALOG_SERVICE_TOKEN", "")
+CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECONDS", str(25 * 60)))
+CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
+CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
+
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [
