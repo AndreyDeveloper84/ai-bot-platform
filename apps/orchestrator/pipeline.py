@@ -227,7 +227,7 @@ async def _run_under_tenant(
 
         # --- Step 10: skill dispatch ---
         skill_result = await sync_to_async(_dispatch_skill)(
-            conversation, bot_user, message.text, trace_id
+            conversation, bot_user, message.text, trace_id, intent_decision
         )
         if skill_result is None:
             # No skill matched + no echo fallback hit — pipeline fallback.
@@ -398,8 +398,21 @@ def _create_handoff(conversation, *, reason: str):
     )
 
 
-def _dispatch_skill(conversation, bot_user, text: str, trace_id: str):
-    """Step 10 helper."""
+def _dispatch_skill(
+    conversation,
+    bot_user,
+    text: str,
+    trace_id: str,
+    intent: IntentDecision | None = None,
+):
+    """Step 10 helper.
+
+    ``intent`` is the step-6 :class:`IntentDecision` for this turn,
+    threaded into :class:`SkillContext.intent` so Sprint 7+ KB-driven
+    skills (FAQ, booking) can branch on it without re-classifying.
+    Optional for backward-compat with Sprint 3 skills + tests that
+    construct a context directly.
+    """
     from apps.skills.base import SkillContext
     from apps.skills.registry import dispatch
 
@@ -408,6 +421,7 @@ def _dispatch_skill(conversation, bot_user, text: str, trace_id: str):
         bot_user=bot_user,
         message_text=text,
         trace_id=trace_id,
+        intent=intent,
     )
     return dispatch(ctx)
 

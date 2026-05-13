@@ -45,9 +45,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
+from apps.llm.protocol import ToolCall
+
 if TYPE_CHECKING:
     from apps.conversations.models import Conversation
     from apps.identity.models import BotUser
+    from apps.orchestrator.intent_router import IntentDecision
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,12 @@ class SkillContext:
     layer doesn't peek at individual attachment payloads in Sprint 3
     (channel adapter handles them); the boolean lets the echo skill
     pick the "no echo" fallback for attachment-only turns.
+
+    ``intent`` is the pipeline's step-6 :class:`IntentDecision` for
+    this turn (Sprint 6 / DRF-536). Optional for backward-compat with
+    Sprint 3 skills (privacy/handoff/echo) that don't read it; required
+    in spirit for Sprint 7+ skills (FAQ/booking) that branch on
+    ``intent.intent`` and ``intent.needs_rag``.
     """
 
     conversation: "Conversation"
@@ -68,6 +77,7 @@ class SkillContext:
     message_text: str
     trace_id: str = ""
     has_attachments: bool = False
+    intent: "IntentDecision | None" = None
 
 
 @dataclass
@@ -85,6 +95,24 @@ class SkillResult:
                                  inactive after the handle.
       new_state: optional explicit state transition. Caller flips
                  ``conversation.state`` to this value when not None.
+      should_handoff: skill is requesting post-dispatch handoff to a
+                      human. Pipeline step 10.5 (Sprint 7 / O2) catches
+                      this, creates the AdminTask, and short-circuits
+                      with the canned handoff reply. The skill MAY also
+                      set ``reply_text`` to a softer "переключаю на
+                      менеджера…" line — pipeline replaces it with the
+                      canned fallback if empty.
+      handoff_reason: short slug for AdminTask + observability when
+                      ``should_handoff`` is True. Examples:
+                      ``"faq_low_confidence"``, ``"booking_unknown_master"``.
+      tool_calls_made: function-calls the skill actually invoked during
+                       ``handle()``. Persisted on the assistant Message
+                       row for replay + audit. Empty for non-tool-using
+                       skills (privacy/handoff/echo).
+      confidence: skill's self-reported confidence in [0.0, 1.0]. Used
+                  by O2 step 10.5 to gate auto-handoff thresholds.
+                  ``None`` = skill didn't compute a score (default for
+                  Sprint 3 skills that always reply deterministically).
     """
 
     reply_text: str = ""
@@ -95,6 +123,11 @@ class SkillResult:
     new_state: str | None = None
     # Free-form skill-metadata bag for logging / events. Not persisted.
     meta: dict[str, Any] = field(default_factory=dict)
+    # Sprint 7 / O1 (DRF-559) contract extension — KB-driven skills.
+    should_handoff: bool = False
+    handoff_reason: str = ""
+    tool_calls_made: list[ToolCall] = field(default_factory=list)
+    confidence: float | None = None
 
 
 @runtime_checkable
