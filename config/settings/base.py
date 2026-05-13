@@ -224,6 +224,12 @@ SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 SENTRY_ENVIRONMENT = os.environ.get("SENTRY_ENVIRONMENT", "local")
 SENTRY_TRACES_SAMPLE_RATE = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.05"))
 
+# Sprint 8 / S3 (DRF-718) — Shadow-mode ground-truth source.
+# mysite exports its Telegram conversation logs as `<YYYY-MM-DD>.csv`
+# files in this directory; the daily delta task reads them. Empty path =
+# delta math returns the no-ground-truth summary (Sprint 9 hardens).
+SHADOW_GROUND_TRUTH_PATH = os.environ.get("SHADOW_GROUND_TRUTH_PATH", "")
+
 # Sprint 7 / M4 (DRF-595) — ChromaDB authentication.
 # Sprint 7 ships the ChromaDB server behind a static Bearer token. The
 # `chromadb` service in docker-compose mounts `CHROMA_SERVER_AUTHN_*`
