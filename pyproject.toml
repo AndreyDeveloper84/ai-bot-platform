@@ -36,10 +36,26 @@ dependencies = [
 [project.optional-dependencies]
 
 # ayla-ai-core is a separate private repo. Pulling it requires GitHub
-# auth (locally via ssh, in CI via a GH_DEPLOY_TOKEN secret). It's split
-# off into its own extra so plain `uv sync --extra dev` works without
-# auth — CI uses that. Local dev that touches AI integration uses
-# `uv sync --extra dev --extra ai-core`.
+# auth (locally via ssh, in CI via a GH_DEPLOY_TOKEN secret + `git
+# config insteadOf` rewrite — see .github/workflows/ci.yml). It lives
+# in its own extra so plain `uv sync --extra dev` works without auth
+# for non-AI contributors. AI work uses `uv sync --extra dev --extra ai-core`.
+#
+# K12 (DRF-570): the ref is pinned to a tag (v0.6.0), NOT `>=0.6` or a
+# branch. uv.lock additionally pins the resolved commit SHA. Combined
+# with CI's `--frozen` flag this means a silent upstream change is a
+# hard CI failure — bumping ayla-ai-core is an explicit lockfile +
+# pyproject change you must review and merge.
+#
+# Bump procedure (when upstream ships 0.7.x):
+#   1. Read upstream CHANGELOG for `BrandVoiceConfig`, `Example`,
+#      `SpecialistContext`, `tools.ActionType` breakage — the platform
+#      allow-list (Sprint 7 / Decision 1) only touches those four.
+#   2. Update tag here (e.g. `@v0.7.0`).
+#   3. `uv lock --upgrade-package ayla-ai-core`
+#   4. Run `tests/smoke/test_ayla_import.py` to confirm the allow-list
+#      still resolves. Update the version-startswith assertion to match.
+#   5. PR title: `chore(deps): bump ayla-ai-core v0.6.0 → v0.7.0`.
 ai-core = [
     "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0",
 ]

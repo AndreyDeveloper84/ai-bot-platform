@@ -73,12 +73,27 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      # CI installs only `--extra dev`. The `ai-core` extra (ayla-ai-core
-      # from a private git repo) requires a GH_DEPLOY_TOKEN secret which
-      # is not configured yet. Once added, the workflow can opt in with
-      # `--extra ai-core` and a `git config insteadOf` step.
-      - name: uv sync
-        run: uv sync --extra dev --frozen
+      # ayla-ai-core lives in a separate private repo. CI auths via the
+      # GH_DEPLOY_TOKEN secret (read-only PAT scoped to that repo). The
+      # `insteadOf` rewrite makes `git+https://github.com/.../ayla-ai-core`
+      # in pyproject.toml resolve to `https://x-access-token:<token>@...`
+      # at fetch time without leaking the token into the lockfile.
+      #
+      # K12 (DRF-570) pins `ayla-ai-core==v0.6.0` exactly — `--frozen`
+      # makes any drift a hard CI failure (the lockfile must match).
+      - name: Configure git auth for private deps
+        env:
+          GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
+        run: |
+          if [ -n "$GH_DEPLOY_TOKEN" ]; then
+            git config --global url."https://x-access-token:${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+          else
+            echo "::error::GH_DEPLOY_TOKEN secret missing — ayla-ai-core fetch will fail. Set the secret in repo settings."
+            exit 1
+          fi
+
+      - name: uv sync (with ai-core extra)
+        run: uv sync --extra dev --extra ai-core --frozen
 
       - name: ruff check
         run: uv run ruff check .

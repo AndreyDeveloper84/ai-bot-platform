@@ -1,0 +1,177 @@
+"""LLMProvider Protocol + provider-agnostic DTOs (DRF-580 / Sprint 7 / L1).
+
+The contract every concrete LLM provider implements. Two operations:
+
+* ``complete(messages, *, model, ...)`` — chat completion. Optional
+  ``tools=[...]`` enables function-calling; the provider parses the
+  vendor-specific tool-use shape back into provider-agnostic
+  :class:`ToolCall` objects.
+* ``embedding(text, *, model)`` — produce a vector. OpenAI has it;
+  Anthropic does NOT, and raises :class:`NotImplementedError`. The
+  L5 router (DRF-587) catches that and falls back to OpenAI for
+  embedding ops regardless of which provider would otherwise be chosen.
+
+### Why a Protocol, not an ABC
+
+Same reason :class:`apps.skills.base.Skill` is a Protocol — providers
+live in different modules (and Sprint 7 also wraps the existing
+``OpenAIProvider`` without forcing it to inherit). Duck-typing through
+:mod:`typing.Protocol` keeps imports flat and avoids a Sprint 1 → 7
+inheritance retrofit.
+
+### Exception hierarchy
+
+* :class:`LLMError` — base. Catch this for "something LLM-side went wrong".
+* :class:`LLMTransportError` — network / 5xx / timeout. Retryable.
+* :class:`LLMQuotaError` — vendor rate-limit / 429. Often retry-after.
+* :class:`LLMProviderQuotaExceeded` — OUR daily budget cap hit
+  (Sprint 7 / L7 wraps Anthropic with a Redis counter). Router catches
+  and falls back to the next-tier provider.
+
+### Tool spec
+
+The :class:`LLMProvider.complete` ``tools`` parameter expects the
+OpenAI-shaped spec (canonical because it's the lowest common denominator):
+
+    {
+        "name": "search_knowledge_base",
+        "description": "Search the tenant KB for matching chunks.",
+        "parameters": {  # JSON Schema
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "default": 3},
+            },
+            "required": ["query"],
+        },
+    }
+
+Anthropic provider converts to its native ``input_schema`` shape under
+the hood. Both providers return :class:`ToolCall.arguments` as a parsed
+``dict[str, Any]`` (NOT the raw JSON string), so call sites never have
+to think about which provider answered.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable
+
+# ---------------------------------------------------------------------------
+# DTOs
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A parsed function-call request emitted by the LLM.
+
+    Fields:
+      id: vendor-supplied identifier. Used as ``tool_call_id`` when
+          sending the tool result back in the next ``complete()`` turn.
+      name: tool name (matches the registered tool spec ``"name"``).
+      arguments: parsed JSON arguments. Always a ``dict[str, Any]`` —
+                 providers parse the raw JSON string for us so call
+                 sites never have to.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    """Return value of :meth:`LLMProvider.complete`.
+
+    Fields:
+      text: assistant message text. Empty when the model emitted only
+            tool_calls (no natural-language reply).
+      tool_calls: parsed function-call list. Empty when the model
+                  produced a plain text reply. Order preserved when
+                  the model emits multiple in one turn.
+      prompt_tokens / completion_tokens: usage counters. Both 0 when
+                                         the vendor doesn't expose them.
+      model: actual model id used (provider may resolve aliases).
+      provider: ``"openai"`` | ``"anthropic"`` — for cost attribution
+                + routing telemetry.
+      finish_reason: vendor finish code, normalised lowercase string.
+                     Common values: ``"stop"``, ``"length"``,
+                     ``"tool_calls"``, ``"content_filter"``.
+    """
+
+    text: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    model: str = ""
+    provider: str = ""
+    finish_reason: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class LLMError(Exception):
+    """Base class for any LLM-side failure."""
+
+
+class LLMTransportError(LLMError):
+    """Network failure, timeout, or vendor 5xx. Generally retryable."""
+
+
+class LLMQuotaError(LLMError):
+    """Vendor rate-limit (HTTP 429) or vendor-side quota exhaustion.
+
+    Distinct from :class:`LLMProviderQuotaExceeded` — that one is OUR
+    daily cap, not the vendor's.
+    """
+
+
+class LLMProviderQuotaExceeded(LLMError):
+    """Our internal daily-token cap hit (Sprint 7 / L7 / DRF-585).
+
+    Raised BEFORE making the upstream call once the counter crosses the
+    configured budget. The L5 router (DRF-587) catches this and falls
+    back to the next-tier provider one hop.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class LLMProvider(Protocol):
+    """The two-method contract every provider implements.
+
+    Implementations:
+
+    * Sprint 7 / L2 (DRF-581): ``apps.llm.providers.openai_provider.OpenAIProvider``
+    * Sprint 7 / L4 (DRF-583): ``apps.llm.providers.anthropic_provider.AnthropicProvider``
+
+    Concrete classes are picked at call-time by
+    ``apps.llm.router.LLMRouter`` (L5 / DRF-587) based on per-tenant
+    feature flags, per-skill defaults, and the org-wide default.
+    """
+
+    name: str  # ``"openai"`` | ``"anthropic"`` — stable identifier
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        temperature: float = 0.0,
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int | None = None,
+    ) -> CompletionResult:
+        """Chat completion. Pass ``tools`` for function-calling."""
+        ...
+
+    async def embedding(self, text: str, *, model: str) -> list[float]:
+        """Embed ``text``. Anthropic raises :class:`NotImplementedError`."""
+        ...
