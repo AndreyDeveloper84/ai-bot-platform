@@ -240,6 +240,18 @@ async def _run_under_tenant(
 ) -> TurnResult:
     """Steps 2-19. Entered after tenant_scope is established."""
 
+    # Sprint 8 / S2 (DRF-717) — shadow-mode early decision. Per-message
+    # `is_shadow` (from the X-Shadow edge header, N2) OR the per-tenant
+    # `shadow_mode` flag (S1) → write rows under is_shadow=True and
+    # short-circuit outbound at step 19. The decision is made ONCE here
+    # so every downstream step writes a consistent row set.
+    is_shadow = bool(getattr(message, "is_shadow", False) or getattr(tenant, "shadow_mode", False))
+    if span is not None:
+        # The outer span already had a coarse is_shadow attribute on the
+        # channel message; override with the effective decision so the
+        # dashboard filter `is_shadow=true` reaches tenant-mode rows too.
+        span.set_attribute("is_shadow", is_shadow)
+
     # tenant_scope is a sync context manager. Async ORM calls happen
     # inside sync_to_async wrappers below, which inherit ContextVar.
     with tenant_scope(tenant):
@@ -249,7 +261,7 @@ async def _run_under_tenant(
 
         # --- Step 3: resolve_or_create_conversation ---
         with _step_event(span, "resolve_conversation"):
-            conversation = await sync_to_async(_resolve_conversation)(bot_user)
+            conversation = await sync_to_async(_resolve_conversation)(bot_user, is_shadow=is_shadow)
 
         # --- Step 4: save user Message ---
         with _step_event(span, "save_user_message"):
@@ -421,6 +433,30 @@ async def _run_under_tenant(
         # Send the composed reply to the channel with retry-3x backoff.
         # Permanent failure → AdminTask of type=MANUAL for operator triage
         # (DLQ via tasks table — no separate queue infra in Phase 0).
+        #
+        # Sprint 8 / S2 (DRF-717): when `is_shadow` is True we DO NOT
+        # send outbound — every other observability hook (audit, replay,
+        # delta) already ran. The shadow Conversation/Message rows let
+        # the daily delta (S3) measure agreement without showing the
+        # platform's reply to the real user.
+        if is_shadow:
+            with _step_event(span, "send_outbound_skipped_shadow"):
+                await sync_to_async(_write_shadow_drop_audit, thread_sensitive=False)(
+                    trace_id, conversation
+                )
+            if span is not None:
+                span.set_attribute("outbound_ok", True)
+                span.set_attribute("shadow_dropped_outbound", True)
+            return TurnResult(
+                ok=True,
+                trace_id=trace_id,
+                reply=reply,
+                intent=intent_decision,
+                pre_check_verdict=pre_result.verdict.value,
+                post_check_verdict=post_result.verdict.value,
+                error="",
+            )
+
         with _step_event(span, "send_outbound"):
             outbound_ok = await sync_to_async(_send_outbound, thread_sensitive=False)(
                 message, reply, conversation, trace_id
@@ -462,12 +498,19 @@ def _resolve_bot_user(message: ChannelMessage):
     )
 
 
-def _resolve_conversation(bot_user):
-    """Step 3 helper. Find/create the one active Conversation for bot_user."""
+def _resolve_conversation(bot_user, *, is_shadow: bool = False):
+    """Step 3 helper. Find/create the active Conversation for bot_user.
+
+    Sprint 8 / S2 (DRF-717): when ``is_shadow`` is True, we look for an
+    open shadow row and create one if missing — this row lives ALONGSIDE
+    the primary active Conversation (N3 / DRF-702 relaxed the unique
+    constraint so both can coexist). Outbound is suppressed for shadow
+    turns at step 19; the row exists purely for the delta dashboard.
+    """
     from apps.conversations.models import Conversation
 
     conv = (
-        Conversation.objects.filter(bot_user=bot_user, is_active=True)
+        Conversation.objects.filter(bot_user=bot_user, is_active=True, is_shadow=is_shadow)
         .order_by("-created_at")
         .first()
     )
@@ -475,6 +518,7 @@ def _resolve_conversation(bot_user):
         conv = Conversation.objects.create(
             tenant=bot_user.tenant,
             bot_user=bot_user,
+            is_shadow=is_shadow,
         )
     return conv
 
@@ -603,6 +647,25 @@ def _write_pipeline_audit(
             "skill": intent.skill,
             "pre_check": pre_verdict,
             "post_check": post_verdict,
+        },
+    )
+
+
+def _write_shadow_drop_audit(trace_id: str, conversation) -> None:
+    """Step 19 shadow short-circuit (Sprint 8 / S2 / DRF-717).
+
+    Audit-only equivalent of ``_send_outbound``. Lets the dashboard
+    (D1) and replay differ count shadow turns as "outbound dropped"
+    rather than as silent missing rows.
+    """
+    from apps.audit.services import write_audit
+
+    write_audit(
+        "pipeline.shadow_dropped_outbound",
+        payload={
+            "trace_id": trace_id,
+            "conversation_id": str(conversation.id),
+            "tenant_id": str(conversation.tenant_id),
         },
     )
 
