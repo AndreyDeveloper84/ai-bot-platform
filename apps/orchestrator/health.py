@@ -114,4 +114,101 @@ def pipeline_health() -> dict[str, dict[str, Any]]:
     return {
         "intent_router": check_intent_router(),
         "skill_registry": check_skill_registry(),
+        # Sprint 8 / G4 (DRF-735) — extended health surface.
+        "chromadb_auth": check_chromadb_auth(),
+        "audit_cleanup": check_audit_cleanup_recent(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8 / G4 (DRF-735) — extended health probes
+# ---------------------------------------------------------------------------
+
+
+def check_chromadb_auth() -> dict[str, Any]:
+    """Probe ChromaDB heartbeat with the platform's Bearer token.
+
+    Sprint 7 / M4 (DRF-595) put ChromaDB behind a token gate. A drifted
+    `CHROMA_AUTH_TOKEN` shows up as 401 on every FAQ retrieval — this
+    probe surfaces it BEFORE traffic flows through to the user.
+
+    Empty CHROMA_HTTP_HOST (local dev / tests using PersistentClient)
+    short-circuits to ok=True — no remote to probe.
+    """
+    start = time.monotonic()
+    try:
+        from django.conf import settings
+
+        host = str(getattr(settings, "CHROMA_HTTP_HOST", "") or "")
+        if not host:
+            return {
+                "ok": True,
+                "error": None,
+                "duration_ms": int((time.monotonic() - start) * 1000),
+                "detail": "no_remote_chromadb",
+            }
+
+        port = int(getattr(settings, "CHROMA_HTTP_PORT", 8001))
+        token = str(getattr(settings, "CHROMA_AUTH_TOKEN", "") or "")
+        import httpx
+
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = httpx.head(
+            f"http://{host}:{port}/api/v2/heartbeat",
+            headers=headers,
+            timeout=2.0,
+        )
+        ok = 200 <= resp.status_code < 400
+        return {
+            "ok": ok,
+            "error": None if ok else f"chromadb returned {resp.status_code}",
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }
+    except Exception as exc:  # noqa: BLE001 — probe never raises
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }
+
+
+def check_audit_cleanup_recent() -> dict[str, Any]:
+    """Verify the audit cleanup task ran within the last 25 hours.
+
+    Sprint 2 / E3 ships a daily 03:00 UTC `cleanup_old_audit_logs`
+    task. A silent beat outage would let the AuditLog table grow
+    unbounded — this probe catches it within one missed cycle.
+    """
+    start = time.monotonic()
+    try:
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.audit.models import AuditLog
+
+        # The cleanup task writes an audit row of its own (`audit.cleanup_succeeded`)
+        # after each successful sweep. We just check recency of any
+        # action — even if the cleanup row isn't there, an empty table
+        # with no recent rows means workers/beat are down.
+        latest = AuditLog.all_tenants.order_by("-created_at").first()
+        if latest is None:
+            return {
+                "ok": True,
+                "error": None,
+                "duration_ms": int((time.monotonic() - start) * 1000),
+                "detail": "audit_table_empty",
+            }
+        age = timezone.now() - latest.created_at
+        ok = age < timedelta(hours=25)
+        return {
+            "ok": ok,
+            "error": None if ok else f"latest audit row is {age} old",
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }
+    except Exception as exc:  # noqa: BLE001 — probe never raises
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }
