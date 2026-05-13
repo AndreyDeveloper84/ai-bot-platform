@@ -57,6 +57,7 @@ def write_audit(
     from apps.audit.models import AuditLog
 
     tenant = current_tenant()
+    merged_payload = _merge_otel_context(payload or {})
     try:
         AuditLog.all_tenants.create(
             tenant=tenant,
@@ -64,7 +65,7 @@ def write_audit(
             action=action,
             target=target or "",
             target_id=target_id,
-            payload=payload or {},
+            payload=merged_payload,
         )
     except Exception:  # noqa: BLE001 — audit must never break the request
         logger.exception(
@@ -74,3 +75,32 @@ def write_audit(
             target,
             target_id,
         )
+
+
+def _merge_otel_context(payload: dict[str, Any]) -> dict[str, Any]:
+    """Inject the current OTel span's ``trace_id`` + ``span_id`` into the
+    audit payload under stable top-level keys (Sprint 8 / T3 / DRF-707).
+
+    Returns a *new* dict so the caller-passed payload is never mutated
+    in place (write_audit is observational; mutating the input would be
+    surprising). Outside any active span the payload passes through
+    unchanged — write_audit MUST be safe to call from system tasks /
+    CLI / tests without OTel set up.
+    """
+    try:
+        from opentelemetry import trace
+    except ImportError:  # pragma: no cover — optional dep
+        return dict(payload)
+    try:
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+    except Exception:  # noqa: BLE001 — defensive
+        return dict(payload)
+    if not getattr(ctx, "is_valid", False):
+        return dict(payload)
+    merged = dict(payload)
+    # Don't clobber a payload-supplied trace_id (test fixtures sometimes
+    # provide their own); the OTel context is a default, not an override.
+    merged.setdefault("trace_id", format(ctx.trace_id, "032x"))
+    merged.setdefault("span_id", format(ctx.span_id, "016x"))
+    return merged
