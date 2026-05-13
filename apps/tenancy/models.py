@@ -100,6 +100,19 @@ class Tenant(models.Model):
         "Per-BotUser overrides land alongside personalisation work.",
     )
 
+    # Sprint 7 / C4 (DRF-575) — cursor for the catalog sync orchestrator.
+    # NULL = full-resync on the next beat (initial bootstrap or admin
+    # force-clear). Sync service writes the upstream `updated_at` of the
+    # most recent row pulled, so the next run's `?since=` filter only
+    # picks up rows mysite has touched since.
+    last_catalog_sync_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Cursor — `?since=` filter for the next catalog sync run. "
+        "NULL → full resync. Written by apps.catalog.services.sync after "
+        "a successful pull-upsert cycle.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
