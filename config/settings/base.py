@@ -56,6 +56,8 @@ LOCAL_APPS = [
     "apps.promptreg",
     "apps.adminconsole",
     "apps.handoff",
+    # Sprint 8 / T1 (DRF-705) — observability package owns OTel + Sentry + JSON logs.
+    "apps.observability",
 ]
 
 INSTALLED_APPS = [
@@ -206,6 +208,14 @@ ANTHROPIC_DAILY_TOKEN_CAP = int(os.environ.get("ANTHROPIC_DAILY_TOKEN_CAP", "100
 # ``"token1=tenant-a,token2=tenant-b"``. Sprint 4 replaces with
 # encrypted-on-tenant lookup (ADR-0006).
 CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", "")
+
+# Sprint 8 / T1 (DRF-705) — OpenTelemetry configuration.
+# Empty endpoint = no-op exporter (local dev + tests).
+# Sample rate is Decision 3 from sprint-8-observability-shadow.md.
+OTEL_EXPORTER_OTLP_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+OTEL_TRACES_SAMPLE_RATE = float(os.environ.get("OTEL_TRACES_SAMPLE_RATE", "0.05"))
+DEPLOYMENT_ENVIRONMENT = os.environ.get("DJANGO_ENV", "local")
+SERVICE_VERSION = os.environ.get("SERVICE_VERSION", "0.0.0")
 
 # Sprint 7 / M4 (DRF-595) — ChromaDB authentication.
 # Sprint 7 ships the ChromaDB server behind a static Bearer token. The
