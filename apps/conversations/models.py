@@ -113,6 +113,18 @@ class Conversation(models.Model):
         help_text="False after explicit close() OR mark_deleted(). The "
         "active-uniqueness constraint depends on this flag.",
     )
+    # Sprint 8 / N3 (DRF-702) — shadow-mode marker.
+    # When True the row was produced by a shadow turn (X-Shadow:1 from
+    # nginx mirror OR tenant.shadow_mode=True). Shadow rows live alongside
+    # the primary Conversation for the same bot_user — the active-
+    # uniqueness constraint excludes them so the primary path is not
+    # blocked by a parallel shadow turn.
+    is_shadow = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True when this row belongs to a shadow-mode turn. "
+        "Shadow rows are observability artifacts; outbound is suppressed.",
+    )
     deleted_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -141,6 +153,8 @@ class Conversation(models.Model):
         indexes = [
             models.Index(fields=["tenant", "is_active", "-last_message_at"]),
             models.Index(fields=["bot_user", "-last_message_at"]),
+            # Sprint 8 / N3 — shadow-mode investigation queries.
+            models.Index(fields=["tenant", "is_shadow", "-created_at"]),
         ]
         constraints = [
             # B3's resolve_active_conversation contract requires exactly
@@ -148,9 +162,13 @@ class Conversation(models.Model):
             # concurrent webhook turns from the same user race into two
             # active conversations. Postgres-only partial unique — see
             # module docstring for SQLite skip-mark note.
+            #
+            # Sprint 8 / N3: the partial filter now also requires
+            # `is_shadow=False` so a shadow turn for the same bot_user
+            # can hold its own row in parallel with the primary active.
             models.UniqueConstraint(
                 fields=["bot_user", "tenant"],
-                condition=models.Q(is_active=True, deleted_at__isnull=True),
+                condition=models.Q(is_active=True, deleted_at__isnull=True, is_shadow=False),
                 name="conversation_one_active_per_bot_user_tenant",
             ),
         ]

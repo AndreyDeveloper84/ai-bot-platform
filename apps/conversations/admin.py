@@ -26,9 +26,10 @@ class ConversationAdmin(admin.ModelAdmin):
         "state",
         "outcome",
         "is_active",
+        "is_shadow",
         "last_message_at",
     )
-    list_filter = ("state", "outcome", "is_active", "tenant")
+    list_filter = ("state", "outcome", "is_active", "is_shadow", "tenant")
     search_fields = (
         "id",
         "bot_user__channel_user_id",
