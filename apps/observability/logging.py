@@ -145,3 +145,73 @@ def _extract_extra(record: logging.LogRecord) -> dict[str, Any]:
             continue
         out[key] = value
     return out
+
+
+# ---------------------------------------------------------------------------
+# ContextFilter (J2 / DRF-714)
+# ---------------------------------------------------------------------------
+
+
+class ContextFilter(logging.Filter):
+    """Enrich every LogRecord with tenant + OTel-trace context.
+
+    Zero-touch design — existing ``logger.info("x")`` call sites
+    don't change. The filter runs on every record produced under the
+    Django LOGGING config and stamps `tenant_id` / `trace_id` /
+    `span_id` attributes so :class:`JsonFormatter` can surface them as
+    named keys (instead of relegating them to ``extra``).
+
+    Defensive on every read — if OTel is unconfigured or the tenancy
+    ContextVar is empty, the field becomes ``""``. Filter MUST NOT
+    raise: a noisy filter would crash production logging which would
+    cascade through every Django request.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Tenant context — read via the existing tenancy.context helper.
+        # Import lazily so this module can be imported during Django
+        # AppConfig.ready() before apps.tenancy itself is fully loaded.
+        #
+        # ``LogRecord`` has no statically-declared `tenant_id` / `trace_id`
+        # / `span_id` attributes; we attach dynamically. ``setattr`` keeps
+        # mypy happy without per-line ignores.
+        trace_id, span_id = _read_otel_ids()
+        setattr(record, "tenant_id", _read_tenant_id())  # noqa: B010
+        setattr(record, "trace_id", trace_id)  # noqa: B010
+        setattr(record, "span_id", span_id)  # noqa: B010
+        # Always pass — filter is for enrichment, not gatekeeping.
+        return True
+
+
+def _read_tenant_id() -> str:
+    try:
+        from apps.tenancy.context import current_tenant
+    except ImportError:  # pragma: no cover
+        return ""
+    try:
+        tenant = current_tenant()
+    except Exception:  # noqa: BLE001 — filter must never raise
+        return ""
+    if tenant is None:
+        return ""
+    return str(getattr(tenant, "id", "") or "")
+
+
+def _read_otel_ids() -> tuple[str, str]:
+    """Return ``(trace_id_hex, span_id_hex)`` — empty strings when no
+    span is active.
+
+    OTel formats trace_id as 32-char hex, span_id as 16-char hex.
+    """
+    try:
+        from opentelemetry import trace
+    except ImportError:  # pragma: no cover
+        return "", ""
+    try:
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+    except Exception:  # noqa: BLE001
+        return "", ""
+    if not getattr(ctx, "is_valid", False):
+        return "", ""
+    return format(ctx.trace_id, "032x"), format(ctx.span_id, "016x")
