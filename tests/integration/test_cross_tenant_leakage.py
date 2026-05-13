@@ -430,6 +430,31 @@ def test_scanner_finds_expected_sprint6_models():
     )
 
 
+def test_scanner_finds_expected_sprint7_models():
+    """Sprint 7 / G1 (DRF-596) — KB document + 4 catalog mirrors.
+
+    K1 (KbDocument) + C1 (CatalogService/Master/Faq/HelpArticle) all
+    declare tenant FK + TenantScopedManager → auto-discovery picks
+    them up. This test pins the expectation explicitly so a future
+    refactor that swaps a default manager (or drops the tenant FK)
+    fails CI loudly instead of silently exempting a model from the
+    tenant contract.
+    """
+    names = {m.__name__ for m in SCANNED_MODELS}
+    sprint7_expected = {
+        "KbDocument",
+        "CatalogService",
+        "CatalogMaster",
+        "CatalogFaq",
+        "CatalogHelpArticle",
+    }
+    sprint7_missing = sprint7_expected - names
+    assert not sprint7_missing, (
+        f"Sprint 7 expected scanner to find {sprint7_expected}; "
+        f"missing: {sprint7_missing}. Got: {names}."
+    )
+
+
 @pytest.mark.parametrize("model", SCANNED_MODELS, ids=lambda m: m.__name__)
 class TestEveryScopedModel:
     """Each tenant-scoped model honors the same three-mode contract."""
