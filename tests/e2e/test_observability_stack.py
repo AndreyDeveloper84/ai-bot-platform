@@ -146,7 +146,9 @@ class TestTraceIdAcrossSinks:
         # OTel side: pull the root span's trace_id (hex).
         roots = [s for s in _wire_otel.get_finished_spans() if s.name == "pipeline.turn"]
         assert len(roots) == 1, "expected exactly one pipeline.turn span"
-        otel_trace_hex = format(roots[0].get_span_context().trace_id, "032x")
+        ctx = roots[0].get_span_context()
+        assert ctx is not None, "root span missing context"
+        otel_trace_hex = format(ctx.trace_id, "032x")
 
         # AuditLog side: any row written during the turn carries the
         # OTel hex in its payload (T3 / DRF-707).
