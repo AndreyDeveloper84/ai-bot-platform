@@ -9,6 +9,11 @@ from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
+    # Sprint 8 / D2 (DRF-722) — observability dashboard mounted under
+    # /admin/observability/. Must be registered BEFORE the Django admin
+    # urlpatterns so the specific prefix wins over admin's catch-all
+    # include (Django matches patterns in declared order).
+    path("admin/observability/", include("apps.observability.urls", namespace="observability")),
     path("admin/", admin.site.urls),
     path("", include("apps.orchestrator.urls")),
     path("api/v1/ingress/", include("apps.ingress.urls", namespace="ingress")),
