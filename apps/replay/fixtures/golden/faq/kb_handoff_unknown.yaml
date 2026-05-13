@@ -1,0 +1,22 @@
+name: kb_handoff_unknown
+description: |
+  Sprint 7 / F2 — out-of-scope query that the KB cannot answer. F2 hits the
+  empty-chunks branch → SkillResult.should_handoff=True → pipeline step
+  10.5 (O2) routes to admin. Must surface a polite handoff blurb.
+input:
+  channel: max
+  text: можете порекомендовать токарный станок по металлу?
+must_pass:
+  - response_contains_any:
+      - менеджер
+      - уточн
+      - переключаю
+      - не уверена
+forbidden:
+  - response_contains_any:
+      - токарный
+      - станок
+      - Traceback
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

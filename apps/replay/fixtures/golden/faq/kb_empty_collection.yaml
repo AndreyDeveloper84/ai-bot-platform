@@ -1,0 +1,25 @@
+name: kb_empty_collection
+description: |
+  Sprint 7 / F2 — defensive scenario: tenant collection is empty (newly
+  onboarded, ingester hasn't run yet). F1 returns no hits → F2 hits the
+  empty-chunks handoff branch → step 10.5 escalates. Even with NO KB,
+  the bot must NEVER fabricate an answer.
+input:
+  channel: max
+  text: какие у вас условия акции?
+must_pass:
+  - response_contains_any:
+      - менеджер
+      - уточн
+      - переключаю
+      - не уверена
+forbidden:
+  - response_contains_any:
+      - "I don't know"
+      - не знаю точно
+      - "100%"
+      - гарантирую
+      - Traceback
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

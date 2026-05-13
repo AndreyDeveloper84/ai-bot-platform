@@ -1,0 +1,24 @@
+name: kb_multi_doctype
+description: |
+  Sprint 7 / F2 — query that bridges service (catalog) + help_article (FAQ)
+  doc_types. Verifies the L5 router does not narrow doc_types and both
+  chunk classes can land in the same grounded answer (per F4 integration
+  scenario 4).
+input:
+  channel: max
+  text: сколько стоит массаж и какой у вас адрес?
+must_pass:
+  - response_contains_any:
+      - массаж
+      - адрес
+      - Пенза
+      - руб
+forbidden:
+  - response_contains_any:
+      - "I don't know"
+      - не знаю
+      - Traceback
+      - +79
+voice_check:
+  max_length: 800
+  caps_lock: 0.5

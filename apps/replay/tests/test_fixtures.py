@@ -138,20 +138,21 @@ class TestLoader:
 
 
 class TestGoldenFixtureSet:
-    """C3 + I5 — sanity for golden YAMLs.
+    """C3 + I5 + I1 — sanity for golden YAMLs.
 
-    Sprint 5 / C3 shipped 30 fixtures across {privacy, handoff, faq}.
-    Sprint 6 / I5 added 5 orchestrator-specific fixtures → 35 total.
+    * Sprint 5 / C3 shipped 30 fixtures across {privacy, handoff, faq}.
+    * Sprint 6 / I5 added 5 orchestrator-specific fixtures → 35 total.
+    * Sprint 7 / I1 added 6 KB-driven FAQ scenarios → 41 total.
     """
 
-    def test_all_35_load(self):
+    def test_all_41_load(self):
         from pathlib import Path
 
         from apps.replay.fixtures.loader import load_fixture_set
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         fixtures = load_fixture_set(root)
-        assert len(fixtures) == 35, f"expected 35 golden fixtures, got {len(fixtures)}"
+        assert len(fixtures) == 41, f"expected 41 golden fixtures, got {len(fixtures)}"
 
     def test_balanced_per_category(self):
         from pathlib import Path
@@ -165,7 +166,11 @@ class TestGoldenFixtureSet:
         orchestrator = load_fixture_set(root / "orchestrator")
         assert len(privacy) == 10
         assert len(handoff) == 10
-        assert len(faq) == 10
+        # Sprint 5 / C3 shipped 10 baseline FAQ; Sprint 7 / I1 added 6
+        # KB-driven scenarios (kb_happy_hours, kb_happy_price,
+        # kb_handoff_unknown, kb_multi_doctype, kb_empty_collection,
+        # kb_low_confidence) → 16 total.
+        assert len(faq) == 16
         assert len(orchestrator) == 5  # Sprint 6 / I5
 
     def test_every_fixture_has_at_least_one_assertion(self):
