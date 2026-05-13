@@ -16,6 +16,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`rollback-procedure.md`](rollback-procedure.md) | skeleton | Sprint 8 (shadow mode) | Lead |
 | [`security-incident.md`](security-incident.md) | partial — reporting flow filled now | Sprint 9 (full IR plan) | Lead |
 | [`chromadb-auth.md`](chromadb-auth.md) | draft | Sprint 7 (M4 / DRF-595) | Platform Lead |
+| [`shadow-mode-launch.md`](shadow-mode-launch.md) | draft | Sprint 8 (N4 / DRF-703) | Platform Lead |
 
 `status` values:
 
