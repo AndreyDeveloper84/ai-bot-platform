@@ -172,6 +172,15 @@ CELERY_BEAT_SCHEDULE = {
         # cron jobs from other systems often fire at :00).
         "schedule": crontab(minute="15"),
     },
+    "catalog_sync_every_15min": {
+        # Sprint 7 / C5 (DRF-579) — fan-out catalog sync across every
+        # active tenant. Cadence matched to apps.catalog.services.sync
+        # advisory-lock TTL (1.5x). The task carries a 12-min soft time
+        # limit so an overrun fires before the next beat fires a
+        # parallel run.
+        "task": "apps.catalog.tasks.sync_catalog_for_all_tenants",
+        "schedule": crontab(minute="*/15"),
+    },
     "cleanup_expired_replay_traces": {
         "task": "apps.replay.tasks.cleanup_expired_traces",
         # Daily 04:00 UTC — offset from the 03:00 audit cleanup so the
