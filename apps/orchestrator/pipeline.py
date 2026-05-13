@@ -227,6 +227,12 @@ async def turn(message: ChannelMessage) -> TurnResult:
             if span is not None:
                 span.set_attribute("error", True)
                 span.set_attribute("error.type", type(exc).__name__)
+            # Sprint 8 / E2 (DRF-711) — additive Sentry capture. logger.exception
+            # already runs (diagnostic), Sentry is the operator paging layer.
+            # Tags are pulled by E1's scrub_event hook from the active OTel span;
+            # we add `tenant_slug` here because the outer except runs BEFORE
+            # tenant resolution might have succeeded.
+            _sentry_capture_pipeline_error(exc, trace_id, message)
             await sync_to_async(_emit_pipeline_error, thread_sensitive=False)(trace_id, str(exc))
             return _error_result(trace_id, f"unhandled: {exc}", step=0)
 
@@ -649,6 +655,30 @@ def _write_pipeline_audit(
             "post_check": post_verdict,
         },
     )
+
+
+def _sentry_capture_pipeline_error(exc: BaseException, trace_id: str, message: Any) -> None:
+    """Sprint 8 / E2 (DRF-711) — additive Sentry capture for the outer
+    pipeline boundary.
+
+    Defensive: import is lazy so test environments without `sentry_sdk`
+    available don't crash. The capture itself uses Sentry's scope API
+    to add tags so the dashboard's filter (`trace_id:abc`) finds
+    pipeline crashes alongside other event types.
+    """
+    try:
+        import sentry_sdk
+    except ImportError:  # pragma: no cover — optional dep
+        return
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("trace_id", trace_id)
+            scope.set_tag("tenant_slug", getattr(message, "tenant_slug", "") or "")
+            scope.set_tag("channel", getattr(message, "channel", "") or "")
+            scope.set_tag("pipeline_step", "turn")
+            sentry_sdk.capture_exception(exc)
+    except Exception:  # noqa: BLE001 — Sentry never breaks the request
+        logger.warning("pipeline.sentry_capture_failed trace_id=%s", trace_id)
 
 
 def _write_shadow_drop_audit(trace_id: str, conversation) -> None:
