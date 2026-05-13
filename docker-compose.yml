@@ -44,6 +44,16 @@ services:
     environment:
       IS_PERSISTENT: "TRUE"
       ANONYMIZED_TELEMETRY: "FALSE"
+      # Sprint 7 / M4 (DRF-595) — Bearer-token auth. Empty token in
+      # local dev means anonymous access is still allowed (provider
+      # falls back to no-auth when CHROMA_AUTH_TOKEN is unset). In
+      # staging / prod ``CHROMA_AUTH_TOKEN`` MUST be non-empty; the
+      # platform settings.production fail-fast enforces it. The
+      # heartbeat probe stays unauthenticated by design (built-in
+      # /api/v2/heartbeat is allow-listed by chromadb's token authn
+      # middleware).
+      CHROMA_SERVER_AUTHN_PROVIDER: "${CHROMA_SERVER_AUTHN_PROVIDER:-chromadb.auth.token_authn.TokenAuthenticationServerProvider}"
+      CHROMA_SERVER_AUTHN_CREDENTIALS: "${CHROMA_AUTH_TOKEN:-}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
       interval: 10s

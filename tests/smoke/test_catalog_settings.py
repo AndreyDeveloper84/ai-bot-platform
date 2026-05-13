@@ -54,26 +54,41 @@ def _restore_production_module() -> Iterator[None]:
 
 
 class TestProductionFailFast:
-    """The production settings module raises on boot when the service-token
-    is missing. Loading by importlib so the test runner's own settings
-    (local) are unaffected.
+    """The production settings module raises on boot when any required
+    service-token is missing. Loading by importlib so the test runner's
+    own settings (local) are unaffected.
     """
 
-    def test_missing_token_raises_improperly_configured(
+    def test_missing_catalog_token_raises_improperly_configured(
         self,
         monkeypatch: pytest.MonkeyPatch,
         _restore_production_module: None,
     ) -> None:
         monkeypatch.delenv("MYSITE_CATALOG_SERVICE_TOKEN", raising=False)
+        monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
         assert "MYSITE_CATALOG_SERVICE_TOKEN" in str(exc_info.value)
 
-    def test_present_token_boots(
+    def test_missing_chroma_token_raises_improperly_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _restore_production_module: None,
+    ) -> None:
+        """Sprint 7 / M4 (DRF-595) — chromadb Bearer-token fail-fast."""
+        monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
+        monkeypatch.delenv("CHROMA_AUTH_TOKEN", raising=False)
+        with pytest.raises(ImproperlyConfigured) as exc_info:
+            importlib.import_module("config.settings.production")
+        assert "CHROMA_AUTH_TOKEN" in str(exc_info.value)
+
+    def test_all_tokens_present_boots(
         self,
         monkeypatch: pytest.MonkeyPatch,
         _restore_production_module: None,
     ) -> None:
         monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "prod-token-abc")  # noqa: S105
+        monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         module = importlib.import_module("config.settings.production")
         assert module.DEBUG is False
+        assert module.CHROMA_AUTH_TOKEN == "chroma-token-abc"  # noqa: S105
