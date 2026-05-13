@@ -71,11 +71,11 @@ class TestAylaAllowList:
         assert ActionType is not None
 
     def test_package_version_pinned(self) -> None:
-        """Pin: v0.7.2 SHA (DRF-677/678/679/680) — drift = lockfile rot."""
+        """Pin: v0.7.3 SHA (DRF-681/682/683/684) — drift = lockfile rot."""
         import ayla_ai_core
 
-        assert ayla_ai_core.__version__ == "0.7.2", (
-            f"ayla-ai-core version drift: expected '0.7.2', got "
+        assert ayla_ai_core.__version__ == "0.7.3", (
+            f"ayla-ai-core version drift: expected '0.7.3', got "
             f"{ayla_ai_core.__version__!r}. Check pyproject.toml [ai-core] "
             "extra + uv.lock. Bump procedure in pyproject.toml header."
         )
