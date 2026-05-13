@@ -195,6 +195,13 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
+# stored in Redis as `anthropic_tokens:<YYYY-MM-DD>` (TTL 24h, natural
+# UTC-midnight rollover). On overrun the provider raises
+# LLMProviderQuotaExceeded; the L5 router falls back to OpenAI.
+ANTHROPIC_DAILY_TOKEN_CAP = int(os.environ.get("ANTHROPIC_DAILY_TOKEN_CAP", "1000000"))
+
+
 # Sprint 1 / C1 channel token map. Format env CHANNEL_TOKEN_TO_TENANT_SLUG:
 # ``"token1=tenant-a,token2=tenant-b"``. Sprint 4 replaces with
 # encrypted-on-tenant lookup (ADR-0006).

@@ -56,13 +56,18 @@ if unset) and threads it into an ``httpx.AsyncClient``.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import cache
 
+from apps.audit.services import write_audit
+from apps.events.services import emit
 from apps.llm.protocol import (
     CompletionResult,
     LLMError,
+    LLMProviderQuotaExceeded,
     LLMQuotaError,
     LLMTransportError,
     ToolCall,
@@ -74,6 +79,17 @@ logger = logging.getLogger(__name__)
 # Decision 18 — pinned default models. Override per-call via ``model=`` kwarg.
 _DEFAULT_INTENT_MODEL = "claude-haiku-4-5"
 _DEFAULT_REPLY_MODEL = "claude-sonnet-4-6"
+
+
+# Sprint 7 / L7 (DRF-585) — Redis key + TTL for daily token counter.
+# 24-hour TTL with UTC midnight ISO date in the key gives a natural
+# rollover: the new day's key doesn't exist until the first call of
+# the new UTC day, so a brief race where the previous key is still
+# alive doesn't matter — they never overlap by ISO date.
+_TOKEN_COUNTER_KEY_PREFIX = "anthropic_tokens:"
+_TOKEN_COUNTER_TTL_SECONDS = 24 * 60 * 60
+
+EVENT_PROVIDER_QUOTA_EXCEEDED = "llm.provider_quota_exceeded"
 
 
 class AnthropicProvider:
@@ -135,19 +151,28 @@ class AnthropicProvider:
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
     ) -> CompletionResult:
-        """Anthropic Messages API call.
+        """Anthropic Messages API call with L7 daily-token cap.
 
-        Returns :class:`CompletionResult` in the same shape OpenAIProvider
-        returns. Tool-use blocks are parsed into :class:`ToolCall`.
+        Returns :class:`CompletionResult`; raises
+        :class:`apps.llm.protocol.LLMProviderQuotaExceeded` when our
+        configured daily token cap has been crossed BEFORE this call
+        would land. The L5 router catches that exception and falls
+        back to OpenAI on the next ``get_provider(prefer_fallback_from=
+        "anthropic")`` call.
         """
         chosen_model = model or self.default_completion_model
-        client = self._get_client()
 
+        # L7 — pre-call quota gate. Read the current counter; if at
+        # or above cap, refuse the call rather than burning more
+        # tokens. We choose pre-call (not post-call) so an in-flight
+        # batch can't push us 50%+ over budget.
+        await _enforce_daily_token_cap(chosen_model)
+
+        client = self._get_client()
         system, anthropic_messages = _split_system_message(messages)
 
         # Anthropic always requires max_tokens. Default to a sensible
-        # cap if the caller didn't specify one (most platforms
-        # don't bother for OpenAI either).
+        # cap if the caller didn't specify one.
         max_tokens_value = max_tokens if max_tokens is not None else 4096
 
         kwargs: dict[str, Any] = {
@@ -168,12 +193,18 @@ class AnthropicProvider:
 
         text, tool_calls = _parse_content_blocks(response.content)
         usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+
+        # L7 — post-call accounting. INCR by the actual tokens used so
+        # the next caller sees the up-to-date counter.
+        _record_token_usage(prompt_tokens + completion_tokens)
 
         return CompletionResult(
             text=text,
             tool_calls=tool_calls,
-            prompt_tokens=getattr(usage, "input_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "output_tokens", 0) or 0,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             model=getattr(response, "model", chosen_model),
             provider=self.name,
             finish_reason=(getattr(response, "stop_reason", "") or "").lower(),
@@ -256,6 +287,124 @@ def _to_anthropic_tool(spec: dict[str, Any]) -> dict[str, Any]:
         "description": spec.get("description", ""),
         "input_schema": spec.get("parameters", {"type": "object"}),
     }
+
+
+def _today_key() -> str:
+    """Today's UTC ISO date as the Redis key suffix.
+
+    Date in UTC because the TTL is also 24h — staying in UTC means
+    the natural midnight rollover never collides with the previous
+    day's still-alive key.
+    """
+    return _TOKEN_COUNTER_KEY_PREFIX + datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _current_token_count() -> int:
+    """Read the current day's token count from Redis. 0 when absent."""
+    value = cache.get(_today_key())
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _enforce_daily_token_cap(model: str) -> None:
+    """Raise LLMProviderQuotaExceeded when today's counter is at or
+    above the configured cap.
+
+    Pre-call gate: refuses BEFORE we would otherwise call the upstream
+    API. The L5 router's fallback path catches the exception and
+    re-resolves the provider for the next call.
+
+    Async because we're called from inside ``provider.complete``
+    (async); the audit + event writes are sync ORM, so we route
+    them through ``sync_to_async`` to satisfy Django's no-sync-ORM-
+    in-async-context guard.
+    """
+    cap = int(getattr(settings, "ANTHROPIC_DAILY_TOKEN_CAP", 1_000_000))
+    current = _current_token_count()
+    if current < cap:
+        return
+
+    from asgiref.sync import sync_to_async
+
+    date_key = _today_key().removeprefix(_TOKEN_COUNTER_KEY_PREFIX)
+    await sync_to_async(_write_quota_exceeded_telemetry, thread_sensitive=False)(
+        model=model,
+        date_key=date_key,
+        current=current,
+        cap=cap,
+    )
+    raise LLMProviderQuotaExceeded(
+        f"anthropic.complete: daily token cap reached "
+        f"({current}/{cap} on {date_key}). Router should fall back to OpenAI."
+    )
+
+
+def _write_quota_exceeded_telemetry(
+    *,
+    model: str,
+    date_key: str,
+    current: int,
+    cap: int,
+) -> None:
+    """Sync ORM writes for the quota-exceeded path."""
+    write_audit(
+        EVENT_PROVIDER_QUOTA_EXCEEDED,
+        target="AnthropicProvider",
+        payload={
+            "provider": "anthropic",
+            "date": date_key,
+            "tokens": current,
+            "cap": cap,
+            "model": model,
+        },
+    )
+    emit(
+        EVENT_PROVIDER_QUOTA_EXCEEDED,
+        properties={
+            "provider": "anthropic",
+            "date": date_key,
+            "tokens": current,
+            "cap": cap,
+        },
+    )
+
+
+def _record_token_usage(tokens: int) -> None:
+    """INCR today's counter by `tokens`. Sets TTL on first write of
+    the day so the key auto-expires at the natural rollover.
+
+    Django's cache backend doesn't expose atomic INCR on every backend
+    (locmem doesn't, redis does). For locmem we fall back to a
+    read-modify-write — fine for tests; the prod redis path uses
+    `.incr()` atomicity.
+    """
+    if tokens <= 0:
+        return
+
+    key = _today_key()
+    incr = getattr(cache, "incr", None)
+    if callable(incr):
+        try:
+            incr(key, tokens)
+            # `add` only sets TTL when the key was absent — on a fresh
+            # day it primes the 24h timer; on subsequent writes it's
+            # a no-op.
+            cache.add(key, 0, timeout=_TOKEN_COUNTER_TTL_SECONDS)
+            return
+        except ValueError:
+            # Some backends raise ValueError on INCR of missing keys.
+            # Fall through to read-modify-write.
+            pass
+
+    # Read-modify-write fallback (locmem in tests). Not atomic across
+    # workers — acceptable in single-tenant Sprint 7. Multi-worker
+    # prod runs on django-redis which has native INCR above.
+    current = _current_token_count()
+    cache.set(key, current + tokens, timeout=_TOKEN_COUNTER_TTL_SECONDS)
 
 
 def _parse_content_blocks(blocks: Any) -> tuple[str, list[ToolCall]]:
