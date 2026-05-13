@@ -54,31 +54,51 @@ F2 will call this twice per turn:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import Any
 
-if TYPE_CHECKING:
-    # Allow-list — never import render_system_prompt or tool_handlers.
-    from ayla_ai_core.prompts import BrandVoiceConfig, Example  # type: ignore[import-not-found]
-else:
-    try:
-        from ayla_ai_core.prompts import BrandVoiceConfig, Example  # type: ignore[import-not-found]
-    except ImportError:
-        # ayla-ai-core lives in the `[ai-core]` extra. Tests + dev
-        # environments without the extra installed get a tiny shim so
-        # the module is still importable; production CI installs the
-        # extra (K0 / DRF-557).
-        from dataclasses import dataclass
 
-        @dataclass
-        class BrandVoiceConfig:  # type: ignore[no-redef]
-            persona: str
-            tone: str = ""
-            forbidden: tuple[str, ...] = ()
+# Platform-owned dataclass: the FAQ skill reads brand voice via
+# `persona` / `tone` / `forbidden` fields. F2 (DRF-589) adapts
+# tenant-specific brand voice (ayla BrandVoiceConfig or any future
+# source) into this shape before calling build_faq_prompt.
+#
+# We deliberately do NOT import `ayla_ai_core.prompts.BrandVoiceConfig`
+# at type-check time: ayla's class has a different field-set (geared
+# toward Examples + skill registry) that doesn't match the
+# persona/tone/forbidden trio the FAQ template needs. Coupling our
+# prompt schema to ayla's exact API would force version-pin lockstep
+# nobody wants. F2 owns the adapter; this module owns the template.
+@dataclass
+class BrandVoiceConfig:
+    """FAQ prompt brand-voice inputs.
 
-        @dataclass
-        class Example:  # type: ignore[no-redef]
-            user: str
-            assistant: str
+    Fields:
+      persona: short noun phrase the system prompt opens with —
+               "Ты — {persona}." Typically the salon's named
+               admin persona (e.g. "Алина, администратор салона").
+      tone: optional tone descriptor; rendered as a "Тон: {tone}."
+            line when present.
+      forbidden: phrases the model must avoid. When non-empty,
+                 rendered as "Запрещено: <comma-joined>.".
+    """
+
+    persona: str
+    tone: str = ""
+    forbidden: tuple[str, ...] = ()
+
+
+@dataclass
+class Example:
+    """Few-shot user/assistant pair for the FAQ prompt.
+
+    Local-owned so the module stays import-safe in CI without the
+    `[ai-core]` extra. F2 may convert ayla's Example into this one
+    if it wants to reuse the broader ayla example library.
+    """
+
+    user: str
+    assistant: str
 
 
 # ---------------------------------------------------------------------------

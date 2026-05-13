@@ -12,11 +12,13 @@ from apps.skills.faq.prompts import (
 )
 
 
-def _voice(**overrides) -> BrandVoiceConfig:
-    """Minimal brand voice with overridable kwargs."""
-    base = {"persona": "Алина, администратор салона «Формула тела»"}
-    base.update(overrides)
-    return BrandVoiceConfig(**base)
+def _voice(
+    persona: str = "Алина, администратор салона «Формула тела»",
+    tone: str = "",
+    forbidden: tuple[str, ...] = (),
+) -> BrandVoiceConfig:
+    """Minimal brand voice helper."""
+    return BrandVoiceConfig(persona=persona, tone=tone, forbidden=forbidden)
 
 
 # ---------------------------------------------------------------------------
