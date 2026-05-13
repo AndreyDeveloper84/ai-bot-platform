@@ -29,7 +29,7 @@ import datetime as _dt
 import logging
 from typing import Any
 
-from celery import shared_task
+from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
 
 from apps.audit.services import write_audit
