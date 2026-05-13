@@ -42,23 +42,28 @@ dependencies = [
 # in its own extra so plain `uv sync --extra dev` works without auth
 # for non-AI contributors. AI work uses `uv sync --extra dev --extra ai-core`.
 #
-# K12 (DRF-570): the ref is pinned to a tag (v0.6.0), NOT `>=0.6` or a
-# branch. uv.lock additionally pins the resolved commit SHA. Combined
-# with CI's `--frozen` flag this means a silent upstream change is a
-# hard CI failure — bumping ayla-ai-core is an explicit lockfile +
-# pyproject change you must review and merge.
+# A2 / DRF-618: ref pinned to a 40-char commit SHA, NOT a tag. Tags are
+# force-pushable on GitHub (Security Engineer P1, 2026-05-12 six-agent
+# review). A SHA pin is immutable — even if `git tag -f v0.7.0` runs
+# upstream, the resolved package never changes silently. uv.lock pins
+# the same SHA; CI's `--frozen` flag makes silent drift a hard failure.
 #
-# Bump procedure (when upstream ships 0.7.x):
-#   1. Read upstream CHANGELOG for `BrandVoiceConfig`, `Example`,
-#      `SpecialistContext`, `tools.ActionType` breakage — the platform
-#      allow-list (Sprint 7 / Decision 1) only touches those four.
-#   2. Update tag here (e.g. `@v0.7.0`).
-#   3. `uv lock --upgrade-package ayla-ai-core`
-#   4. Run `tests/smoke/test_ayla_import.py` to confirm the allow-list
-#      still resolves. Update the version-startswith assertion to match.
-#   5. PR title: `chore(deps): bump ayla-ai-core v0.6.0 → v0.7.0`.
+# Bump procedure:
+#   1. Read upstream CHANGELOG.md for breaking changes against the
+#      allow-list (Sprint 7 / Decision 1): `BrandVoiceConfig`, `Example`,
+#      `SpecialistContext`, `tools.ActionType`, `render_system_prompt`
+#      (escape_for_format default), and any new mandatory kwargs.
+#   2. Capture target SHA: `cd ~/PycharmProjects/ayla-ai-core && git rev-parse vX.Y.Z`.
+#   3. Replace the @<SHA> below.
+#   4. `uv lock --upgrade-package ayla-ai-core`
+#   5. Run `tests/smoke/test_ayla_import.py` — update the version
+#      assertion to match the new release.
+#   6. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
+#
+# Current: v0.7.0 — mandatory tenant_id + anti-injection + B1/B2 fixes.
+# CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0",
+    "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@2675836240fe3568a7e505a08a3a21892322dd5f",
 ]
 
 dev = [

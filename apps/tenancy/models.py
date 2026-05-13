@@ -100,6 +100,22 @@ class Tenant(models.Model):
         "Per-BotUser overrides land alongside personalisation work.",
     )
 
+    # Sprint 8 / S1 (DRF-716) — shadow-mode flag.
+    # When True the orchestrator persists Conversation/Message rows with
+    # ``is_shadow=True`` and short-circuits step 19 (outbound). Used during
+    # the Sprint 8 shadow-mode soak before the canary cutover; flips back to
+    # False per-tenant on cutover. The boolean is per-tenant (not global)
+    # because the catalog cohort flips first; production tenant flips only
+    # after the delta dashboard hits ≥95% intent agreement.
+    shadow_mode = models.BooleanField(
+        default=False,
+        help_text=(
+            "When True the orchestrator writes shadow rows but does NOT send "
+            "outbound messages to the user. Used during shadow-mode soak "
+            "before canary cutover. See docs/runbooks/shadow-mode-launch.md."
+        ),
+    )
+
     # Sprint 7 / C4 (DRF-575) — cursor for the catalog sync orchestrator.
     # NULL = full-resync on the next beat (initial bootstrap or admin
     # force-clear). Sync service writes the upstream `updated_at` of the

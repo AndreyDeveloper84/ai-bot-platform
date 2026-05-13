@@ -1,8 +1,8 @@
-"""ayla-ai-core import allow-list smoke (DRF-557 / Sprint 7 / K0).
+"""ayla-ai-core import allow-list smoke (DRF-557, DRF-618 / Sprint 7 / K0 + A2).
 
-When the `--extra ai-core` CI extra is enabled (K0), ayla-ai-core v0.6.0
-(K12 / DRF-570) is installed. Sprint 7 / Decision 1 + Decision 15 lock
-the platform to a **narrow allow-list** of imports from that package:
+When the `--extra ai-core` CI extra is enabled (K0), ayla-ai-core v0.7.0
+(A2 / DRF-618, SHA pin) is installed. Sprint 7 / Decision 1 + Decision 15
+lock the platform to a **narrow allow-list** of imports from that package:
 
   * ``ayla_ai_core.prompts.BrandVoiceConfig``
   * ``ayla_ai_core.prompts.Example``
@@ -71,15 +71,44 @@ class TestAylaAllowList:
         assert ActionType is not None
 
     def test_package_version_pinned(self) -> None:
-        """K12 (DRF-570) pins to v0.6.0 — drift indicates lockfile rot."""
+        """A2 (DRF-618) pins to v0.7.0 SHA — drift = lockfile rot."""
         import ayla_ai_core
 
-        version = getattr(ayla_ai_core, "__version__", None)
-        # ayla-ai-core may not expose __version__ in 0.6.0; the real
-        # check is the git ref pin in pyproject.toml. This is a soft
-        # signal — only assert when the attribute exists.
-        if version is not None:
-            assert version.startswith("0.6"), (
-                f"ayla-ai-core version drift: expected 0.6.x, got {version!r}. "
-                "Check pyproject.toml [ai-core] extra + uv.lock."
-            )
+        assert ayla_ai_core.__version__ == "0.7.0", (
+            f"ayla-ai-core version drift: expected '0.7.0', got "
+            f"{ayla_ai_core.__version__!r}. Check pyproject.toml [ai-core] "
+            "extra + uv.lock. Bump procedure in pyproject.toml header."
+        )
+
+    def test_render_system_prompt_escapes_braces_by_default(self) -> None:
+        """B4 layer 2 (ayla v0.7.0) — protects consumers bypassing the adapter.
+
+        `escape_for_format=True` is the default in ayla 0.7+. Even if a
+        future caller forgets to route through `apps.orchestrator.ayla_adapter`,
+        injected `{...}` in user-controlled fields cannot trigger a
+        `KeyError` or template substitution inside ayla's `.format()` call.
+        """
+        from datetime import date
+
+        from ayla_ai_core.context import build_specialist_context_from_candidates
+        from ayla_ai_core.prompts import BrandVoiceConfig, render_system_prompt
+
+        voice = BrandVoiceConfig(
+            assistant_name="Alina",
+            business_name="Test Beauty",
+            business_address="Penza, Test str. 1",
+            domain="beauty_salon",
+            off_topic_redirect="—",
+        )
+        ctx = build_specialist_context_from_candidates([], tenant_id="smoke-test")
+        rendered = render_system_prompt(
+            today=date(2026, 5, 19),
+            client_name="{evil}",  # pre-v0.7.0 → KeyError
+            bookings_count=0,
+            specialist_context=ctx,
+            voice_config=voice,
+        )
+        assert "{evil}" in rendered, (
+            "ayla v0.7.0 default `escape_for_format=True` should preserve "
+            "literal braces in user-controlled fields."
+        )
