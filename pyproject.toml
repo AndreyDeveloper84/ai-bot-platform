@@ -71,12 +71,14 @@ dependencies = [
 #      assertion to match the new release.
 #   6. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
 #
-# Current: v0.7.2 — perf + parallel tool_calls + stricter tenant guard
-# (DRF-677/678/679/680). DRF-678 fixes silent prod data loss with
-# gpt-4o's parallel_tool_calls=True default — pinned ASAP.
+# Current: v0.7.3 — Observability + replay-determinism patch
+# (DRF-681/682/683/684). Non-breaking add-ons: ContextVar-backed tenant
+# scope on every log record, telemetry fields on ChatResponseDTO, a
+# frozen-clock contract for replay, and a per-turn history token-budget
+# guard. None require call-site changes in this repo.
 # CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@97b9b43e96bb83c1fe35458d6c211baebe65c7f5",
+    "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@d0efc634ac8d49bacdfac4c90d99943ac023fbc1",
 ]
 
 dev = [
