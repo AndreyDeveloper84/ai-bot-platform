@@ -12,6 +12,8 @@ collector is reachable:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -24,7 +26,7 @@ from apps.observability import otel
 
 
 @pytest.fixture(autouse=True)
-def _reset() -> None:
+def _reset() -> Iterator[None]:
     otel.reset_otel_for_tests()
     yield
     otel.reset_otel_for_tests()
