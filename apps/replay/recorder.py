@@ -64,7 +64,11 @@ class TraceRecorder:
         """Persist one trace iff sampling + tenant context permit.
 
         Args:
-          trace_id: uuid7 stringified by the caller.
+          trace_id: uuid7 stringified by the caller. When an OTel span
+            is active this is OVERRIDDEN by the OTel trace_id (Sprint 8
+            / T4 / DRF-708) so ReplayTrace.trace_id matches the value
+            on the parent AuditLog rows (T3) and the OTel UI search
+            page. CLI replay runs without OTel keep the caller's UUID.
           pipeline_steps: list of dict step snapshots.
 
         Returns:
@@ -72,10 +76,11 @@ class TraceRecorder:
           out / no tenant / DB error.
         """
 
+        effective_trace_id = _prefer_otel_trace_id(trace_id)
         try:
-            return self._capture_inner(trace_id, pipeline_steps)
+            return self._capture_inner(effective_trace_id, pipeline_steps)
         except Exception:  # noqa: BLE001 — telemetry never breaks request
-            logger.exception("replay.capture_failed trace_id=%s", trace_id)
+            logger.exception("replay.capture_failed trace_id=%s", effective_trace_id)
             return None
 
     # --- Internals --------------------------------------------------------
@@ -166,3 +171,30 @@ def capture(trace_id: str, pipeline_steps: list[Any]) -> Any | None:
     """Module-level convenience for the default recorder instance."""
 
     return _DEFAULT_RECORDER.capture(trace_id, pipeline_steps)
+
+
+def _prefer_otel_trace_id(fallback: str) -> str:
+    """Sprint 8 / T4 (DRF-708) — return the active OTel span's trace_id
+    when one exists; otherwise pass through ``fallback``.
+
+    The recorder is the only place where ReplayTrace's identifier is
+    decided; binding it to OTel here keeps the four observability sinks
+    (OTel UI, AuditLog metadata, ReplayTrace row, Sentry tag) consistent
+    on a single ID without forcing every pipeline call site to know
+    about OTel.
+
+    Defensive on every read: import error, no provider, invalid context
+    → fallback. CLI replay (no OTel set up) keeps the caller's uuid7.
+    """
+    try:
+        from opentelemetry import trace
+    except ImportError:  # pragma: no cover — optional dep
+        return fallback
+    try:
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+    except Exception:  # noqa: BLE001
+        return fallback
+    if not getattr(ctx, "is_valid", False):
+        return fallback
+    return format(ctx.trace_id, "032x")
