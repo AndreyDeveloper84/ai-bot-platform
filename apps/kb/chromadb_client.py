@@ -157,11 +157,27 @@ def _build_chromadb_client() -> Any:
 
 
 def reset_client_cache() -> None:
-    """Clear the cached client. Test helper — invoked when settings change
-    mid-test (e.g. switching from local to fake HTTP). Production code
-    never calls this.
+    """Clear BOTH cached layers — the underlying chromadb client AND
+    the ChromaClient wrapper singleton.
+
+    Without clearing the wrapper, ``get_chroma_client()`` keeps
+    handing back a ChromaClient whose ``_client`` was constructed
+    against an older settings.BASE_DIR — common in tests that
+    re-point ``BASE_DIR`` to a new ``tmp_path`` per case. The wrapper
+    binds its inner chromadb client at construction time, so clearing
+    only the inner LRU isn't enough — the wrapper's stale ref keeps
+    going to the old persist root.
+
+    Production code never calls this; it's a pure test helper.
     """
     _build_chromadb_client.cache_clear()
+    # Tests sometimes monkeypatch `get_chroma_client` to inject a fake
+    # client. After such a swap the symbol may not be the @lru_cache-
+    # wrapped function any more — fall through silently rather than
+    # crashing the test's teardown.
+    cache_clear = getattr(get_chroma_client, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
 
 
 # ---------------------------------------------------------------------------
