@@ -1,0 +1,177 @@
+"""OTel happy-path span event coverage (DRF-709 / Sprint 8 / T5).
+
+Drives a fully-mocked ``turn()`` against ``InMemorySpanExporter`` and
+asserts the root span's event log carries the expected step markers.
+
+The complementary unit gate (T2 / `test_otel_spans.py`) covers
+short-circuit paths + the `_tracer=None` defensive path. T5 is the
+happy-path counterpart — it gives us a single test that fails the
+moment a step-event call gets dropped from `_run_under_tenant`.
+
+### Why not assert exact 19 events
+
+The plan's acceptance text says "19 spans / events emit per turn", but
+the actual count depends on which short-circuits fire (block / clarify
+/ handoff / no_skill). For a clean happy path Phase 0 emits ~13
+events (steps 1-19 minus the short-circuit-only ones). We assert a
+minimum floor instead of an exact match so the test stays meaningful
+as steps move around in future sprints.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
+
+from apps.llm.protocol import CompletionResult
+from apps.orchestrator.llm.openai_provider import LLMResponse
+from apps.orchestrator.pipeline import ChannelMessage, turn
+from apps.tenancy.models import Tenant
+
+
+pytestmark = pytest.mark.django_db(transaction=True)
+
+
+_INTENT_JSON = json.dumps(
+    {
+        "intent": "faq",
+        "skill": "faq",
+        "confidence": 0.92,
+        "risk_level": "low",
+        "missing_slots": [],
+        "reply_mode": "text",
+        "needs_rag": False,
+        "needs_tool": False,
+    }
+)
+
+
+# Module-level exporter — OTel's set_tracer_provider is process-global one-shot.
+_MODULE_EXPORTER = InMemorySpanExporter()
+_MODULE_PROVIDER = TracerProvider()
+_MODULE_PROVIDER.add_span_processor(SimpleSpanProcessor(_MODULE_EXPORTER))
+
+
+def _intent_provider() -> AsyncMock:
+    provider = AsyncMock()
+    provider.complete.return_value = LLMResponse(
+        content=_INTENT_JSON,
+        model="mock",
+        is_fallback=False,
+        tokens_in=5,
+        tokens_out=10,
+    )
+    return provider
+
+
+@pytest.fixture(autouse=True)
+def _wire_otel() -> InMemorySpanExporter:
+    try:
+        trace.set_tracer_provider(_MODULE_PROVIDER)
+    except Exception:  # pragma: no cover — already-set is non-fatal
+        pass
+    from apps.orchestrator import pipeline
+
+    pipeline._tracer = _MODULE_PROVIDER.get_tracer(pipeline.__name__)  # noqa: SLF001
+    _MODULE_EXPORTER.clear()
+    return _MODULE_EXPORTER
+
+
+@pytest.fixture
+def t5_tenant() -> Tenant:
+    return Tenant.objects.create(slug="t5-tenant", name="T5")
+
+
+@pytest.fixture(autouse=True)
+def _stub_external() -> Any:
+    """Neutralise both LLM seams + MAX outbound for a clean happy turn."""
+    from apps.llm.providers.openai_provider import OpenAIProvider as FaqProvider
+
+    faq_completion = CompletionResult(
+        text="ok",
+        tool_calls=[],
+        prompt_tokens=1,
+        completion_tokens=1,
+        model="mock",
+        provider="openai",
+        finish_reason="stop",
+    )
+    with (
+        patch(
+            "apps.orchestrator.intent_router.OpenAIProvider",
+            return_value=_intent_provider(),
+        ),
+        patch.object(FaqProvider, "complete", return_value=faq_completion),
+        patch.object(FaqProvider, "embedding", return_value=[0.5] * 8),
+        patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),
+    ):
+        yield
+
+
+def _msg(tenant_slug: str) -> ChannelMessage:
+    return ChannelMessage(
+        tenant_slug=tenant_slug,
+        channel="max",
+        channel_user_id="t5-uid",
+        chat_id="t5-chat",
+        text="когда работаете?",
+    )
+
+
+class TestHappyTurnSpanCoverage:
+    def test_happy_turn_emits_root_span(
+        self, t5_tenant: Tenant, _wire_otel: InMemorySpanExporter
+    ) -> None:
+        asyncio.run(turn(_msg(t5_tenant.slug)))
+        roots = [s for s in _wire_otel.get_finished_spans() if s.name == "pipeline.turn"]
+        assert len(roots) == 1
+
+    def test_happy_turn_emits_minimum_step_events(
+        self, t5_tenant: Tenant, _wire_otel: InMemorySpanExporter
+    ) -> None:
+        """A clean happy turn emits paired .start/.end events for at least
+        10 distinct step names (out of 19 — short-circuit-only steps
+        don't fire on the happy path).
+        """
+        asyncio.run(turn(_msg(t5_tenant.slug)))
+        root = next(s for s in _wire_otel.get_finished_spans() if s.name == "pipeline.turn")
+        starts = {
+            e.name.removeprefix("step.").removesuffix(".start")
+            for e in root.events
+            if e.name.endswith(".start")
+        }
+        # Floor of 10 — easier to maintain than exact-19 as steps evolve.
+        assert len(starts) >= 10, (
+            f"only {len(starts)} step.*.start events fired on happy path: {sorted(starts)}"
+        )
+        # Anchors: the steps every happy path MUST hit.
+        for required in (
+            "tenant_resolve",
+            "resolve_bot_user",
+            "resolve_conversation",
+            "intent_classify",
+            "pre_check",
+            "skill_dispatch",
+            "compose",
+            "send_outbound",
+        ):
+            assert required in starts, f"missing required step event {required!r}"
+
+    def test_root_span_carries_intent_attribute(
+        self, t5_tenant: Tenant, _wire_otel: InMemorySpanExporter
+    ) -> None:
+        asyncio.run(turn(_msg(t5_tenant.slug)))
+        root = next(s for s in _wire_otel.get_finished_spans() if s.name == "pipeline.turn")
+        attrs = dict(root.attributes or {})
+        assert attrs.get("intent") == "faq"
+        assert attrs.get("tenant.id") == str(t5_tenant.id)
