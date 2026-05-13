@@ -1,4 +1,4 @@
-"""PII redactor — regex layer (DRF-507/503/504 / Sprint 5 / B1+B2+B3).
+"""PII redactor — regex layer (DRF-507/503/504/571 / Sprint 5 + 7).
 
 Per PHASE0_DESIGN §7.2 Phase 0 ships **regex-only** redaction;
 Russian NER layer (natasha) deferred to Phase 1.
@@ -20,6 +20,31 @@ Two reasons:
 2. ``redact_steps`` is a recursive walk over nested dicts/lists;
    keeping it on a class keeps the call-chain readable
    (``self._redact_value`` self-recursion).
+
+### KB chunk coverage (Sprint 7 / K13 / DRF-571 — 152-ФЗ compliance)
+
+The Sprint 7 FAQ skill (F2 / DRF-589) emits ``SkillResult.tool_calls_made``
+with ``args.chunks`` (list of strings) and ``args.retrieved_chunks``
+(list of dicts with ``text`` / ``metadata`` keys) — KB content that
+may include master phones, salon addresses, or contact emails.
+
+The recursive walk in :meth:`Redactor.redact_steps` already reaches
+those nested paths via :meth:`_redact_value` (dict → list → string).
+K13 (DRF-571) adds explicit test coverage for that flow and
+documents the structure here so future code that adds new
+chunk-bearing keys stays in scope.
+
+**Paths the recursive walk covers when KB tool_calls land in
+``pipeline_steps``:**
+
+* ``step["tool_calls_made"][*]["args"]["chunks"][*]`` — raw chunk text
+* ``step["tool_calls_made"][*]["args"]["retrieved_chunks"][*]["text"]``
+* ``step["tool_calls_made"][*]["args"]["retrieved_chunks"][*]["metadata"]["source_uri"]``
+* ``step["tool_calls_made"][*]["result"]["hits"][*]["text"]``
+
+If a future skill adds a new key carrying chunk text, no code change
+is needed — the walker is structural — but new tests should pin
+the contract.
 """
 
 from __future__ import annotations

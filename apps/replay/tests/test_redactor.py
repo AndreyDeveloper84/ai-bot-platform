@@ -178,3 +178,138 @@ class TestRedactStepsRecursive:
         once = redactor.redact_text(text)
         twice = redactor.redact_text(once)
         assert once == twice  # 2nd pass = no-op
+
+
+class TestKbChunkRedaction:
+    """Sprint 7 / K13 (DRF-571) — 152-ФЗ compliance.
+
+    The FAQ skill (F2 / DRF-589) emits SkillResult.tool_calls_made
+    where args carry KB chunk text + retrieved-chunk dicts. The
+    Sprint 5 recursive walker already reaches those paths via
+    dict→list→string descent; these tests pin the contract so a
+    future refactor can't silently drop chunk-redaction coverage.
+
+    NOT NEW BEHAVIOUR — explicit coverage of an implicit guarantee.
+    If any of these tests fail, the redactor stopped recursing into
+    a nested path and KB content with master phones / addresses
+    would leak into ReplayTrace rows.
+    """
+
+    def test_chunks_list_of_strings_redacted(self, redactor):
+        # search_knowledge_base passes the chunk strings into a list.
+        steps = [
+            {
+                "step": "skill_dispatch",
+                "tool_calls_made": [
+                    {
+                        "name": "search_knowledge_base",
+                        "args": {
+                            "chunks": [
+                                "Мастер Анна: +79991234567",
+                                "Адрес: Пенза, ул. Ленина 1",
+                            ],
+                        },
+                    }
+                ],
+            }
+        ]
+        result = redactor.redact_steps(steps)
+        chunks = result[0]["tool_calls_made"][0]["args"]["chunks"]
+        # Phone redacted in first chunk; second has no PII pattern.
+        assert "[PHONE]" in chunks[0]
+        assert "+79991234567" not in chunks[0]
+
+    def test_retrieved_chunks_dict_text_redacted(self, redactor):
+        # Tool result shape: list[KbToolHit-as-dict].
+        steps = [
+            {
+                "tool_calls_made": [
+                    {
+                        "args": {
+                            "retrieved_chunks": [
+                                {
+                                    "text": "Звоните мастеру +74951112233",
+                                    "doc_id": "doc-1",
+                                    "score": 0.91,
+                                },
+                                {
+                                    "text": "Email салона: contact@formulatela.ru",
+                                    "doc_id": "doc-2",
+                                },
+                            ]
+                        }
+                    }
+                ],
+            }
+        ]
+        result = redactor.redact_steps(steps)
+        hits = result[0]["tool_calls_made"][0]["args"]["retrieved_chunks"]
+        assert "[PHONE]" in hits[0]["text"]
+        assert "[EMAIL]" in hits[1]["text"]
+        # Non-string fields preserved.
+        assert hits[0]["score"] == 0.91
+        assert hits[0]["doc_id"] == "doc-1"
+
+    def test_metadata_source_uri_with_phone_redacted(self, redactor):
+        # Operator-mis-entered source URI with embedded phone — paranoid case.
+        steps = [
+            {
+                "tool_calls_made": [
+                    {
+                        "args": {
+                            "retrieved_chunks": [
+                                {
+                                    "text": "ok",
+                                    "metadata": {
+                                        "source_uri": "internal://+79001234567/note",
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ],
+            }
+        ]
+        result = redactor.redact_steps(steps)
+        uri = result[0]["tool_calls_made"][0]["args"]["retrieved_chunks"][0]["metadata"][
+            "source_uri"
+        ]
+        assert "[PHONE]" in uri
+        assert "+79001234567" not in uri
+
+    def test_tool_result_hits_text_redacted(self, redactor):
+        # Alternate shape: tool_result key on the step (some skills
+        # may persist the raw result rather than args).
+        steps = [
+            {
+                "tool_calls_made": [
+                    {
+                        "result": {
+                            "hits": [
+                                {"text": "Звоните +79123334455", "score": 0.8},
+                            ],
+                        },
+                    }
+                ],
+            }
+        ]
+        result = redactor.redact_steps(steps)
+        assert "[PHONE]" in result[0]["tool_calls_made"][0]["result"]["hits"][0]["text"]
+
+    def test_mixed_kb_and_non_kb_steps_coexist(self, redactor):
+        # The pipeline has multiple steps — kb-tool step + non-kb steps
+        # in the same list. Walker covers all of them.
+        steps = [
+            {"step": "intent", "value": "faq"},  # no PII
+            {
+                "step": "skill_dispatch",
+                "tool_calls_made": [
+                    {"args": {"chunks": ["call +74951234567"]}},
+                ],
+            },
+            {"step": "final_reply", "text": "Спасибо!"},  # no PII
+        ]
+        result = redactor.redact_steps(steps)
+        assert result[0] == steps[0]
+        assert "[PHONE]" in result[1]["tool_calls_made"][0]["args"]["chunks"][0]
+        assert result[2] == steps[2]
