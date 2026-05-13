@@ -32,6 +32,13 @@ dependencies = [
     "httpx>=0.27",
     "django-cryptography-django5==2.2",
     "python-dotenv>=1.0",
+    # Sprint 8 / T1 (DRF-705) — OpenTelemetry.
+    # Pin the API + SDK + OTLP/gRPC exporter as a set. The SDK refuses
+    # to start under mismatched API/SDK majors; pinning the set avoids
+    # a transitive surprise during a security-fix CI run.
+    "opentelemetry-api>=1.26,<2",
+    "opentelemetry-sdk>=1.26,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.26,<2",
 ]
 
 [project.optional-dependencies]
