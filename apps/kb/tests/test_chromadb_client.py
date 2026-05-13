@@ -220,3 +220,80 @@ class TestCollectionCount:
             ],
         )
         assert client.collection_count(tenant) == 2
+
+
+class TestHttpClientAuth:
+    """Sprint 7 / M4 (DRF-595) — HttpClient threads ``CHROMA_AUTH_TOKEN`` into
+    the ``chromadb.config.Settings(chroma_client_auth_*)`` payload so requests
+    carry the Bearer header chromadb expects under
+    ``token_authn.TokenAuthClientProvider``.
+
+    Mocks ``chromadb.HttpClient`` to capture the constructor kwargs — the
+    real network call is irrelevant; we only assert wiring.
+    """
+
+    def test_token_threaded_into_client_settings(
+        self,
+        settings: pytest.FixtureRequest,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import chromadb
+
+        from apps.kb import chromadb_client as cc
+
+        captured: dict[str, object] = {}
+
+        def fake_http_client(*, host: str, port: int, **kwargs: object) -> object:
+            captured["host"] = host
+            captured["port"] = port
+            captured["settings"] = kwargs.get("settings")
+            return object()  # opaque — the wrapper never touches the real client here
+
+        monkeypatch.setattr(chromadb, "HttpClient", fake_http_client)
+        settings.CHROMA_HTTP_HOST = "chroma.internal"  # type: ignore[attr-defined]
+        settings.CHROMA_HTTP_PORT = 8001  # type: ignore[attr-defined]
+        settings.CHROMA_AUTH_TOKEN = "test-bearer-token-32chars-xxxxxxx"  # type: ignore[attr-defined]
+        cc.reset_client_cache()
+
+        cc._build_chromadb_client()
+
+        assert captured["host"] == "chroma.internal"
+        assert captured["port"] == 8001
+        chroma_settings = captured["settings"]
+        # `Settings` is a pydantic model; expose values via attribute access.
+        assert getattr(chroma_settings, "chroma_client_auth_provider", "") == (
+            "chromadb.auth.token_authn.TokenAuthClientProvider"
+        )
+        assert getattr(chroma_settings, "chroma_client_auth_credentials", "") == (
+            "test-bearer-token-32chars-xxxxxxx"
+        )
+
+    def test_empty_token_skips_auth_settings(
+        self,
+        settings: pytest.FixtureRequest,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No token → HttpClient invoked without ``settings`` kwarg
+        (local dev / staging-without-auth safety net).
+        """
+        import chromadb
+
+        from apps.kb import chromadb_client as cc
+
+        captured_kwargs: dict[str, object] = {}
+
+        def fake_http_client(**kwargs: object) -> object:
+            captured_kwargs.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(chromadb, "HttpClient", fake_http_client)
+        settings.CHROMA_HTTP_HOST = "chroma.internal"  # type: ignore[attr-defined]
+        settings.CHROMA_AUTH_TOKEN = ""  # type: ignore[attr-defined]
+        cc.reset_client_cache()
+
+        cc._build_chromadb_client()
+
+        assert "settings" not in captured_kwargs, (
+            "empty CHROMA_AUTH_TOKEN must not produce a chromadb auth-settings "
+            f"payload; got kwargs={captured_kwargs!r}"
+        )

@@ -36,3 +36,20 @@ if not MYSITE_CATALOG_SERVICE_TOKEN:
         "Set it in the environment (matching the token configured on "
         "mysite via M2 / DRF-593)."
     )
+
+
+# Sprint 7 / M4 (DRF-595) — ChromaDB authentication. ChromaDB stores
+# every tenant's KB embeddings; an unauthenticated server lets anyone
+# on the docker network read or wipe `tenant_<uuid>` collections. The
+# `chromadb` container ships a Bearer-auth gate; the client must
+# present a matching ``CHROMA_AUTH_TOKEN`` on every request. A missing
+# value here would silently downgrade to anonymous and the FAQ skill
+# would start serving 401s — fail fast on boot instead.
+CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
+if not CHROMA_AUTH_TOKEN:
+    raise ImproperlyConfigured(
+        "CHROMA_AUTH_TOKEN is required in production. "
+        "Set it in the environment to a value matching the "
+        "CHROMA_SERVER_AUTHN_CREDENTIALS configured on the ChromaDB "
+        "container (see infra/README.md → 'ChromaDB Bearer auth')."
+    )

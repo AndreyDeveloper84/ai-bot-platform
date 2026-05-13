@@ -207,6 +207,22 @@ ANTHROPIC_DAILY_TOKEN_CAP = int(os.environ.get("ANTHROPIC_DAILY_TOKEN_CAP", "100
 # encrypted-on-tenant lookup (ADR-0006).
 CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", "")
 
+# Sprint 7 / M4 (DRF-595) — ChromaDB authentication.
+# Sprint 7 ships the ChromaDB server behind a static Bearer token. The
+# `chromadb` service in docker-compose mounts `CHROMA_SERVER_AUTHN_*`
+# env vars and refuses unauthenticated requests with 401. Platform-side
+# the token is read into ``CHROMA_AUTH_TOKEN`` and threaded into
+# :func:`apps.kb.chromadb_client._build_chromadb_client`.
+#
+# Empty default keeps local dev / tests working (PersistentClient
+# bypasses auth entirely; HttpClient with empty token connects
+# unauthenticated against a same-network container). Production is the
+# only environment that must have a non-empty value — enforced in
+# :mod:`config.settings.production`.
+CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "")
+CHROMA_HTTP_PORT = int(os.environ.get("CHROMA_HTTP_PORT", "8001"))
+CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
+
 # Sprint 7 / C8 (DRF-578) — Catalog sync (mysite → platform mirror).
 # Sync service (C4 / DRF-575) pulls Service/Master/FAQ/HelpArticle from
 # `mysite/api/v1/catalog/*` via HTTP and upserts into apps.catalog
