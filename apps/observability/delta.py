@@ -257,23 +257,23 @@ def _load_shadow_rows(date: _dt.date, tenant: "Tenant") -> list[_ShadowRow]:
     # message still finds its reply. Ordered ascending so the
     # `defaultdict[conversation_id] → list` is naturally chronological
     # and the first un-consumed entry is the correct pair.
-    assistant_by_conv: dict[int, list[Message]] = defaultdict(list)
-    for assistant in Message.all_tenants.filter(
+    assistant_by_conv: dict[int, list[Any]] = defaultdict(list)
+    for assistant_msg in Message.all_tenants.filter(
         tenant=tenant,
         conversation__is_shadow=True,
         role="assistant",
         created_at__gte=day_start,
         created_at__lt=day_end + _dt.timedelta(minutes=5),
     ).order_by("created_at"):
-        assistant_by_conv[assistant.conversation_id].append(assistant)
+        assistant_by_conv[assistant_msg.conversation_id].append(assistant_msg)
 
     rows: list[_ShadowRow] = []
     for um in user_msgs:
         # Pop the next-after assistant for this conversation, if any.
         # Linear scan is fine — same conversation rarely has more than
         # a handful of turns in one day.
-        candidates = assistant_by_conv.get(um.conversation_id, [])
-        assistant: Message | None = None
+        candidates = assistant_by_conv.get(um.conversation_id) or []
+        assistant: Any = None
         for idx, candidate in enumerate(candidates):
             if candidate.created_at >= um.created_at:
                 assistant = candidates.pop(idx)
