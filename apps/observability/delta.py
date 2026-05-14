@@ -44,7 +44,7 @@ import logging
 import statistics
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from django.conf import settings
 
@@ -98,7 +98,18 @@ class DeltaSummary:
 
 
 @dataclass(frozen=True)
-class _ShadowRow:
+class _TurnRow:
+    """One observed turn — either side of the agreement comparison.
+
+    Sprint 8 review P1-4 merged the two structurally-identical
+    ``_ShadowRow`` and ``_GroundTruthRow`` dataclasses into one. The
+    ``source`` field preserves provenance (so a future bug doesn't
+    silently swap shadow vs ground truth) without 14 lines of duplicate
+    field declarations.
+
+    Module-private — public consumers see the aggregated ``DeltaSummary``.
+    """
+
     bot_user_id: str
     text: str
     ts: _dt.datetime
@@ -106,17 +117,14 @@ class _ShadowRow:
     action_type: str
     latency_ms: float
     is_error: bool
+    source: Literal["shadow", "ground_truth"]
 
 
-@dataclass(frozen=True)
-class _GroundTruthRow:
-    bot_user_id: str
-    text: str
-    ts: _dt.datetime
-    intent: str
-    action_type: str
-    latency_ms: float
-    is_error: bool
+# Backwards-compatible aliases for internal callers — both names map to
+# the same dataclass now. Removed in a follow-up once external test
+# imports (if any) are updated.
+_ShadowRow = _TurnRow
+_GroundTruthRow = _TurnRow
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +212,7 @@ def _load_ground_truth(date: _dt.date) -> list[_GroundTruthRow] | None:
                     action_type=str(raw["action_type"]),
                     latency_ms=float(raw["latency_ms"]) if raw["latency_ms"] else 0.0,
                     is_error=str(raw.get("is_error", "")).lower() in {"1", "true"},
+                    source="ground_truth",
                 )
             )
     return rows
@@ -300,6 +309,7 @@ def _load_shadow_rows(date: _dt.date, tenant: "Tenant") -> list[_ShadowRow]:
                 action_type=assistant_action_type,
                 latency_ms=assistant_latency,
                 is_error=is_error,
+                source="shadow",
             )
         )
     return rows
