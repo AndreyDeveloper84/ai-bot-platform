@@ -66,3 +66,18 @@ if not CHROMA_AUTH_TOKEN:
         "CHROMA_SERVER_AUTHN_CREDENTIALS configured on the ChromaDB "
         "container (see infra/README.md → 'ChromaDB Bearer auth')."
     )
+
+
+# Sprint 10 / C3 (DRF-879) — mysite catalog webhook HMAC secret.
+# Without this, the receiver's fail-closed signature check rejects
+# every delivery and salons get 15-minute stale catalog state via the
+# pull-side beat. Acceptable in dev/CI; production-broken silently. The
+# secret must match mysite's outgoing webhook signing key (DRF-726).
+MYSITE_WEBHOOK_HMAC_SECRET = os.environ.get("MYSITE_WEBHOOK_HMAC_SECRET", "")
+if not MYSITE_WEBHOOK_HMAC_SECRET:
+    raise ImproperlyConfigured(
+        "MYSITE_WEBHOOK_HMAC_SECRET is required in production. "
+        "Set it to the same shared secret configured on mysite "
+        "(see Phase 1 / DRF-726). The receiver fails-closed when "
+        "the secret is empty — every webhook delivery is rejected."
+    )

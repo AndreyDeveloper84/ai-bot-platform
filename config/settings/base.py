@@ -282,6 +282,14 @@ CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECOND
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
 
+# Sprint 10 / C3 (DRF-879) — mysite catalog webhook HMAC secret.
+# The 15-min pull keeps state eventually consistent; this push gives
+# salons sub-second feedback when they edit prices/masters. Empty
+# default fails closed in production (production.py raises) and
+# rejects everything in dev/CI — never silently accepts unsigned
+# deliveries.
+MYSITE_WEBHOOK_HMAC_SECRET = os.environ.get("MYSITE_WEBHOOK_HMAC_SECRET", "")
+
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [
