@@ -132,6 +132,26 @@ class Conversation(models.Model):
         "data — never hard-deleted from this table; retention sweeps "
         "(Sprint 1 pattern) eventually cascade-prune messages.",
     )
+    # Sprint 9 / D3 (DRF-835) — multi-step skill FSM state.
+    #
+    # ``apps.skills.fsm.SkillFSM`` serialises its in-flight state here
+    # so a multi-step skill (nutrition_anketa, food_correction) can
+    # resume across turns + bot restarts. Default empty dict means
+    # "no active FSM" — most skills are stateless and never touch it.
+    #
+    # The key in the dict is the skill name (``"nutrition_anketa"``);
+    # the value is the FSM's ``serialize()`` output. This lets two
+    # skills coexist (rare, but possible during cross_domain transitions)
+    # without colliding state.
+    #
+    # NOT touched by retention sweeps separately — falls under the
+    # conversation row's lifecycle.
+    skill_state = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Per-skill FSM state {skill_name: state_dict}. "
+        "Sprint 9 D3 — see apps/skills/fsm.py.",
+    )
     last_message_at = models.DateTimeField(
         null=True,
         blank=True,
