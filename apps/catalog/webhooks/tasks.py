@@ -33,7 +33,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from celery import shared_task
+from celery import shared_task  # type: ignore[import-untyped]
 from django.utils.dateparse import parse_datetime
 
 from apps.audit.services import write_audit
