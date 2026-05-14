@@ -156,6 +156,18 @@ class Redactor:
 
         return [self._redact_value(s) for s in steps]
 
+    def redact_value(self, value: Any) -> Any:
+        """Public single-value recursive redaction.
+
+        Same recursive walk as :meth:`redact_steps`, but accepts an
+        arbitrary value (dict / list / scalar) instead of a list of
+        step snapshots. Sprint 8 / E1 (Sentry ``before_send`` hook)
+        consumes this on whole event payloads — keeping the entry
+        point public is the SOLID / LSP fix from the Sprint 8 code
+        review (was reaching into ``_redact_value`` directly).
+        """
+        return self._redact_value(value)
+
     # --- Internals --------------------------------------------------------
 
     def _replace_with_allowlist(self, pattern: re.Pattern[str], placeholder: str, text: str) -> str:
