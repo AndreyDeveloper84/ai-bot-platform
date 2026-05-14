@@ -71,18 +71,14 @@ dependencies = [
 #      assertion to match the new release.
 #   6. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
 #
-# Current: v0.8.0 — Architecture refactor (3-PR rollout: rc1+rc2+final).
-#   - Arch-5: pluggable CompletionAdapter + Anthropic adapter
-#   - Arch-6: parse_int/parse_uuid (legacy _safe_int/_safe_uuid still work
-#             via PEP 562 DeprecationWarning — removed in v0.9.0)
-#   - Arch-2: PromptComposer (byte-identical to legacy render_system_prompt)
-#   - Arch-1: CandidateContext[ID_T, ItemT] structural Protocol
-#   - Arch-3: Django moved to [django] optional extra — package qualifier
-#             below switches from plain `ayla-ai-core` to `ayla-ai-core[django]`
-#   - Arch-4: Master*/build_master_context aliases removed
+# Current: v0.8.1 — additive only. Adds RELEASING.md + LTS_POLICY.md +
+# tests/test_public_api_surface.py drift gate. Zero behavioural changes;
+# infrastructure for an eventual v1.0.0 API freeze (deliberately deferred
+# until prod adoption traffic confirms v0.8.0 stable — 2-4 wk observation
+# period in progress).
 # CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@cc292e4512fc34f9918fd92101bb4e9db2adeec7",
+    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@e73a1b4784c150493c300b316d7a62cd423c8377",
 ]
 
 dev = [

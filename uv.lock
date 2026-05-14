@@ -52,7 +52,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40" },
-    { name = "ayla-ai-core", extras = ["django"], marker = "extra == 'ai-core'", git = "https://github.com/AndreyDeveloper84/ayla-ai-core.git?rev=cc292e4512fc34f9918fd92101bb4e9db2adeec7" },
+    { name = "ayla-ai-core", extras = ["django"], marker = "extra == 'ai-core'", git = "https://github.com/AndreyDeveloper84/ayla-ai-core.git?rev=e73a1b4784c150493c300b316d7a62cd423c8377" },
     { name = "celery", extras = ["redis"], specifier = ">=5.4" },
     { name = "chromadb", specifier = ">=0.5" },
     { name = "detect-secrets", marker = "extra == 'dev'", specifier = ">=1.5" },
@@ -202,8 +202,8 @@ wheels = [
 
 [[package]]
 name = "ayla-ai-core"
-version = "0.8.0"
-source = { git = "https://github.com/AndreyDeveloper84/ayla-ai-core.git?rev=cc292e4512fc34f9918fd92101bb4e9db2adeec7#cc292e4512fc34f9918fd92101bb4e9db2adeec7" }
+version = "0.8.1"
+source = { git = "https://github.com/AndreyDeveloper84/ayla-ai-core.git?rev=e73a1b4784c150493c300b316d7a62cd423c8377#e73a1b4784c150493c300b316d7a62cd423c8377" }
 dependencies = [
     { name = "asgiref" },
     { name = "openai" },
