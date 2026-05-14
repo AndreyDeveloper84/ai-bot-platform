@@ -257,7 +257,7 @@ def _load_shadow_rows(date: _dt.date, tenant: "Tenant") -> list[_ShadowRow]:
     # message still finds its reply. Ordered ascending so the
     # `defaultdict[conversation_id] → list` is naturally chronological
     # and the first un-consumed entry is the correct pair.
-    assistant_by_conv: dict[int, list[Any]] = defaultdict(list)
+    assistant_by_conv: dict[Any, list[Any]] = defaultdict(list)
     for assistant_msg in Message.all_tenants.filter(
         tenant=tenant,
         conversation__is_shadow=True,
