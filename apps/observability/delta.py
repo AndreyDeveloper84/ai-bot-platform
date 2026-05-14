@@ -227,7 +227,16 @@ def _load_shadow_rows(date: _dt.date, tenant: "Tenant") -> list[_ShadowRow]:
     the same conversation. Pairs without a paired assistant row are
     skipped — those are turns that crashed before composer finished, and
     they show up in the error_delta_pct downstream.
+
+    Sprint 8 review P1-5 fixed an O(n) per-user-message lookup —
+    1001 queries on a 1000-msg day — by bulk-fetching all assistant
+    rows in the window once and pairing in Python. Now O(2). The
+    upper fence on the assistant query (``day_end + 5 minutes``) also
+    fixes P2-2: a user message at 23:59:58 no longer accidentally
+    pairs with an assistant reply from the next UTC day.
     """
+    from collections import defaultdict
+
     from apps.conversations.models import Message
 
     day_start = _dt.datetime.combine(date, _dt.time.min, tzinfo=_dt.timezone.utc)
@@ -243,18 +252,32 @@ def _load_shadow_rows(date: _dt.date, tenant: "Tenant") -> list[_ShadowRow]:
         ).select_related("conversation__bot_user")
     )
 
+    # Single bulk fetch: every assistant message in the same window,
+    # extended by 5 minutes on the trailing edge so a 23:59:58 user
+    # message still finds its reply. Ordered ascending so the
+    # `defaultdict[conversation_id] → list` is naturally chronological
+    # and the first un-consumed entry is the correct pair.
+    assistant_by_conv: dict[Any, list[Any]] = defaultdict(list)
+    for assistant_msg in Message.all_tenants.filter(
+        tenant=tenant,
+        conversation__is_shadow=True,
+        role="assistant",
+        created_at__gte=day_start,
+        created_at__lt=day_end + _dt.timedelta(minutes=5),
+    ).order_by("created_at"):
+        assistant_by_conv[assistant_msg.conversation_id].append(assistant_msg)
+
     rows: list[_ShadowRow] = []
     for um in user_msgs:
-        assistant = (
-            Message.all_tenants.filter(
-                tenant=tenant,
-                conversation_id=um.conversation_id,
-                role="assistant",
-                created_at__gte=um.created_at,
-            )
-            .order_by("created_at")
-            .first()
-        )
+        # Pop the next-after assistant for this conversation, if any.
+        # Linear scan is fine — same conversation rarely has more than
+        # a handful of turns in one day.
+        candidates = assistant_by_conv.get(um.conversation_id) or []
+        assistant: Any = None
+        for idx, candidate in enumerate(candidates):
+            if candidate.created_at >= um.created_at:
+                assistant = candidates.pop(idx)
+                break
         if assistant is None:
             # No assistant reply paired with this turn — crashed before
             # composer. Counts as error on the platform side later.

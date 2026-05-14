@@ -22,6 +22,10 @@ from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
 from django.utils.html import escape
 
+from apps.observability.constants import (
+    AGREEMENT_THRESHOLD_AMBER,
+    AGREEMENT_THRESHOLD_GREEN,
+)
 from apps.observability.models import ShadowDeltaSnapshot
 
 
@@ -97,10 +101,11 @@ def _render_table(rows: list[ShadowDeltaSnapshot]) -> str:
 def _agreement_class(agreement: float) -> str:
     """Three-tier badge class — matches the S4 Telegram digest emoji
     bands so the dashboard + the alert tell the same story.
+    Thresholds live in :mod:`apps.observability.constants`.
     """
-    if agreement >= 0.95:
+    if agreement >= AGREEMENT_THRESHOLD_GREEN:
         return "agreement-green"
-    if agreement >= 0.85:
+    if agreement >= AGREEMENT_THRESHOLD_AMBER:
         return "agreement-amber"
     return "agreement-red"
 

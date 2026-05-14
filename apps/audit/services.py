@@ -86,21 +86,19 @@ def _merge_otel_context(payload: dict[str, Any]) -> dict[str, Any]:
     surprising). Outside any active span the payload passes through
     unchanged — write_audit MUST be safe to call from system tasks /
     CLI / tests without OTel set up.
+
+    Sprint 8 code review P1-1 collapsed the in-place try/import/getattr
+    block to a single :func:`apps.observability.otel.get_current_span_ids`
+    call shared with the logging filter and the replay recorder.
     """
-    try:
-        from opentelemetry import trace
-    except ImportError:  # pragma: no cover — optional dep
-        return dict(payload)
-    try:
-        span = trace.get_current_span()
-        ctx = span.get_span_context()
-    except Exception:  # noqa: BLE001 — defensive
-        return dict(payload)
-    if not getattr(ctx, "is_valid", False):
+    from apps.observability.otel import get_current_span_ids
+
+    trace_id, span_id = get_current_span_ids()
+    if not trace_id:
         return dict(payload)
     merged = dict(payload)
     # Don't clobber a payload-supplied trace_id (test fixtures sometimes
     # provide their own); the OTel context is a default, not an override.
-    merged.setdefault("trace_id", format(ctx.trace_id, "032x"))
-    merged.setdefault("span_id", format(ctx.span_id, "016x"))
+    merged.setdefault("trace_id", trace_id)
+    merged.setdefault("span_id", span_id)
     return merged

@@ -160,3 +160,47 @@ def reset_otel_for_tests() -> None:
     """
     global _CONFIGURED
     _CONFIGURED = False
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8 code review (P1-1) — single source of truth for OTel context read
+# ---------------------------------------------------------------------------
+
+
+def get_current_span_ids() -> tuple[str, str]:
+    """Return ``(trace_id_hex, span_id_hex)`` from the active OTel span.
+
+    Both values are empty strings when:
+      * the ``opentelemetry`` package isn't installed;
+      * no span is currently active;
+      * the active span context is invalid (e.g. test setup before
+        ``trace.set_tracer_provider`` was called).
+
+    Defensive on every read — the function MUST NOT raise. Audit
+    writes, log enrichment, and the replay recorder all consume this
+    on hot paths; an exception here would crash the request.
+
+    Sprint 8 review P1-1 collapsed three near-identical helpers into
+    this single function:
+
+    * ``apps.audit.services._merge_otel_context``
+    * ``apps.observability.logging._read_otel_ids``
+    * ``apps.replay.recorder._prefer_otel_trace_id``
+
+    Each was independently re-implementing the same try/import/
+    getattr-defensive shape. Centralising it keeps the lazy-import
+    cost paid once and the ``# pragma: no cover`` for the missing-SDK
+    branch in one place.
+    """
+    try:
+        from opentelemetry import trace
+    except ImportError:  # pragma: no cover — optional dep
+        return "", ""
+    try:
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+    except Exception:  # noqa: BLE001 — defensive: never raise
+        return "", ""
+    if not getattr(ctx, "is_valid", False):
+        return "", ""
+    return format(ctx.trace_id, "032x"), format(ctx.span_id, "016x")

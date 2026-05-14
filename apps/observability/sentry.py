@@ -126,8 +126,8 @@ def scrub_event(event: dict[str, Any], hint: dict[str, Any] | None = None) -> di
 
     Sentry passes ``event`` as a ``dict`` (already serialised at this
     point — opaque dataclasses have been turned into JSON-friendly
-    mappings). The Sprint 5 redactor's ``_redact_value`` recursion is
-    exactly the shape we need.
+    mappings). The Sprint 5 redactor's :meth:`Redactor.redact_value`
+    recursion handles the exact shape Sentry produces.
 
     ``hint`` carries the original exception when available; we don't use
     it for redaction (the message string is already in ``event["message"]``
@@ -139,7 +139,7 @@ def scrub_event(event: dict[str, Any], hint: dict[str, Any] | None = None) -> di
     # The recursive walk only touches str leaves — dict keys (Sentry
     # uses stable, non-PII keys like "message" / "exception") stay
     # intact. The result is the same shape Sentry expects.
-    scrubbed = redactor._redact_value(event)  # noqa: SLF001 — single chokepoint
+    scrubbed = redactor.redact_value(event)
 
     # Tag layer — trace + tenant. Done AFTER redaction because tag
     # values are short identifiers (UUID hex) that look nothing like

@@ -183,18 +183,11 @@ def _prefer_otel_trace_id(fallback: str) -> str:
     on a single ID without forcing every pipeline call site to know
     about OTel.
 
-    Defensive on every read: import error, no provider, invalid context
-    → fallback. CLI replay (no OTel set up) keeps the caller's uuid7.
+    Sprint 8 review P1-1 deduped the defensive try/import/getattr block
+    into :func:`apps.observability.otel.get_current_span_ids`. CLI
+    replay (no OTel set up) keeps the caller's uuid7.
     """
-    try:
-        from opentelemetry import trace
-    except ImportError:  # pragma: no cover — optional dep
-        return fallback
-    try:
-        span = trace.get_current_span()
-        ctx = span.get_span_context()
-    except Exception:  # noqa: BLE001
-        return fallback
-    if not getattr(ctx, "is_valid", False):
-        return fallback
-    return format(ctx.trace_id, "032x")
+    from apps.observability.otel import get_current_span_ids
+
+    trace_id, _span_id = get_current_span_ids()
+    return trace_id or fallback
