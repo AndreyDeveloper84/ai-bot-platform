@@ -74,16 +74,17 @@ def _mode() -> str:
 def _audit_log(action: str, **extra: Any) -> None:
     """Best-effort audit log for tenant-scope violations.
 
-    Wired to ``apps.audit.services.write_audit`` per the B1 swap. Keeps
-    a fallback structured log line so failures in the audit path are
-    visible even when AuditLog is unavailable.
+    Sprint 8 review P1-cycle1: wired via the
+    :mod:`apps.tenancy.audit_hook` callback registry — ``apps.audit``
+    registers its ``write_audit`` at AppConfig ``ready()`` time. This
+    inverts the previous lazy-import dependency (foundation→domain).
+
+    Keeps a fallback structured log line so violations are visible
+    even when the audit writer is unregistered (tests, early boot).
     """
+    from apps.tenancy.audit_hook import write as audit_write
 
-    # Local import — apps.audit imports apps.tenancy, so we defer to
-    # avoid the load-order cycle.
-    from apps.audit.services import write_audit
-
-    write_audit(f"tenancy.scope.{action}", payload=extra)
+    audit_write(f"tenancy.scope.{action}", payload=dict(extra))
     logger.warning("tenancy.scope.%s extra=%r", action, extra)
 
 
