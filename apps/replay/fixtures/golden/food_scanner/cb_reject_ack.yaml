@@ -1,0 +1,12 @@
+name: food_scanner_cb_reject
+description: ❌ Не то → silent ack, prompt for another photo.
+input:
+  channel: max
+  text: "cb:food:reject:scan-1"
+must_pass:
+  - response_contains_any:
+      - не записываю
+      - поняла
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

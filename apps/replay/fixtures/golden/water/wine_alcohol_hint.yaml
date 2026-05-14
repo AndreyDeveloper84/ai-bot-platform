@@ -1,0 +1,11 @@
+name: water_wine_alcohol_hint
+description: Alcohol → water_ml=0 + recovery hint.
+input:
+  channel: max
+  text: бокал вина
+must_pass:
+  - response_contains_any:
+      - вода
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

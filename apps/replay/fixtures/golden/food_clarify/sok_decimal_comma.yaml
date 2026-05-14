@@ -1,0 +1,14 @@
+name: food_clarify_sok_decimal_comma
+description: |
+  DRF-358 bug 1 from 2026-05-08 dev-bot smoke. Bare "сок" is not in the
+  beverage catalog (apelsinovyi / yablochnyi require colour). Decimal-comma
+  format is the original parser miss. food_clarify must catch this.
+input:
+  channel: max
+  text: Сок 0,5л
+must_pass:
+  - response_contains_any:
+      - дневник
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

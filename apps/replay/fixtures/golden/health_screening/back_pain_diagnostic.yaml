@@ -1,0 +1,19 @@
+name: health_back_pain_diagnostic
+description: |
+  DRF-358 T04 fix: pain mention → diagnostic-first questions, NOT a
+  cold "вот наши услуги" jump.
+input:
+  channel: max
+  text: Болит спина
+must_pass:
+  - response_contains_any:
+      - где
+      - какая
+      - "?"
+forbidden:
+  - response_contains_any:
+      - наши услуги
+      - запишитесь
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

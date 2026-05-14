@@ -145,14 +145,20 @@ class TestGoldenFixtureSet:
     * Sprint 7 / I1 added 6 KB-driven FAQ scenarios → 41 total.
     """
 
-    def test_all_41_load(self):
+    def test_all_load(self):
+        """Total golden fixture count.
+
+        Growth log:
+          - Sprint 5 (baseline): 41
+          - Sprint 9 / Q2 (DRF-829): +35 (5 per skill × 7 new skills)
+        """
         from pathlib import Path
 
         from apps.replay.fixtures.loader import load_fixture_set
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         fixtures = load_fixture_set(root)
-        assert len(fixtures) == 41, f"expected 41 golden fixtures, got {len(fixtures)}"
+        assert len(fixtures) == 76, f"expected 76 golden fixtures, got {len(fixtures)}"
 
     def test_balanced_per_category(self):
         from pathlib import Path
@@ -164,6 +170,15 @@ class TestGoldenFixtureSet:
         handoff = load_fixture_set(root / "handoff")
         faq = load_fixture_set(root / "faq")
         orchestrator = load_fixture_set(root / "orchestrator")
+        # Sprint 9 / Q2 — 5 fixtures per new Sprint 9 skill.
+        food_clarify = load_fixture_set(root / "food_clarify")
+        food_scanner = load_fixture_set(root / "food_scanner")
+        food_correction = load_fixture_set(root / "food_correction")
+        water = load_fixture_set(root / "water")
+        health_screening = load_fixture_set(root / "health_screening")
+        nutrition_anketa = load_fixture_set(root / "nutrition_anketa")
+        cross_domain = load_fixture_set(root / "cross_domain")
+
         assert len(privacy) == 10
         assert len(handoff) == 10
         # Sprint 5 / C3 shipped 10 baseline FAQ; Sprint 7 / I1 added 6
@@ -172,6 +187,14 @@ class TestGoldenFixtureSet:
         # kb_low_confidence) → 16 total.
         assert len(faq) == 16
         assert len(orchestrator) == 5  # Sprint 6 / I5
+        # Sprint 9 / Q2 (DRF-829) — 5 fixtures per Sprint 9 skill.
+        assert len(food_clarify) == 5
+        assert len(food_scanner) == 5
+        assert len(food_correction) == 5
+        assert len(water) == 5
+        assert len(health_screening) == 5
+        assert len(nutrition_anketa) == 5
+        assert len(cross_domain) == 5
 
     def test_every_fixture_has_at_least_one_assertion(self):
         from pathlib import Path

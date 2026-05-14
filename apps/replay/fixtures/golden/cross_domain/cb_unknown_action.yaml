@@ -1,0 +1,12 @@
+name: cross_unknown_action
+description: matches() must NOT claim unknown actions.
+input:
+  channel: max
+  text: "cb:cross:click:shown-1"
+forbidden:
+  - response_contains_any:
+      - не интересно
+      - менеджер
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

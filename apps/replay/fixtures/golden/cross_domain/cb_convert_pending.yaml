@@ -1,0 +1,13 @@
+name: cross_convert_pending
+description: |
+  Convert click — Sprint 9 cut acknowledges intent but doesn't POST to
+  Ayla (no appointment_id without booking skill).
+input:
+  channel: max
+  text: "cb:cross:convert:shown-2"
+must_pass:
+  - response_contains_any:
+      - менеджер
+voice_check:
+  max_length: 300
+  caps_lock: 0.5

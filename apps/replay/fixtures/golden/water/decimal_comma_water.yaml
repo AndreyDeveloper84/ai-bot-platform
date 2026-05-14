@@ -1,0 +1,11 @@
+name: water_decimal_comma_water
+description: DRF-358 decimal-comma regression — 0,5 л воды → 500 ml.
+input:
+  channel: max
+  text: 0,5 л воды
+must_pass:
+  - response_contains_any:
+      - 500
+voice_check:
+  max_length: 300
+  caps_lock: 0.5

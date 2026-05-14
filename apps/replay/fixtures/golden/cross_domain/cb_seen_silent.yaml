@@ -1,0 +1,14 @@
+name: cross_seen_silent
+description: |
+  Telemetry-only callback — reply must be empty (silent).
+  Voice-check is on the empty string (still validates length cap).
+input:
+  channel: max
+  text: "cb:cross:seen:shown-3"
+forbidden:
+  - response_contains_any:
+      - ошибка
+      - traceback
+voice_check:
+  max_length: 50
+  caps_lock: 0.5

@@ -1,0 +1,13 @@
+name: anketa_age_invalid_reask
+description: |
+  Validation error path — out-of-range age triggers a re-ask with
+  range hint in the error.
+input:
+  channel: max
+  text: "150"
+must_pass:
+  - response_contains_any:
+      - возраст
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

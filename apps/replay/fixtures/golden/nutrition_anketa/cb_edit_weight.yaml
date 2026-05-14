@@ -1,0 +1,11 @@
+name: anketa_cb_edit_weight
+description: Edit callback jumps back to weight step.
+input:
+  channel: max
+  text: "cb:anketa:edit:weight"
+must_pass:
+  - response_contains_any:
+      - вес
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

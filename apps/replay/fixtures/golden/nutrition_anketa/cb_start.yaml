@@ -1,0 +1,11 @@
+name: anketa_cb_start
+description: cb:anketa:start → first step asks gender with choice keyboard.
+input:
+  channel: max
+  text: "cb:anketa:start"
+must_pass:
+  - response_contains_any:
+      - пол
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

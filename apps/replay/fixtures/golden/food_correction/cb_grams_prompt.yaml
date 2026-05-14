@@ -1,0 +1,12 @@
+name: food_correction_cb_grams
+description: ✏️ → Грамм → prompt for new gram amount.
+input:
+  channel: max
+  text: "cb:food:correct:grams:scan-1"
+must_pass:
+  - response_contains_any:
+      - грамм
+      - число
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

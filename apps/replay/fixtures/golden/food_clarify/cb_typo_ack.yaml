@@ -1,0 +1,17 @@
+name: food_clarify_cb_typo_ack
+description: |
+  Click on the "Опечатка" button (cb:food:typo) — silent soft ack. Reply
+  must be short and non-pushy.
+input:
+  channel: max
+  text: "cb:food:typo"
+must_pass:
+  - response_contains_any:
+      - поняла
+forbidden:
+  - response_contains_any:
+      - извини
+      - простите
+voice_check:
+  max_length: 100
+  caps_lock: 0.5

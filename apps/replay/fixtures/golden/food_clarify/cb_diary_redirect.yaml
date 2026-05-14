@@ -1,0 +1,13 @@
+name: food_clarify_cb_diary_redirect
+description: |
+  Click on the "В дневник" button (cb:food:diary) — the skill redirects to
+  photo-scan path because text-only food log is not in scope for Phase 0.
+input:
+  channel: max
+  text: "cb:food:diary"
+must_pass:
+  - response_contains_any:
+      - фото
+voice_check:
+  max_length: 300
+  caps_lock: 0.5
