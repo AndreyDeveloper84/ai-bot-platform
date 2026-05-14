@@ -37,16 +37,19 @@ the fail-fast lives one layer up.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any
 
 from django.conf import settings
 
+from apps.observability._once import OnceLock
+
 logger = logging.getLogger(__name__)
 
 
-_CONFIGURE_LOCK = threading.Lock()
-_CONFIGURED = False
+# Sprint 8 review P1-3: shared OnceLock primitive. The double-checked
+# locking semantics live in apps.observability._once; this module
+# supplies the inner work.
+_once = OnceLock()
 
 
 # Decision 3 — 5% trace sampling. Errors always sampled at 100%; only
@@ -58,66 +61,60 @@ def configure_sentry() -> bool:
     """Wire the Sentry SDK. Idempotent.
 
     Returns ``True`` when configuration just ran, ``False`` when an
-    earlier call already did the work or when ``SENTRY_DSN`` is empty.
+    earlier call already did the work OR ``SENTRY_DSN`` is empty.
 
     Empty DSN = no-op (events never leave the process). This is how
     local dev + CI avoid noisy upstream reports without any conditional
     import-skip dance at call sites.
     """
-    global _CONFIGURED
+    result = _once.run(_do_configure_sentry)
+    return bool(result)
 
-    if _CONFIGURED:
+
+def _do_configure_sentry() -> bool:
+    """Inner config — runs at most once via the OnceLock latch."""
+    dsn = str(getattr(settings, "SENTRY_DSN", "") or "")
+    if not dsn:
+        logger.info("sentry.configure noop reason=no_dsn")
         return False
 
-    with _CONFIGURE_LOCK:
-        if _CONFIGURED:
-            return False
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.celery import CeleryIntegration
+        from sentry_sdk.integrations.django import DjangoIntegration
+        from sentry_sdk.integrations.redis import RedisIntegration
+    except ImportError:  # pragma: no cover — optional dependency
+        logger.warning("sentry.configure skipped reason=sentry_sdk_not_installed")
+        return False
 
-        dsn = str(getattr(settings, "SENTRY_DSN", "") or "")
-        if not dsn:
-            logger.info("sentry.configure noop reason=no_dsn")
-            _CONFIGURED = True
-            return False
+    environment = str(getattr(settings, "SENTRY_ENVIRONMENT", "local") or "local")
+    traces_sample_rate = float(
+        getattr(settings, "SENTRY_TRACES_SAMPLE_RATE", _DEFAULT_TRACES_SAMPLE_RATE)
+    )
+    release = str(getattr(settings, "SERVICE_VERSION", "0.0.0") or "0.0.0")
 
-        try:
-            import sentry_sdk
-            from sentry_sdk.integrations.celery import CeleryIntegration
-            from sentry_sdk.integrations.django import DjangoIntegration
-            from sentry_sdk.integrations.redis import RedisIntegration
-        except ImportError:  # pragma: no cover — optional dependency
-            logger.warning("sentry.configure skipped reason=sentry_sdk_not_installed")
-            _CONFIGURED = True
-            return False
-
-        environment = str(getattr(settings, "SENTRY_ENVIRONMENT", "local") or "local")
-        traces_sample_rate = float(
-            getattr(settings, "SENTRY_TRACES_SAMPLE_RATE", _DEFAULT_TRACES_SAMPLE_RATE)
-        )
-        release = str(getattr(settings, "SERVICE_VERSION", "0.0.0") or "0.0.0")
-
-        sentry_sdk.init(
-            dsn=dsn,
-            environment=environment,
-            release=release,
-            traces_sample_rate=traces_sample_rate,
-            # Errors always sampled at 100% (sample_rate default = 1.0).
-            # Only transaction traces obey traces_sample_rate.
-            send_default_pii=False,
-            integrations=[
-                DjangoIntegration(),
-                CeleryIntegration(),
-                RedisIntegration(),
-            ],
-            before_send=scrub_event,  # type: ignore[arg-type]
-        )
-        logger.info(
-            "sentry.configure ok env=%s release=%s traces_sample_rate=%s",
-            environment,
-            release,
-            traces_sample_rate,
-        )
-        _CONFIGURED = True
-        return True
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=environment,
+        release=release,
+        traces_sample_rate=traces_sample_rate,
+        # Errors always sampled at 100% (sample_rate default = 1.0).
+        # Only transaction traces obey traces_sample_rate.
+        send_default_pii=False,
+        integrations=[
+            DjangoIntegration(),
+            CeleryIntegration(),
+            RedisIntegration(),
+        ],
+        before_send=scrub_event,  # type: ignore[arg-type]
+    )
+    logger.info(
+        "sentry.configure ok env=%s release=%s traces_sample_rate=%s",
+        environment,
+        release,
+        traces_sample_rate,
+    )
+    return True
 
 
 def scrub_event(event: dict[str, Any], hint: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -182,5 +179,4 @@ def _attach_context_tags(event: dict[str, Any]) -> None:
 
 def reset_sentry_for_tests() -> None:
     """Test-only — pretend Sentry was never configured."""
-    global _CONFIGURED
-    _CONFIGURED = False
+    _once.reset()
