@@ -18,6 +18,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`chromadb-auth.md`](chromadb-auth.md) | draft | Sprint 7 (M4 / DRF-595) | Platform Lead |
 | [`strict-scope-flip.md`](strict-scope-flip.md) | draft | Sprint 8 (R3 / DRF-729) | Platform Lead |
 | [`shadow-mode-launch.md`](shadow-mode-launch.md) | draft | Sprint 8 (N4 / DRF-703) | Platform Lead |
+| [`canary-ramp.md`](canary-ramp.md) | **complete** | Sprint 10 / X-criteria (DRF-871) | Lead |
 
 `status` values:
 
