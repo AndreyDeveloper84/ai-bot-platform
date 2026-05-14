@@ -17,7 +17,14 @@ Service-to-service auth via ``X-Service-Token`` (shared secret) +
 Resilience:
 
 * Per-call timeout (default 10s).
-* Inline circuit breaker: 3 failures within 60s → 60s cool-down.
+* Inline circuit breaker: 5 failures within 60s → 30s cool-down. Matches
+  the platform CR-3 default policy (Sprint 1 / D1 / DRF-428). Sprint 9 /
+  I3 (DRF-827) kept the breaker inline rather than replacing it with
+  ``apps.orchestrator.llm.with_circuit_breaker`` because the latter
+  counts every exception as a failure — including ``FoodNotRecognizedError``
+  for a blurry photo, which is a user-input issue and must not trip the
+  breaker. The fix-grained signalling stays here; we borrow CR-3's
+  Telegram-alert path on transition.
 * Caller-side retries are out of scope — the bot fires once per turn.
 
 Schema fix note (per memory ``reference_ayla_backend.md``): Ayla nests
@@ -40,9 +47,32 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 10.0
+# Sprint 9 / I3 (DRF-827): policy aligned with the platform CR-3 breaker
+# (``apps.orchestrator.llm.breaker``). 5 failures in 60s → 30s cooldown.
 CIRCUIT_FAILURE_WINDOW_S = 60.0
-CIRCUIT_FAILURE_THRESHOLD = 3
-CIRCUIT_OPEN_DURATION_S = 60.0
+CIRCUIT_FAILURE_THRESHOLD = 5
+CIRCUIT_OPEN_DURATION_S = 30.0
+_BREAKER_NAME = "ayla.nutrition"
+
+
+def _fire_breaker_alert(transition: str, failures: int) -> None:
+    """Borrow the CR-3 Telegram alert path on a state transition.
+
+    Lazy-imports the alert helper — keeps this module free of Django
+    coupling at import time AND matches the alert-path principle:
+    alerting is forensic, never critical-path. Wraps all exceptions so
+    a slow/broken Telegram channel can't block the breaker.
+    """
+    try:
+        from apps.orchestrator.llm.telegram_alert import send_breaker_alert
+
+        send_breaker_alert(
+            provider=_BREAKER_NAME,
+            transition=transition,
+            details={"failures": failures},
+        )
+    except Exception:  # noqa: BLE001 — alerting must NEVER break the breaker
+        logger.exception("nutrition_client.alert_failed transition=%s", transition)
 
 
 @dataclass
@@ -52,6 +82,9 @@ class _Circuit:
     Not thread-safe across worker processes — each worker tracks its own
     failures. If Ayla goes down every worker independently opens its breaker
     within seconds; no shared state is needed.
+
+    Sprint 9 / I3 (DRF-827) added Telegram alerts on every state transition
+    (closed → open, open → closed) via the platform CR-3 alert path.
     """
 
     failures: list[float] = field(default_factory=list)
@@ -61,8 +94,15 @@ class _Circuit:
         if self.opened_at is None:
             return False
         if now - self.opened_at >= CIRCUIT_OPEN_DURATION_S:
+            # Half-open behaviour: clear state and let the next call probe.
+            # The mysite source never had explicit half-open; the platform
+            # CR-3 breaker does, but for the inline breaker we approximate
+            # by clearing on cooldown-expiry and letting the next call
+            # attempt — same observable outcome from the caller's side.
+            failures_before = len(self.failures)
             self.opened_at = None
             self.failures = []
+            _fire_breaker_alert("open → closed", failures_before)
             return False
         return True
 
@@ -70,13 +110,14 @@ class _Circuit:
         cutoff = now - CIRCUIT_FAILURE_WINDOW_S
         self.failures = [t for t in self.failures if t >= cutoff]
         self.failures.append(now)
-        if len(self.failures) >= CIRCUIT_FAILURE_THRESHOLD:
+        if len(self.failures) >= CIRCUIT_FAILURE_THRESHOLD and self.opened_at is None:
             self.opened_at = now
             logger.warning(
                 "nutrition_client.circuit_opened failures=%d window_s=%.0f",
                 len(self.failures),
                 CIRCUIT_FAILURE_WINDOW_S,
             )
+            _fire_breaker_alert("closed → open", len(self.failures))
 
     def record_success(self) -> None:
         self.failures = []

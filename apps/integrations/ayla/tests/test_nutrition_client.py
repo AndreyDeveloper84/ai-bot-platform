@@ -126,22 +126,96 @@ class TestScanPhoto:
             await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
 
     @pytest.mark.asyncio
-    async def test_5xx_opens_breaker_on_threshold(self) -> None:
+    async def test_5xx_opens_breaker_on_threshold(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """5 failures within 60s → breaker opens. Matches platform CR-3 default."""
+        # Sprint 9 / I3 (DRF-827): silence the Telegram alert path during
+        # tests so we don't depend on legacy_maxbot imports. The breaker
+        # logic is the unit under test, not the alert.
+        alerts: list[tuple[str, int]] = []
+        monkeypatch.setattr(
+            nc,
+            "_fire_breaker_alert",
+            lambda transition, failures: alerts.append((transition, failures)),
+        )
+
         def handler(_: httpx.Request) -> httpx.Response:
             return httpx.Response(500)
 
         client, transport = _client_with_handler(handler)
         _set_transport(transport)
 
-        # Three 5xx → circuit opens.
-        for _ in range(3):
+        # Five 5xx → circuit opens (CIRCUIT_FAILURE_THRESHOLD == 5).
+        for _ in range(nc.CIRCUIT_FAILURE_THRESHOLD):
             with pytest.raises(nc.NutritionUnavailableError):
                 await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
 
-        # Fourth call short-circuits before transport — message is
+        # Sixth call short-circuits before transport — message is
         # ``circuit_open``, not ``http_500``.
         with pytest.raises(nc.NutritionUnavailableError, match="circuit_open"):
             await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+
+        # Telegram alert fired exactly once on closed → open transition.
+        assert ("closed → open", nc.CIRCUIT_FAILURE_THRESHOLD) in alerts
+
+    @pytest.mark.asyncio
+    async def test_breaker_closes_after_cooldown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """After CIRCUIT_OPEN_DURATION_S the breaker auto-closes on next call."""
+        import time as time_module
+
+        alerts: list[tuple[str, int]] = []
+        monkeypatch.setattr(
+            nc,
+            "_fire_breaker_alert",
+            lambda transition, failures: alerts.append((transition, failures)),
+        )
+
+        # Drive a fast time-skip via patching ``time.monotonic`` in the
+        # client module. The breaker only reads ``time.monotonic()``, so
+        # advancing it past the cooldown window simulates the wall-clock
+        # passing without sleeping the test.
+        fake_now = [time_module.monotonic()]
+        monkeypatch.setattr(nc.time, "monotonic", lambda: fake_now[0])
+
+        def fail(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        client, transport = _client_with_handler(fail)
+        _set_transport(transport)
+
+        # Trip the breaker.
+        for _ in range(nc.CIRCUIT_FAILURE_THRESHOLD):
+            with pytest.raises(nc.NutritionUnavailableError):
+                await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+        assert ("closed → open", nc.CIRCUIT_FAILURE_THRESHOLD) in alerts
+
+        # Confirm breaker is open.
+        with pytest.raises(nc.NutritionUnavailableError, match="circuit_open"):
+            await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+
+        # Fast-forward past the cooldown window.
+        fake_now[0] += nc.CIRCUIT_OPEN_DURATION_S + 1.0
+
+        # Next call probes — breaker reports closed → open via alert.
+        # We feed a successful response so the probe doesn't re-open.
+        def ok(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "id": "scan-x",
+                        "dish_name": "ok",
+                        "confidence": 1.0,
+                        "portion_g": 100,
+                        "nutrition": {},
+                        "provider": "test",
+                    }
+                },
+            )
+
+        _set_transport(httpx.MockTransport(ok))
+        result = await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+        assert result.scan_id == "scan-x"
+        assert ("open → closed", nc.CIRCUIT_FAILURE_THRESHOLD) in alerts
 
 
 # ─── log_meal + summary ────────────────────────────────────────────────────
