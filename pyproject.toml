@@ -71,14 +71,18 @@ dependencies = [
 #      assertion to match the new release.
 #   6. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
 #
-# Current: v0.7.4 — hotfix: encoder cache (per-model lru_cache) + token
-# budget envelope overhead + re-exported observability surface from
-# package root (scope_tenant_id, current_tenant_id, etc). Code-Reviewer
-# P0 finding: pre-v0.7.4 multi-model deployments silently used the wrong
-# encoder, giving wrong token counts. Pure additive — no migration.
+# Current: v0.8.0 — Architecture refactor (3-PR rollout: rc1+rc2+final).
+#   - Arch-5: pluggable CompletionAdapter + Anthropic adapter
+#   - Arch-6: parse_int/parse_uuid (legacy _safe_int/_safe_uuid still work
+#             via PEP 562 DeprecationWarning — removed in v0.9.0)
+#   - Arch-2: PromptComposer (byte-identical to legacy render_system_prompt)
+#   - Arch-1: CandidateContext[ID_T, ItemT] structural Protocol
+#   - Arch-3: Django moved to [django] optional extra — package qualifier
+#             below switches from plain `ayla-ai-core` to `ayla-ai-core[django]`
+#   - Arch-4: Master*/build_master_context aliases removed
 # CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@6d0c0495f9959a8d4cbb99333978f2f20979b9fc",
+    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@cc292e4512fc34f9918fd92101bb4e9db2adeec7",
 ]
 
 dev = [
