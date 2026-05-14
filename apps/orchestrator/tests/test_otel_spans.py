@@ -33,28 +33,29 @@ from apps.orchestrator.pipeline import ChannelMessage, turn
 pytestmark = pytest.mark.django_db
 
 
-# OTel's `set_tracer_provider` is process-global one-shot. Install the
-# in-memory exporter ONCE at module load and clear it between tests.
+# OTel's `set_tracer_provider` is process-global one-shot. Multiple test
+# modules cooperate via a per-module SpanProcessor attached to the live
+# global provider; first-in installs the SDK provider when only the
+# default no-op is present.
 _MODULE_EXPORTER = InMemorySpanExporter()
-_MODULE_PROVIDER = TracerProvider()
-_MODULE_PROVIDER.add_span_processor(SimpleSpanProcessor(_MODULE_EXPORTER))
+_PROCESSOR_INSTALLED = False
 
 
 def _install_module_provider() -> None:
-    """Wire the in-memory provider into OTel + the pipeline tracer.
+    """Attach our exporter to the global tracer provider.
 
-    Tolerates the global provider being already-set: if the production
-    OTel SDK already wrote a TracerProvider, we still bind the pipeline
-    module's ``_tracer`` to our InMemorySpanExporter-backed provider so
-    spans land in our exporter for this test module.
+    Sprint 8 review P2-3: pipeline resolves its tracer lazily via
+    ``trace.get_tracer(__name__)``, so we just need our SpanProcessor
+    on the live global provider. No private monkeypatch.
     """
-    try:
-        trace.set_tracer_provider(_MODULE_PROVIDER)
-    except Exception:  # pragma: no cover — already-set is non-fatal
-        pass
-    from apps.orchestrator import pipeline
-
-    pipeline._tracer = _MODULE_PROVIDER.get_tracer(pipeline.__name__)  # noqa: SLF001
+    global _PROCESSOR_INSTALLED
+    provider = trace.get_tracer_provider()
+    if not hasattr(provider, "add_span_processor"):
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+    if not _PROCESSOR_INSTALLED:
+        provider.add_span_processor(SimpleSpanProcessor(_MODULE_EXPORTER))
+        _PROCESSOR_INSTALLED = True
 
 
 @pytest.fixture(autouse=True)
@@ -132,12 +133,16 @@ class TestOTelOptional:
         monkeypatch: pytest.MonkeyPatch,
         _otel_provider: InMemorySpanExporter,
     ) -> None:
-        """Defensive: setting `_tracer=None` (e.g. OTel SDK uninstalled)
-        must NOT break the pipeline.
+        """Defensive: when ``_get_tracer()`` returns None (e.g. OTel SDK
+        uninstalled), the pipeline must NOT break.
+
+        Sprint 8 review P2-3: previously this test monkeypatched the
+        module-level ``pipeline._tracer = None``. The tracer now
+        resolves lazily, so we patch the helper that returns it instead.
         """
         from apps.orchestrator import pipeline
 
-        monkeypatch.setattr(pipeline, "_tracer", None)
+        monkeypatch.setattr(pipeline, "_get_tracer", lambda: None)
         result = _run(turn(_msg(tenant_slug="also-ghost")))
         assert result.ok is False  # unknown tenant → graceful
 

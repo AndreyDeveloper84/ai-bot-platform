@@ -56,10 +56,12 @@ _INTENT_JSON = json.dumps(
 )
 
 
-# Module-level exporter — OTel's set_tracer_provider is process-global one-shot.
+# Module-level exporter — OTel's set_tracer_provider is process-global
+# one-shot, so multiple test files can't each install their own provider.
+# Pattern: each test module installs its OWN SpanProcessor onto whichever
+# provider is currently global, so spans land in this module's exporter
+# regardless of which test module booted OTel first.
 _MODULE_EXPORTER = InMemorySpanExporter()
-_MODULE_PROVIDER = TracerProvider()
-_MODULE_PROVIDER.add_span_processor(SimpleSpanProcessor(_MODULE_EXPORTER))
 
 
 def _intent_provider() -> AsyncMock:
@@ -74,15 +76,28 @@ def _intent_provider() -> AsyncMock:
     return provider
 
 
+_PROCESSOR_INSTALLED = False
+
+
 @pytest.fixture(autouse=True)
 def _wire_otel() -> InMemorySpanExporter:
-    try:
-        trace.set_tracer_provider(_MODULE_PROVIDER)
-    except Exception:  # pragma: no cover — already-set is non-fatal
-        pass
-    from apps.orchestrator import pipeline
+    """Hook our exporter into the global provider.
 
-    pipeline._tracer = _MODULE_PROVIDER.get_tracer(pipeline.__name__)  # noqa: SLF001
+    Sprint 8 review P2-3: pipeline resolves its tracer lazily via
+    ``trace.get_tracer(__name__)``, so we just need ``_MODULE_EXPORTER``
+    on the global provider's processor chain. First test that runs
+    installs the SDK provider (if the default no-op is still in
+    place); subsequent tests reuse it.
+    """
+    global _PROCESSOR_INSTALLED
+    provider = trace.get_tracer_provider()
+    if not hasattr(provider, "add_span_processor"):
+        # Default no-op provider — install our SDK one.
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+    if not _PROCESSOR_INSTALLED:
+        provider.add_span_processor(SimpleSpanProcessor(_MODULE_EXPORTER))
+        _PROCESSOR_INSTALLED = True
     _MODULE_EXPORTER.clear()
     return _MODULE_EXPORTER
 

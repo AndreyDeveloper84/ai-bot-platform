@@ -162,13 +162,32 @@ def _post_to_max(token: str, chat_id: str, text: str) -> None:
     The platform already uses the MAX bot API (Sprint 2 / D2) for
     outbound; we reuse the same endpoint with a low timeout — the
     digest is best-effort.
+
+    Sprint 8 review P2-1: a 4xx (e.g. ``403`` for a banned bot or
+    expired token) used to be silently swallowed because the body
+    returned successfully — operators just saw missing digests with
+    no log entry. We now log the status code + body snippet AND
+    raise via ``raise_for_status``; the outer ``except`` in
+    :func:`_send_telegram_digest` still catches and logs, so the
+    daily task is unaffected, but the failure mode is no longer
+    invisible.
     """
     import httpx
 
     api_base = str(getattr(settings, "MAX_API_BASE", "https://botapi.max.ru"))
     url = f"{api_base}/messages?access_token={token}"
-    httpx.post(
+    resp = httpx.post(
         url,
         json={"chat_id": chat_id, "text": text},
         timeout=5.0,
     )
+    if resp.status_code >= 400:
+        # The MAX response body is short JSON — safe to log up to 200 chars.
+        # Token is in the URL query string, NOT in the body, so this is
+        # safe wrt secret-leak (the URL itself is never logged).
+        logger.warning(
+            "observability.shadow_delta.digest_http_%d body=%.200s",
+            resp.status_code,
+            resp.text,
+        )
+    resp.raise_for_status()

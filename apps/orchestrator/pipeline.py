@@ -79,13 +79,24 @@ from apps.tenancy.models import Tenant
 # (a developer can filter on `pipeline.step=intent` in Tempo / Jaeger),
 # at a fraction of the diff churn — and the test (T5 / DRF-709) explicitly
 # asserts events on the root, not child-span count.
-try:
-    from opentelemetry import trace as _otel_trace
+#
+# Sprint 8 review P2-3: tracer is resolved lazily via
+# `trace.get_tracer(__name__)` on every `turn()` call. The previous
+# module-level `_tracer = _otel_trace.get_tracer(__name__)` was bound at
+# import time and required tests to monkeypatch `pipeline._tracer` after
+# `set_tracer_provider`. Lazy resolution honours the OTel public API:
+# `trace.get_tracer` returns the tracer for whichever provider is
+# currently registered, so tests just call `trace.set_tracer_provider`
+# and the pipeline picks up the new provider automatically.
 
-    _tracer: Any = _otel_trace.get_tracer(__name__)
-except ImportError:  # pragma: no cover — optional dep
-    _otel_trace = None  # type: ignore[assignment]
-    _tracer = None
+
+def _get_tracer() -> Any:
+    """Resolve the current OTel tracer. None when SDK is missing."""
+    try:
+        from opentelemetry import trace as _otel_trace
+    except ImportError:  # pragma: no cover — optional dep
+        return None
+    return _otel_trace.get_tracer(__name__)
 
 
 @contextmanager
@@ -113,11 +124,12 @@ def _step_event(span: Any, step: str, **attrs: Any) -> Any:
 
 @contextmanager
 def _root_span(message: Any, trace_id: str) -> Any:
-    """Open the per-turn OTel root span. No-op when ``_tracer`` is None."""
-    if _tracer is None:
+    """Open the per-turn OTel root span. No-op when the SDK is missing."""
+    tracer = _get_tracer()
+    if tracer is None:
         yield None
         return
-    with _tracer.start_as_current_span("pipeline.turn") as span:
+    with tracer.start_as_current_span("pipeline.turn") as span:
         span.set_attribute("pipeline.trace_id", trace_id)
         span.set_attribute("channel", getattr(message, "channel", ""))
         span.set_attribute("tenant.slug", getattr(message, "tenant_slug", ""))
