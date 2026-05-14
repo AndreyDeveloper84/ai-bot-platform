@@ -68,7 +68,7 @@ class TestConfigureOtel:
             result = otel.configure_otel()
 
         assert result is False
-        assert otel._CONFIGURED is True  # don't retry on next request
+        assert otel._once.done is True  # don't retry on next request
 
     def test_endpoint_set_builds_exporter(self, settings: Any) -> None:
         """When endpoint is set, the OTLPSpanExporter constructor is called

@@ -33,16 +33,19 @@ from `/etc/ai-bot-platform/.env`; staging mirrors the same path.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any
 
 from django.conf import settings
 
+from apps.observability._once import OnceLock
+
 logger = logging.getLogger(__name__)
 
 
-_CONFIGURE_LOCK = threading.Lock()
-_CONFIGURED = False
+# Sprint 8 review P1-3: single OnceLock shared with sentry.py. The
+# double-checked-locking pattern lives in apps.observability._once;
+# this module just supplies the inner work function.
+_once = OnceLock()
 
 
 # Decision 3 — 5% root-span sampling. Children inherit the recording decision
@@ -57,76 +60,74 @@ def configure_otel() -> bool:
     """Wire the global OTel ``TracerProvider``.
 
     Returns ``True`` when the SDK was just configured, ``False`` when an
-    earlier call already did the work. Caller doesn't have to check; the
-    return value is for telemetry / health-probes.
+    earlier call already did the work OR the SDK is missing. Caller
+    doesn't have to check; the return value is for telemetry /
+    health-probes.
 
     Safe to call from anywhere — including under ``DEBUG=True``, during
-    ``manage.py shell``, or from a test fixture. Subsequent calls bail out
-    cheap (boolean + lock) without ever importing the SDK.
+    ``manage.py shell``, or from a test fixture. Subsequent calls bail
+    out cheap without ever importing the SDK.
     """
-    global _CONFIGURED
+    result = _once.run(_do_configure_otel)
+    return bool(result)
 
-    if _CONFIGURED:
+
+def _do_configure_otel() -> bool:
+    """Inner config — runs at most once via the OnceLock latch.
+
+    Returns ``True`` on full success, ``False`` when the SDK import
+    failed (configured-as-no-op so subsequent calls don't retry).
+    """
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.trace.sampling import (
+            ParentBased,
+            TraceIdRatioBased,
+        )
+    except ImportError:  # pragma: no cover — optional dependency
+        logger.warning("otel.configure_skipped reason=opentelemetry-sdk_not_installed")
         return False
 
-    with _CONFIGURE_LOCK:
-        if _CONFIGURED:
-            return False
+    sample_rate = float(getattr(settings, "OTEL_TRACES_SAMPLE_RATE", _DEFAULT_SAMPLE_RATE))
+    endpoint = str(getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", _DEFAULT_OTLP_ENDPOINT) or "")
+    environment = str(getattr(settings, "DEPLOYMENT_ENVIRONMENT", "local") or "local")
+    service_version = str(getattr(settings, "SERVICE_VERSION", "0.0.0") or "0.0.0")
 
-        try:
-            from opentelemetry import trace
-            from opentelemetry.sdk.resources import Resource
-            from opentelemetry.sdk.trace import TracerProvider
-            from opentelemetry.sdk.trace.export import BatchSpanProcessor
-            from opentelemetry.sdk.trace.sampling import (
-                ParentBased,
-                TraceIdRatioBased,
-            )
-        except ImportError:  # pragma: no cover — optional dependency
-            logger.warning("otel.configure_skipped reason=opentelemetry-sdk_not_installed")
-            _CONFIGURED = True  # don't retry every request
-            return False
+    resource = Resource.create(
+        {
+            "service.name": "ai-bot-platform",
+            "service.version": service_version,
+            "deployment.environment": environment,
+        }
+    )
+    provider = TracerProvider(
+        resource=resource,
+        sampler=ParentBased(TraceIdRatioBased(sample_rate)),
+    )
 
-        sample_rate = float(getattr(settings, "OTEL_TRACES_SAMPLE_RATE", _DEFAULT_SAMPLE_RATE))
-        endpoint = str(
-            getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", _DEFAULT_OTLP_ENDPOINT) or ""
+    exporter = _build_exporter(endpoint)
+    if exporter is not None:
+        provider.add_span_processor(BatchSpanProcessor(exporter, max_export_batch_size=512))
+        logger.info(
+            "otel.configure ok endpoint=%s sample_rate=%s env=%s",
+            endpoint,
+            sample_rate,
+            environment,
         )
-        environment = str(getattr(settings, "DEPLOYMENT_ENVIRONMENT", "local") or "local")
-        service_version = str(getattr(settings, "SERVICE_VERSION", "0.0.0") or "0.0.0")
-
-        resource = Resource.create(
-            {
-                "service.name": "ai-bot-platform",
-                "service.version": service_version,
-                "deployment.environment": environment,
-            }
-        )
-        provider = TracerProvider(
-            resource=resource,
-            sampler=ParentBased(TraceIdRatioBased(sample_rate)),
+    else:
+        # No exporter = effectively a no-op TracerProvider. Spans still
+        # carry trace_id/span_id (T3 + T4 read those) but never leave
+        # the process.
+        logger.info(
+            "otel.configure noop reason=no_endpoint env=%s",
+            environment,
         )
 
-        exporter = _build_exporter(endpoint)
-        if exporter is not None:
-            provider.add_span_processor(BatchSpanProcessor(exporter, max_export_batch_size=512))
-            logger.info(
-                "otel.configure ok endpoint=%s sample_rate=%s env=%s",
-                endpoint,
-                sample_rate,
-                environment,
-            )
-        else:
-            # No exporter = effectively a no-op TracerProvider. Spans still
-            # carry trace_id/span_id (T3 + T4 read those) but never leave
-            # the process.
-            logger.info(
-                "otel.configure noop reason=no_endpoint env=%s",
-                environment,
-            )
-
-        trace.set_tracer_provider(provider)
-        _CONFIGURED = True
-        return True
+    trace.set_tracer_provider(provider)
+    return True
 
 
 def _build_exporter(endpoint: str) -> Any | None:
@@ -158,8 +159,7 @@ def reset_otel_for_tests() -> None:
     exporter should swap the provider themselves via
     ``trace.set_tracer_provider``.
     """
-    global _CONFIGURED
-    _CONFIGURED = False
+    _once.reset()
 
 
 # ---------------------------------------------------------------------------
