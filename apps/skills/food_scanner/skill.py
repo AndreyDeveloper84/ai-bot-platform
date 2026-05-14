@@ -1,0 +1,283 @@
+"""Food-scanner skill — photo → Ayla recognize → diary log.
+
+Sprint 9 / P1 (DRF-818). Ports the **skill-level** path from
+``legacy_maxbot/handlers/food_scanner.py`` (554 LOC); channel-specific
+photo-byte download is not yet plumbed through the platform's skill
+contract, so the Sprint 9 cut ships the callback half of the flow plus
+a scan entry-point that takes bytes via a context-meta passthrough.
+
+## Platform-side flow
+
+1. **Photo turn** — channel adapter delivers an attachment-only turn
+   (``context.has_attachments=True``, ``context.message_text==""``). The
+   adapter stashes the raw bytes on the conversation as
+   ``conversation.last_photo_bytes`` (channel-adapter convention; the
+   web channel adapter introduced this Phase 1 / DRF-850). When bytes
+   are absent the skill returns a graceful "не получилось скачать фото"
+   message rather than crashing.
+
+2. **Scan call** — :func:`apps.integrations.ayla.NutritionClient.scan_photo`
+   with the bytes. Result includes ``scan_id`` (used by the callbacks
+   below to reference this dish).
+
+3. **Recognition card** — text body with dish + macros + a
+   :func:`apps.orchestrator.ui.keyboards.food_recognition_keyboard`
+   3-button row (✅ В дневник / ✏️ Уточнить / ❌ Не то).
+
+4. **Callback turn** — channel adapter routes ``cb:food:to_diary:{id}``
+   / ``cb:food:clarify:{id}`` / ``cb:food:reject:{id}`` to the dispatcher,
+   which lands them here. Each callback writes-or-skips through Ayla:
+
+   * ``to_diary`` → :func:`NutritionClient.log_meal` (idempotent on
+     ``scan_id``) + confirmation reply.
+   * ``clarify`` → reply prompts the user to type the correction; the
+     P5 food_correction skill takes over on the next turn.
+   * ``reject`` → silent ack.
+
+## Scope cut (vs mysite source)
+
+Skipped for Sprint 9 — folded into P5 or Phase 1:
+
+* Consent flow (``food_scanner_consent_at`` BotUser field). The mysite
+  version asked first-time scanners for opt-in; we assume the channel
+  adapter handles consent uplink in Phase 1.
+* Meal-type buttons (``Завтрак|Обед|Ужин|Перекус``). The mysite
+  ``on_log_meal`` callback took ``cb:nutrition:log:{scan_id}:{meal_type}``;
+  here we log without meal type (Ayla defaults to "other"). Adding
+  meal-type buttons is a 1-line keyboard extension.
+* Evening-inline daily report trigger. Belongs in P3 nutrition_anketa
+  context or a separate notification job.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import ClassVar
+
+from apps.integrations.ayla import (
+    FoodNotRecognizedError,
+    NutritionAPIError,
+    NutritionUnavailableError,
+    external_user_id_for,
+    get_nutrition_client,
+)
+from apps.orchestrator.ui.keyboards import (
+    food_recognition_keyboard,
+    parse_callback,
+)
+from apps.skills.base import SkillContext, SkillResult
+from apps.skills.registry import register
+
+logger = logging.getLogger(__name__)
+
+
+# ─── reply templates ──────────────────────────────────────────────────────
+
+
+PHOTO_NO_BYTES = "Фото пришло, но скачать не получилось — пришли ещё раз, пожалуйста."
+
+REJECTED_ACK = "Поняла, не записываю. Если хочешь — пришли ещё фото."
+
+CLARIFY_PROMPT = "Что не так? Напиши коротко — поправлю граммы, название или БЖУ."
+
+AYLA_DOWN_FALLBACK = "Сервис распознавания временно недоступен — попробуй через минуту."
+
+NOT_RECOGNIZED_FALLBACK = (
+    "Фото немного сложное — не разобралась. Можешь переснять поближе или просто написать, что было?"
+)
+
+
+# ─── skill ────────────────────────────────────────────────────────────────
+
+
+@register
+class FoodScannerSkill:
+    """Photo recognition + diary log. Sprint 9 / P1."""
+
+    name: ClassVar[str] = "food_scanner"
+
+    def matches(self, context: SkillContext) -> bool:
+        # Photo-only turn → scan path.
+        if context.has_attachments and not context.message_text.strip():
+            return True
+        # Callback path — channel adapter delivers cb:food:* strings as
+        # message_text per the D2 contract.
+        text = context.message_text.strip()
+        if not text.startswith("cb:food:"):
+            return False
+        parsed = parse_callback(text)
+        if parsed is None:
+            return False
+        # Owned actions. The simpler "cb:food:diary" / "cb:food:typo"
+        # variants belong to P4 food_clarify (no scan_id).
+        return parsed["action"] in {"to_diary", "clarify", "reject"} and bool(parsed.get("ref"))
+
+    def handle(self, context: SkillContext) -> SkillResult:
+        text = context.message_text.strip()
+        if text.startswith("cb:food:"):
+            return self._handle_callback(context, text)
+        return self._handle_photo(context)
+
+    # ─── photo flow ──────────────────────────────────────────────────────
+
+    def _handle_photo(self, context: SkillContext) -> SkillResult:
+        photo_bytes = _extract_photo_bytes(context)
+        if not photo_bytes:
+            logger.info(
+                "food_scanner.no_bytes conversation=%s",
+                getattr(context.conversation, "id", None),
+            )
+            return SkillResult(
+                reply_text=PHOTO_NO_BYTES,
+                meta={"reply_kind": "food_scanner_no_bytes"},
+            )
+
+        external_id = external_user_id_for(context.bot_user)
+        try:
+            scan = asyncio.run(
+                get_nutrition_client().scan_photo(
+                    external_user_id=external_id,
+                    image_bytes=photo_bytes,
+                )
+            )
+        except FoodNotRecognizedError:
+            return SkillResult(
+                reply_text=NOT_RECOGNIZED_FALLBACK,
+                meta={"reply_kind": "food_scanner_not_recognized"},
+            )
+        except NutritionUnavailableError:
+            logger.warning("food_scanner.unavailable user=%s", external_id)
+            return SkillResult(
+                reply_text=AYLA_DOWN_FALLBACK,
+                meta={"reply_kind": "food_scanner_unavailable"},
+            )
+        except NutritionAPIError:
+            logger.exception("food_scanner.api_error user=%s", external_id)
+            return SkillResult(
+                reply_text=AYLA_DOWN_FALLBACK,
+                meta={"reply_kind": "food_scanner_error"},
+            )
+
+        reply = _format_scan_card(scan)
+        return SkillResult(
+            reply_text=reply,
+            action_type="food_scan_card",
+            action_data={
+                "scan_id": scan.scan_id,
+                "dish_name": scan.dish_name,
+                "buttons": food_recognition_keyboard(scan.scan_id),
+            },
+            meta={"reply_kind": "food_scanner_card"},
+        )
+
+    # ─── callback flow ───────────────────────────────────────────────────
+
+    def _handle_callback(self, context: SkillContext, text: str) -> SkillResult:
+        parsed = parse_callback(text)
+        # matches() already validated — but be defensive.
+        if parsed is None or not parsed.get("ref"):
+            return SkillResult(reply_text="", should_send=False)
+
+        action = parsed["action"]
+        scan_id = parsed["ref"]
+
+        if action == "reject":
+            return SkillResult(
+                reply_text=REJECTED_ACK,
+                meta={"reply_kind": "food_scanner_rejected"},
+            )
+
+        if action == "clarify":
+            return SkillResult(
+                reply_text=CLARIFY_PROMPT,
+                meta={"reply_kind": "food_scanner_clarify_prompt"},
+            )
+
+        # action == "to_diary"
+        external_id = external_user_id_for(context.bot_user)
+        try:
+            log = asyncio.run(
+                get_nutrition_client().log_meal(
+                    external_user_id=external_id,
+                    scan_id=scan_id,
+                    meal_type="other",  # P1 doesn't show meal-type buttons
+                    idempotency_key=f"diary:{external_id}:{scan_id}",
+                )
+            )
+        except FoodNotRecognizedError:
+            return SkillResult(
+                reply_text=NOT_RECOGNIZED_FALLBACK,
+                meta={"reply_kind": "food_scanner_log_not_recognized"},
+            )
+        except NutritionUnavailableError:
+            logger.warning("food_scanner.log.unavailable user=%s", external_id)
+            return SkillResult(
+                reply_text=AYLA_DOWN_FALLBACK,
+                meta={"reply_kind": "food_scanner_log_unavailable"},
+            )
+        except NutritionAPIError:
+            logger.exception("food_scanner.log.error user=%s", external_id)
+            return SkillResult(
+                reply_text=AYLA_DOWN_FALLBACK,
+                meta={"reply_kind": "food_scanner_log_error"},
+            )
+
+        return SkillResult(
+            reply_text=f"Записала: {log.dish_name} — {int(log.calories)} ккал.",
+            action_type="food_logged",
+            action_data={
+                "log_id": log.log_id,
+                "dish_name": log.dish_name,
+                "calories": log.calories,
+            },
+            meta={"reply_kind": "food_scanner_logged"},
+        )
+
+
+# ─── helpers ──────────────────────────────────────────────────────────────
+
+
+def _extract_photo_bytes(context: SkillContext) -> bytes | None:
+    """Read photo bytes from the channel-adapter's conversation stash.
+
+    Phase 1 channel adapters set ``conversation.last_photo_bytes`` before
+    dispatch. In Sprint 9 the bytes path is not yet wired; tests inject
+    them via Mock. Returns ``None`` when no bytes available — caller
+    emits ``PHOTO_NO_BYTES``.
+    """
+    return getattr(context.conversation, "last_photo_bytes", None)
+
+
+def _format_scan_card(scan) -> str:
+    """User-facing recognition card text.
+
+    Voice mirrors D1 ``FOOD_RECOGNITION_EXAMPLES`` — terse, friendly,
+    ends with the implicit question (the buttons answer it). When
+    confidence is low (<0.6) we lead with a hedge so the user is
+    primed to use the ✏️ Уточнить button.
+    """
+    dish = scan.dish_name or "блюдо"
+    portion = scan.portion_g or 0
+    nutrition = scan.nutrition or {}
+    kcal = nutrition.get("calories")
+    protein = nutrition.get("protein_g")
+    fat = nutrition.get("fat_g")
+    carbs = nutrition.get("carbs_g")
+
+    parts: list[str] = []
+    hedge = "Похоже на" if scan.confidence < 0.6 else "Узнала:"
+    parts.append(f"{hedge} {dish}.")
+    if portion:
+        parts.append(f"Примерно {int(portion)} г.")
+    if kcal is not None:
+        macros_line = f"{int(kcal)} ккал"
+        if protein is not None:
+            macros_line += f" · Б {int(protein)}"
+        if fat is not None:
+            macros_line += f" · Ж {int(fat)}"
+        if carbs is not None:
+            macros_line += f" · У {int(carbs)}"
+        parts.append(macros_line)
+    parts.append("Записать в дневник?")
+    return "\n".join(parts)
