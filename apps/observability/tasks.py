@@ -33,14 +33,13 @@ from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
 
 from apps.audit.services import write_audit
+from apps.observability.constants import (
+    AGREEMENT_THRESHOLD_AMBER,
+    AGREEMENT_THRESHOLD_GREEN,
+)
 from apps.observability.delta import DeltaSummary, compute_daily_delta
 
 logger = logging.getLogger(__name__)
-
-
-_TELEGRAM_THRESHOLD_GREEN = 0.95  # ≥95% intent agreement = ✅
-_TELEGRAM_THRESHOLD_AMBER = 0.85  # 85-94% = ⚠ degraded
-# Below amber = 🚨 incident — operators see this before the dashboard catches up.
 
 
 @shared_task(
@@ -150,9 +149,9 @@ def _send_telegram_digest(target_date: _dt.date, summaries: dict[str, DeltaSumma
 
 
 def _emoji_for(agreement: float) -> str:
-    if agreement >= _TELEGRAM_THRESHOLD_GREEN:
+    if agreement >= AGREEMENT_THRESHOLD_GREEN:
         return "✅"
-    if agreement >= _TELEGRAM_THRESHOLD_AMBER:
+    if agreement >= AGREEMENT_THRESHOLD_AMBER:
         return "⚠"
     return "🚨"
 
