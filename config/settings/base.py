@@ -150,6 +150,12 @@ MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 
+# Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
+# Empty defaults make the lazy singleton fail loudly on first use rather
+# than silently 500ing on a misconfigured prod box.
+AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
+AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
+
 # Sprint 2 / E2 — admin chat for breaker state-transition alerts.
 # Empty (default) → telegram_alert is a no-op. Set to the operator's
 # MAX chat id to receive 🚨 messages on breaker open/close.
