@@ -1,0 +1,15 @@
+name: food_scanner_photo_no_bytes
+description: |
+  Photo attachment without bytes (channel-adapter didn't stash). Skill
+  returns graceful "перешли ещё раз" reply rather than crashing.
+input:
+  channel: max
+  text: ""
+  has_attachments: true
+must_pass:
+  - response_contains_any:
+      - фото
+      - ещё раз
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

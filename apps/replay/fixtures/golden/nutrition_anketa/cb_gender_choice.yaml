@@ -1,0 +1,12 @@
+name: anketa_cb_gender_female
+description: Gender choice callback advances to age step.
+input:
+  channel: max
+  text: "cb:anketa:choice:gender:female"
+must_pass:
+  - response_contains_any:
+      - лет
+      - возраст
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

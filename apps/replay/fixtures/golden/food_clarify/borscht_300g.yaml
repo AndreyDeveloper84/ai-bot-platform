@@ -1,0 +1,18 @@
+name: food_clarify_borscht_300g
+description: |
+  Sprint 9 / P4 (DRF-358). Short text shaped as food log with unit ("Борщ 300г")
+  must produce the diary-or-typo card, not the cold "не могу с заказом" reply.
+  The incident this guards against: dev-bot 2026-05-08 09:10.
+input:
+  channel: max
+  text: Борщ 300г
+must_pass:
+  - response_contains_any:
+      - дневник
+forbidden:
+  - response_contains_any:
+      - не могу
+      - не понимаю
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

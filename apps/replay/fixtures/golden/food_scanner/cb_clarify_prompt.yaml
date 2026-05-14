@@ -1,0 +1,12 @@
+name: food_scanner_cb_clarify
+description: ✏️ Уточнить → free-text correction prompt.
+input:
+  channel: max
+  text: "cb:food:clarify:scan-1"
+must_pass:
+  - response_contains_any:
+      - что не так
+      - напиши
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

@@ -1,0 +1,13 @@
+name: food_correction_cb_name
+description: ✏️ → Название → prompt to retype dish name.
+input:
+  channel: max
+  text: "cb:food:correct:name:scan-1"
+must_pass:
+  - response_contains_any:
+      - напиши
+      - название
+      - было
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

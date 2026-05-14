@@ -1,0 +1,12 @@
+name: cross_dismiss
+description: User dismisses an Ayla cross-domain insight card.
+input:
+  channel: max
+  text: "cb:cross:dismiss:shown-1"
+must_pass:
+  - response_contains_any:
+      - не буду
+      - ок
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

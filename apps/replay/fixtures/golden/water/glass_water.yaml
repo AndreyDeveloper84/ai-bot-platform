@@ -1,0 +1,14 @@
+name: water_glass_water
+description: |
+  Sprint 9 / P2. "стакан воды" → fast-lane Ayla log. Reply mentions the
+  recorded volume (250 ml default for "стакан").
+input:
+  channel: max
+  text: стакан воды
+must_pass:
+  - response_contains_any:
+      - 250
+      - мл
+voice_check:
+  max_length: 300
+  caps_lock: 0.5

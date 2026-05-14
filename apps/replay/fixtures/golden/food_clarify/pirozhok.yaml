@@ -1,0 +1,13 @@
+name: food_clarify_pirozhok
+description: |
+  Short food mention without explicit volume — still claimed. The hint
+  detector stems on "пирож" so "пирожок" hits.
+input:
+  channel: max
+  text: пирожок
+must_pass:
+  - response_contains_any:
+      - дневник
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

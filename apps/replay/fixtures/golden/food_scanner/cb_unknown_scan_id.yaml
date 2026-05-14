@@ -1,0 +1,14 @@
+name: food_scanner_cb_unknown_id
+description: |
+  Callback with empty scan_id ref — matches() screens this out. Skill
+  must not crash even if a malformed callback reaches handle.
+input:
+  channel: max
+  text: "cb:food:to_diary"
+forbidden:
+  - response_contains_any:
+      - ошибка
+      - traceback
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

@@ -1,0 +1,12 @@
+name: food_scanner_cb_to_diary
+description: ✅ В дневник button click → Ayla log_meal + confirmation reply.
+input:
+  channel: max
+  text: "cb:food:to_diary:scan-1"
+must_pass:
+  - response_contains_any:
+      - записала
+      - дневник
+voice_check:
+  max_length: 300
+  caps_lock: 0.5

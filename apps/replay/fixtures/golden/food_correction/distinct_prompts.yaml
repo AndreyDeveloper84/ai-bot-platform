@@ -1,0 +1,13 @@
+name: food_correction_distinct_prompts
+description: |
+  Sanity baseline — when scan_id varies, prompt stays the same per field.
+  No copy-paste accident between the 3 prompts.
+input:
+  channel: max
+  text: "cb:food:correct:grams:abc-xyz-789"
+must_pass:
+  - response_contains_any:
+      - грамм
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

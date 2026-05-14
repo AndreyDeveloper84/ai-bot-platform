@@ -1,0 +1,13 @@
+name: cross_missing_shown_id
+description: |
+  Callback without shown_id ref is rejected by matches(); other skill
+  (echo/fallback) takes the turn.
+input:
+  channel: max
+  text: "cb:cross:dismiss"
+forbidden:
+  - response_contains_any:
+      - не буду больше
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

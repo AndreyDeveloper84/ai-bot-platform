@@ -1,0 +1,12 @@
+name: food_correction_unknown_field
+description: matches() must NOT claim unknown correction field.
+input:
+  channel: max
+  text: "cb:food:correct:nope:scan-1"
+forbidden:
+  - response_contains_any:
+      - грамм
+      - макрос
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

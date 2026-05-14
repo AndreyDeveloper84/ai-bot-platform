@@ -1,0 +1,11 @@
+name: water_coffee_default
+description: Bare "кофе" hits kofe_chernyi default 200 ml.
+input:
+  channel: max
+  text: кофе
+must_pass:
+  - response_contains_any:
+      - кофе
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

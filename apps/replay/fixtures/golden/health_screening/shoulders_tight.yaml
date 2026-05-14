@@ -1,0 +1,14 @@
+name: health_shoulders_tight
+description: Soft pain pattern — clarifying question expected.
+input:
+  channel: max
+  text: плечи тянет
+must_pass:
+  - response_contains_any:
+      - "?"
+forbidden:
+  - response_contains_any:
+      - наши услуги
+voice_check:
+  max_length: 400
+  caps_lock: 0.5

@@ -1,0 +1,13 @@
+name: food_correction_cb_macros
+description: ✏️ → Макросы → prompt for slash-separated triple.
+input:
+  channel: max
+  text: "cb:food:correct:macros:scan-1"
+must_pass:
+  - response_contains_any:
+      - макрос
+      - белк
+      - жир
+voice_check:
+  max_length: 250
+  caps_lock: 0.5
