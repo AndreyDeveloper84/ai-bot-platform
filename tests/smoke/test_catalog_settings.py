@@ -67,6 +67,7 @@ class TestProductionFailFast:
         monkeypatch.delenv("MYSITE_CATALOG_SERVICE_TOKEN", raising=False)
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
+        monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
         assert "MYSITE_CATALOG_SERVICE_TOKEN" in str(exc_info.value)
@@ -79,6 +80,7 @@ class TestProductionFailFast:
         """Sprint 7 / M4 (DRF-595) — chromadb Bearer-token fail-fast."""
         monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
+        monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         monkeypatch.delenv("CHROMA_AUTH_TOKEN", raising=False)
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
@@ -92,10 +94,25 @@ class TestProductionFailFast:
         """Sprint 8 / E1 (DRF-710) — production must have Sentry."""
         monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
+        monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         monkeypatch.delenv("SENTRY_DSN", raising=False)
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
         assert "SENTRY_DSN" in str(exc_info.value)
+
+    def test_missing_webhook_hmac_secret_raises_improperly_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _restore_production_module: None,
+    ) -> None:
+        """Sprint 10 / C3 (DRF-879) — webhook HMAC secret fail-fast."""
+        monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
+        monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
+        monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
+        monkeypatch.delenv("MYSITE_WEBHOOK_HMAC_SECRET", raising=False)
+        with pytest.raises(ImproperlyConfigured) as exc_info:
+            importlib.import_module("config.settings.production")
+        assert "MYSITE_WEBHOOK_HMAC_SECRET" in str(exc_info.value)
 
     def test_all_tokens_present_boots(
         self,
@@ -105,7 +122,10 @@ class TestProductionFailFast:
         monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "prod-token-abc")  # noqa: S105
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
+        monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         module = importlib.import_module("config.settings.production")
         assert module.DEBUG is False
         assert module.CHROMA_AUTH_TOKEN == "chroma-token-abc"  # noqa: S105
         assert module.SENTRY_DSN == "https://public@sentry.example.com/1"
+        expected_hmac = "hmac-secret-abc"  # noqa: S105  # pragma: allowlist secret
+        assert module.MYSITE_WEBHOOK_HMAC_SECRET == expected_hmac
