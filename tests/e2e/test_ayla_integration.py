@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Generator
 
 import pytest
 
@@ -46,7 +47,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def _fresh_singleton() -> None:
+def _fresh_singleton() -> Generator[None, None, None]:
     """Each test rebuilds the singleton so changes to env vars
     between tests are reflected. Cheap — just clears a module-global.
     """
