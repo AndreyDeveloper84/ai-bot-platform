@@ -390,3 +390,54 @@ def test_empty_tenant_returns_zero_sample(
     result = compute_daily_delta(shadow_date, shadow_tenant)
     assert result.sample_count == 0
     assert result.debug.get("reason") == "no_shadow_traffic"
+
+
+# ---------------------------------------------------------------------------
+# 9. P1-5 regression guard — bulk-fetch, not N+1
+# ---------------------------------------------------------------------------
+
+
+def test_load_shadow_rows_does_not_run_n_plus_one_queries(
+    shadow_tenant: Tenant, shadow_date: _dt.date, _ground_truth_dir: Path
+) -> None:
+    """Sprint 8 code review P1-5: previously the shadow-row loader hit
+    the DB once per user message. With N=10 turns, this test would have
+    fired 11+ queries; the bulk-fetch version fires a constant ~3
+    (Conversation user-msgs + assistant-msgs + the audit write done by
+    compute_daily_delta's CSV path).
+    """
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    ts0 = _dt.datetime(2026, 5, 13, 10, 0, tzinfo=_dt.timezone.utc)
+    for i in range(10):
+        _seed_shadow_turn(
+            shadow_tenant,
+            channel_user_id=f"u{i}",
+            text=f"q{i}",
+            ts=ts0 + _dt.timedelta(minutes=i),
+        )
+    _write_csv(
+        _ground_truth_dir,
+        shadow_date,
+        [
+            {
+                "bot_user_id": f"u{i}",
+                "text": f"q{i}",
+                "ts": (ts0 + _dt.timedelta(minutes=i)).isoformat(),
+                "intent": "faq",
+                "action_type": "faq",
+                "latency_ms": "800",
+                "is_error": "false",
+            }
+            for i in range(10)
+        ],
+    )
+
+    with CaptureQueriesContext(connection) as ctx:
+        result = compute_daily_delta(shadow_date, shadow_tenant)
+
+    # 10 turns matched. The bulk-fetch fires <= 8 queries total
+    # (orders of magnitude under the old N+1 path).
+    assert result.sample_count == 10
+    assert len(ctx) <= 8, f"expected ≤ 8 queries; got {len(ctx)}: {[q['sql'][:80] for q in ctx]}"
