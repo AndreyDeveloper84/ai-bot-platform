@@ -36,6 +36,11 @@ class SkillsConfig(AppConfig):
         # are distinct callbacks so collision is structural-not-textual.
         from apps.skills.food_scanner import skill as _food_scanner  # noqa: F401
 
+        # Sprint 9 / P5 (DRF-822) — food_correction owns
+        # cb:food:correct:{field}:{scan_id} (3 fields). Below
+        # food_scanner so the cb:food:* family is grouped.
+        from apps.skills.food_correction import skill as _food_correction  # noqa: F401
+
         # Sprint 9 / P4 (DRF-821) — food_clarify runs BEFORE faq so the
         # DRF-358 fallback card catches "Борщ 300г" before the LLM
         # gives a cold "не могу с заказом". Cheap regex, no network.
