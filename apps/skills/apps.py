@@ -14,6 +14,13 @@ class SkillsConfig(AppConfig):
         from apps.skills.privacy_consent import skill as _privacy  # noqa: F401
         from apps.skills.human_handoff import skill as _handoff  # noqa: F401
 
+        # Sprint 9 / P7 (DRF-824) — health_screening MUST precede every
+        # service-suggesting skill so "болит спина" gets a diagnostic
+        # question rather than a cold "вот наши услуги". Red-flag
+        # symptoms ("онемение" / "не могу встать") get redirected to a
+        # doctor. The DRF-358 T04 fix; voice mirrors D1 examples.
+        from apps.skills.health_screening import skill as _health  # noqa: F401
+
         # Sprint 9 / P2 (DRF-819) — water fast-lane MUST precede
         # food_clarify so "стакан воды" lands an Ayla log instead of
         # the diary-or-typo card. Both are cheap regex; water wins on
