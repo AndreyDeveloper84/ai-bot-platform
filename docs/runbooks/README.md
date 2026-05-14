@@ -14,7 +14,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`replay-debugging.md`](replay-debugging.md) | skeleton | Sprint 5 | Dev1 |
 | [`incident-response.md`](incident-response.md) | **complete** | Sprint 10 / O5 (DRF-866) | Lead |
 | [`rollback-procedure.md`](rollback-procedure.md) | skeleton | Sprint 8 (shadow mode) | Lead |
-| [`security-incident.md`](security-incident.md) | partial — reporting flow filled now | Sprint 9 (full IR plan) | Lead |
+| [`security-incident.md`](security-incident.md) | **complete** | Sprint 10 / O6 (DRF-867) | Lead |
 | [`chromadb-auth.md`](chromadb-auth.md) | draft | Sprint 7 (M4 / DRF-595) | Platform Lead |
 | [`strict-scope-flip.md`](strict-scope-flip.md) | draft | Sprint 8 (R3 / DRF-729) | Platform Lead |
 | [`shadow-mode-launch.md`](shadow-mode-launch.md) | draft | Sprint 8 (N4 / DRF-703) | Platform Lead |
