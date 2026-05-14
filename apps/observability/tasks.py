@@ -156,6 +156,153 @@ def _emoji_for(agreement: float) -> str:
     return "🚨"
 
 
+# ---------------------------------------------------------------------------
+# F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip violation monitor
+# ---------------------------------------------------------------------------
+
+
+_POST_FLIP_WINDOW_HOURS = 24
+_POST_FLIP_RECHECK_SECONDS = 900  # 15 min
+
+
+@shared_task(  # type: ignore[misc]
+    name="apps.observability.tasks.monitor_post_flip_violations",
+    bind=True,
+)
+def monitor_post_flip_violations(self: Any) -> dict[str, Any]:
+    """Watch for tenant_scope_violation audit rows after F1 flip.
+
+    Sprint 8 / F2 (DRF-731). Activated by setting
+    ``STRICT_SCOPE_FLIP_AT=<ISO 8601 datetime>`` in the prod env at
+    the F1 flip moment. The task:
+
+    1. Reads ``settings.STRICT_SCOPE_FLIP_AT``. Unset OR > 24h old →
+       no-op (idle state).
+    2. Counts ``AuditLog`` rows with ``action="tenant_scope_violation"``
+       and ``created_at >= flip_at``.
+    3. Any non-zero count → Telegram alert + Sentry P0 capture +
+       ``observability.strict_scope.violation_detected`` audit row.
+    4. Self-reschedules ``apply_async(countdown=900)`` (15 min) until
+       the 24h window closes.
+
+    After 24h the monitor auto-stops (the conditional in step 1).
+    Operators clear ``STRICT_SCOPE_FLIP_AT`` from prod env once the
+    runbook gate is confirmed.
+
+    Returns a small status dict — useful for one-shot manual probes
+    via ``celery call`` and for the F2 dry-run on staging.
+    """
+    flip_at_iso = str(getattr(settings, "STRICT_SCOPE_FLIP_AT", "") or "")
+    if not flip_at_iso:
+        logger.info("observability.post_flip.idle reason=no_flip_at")
+        return {"status": "idle", "reason": "no_flip_at"}
+
+    try:
+        flip_at = _dt.datetime.fromisoformat(flip_at_iso.replace("Z", "+00:00"))
+        if flip_at.tzinfo is None:
+            flip_at = flip_at.replace(tzinfo=_dt.timezone.utc)
+    except ValueError:
+        logger.warning("observability.post_flip.bad_flip_at value=%r — task is no-op", flip_at_iso)
+        return {"status": "error", "reason": "bad_flip_at"}
+
+    now = _dt.datetime.now(tz=_dt.timezone.utc)
+    age = now - flip_at
+    if age > _dt.timedelta(hours=_POST_FLIP_WINDOW_HOURS):
+        logger.info(
+            "observability.post_flip.window_closed flip_at=%s age_hours=%.1f",
+            flip_at_iso,
+            age.total_seconds() / 3600,
+        )
+        return {"status": "window_closed", "age_hours": age.total_seconds() / 3600}
+
+    # Count violations since flip.
+    from apps.audit.models import AuditLog
+
+    violations = AuditLog.all_tenants.filter(
+        action="tenancy.scope.cross_tenant_attempt",
+        created_at__gte=flip_at,
+    ).count()
+    # Also count the older naming convention that the auditor may emit —
+    # cheaper than rebooting the auditor's vocabulary for one rename.
+    legacy_violations = AuditLog.all_tenants.filter(
+        action="tenant_scope_violation",
+        created_at__gte=flip_at,
+    ).count()
+    total = violations + legacy_violations
+
+    if total > 0:
+        _page_post_flip_violation(total, flip_at)
+
+    # Always log a heartbeat — operators want to see the monitor is alive.
+    write_audit(
+        "observability.post_flip.checked",
+        payload={
+            "flip_at": flip_at_iso,
+            "violations": total,
+            "age_minutes": int(age.total_seconds() / 60),
+        },
+    )
+
+    # Self-reschedule unless the window already closed by the next tick.
+    next_tick_due = age + _dt.timedelta(seconds=_POST_FLIP_RECHECK_SECONDS)
+    if next_tick_due < _dt.timedelta(hours=_POST_FLIP_WINDOW_HOURS):
+        try:
+            monitor_post_flip_violations.apply_async(countdown=_POST_FLIP_RECHECK_SECONDS)
+        except Exception:  # noqa: BLE001 — broker outage; monitor still ran this cycle
+            logger.exception("observability.post_flip.reschedule_failed")
+
+    return {
+        "status": "checked",
+        "violations": total,
+        "age_minutes": int(age.total_seconds() / 60),
+    }
+
+
+def _page_post_flip_violation(count: int, flip_at: _dt.datetime) -> None:
+    """Fan out a violation alert to Telegram + Sentry.
+
+    Both channels are best-effort; failure of either does NOT block the
+    other. The audit row written by the parent task is the durable record.
+    """
+    text = (
+        f"🚨 STRICT_TENANT_SCOPE post-flip violation\n"
+        f"Flip at: {flip_at.isoformat()}\n"
+        f"Violations since flip: {count}\n"
+        f"Runbook: docs/runbooks/strict-scope-flip.md — consider rollback."
+    )
+    write_audit(
+        "observability.strict_scope.violation_detected",
+        payload={"count": count, "flip_at": flip_at.isoformat()},
+    )
+
+    # Telegram via the MAX admin chat (Sprint 2 / E2).
+    chat_id = str(getattr(settings, "ADMIN_MAX_CHAT_ID", "") or "")
+    token = str(getattr(settings, "MAX_BOT_TOKEN", "") or "")
+    if chat_id and token:
+        try:
+            _post_to_max(token, chat_id, text)
+        except Exception:  # noqa: BLE001
+            logger.exception("observability.post_flip.telegram_failed")
+    else:
+        logger.info("observability.post_flip.telegram_skipped reason=no_credentials")
+
+    # Sentry P0 capture.
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("alert", "strict_scope_post_flip_violation")
+            scope.set_tag("flip_at", flip_at.isoformat())
+            scope.set_level("fatal")
+            sentry_sdk.capture_message(
+                f"STRICT_TENANT_SCOPE post-flip: {count} violations since {flip_at.isoformat()}"
+            )
+    except ImportError:  # pragma: no cover — sentry-sdk optional
+        pass
+    except Exception:  # noqa: BLE001
+        logger.exception("observability.post_flip.sentry_failed")
+
+
 def _post_to_max(token: str, chat_id: str, text: str) -> None:
     """Thin MAX-API poke. Isolated for easy test mocking.
 

@@ -95,6 +95,15 @@ MIDDLEWARE = [
 #            fully disabled (none today).
 STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 
+# Sprint 8 / F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip monitor armed.
+# Operator sets this to the ISO 8601 flip timestamp at the same moment
+# they roll STRICT_TENANT_SCOPE=strict in /etc/ai-bot-platform/.env.
+# apps.observability.tasks.monitor_post_flip_violations reads it; while
+# the value is set AND less than 24h old, the task runs every 15 min
+# (self-rescheduling) and pages on any tenant_scope_violation audit row.
+# After 24h it auto-stops; operator clears the env var per the runbook.
+STRICT_SCOPE_FLIP_AT = os.environ.get("STRICT_SCOPE_FLIP_AT", "")
+
 # Audit-trail retention (per 6A-split decision in plan-eng-review 2026-05-11).
 # Audit logs are forensic data — kept long; idempotency keys are short-lived.
 # Different lifecycles, separate settings, separate cleanup tasks.
