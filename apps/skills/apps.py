@@ -46,6 +46,12 @@ class SkillsConfig(AppConfig):
         # Insight-card emission (post-food-log hook) lands Phase 1.
         from apps.skills.cross_domain import skill as _cross_domain  # noqa: F401
 
+        # Sprint 9 / P3 (DRF-820) — nutrition_anketa: 5-step FSM via D3,
+        # POSTs to Ayla upsert_profile on completion. Claims plain text
+        # AND cb:anketa:choice:* while an FSM is in flight (resume
+        # path). Order: above echo so resumed turns aren't swallowed.
+        from apps.skills.nutrition_anketa import skill as _anketa  # noqa: F401
+
         # Sprint 9 / P4 (DRF-821) — food_clarify runs BEFORE faq so the
         # DRF-358 fallback card catches "Борщ 300г" before the LLM
         # gives a cold "не могу с заказом". Cheap regex, no network.
