@@ -848,24 +848,31 @@ def _send_outbound(
     if not reply.final_send or not reply.text:
         return True
 
-    # Only MAX channel in Phase 0.
-    if message.channel != "max":
+    # Sprint 8 review P1-cycle2: outbound goes through the channel
+    # registry (apps.orchestrator.channel_registry). Each channel
+    # AppConfig.ready() registers its sender; the pipeline no longer
+    # imports apps.channels.* directly — feature↔feature cycle broken.
+    from apps.orchestrator.channel_registry import (
+        ChannelSendError,
+        get_sender,
+        send,
+    )
+
+    if get_sender(message.channel) is None:
         logger.warning(
             "pipeline.outbound.unsupported_channel channel=%s trace_id=%s",
             message.channel,
             trace_id,
         )
-        return True  # Treat as ok — Sprint 7+ adds the channel adapter
-
-    from apps.channels.max.outbound import MaxAPIError, send_message
+        return True  # Treat as ok — channel adapter missing from INSTALLED_APPS
 
     last_error: str = ""
     for attempt in range(_OUTBOUND_MAX_ATTEMPTS):
         try:
-            send_message(chat_id=message.chat_id, text=reply.text)
+            send(message.channel, chat_id=message.chat_id, text=reply.text)
             return True
-        except MaxAPIError as exc:
-            last_error = f"MaxAPIError: {exc}"
+        except ChannelSendError as exc:
+            last_error = f"ChannelSendError: {exc}"
             logger.warning(
                 "pipeline.outbound.retry attempt=%d/%d trace_id=%s err=%s",
                 attempt + 1,
