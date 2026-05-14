@@ -101,7 +101,7 @@ class TestReplayDiffVsMysite:
 
     def test_at_least_95_percent_match(self) -> None:
         from apps.replay.fixtures.loader import load_fixture_set
-        from apps.replay.runner import run_fixture_set
+        from apps.replay.runner import run_fixture_set  # type: ignore[attr-defined]
 
         ground_truth = _load_ground_truth()
         expected_by_name = {entry["fixture"]: entry for entry in ground_truth["fixtures"]}

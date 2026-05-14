@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Generator
 from unittest.mock import patch
 
 import pytest
@@ -20,7 +21,7 @@ def _iso(dt: _dt.datetime) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _reset_env() -> None:
+def _reset_env() -> Generator[None, None, None]:
     settings.STRICT_SCOPE_FLIP_AT = ""
     settings.ADMIN_MAX_CHAT_ID = ""
     settings.MAX_BOT_TOKEN = ""
