@@ -41,6 +41,11 @@ class SkillsConfig(AppConfig):
         # food_scanner so the cb:food:* family is grouped.
         from apps.skills.food_correction import skill as _food_correction  # noqa: F401
 
+        # Sprint 9 / P6 (DRF-823) — cross_domain owns the Ayla insight
+        # card callbacks cb:cross:{seen,dismiss,convert}:{shown_id}.
+        # Insight-card emission (post-food-log hook) lands Phase 1.
+        from apps.skills.cross_domain import skill as _cross_domain  # noqa: F401
+
         # Sprint 9 / P4 (DRF-821) — food_clarify runs BEFORE faq so the
         # DRF-358 fallback card catches "Борщ 300г" before the LLM
         # gives a cold "не могу с заказом". Cheap regex, no network.
