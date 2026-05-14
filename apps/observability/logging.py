@@ -201,17 +201,11 @@ def _read_otel_ids() -> tuple[str, str]:
     """Return ``(trace_id_hex, span_id_hex)`` — empty strings when no
     span is active.
 
-    OTel formats trace_id as 32-char hex, span_id as 16-char hex.
+    Thin wrapper over the canonical implementation in
+    :func:`apps.observability.otel.get_current_span_ids` (Sprint 8 P1-1
+    extraction). Kept as a module-private function for clarity at the
+    filter's call site, but the actual logic lives once.
     """
-    try:
-        from opentelemetry import trace
-    except ImportError:  # pragma: no cover
-        return "", ""
-    try:
-        span = trace.get_current_span()
-        ctx = span.get_span_context()
-    except Exception:  # noqa: BLE001
-        return "", ""
-    if not getattr(ctx, "is_valid", False):
-        return "", ""
-    return format(ctx.trace_id, "032x"), format(ctx.span_id, "016x")
+    from apps.observability.otel import get_current_span_ids
+
+    return get_current_span_ids()
