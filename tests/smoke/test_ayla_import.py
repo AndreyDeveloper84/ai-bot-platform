@@ -71,11 +71,11 @@ class TestAylaAllowList:
         assert ActionType is not None
 
     def test_package_version_pinned(self) -> None:
-        """Pin: v0.7.4 SHA — hotfix encoder cache + budget envelope + re-exports."""
+        """Pin: v0.8.0 SHA + [django] extra — Architecture refactor (Arch-1..6)."""
         import ayla_ai_core
 
-        assert ayla_ai_core.__version__ == "0.7.4", (
-            f"ayla-ai-core version drift: expected '0.7.4', got "
+        assert ayla_ai_core.__version__ == "0.8.0", (
+            f"ayla-ai-core version drift: expected '0.8.0', got "
             f"{ayla_ai_core.__version__!r}. Check pyproject.toml [ai-core] "
             "extra + uv.lock. Bump procedure in pyproject.toml header."
         )
