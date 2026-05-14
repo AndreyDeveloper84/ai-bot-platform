@@ -12,7 +12,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 |---|---|---|---|
 | [`tenant-onboarding.md`](tenant-onboarding.md) | skeleton | Sprint 9 | Lead |
 | [`replay-debugging.md`](replay-debugging.md) | skeleton | Sprint 5 | Dev1 |
-| [`incident-response.md`](incident-response.md) | skeleton | Sprint 9 (on-call rotation) | Lead |
+| [`incident-response.md`](incident-response.md) | **complete** | Sprint 10 / O5 (DRF-866) | Lead |
 | [`rollback-procedure.md`](rollback-procedure.md) | skeleton | Sprint 8 (shadow mode) | Lead |
 | [`security-incident.md`](security-incident.md) | partial — reporting flow filled now | Sprint 9 (full IR plan) | Lead |
 | [`chromadb-auth.md`](chromadb-auth.md) | draft | Sprint 7 (M4 / DRF-595) | Platform Lead |
