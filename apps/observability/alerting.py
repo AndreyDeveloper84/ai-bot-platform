@@ -50,7 +50,7 @@ import hashlib
 import logging
 from typing import Final, Literal
 
-import requests
+import requests  # type: ignore[import-untyped]
 from django.conf import settings
 from django.core.cache import cache
 
@@ -247,7 +247,7 @@ def _send_sentry(severity: Severity, title: str, body: str) -> bool:
     try:
         with sentry_sdk.new_scope() as scope:
             scope.set_tag("alert.severity", severity)
-            scope.set_level(_SEVERITY_SENTRY_LEVEL[severity])
+            scope.set_level(_SEVERITY_SENTRY_LEVEL[severity])  # type: ignore[arg-type]
             scope.set_context(
                 "alert",
                 {"title": title, "body": body[:4000]},
