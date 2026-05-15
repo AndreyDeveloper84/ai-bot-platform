@@ -16,7 +16,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`rollback-procedure.md`](rollback-procedure.md) | skeleton | Sprint 8 (shadow mode) | Lead |
 | [`security-incident.md`](security-incident.md) | **complete** | Sprint 10 / O6 (DRF-867) | Lead |
 | [`chromadb-auth.md`](chromadb-auth.md) | draft | Sprint 7 (M4 / DRF-595) | Platform Lead |
-| [`strict-scope-flip.md`](strict-scope-flip.md) | draft | Sprint 8 (R3 / DRF-729) | Platform Lead |
+| [`strict-scope-flip.md`](strict-scope-flip.md) | **complete** | Sprint 10 polish (F-dry / DRF-868) | Lead |
 | [`shadow-mode-launch.md`](shadow-mode-launch.md) | draft | Sprint 8 (N4 / DRF-703) | Platform Lead |
 | [`canary-ramp.md`](canary-ramp.md) | **complete** | Sprint 10 / X-criteria (DRF-871) | Lead |
 | [`on-call.md`](on-call.md) | **complete** | Sprint 10 / O3 (DRF-864) | Lead |
