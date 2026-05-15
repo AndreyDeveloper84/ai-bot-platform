@@ -58,6 +58,10 @@ LOCAL_APPS = [
     "apps.handoff",
     # Sprint 8 / T1 (DRF-705) — observability package owns OTel + Sentry + JSON logs.
     "apps.observability",
+    # Phase 1 / B2 (DRF-838) — booking persistence (BookingRequest +
+    # BookingReminder) bundled with the YClients admin-webhook port.
+    # Skill / tool layer (LLM-callable booking ops) lands in B3 / DRF-839.
+    "apps.booking",
 ]
 
 INSTALLED_APPS = [
@@ -166,6 +170,16 @@ YCLIENTS_PARTNER_TOKEN = os.environ.get("YCLIENTS_PARTNER_TOKEN", "")
 YCLIENTS_USER_TOKEN = os.environ.get("YCLIENTS_USER_TOKEN", "")
 YCLIENTS_COMPANY_ID = os.environ.get("YCLIENTS_COMPANY_ID", "")
 YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.com/api/v1")
+
+# Phase 1 / B2 (DRF-838) — YClients admin webhook tenant resolution.
+# YClients does NOT send our X-Tenant header (it's an external system).
+# Single-tenant Phase 1 maps every incoming webhook to ONE configured
+# tenant slug. Phase 2 will add a (yclients_company_id → tenant_slug)
+# mapping table on Tenant; until then, deployments serving multiple
+# tenants must run one webhook URL per tenant subdomain.
+# Empty default keeps the receiver dormant: payloads get an audit row
+# + 200 (still no retries from YClients) until ops configures the slug.
+YCLIENTS_WEBHOOK_TENANT_SLUG = os.environ.get("YCLIENTS_WEBHOOK_TENANT_SLUG", "")
 
 # Sprint 2 / E2 — admin chat for breaker state-transition alerts.
 # Empty (default) → telegram_alert is a no-op. Set to the operator's

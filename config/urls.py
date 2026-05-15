@@ -4,6 +4,7 @@ Sprint 0 / A1: only Django admin.
 Sprint 1: orchestrator (/healthz/, /readyz/).
 Sprint 2 / D4: ingress webhook routes (/api/v1/ingress/<channel>/).
 Sprint 10 / C3: catalog webhook receiver (/api/v1/catalog/webhook/).
+Phase 1 / B2: YClients admin webhook (/api/v1/yclients/webhook/).
 """
 
 from django.contrib import admin
@@ -21,5 +22,10 @@ urlpatterns = [
     path(
         "api/v1/catalog/",
         include("apps.catalog.webhooks.urls", namespace="catalog_webhooks"),
+    ),
+    # Phase 1 / B2 (DRF-838) — YClients admin-side webhook port.
+    path(
+        "api/v1/yclients/",
+        include("apps.integrations.yclients.urls", namespace="yclients"),
     ),
 ]
