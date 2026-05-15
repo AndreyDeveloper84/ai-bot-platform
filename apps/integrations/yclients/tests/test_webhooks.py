@@ -113,7 +113,11 @@ def _payload_create(
     }
 
 
-def _post(client: Client, payload: object) -> object:
+def _post(client: Client, payload: object):
+    """Helper for posting to the webhook. Return type is intentionally
+    inferred — django-stubs returns ``_MonkeyPatchedWSGIResponse`` (with
+    ``.json()``) which is private API. Annotating it explicitly would
+    couple us to a stub internal."""
     return client.post(
         _URL,
         data=json.dumps(payload),
