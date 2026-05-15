@@ -1,16 +1,81 @@
 # Branch protection rules — `main` + `dev`
 
 > Sprint 10 / DRF-891 task 3 — operator setup procedure.
-> Status: ready to apply. Run the `gh api` commands below from a shell
-> authenticated as repo owner OR set the rules via the GitHub UI.
 
-## Why we need this
+## Phase 0 state: GitHub-side protection deferred
+
+GitHub branch protection (both the legacy "Branch protection rules" and
+the newer "Repository rulesets" APIs) **requires GitHub Pro on private
+repositories**. Tested 2026-05-15 — both endpoints return
+`HTTP 403: Upgrade to GitHub Pro or make this repository public`.
+
+For Phase 0 (1-person team, no real MAX traffic yet) we use **local
+soft enforcement** via `.githooks/pre-push` instead. Strategy detailed
+in [§ Local soft enforcement](#local-soft-enforcement) below.
+
+### When to revisit (Phase 1 triggers)
+
+Switch to GitHub-side enforcement when **any** of:
+
+* 2nd human joins the team (single-author dev discipline ≠ team workflow)
+* Sprint 10 X-5pct goes live (real traffic = real cost of `main` mistakes)
+* Repo goes public (rules free) — requires history audit for secrets first
+
+At that point, pick one:
+* **GitHub Pro ($4/mo per user)** — runs the `gh api` commands below as-is
+* **Public repo** — same commands work for free; do history audit first
+
+The JSON payloads in `protection-main.json` + `protection-dev.json` are
+ready when that day comes; the commands below work as-is once we have
+Pro or repo is public.
+
+## Why we need this (eventually)
 
 Before Sprint 10 X-5pct (5% of real MAX traffic), every merge to `main`
 must go through dev validation. Branch protection enforces this at the
 GitHub level so nobody can accidentally `git push` straight to `main`.
 
-Without this, the dev-flow we set up is a convention, not a guarantee.
+Without GitHub-side protection, the dev-flow is a convention enforced
+by `pre-push` hook + Lead discipline + PR review.
+
+## Local soft enforcement
+
+Phase 0 substitute for GitHub-side protection. Lives in
+`.githooks/pre-push`. Activation is **one-time per clone**:
+
+```
+git config core.hooksPath .githooks
+```
+
+After that, attempting `git push origin main` fails locally with a
+clear message before the network call. Workflow:
+
+```
+feat/*  →  PR  →  dev  →  PR  →  main
+```
+
+### What the hook catches
+
+* `git push origin main` when on main
+* Direct cross-branch push targeting `refs/heads/main`
+
+### What the hook does NOT catch
+
+* `git push --no-verify` (explicit bypass — emergency hotfix path)
+* Web UI merges on GitHub (those don't fire local hooks)
+* Pushes from a clone where the hook isn't activated (anyone running
+  the project must run the activation command above; document this in
+  onboarding)
+
+### Bypass (for genuine emergencies)
+
+```
+git push --no-verify origin main
+```
+
+Document the bypass in the commit message + Telegram admin chat so
+the audit trail is clear. Per `on-call.md`, treat any `--no-verify`
+push as a Sev2 process-violation event.
 
 ## Target state
 

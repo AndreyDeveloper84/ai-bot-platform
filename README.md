@@ -133,9 +133,17 @@ Branch protection enforces this — see [`docs/setup/branch-protection.md`](docs
 
 ### Setup
 
-Dev environment + MAX-bot creation: [`docs/setup/dev-environment.md`](docs/setup/dev-environment.md) (operator setup, ~4-6h one-time).
+After cloning, activate the pre-push hook (one-time per clone):
 
-Branch protection rules: [`docs/setup/branch-protection.md`](docs/setup/branch-protection.md).
+```
+git config core.hooksPath .githooks
+```
+
+This blocks `git push origin main` locally — the dev-flow is enforced
+at the local git level since the repo is private + free-tier (GitHub
+branch protection requires Pro). See [`docs/setup/branch-protection.md`](docs/setup/branch-protection.md) § Phase 0 state for rationale + Phase 1 upgrade triggers.
+
+Dev environment + MAX-bot creation: [`docs/setup/dev-environment.md`](docs/setup/dev-environment.md) (operator setup, ~4-6h one-time).
 
 Deploy workflows:
 - `.github/workflows/deploy-dev.yml` — fires on push to `dev`
