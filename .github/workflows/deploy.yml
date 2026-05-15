@@ -1,0 +1,126 @@
+# deploy — push to `main` branch → deploy to prod MAX-bot instance
+#
+# Sprint 10 / DRF-891 — sibling of deploy-dev.yml. Operator workflow:
+#   feat/* → PR → dev → (manual test on dev-bot ≥1h) → PR → main → prod
+#
+# ### Trigger
+# - push to `main` branch (after PR from `dev` merges)
+# - manual via workflow_dispatch (emergency hotfix path — still requires
+#   approval per branch protection rules)
+#
+# ### Gates BEFORE prod deploy fires
+# 1. CI must be green on the merge commit (branch protection enforces)
+# 2. Code must have spent ≥24h on dev-bot per canary-ramp.md pre-flight
+#    (manual gate — operator confirms in PR description)
+# 3. During X-track canary window: deploys are scoped to non-canary-affecting
+#    code only. Any change to skill dispatch / pipeline / scope enforcement
+#    requires `canary-pause` label + Lead approval.
+#
+# ### Setup status
+# This is the **bootstrap version** of the workflow. Real machinery
+# activates when DRF-891 closes:
+# - DRF-891 task 2: branch protection enforced
+# - DRF-891 task 4: GitHub secrets PROD_HOST / PROD_USER / PROD_SSH_KEY
+# - DRF-891 task 5+ done
+#
+# Until then, workflow exercises trigger graph + prints what WOULD deploy.
+
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod-${{ github.ref }}
+  cancel-in-progress: false  # NEVER cancel a prod deploy in flight
+
+jobs:
+  deploy:
+    name: deploy-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pre-flight check — was this on dev?
+        run: |
+          echo "::notice::deploy-prod triggered for ${{ github.ref }} @ ${{ github.sha }}"
+          echo "Triggered by ${{ github.event_name }}"
+          # The dev-bot 24h soak gate is currently manual (operator confirms
+          # in PR description). Sprint 11+ can automate this via a check
+          # that queries dev's audit log for first-seen-on-dev timestamp.
+
+      # ─── ACTIVATE AFTER DRF-891 SECRETS LAND ───
+      # - name: Configure SSH
+      #   env:
+      #     PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+      #   run: |
+      #     mkdir -p ~/.ssh
+      #     echo "$PROD_SSH_KEY" > ~/.ssh/prod_deploy
+      #     chmod 600 ~/.ssh/prod_deploy
+      #     ssh-keyscan -H ${{ secrets.PROD_HOST }} >> ~/.ssh/known_hosts
+      #
+      # - name: Postgres backup before deploy
+      #   env:
+      #     PROD_HOST: ${{ secrets.PROD_HOST }}
+      #     PROD_USER: ${{ secrets.PROD_USER }}
+      #   run: |
+      #     ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" bash -lc "
+      #       set -e
+      #       BACKUP_PATH=/var/backups/ai-bot-platform/pre-deploy-\$(date +%Y%m%d-%H%M%S).sql.gz
+      #       sudo docker compose -p ai-bot-platform exec -T postgres \
+      #         pg_dump -U platform ai_bot_platform | gzip > \$BACKUP_PATH
+      #       # Size sanity check — empty backups are deploy-blockers.
+      #       test \$(stat -c%s \$BACKUP_PATH) -ge 1024 || { echo 'backup too small'; exit 1; }
+      #       echo \"Backup: \$BACKUP_PATH\"
+      #     "
+      #
+      # - name: Pull + restart prod services
+      #   env:
+      #     PROD_HOST: ${{ secrets.PROD_HOST }}
+      #     PROD_USER: ${{ secrets.PROD_USER }}
+      #     PROD_DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
+      #   run: |
+      #     ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" bash -lc "
+      #       set -e
+      #       cd $PROD_DEPLOY_PATH
+      #       git fetch origin
+      #       git checkout main
+      #       git pull origin main
+      #       sudo docker compose --env-file /etc/ai-bot-platform/.env \
+      #         -p ai-bot-platform up -d --force-recreate --no-deps web worker
+      #     "
+      #
+      # - name: Smoke /readyz/ on prod
+      #   env:
+      #     PROD_HOST: ${{ secrets.PROD_HOST }}
+      #     PROD_USER: ${{ secrets.PROD_USER }}
+      #   run: |
+      #     for i in 1 2 3 4 5; do
+      #       if ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" \
+      #            'curl -fsS http://127.0.0.1:8003/readyz/'; then
+      #         echo "::notice::readyz green attempt $i"
+      #         exit 0
+      #       fi
+      #       sleep 10
+      #     done
+      #     echo "::error::readyz red after 5 attempts — investigate"
+      #     exit 1
+      #
+      # - name: Telegram alert — prod deploy complete
+      #   env:
+      #     PROD_HOST: ${{ secrets.PROD_HOST }}
+      #     PROD_USER: ${{ secrets.PROD_USER }}
+      #     PROD_DEPLOY_PATH: ${{ secrets.PROD_DEPLOY_PATH }}
+      #   run: |
+      #     ssh -i ~/.ssh/prod_deploy "$PROD_USER@$PROD_HOST" bash -lc "
+      #       cd $PROD_DEPLOY_PATH
+      #       sudo docker compose --env-file /etc/ai-bot-platform/.env \
+      #         -p ai-bot-platform exec -T web \
+      #         python manage.py smoke_alert --severity=warning \
+      #         --title='prod deploy' --body='${{ github.sha }} live'
+      #     "
