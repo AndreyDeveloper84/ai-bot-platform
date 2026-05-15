@@ -282,6 +282,34 @@ CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECOND
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
 
+# Sprint 10 / O2 (DRF-863) — Alerting (Telegram-only, no PagerDuty).
+#
+# After the Sprint 10 day-15 decision to skip PagerDuty (cost / RF
+# friction of credit-card-backed SaaS signup), the alerting library
+# pages exclusively to a dedicated Telegram channel + Sentry for
+# critical events. The trade-offs vs PagerDuty are documented in
+# `docs/runbooks/on-call.md`.
+#
+# Setup:
+# 1. Create a private Telegram channel `🚨 ai-bot-platform alerts`.
+# 2. Add your bot (TELEGRAM_BOT_TOKEN) as a channel admin.
+# 3. Find the channel's chat_id (negative integer for channels) via:
+#       curl "https://api.telegram.org/bot<TOKEN>/getUpdates"
+#    after sending any message to the channel from the bot.
+# 4. Set the env vars below.
+#
+# Empty token / chat_id → page() logs at INFO and skips (local dev
+# never pages anyone accidentally). Sentry capture still fires when
+# SENTRY_DSN is set.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ALERTS_TELEGRAM_CHAT_ID = os.environ.get("ALERTS_TELEGRAM_CHAT_ID", "")
+TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
+OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
+# Dedup window: identical (severity, dedup_key) pairs within this window
+# collapse to a single page. Defaults to 5 minutes — same as PD's default
+# dedup behaviour. Lower in tests via override_settings.
+ALERTS_DEDUP_TTL_SECONDS = int(os.environ.get("ALERTS_DEDUP_TTL_SECONDS", "300"))
+
 # Sprint 10 / C3 (DRF-879) — mysite catalog webhook HMAC secret.
 # The 15-min pull keeps state eventually consistent; this push gives
 # salons sub-second feedback when they edit prices/masters. Empty
