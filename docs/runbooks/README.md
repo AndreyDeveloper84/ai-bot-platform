@@ -19,6 +19,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`strict-scope-flip.md`](strict-scope-flip.md) | draft | Sprint 8 (R3 / DRF-729) | Platform Lead |
 | [`shadow-mode-launch.md`](shadow-mode-launch.md) | draft | Sprint 8 (N4 / DRF-703) | Platform Lead |
 | [`canary-ramp.md`](canary-ramp.md) | **complete** | Sprint 10 / X-criteria (DRF-871) | Lead |
+| [`on-call.md`](on-call.md) | **complete** | Sprint 10 / O3 (DRF-864) | Lead |
 
 `status` values:
 

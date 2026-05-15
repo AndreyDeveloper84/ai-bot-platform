@@ -105,33 +105,25 @@ class TestViolationDetected:
 
 
 class TestPageRouting:
-    def test_no_telegram_creds_skips_post(self) -> None:
+    """Sprint 10 / O2 (DRF-863) refactor: F2 routes through
+    :func:`apps.observability.alerting.page`, not inline MAX. Tests now
+    mock `page` directly — its own coverage lives in test_alerting.py.
+    """
+
+    def test_violation_calls_alerting_page_with_critical(self) -> None:
         flip = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(minutes=10)
         settings.STRICT_SCOPE_FLIP_AT = _iso(flip)
-
-        AuditLog.all_tenants.create(action="tenant_scope_violation", payload={})
-
-        with patch("apps.observability.tasks._post_to_max") as mock_post:
-            monitor_post_flip_violations.apply().get()
-
-        mock_post.assert_not_called()
-
-    def test_with_creds_calls_telegram(self) -> None:
-        flip = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(minutes=10)
-        settings.STRICT_SCOPE_FLIP_AT = _iso(flip)
-        settings.ADMIN_MAX_CHAT_ID = "9999"
-        settings.MAX_BOT_TOKEN = "fake"  # noqa: S105 — test literal
 
         row = AuditLog.all_tenants.create(action="tenant_scope_violation", payload={})
         AuditLog.all_tenants.filter(pk=row.pk).update(
             created_at=_dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(minutes=5),
         )
 
-        with patch("apps.observability.tasks._post_to_max") as mock_post:
+        with patch("apps.observability.alerting.page") as mock_page:
             monitor_post_flip_violations.apply().get()
 
-        mock_post.assert_called_once()
-        args = mock_post.call_args.args
-        assert args[0] == "fake"
-        assert args[1] == "9999"
-        assert "STRICT_TENANT_SCOPE post-flip violation" in args[2]
+        mock_page.assert_called_once()
+        args, kwargs = mock_page.call_args
+        assert args[0] == "critical"
+        assert "STRICT_TENANT_SCOPE post-flip violation" in args[1]
+        assert kwargs["dedup_key"].startswith("f2_post_flip_violation:")

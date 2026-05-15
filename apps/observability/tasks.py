@@ -259,48 +259,37 @@ def monitor_post_flip_violations(self: Any) -> dict[str, Any]:
 
 
 def _page_post_flip_violation(count: int, flip_at: _dt.datetime) -> None:
-    """Fan out a violation alert to Telegram + Sentry.
+    """Fan out a violation alert via the central alerting library.
 
-    Both channels are best-effort; failure of either does NOT block the
-    other. The audit row written by the parent task is the durable record.
+    Sprint 10 / O2 (DRF-863) refactor: was inline MAX + Sentry; now
+    routes through :func:`apps.observability.alerting.page` so the
+    severity/dedup/Telegram-channel logic lives in one place. The
+    ``observability.strict_scope.violation_detected`` audit row is
+    still written here so log archeology stays cheap.
     """
-    text = (
-        f"🚨 STRICT_TENANT_SCOPE post-flip violation\n"
-        f"Flip at: {flip_at.isoformat()}\n"
-        f"Violations since flip: {count}\n"
-        f"Runbook: docs/runbooks/strict-scope-flip.md — consider rollback."
-    )
+    from apps.observability.alerting import page
+
     write_audit(
         "observability.strict_scope.violation_detected",
         payload={"count": count, "flip_at": flip_at.isoformat()},
     )
 
-    # Telegram via the MAX admin chat (Sprint 2 / E2).
-    chat_id = str(getattr(settings, "ADMIN_MAX_CHAT_ID", "") or "")
-    token = str(getattr(settings, "MAX_BOT_TOKEN", "") or "")
-    if chat_id and token:
-        try:
-            _post_to_max(token, chat_id, text)
-        except Exception:  # noqa: BLE001
-            logger.exception("observability.post_flip.telegram_failed")
-    else:
-        logger.info("observability.post_flip.telegram_skipped reason=no_credentials")
-
-    # Sentry P0 capture.
-    try:
-        import sentry_sdk
-
-        with sentry_sdk.new_scope() as scope:
-            scope.set_tag("alert", "strict_scope_post_flip_violation")
-            scope.set_tag("flip_at", flip_at.isoformat())
-            scope.set_level("fatal")
-            sentry_sdk.capture_message(
-                f"STRICT_TENANT_SCOPE post-flip: {count} violations since {flip_at.isoformat()}"
-            )
-    except ImportError:  # pragma: no cover — sentry-sdk optional
-        pass
-    except Exception:  # noqa: BLE001
-        logger.exception("observability.post_flip.sentry_failed")
+    title = "STRICT_TENANT_SCOPE post-flip violation"
+    body = (
+        f"Flip at: {flip_at.isoformat()}\n"
+        f"Violations since flip: {count}\n"
+        f"Runbook: docs/runbooks/strict-scope-flip.md — consider rollback."
+    )
+    # Explicit dedup_key per flip_at so a steady stream of violations
+    # within the same flip doesn't spam the channel — critical bypasses
+    # dedup but the audit row is per-tick so investigators still see
+    # cadence in the audit log.
+    page(
+        "critical",
+        title,
+        body,
+        dedup_key=f"f2_post_flip_violation:{flip_at.isoformat()}",
+    )
 
 
 def _post_to_max(token: str, chat_id: str, text: str) -> None:
