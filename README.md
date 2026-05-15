@@ -108,7 +108,7 @@ uv run pre-commit run --all-files
 feature/X
     │ PR (CI must be green)
     ▼
-dev ──────────────► @ai_bot_platform_dev (dev MAX-bot)
+dev ──────────────► @id583403546770_1_bot (dev MAX-bot)
     │ manual test on dev-bot ≥1h (24h before canary bumps)
     │ PR dev → main (1 approval, CI green, linear history)
     ▼

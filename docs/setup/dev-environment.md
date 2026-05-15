@@ -17,20 +17,49 @@ supposed to be the rollback safety net, not the QA gate.
 
 | Option | Pros | Cons | Recommendation |
 |---|---|---|---|
-| **A. Same VPS, separate compose project** | No extra cost; shares Postgres + Redis containers via separate DBs/databases | Shared blast radius — kernel panic on prod = dev down too | ✅ **default for Phase 0** |
+| **A. Same VPS, separate compose project** | No extra cost; reuses existing Postgres + Redis containers from `/home/taximeter/mysite/formula_tela_dev/` (just new databases + Redis index) | Shared blast radius — kernel panic on prod = dev down too | ✅ **default for Phase 0** |
 | **B. Separate VPS** (~₽500-1000/мес) | Full isolation | Extra cost + setup + monitoring | Use if A starves on resources or if security iso required |
 | **C. Local + Cloudflare Tunnel** | Zero-cost iteration | MAX webhook unstable via tunnel; can't `git pull` from CI | Use for sub-feature poke-tests only, not for the 24h soak gate |
 
 **Recommended:** A for Phase 0; revisit at Phase 1 kickoff.
 
+### Reusing formula_tela_dev infra
+
+The existing `formula_tela_dev` deployment on prod already has running
+containers we can reuse instead of duplicating:
+
+| Container | Image | Reuse strategy |
+|---|---|---|
+| `formula_tela_db` (Postgres 16) | port 5432 | Add new `ai_bot_platform_dev` database + `platform_dev` user — same instance, no new container |
+| `formula_tela_redis` (Redis 7) | port 6379 | Use Redis DB index `/2` (formula_tela uses `/0`, prod platform uses `/1`) |
+| Django web + Celery worker | (per-project) | **Separate** containers — never share Python process between projects |
+
+This keeps disk/memory footprint low. Trade-off: if the formula_tela
+Postgres container dies, ai-bot-platform-dev dies too. Acceptable for
+Phase 0 since prod platform has its own dedicated containers.
+
+For reference: working `OPENAI_PROXY` + `TELEGRAM_PROXY` values for RU
+network are documented in `/home/taximeter/mysite/formula_tela_dev/.env`
+(ssh to the host and read with care — that file contains live secrets).
+Copy the proxy values into the new dev `.env` for ai-bot-platform-dev;
+do NOT copy any other secrets (DB password, MAX_BOT_TOKEN, Django
+SECRET_KEY all need to be freshly generated for this isolation).
+
 ## One-time setup (operator, ~4-6 hours)
 
-### Step 1 — Create `@ai_bot_platform_dev` MAX-bot (10 min)
+### Step 1 — Create dev MAX-bot (10 min) — DONE
+
+✅ Bot created: `@id583403546770_1_bot` (the username MAX assigned).
+Token stored in operator's secret manager (1Password / equivalent).
+
+For future re-creation if needed:
 
 1. Open https://botapi.max.ru (or the MAX bot creator UI)
 2. Sign in as the platform team member
-3. Create a new bot: `@ai_bot_platform_dev`
-4. Copy the token; store in 1Password under `ops vault → MAX_BOT_TOKEN_DEV`
+3. Create a new bot — MAX assigns the `@id...` username automatically
+4. Copy the token; store in 1Password under `ops vault → MAX_BOT_TOKEN_DEV`.
+   **NEVER paste the token into chat, code, or this doc** — it goes
+   straight from the MAX UI to 1Password to the server's `.env`.
 5. **Do NOT** configure a webhook yet — we set it after the dev instance
    is reachable
 
@@ -202,14 +231,25 @@ sudo nginx -t && sudo systemctl reload nginx
 ### Step 6 — Wire MAX webhook to dev (5 min)
 
 ```bash
-# Via curl (replace token):
-curl "https://botapi.max.ru/setWebhook?access_token=<MAX_BOT_TOKEN_DEV>" \
+# Via curl — paste token from 1Password ad-hoc, do NOT echo to chat history.
+# Use a heredoc + env var to keep the token out of bash history:
+read -s MAX_BOT_TOKEN_DEV
+echo  # newline after secret prompt
+
+curl "https://botapi.max.ru/setWebhook?access_token=$MAX_BOT_TOKEN_DEV" \
   -d "url=https://dev.app.penza.taxi/api/maxbot/webhook/" \
   -d "secret=<X-Max-Bot-Api-Secret value matching dev .env>"
+
+unset MAX_BOT_TOKEN_DEV
 ```
 
-Smoke: open `@ai_bot_platform_dev` in MAX, send `/start`. Bot should
-respond as the prod bot does but using dev data.
+Smoke: open **`@id583403546770_1_bot`** in MAX, send `/start`. Bot
+should respond as the prod bot does but using dev data.
+
+Note: MAX assigns numeric usernames (`@id<digits>_<n>_bot`) — the
+bot doesn't have a custom display name yet. To set a display name +
+description (helpful UX even for a dev bot), use the bot's settings
+in the MAX bot creator panel.
 
 ### Step 7 — Configure GitHub secrets (10 min)
 
