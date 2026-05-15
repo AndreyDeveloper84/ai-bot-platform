@@ -57,4 +57,14 @@ class SkillsConfig(AppConfig):
         # gives a cold "не могу с заказом". Cheap regex, no network.
         from apps.skills.food_clarify import skill as _food_clarify  # noqa: F401
         from apps.skills.faq import skill as _faq  # noqa: F401
+
+        # Phase 1 / B3 (DRF-839) — booking skill: LLM-tool-use flow over
+        # 4 YClients-backed tools. Registers AFTER faq because the FAQ
+        # keyword fallback would otherwise swallow questions like
+        # "сколько стоит запись" before the booking intent classifier
+        # gets a chance. In production both gate on ctx.intent and the
+        # order is moot; the legacy keyword fallback drives this
+        # ordering only.
+        from apps.skills.booking import skill as _booking  # noqa: F401
+
         from apps.skills.echo import skill as _echo  # noqa: F401
