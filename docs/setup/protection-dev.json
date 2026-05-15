@@ -1,0 +1,13 @@
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": ["ci / pytest + ruff + mypy", "replay / replay regression gate"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "required_linear_history": false,
+  "allow_force_pushes": true,
+  "allow_deletions": false,
+  "required_conversation_resolution": false
+}
