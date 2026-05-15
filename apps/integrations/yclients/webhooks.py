@@ -108,6 +108,7 @@ logger = logging.getLogger(__name__)
 
 _EVENT_BOOKING_CREATED_FROM_YCLIENTS_ADMIN = "booking_created_from_yclients_admin"
 
+
 # Always-200 ack. JSON body returned regardless of internal outcome.
 def _ack(status: str, **extra: object) -> JsonResponse:
     body: dict[str, object] = {"status": status, **extra}
@@ -175,7 +176,9 @@ def _dispatch(request: HttpRequest) -> JsonResponse:
             payload={
                 "reason": "tenant_unresolved",
                 "configured_slug": getattr(
-                    settings, "YCLIENTS_WEBHOOK_TENANT_SLUG", "",
+                    settings,
+                    "YCLIENTS_WEBHOOK_TENANT_SLUG",
+                    "",
                 ),
             },
         )
@@ -217,8 +220,7 @@ def _resolve_tenant(payload: dict[str, Any]) -> Tenant | None:
     slug = getattr(settings, "YCLIENTS_WEBHOOK_TENANT_SLUG", "") or ""
     if not slug:
         logger.warning(
-            "yclients_webhook: YCLIENTS_WEBHOOK_TENANT_SLUG not set — "
-            "receiver is dormant",
+            "yclients_webhook: YCLIENTS_WEBHOOK_TENANT_SLUG not set — receiver is dormant",
         )
         return None
     return Tenant.all_objects.filter(slug=slug, is_active=True).first()
@@ -404,12 +406,10 @@ def _handle_create(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
     # is small and the audit log catches the duplicate if it ever
     # happens.
     yc_marker = f"yclients_record_id={yc_id}"
-    booking = (
-        BookingRequest.objects.filter(
-            bot_user=bot_user,
-            comment__contains=yc_marker,
-        ).first()
-    )
+    booking = BookingRequest.objects.filter(
+        bot_user=bot_user,
+        comment__contains=yc_marker,
+    ).first()
     if booking is None:
         booking = BookingRequest.objects.create(
             tenant=tenant,
@@ -417,11 +417,7 @@ def _handle_create(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
             category_name="",
             service_name=service_name or "—",
             master_name=master_name or "—",
-            client_name=(
-                str(client.get("name") or "")
-                or bot_user.client_name
-                or "Client"
-            ),
+            client_name=(str(client.get("name") or "") or bot_user.client_name or "Client"),
             client_phone=phone or bot_user.phone or "",
             comment=f"YClients admin booking | {yc_marker}",
             source="yclients_admin",
@@ -507,7 +503,9 @@ def _handle_create(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
     )
     logger.info(
         "yclients_webhook.create: yc=%s booking=%s bot_user=%s",
-        yc_id, booking.id, bot_user.id,
+        yc_id,
+        booking.id,
+        bot_user.id,
     )
     return {
         "status": "created",
@@ -607,7 +605,8 @@ def _handle_update(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
     )
     logger.info(
         "yclients_webhook.update: yc=%s new_visit_at=%s",
-        yc_id, new_visit_at.isoformat(),
+        yc_id,
+        new_visit_at.isoformat(),
     )
     return {
         "status": "updated",
@@ -638,7 +637,9 @@ def _handle_delete(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
         payload={"yclients_record_id": yc_id, "cancelled": count},
     )
     logger.info(
-        "yclients_webhook.delete: yc=%s cancelled=%d", yc_id, count,
+        "yclients_webhook.delete: yc=%s cancelled=%d",
+        yc_id,
+        count,
     )
     return {
         "status": "deleted",

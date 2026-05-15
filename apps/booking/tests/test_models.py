@@ -113,9 +113,7 @@ class TestBookingReminder:
             )
         assert rem.status == BookingReminder.Status.PENDING
 
-    def test_unique_together_yclients_id_kind(
-        self, tenant_a: Tenant, bot_user_a: BotUser
-    ) -> None:
+    def test_unique_together_yclients_id_kind(self, tenant_a: Tenant, bot_user_a: BotUser) -> None:
         """The idempotency cornerstone — same (yc_id, kind) pair twice fails."""
         visit_at = timezone.now() + timedelta(days=1)
         BookingReminder.all_tenants.create(

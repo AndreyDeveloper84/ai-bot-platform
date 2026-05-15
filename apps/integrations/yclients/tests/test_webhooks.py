@@ -132,9 +132,7 @@ class TestCreateEvent:
     def test_create_persists_booking_and_two_reminders(
         self, client: Client, tenant: Tenant, bot_user: BotUser
     ) -> None:
-        with patch(
-            "apps.integrations.yclients.webhooks.emit"
-        ) as emit_mock:
+        with patch("apps.integrations.yclients.webhooks.emit") as emit_mock:
             resp = _post(client, _payload_create())
 
         assert resp.status_code == 200
@@ -165,12 +163,8 @@ class TestCreateEvent:
             assert r.chat_id == "chat-111"
 
         # Scheduled offsets correct.
-        day_before = next(
-            r for r in rems if r.kind == BookingReminder.Kind.DAY_BEFORE
-        )
-        two_hours = next(
-            r for r in rems if r.kind == BookingReminder.Kind.TWO_HOURS
-        )
+        day_before = next(r for r in rems if r.kind == BookingReminder.Kind.DAY_BEFORE)
+        two_hours = next(r for r in rems if r.kind == BookingReminder.Kind.TWO_HOURS)
         delta_day = day_before.visit_at - day_before.scheduled_at
         delta_two = two_hours.visit_at - two_hours.scheduled_at
         assert delta_day == timedelta(hours=24)
@@ -197,9 +191,7 @@ class TestCreateEvent:
         assert BookingRequest.all_tenants.count() == 1
         assert BookingReminder.all_tenants.count() == 2
 
-    def test_no_bot_user_match_returns_200_with_audit(
-        self, client: Client, tenant: Tenant
-    ) -> None:
+    def test_no_bot_user_match_returns_200_with_audit(self, client: Client, tenant: Tenant) -> None:
         # No BotUser exists for this phone.
         resp = _post(client, _payload_create(phone="+78889999999"))
 
@@ -357,9 +349,7 @@ class TestAlwaysReturns200:
         )
         assert resp.status_code == 200
 
-    def test_unknown_resource_returns_200_ignored(
-        self, client: Client, tenant: Tenant
-    ) -> None:
+    def test_unknown_resource_returns_200_ignored(self, client: Client, tenant: Tenant) -> None:
         resp = _post(client, {"resource": "client", "status": "create"})
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"

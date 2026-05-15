@@ -251,8 +251,7 @@ class BookingReminder(models.Model):
         db_index=True,
     )
     scheduled_at = models.DateTimeField(
-        help_text="When this reminder should fire (visit_at minus 24h "
-        "or 2h depending on `kind`).",
+        help_text="When this reminder should fire (visit_at minus 24h or 2h depending on `kind`).",
     )
     sent_at = models.DateTimeField(null=True, blank=True)
     replied_at = models.DateTimeField(null=True, blank=True)
@@ -279,7 +278,4 @@ class BookingReminder(models.Model):
         ]
 
     def __str__(self) -> str:
-        return (
-            f"{self.get_kind_display()} {self.master_name} "
-            f"{self.visit_at:%d.%m %H:%M}"
-        )
+        return f"{self.get_kind_display()} {self.master_name} {self.visit_at:%d.%m %H:%M}"
