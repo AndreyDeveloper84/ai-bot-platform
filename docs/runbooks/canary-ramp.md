@@ -30,6 +30,35 @@ trigger fires automatically when any criterion breaches.
 
 ---
 
+## Pre-flight: dev-bot soak (Sprint 10 / DRF-891)
+
+Before any X-bump (5% → 25% → 50% → 100%), the code on `main` MUST have
+spent **≥24 consecutive hours on the dev-bot** (`@ai_bot_platform_dev`)
+with no fresh Sentry events, no failed `smoke_alert` runs, and no
+`tenant_scope_violation` audit rows.
+
+Why: the X-criteria below catch regressions **after** they hit real
+users. The dev-bot soak catches them **before**. If the criteria are
+the rollback safety net, the dev-bot is the validation gate — they
+serve different stages of defense in depth.
+
+How to verify:
+* `git log dev..main` should be empty (or only the merge commit) — i.e.
+  every commit on `main` is already on `dev`.
+* `git log -1 --format=%cI main` ≥ 24h ago (the merge commit's time).
+* Dev-bot audit log: `AuditLog.all_tenants.filter(action__startswith="observability.alert", created_at__gte=now-timedelta(hours=24)).count()` is 0 OR all such rows are explainable.
+* Manual smoke: at least one operator-issued message to
+  `@ai_bot_platform_dev` in the last 24h produced a valid response.
+
+If any of these fail: pause the X-bump; merge fresh code to `dev`
+first; re-time the 24h soak from the new merge.
+
+Hotfix exception: a `hotfix`-labeled PR may bypass the 24h soak with
+explicit Lead approval, but **still** requires ≥15 min on dev-bot.
+The bypass is logged in the PR body as the audit trail.
+
+---
+
 ## The five criteria — ALL must be green
 
 Each criterion has a precise measurement. No subjective evaluation.
