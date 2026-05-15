@@ -156,6 +156,17 @@ MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
+# Phase 1 / B1 (DRF-837) — YClients booking API.
+# Single-tenant: env-based credentials. Per-tenant encrypted storage on
+# Tenant is a follow-up (requires a migration). Empty defaults keep the
+# integration dormant until configured; ``get_yclients_client()`` raises
+# loudly on first use when env is missing. NOT enforced in production.py's
+# _REQUIRED_ENV_VARS — non-YClients tenants must still boot clean.
+YCLIENTS_PARTNER_TOKEN = os.environ.get("YCLIENTS_PARTNER_TOKEN", "")
+YCLIENTS_USER_TOKEN = os.environ.get("YCLIENTS_USER_TOKEN", "")
+YCLIENTS_COMPANY_ID = os.environ.get("YCLIENTS_COMPANY_ID", "")
+YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.com/api/v1")
+
 # Sprint 2 / E2 — admin chat for breaker state-transition alerts.
 # Empty (default) → telegram_alert is a no-op. Set to the operator's
 # MAX chat id to receive 🚨 messages on breaker open/close.
