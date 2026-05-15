@@ -1,16 +1,81 @@
 # Branch protection rules — `main` + `dev`
 
 > Sprint 10 / DRF-891 task 3 — operator setup procedure.
-> Status: ready to apply. Run the `gh api` commands below from a shell
-> authenticated as repo owner OR set the rules via the GitHub UI.
 
-## Why we need this
+## Phase 0 state: GitHub-side protection deferred
+
+GitHub branch protection (both the legacy "Branch protection rules" and
+the newer "Repository rulesets" APIs) **requires GitHub Pro on private
+repositories**. Tested 2026-05-15 — both endpoints return
+`HTTP 403: Upgrade to GitHub Pro or make this repository public`.
+
+For Phase 0 (1-person team, no real MAX traffic yet) we use **local
+soft enforcement** via `.githooks/pre-push` instead. Strategy detailed
+in [§ Local soft enforcement](#local-soft-enforcement) below.
+
+### When to revisit (Phase 1 triggers)
+
+Switch to GitHub-side enforcement when **any** of:
+
+* 2nd human joins the team (single-author dev discipline ≠ team workflow)
+* Sprint 10 X-5pct goes live (real traffic = real cost of `main` mistakes)
+* Repo goes public (rules free) — requires history audit for secrets first
+
+At that point, pick one:
+* **GitHub Pro ($4/mo per user)** — runs the `gh api` commands below as-is
+* **Public repo** — same commands work for free; do history audit first
+
+The JSON payloads in `protection-main.json` + `protection-dev.json` are
+ready when that day comes; the commands below work as-is once we have
+Pro or repo is public.
+
+## Why we need this (eventually)
 
 Before Sprint 10 X-5pct (5% of real MAX traffic), every merge to `main`
 must go through dev validation. Branch protection enforces this at the
 GitHub level so nobody can accidentally `git push` straight to `main`.
 
-Without this, the dev-flow we set up is a convention, not a guarantee.
+Without GitHub-side protection, the dev-flow is a convention enforced
+by `pre-push` hook + Lead discipline + PR review.
+
+## Local soft enforcement
+
+Phase 0 substitute for GitHub-side protection. Lives in
+`.githooks/pre-push`. Activation is **one-time per clone**:
+
+```
+git config core.hooksPath .githooks
+```
+
+After that, attempting `git push origin main` fails locally with a
+clear message before the network call. Workflow:
+
+```
+feat/*  →  PR  →  dev  →  PR  →  main
+```
+
+### What the hook catches
+
+* `git push origin main` when on main
+* Direct cross-branch push targeting `refs/heads/main`
+
+### What the hook does NOT catch
+
+* `git push --no-verify` (explicit bypass — emergency hotfix path)
+* Web UI merges on GitHub (those don't fire local hooks)
+* Pushes from a clone where the hook isn't activated (anyone running
+  the project must run the activation command above; document this in
+  onboarding)
+
+### Bypass (for genuine emergencies)
+
+```
+git push --no-verify origin main
+```
+
+Document the bypass in the commit message + Telegram admin chat so
+the audit trail is clear. Per `on-call.md`, treat any `--no-verify`
+push as a Sev2 process-violation event.
 
 ## Target state
 
@@ -22,12 +87,96 @@ Without this, the dev-flow we set up is a convention, not a guarantee.
 `dev` allows direct push for the Lead because the whole point of dev is
 to be a fast-iteration playground. PR-only on dev would defeat that.
 
-## Apply via `gh api` (recommended)
+## Apply via `gh api` — portable across cmd / PowerShell / bash
 
-These commands require the `gh` CLI authenticated as repo admin. The
-rules take effect immediately.
+The rule payload lives in two JSON files in this folder:
+
+* `docs/setup/protection-main.json`
+* `docs/setup/protection-dev.json`
+
+This avoids shell-specific heredoc syntax (which doesn't work in
+Windows `cmd.exe` or PowerShell). Pass the file via `--input <path>`.
+The commands below work identically in any shell.
 
 ### Protect `main`
+
+From the repo root:
+
+```
+gh api -X PUT repos/AndreyDeveloper84/ai-bot-platform/branches/main/protection --input docs/setup/protection-main.json
+```
+
+### Protect `dev`
+
+```
+gh api -X PUT repos/AndreyDeveloper84/ai-bot-platform/branches/dev/protection --input docs/setup/protection-dev.json
+```
+
+### Rule payload contents (for reference)
+
+`protection-main.json`:
+
+```json
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["ci / pytest + ruff + mypy", "replay / replay regression gate"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false
+  },
+  "restrictions": null,
+  "required_linear_history": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_conversation_resolution": true
+}
+```
+
+`protection-dev.json`:
+
+```json
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": ["ci / pytest + ruff + mypy", "replay / replay regression gate"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "required_linear_history": false,
+  "allow_force_pushes": true,
+  "allow_deletions": false,
+  "required_conversation_resolution": false
+}
+```
+
+### Why each field matters
+
+- `enforce_admins: false` — Lead can still force-merge during
+  emergencies (e.g. critical security patch). Set to `true` once the
+  team has 2+ humans in Phase 1.
+- `required_linear_history: true` (main) forces squash-or-rebase merges
+  (no merge commits cluttering main).
+- `dismiss_stale_reviews: true` (main) — re-approval needed if more
+  commits land after the approval. Otherwise a "approved + then I
+  sneak in a bad commit" pattern is possible.
+- `required_pull_request_reviews: null` (dev) — no PR required, Lead
+  can direct-push for fast iteration.
+- `allow_force_pushes: true` (dev) — dev is allowed to be force-pushed
+  (rebase + reset workflows). `main` is not.
+- CI/replay still required on every push to dev so a broken dev branch
+  can't poison the dev MAX-bot.
+
+### bash heredoc alternative (Linux/macOS/Git-Bash only)
+
+If you prefer to inline the JSON and you're in a POSIX shell:
+
+<details>
+<summary>Click to expand bash heredoc form</summary>
 
 ```bash
 gh api -X PUT repos/AndreyDeveloper84/ai-bot-platform/branches/main/protection \
@@ -52,18 +201,6 @@ gh api -X PUT repos/AndreyDeveloper84/ai-bot-platform/branches/main/protection \
 JSON
 ```
 
-Notes:
-- `enforce_admins: false` — Lead can still force-merge during
-  emergencies (e.g. critical security patch). Set to `true` once the
-  team has 2+ humans in Phase 1.
-- `required_linear_history: true` forces squash-or-rebase merges (no
-  merge commits cluttering main).
-- `dismiss_stale_reviews: true` — re-approval needed if more commits
-  land after the approval. Otherwise a "approved + then I sneak in a
-  bad commit" pattern is possible.
-
-### Protect `dev`
-
 ```bash
 gh api -X PUT repos/AndreyDeveloper84/ai-bot-platform/branches/dev/protection \
   --input - <<'JSON'
@@ -83,13 +220,11 @@ gh api -X PUT repos/AndreyDeveloper84/ai-bot-platform/branches/dev/protection \
 JSON
 ```
 
-Notes:
-- `required_pull_request_reviews: null` — no PR required, Lead can
-  direct-push for fast iteration.
-- `allow_force_pushes: true` — dev is allowed to be force-pushed
-  (rebase + reset workflows). `main` is not.
-- CI/replay still required on every push so a broken dev branch
-  can't poison the dev MAX-bot.
+Note: `<<'JSON'` and unterminated single-quoted strings are bash
+features. They will fail in `cmd.exe` and PowerShell. Use the
+`--input <file>` form above on Windows.
+
+</details>
 
 ## Apply via GitHub UI (fallback)
 

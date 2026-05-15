@@ -1,0 +1,47 @@
+#!/bin/sh
+# Block direct push to `main` — enforces dev-flow at the local git level.
+#
+# Sprint 10 / DRF-891 soft-enforcement layer. The GitHub-side branch
+# protection rules require GitHub Pro on private repos; we don't have it
+# at Phase 0, so this hook is the cheapest substitute for protection
+# against the most likely mistake: muscle-memory `git push origin main`.
+#
+# What this catches:
+#   - Direct `git push origin main` when you're on the main branch
+#   - Direct `git push origin <local>:main` cross-branch push
+#
+# What this does NOT catch:
+#   - Force-push (`git push --no-verify` bypasses hooks entirely)
+#   - Web UI merges (GitHub UI doesn't fire local hooks)
+#   - Direct pushes from another clone where the hook isn't activated
+#
+# Activation (one-time per clone):
+#   git config core.hooksPath .githooks
+#
+# Bypass (intentional, for genuine emergencies):
+#   git push --no-verify ...
+#
+# When this hook should die:
+#   When we upgrade to GitHub Pro OR make the repo public, the GitHub
+#   protection rules from docs/setup/protection-main.json take over.
+#   This hook stays as defense-in-depth but its primary role retires.
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$remote_ref" in
+        refs/heads/main)
+            echo "" >&2
+            echo "❌  Direct push to main blocked by .githooks/pre-push" >&2
+            echo "" >&2
+            echo "Required workflow:" >&2
+            echo "    feat/*  →  PR  →  dev  →  PR  →  main" >&2
+            echo "" >&2
+            echo "If this is an emergency (security hotfix), bypass with:" >&2
+            echo "    git push --no-verify origin main" >&2
+            echo "And note the bypass in the commit message + on-call channel." >&2
+            echo "" >&2
+            exit 1
+            ;;
+    esac
+done
+
+exit 0
