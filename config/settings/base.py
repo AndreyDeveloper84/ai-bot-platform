@@ -257,6 +257,19 @@ CELERY_BEAT_SCHEDULE = {
         "task": "bookings.send_due_reminders",
         "schedule": crontab(minute="*/15"),
     },
+    # Phase 1 / R2 (DRF-845) — escalate stale T-24h reminders to the
+    # salon manager. Runs hourly on the hour: picks
+    # DAY_BEFORE/SENT_NO_REPLY rows where the visit is < 12h away, flips
+    # them to ESCALATED via compare-and-set, and posts a plain-text
+    # alert (no buttons) to the tenant's manager_chat_id. The hourly
+    # cadence matches the operational tempo — managers don't need to
+    # see the alert in < 60 min for a phone call that's still within
+    # the 12h window. T-2h reminders are deliberately NOT escalated:
+    # they fire too late for the manager to phone before the visit.
+    "bookings.escalate_stale_reminders": {
+        "task": "bookings.escalate_stale_reminders",
+        "schedule": crontab(minute="0"),
+    },
 }
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter

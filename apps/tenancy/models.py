@@ -116,6 +116,27 @@ class Tenant(models.Model):
         ),
     )
 
+    # Phase 1 / R2 (DRF-845) — destination chat for stale-reminder
+    # escalation. The hourly escalate_stale_reminders beat posts a
+    # plain-text alert here when a T-24h DAY_BEFORE reminder is in
+    # SENT_NO_REPLY state and the visit is < 12h away (the client never
+    # tapped a button and time is running out for the salon manager to
+    # phone them). ``blank=True`` because existing tenants pre-date the
+    # feature and the beat tolerates an empty value as a soft no-op
+    # (status still flips to ESCALATED — terminal regardless — but no
+    # MAX message is sent and a WARN is logged).
+    manager_chat_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text=(
+            "MAX chat_id of the salon manager who receives escalation "
+            "alerts for T-24h reminders the client never replied to. "
+            "Empty disables escalation for the tenant; status still "
+            "flips to ESCALATED but no outbound message is dispatched."
+        ),
+    )
+
     # Sprint 7 / C4 (DRF-575) — cursor for the catalog sync orchestrator.
     # NULL = full-resync on the next beat (initial bootstrap or admin
     # force-clear). Sync service writes the upstream `updated_at` of the
