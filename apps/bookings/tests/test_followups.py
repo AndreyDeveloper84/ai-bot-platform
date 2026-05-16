@@ -1,0 +1,698 @@
+"""Post-visit follow-up beat tests (DRF-846 / Phase 1 / R3).
+
+Covers the 12 spec behaviours plus a few defensive cases:
+
+1. Happy path — yesterday's visit → message sent + context bumped.
+2. Yesterday 23:59 МСК edge — still included.
+3. Day-before-yesterday excluded.
+4. Today excluded.
+5. CANCELLED reminder excluded.
+6. Dedup — two reminders for same visit → one message.
+7. Idempotency: already sent today → skip.
+8. Idempotency: sent yesterday → proceed.
+9. Idempotency: missing context → proceed.
+10. MAX send failure → no context bump, audit'd.
+11. Multi-tenant fan-out — per-tenant, no leak.
+12. No chat_id → skip with WARN.
+
+Plus defensive cases: empty queue, race-condition tolerance, batch
+limit, MSK midnight rollover.
+
+Time handling: tests freeze ``timezone.now`` at a known UTC moment so
+the "yesterday MSK" window math is deterministic. The MSK day window
+helper is exercised directly via fixtures that construct ``visit_at``
+relative to the frozen now.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone as dt_timezone
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from apps.booking.models import BookingReminder
+from apps.bookings import followups as followups_mod
+from apps.bookings.followups import (
+    CONTEXT_KEY,
+    send_post_visit_followups,
+)
+from apps.channels.max.outbound import MaxAPIError
+from apps.identity.models import BotUser
+from apps.tenancy.models import Tenant
+
+
+pytestmark = pytest.mark.django_db
+
+
+MSK = ZoneInfo("Europe/Moscow")
+
+# Frozen "now" = 2026-05-16 19:00 МСК = 2026-05-16 16:00 UTC.
+# This is exactly the beat fire moment per the schedule, which makes
+# the window math easy to reason about:
+#   yesterday MSK = 2026-05-15
+#   yesterday MSK window UTC = [2026-05-14 21:00, 2026-05-15 21:00)
+NOW_MSK = datetime(2026, 5, 16, 19, 0, tzinfo=MSK)
+NOW_UTC = NOW_MSK.astimezone(dt_timezone.utc)
+YESTERDAY_MSK_DATE = NOW_MSK.date() - timedelta(days=1)  # 2026-05-15
+TODAY_MSK_ISO = NOW_MSK.date().isoformat()  # "2026-05-16"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_now():
+    """Freeze ``timezone.now`` at NOW_UTC for deterministic window math.
+
+    Patching ``django.utils.timezone.now`` rather than the followups
+    module's own reference because the helper calls ``timezone.now()``
+    via the module-level import.
+    """
+    with patch("apps.bookings.followups.timezone.now", return_value=NOW_UTC):
+        yield
+
+
+def _msk(year: int, month: int, day: int, hour: int = 12, minute: int = 0) -> datetime:
+    """Helper — build a MSK datetime cast to UTC for visit_at."""
+    return datetime(year, month, day, hour, minute, tzinfo=MSK).astimezone(dt_timezone.utc)
+
+
+@pytest.fixture
+def tenant(db) -> Tenant:
+    return Tenant.objects.create(
+        slug="rem-fu",
+        name="Salon Follow-up",
+    )
+
+
+@pytest.fixture
+def bot_user(tenant: Tenant) -> BotUser:
+    return BotUser.all_tenants.create(
+        tenant=tenant,
+        channel="max",
+        channel_user_id="bu-fu-1",
+        chat_id="chat-fu-1",
+        phone="79991234567",
+        client_name="Anna",
+        context={},
+    )
+
+
+def _make_reminder(
+    *,
+    tenant: Tenant,
+    bot_user: BotUser,
+    visit_at,
+    yc_id: str = "yc-fu",
+    kind: str = BookingReminder.Kind.DAY_BEFORE,
+    status: str = BookingReminder.Status.SENT,
+    master_name: str = "Lera",
+) -> BookingReminder:
+    """Helper — create a BookingReminder with sensible defaults.
+
+    ``scheduled_at`` is computed from visit_at to match the factory
+    convention (T-24h or T-2h ahead of the visit).
+    """
+    if kind == BookingReminder.Kind.DAY_BEFORE:
+        scheduled_at = visit_at - timedelta(hours=24)
+    else:
+        scheduled_at = visit_at - timedelta(hours=2)
+    return BookingReminder.all_tenants.create(
+        tenant=tenant,
+        bot_user=bot_user,
+        yclients_record_id=yc_id,
+        chat_id=bot_user.chat_id,
+        visit_at=visit_at,
+        kind=kind,
+        status=status,
+        scheduled_at=scheduled_at,
+        master_name=master_name,
+        service_name="Массаж",
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
+# 1. Happy path
+# ────────────────────────────────────────────────────────────────────
+class TestHappyPath:
+    def test_yesterday_visit_sends_followup(self, tenant: Tenant, bot_user: BotUser) -> None:
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),  # yesterday 14:00 MSK
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+
+        assert result["sent"] == 1
+        assert result["skipped_already_sent"] == 0
+        assert result["skipped_no_chat_id"] == 0
+        assert result["send_failed"] == 0
+
+        assert mock_send.call_count == 1
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs["chat_id"] == "chat-fu-1"
+        assert kwargs["attachments"] is None
+        text = kwargs["text"]
+        # Copy should mention "вчерашний визит" + the master name.
+        assert "вчерашний визит" in text
+        assert "Lera" in text
+
+        # Idempotency key bumped.
+        bot_user.refresh_from_db()
+        assert bot_user.context[CONTEXT_KEY] == TODAY_MSK_ISO
+
+    def test_master_name_blank_uses_fallback_in_copy(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+            master_name="",
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            send_post_visit_followups()
+        text = mock_send.call_args.kwargs["text"]
+        # No empty "к " — uses the fallback word.
+        assert "к мастеру" in text or "мастеру" in text
+
+
+# ────────────────────────────────────────────────────────────────────
+# 2. Yesterday-window edges
+# ────────────────────────────────────────────────────────────────────
+class TestYesterdayWindowEdges:
+    def test_yesterday_23_59_msk_included(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # Visit at the very last minute of yesterday MSK — still in window.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 23, 59),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+
+    def test_yesterday_00_00_msk_included(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # First instant of yesterday MSK is the inclusive start.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 0, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+
+
+# ────────────────────────────────────────────────────────────────────
+# 3. Day-before-yesterday excluded
+# ────────────────────────────────────────────────────────────────────
+class TestDayBeforeYesterdayExcluded:
+    def test_two_days_ago_not_sent(self, tenant: Tenant, bot_user: BotUser) -> None:
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 14, 14, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        mock_send.assert_not_called()
+
+    def test_yesterday_minus_one_second_excluded(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # 2026-05-14 23:59:59 MSK — last second BEFORE yesterday-start.
+        # (Yesterday-start = 2026-05-15 00:00 MSK exactly.)
+        visit_at = datetime(2026, 5, 14, 23, 59, 59, tzinfo=MSK).astimezone(dt_timezone.utc)
+        _make_reminder(tenant=tenant, bot_user=bot_user, visit_at=visit_at)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        mock_send.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────
+# 4. Today's visit excluded
+# ────────────────────────────────────────────────────────────────────
+class TestTodayExcluded:
+    def test_today_visit_not_sent(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # Today's visit hasn't happened yet at 19:00 MSK fire time (or
+        # is happening right now); either way it's not "yesterday's".
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 16, 10, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        mock_send.assert_not_called()
+
+    def test_today_00_00_msk_excluded(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # End-exclusive boundary — today 00:00 MSK is the first instant
+        # OUTSIDE the yesterday window.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 16, 0, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        mock_send.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────
+# 5. CANCELLED reminder excluded
+# ────────────────────────────────────────────────────────────────────
+class TestCancelledExcluded:
+    def test_cancelled_reminder_no_followup(self, tenant: Tenant, bot_user: BotUser) -> None:
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+            status=BookingReminder.Status.CANCELLED,
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        mock_send.assert_not_called()
+        # Context untouched.
+        bot_user.refresh_from_db()
+        assert CONTEXT_KEY not in (bot_user.context or {})
+
+    def test_cancelled_one_of_two_falls_back_to_other(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        # If the DAY_BEFORE row was cancelled but TWO_HOURS still SENT,
+        # the visit did happen — TWO_HOURS row alone yields one nudge.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+            yc_id="yc-cx-1",
+            kind=BookingReminder.Kind.DAY_BEFORE,
+            status=BookingReminder.Status.CANCELLED,
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+            yc_id="yc-cx-2",
+            kind=BookingReminder.Kind.TWO_HOURS,
+            status=BookingReminder.Status.SENT,
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+
+
+# ────────────────────────────────────────────────────────────────────
+# 6. Dedup — one client, two reminders → one message
+# ────────────────────────────────────────────────────────────────────
+class TestDedup:
+    def test_two_reminders_one_visit_one_message(self, tenant: Tenant, bot_user: BotUser) -> None:
+        visit_at = _msk(2026, 5, 15, 14, 0)
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=visit_at,
+            yc_id="yc-dedup-1",
+            kind=BookingReminder.Kind.DAY_BEFORE,
+            status=BookingReminder.Status.SENT,
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=visit_at,
+            yc_id="yc-dedup-2",
+            kind=BookingReminder.Kind.TWO_HOURS,
+            status=BookingReminder.Status.SENT,
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        # Exactly one nudge, not two.
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+
+
+# ────────────────────────────────────────────────────────────────────
+# 7-9. Idempotency
+# ────────────────────────────────────────────────────────────────────
+class TestIdempotency:
+    def test_already_sent_today_skipped(self, tenant: Tenant, bot_user: BotUser) -> None:
+        bot_user.context = {CONTEXT_KEY: TODAY_MSK_ISO}
+        bot_user.save()
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        assert result["skipped_already_sent"] == 1
+        mock_send.assert_not_called()
+
+    def test_sent_yesterday_proceeds(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # A "last_followup_sent_at" from yesterday is stale — proceed
+        # and overwrite with today's date.
+        bot_user.context = {CONTEXT_KEY: YESTERDAY_MSK_DATE.isoformat()}
+        bot_user.save()
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+        bot_user.refresh_from_db()
+        assert bot_user.context[CONTEXT_KEY] == TODAY_MSK_ISO
+
+    def test_missing_context_key_proceeds(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # Context dict exists but doesn't have the key.
+        bot_user.context = {"some_other_flag": True}
+        bot_user.save()
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+        bot_user.refresh_from_db()
+        assert bot_user.context[CONTEXT_KEY] == TODAY_MSK_ISO
+        # Pre-existing keys preserved.
+        assert bot_user.context["some_other_flag"] is True
+
+    def test_none_context_tolerated(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # Defensive: even though the column is NOT NULL (default=dict),
+        # the helper must tolerate a None attribute on the in-memory
+        # instance (e.g. a select_related cache miss, a corrupted ORM
+        # load, or future schema relaxation). We exercise the helper
+        # directly to assert it doesn't crash, then verify the full
+        # path with an empty-dict context (the JSONField-NOT-NULL
+        # equivalent).
+        from apps.bookings.followups import _already_followed_up_today
+
+        assert _already_followed_up_today(None, NOW_MSK.date()) is False
+
+        # Now exercise the full task path with the default empty {}.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+        bot_user.refresh_from_db()
+        assert bot_user.context == {CONTEXT_KEY: TODAY_MSK_ISO}
+
+    def test_malformed_context_value_treated_as_unset(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        # A non-string stored value (legacy bug — e.g. someone wrote a
+        # timestamp int) shouldn't crash the comparison. Treat as
+        # "never sent" and proceed.
+        bot_user.context = {CONTEXT_KEY: 1234567890}  # int, not str
+        bot_user.save()
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 1
+        assert mock_send.call_count == 1
+
+
+# ────────────────────────────────────────────────────────────────────
+# 10. Send failure — no context bump
+# ────────────────────────────────────────────────────────────────────
+class TestSendFailure:
+    def test_max_api_error_no_context_bump(self, tenant: Tenant, bot_user: BotUser) -> None:
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with patch(
+            "apps.bookings.followups.send_message",
+            side_effect=MaxAPIError(503, "service unavailable"),
+        ):
+            result = send_post_visit_followups()
+        assert result["send_failed"] == 1
+        assert result["sent"] == 0
+        bot_user.refresh_from_db()
+        # Idempotency key NOT bumped — next day's run can retry.
+        assert CONTEXT_KEY not in (bot_user.context or {})
+
+    def test_unexpected_exception_no_context_bump(
+        self, tenant: Tenant, bot_user: BotUser, caplog
+    ) -> None:
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with (
+            patch(
+                "apps.bookings.followups.send_message",
+                side_effect=RuntimeError("boom"),
+            ),
+            caplog.at_level(logging.ERROR, logger="apps.bookings.followups"),
+        ):
+            result = send_post_visit_followups()
+        assert result["send_failed"] == 1
+        bot_user.refresh_from_db()
+        assert CONTEXT_KEY not in (bot_user.context or {})
+        # log.exception fired.
+        assert any("send_unexpected" in rec.getMessage() for rec in caplog.records)
+
+
+# ────────────────────────────────────────────────────────────────────
+# 11. Multi-tenant fan-out
+# ────────────────────────────────────────────────────────────────────
+class TestMultiTenant:
+    def test_each_tenant_gets_own_message(self, db) -> None:
+        t1 = Tenant.objects.create(slug="salon-fu-a", name="Salon A")
+        t2 = Tenant.objects.create(slug="salon-fu-b", name="Salon B")
+        bu1 = BotUser.all_tenants.create(
+            tenant=t1,
+            channel="max",
+            channel_user_id="bu-fu-a",
+            chat_id="cli-A",
+            phone="79990000001",
+            client_name="Alice",
+            context={},
+        )
+        bu2 = BotUser.all_tenants.create(
+            tenant=t2,
+            channel="max",
+            channel_user_id="bu-fu-b",
+            chat_id="cli-B",
+            phone="79990000002",
+            client_name="Bob",
+            context={},
+        )
+        _make_reminder(
+            tenant=t1,
+            bot_user=bu1,
+            visit_at=_msk(2026, 5, 15, 12, 0),
+            yc_id="yc-mt-A",
+        )
+        _make_reminder(
+            tenant=t2,
+            bot_user=bu2,
+            visit_at=_msk(2026, 5, 15, 15, 0),
+            yc_id="yc-mt-B",
+        )
+
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+
+        assert result["sent"] == 2
+        assert mock_send.call_count == 2
+        chat_ids = {call.kwargs["chat_id"] for call in mock_send.call_args_list}
+        assert chat_ids == {"cli-A", "cli-B"}
+
+        bu1.refresh_from_db()
+        bu2.refresh_from_db()
+        assert bu1.context[CONTEXT_KEY] == TODAY_MSK_ISO
+        assert bu2.context[CONTEXT_KEY] == TODAY_MSK_ISO
+
+
+# ────────────────────────────────────────────────────────────────────
+# 12. No chat_id → skip + WARN
+# ────────────────────────────────────────────────────────────────────
+class TestNoChatId:
+    def test_empty_chat_id_skipped(self, tenant: Tenant, caplog) -> None:
+        bu = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="bu-no-chat",
+            chat_id="",  # empty — can't reach them
+            phone="79990000099",
+            client_name="No Reach",
+            context={},
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bu,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with (
+            patch("apps.bookings.followups.send_message") as mock_send,
+            caplog.at_level(logging.WARNING, logger="apps.bookings.followups"),
+        ):
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        assert result["skipped_no_chat_id"] == 1
+        mock_send.assert_not_called()
+        assert any("no_chat_id" in rec.getMessage() for rec in caplog.records)
+        # Context NOT bumped — a future re-link (e.g. client logs into a
+        # different channel) should let the follow-up fire later.
+        bu.refresh_from_db()
+        assert CONTEXT_KEY not in (bu.context or {})
+
+    def test_whitespace_only_chat_id_treated_as_empty(self, tenant: Tenant) -> None:
+        bu = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="bu-ws-chat",
+            chat_id="   ",
+            phone="79990000098",
+            client_name="WS",
+            context={},
+        )
+        _make_reminder(tenant=tenant, bot_user=bu, visit_at=_msk(2026, 5, 15, 14, 0))
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["skipped_no_chat_id"] == 1
+        mock_send.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────
+# Defensive — empty queue, batch limit, second run idempotent
+# ────────────────────────────────────────────────────────────────────
+class TestEmptyQueue:
+    def test_no_eligible_rows_returns_zero_counters(self, tenant: Tenant) -> None:
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result == {
+            "sent": 0,
+            "skipped_already_sent": 0,
+            "skipped_no_chat_id": 0,
+            "send_failed": 0,
+        }
+        mock_send.assert_not_called()
+
+
+class TestBatchLimit:
+    def test_batch_limit_enforced(self, tenant: Tenant) -> None:
+        # 5 distinct BotUsers, each with one yesterday-visit reminder.
+        for i in range(5):
+            bu = BotUser.all_tenants.create(
+                tenant=tenant,
+                channel="max",
+                channel_user_id=f"bu-batch-{i}",
+                chat_id=f"chat-batch-{i}",
+                phone=f"7999000{i:04d}",
+                client_name=f"Client {i}",
+                context={},
+            )
+            _make_reminder(
+                tenant=tenant,
+                bot_user=bu,
+                visit_at=_msk(2026, 5, 15, 10 + i, 0),
+                yc_id=f"yc-batch-{i}",
+            )
+        with (
+            patch.object(followups_mod, "BATCH_LIMIT", 2),
+            patch("apps.bookings.followups.send_message") as mock_send,
+        ):
+            result = send_post_visit_followups()
+        assert mock_send.call_count == 2
+        assert result["sent"] == 2
+
+
+class TestSecondRunIdempotent:
+    def test_second_run_same_day_is_noop(self, tenant: Tenant, bot_user: BotUser) -> None:
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            first = send_post_visit_followups()
+            second = send_post_visit_followups()
+        assert first["sent"] == 1
+        assert second["sent"] == 0
+        assert second["skipped_already_sent"] == 1
+        # Only the first run dispatched.
+        assert mock_send.call_count == 1
+
+
+class TestRaceCondition:
+    def test_concurrent_already_sent_value_blocks_second_worker(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Race scenario: worker A bumps context mid-flight; worker B
+        re-reads the BotUser inside the loop and finds the key already
+        set. We simulate by pre-setting the context just before the
+        send for the only row, then verifying the second invocation
+        is a no-op.
+
+        Strictly speaking this is the same as TestSecondRunIdempotent
+        — included as a separate test to document the intent.
+        """
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 14, 0),
+        )
+        # Simulate "the other worker already finished" by stamping the
+        # idempotency key before our run starts.
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(context={CONTEXT_KEY: TODAY_MSK_ISO})
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        assert result["sent"] == 0
+        assert result["skipped_already_sent"] == 1
+        mock_send.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────
+# MSK midnight rollover — direct check of window helper
+# ────────────────────────────────────────────────────────────────────
+class TestMoscowWindow:
+    def test_window_correctly_brackets_yesterday(self) -> None:
+        from apps.bookings.followups import _moscow_day_window
+
+        start_utc, end_utc, today_msk = _moscow_day_window(NOW_UTC)
+        # Yesterday start MSK = 2026-05-15 00:00 MSK = 2026-05-14 21:00 UTC.
+        assert start_utc == datetime(2026, 5, 14, 21, 0, tzinfo=dt_timezone.utc)
+        # Today start MSK = 2026-05-16 00:00 MSK = 2026-05-15 21:00 UTC.
+        assert end_utc == datetime(2026, 5, 15, 21, 0, tzinfo=dt_timezone.utc)
+        assert today_msk.isoformat() == TODAY_MSK_ISO
+
+    def test_window_at_msk_midnight(self) -> None:
+        from apps.bookings.followups import _moscow_day_window
+
+        # Run "now" at exactly 2026-05-16 00:00 MSK = 2026-05-15 21:00 UTC.
+        midnight_msk_as_utc = datetime(2026, 5, 15, 21, 0, tzinfo=dt_timezone.utc)
+        start_utc, end_utc, today_msk = _moscow_day_window(midnight_msk_as_utc)
+        # "Yesterday" should still be 2026-05-15 from midnight's
+        # perspective (we just rolled into 2026-05-16).
+        assert today_msk.isoformat() == "2026-05-16"
+        assert start_utc == datetime(2026, 5, 14, 21, 0, tzinfo=dt_timezone.utc)
+        assert end_utc == datetime(2026, 5, 15, 21, 0, tzinfo=dt_timezone.utc)

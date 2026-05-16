@@ -270,6 +270,21 @@ CELERY_BEAT_SCHEDULE = {
         "task": "bookings.escalate_stale_reminders",
         "schedule": crontab(minute="0"),
     },
+    # Phase 1 / R3 (DRF-846) — post-visit follow-up nudge. Runs once
+    # daily at 19:00 МСК (= 16:00 UTC) and sends a low-pressure
+    # "как прошёл вчерашний визит?" message to every client whose
+    # visit was yesterday (Moscow-local day window). Idempotent via
+    # ``BotUser.context["last_followup_sent_at"]`` — the same beat
+    # tick re-running mid-day, or a daily re-run after a transient
+    # MAX outage that left status uncommitted, will not double-send.
+    # Cancelled reminders are excluded (the client didn't actually
+    # visit). Sentiment classification of the reply is deferred to
+    # a follow-up ticket — this beat only sends the prompt.
+    "bookings.send_post_visit_followups": {
+        "task": "bookings.send_post_visit_followups",
+        # 16:00 UTC = 19:00 МСК (UTC+3, Russia does not observe DST).
+        "schedule": crontab(hour="16", minute="0"),
+    },
 }
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
