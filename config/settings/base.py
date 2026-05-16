@@ -62,6 +62,10 @@ LOCAL_APPS = [
     # BookingReminder) bundled with the YClients admin-webhook port.
     # Skill / tool layer (LLM-callable booking ops) lands in B3 / DRF-839.
     "apps.booking",
+    # Phase 1 / R1 (DRF-844) — reminder system: factory + periodic
+    # dispatcher + cb:rem:* callback skill. Consumes apps.booking models;
+    # owns the reminder lifecycle code paths.
+    "apps.bookings",
 ]
 
 INSTALLED_APPS = [
@@ -243,6 +247,15 @@ CELERY_BEAT_SCHEDULE = {
     "compute_shadow_delta_daily": {
         "task": "apps.observability.tasks.compute_shadow_delta",
         "schedule": crontab(hour="5", minute="0"),
+    },
+    # Phase 1 / R1 (DRF-844) — reminder dispatcher. Every 15 min picks
+    # PENDING reminders whose scheduled_at has passed, atomically flips
+    # status (compare-and-set so concurrent beats can't double-fire),
+    # and sends via the channel outbound adapter. 15-min cadence trades
+    # ~7m worst-case delay for low load (Phase 1 ~50 bookings/day total).
+    "bookings.send_due_reminders": {
+        "task": "bookings.send_due_reminders",
+        "schedule": crontab(minute="*/15"),
     },
 }
 
