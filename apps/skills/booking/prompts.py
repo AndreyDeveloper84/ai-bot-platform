@@ -55,6 +55,7 @@ def build_booking_prompt(
     candidate_masters: list[dict[str, Any]] | None = None,
     available_slots: list[dict[str, Any]] | None = None,
     confirmation: dict[str, Any] | None = None,
+    pending: dict[str, Any] | None = None,
     user_bookings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     """Build a ChatML messages list for one booking-skill LLM call.
@@ -70,6 +71,10 @@ def build_booking_prompt(
       confirmation: when set, payload from a successful
                     :func:`confirm_booking` call — the model phrases
                     the receipt message.
+      pending: when set, payload from one of the preview-card tools
+               (confirm / cancel / reschedule). The model phrases the
+               preview question; the channel adapter renders the
+               2-button card alongside the text.
       user_bookings: when set, the list from :func:`show_my_bookings`.
 
     Returns:
@@ -81,6 +86,7 @@ def build_booking_prompt(
         candidate_masters=candidate_masters,
         available_slots=available_slots,
         confirmation=confirmation,
+        pending=pending,
         user_bookings=user_bookings,
     )
     return [
@@ -95,6 +101,7 @@ def _render_system_prompt(
     candidate_masters: list[dict[str, Any]] | None,
     available_slots: list[dict[str, Any]] | None,
     confirmation: dict[str, Any] | None,
+    pending: dict[str, Any] | None,
     user_bookings: list[dict[str, Any]] | None,
 ) -> str:
     sections: list[str] = [f"Ты — {brand_voice.persona}."]
@@ -107,18 +114,25 @@ def _render_system_prompt(
         sections.append("Запрещено: " + ", ".join(forbidden) + ".")
 
     sections.append(
-        "Ты помогаешь записаться в салон. У тебя 4 инструмента:\n"
+        "Ты помогаешь записаться в салон. У тебя 6 инструментов:\n"
         "• show_masters — список мастеров для услуги.\n"
         "• show_slots — свободные слоты для мастера.\n"
-        "• confirm_booking — создать запись (только после явного "
-        "подтверждения пользователя).\n"
+        "• confirm_booking — показать карточку подтверждения новой "
+        "записи (НЕ создаёт запись напрямую — ждёт нажатия ✅).\n"
+        "• cancel_booking — показать карточку подтверждения отмены "
+        "существующей записи. record_id берётся из show_my_bookings.\n"
+        "• reschedule_booking — показать карточку подтверждения "
+        "переноса записи. record_id из show_my_bookings, "
+        "new_datetime — будущее время в ISO формате.\n"
         "• show_my_bookings — показать существующие записи."
     )
 
     sections.append(
-        "СТРОГО: master_id и service_id ВСЕГДА берутся из результатов "
-        "предыдущих вызовов show_masters / show_slots. Никогда не "
-        "выдумывай ID."
+        "СТРОГО: master_id, service_id и record_id ВСЕГДА берутся из "
+        "результатов предыдущих вызовов show_masters / show_slots / "
+        "show_my_bookings. Никогда не выдумывай ID. Если пользователь "
+        "просит отменить или перенести запись и ID неизвестен — "
+        "сначала вызови show_my_bookings."
     )
 
     if candidate_masters:
@@ -127,11 +141,30 @@ def _render_system_prompt(
         sections.append(_format_slots_block(available_slots))
     if confirmation:
         sections.append(_format_confirmation_block(confirmation))
+    if pending:
+        sections.append(_format_pending_block(pending))
     if user_bookings is not None:
         sections.append(_format_bookings_block(user_bookings))
 
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
+
+
+def _format_pending_block(pending: dict[str, Any]) -> str:
+    """Splice the preview-card context into the system prompt.
+
+    The LLM should rephrase ``preview_text`` in its own voice but
+    preserve the structured fields (service, master, time). The
+    2-button card itself is rendered by the channel adapter via
+    ``SkillResult.action_data``; the LLM just produces the body text.
+    """
+    kind = pending.get("kind", "")
+    return (
+        "ПРЕДПРОСМОТР (2 кнопки появятся под ответом):\n"
+        f"• Тип: {kind}\n"
+        f"• Текст: {pending.get('preview_text', '')}\n"
+        "Перефразируй коротко, заверши вопросом 'Подтверждаете?'."
+    )
 
 
 def _format_masters_block(masters: list[dict[str, Any]]) -> str:
