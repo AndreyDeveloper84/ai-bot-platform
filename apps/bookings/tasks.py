@@ -55,6 +55,18 @@ from apps.booking.models import BookingReminder
 from apps.channels.max.outbound import MaxAPIError, send_message
 from apps.bookings.keyboards import day_before_keyboard
 
+# Re-export R2's escalation task so Celery's autodiscover_tasks() finds
+# it. autodiscover walks installed apps for a top-level ``tasks`` module
+# and registers every ``@shared_task`` decorator it encounters during
+# import. The escalation task lives in a sibling module
+# (``apps.bookings.escalation``) for readability, so we trigger the
+# import here. Module import is idempotent — Celery doesn't double-
+# register the task.
+from apps.bookings.escalation import escalate_stale_reminders  # noqa: F401
+
+# Re-export R3's post-visit follow-up task — same autodiscover rationale.
+from apps.bookings.followups import send_post_visit_followups  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 

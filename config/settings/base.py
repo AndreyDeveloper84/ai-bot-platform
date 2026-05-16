@@ -257,6 +257,34 @@ CELERY_BEAT_SCHEDULE = {
         "task": "bookings.send_due_reminders",
         "schedule": crontab(minute="*/15"),
     },
+    # Phase 1 / R2 (DRF-845) — escalate stale T-24h reminders to the
+    # salon manager. Runs hourly on the hour: picks
+    # DAY_BEFORE/SENT_NO_REPLY rows where the visit is < 12h away, flips
+    # them to ESCALATED via compare-and-set, and posts a plain-text
+    # alert (no buttons) to the tenant's manager_chat_id. The hourly
+    # cadence matches the operational tempo — managers don't need to
+    # see the alert in < 60 min for a phone call that's still within
+    # the 12h window. T-2h reminders are deliberately NOT escalated:
+    # they fire too late for the manager to phone before the visit.
+    "bookings.escalate_stale_reminders": {
+        "task": "bookings.escalate_stale_reminders",
+        "schedule": crontab(minute="0"),
+    },
+    # Phase 1 / R3 (DRF-846) — post-visit follow-up nudge. Runs once
+    # daily at 19:00 МСК (= 16:00 UTC) and sends a low-pressure
+    # "как прошёл вчерашний визит?" message to every client whose
+    # visit was yesterday (Moscow-local day window). Idempotent via
+    # ``BotUser.context["last_followup_sent_at"]`` — the same beat
+    # tick re-running mid-day, or a daily re-run after a transient
+    # MAX outage that left status uncommitted, will not double-send.
+    # Cancelled reminders are excluded (the client didn't actually
+    # visit). Sentiment classification of the reply is deferred to
+    # a follow-up ticket — this beat only sends the prompt.
+    "bookings.send_post_visit_followups": {
+        "task": "bookings.send_post_visit_followups",
+        # 16:00 UTC = 19:00 МСК (UTC+3, Russia does not observe DST).
+        "schedule": crontab(hour="16", minute="0"),
+    },
 }
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
