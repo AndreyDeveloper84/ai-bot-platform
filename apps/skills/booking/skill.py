@@ -60,14 +60,18 @@ from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
+    CANCEL_BOOKING_TOOL_SPEC,
     CONFIRM_BOOKING_TOOL_SPEC,
+    RESCHEDULE_BOOKING_TOOL_SPEC,
     SHOW_MASTERS_TOOL_SPEC,
     SHOW_MY_BOOKINGS_TOOL_SPEC,
     SHOW_SLOTS_TOOL_SPEC,
     BookingToolResult,
     build_master_lookup,
     build_service_lookup,
+    cancel_booking,
     confirm_booking,
+    reschedule_booking,
     show_masters,
     show_my_bookings,
     show_slots,
@@ -115,6 +119,14 @@ _BOOKING_KEYWORDS: tuple[str, ...] = (
     "запись",
     "забронир",
     "хочу на",
+    # B5 / DRF-841 — customer-initiated cancel + reschedule keywords.
+    # These nudge the keyword fallback into the booking skill when the
+    # intent classifier isn't around (tests, legacy callers). The LLM
+    # tool selection still owns the actual cancel-vs-reschedule pick.
+    "отмени",
+    "отменить",
+    "перенес",
+    "перенести",
 )
 
 
@@ -239,6 +251,7 @@ class BookingSkill:
             candidate_masters=_masters_payload(tool_result),
             available_slots=_slots_payload(tool_result),
             confirmation=_confirmation_payload(tool_result),
+            pending=_pending_payload(tool_result),
             user_bookings=_bookings_payload(tool_result, tool_name),
         )
         second = asyncio.run(provider.complete(second_messages, model=model))
@@ -247,10 +260,12 @@ class BookingSkill:
         reply_text = second.text or tool_result.text or _FALLBACK_HANDOFF_TEXT
 
         _audit_handled(tenant_id=tenant_id, tool=tool_name)
+        action_data = _action_data_for_pending(tool_result)
         return _build_skill_result(
             text=reply_text,
             tool_calls_made=tool_calls_made,
             confidence=_CONFIDENCE_OK,
+            action_data=action_data,
         )
 
 
@@ -317,6 +332,45 @@ def _execute_tool(
             return result, "booking_invalid_service_id"
         if result.error in {"yclients_unavailable", "yclients_api_error"}:
             return result, "booking_yclients_failure"
+        if result.error:
+            return result, "booking_yclients_failure"
+        return result, ""
+
+    if tool_name == CANCEL_BOOKING_TOOL_SPEC["name"]:
+        result = cancel_booking(
+            client=yclients,
+            arguments=arguments,
+            tenant=tenant,
+            bot_user=bot_user,
+        )
+        if result.error == "invalid_record_id":
+            return result, "booking_invalid_record_id"
+        if result.error:
+            return result, "booking_yclients_failure"
+        return result, ""
+
+    if tool_name == RESCHEDULE_BOOKING_TOOL_SPEC["name"]:
+        result = reschedule_booking(
+            client=yclients,
+            arguments=arguments,
+            tenant=tenant,
+            bot_user=bot_user,
+        )
+        if result.error == "invalid_record_id":
+            return result, "booking_invalid_record_id"
+        if result.error == "slot_unavailable":
+            # NOT a handoff — the LLM should phrase the clarification
+            # itself ("на это время уже занято — могу подобрать
+            # соседний слот?"). Return ``result`` with no handoff
+            # reason; the skill's second LLM call will see the empty
+            # ``pending`` field and pick the clarification template.
+            return result, ""
+        if result.error == "invalid_datetime":
+            return result, ""
+        if result.error == "past_datetime":
+            return result, ""
+        if result.error == "record_not_found":
+            return result, "booking_invalid_record_id"
         if result.error:
             return result, "booking_yclients_failure"
         return result, ""
@@ -409,6 +463,48 @@ def _confirmation_payload(result: BookingToolResult) -> dict[str, Any] | None:
     }
 
 
+def _pending_payload(result: BookingToolResult) -> dict[str, Any] | None:
+    p = result.pending
+    if p is None:
+        return None
+    return {
+        "kind": p.kind,
+        "preview_text": p.preview_text,
+        "token": str(p.token),
+    }
+
+
+def _action_data_for_pending(result: BookingToolResult) -> dict[str, Any] | None:
+    """Build the ``SkillResult.action_data`` payload carrying the keyboard.
+
+    Channel adapters consume ``action_data["attachments"]`` to render
+    inline keyboards — same shape used by ``cb:rem:*`` reminders
+    (see :func:`apps.bookings.tasks._build_attachments`). The
+    platform-canonical UI envelope is:
+
+        {"attachments": [{"type": "inline_keyboard",
+                          "payload": {"buttons": [...]}}]}
+
+    Returns ``None`` when the tool result has no pending preview —
+    keeps the SkillResult clean for non-destructive tool paths
+    (show_masters / show_slots / show_my_bookings).
+    """
+    if result.pending is None:
+        return None
+    return {
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {"buttons": result.pending.keyboard},
+            }
+        ],
+        "pending_action": {
+            "kind": result.pending.kind,
+            "token": str(result.pending.token),
+        },
+    }
+
+
 def _bookings_payload(result: BookingToolResult, tool_name: str) -> list[dict[str, Any]] | None:
     if tool_name != SHOW_MY_BOOKINGS_TOOL_SPEC["name"]:
         return None
@@ -433,10 +529,12 @@ def _build_skill_result(
     text: str,
     tool_calls_made: list[ToolCall],
     confidence: float | None,
+    action_data: dict[str, Any] | None = None,
 ) -> SkillResult:
     return SkillResult(
         reply_text=text,
         action_type="booking",
+        action_data=action_data,
         tool_calls_made=tool_calls_made,
         confidence=confidence,
         meta={"skill": "booking"},

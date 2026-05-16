@@ -274,13 +274,19 @@ class TestShowSlotsFlow:
 
 
 class TestConfirmBookingFlow:
-    def test_creates_booking_request(
+    def test_returns_preview_card_no_record_yet(
         self, context: SkillContext, tenant: Tenant, bot_user: BotUser
     ) -> None:
+        """B5: confirm_booking is preview-only.
+
+        The skill returns a 2-button card; no YClients call happens
+        until the user taps ✅ (covered by the gate-callback tests).
+        """
+        from apps.booking.models import PendingBookingAction
+
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11, "Ольга")]
-        client.create_record_response = BookingRecord(record_id=777, record_hash="h", raw={})
         tc = ToolCall(
             id="c1",
             name="confirm_booking",
@@ -292,14 +298,21 @@ class TestConfirmBookingFlow:
         )
         completions = [
             _completion(tool_calls=[tc]),
-            _completion(text="Готово, записала!"),
+            _completion(text="Записываю в 14:00 — подтверждаете?"),
         ]
         with _patch_yclients(client), _patch_provider_complete(completions):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(context)
         assert result.should_handoff is False
-        rows = BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user)
-        assert rows.count() == 1
+        # No BookingRequest created at preview time.
+        assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user).count() == 0
+        # No YClients create call.
+        assert client.create_calls == []
+        # Action data carries the keyboard.
+        assert result.action_data is not None
+        assert "attachments" in result.action_data
+        assert "pending_action" in result.action_data
+        assert result.action_data["pending_action"]["kind"] == PendingBookingAction.Kind.CONFIRM
 
 
 class TestShowMyBookingsFlow:
@@ -349,12 +362,22 @@ class TestHandoffPaths:
         assert result.should_handoff is True
         assert result.handoff_reason == "booking_no_masters"
 
-    def test_yclients_failure_on_confirm_handoff(
+    def test_confirm_booking_preview_does_not_call_yclients(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
+        """B5: confirm_booking is preview-only.
+
+        A YClients failure during create can no longer happen at the
+        skill layer — the create moved to ``execute_confirm`` invoked
+        by the gate-callback. Skill-layer YClients failure paths still
+        cover prefetch + slot-fetch (other tests). This test asserts
+        the preview-only contract.
+        """
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
+        # ``create_record_exc`` is irrelevant at the preview stage; we
+        # set it to prove it's NOT invoked.
         client.create_record_exc = YClientsAPIError("http_400")
         tc = ToolCall(
             id="c1",
@@ -365,12 +388,17 @@ class TestHandoffPaths:
                 "slot_datetime": "2026-05-20T14:00:00",
             },
         )
-        completions = [_completion(tool_calls=[tc])]
+        completions = [
+            _completion(tool_calls=[tc]),
+            _completion(text="Записываю — подтверждаете?"),
+        ]
         with _patch_yclients(client), _patch_provider_complete(completions):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(context)
-        assert result.should_handoff is True
-        assert result.handoff_reason == "booking_yclients_failure"
+        # Preview success — no handoff, no create.
+        assert result.should_handoff is False
+        assert client.create_calls == []
+        assert result.action_data is not None
 
     def test_invalid_master_id_handoff(self, context: SkillContext, tenant: Tenant) -> None:
         client = FakeYClients()
@@ -466,7 +494,7 @@ class TestHandoffPaths:
 
 
 class TestToolSpecWiring:
-    def test_all_four_specs_passed_on_first_call(
+    def test_all_six_specs_passed_on_first_call(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
         captured_tools: list[Any] = []
@@ -495,6 +523,8 @@ class TestToolSpecWiring:
         assert first_tools is not None
         names = {spec["name"] for spec in first_tools}
         assert names == {
+            "cancel_booking",
+            "reschedule_booking",
             "show_masters",
             "show_slots",
             "confirm_booking",

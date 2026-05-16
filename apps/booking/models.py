@@ -79,8 +79,13 @@ class BookingRequest(models.Model):
       (channel-scoped identity), not mysite's single-channel BotUser.
     * Soft-delete column intentionally NOT added — the table is
       append-only by design (analytics relies on it). Cancellation
-      goes through :class:`BookingReminder.Status.CANCELLED` on the
-      linked reminder rows instead.
+      goes through :attr:`BookingRequest.status` transitions
+      (B5 / DRF-841 — adds ``cancelled`` / ``rescheduled`` states so
+      ``cancel_booking`` / ``reschedule_booking`` tools have a place
+      to flip lifecycle without rewriting history). Old paths that
+      relied on ``BookingReminder.Status.CANCELLED`` to imply booking
+      cancellation continue to work — the two statuses are
+      complementary signals.
 
     Indexes mirror what mysite admin actually scans for:
 
@@ -131,6 +136,42 @@ class BookingRequest(models.Model):
         choices=BOOKING_SOURCE_CHOICES,
         default="wizard",
     )
+
+    class Status(models.TextChoices):
+        """Lifecycle of a booking row.
+
+        Added in B5 / DRF-841 so customer-initiated ``cancel_booking``
+        and ``reschedule_booking`` tools have a place to flip state
+        without rewriting history. Pre-B5 rows default to ``CONFIRMED``
+        (the implicit prior state — every row was created by a
+        successful YClients write).
+
+        * ``CONFIRMED``    — initial state on create (was implicit before).
+        * ``CANCELLED``    — customer cancelled (B5 ``cancel_booking``).
+        * ``RESCHEDULED``  — old row after ``reschedule_booking``
+                             cancel-and-create; new BookingRequest row
+                             is created as ``CONFIRMED`` and links via
+                             the comment marker.
+
+        ``RESCHEDULED`` is a terminal label on the OLD row — the
+        actual "this is your booking now" lives on the new row. The
+        old row is preserved (not deleted) so analytics can compute
+        reschedule rates per master / service.
+        """
+
+        CONFIRMED = "confirmed", "Confirmed"
+        CANCELLED = "cancelled", "Cancelled"
+        RESCHEDULED = "rescheduled", "Rescheduled (replaced)"
+
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.CONFIRMED,
+        db_index=True,
+        help_text="Lifecycle: confirmed (default), cancelled (customer "
+        "cancel), rescheduled (replaced by a new row after a "
+        "cancel-and-create reschedule).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = TenantScopedManager()
@@ -143,6 +184,7 @@ class BookingRequest(models.Model):
         indexes = [
             models.Index(fields=["tenant", "-created_at"]),
             models.Index(fields=["tenant", "bot_user"]),
+            models.Index(fields=["tenant", "status"]),
         ]
 
     def __str__(self) -> str:
@@ -279,3 +321,117 @@ class BookingReminder(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()} {self.master_name} {self.visit_at:%d.%m %H:%M}"
+
+
+class PendingBookingAction(models.Model):
+    """Short-lived bridge between a destructive tool preview + the customer's tap.
+
+    DRF-841 / Phase 1 / B5 (absorbs B4 / DRF-840). The bot now shows a
+    2-button confirmation card before EVERY destructive YClients call
+    (``confirm_booking`` / ``cancel_booking`` / ``reschedule_booking``).
+    The preview phase persists the proposed action here; tapping ✅ in
+    the inline keyboard fires :mod:`apps.bookings.callbacks` which
+    looks up this row, validates TTL, and executes the action.
+
+    ### Why a dedicated model vs stashing in Conversation.context
+
+    1. **Survives Celery worker restart** — the bot reads the row from
+       Postgres in the callback handler; an in-memory or worker-local
+       cache would lose pending actions on rolling deploy.
+    2. **Cheap TTL filter** — ``expires_at <= now()`` is a single index
+       lookup; a JSON blob on Conversation would require Python-side
+       parsing on every callback.
+    3. **Opaque token** — the row's UUID pk is threaded through the
+       callback payload (``cb:book:confirm:<token>``). A stale message
+       clicked an hour later finds either ``None`` (cleaned up) or a
+       consumed row, both of which short-circuit cleanly.
+
+    ### Kind vs payload
+
+    ``kind`` is the destructive verb (``confirm`` / ``cancel`` /
+    ``reschedule``); ``payload`` is the per-kind argument bundle
+    captured at preview time:
+
+    * ``confirm``:    ``{master_id, service_id, slot_datetime,
+                       client_phone, client_name, master_name,
+                       service_name}``
+    * ``cancel``:     ``{record_id, reason}``
+    * ``reschedule``: ``{record_id, new_datetime, master_id, service_id,
+                       master_name, service_name}``
+
+    The dict is the source of truth for the callback handler — it
+    re-validates the IDs against fresh YClients data at execute time
+    to catch staff/service changes during the 10-minute window.
+
+    ### Idempotency
+
+    ``consumed_at`` is set inside a compare-and-set
+    ``filter(consumed_at__isnull=True).update(...)`` SQL statement;
+    rowcount-zero means another worker (or a double-tap) already
+    consumed it. Same idiom as :class:`BookingReminder` callback
+    handling — see ``apps.bookings.callbacks`` module docstring.
+
+    ### GDPR / data retention
+
+    Rows are ephemeral by design — the periodic cleanup task (or a
+    nightly DB maintenance pass) deletes consumed + expired rows
+    older than 24h. The 10-minute TTL bounds the window; the audit
+    log keeps the long-term forensic record.
+    """
+
+    class Kind(models.TextChoices):
+        CONFIRM = "confirm", "Confirm booking (preview → create)"
+        CANCEL = "cancel", "Cancel booking (preview → cancel)"
+        RESCHEDULE = "reschedule", "Reschedule booking (preview → cancel+create)"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="pending_booking_actions",
+        help_text="Owning tenant. CASCADE — pending rows are ephemeral "
+        "(10-min TTL), no audit value in keeping after tenant deletion.",
+    )
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.CASCADE,
+        related_name="pending_booking_actions",
+        help_text="Owner of this pending action. Authorisation check "
+        "in the callback handler compares the tapping user's BotUser pk "
+        "to this FK — prevents a leaked callback id from being executed "
+        "by a different user.",
+    )
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    payload = models.JSONField(
+        default=dict,
+        help_text="Per-kind argument bundle captured at preview time. "
+        "See model docstring for the shape per kind.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(
+        db_index=True,
+        help_text="Tap-after-expiry returns a polite 'too much time' "
+        "reply and does NOT execute. 10-minute window per spec.",
+    )
+    consumed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Set inside the consume CAS. Non-null → already "
+        "executed (or cancelled by user tap on ❌). A second tap "
+        "on the same token short-circuits to 'already handled'.",
+    )
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Pending booking action"
+        verbose_name_plural = "Pending booking actions"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["tenant", "bot_user"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()} pending={self.consumed_at is None}"
