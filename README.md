@@ -98,6 +98,63 @@ To run all hooks against the whole repo on demand:
 uv run pre-commit run --all-files
 ```
 
+## Git workflow
+
+> Sprint 10 / DRF-891 introduces a **two-tier deploy flow** with a dev MAX-bot. Aligns with the formula_tela pattern of "dev bot for debugging" but enforced via branch protection.
+
+### Branch model
+
+```
+feature/X
+    │ PR (CI must be green)
+    ▼
+dev ──────────────► @id583403546770_1_bot (dev MAX-bot)
+    │ manual test on dev-bot ≥1h (24h before canary bumps)
+    │ PR dev → main (1 approval, CI green, linear history)
+    ▼
+main ─────────────► @ai_bot_platform (prod MAX-bot, X-track canary)
+```
+
+| Branch | Direct push | PR required | Approvals | Use |
+|---|---|---|---|---|
+| `feat/*`, `fix/*`, `chore/*` | yes (own branches) | yes (target: `dev`) | 0 | feature work |
+| `dev` | Lead only | for non-Lead PRs | 0 | dev-bot validation |
+| `main` | **forbidden** | yes (only from `dev`) | 1 (Lead) | prod-bot rollout |
+
+Branch protection enforces this — see [`docs/setup/branch-protection.md`](docs/setup/branch-protection.md) for the `gh api` commands that apply the rules.
+
+### Rules
+
+1. **All feature work targets `dev`**, never `main`. CI must be green to merge.
+2. **Code must spend ≥1h on dev-bot before merging to `main`** (the "did you actually try it?" gate). For changes during X-track canary windows: ≥24h on dev-bot before any `dev → main` PR. The 24h soak is documented in [`docs/runbooks/canary-ramp.md`](docs/runbooks/canary-ramp.md).
+3. **Force-pushes** allowed on `dev` (rebase workflows), forbidden on `main` (history is canonical).
+4. **Hotfix path** for emergencies (e.g. critical security patch): cherry-pick to `dev`, smoke on dev-bot in ≥15 min, then PR to `main` with `hotfix` label + Lead emergency approval. Skips the 1h gate but NOT the dev-bot exposure entirely.
+5. **Direct push to `main` is rejected at the GitHub level** — branch protection forbids it. The only way code reaches `main` is via reviewed PR from `dev`.
+
+### Setup
+
+After cloning, activate the pre-push hook (one-time per clone):
+
+```
+git config core.hooksPath .githooks
+```
+
+This blocks `git push origin main` locally — the dev-flow is enforced
+at the local git level since the repo is private + free-tier (GitHub
+branch protection requires Pro). See [`docs/setup/branch-protection.md`](docs/setup/branch-protection.md) § Phase 0 state for rationale + Phase 1 upgrade triggers.
+
+Dev environment + MAX-bot creation: [`docs/setup/dev-environment.md`](docs/setup/dev-environment.md) (operator setup, ~4-6h one-time).
+
+Deploy workflows:
+- `.github/workflows/deploy-dev.yml` — fires on push to `dev`
+- `.github/workflows/deploy.yml` — fires on push to `main`
+
+Both are bootstrap-skeleton until DRF-891 completes; uncomment the SSH+deploy steps after GitHub secrets (DEV_HOST, PROD_HOST, etc.) are populated.
+
+### Why this matters now
+
+Before X-5pct (DRF-874 — 5% of real MAX traffic on platform), there's no risk: nobody's reading the code. After X-5pct, every merge to `main` is a partial production rollout within ~minutes. Dev-flow + branch protection are the cheapest way to keep the canary as a rollback safety net rather than the first-line bug filter.
+
 ## Migration context
 
 This repo replaces `formula_tela/mysite/maxbot/` (frozen since 2026-05-09 — see `mysite/maxbot/.FROZEN`). The frozen `maxbot/` is copied AS-IS into `legacy_maxbot/` in Sprint 0 / C7 (`DRF-409`) and drained sprint-by-sprint until 100% cutover in Sprint 10.

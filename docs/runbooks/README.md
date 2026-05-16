@@ -21,6 +21,17 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`canary-ramp.md`](canary-ramp.md) | **complete** | Sprint 10 / X-criteria (DRF-871) | Lead |
 | [`on-call.md`](on-call.md) | **complete** | Sprint 10 / O3 (DRF-864) | Lead |
 
+## Setup (one-time procedures)
+
+These live under `docs/setup/` rather than `docs/runbooks/` — they're
+**one-time bootstrap** procedures rather than **recurring response**
+procedures.
+
+| Doc | Status | Sprint | Purpose |
+|---|---|---|---|
+| [`../setup/branch-protection.md`](../setup/branch-protection.md) | **complete** | Sprint 10 / DRF-891 | Apply main/dev branch protection rules via `gh api` |
+| [`../setup/dev-environment.md`](../setup/dev-environment.md) | **complete** | Sprint 10 / DRF-891 | Create `@ai_bot_platform_dev` bot + dev instance (8 steps) |
+
 `status` values:
 
 - **skeleton** — sections exist, content is TBD markers tied to a future sprint

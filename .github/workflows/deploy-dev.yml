@@ -1,16 +1,43 @@
-# Sprint 0 / B4 — skeleton placeholder.
+# deploy-dev — push to `dev` branch → deploy to dev MAX-bot instance
 #
-# Real deploy machinery lands in Sprint 9 (DRF-XXX) once we know the
-# target host (formula_tela_dev box vs new server) and the rollout
-# strategy (shadow → canary 10% → 50% → 100%). For now this workflow
-# only confirms the trigger graph and prints what *would* happen.
+# Sprint 10 / DRF-891 — replaces the Sprint 0 placeholder.
+#
+# ### Trigger
+# - push to `dev` branch (after PR from feat/* merges into dev)
+# - manual via workflow_dispatch
+#
+# ### What it does (when secrets configured)
+# 1. CI gate via `needs: ci` — won't deploy red builds.
+# 2. SSH to DEV_HOST as DEV_USER.
+# 3. git fetch + checkout dev + pull
+# 4. docker compose --env-file .env.dev up -d --force-recreate web worker
+# 5. Smoke: /readyz/ on the dev port (8013 not 8003)
+# 6. Telegram alert to dev-team channel via `python manage.py smoke_alert
+#    --severity=warning --title="dev deploy" --body="<sha>"`
+#
+# ### Operator setup BEFORE first real deploy
+#
+# All steps are commented out below — uncomment after these are done:
+#
+# 1. DRF-891 task 1: create @ai_bot_platform_dev MAX-bot, token in 1Password
+# 2. DRF-891 task 5: deploy dev instance (decision A: same VPS port +1000)
+# 3. GitHub repo secrets:
+#    - DEV_HOST (e.g. app.penza.taxi if same VPS)
+#    - DEV_USER (e.g. ops)
+#    - DEV_SSH_KEY (private key contents — `cat ~/.ssh/id_rsa | clip`)
+#    - DEV_DEPLOY_PATH (e.g. /home/ops/ai-bot-platform-dev)
+# 4. dev box /etc/ai-bot-platform-dev/.env populated with MAX_BOT_TOKEN_DEV,
+#    DB / Redis / ChromaDB credentials scoped to dev
+#
+# Until then, the workflow is a skeleton that exercises the trigger graph
+# but performs no destructive ops.
 
 name: deploy-dev
 
 on:
   push:
     branches:
-      - main
+      - dev
   workflow_dispatch:
 
 concurrency:
@@ -18,17 +45,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  placeholder:
-    name: deploy-dev (skeleton)
+  deploy:
+    name: deploy-dev
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Print deploy plan
         run: |
-          echo "::notice::Sprint 0 placeholder — no deploy performed."
-          echo "Triggered by ${{ github.event_name }} on ${{ github.ref }}."
-          echo "Real deploy steps land in Sprint 9 (shadow + canary)."
-          echo "Carry-over reference: mysite/.github/workflows/deploy.yml"
+          echo "::notice::deploy-dev triggered for ${{ github.ref }} @ ${{ github.sha }}"
+          echo "Triggered by ${{ github.event_name }}"
+
+      # ─── ACTIVATE AFTER DRF-891 SECRETS LAND ───
+      # - name: Configure SSH
+      #   env:
+      #     DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
+      #   run: |
+      #     mkdir -p ~/.ssh
+      #     echo "$DEV_SSH_KEY" > ~/.ssh/dev_deploy
+      #     chmod 600 ~/.ssh/dev_deploy
+      #     ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
+      #
+      # - name: Pull + restart dev services
+      #   env:
+      #     DEV_HOST: ${{ secrets.DEV_HOST }}
+      #     DEV_USER: ${{ secrets.DEV_USER }}
+      #     DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+      #   run: |
+      #     ssh -i ~/.ssh/dev_deploy "$DEV_USER@$DEV_HOST" bash -lc "
+      #       set -e
+      #       cd $DEV_DEPLOY_PATH
+      #       git fetch origin
+      #       git checkout dev
+      #       git pull origin dev
+      #       sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
+      #         -p ai-bot-platform-dev up -d --force-recreate --no-deps web worker
+      #     "
+      #
+      # - name: Smoke /readyz/ on dev
+      #   env:
+      #     DEV_HOST: ${{ secrets.DEV_HOST }}
+      #     DEV_USER: ${{ secrets.DEV_USER }}
+      #   run: |
+      #     ssh -i ~/.ssh/dev_deploy "$DEV_USER@$DEV_HOST" \
+      #       'curl -fsS http://127.0.0.1:8013/readyz/' | head
+      #
+      # - name: Telegram smoke alert (informational)
+      #   env:
+      #     DEV_HOST: ${{ secrets.DEV_HOST }}
+      #     DEV_USER: ${{ secrets.DEV_USER }}
+      #   run: |
+      #     ssh -i ~/.ssh/dev_deploy "$DEV_USER@$DEV_HOST" bash -lc "
+      #       cd $DEV_DEPLOY_PATH
+      #       sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
+      #         -p ai-bot-platform-dev exec -T web \
+      #         python manage.py smoke_alert --severity=warning \
+      #         --title='dev deploy' --body='${{ github.sha }}'
+      #     "
