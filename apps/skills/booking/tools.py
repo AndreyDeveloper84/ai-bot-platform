@@ -36,13 +36,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
-from apps.booking.models import BookingReminder, BookingRequest
+from apps.booking.models import BookingRequest
+from apps.bookings.reminders_factory import create_reminders_for_booking
 from apps.integrations.yclients import (
     AvailableTime,
     BookingRecord,
@@ -581,7 +582,7 @@ def confirm_booking(
             source="bot",
             is_processed=False,
         )
-        _schedule_day_before_reminder(
+        _schedule_reminders(
             tenant=tenant,
             bot_user=bot_user,
             yc_id=yc_id,
@@ -611,7 +612,7 @@ def confirm_booking(
     return BookingToolResult(text=text, confirmation=confirmation)
 
 
-def _schedule_day_before_reminder(
+def _schedule_reminders(
     *,
     tenant: Any,
     bot_user: Any,
@@ -620,34 +621,29 @@ def _schedule_day_before_reminder(
     master_name: str,
     service_name: str,
 ) -> None:
-    """Best-effort T-24h reminder write.
+    """Best-effort reminder pair (T-24h + T-2h) via the R1 factory.
 
-    Mirrors the webhook handler. The reminder dispatcher (R1, next
-    ticket) picks rows where ``status=PENDING AND scheduled_at <= now()``.
-    Failing to write the reminder MUST NOT fail the booking — wrap in
-    try/except.
+    Delegates to :func:`apps.bookings.reminders_factory.create_reminders_for_booking`
+    — the single source of truth for reminder scheduling. Updated in
+    R1 (DRF-844) from the original single-DAY_BEFORE write so both
+    reminders get scheduled at confirm time; this matches the B2
+    admin-webhook path which has always written both.
+
+    Best-effort: failing to write reminders MUST NOT fail the
+    booking (the YClients record is already committed). The factory
+    itself swallows ``chat_id`` absences; broader exceptions are
+    caught here so an ORM hiccup doesn't break the confirm reply.
     """
     if visit_at_dt is None:
         return
-    if not getattr(bot_user, "chat_id", ""):
-        # No reachable channel → reminder can't fire; skip.
-        return
     try:
-        BookingReminder.all_tenants.update_or_create(
+        create_reminders_for_booking(
+            tenant=tenant,
+            bot_user=bot_user,
             yclients_record_id=yc_id,
-            kind=BookingReminder.Kind.DAY_BEFORE,
-            defaults={
-                "tenant": tenant,
-                "bot_user": bot_user,
-                "chat_id": bot_user.chat_id,
-                "visit_at": visit_at_dt,
-                "status": BookingReminder.Status.PENDING,
-                "scheduled_at": visit_at_dt - timedelta(hours=24),
-                "master_name": master_name,
-                "service_name": service_name,
-                "sent_at": None,
-                "replied_at": None,
-            },
+            visit_at=visit_at_dt,
+            master_name=master_name,
+            service_name=service_name,
         )
     except Exception:  # noqa: BLE001 — reminder is best-effort
         logger.exception("booking.reminder.schedule_failed yc_id=%s", yc_id)

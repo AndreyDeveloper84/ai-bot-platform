@@ -83,7 +83,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from django.conf import settings
@@ -95,6 +95,7 @@ from django.views.decorators.http import require_POST
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder, BookingRequest
+from apps.bookings.reminders_factory import create_reminders_for_booking
 from apps.events.services import emit
 from apps.identity.models import BotUser
 from apps.tenancy.context import tenant_scope
@@ -424,42 +425,20 @@ def _handle_create(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
             is_processed=True,
         )
 
-    # ── BookingReminders: idempotent via unique_together.
-    # T-24h
-    BookingReminder.all_tenants.update_or_create(
+    # ── BookingReminders: idempotent via unique_together. R1 (DRF-844)
+    # routes both writes through the factory so reminder scheduling
+    # rules live in exactly one place (see
+    # ``apps.bookings.reminders_factory`` module docstring). The
+    # factory writes T-24h then T-2h with the same defaults as the
+    # original inline code; behaviour is byte-equivalent.
+    create_reminders_for_booking(
+        tenant=tenant,
+        bot_user=bot_user,
         yclients_record_id=yc_id,
-        kind=BookingReminder.Kind.DAY_BEFORE,
-        defaults={
-            "tenant": tenant,
-            "bot_user": bot_user,
-            "booking_request": booking,
-            "chat_id": bot_user.chat_id,
-            "visit_at": visit_at,
-            "status": BookingReminder.Status.PENDING,
-            "scheduled_at": visit_at - timedelta(hours=24),
-            "master_name": master_name,
-            "service_name": service_name,
-            "sent_at": None,
-            "replied_at": None,
-        },
-    )
-    # T-2h
-    BookingReminder.all_tenants.update_or_create(
-        yclients_record_id=yc_id,
-        kind=BookingReminder.Kind.TWO_HOURS,
-        defaults={
-            "tenant": tenant,
-            "bot_user": bot_user,
-            "booking_request": booking,
-            "chat_id": bot_user.chat_id,
-            "visit_at": visit_at,
-            "status": BookingReminder.Status.PENDING,
-            "scheduled_at": visit_at - timedelta(hours=2),
-            "master_name": master_name,
-            "service_name": service_name,
-            "sent_at": None,
-            "replied_at": None,
-        },
+        visit_at=visit_at,
+        master_name=master_name,
+        service_name=service_name,
+        booking_request=booking,
     )
 
     # ── Welcome event (scope cut — see module docstring).
@@ -565,34 +544,28 @@ def _handle_update(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
         else sample.service_name
     )
 
-    # Mark old rows CANCELLED then upsert fresh PENDING rows.
-    # Why CANCEL instead of UPDATE the existing row in place:
-    # mysite's reminder dispatcher reads (status=PENDING, scheduled_at<now)
-    # and if we just mutated scheduled_at while sent_at was set, the
-    # dispatcher would skip the now-rescheduled reminder. Cancel-and-
-    # recreate yields a clean PENDING row.
+    # Mark old rows CANCELLED then re-schedule via the factory.
+    # Why CANCEL the existing rows before re-creating:
+    # the dispatcher reads (status=PENDING, scheduled_at<now) and a
+    # naive in-place mutation of scheduled_at while sent_at is set
+    # would let the dispatcher skip the now-rescheduled reminder.
+    # The factory's update_or_create on (yc_id, kind) flips status
+    # back to PENDING in defaults, so the explicit pre-cancel is
+    # belt-and-braces — the CANCELLED→PENDING transition in the
+    # factory's defaults catches it either way. The explicit pre-
+    # cancel is preserved as an audit-friendly trail (a reader
+    # scanning the rows sees "old rows cancelled, new rows pending"
+    # rather than a single bumped row).
     existing.update(status=BookingReminder.Status.CANCELLED)
 
-    for kind, offset in (
-        (BookingReminder.Kind.DAY_BEFORE, timedelta(hours=24)),
-        (BookingReminder.Kind.TWO_HOURS, timedelta(hours=2)),
-    ):
-        BookingReminder.all_tenants.update_or_create(
-            yclients_record_id=yc_id,
-            kind=kind,
-            defaults={
-                "tenant": tenant,
-                "bot_user": bot_user,
-                "chat_id": bot_user.chat_id,
-                "visit_at": new_visit_at,
-                "status": BookingReminder.Status.PENDING,
-                "scheduled_at": new_visit_at - offset,
-                "master_name": master_name,
-                "service_name": service_name,
-                "sent_at": None,
-                "replied_at": None,
-            },
-        )
+    create_reminders_for_booking(
+        tenant=tenant,
+        bot_user=bot_user,
+        yclients_record_id=yc_id,
+        visit_at=new_visit_at,
+        master_name=master_name,
+        service_name=service_name,
+    )
 
     write_audit(
         action="yclients.webhook.update_processed",
