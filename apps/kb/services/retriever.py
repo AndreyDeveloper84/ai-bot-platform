@@ -29,11 +29,11 @@ post-skill handoff (O2 step 10.5).
 
 For ``doc_type ∈ {service, contraindication, help_article}`` the
 retriever issues a *second* ChromaDB query against the ``global_kb``
-system tenant's collection (looked up by ``slug == "global_kb"``).
-Results are merged by cosine score descending and truncated to the
-caller's ``k``. Each returned chunk carries ``metadata["kb_source"]``
-of ``"tenant"`` or ``"global"`` so replay / debugging can trace
-provenance.
+system tenant's collection (resolved via
+:func:`apps.kb.services.global_tenant.get_global_kb_tenant`). Results
+are merged by cosine score descending and truncated to the caller's
+``k``. Each returned chunk carries ``metadata["kb_source"]`` of
+``"tenant"`` or ``"global"`` so replay / debugging can trace provenance.
 
 **Security invariant**: ``doc_type ∈ {master, faq, legal}`` is
 strictly per-tenant — masters belong to a salon, FAQs are salon-
@@ -42,9 +42,10 @@ global collection is NEVER queried for these doc_types; leakage would
 be a tenancy breach. The branch is guarded by
 :data:`_GLOBAL_FALLBACK_DOC_TYPES` and asserted in tests.
 
-Graceful degradation: if the ``global_kb`` tenant row is missing
-(Sub-2 hasn't seeded it, dev environment, etc.) we log a single WARN
-and fall back to tenant-only results — never raise.
+Graceful degradation: if the ``global_kb`` tenant row is missing (the
+seed runbook hasn't been executed on this environment, fresh CI, …)
+the helper returns ``None`` and we serve tenant-only results — never
+raise.
 
 ### Event emission
 
@@ -59,12 +60,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from apps.events.services import emit
 from apps.kb.chromadb_client import ChromaClient, KbHit, get_chroma_client
+from apps.kb.services.global_tenant import get_global_kb_tenant
 from apps.llm.protocol import LLMProvider
 
 if TYPE_CHECKING:
@@ -89,12 +90,6 @@ _GLOBAL_FALLBACK_DOC_TYPES: frozenset[str] = frozenset(
         "help_article",
     }
 )
-
-# Slug of the system tenant that owns the shared (cross-salon) KB
-# content. The lookup deliberately uses slug rather than a future
-# ``is_system`` boolean — Sub-1 (PR #120) is parallel work and we
-# don't want a hard dependency on its schema change.
-_GLOBAL_KB_TENANT_SLUG = "global_kb"
 
 
 @dataclass(frozen=True)
@@ -166,8 +161,10 @@ def search_kb(
         )
 
     # Resolve the global tenant up-front so we can also short-circuit
-    # when both collections are cold.
-    global_tenant = _get_global_kb_tenant() if _should_use_global_fallback(doc_types) else None
+    # when both collections are cold. ``get_global_kb_tenant`` lives in
+    # ``apps.kb.services.global_tenant`` (Sub-2) so seed cmd (Sub-5) and
+    # other future callers share the same lookup + cache.
+    global_tenant = get_global_kb_tenant() if _should_use_global_fallback(doc_types) else None
     global_count = chroma_client.collection_count(global_tenant) if global_tenant is not None else 0
 
     if tenant_count == 0 and global_count == 0:
@@ -274,33 +271,6 @@ def _should_use_global_fallback(doc_types: list[str] | None) -> bool:
     if not doc_types:
         return False
     return all(dt in _GLOBAL_FALLBACK_DOC_TYPES for dt in doc_types)
-
-
-@lru_cache(maxsize=1)
-def _get_global_kb_tenant() -> "Tenant | None":
-    """Resolve the system tenant that owns shared cross-salon KB content.
-
-    Looked up by ``slug == "global_kb"`` (not ``is_system=True``) — Sub-1
-    is parallel work and we don't want a hard schema dependency. Cached
-    process-wide because the row is created once and never mutated.
-
-    Returns ``None`` (with a WARN log) when the row doesn't exist yet —
-    Sub-2 seeds it; in dev / fresh CI the row may be absent. Callers
-    treat ``None`` as "no global fallback available" and serve
-    tenant-only results.
-    """
-    # Local import to avoid Django app-loading order issues at module
-    # import time (apps.kb may be imported before apps.tenancy in some
-    # contexts).
-    from apps.tenancy.models import Tenant
-
-    row = Tenant.all_objects.filter(slug=_GLOBAL_KB_TENANT_SLUG).first()
-    if row is None:
-        logger.warning(
-            "kb.retriever.global_kb_tenant_missing slug=%s falling_back_to_tenant_only",
-            _GLOBAL_KB_TENANT_SLUG,
-        )
-    return row
 
 
 def _merge_hits(
