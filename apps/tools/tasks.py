@@ -22,6 +22,9 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
+IDEMPOTENCY_CLEANUP_ACTION = "tools.idempotency.cleanup"
+
+
 @shared_task(name="apps.tools.tasks.cleanup_old_idempotency_keys")
 def cleanup_old_idempotency_keys() -> int:
     """Delete idempotency keys past their TTL or older than retention.
@@ -31,8 +34,14 @@ def cleanup_old_idempotency_keys() -> int:
 
     Reads:
       settings.IDEMPOTENCY_KEY_RETENTION_DAYS (default 7).
+
+    Side effects:
+      Writes a ``tools.idempotency.cleanup`` audit row capturing
+      deleted count + retention days (DRF-851 / PI1). Cross-tenant
+      run — written with ``tenant=None``.
     """
 
+    from apps.audit.services import write_audit
     from apps.tools.models import IdempotencyKey
 
     days = int(getattr(settings, "IDEMPOTENCY_KEY_RETENTION_DAYS", 7))
@@ -48,6 +57,14 @@ def cleanup_old_idempotency_keys() -> int:
         "tools.idempotency.cleanup deleted=%d retention_days=%d",
         deleted,
         days,
+    )
+    write_audit(
+        action=IDEMPOTENCY_CLEANUP_ACTION,
+        target="tools.IdempotencyKey",
+        payload={
+            "deleted": deleted,
+            "retention_days": days,
+        },
     )
     return deleted
 

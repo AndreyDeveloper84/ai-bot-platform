@@ -12,9 +12,10 @@ from datetime import timedelta
 import pytest
 from django.utils import timezone
 
+from apps.audit.models import AuditLog
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 from apps.tools.models import IdempotencyKey
-from apps.tools.tasks import cleanup_old_idempotency_keys
+from apps.tools.tasks import IDEMPOTENCY_CLEANUP_ACTION, cleanup_old_idempotency_keys
 
 pytestmark = pytest.mark.django_db
 
@@ -117,3 +118,45 @@ class TestRetention:
         )
         deleted = cleanup_old_idempotency_keys()
         assert deleted == 0
+
+
+class TestCleanupAuditRow:
+    """Every cleanup run writes a `tools.idempotency.cleanup` row (DRF-851)."""
+
+    def test_writes_audit_row_with_deleted_count(self, settings):
+        settings.IDEMPOTENCY_KEY_RETENTION_DAYS = 7
+        IdempotencyKey.objects.create(
+            key="expired-audit-1",
+            expires_at=timezone.now() - timedelta(hours=1),
+        )
+        cleanup_old_idempotency_keys()
+        row = AuditLog.all_tenants.get(action=IDEMPOTENCY_CLEANUP_ACTION)
+        assert row.payload["deleted"] == 1
+        assert row.payload["retention_days"] == 7
+        # System action — no tenant context.
+        assert row.tenant is None
+
+    def test_writes_audit_row_even_when_nothing_to_delete(self, settings):
+        settings.IDEMPOTENCY_KEY_RETENTION_DAYS = 7
+        IdempotencyKey.objects.create(
+            key="fresh-audit",
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        cleanup_old_idempotency_keys()
+        # Audit row still written — operators want to see "ran, found nothing".
+        row = AuditLog.all_tenants.get(action=IDEMPOTENCY_CLEANUP_ACTION)
+        assert row.payload["deleted"] == 0
+
+    def test_cleanup_is_idempotent(self, settings):
+        # Two back-to-back runs: second deletes nothing, but still
+        # writes its own audit row (operators want every run logged).
+        settings.IDEMPOTENCY_KEY_RETENTION_DAYS = 7
+        IdempotencyKey.objects.create(
+            key="expired-idem",
+            expires_at=timezone.now() - timedelta(hours=1),
+        )
+        first = cleanup_old_idempotency_keys()
+        assert first == 1
+        second = cleanup_old_idempotency_keys()
+        assert second == 0
+        assert AuditLog.all_tenants.filter(action=IDEMPOTENCY_CLEANUP_ACTION).count() == 2

@@ -127,6 +127,27 @@ STRICT_SCOPE_FLIP_AT = os.environ.get("STRICT_SCOPE_FLIP_AT", "")
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "90"))
 IDEMPOTENCY_KEY_RETENTION_DAYS = int(os.environ.get("IDEMPOTENCY_KEY_RETENTION_DAYS", "7"))
 
+# Phase 1 / PI1 (DRF-851) — AuditLog retention sweep mode.
+#
+#   "hard"  — DELETE rows past the cutoff. Original behaviour;
+#             default to keep existing deployments backwards-compatible.
+#   "soft"  — UPDATE rows to is_archived=True + archived_at=now.
+#             Recommended for prod going forward; a future task can
+#             then hard-delete archived rows past a longer cutoff
+#             (out of scope for this PR — TODO in apps/audit/tasks.py).
+#
+# Trade-off: "soft" keeps a forensic trail of "what was retired and
+# when" at the cost of disk + index size. "hard" reclaims the disk
+# but loses the row entirely. For a single-tenant Phase 1 deployment
+# either is fine; we recommend operators flip this to "soft" once
+# disk usage is observed and bounded.
+AUDIT_LOG_RETENTION_MODE = os.environ.get("AUDIT_LOG_RETENTION_MODE", "hard")
+
+# Phase 1 / PI1 (DRF-851) — PaymentEvent retention.
+# Webhook idempotency ledger entries. Hard-delete only — these are
+# dedup tokens, not forensic data (Order carries the forensic trail).
+PAYMENT_EVENT_RETENTION_DAYS = int(os.environ.get("PAYMENT_EVENT_RETENTION_DAYS", "90"))
+
 # Sprint 5 / A3 — Replay infrastructure config (PHASE0_DESIGN §7.1).
 # Per-env sample rate so prod/staging stay at 100% (1 tenant, low traffic;
 # ~30MB/30d retention) while tests default to 0 to avoid noisy row creation
@@ -266,6 +287,16 @@ CELERY_BEAT_SCHEDULE = {
         # Daily 04:00 UTC — offset from the 03:00 audit cleanup so the
         # worker pool isn't slammed by both sweeps simultaneously.
         "schedule": crontab(hour="4", minute="0"),
+    },
+    # Phase 1 / PI1 (DRF-851) — PaymentEvent dedup-ledger retention.
+    # Daily 04:30 UTC — slotted between the 04:00 replay sweep and the
+    # 05:00 shadow-delta compute so no two sweeps fire simultaneously
+    # against the same worker pool. PaymentEvent is a small table in
+    # Phase 1 (1 tenant, low webhook volume) but accumulates fast
+    # under YooKassa redelivery — daily hard-delete keeps it bounded.
+    "cleanup_old_payment_events": {
+        "task": "apps.orders.tasks.cleanup_old_payment_events",
+        "schedule": crontab(hour="4", minute="30"),
     },
     "recompute_profiles_daily": {
         "task": "apps.identity.tasks.recompute_profiles_daily",

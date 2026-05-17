@@ -37,10 +37,12 @@ grep-target so when email lands we can find every emission point.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
 from celery import shared_task  # type: ignore[import-untyped]
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -57,6 +59,7 @@ AUDIT_CERT_FULFILLED = "orders.certificate.fulfilled"
 AUDIT_CERT_FULFILL_SKIPPED = "orders.certificate.fulfill_skipped"
 AUDIT_CERT_FULFILL_SEND_FAILED = "orders.certificate.send_failed"
 AUDIT_CERT_CANCELLED_NOTIFY = "orders.certificate.cancelled_notify"
+AUDIT_PAYMENT_EVENT_CLEANUP = "orders.payment_event.cleanup"
 
 # Email-delivery TODO marker — single source of truth for grep when
 # the actual SMTP path lands. NEVER include this string in operator-
@@ -290,3 +293,54 @@ def notify_cancelled_certificate(order_id: UUID | str) -> dict[str, Any]:
         },
     )
     return {"status": "notified", "order_id": str(order.id), "max_sent": sent}
+
+
+@shared_task(name="apps.orders.tasks.cleanup_old_payment_events")
+def cleanup_old_payment_events() -> int:
+    """Hard-delete PaymentEvent rows older than the retention cutoff.
+
+    Added DRF-851 / Phase 1 / PI1.
+
+    Returns:
+      Number of rows deleted.
+
+    Reads:
+      settings.PAYMENT_EVENT_RETENTION_DAYS (default 90).
+
+    Rationale:
+      :class:`apps.orders.models.PaymentEvent` is a dedup ledger of
+      inbound webhook deliveries — it accumulates fast under load.
+      Forensic / audit data for payments lives on :class:`Order`
+      (which has its own retention contract via being a billing
+      artefact); the event rows are throwaway after the dedup window
+      closes. No soft-delete here — keeps the ledger trim.
+
+    Side effects:
+      Writes ``orders.payment_event.cleanup`` audit row with deleted
+      count, cutoff, and retention days. Cross-tenant — no tenant
+      context (PaymentEvent isn't tenant-scoped; routing happens via
+      the linked Order). Audit row lands with ``tenant=None``.
+    """
+
+    from apps.orders.models import PaymentEvent
+
+    days = int(getattr(settings, "PAYMENT_EVENT_RETENTION_DAYS", 90))
+    cutoff = timezone.now() - timedelta(days=days)
+
+    deleted, _per_model = PaymentEvent.objects.filter(received_at__lt=cutoff).delete()
+    logger.info(
+        "orders.payment_event.cleanup deleted=%d cutoff=%s days=%d",
+        deleted,
+        cutoff.isoformat(),
+        days,
+    )
+    write_audit(
+        action=AUDIT_PAYMENT_EVENT_CLEANUP,
+        target="orders.PaymentEvent",
+        payload={
+            "deleted": deleted,
+            "cutoff": cutoff.isoformat(),
+            "retention_days": days,
+        },
+    )
+    return deleted
