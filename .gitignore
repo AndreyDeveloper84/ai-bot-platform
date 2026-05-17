@@ -35,6 +35,10 @@ staticfiles/
 *.log
 local_settings.py
 
+# ChromaDB local persistence (KB-RAG K2 dev fallback when CHROMA_HTTP_HOST is unset).
+# Per-developer / per-environment binary store; never committed.
+.chroma/
+
 # Environments
 .env
 .env.local

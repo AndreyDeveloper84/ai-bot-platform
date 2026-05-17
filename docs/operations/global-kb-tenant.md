@@ -202,6 +202,107 @@ The command never partially seeds: a mid-doc Google API failure
 rolls the whole transaction back, so a retry starts from a clean
 slate.
 
+### Verifying the seed (smoke tests)
+
+After seeding (and waiting for `embed_pending_kb_documents` to finish),
+run the golden-query smoke suite to confirm the corpus is queryable
+end-to-end through the live retriever:
+
+```bash
+./.venv/Scripts/python.exe -m pytest \
+    apps/kb/services/tests/test_global_fallback_smoke.py -m smoke -v
+```
+
+The suite is **opt-in** — `pyproject.toml`'s default `addopts` pin
+`-m "not smoke"` so a plain `pytest` run never touches OpenAI. The
+five tests live in `apps/kb/services/tests/test_global_fallback_smoke.py`
+and cover the high-value end-user intents from issue
+[#119](https://github.com/AndreyDeveloper84/ai-bot-platform/issues/119):
+
+| # | Intent | `doc_types` filter |
+| --- | --- | --- |
+| 1 | "I want to relax — which massage?" | `["service"]` |
+| 2 | "I'm pregnant — can I do laser?" | `["contraindication"]` |
+| 3 | "What should I do after biorevitalization?" | `["help_article"]` |
+| 4 | "Redness after procedure — is it normal?" | `["contraindication", "help_article"]` |
+| 5 | "My back hurts — what do you suggest?" | `["service", "contraindication"]` |
+
+Each test creates a fresh non-`global_kb` tenant (so the tenant's own
+collection is empty), runs `search_kb` with a real
+`OpenAIProvider`, and asserts:
+
+* at least one hit returned;
+* the top hit carries `metadata.kb_source == "global"` (proving the
+  fallback fired);
+* a lenient substring matches the expected topic in section title /
+  source_uri / chunk text.
+
+**When to run**: after a fresh seed on a new environment, before
+declaring the seed "good". Also after any non-trivial heading rename
+in the source Google Docs — see the orphan-row note below.
+
+**Cost**: each run does 5 small OpenAI `text-embedding-3-small` calls
+— roughly $0.0001 total. Negligible, but non-zero, which is why the
+suite is opt-in.
+
+**If a test skips with "global_kb tenant not provisioned" or "global_kb
+ChromaDB collection is empty"** — the autouse precondition fixture
+caught a missing seed step. Re-run `create_tenant --system` /
+`seed_kb_from_gdocs` / `embed_pending_kb_documents` and re-run the
+smoke suite.
+
+### Orphan rows after a heading rename
+
+`seed_kb_from_gdocs` keys idempotency on the `source_uri` slug, which is
+derived from the heading text (transliterated Cyrillic → Latin via
+`transliterate.translit(..., "ru", reversed=True)`). **Renaming an H2 or
+H3 in the Google Doc breaks idempotency**: the old slug becomes an
+orphan (no longer touched by reruns; latest version remains "current"
+with stale content) and a new row appears under the new slug.
+
+The retriever ranks by relevance so an orphan with stale wording
+naturally sinks below the new row, but operators may still want to
+clean up. To find candidate orphans for a given doc:
+
+```python
+from collections import defaultdict
+from apps.kb.models import KbDocument
+from apps.kb.services.global_tenant import get_global_kb_tenant
+
+gkb = get_global_kb_tenant()
+# Latest version per source_uri, scoped to one doc:
+DOC_ID = "1abc...XYZ"  # the Google Doc ID
+prefix = f"gdoc://{DOC_ID}/"
+rows = (
+    KbDocument.all_tenants
+    .filter(tenant=gkb, source_uri__startswith=prefix)
+    .order_by("source_uri", "-version")
+)
+seen: dict[str, KbDocument] = {}
+for r in rows:
+    seen.setdefault(r.source_uri, r)
+# Inspect `seen.values()` — slugs that DON'T match a current heading
+# in the live Doc are orphans. Cross-reference manually against the
+# Doc's headings (open in Google Docs, scan H2/H3 outline) before
+# deleting from the admin.
+print("\n".join(sorted(seen.keys())))
+```
+
+**Recommended workflow** when renaming a heading:
+
+1. Note the old slug (run the snippet above before the rename).
+2. Rename the heading in the Doc.
+3. Re-run `seed_kb_from_gdocs` for that doc (creates new row).
+4. Delete the orphan row via Django admin (search by the old
+   `source_uri`).
+5. The K11 pre-delete signal fans out to ChromaDB; no separate Chroma
+   cleanup needed.
+
+For mass renames, consider using a one-off script — but think hard:
+the previous versions are forensic-relevant. The platform ships with
+audit trails on `KbDocument` (Sprint 8 / E1) precisely so old retrieval
+answers can be replayed.
+
 ---
 
 ## Related work
@@ -209,7 +310,9 @@ slate.
 * **Sub-1 / PR #120** — `Tenant.is_system` field + admin delete guard
 * **Sub-3 / PR #122** — `KbRetriever` global-fallback for shared doc_types
 * **Sub-4 / PR #121** — Google Docs API client (this corpus's source)
-* **Sub-5 / GH #118** — `seed_kb_from_gdocs` management command (this
+* **Sub-4b / PR #129** — Pivot to public Markdown export (no SA credentials)
+* **Sub-5 / PR #125** — `seed_kb_from_gdocs` management command (this
   section's source); uses `get_global_kb_tenant()` for the default target.
-* **Sub-6 (planned)** — Seed run on 4 Google Docs + golden-query smoke tests.
+* **Sub-6 / GH #119** — Seed run on 4 Google Docs + golden-query smoke
+  tests (this section).
 * **Parent epic** — [#113](https://github.com/AndreyDeveloper84/ai-bot-platform/issues/113)
