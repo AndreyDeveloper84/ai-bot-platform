@@ -173,7 +173,8 @@ def _service(id_: int, title: str = "Массаж спины") -> Service:
 
 
 class TestToolSpecs:
-    def test_all_seven_specs_registered(self) -> None:
+    def test_all_eight_specs_registered(self) -> None:
+        # B7 / DRF-843 — added buy_certificate as the 8th tool.
         names = {spec["name"] for spec in BOOKING_TOOL_SPECS}
         assert names == {
             "show_masters",
@@ -183,6 +184,7 @@ class TestToolSpecs:
             "reschedule_booking",
             "show_my_bookings",
             "calc_price",
+            "buy_certificate",
         }
 
     def test_specs_have_openai_shape(self) -> None:

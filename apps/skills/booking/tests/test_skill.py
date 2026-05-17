@@ -494,7 +494,7 @@ class TestHandoffPaths:
 
 
 class TestToolSpecWiring:
-    def test_all_seven_specs_passed_on_first_call(
+    def test_all_eight_specs_passed_on_first_call(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
         captured_tools: list[Any] = []
@@ -530,6 +530,7 @@ class TestToolSpecWiring:
             "confirm_booking",
             "show_my_bookings",
             "calc_price",
+            "buy_certificate",
         }
 
 
