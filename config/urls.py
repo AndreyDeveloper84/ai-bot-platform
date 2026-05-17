@@ -33,4 +33,14 @@ urlpatterns = [
         "api/v1/yookassa/",
         include("apps.integrations.yookassa.urls", namespace="yookassa"),
     ),
+    # Phase 1 / CH1 (DRF-848) — Telegram channel adapter webhook.
+    # Tenant resolution happens from the URL slug, not the X-Tenant
+    # header (Telegram has no equivalent). The view authenticates with
+    # the X-Telegram-Bot-Api-Secret-Token header against the tenant's
+    # ``telegram_webhook_secret`` field. See
+    # ``docs/runbooks/telegram-bot-onboarding.md``.
+    path(
+        "api/v1/channels/telegram/",
+        include("apps.channels.telegram.urls", namespace="telegram"),
+    ),
 ]
