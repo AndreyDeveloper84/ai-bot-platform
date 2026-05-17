@@ -50,6 +50,12 @@ dependencies = [
     # here so it can co-evolve with the discovery SDK.
     "google-api-python-client>=2.140",
     "google-auth>=2.30",
+    # KB-RAG Sub-5 (GH #118) — deterministic Russian → ASCII transliteration
+    # for the slug used in KbDocument.source_uri. Pure-Python, zero deps,
+    # MIT-licensed. Runtime dep (not dev-only) because the slug builder is
+    # called inside the seed_kb_from_gdocs management command which runs in
+    # production environments — never in tests alone.
+    "transliterate>=1.10",
 ]
 
 [project.optional-dependencies]
