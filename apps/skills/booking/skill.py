@@ -60,6 +60,7 @@ from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
+    CALC_PRICE_TOOL_SPEC,
     CANCEL_BOOKING_TOOL_SPEC,
     CONFIRM_BOOKING_TOOL_SPEC,
     RESCHEDULE_BOOKING_TOOL_SPEC,
@@ -69,6 +70,7 @@ from apps.skills.booking.tools import (
     BookingToolResult,
     build_master_lookup,
     build_service_lookup,
+    calc_price,
     cancel_booking,
     confirm_booking,
     reschedule_booking,
@@ -127,6 +129,12 @@ _BOOKING_KEYWORDS: tuple[str, ...] = (
     "отменить",
     "перенес",
     "перенести",
+    # B6 / DRF-842 — price / promo questions route into the booking
+    # skill so calc_price is reachable from the keyword fallback path.
+    "сколько стоит",
+    "сколько будет",
+    "цена",
+    "промокод",
 )
 
 
@@ -253,6 +261,7 @@ class BookingSkill:
             confirmation=_confirmation_payload(tool_result),
             pending=_pending_payload(tool_result),
             user_bookings=_bookings_payload(tool_result, tool_name),
+            price=_price_payload(tool_result),
         )
         second = asyncio.run(provider.complete(second_messages, model=model))
 
@@ -380,6 +389,20 @@ def _execute_tool(
         # No handoff path for read-only listing — empty is OK.
         return result, ""
 
+    if tool_name == CALC_PRICE_TOOL_SPEC["name"]:
+        result = calc_price(
+            tenant=tenant,
+            arguments=arguments,
+            allowed_service_ids=allowed_service_ids,
+            service_lookup=service_lookup,
+        )
+        if result.error == "price_invalid_service_id":
+            return result, "price_invalid_service_id"
+        # promo_status values (not_found / expired / wrong_service / ...)
+        # are part of the answer, NOT handoff triggers — the user just
+        # gets a polite "не нашла такой промокод" reply.
+        return result, ""
+
     return BookingToolResult(error="unknown_tool"), "booking_unknown_tool"
 
 
@@ -502,6 +525,22 @@ def _action_data_for_pending(result: BookingToolResult) -> dict[str, Any] | None
             "kind": result.pending.kind,
             "token": str(result.pending.token),
         },
+    }
+
+
+def _price_payload(result: BookingToolResult) -> dict[str, Any] | None:
+    p = result.price
+    if p is None:
+        return None
+    return {
+        "service_name": p.service_name,
+        "original_price": str(p.original_price) if p.original_price is not None else None,
+        "final_price": str(p.final_price) if p.final_price is not None else None,
+        "discount_percent": p.discount_percent,
+        "promo_status": p.promo_status,
+        # Pre-rendered text — the deterministic fallback. The LLM may
+        # rephrase but should preserve the numbers verbatim.
+        "rendered_text": result.text,
     }
 
 
