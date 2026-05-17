@@ -66,6 +66,10 @@ LOCAL_APPS = [
     # dispatcher + cb:rem:* callback skill. Consumes apps.booking models;
     # owns the reminder lifecycle code paths.
     "apps.bookings",
+    # Phase 1 / B6 (DRF-842) — promo codes + calc_price LLM tool.
+    # Owns the Promotion model + promo-validation service; the
+    # ``calc_price`` tool wiring lives in apps.skills.booking.
+    "apps.promotions",
 ]
 
 INSTALLED_APPS = [

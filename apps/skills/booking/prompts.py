@@ -57,6 +57,7 @@ def build_booking_prompt(
     confirmation: dict[str, Any] | None = None,
     pending: dict[str, Any] | None = None,
     user_bookings: list[dict[str, Any]] | None = None,
+    price: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a ChatML messages list for one booking-skill LLM call.
 
@@ -88,6 +89,7 @@ def build_booking_prompt(
         confirmation=confirmation,
         pending=pending,
         user_bookings=user_bookings,
+        price=price,
     )
     return [
         {"role": "system", "content": system_text},
@@ -103,6 +105,7 @@ def _render_system_prompt(
     confirmation: dict[str, Any] | None,
     pending: dict[str, Any] | None,
     user_bookings: list[dict[str, Any]] | None,
+    price: dict[str, Any] | None = None,
 ) -> str:
     sections: list[str] = [f"Ты — {brand_voice.persona}."]
 
@@ -114,7 +117,7 @@ def _render_system_prompt(
         sections.append("Запрещено: " + ", ".join(forbidden) + ".")
 
     sections.append(
-        "Ты помогаешь записаться в салон. У тебя 6 инструментов:\n"
+        "Ты помогаешь записаться в салон. У тебя 7 инструментов:\n"
         "• show_masters — список мастеров для услуги.\n"
         "• show_slots — свободные слоты для мастера.\n"
         "• confirm_booking — показать карточку подтверждения новой "
@@ -124,7 +127,11 @@ def _render_system_prompt(
         "• reschedule_booking — показать карточку подтверждения "
         "переноса записи. record_id из show_my_bookings, "
         "new_datetime — будущее время в ISO формате.\n"
-        "• show_my_bookings — показать существующие записи."
+        "• show_my_bookings — показать существующие записи.\n"
+        "• calc_price — посчитать цену услуги, опционально с "
+        "промокодом. Вызывай, когда клиент спрашивает про цену "
+        '("сколько стоит ...") или упоминает промокод. Передавай '
+        "promo_code ТОЛЬКО если клиент явно назвал код — не выдумывай."
     )
 
     sections.append(
@@ -145,6 +152,8 @@ def _render_system_prompt(
         sections.append(_format_pending_block(pending))
     if user_bookings is not None:
         sections.append(_format_bookings_block(user_bookings))
+    if price is not None:
+        sections.append(_format_price_block(price))
 
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
@@ -192,6 +201,26 @@ def _format_confirmation_block(confirmation: dict[str, Any]) -> str:
         f"• Услуга: {confirmation.get('service_name', '—')}\n"
         f"• Время: {confirmation.get('visit_at', '—')}\n"
         f"• ID записи: {confirmation.get('record_id', '—')}"
+    )
+
+
+def _format_price_block(price: dict[str, Any]) -> str:
+    """Splice the calc_price payload into the system prompt.
+
+    The LLM should preserve the numbers verbatim (no rounding, no
+    "примерно") and pick the conversational frame matching
+    ``promo_status``. ``rendered_text`` is the deterministic fallback;
+    the model may rephrase but should keep the price figures intact.
+    """
+    return (
+        "ЦЕНА (calc_price):\n"
+        f"• Услуга: {price.get('service_name', '—')}\n"
+        f"• Базовая цена: {price.get('original_price', '—')}\n"
+        f"• Финальная цена: {price.get('final_price', '—')}\n"
+        f"• Скидка: {price.get('discount_percent', '—')}\n"
+        f"• Статус промокода: {price.get('promo_status', '—')}\n"
+        f"• Готовый текст: {price.get('rendered_text', '')}\n"
+        "Сохрани числа без изменений. Подбери тон под promo_status."
     )
 
 

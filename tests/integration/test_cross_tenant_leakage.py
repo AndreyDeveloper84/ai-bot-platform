@@ -172,6 +172,13 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
             tenant, f"profile-{suffix or 'x'}"
         ),
     },
+    # Phase 1 / B6 (DRF-842): Promotion needs a unique code per row +
+    # an in-range discount_percent. Code is upper-cased on save (see
+    # Promotion.save) so the suffix gets normalised consistently.
+    "Promotion": {
+        "code": lambda tenant, suffix: f"SCANNER-{suffix or 'X'}",
+        "discount_percent": 10,
+    },
 }
 
 

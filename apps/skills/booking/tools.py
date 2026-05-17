@@ -1,6 +1,6 @@
-"""Booking-skill tool specs + handlers (DRF-839 / Phase 1 / B3 + B5).
+"""Booking-skill tool specs + handlers (DRF-839 / Phase 1 / B3 + B5 + B6).
 
-Six LLM-callable functions:
+Seven LLM-callable functions:
 
 * :func:`show_masters` — list staff for a service.
 * :func:`show_slots` — list time slots for a master.
@@ -16,6 +16,9 @@ Six LLM-callable functions:
   :func:`execute_reschedule` on the ✅ tap (YClients has no native
   reschedule).
 * :func:`show_my_bookings` — list the bot_user's upcoming bookings.
+* :func:`calc_price` (B6 / DRF-842) — quote a service price with an
+  optional promo code. Read-only; never touches YClients (price data
+  is mirrored on :class:`apps.catalog.models.CatalogService`).
 
 Each tool spec follows the OpenAI ``{name, description, parameters}``
 shape (L1 canonical form, same as
@@ -75,7 +78,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from decimal import Decimal
+from typing import Any, Literal
 from uuid import UUID
 
 from django.utils import timezone as dj_timezone
@@ -93,6 +97,8 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
+from apps.promotions.formatting import format_rub
+from apps.promotions.services import validate_promo
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +282,40 @@ SHOW_MY_BOOKINGS_TOOL_SPEC: dict[str, Any] = {
 }
 
 
+CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
+    "name": "calc_price",
+    "description": (
+        "Quote the price of a service, optionally applying a promo code. "
+        "Call when the client asks about a price ('сколько стоит ...'), "
+        "or mentions a promo code ('у меня промокод ...'). Pass "
+        "promo_code ONLY if the client explicitly named one — never "
+        "invent. service_id MUST come from the bot's known catalog "
+        "(prior show_masters / show_slots, or the visible service "
+        "list); fabricated IDs trigger a handoff."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "service_id": {
+                "type": "integer",
+                "description": (
+                    "Catalog/YClients service id. Must come from the "
+                    "bot's known catalog — never invent."
+                ),
+            },
+            "promo_code": {
+                "type": "string",
+                "description": (
+                    "Promo code the client mentioned. Optional. Pass "
+                    "only when the client explicitly named one."
+                ),
+            },
+        },
+        "required": ["service_id"],
+    },
+}
+
+
 BOOKING_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_MASTERS_TOOL_SPEC,
     SHOW_SLOTS_TOOL_SPEC,
@@ -283,6 +323,7 @@ BOOKING_TOOL_SPECS: list[dict[str, Any]] = [
     CANCEL_BOOKING_TOOL_SPEC,
     RESCHEDULE_BOOKING_TOOL_SPEC,
     SHOW_MY_BOOKINGS_TOOL_SPEC,
+    CALC_PRICE_TOOL_SPEC,
 ]
 
 
@@ -295,6 +336,20 @@ EVENT_BOOKING_CANCELLED = "booking.cancelled"
 EVENT_BOOKING_CANCEL_FAILED = "booking.cancel_failed"
 EVENT_BOOKING_RESCHEDULED = "booking.rescheduled"
 EVENT_BOOKING_RESCHEDULE_PARTIAL = "booking.reschedule_partial_failure"
+EVENT_BOOKING_PRICE_QUOTED = "booking.price_quoted"
+
+
+# B6 / DRF-842 — promo_status values reported by ``calc_price``.
+# Adds ``not_supplied`` on top of the validate_promo taxonomy.
+PromoStatus = Literal[
+    "ok",
+    "not_found",
+    "inactive",
+    "not_started",
+    "expired",
+    "wrong_service",
+    "not_supplied",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +434,35 @@ class PendingPreview:
     keyboard: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CalcPriceResult:
+    """Return value of :func:`calc_price` (B6 / DRF-842).
+
+    Fields:
+
+    * ``service_name``     — display name from catalog (snapshot of the
+                            catalog row at quote time).
+    * ``original_price``   — Decimal from
+                            :attr:`apps.catalog.models.CatalogService.price_from`.
+                            ``None`` when the service has no base price
+                            ("по запросу" услуги).
+    * ``final_price``      — Original minus discount when ``promo_status="ok"``;
+                            equal to original otherwise. ``None`` mirrors
+                            ``original_price=None``.
+    * ``discount_percent`` — int in 1..99 when ``promo_status="ok"``;
+                            ``None`` otherwise.
+    * ``promo_status``     — see :data:`PromoStatus`. ``"not_supplied"``
+                            is the no-promo-mentioned case; the seven
+                            others mirror :data:`apps.promotions.services.PromoReason`.
+    """
+
+    service_name: str
+    original_price: Decimal | None
+    final_price: Decimal | None
+    discount_percent: int | None
+    promo_status: PromoStatus
+
+
 @dataclass
 class BookingToolResult:
     """Container the skill stores between LLM calls.
@@ -394,6 +478,7 @@ class BookingToolResult:
     confirmation: ConfirmationResult | None = None
     bookings: list[BookingRow] = field(default_factory=list)
     pending: PendingPreview | None = None
+    price: CalcPriceResult | None = None
     error: str = ""
 
 
@@ -1583,6 +1668,221 @@ def _format_bookings_text(bookings: list[BookingRow]) -> str:
             parts.append(f"в {b.visit_at}")
         lines.append("• " + " ".join(parts))
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 7: calc_price (B6 / DRF-842)
+# ---------------------------------------------------------------------------
+
+
+def calc_price(
+    *,
+    tenant: Any,
+    arguments: dict[str, Any],
+    allowed_service_ids: set[int],
+    service_lookup: dict[int, str],
+) -> BookingToolResult:
+    """Quote a service price, optionally applying a promo code.
+
+    Args:
+      tenant: current :class:`apps.tenancy.models.Tenant`. Used to
+              scope both the catalog lookup (for ``price_from``) and
+              the promo lookup.
+      arguments: LLM-supplied ``{service_id, promo_code?}``.
+      allowed_service_ids: pre-fetched set of valid YClients service
+                           ids on this tenant. An LLM-emitted id not
+                           in this set returns
+                           ``error="price_invalid_service_id"`` so the
+                           skill emits a handoff (anti-hallucination
+                           guard — mirrors confirm_booking).
+      service_lookup: id → display name map, used to render the reply
+                      and to fall back when the catalog row is missing
+                      a name.
+
+    Returns a :class:`BookingToolResult` with ``price`` populated on
+    success. ``error="price_invalid_service_id"`` triggers a handoff
+    at the skill layer. Other promo failures (not_found / inactive /
+    expired / etc.) are NOT errors — they're part of the answer, see
+    ``promo_status`` on the :class:`CalcPriceResult`.
+    """
+    from apps.catalog.models import CatalogService
+
+    service_id = _coerce_int(arguments.get("service_id"))
+    raw_promo = arguments.get("promo_code")
+    promo_code = str(raw_promo).strip() if raw_promo else ""
+
+    tenant_id = str(getattr(tenant, "id", ""))
+
+    if service_id is None or service_id not in allowed_service_ids:
+        logger.info(
+            "booking.calc_price.invalid_service_id service_id=%s allowed=%s",
+            service_id,
+            sorted(allowed_service_ids),
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="calc_price",
+            outcome="invalid_service_id",
+        )
+        return BookingToolResult(error="price_invalid_service_id")
+
+    catalog_row = (
+        CatalogService.all_tenants.filter(
+            tenant=tenant,
+            external_id=int(service_id),
+        )
+        .only("id", "name", "price_from")
+        .first()
+    )
+
+    if catalog_row is None:
+        # YClients knows the service but the catalog mirror doesn't.
+        # The catalog sync runs every 15 min — we may be in the gap
+        # right after a salon added a new service in mysite. Surface
+        # the bot's display name (from service_lookup) and treat as
+        # "цена по запросу" so the LLM doesn't confidently quote a
+        # made-up price.
+        service_name = service_lookup.get(service_id, "")
+        result = CalcPriceResult(
+            service_name=service_name,
+            original_price=None,
+            final_price=None,
+            discount_percent=None,
+            promo_status="not_supplied" if not promo_code else "not_found",
+        )
+        text = _format_price_text(result)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="calc_price",
+            outcome="catalog_missing",
+            extra={"service_id": service_id},
+        )
+        return BookingToolResult(text=text, price=result)
+
+    service_name = catalog_row.name or service_lookup.get(service_id, "")
+    base_price: Decimal | None = catalog_row.price_from
+
+    # ── No promo case ──────────────────────────────────────────────
+    if not promo_code:
+        result = CalcPriceResult(
+            service_name=service_name,
+            original_price=base_price,
+            final_price=base_price,
+            discount_percent=None,
+            promo_status="not_supplied",
+        )
+        text = _format_price_text(result)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="calc_price",
+            outcome="ok_no_promo",
+            extra={"service_id": service_id},
+        )
+        write_audit(
+            EVENT_BOOKING_PRICE_QUOTED,
+            target="BookingSkill",
+            payload={
+                "tenant_id": tenant_id,
+                "service_id": service_id,
+                "promo": "",
+                "promo_status": "not_supplied",
+            },
+        )
+        return BookingToolResult(text=text, price=result)
+
+    # ── Promo case ─────────────────────────────────────────────────
+    validation = validate_promo(
+        tenant=tenant,
+        code=promo_code,
+        service_id=catalog_row.id,
+    )
+
+    discount: int | None = None
+    final_price: Decimal | None = base_price
+    if validation.ok and validation.promo is not None and base_price is not None:
+        discount = validation.promo.discount_percent
+        # Discount math at Decimal precision: (100 - discount) / 100
+        # is exact for integer percent. Quantise to 2 dp at format
+        # time, not here, so downstream consumers (audit, future
+        # checkout) see the unrounded result.
+        multiplier = (Decimal(100) - Decimal(discount)) / Decimal(100)
+        final_price = (base_price * multiplier).quantize(Decimal("0.01"))
+    elif validation.ok and validation.promo is not None and base_price is None:
+        # Promo valid but base price unknown — discount is meaningless,
+        # report ok=False semantics (no discount applied) but keep the
+        # row's percent for transparency.
+        discount = validation.promo.discount_percent
+
+    result = CalcPriceResult(
+        service_name=service_name,
+        original_price=base_price,
+        final_price=final_price,
+        discount_percent=discount,
+        promo_status=validation.reason,
+    )
+    text = _format_price_text(result)
+    _audit_tool(
+        tenant_id=tenant_id,
+        tool="calc_price",
+        outcome="ok",
+        extra={
+            "service_id": service_id,
+            "promo_status": validation.reason,
+        },
+    )
+    write_audit(
+        EVENT_BOOKING_PRICE_QUOTED,
+        target="BookingSkill",
+        payload={
+            "tenant_id": tenant_id,
+            "service_id": service_id,
+            "promo": promo_code.upper(),
+            "promo_status": validation.reason,
+        },
+    )
+    return BookingToolResult(text=text, price=result)
+
+
+def _format_price_text(result: CalcPriceResult) -> str:
+    """Render a Russian price quote for the deterministic fallback path.
+
+    The skill's second LLM call MAY rephrase; this is what the channel
+    adapter shows when the LLM returns empty. Wording per the B6 spec:
+
+    * No promo, price known          → "1 500 ₽".
+    * Valid promo applied            → "1 500 ₽ → 1 350 ₽ (промокод MAY10, −10%)".
+    * Promo not_found / inactive     → "Не нашла такой промокод — могу посчитать без него?"
+    * Promo not_started              → "Этот промокод начнёт действовать ..."
+    * Promo expired                  → "Срок действия промокода истёк."
+    * Promo wrong_service            → "Промокод не подходит к этой услуге."
+    * price_from is None             → "Точную цену озвучит администратор — это услуга по индивидуальному прайсу."
+
+    Strings are short on purpose — the LLM rephrases freely on top.
+    """
+    name = result.service_name or "услуга"
+
+    if result.original_price is None:
+        return f"{name}: точную цену озвучит администратор — это услуга по индивидуальному прайсу."
+
+    base_str = format_rub(result.original_price)
+
+    status = result.promo_status
+    if status == "not_supplied":
+        return f"{name}: {base_str}."
+    if status == "ok" and result.final_price is not None and result.discount_percent is not None:
+        final_str = format_rub(result.final_price)
+        return f"{name}: {base_str} → {final_str} (промокод, −{result.discount_percent}%)."
+    if status in ("not_found", "inactive"):
+        return f"Не нашла такой промокод — могу посчитать без него? {name}: {base_str}."
+    if status == "not_started":
+        return f"Этот промокод начнёт действовать позже. Сейчас {name}: {base_str}."
+    if status == "expired":
+        return f"Срок действия промокода истёк. {name}: {base_str}."
+    if status == "wrong_service":
+        return f"Промокод не подходит к этой услуге. {name}: {base_str}."
+    # Fallback — should not be reached, but keeps mypy happy on the
+    # exhaustive-match case (PromoStatus is a Literal).
+    return f"{name}: {base_str}."
 
 
 # ---------------------------------------------------------------------------

@@ -173,7 +173,7 @@ def _service(id_: int, title: str = "Массаж спины") -> Service:
 
 
 class TestToolSpecs:
-    def test_all_six_specs_registered(self) -> None:
+    def test_all_seven_specs_registered(self) -> None:
         names = {spec["name"] for spec in BOOKING_TOOL_SPECS}
         assert names == {
             "show_masters",
@@ -182,6 +182,7 @@ class TestToolSpecs:
             "cancel_booking",
             "reschedule_booking",
             "show_my_bookings",
+            "calc_price",
         }
 
     def test_specs_have_openai_shape(self) -> None:
