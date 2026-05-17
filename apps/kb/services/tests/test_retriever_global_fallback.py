@@ -28,11 +28,14 @@ from typing import Any
 import pytest
 
 from apps.kb.chromadb_client import ChromaClient, KbItem, reset_client_cache
-from apps.kb.services import retriever as retriever_module
+from apps.kb.constants import GLOBAL_KB_TENANT_SLUG
+from apps.kb.services.global_tenant import get_global_kb_tenant
 from apps.kb.services.retriever import search_kb
 from apps.tenancy.models import Tenant
 
-GLOBAL_KB_SLUG = "global_kb"
+# Re-exported here as the legacy test-only alias. New callers should
+# import from ``apps.kb.constants`` directly (Sub-2 / GH #115).
+GLOBAL_KB_SLUG = GLOBAL_KB_TENANT_SLUG
 
 
 @pytest.fixture(autouse=True)
@@ -40,11 +43,14 @@ def _isolated_chroma(tmp_path: Path, settings: pytest.FixtureRequest) -> Any:
     settings.BASE_DIR = tmp_path  # type: ignore[attr-defined]
     settings.CHROMA_HTTP_HOST = ""  # type: ignore[attr-defined]
     reset_client_cache()
-    # Clear the module-level global-tenant cache so each test starts fresh.
-    retriever_module._get_global_kb_tenant.cache_clear()  # type: ignore[attr-defined]
+    # Clear the shared global-tenant cache so each test starts fresh.
+    # Sub-2 (GH #115) extracted this lookup from the retriever into a
+    # public helper so seed cmd (Sub-5) can reuse it; the cache lives on
+    # the helper now, not on a retriever-private symbol.
+    get_global_kb_tenant.cache_clear()
     yield
     reset_client_cache()
-    retriever_module._get_global_kb_tenant.cache_clear()  # type: ignore[attr-defined]
+    get_global_kb_tenant.cache_clear()
 
 
 @pytest.fixture
@@ -364,7 +370,10 @@ class TestGracefulDegradation:
 
         _seed(chroma, tenant, "service", n=2, id_prefix="t-service")
 
-        with caplog.at_level(logging.WARNING, logger="apps.kb.services.retriever"):
+        # The WARN now lives in ``apps.kb.services.global_tenant`` (Sub-2
+        # extracted the lookup into the shared helper) — the test pins
+        # the new log surface so future regressions surface here.
+        with caplog.at_level(logging.WARNING, logger="apps.kb.services.global_tenant"):
             result = search_kb(
                 tenant,
                 "услуга",
@@ -377,5 +386,5 @@ class TestGracefulDegradation:
         assert len(result.hits) >= 1
         assert all(h.metadata.get("kb_source") == "tenant" for h in result.hits)
         # Exactly one WARN about the missing global tenant.
-        warns = [r for r in caplog.records if "global_kb_tenant_missing" in r.getMessage()]
+        warns = [r for r in caplog.records if "global_tenant.missing" in r.getMessage()]
         assert len(warns) == 1
