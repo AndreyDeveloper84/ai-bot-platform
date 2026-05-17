@@ -43,13 +43,12 @@ dependencies = [
     # Pinned to v2+ for the modern `before_send` semantics and
     # CeleryIntegration's beat-aware tagging.
     "sentry-sdk[django,celery]>=2.0,<3",
-    # KB-RAG Sub-4 (GH #117) — Google Docs read-only client. Service-account
-    # auth (google-auth) + Discovery SDK (google-api-python-client). Both
-    # are official Google-published packages; google-auth is already a
-    # transitive of many cloud libs and is intentionally pinned loosely
-    # here so it can co-evolve with the discovery SDK.
-    "google-api-python-client>=2.140",
-    "google-auth>=2.30",
+    # KB-RAG Sub-4b (GH #128) — Google Docs read-only client.
+    # Pivoted from service-account auth to the public Markdown export
+    # endpoint (`/document/d/<id>/export?format=md`) because operator GCP
+    # orgs increasingly enforce `iam.disableServiceAccountKeyCreation`
+    # ("Secure by Default") which blocks JSON key generation. Source docs
+    # are link-shareable; no auth needed. httpx is already a project dep.
 ]
 
 [project.optional-dependencies]
