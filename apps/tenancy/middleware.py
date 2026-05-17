@@ -63,6 +63,11 @@ STRICT_OPT_OUT_PREFIXES = (
     # channel-token → tenant mapping (apps.ingress.services._resolve_tenant)
     # before any view code runs. The X-Tenant header is never present.
     "/api/v1/ingress/",
+    # Phase 1 / CH1 (DRF-848): Telegram webhook resolves tenant from
+    # the URL path slug (and authenticates via the
+    # X-Telegram-Bot-Api-Secret-Token header). The X-Tenant header is
+    # never present on inbound Telegram updates.
+    "/api/v1/channels/telegram/",
 )
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.

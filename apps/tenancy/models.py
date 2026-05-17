@@ -151,6 +151,49 @@ class Tenant(models.Model):
         ),
     )
 
+    # Phase 1 / CH1 (DRF-848) — per-tenant Telegram bot credentials.
+    #
+    # The platform's Telegram channel adapter is strictly per-tenant: each
+    # tenant registers its own BotFather token here and a webhook secret
+    # the operator generates with ``secrets.token_urlsafe(32)`` and passes
+    # to Telegram's ``setWebhook`` as ``secret_token``. Telegram then echoes
+    # the secret back on every inbound POST in the
+    # ``X-Telegram-Bot-Api-Secret-Token`` header; the webhook view uses
+    # ``hmac.compare_digest`` to verify before dispatching to the handler.
+    #
+    # SECURITY: ``telegram_bot_token`` is a Telegram-side credential — it
+    # MUST NOT be logged, included in audit / event payloads, or surfaced
+    # in unmasked admin list views. :meth:`__repr__` redacts it; the admin
+    # registration shows only the last 4 characters in list_display. See
+    # ``docs/runbooks/telegram-bot-onboarding.md`` for the operator flow.
+    #
+    # ``blank=True`` + empty defaults keep existing tenants migration-safe;
+    # the webhook view treats an empty pair as "Telegram not configured
+    # for this tenant" and returns 404 (hygiene: don't leak which slugs
+    # exist but lack credentials).
+    telegram_bot_token = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text=(
+            "BotFather access token for this tenant's Telegram bot. NEVER "
+            "log this value — masked in __repr__ and admin list views. "
+            "See docs/runbooks/telegram-bot-onboarding.md."
+        ),
+    )
+    telegram_webhook_secret = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=(
+            "Per-tenant secret the operator generates (e.g. "
+            "secrets.token_urlsafe(32)) and registers with Telegram's "
+            "setWebhook ?secret_token=…. Telegram sends it back in "
+            "X-Telegram-Bot-Api-Secret-Token on every webhook POST; the "
+            "webhook view verifies with hmac.compare_digest."
+        ),
+    )
+
     # Sprint 7 / C4 (DRF-575) — cursor for the catalog sync orchestrator.
     # NULL = full-resync on the next beat (initial bootstrap or admin
     # force-clear). Sync service writes the upstream `updated_at` of the
@@ -180,6 +223,34 @@ class Tenant(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} ({self.slug})"
+
+    def __repr__(self) -> str:
+        """Repr that masks the Telegram bot token (Phase 1 / CH1).
+
+        ``telegram_bot_token`` is a credential — the default
+        ``Model.__repr__`` reveals all fields, so we override and emit
+        only the last 4 characters (mirrors banking convention for card
+        numbers). Tests assert that the full token does NOT appear in
+        repr output.
+        """
+        masked = self._mask_telegram_token()
+        return (
+            f"<Tenant id={self.id} slug={self.slug!r} name={self.name!r} "
+            f"telegram_bot_token={masked!r}>"
+        )
+
+    def _mask_telegram_token(self) -> str:
+        """Return the last 4 chars of the Telegram bot token, prefixed by '…'.
+
+        Returns the empty string when no token is set. Used by ``__repr__``
+        AND by the admin list display, so both surfaces stay in sync.
+        """
+        token = self.telegram_bot_token or ""
+        if not token:
+            return ""
+        if len(token) <= 4:
+            return "…" + "*" * len(token)
+        return "…" + token[-4:]
 
     def clean(self) -> None:
         """Validate slug shape at the model layer.

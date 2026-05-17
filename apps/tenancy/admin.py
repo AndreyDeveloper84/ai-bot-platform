@@ -28,7 +28,15 @@ from apps.tenancy.models import Tenant
 
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
-    list_display = ("name", "slug", "is_active", "is_system", "shadow_mode", "created_at")
+    list_display = (
+        "name",
+        "slug",
+        "is_active",
+        "is_system",
+        "shadow_mode",
+        "telegram_bot_token_masked",
+        "created_at",
+    )
     list_filter = ("is_active", "is_system", "shadow_mode")
     list_editable = ("shadow_mode",)
     search_fields = ("name", "slug")
@@ -47,6 +55,20 @@ class TenantAdmin(admin.ModelAdmin):
             },
         ),
         (
+            "Phase 1 — Telegram channel",
+            {
+                "fields": ("telegram_bot_token", "telegram_webhook_secret"),
+                "description": (
+                    "Per-tenant Telegram bot credentials. Token is from "
+                    "@BotFather; webhook_secret is operator-generated via "
+                    "secrets.token_urlsafe(32) and registered with "
+                    "Telegram's setWebhook. The list view shows only the "
+                    "last 4 token characters; full value is editable here. "
+                    "See docs/runbooks/telegram-bot-onboarding.md."
+                ),
+            },
+        ),
+        (
             "Системное",
             {
                 "fields": ("created_at", "updated_at"),
@@ -54,6 +76,15 @@ class TenantAdmin(admin.ModelAdmin):
             },
         ),
     )
+
+    @admin.display(description="Telegram token (last 4)")
+    def telegram_bot_token_masked(self, obj: Tenant) -> str:
+        """Admin column: never expose the full Telegram bot token.
+
+        Delegates to :meth:`Tenant._mask_telegram_token` so the masking
+        rule lives in one place (model + admin can't drift).
+        """
+        return obj._mask_telegram_token() or "—"
 
     def get_queryset(self, request):
         # Admin must see deactivated tenants too — use all_objects manager.
