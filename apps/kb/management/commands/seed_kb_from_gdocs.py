@@ -58,7 +58,6 @@ would be a no-op; we skip the wrapper to keep the dry-run path obvious.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any
 
@@ -74,7 +73,9 @@ from apps.kb.models import KbDocType, KbDocument
 from apps.kb.services.gdocs_client import (
     GoogleDoc,
     GoogleDocParagraph,
+    GoogleDocsAccessError,
     GoogleDocsClient,
+    GoogleDocsNotFoundError,
 )
 from apps.kb.services.global_tenant import get_global_kb_tenant
 from apps.tenancy.models import Tenant
@@ -194,14 +195,15 @@ class Command(BaseCommand):
         return tenant
 
     def _fetch_doc(self, doc_id: str) -> GoogleDoc:
-        # GoogleDocsClient reads the credentials path from an env var.
-        # We pass it explicitly so the operator gets a clear FileNotFoundError
-        # → CommandError translation if the file's missing.
-        creds_path = os.environ.get("GOOGLE_DOCS_SERVICE_ACCOUNT_FILE")
+        # Sub-4b (PR #129) — GoogleDocsClient now fetches via the public
+        # Markdown export endpoint, no credentials needed. The source doc
+        # must be set to "Anyone with the link can view" — a 403 raises
+        # GoogleDocsAccessError which we surface as a clean CommandError
+        # with the operator-friendly hint already baked into its message.
         try:
-            client = GoogleDocsClient(credentials_path=creds_path)
+            client = GoogleDocsClient()
             return client.fetch_document(doc_id)
-        except FileNotFoundError as exc:
+        except (GoogleDocsAccessError, GoogleDocsNotFoundError) as exc:
             raise CommandError(str(exc)) from exc
 
     # ------------------------------------------------------------------

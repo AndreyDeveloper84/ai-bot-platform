@@ -316,6 +316,50 @@ CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
 }
 
 
+BUY_CERTIFICATE_TOOL_SPEC: dict[str, Any] = {
+    "name": "buy_certificate",
+    "description": (
+        "Issue a YooKassa hosted-checkout URL for a gift certificate "
+        "purchase. Call when the client asks to buy a сертификат / "
+        "подарочный сертификат. amount_rub MUST be a positive number in "
+        "[500, 100000] roubles — out-of-range values trigger a polite "
+        "clarification. recipient_name is the person the certificate is "
+        "for (free-text, optional — blank means 'for me'). buyer_email "
+        "is optional; supply it ONLY if the client volunteers an email "
+        "for the receipt. The tool returns a checkout URL — render it "
+        "with an inline '💳 Оплатить' button so the client can pay."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "amount_rub": {
+                "type": "number",
+                "description": (
+                    "Certificate amount in roubles. Must be in "
+                    "[500, 100000] — values outside trigger a "
+                    "clarification."
+                ),
+            },
+            "recipient_name": {
+                "type": "string",
+                "description": (
+                    "Whom the certificate is for. Optional — empty "
+                    "means the buyer is also the recipient."
+                ),
+            },
+            "buyer_email": {
+                "type": "string",
+                "description": (
+                    "Buyer's email for the receipt. Optional — only "
+                    "pass when the client explicitly named one."
+                ),
+            },
+        },
+        "required": ["amount_rub"],
+    },
+}
+
+
 BOOKING_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_MASTERS_TOOL_SPEC,
     SHOW_SLOTS_TOOL_SPEC,
@@ -324,6 +368,7 @@ BOOKING_TOOL_SPECS: list[dict[str, Any]] = [
     RESCHEDULE_BOOKING_TOOL_SPEC,
     SHOW_MY_BOOKINGS_TOOL_SPEC,
     CALC_PRICE_TOOL_SPEC,
+    BUY_CERTIFICATE_TOOL_SPEC,
 ]
 
 
@@ -337,6 +382,15 @@ EVENT_BOOKING_CANCEL_FAILED = "booking.cancel_failed"
 EVENT_BOOKING_RESCHEDULED = "booking.rescheduled"
 EVENT_BOOKING_RESCHEDULE_PARTIAL = "booking.reschedule_partial_failure"
 EVENT_BOOKING_PRICE_QUOTED = "booking.price_quoted"
+EVENT_CERTIFICATE_CHECKOUT_REQUESTED = "booking.certificate_checkout_requested"
+EVENT_CERTIFICATE_CHECKOUT_FAILED = "booking.certificate_checkout_failed"
+
+
+# B7 / DRF-843 — amount bounds for buy_certificate. Enforced at the
+# tool layer; the DB column is unconstrained because admin paths must
+# remain able to fix up edge cases.
+CERTIFICATE_AMOUNT_MIN = Decimal("500")
+CERTIFICATE_AMOUNT_MAX = Decimal("100000")
 
 
 # B6 / DRF-842 — promo_status values reported by ``calc_price``.
@@ -463,6 +517,32 @@ class CalcPriceResult:
     promo_status: PromoStatus
 
 
+@dataclass(frozen=True)
+class BuyCertificateResult:
+    """Return value of :func:`buy_certificate` (B7 / DRF-843).
+
+    Fields:
+
+    * ``ok``           — True on a successful checkout-URL issuance.
+    * ``order_id``     — UUID of the created
+                         :class:`apps.orders.models.Order`. Empty on
+                         failure paths.
+    * ``amount_rub``   — Echoed for downstream rendering. ``Decimal("0")``
+                         on failures.
+    * ``checkout_url`` — YooKassa-hosted checkout URL the bot hands the
+                         client (stub URL in test mode). Empty on
+                         failures.
+    * ``error``        — Slug used by the skill to map onto a handoff
+                         reason. Empty on success.
+    """
+
+    ok: bool
+    order_id: str = ""
+    amount_rub: Decimal = field(default_factory=lambda: Decimal("0"))
+    checkout_url: str = ""
+    error: str = ""
+
+
 @dataclass
 class BookingToolResult:
     """Container the skill stores between LLM calls.
@@ -479,6 +559,8 @@ class BookingToolResult:
     bookings: list[BookingRow] = field(default_factory=list)
     pending: PendingPreview | None = None
     price: CalcPriceResult | None = None
+    certificate: BuyCertificateResult | None = None
+    keyboard: list[dict[str, str]] = field(default_factory=list)
     error: str = ""
 
 
@@ -1883,6 +1965,231 @@ def _format_price_text(result: CalcPriceResult) -> str:
     # Fallback — should not be reached, but keeps mypy happy on the
     # exhaustive-match case (PromoStatus is a Literal).
     return f"{name}: {base_str}."
+
+
+# ---------------------------------------------------------------------------
+# Tool 8: buy_certificate (B7 / DRF-843)
+# ---------------------------------------------------------------------------
+
+
+def buy_certificate(
+    *,
+    tenant: Any,
+    bot_user: Any,
+    arguments: dict[str, Any],
+) -> BookingToolResult:
+    """Issue a YooKassa hosted-checkout URL for a gift certificate.
+
+    Args:
+      tenant: current :class:`apps.tenancy.models.Tenant`. Scopes the
+              created :class:`apps.orders.models.Order` row.
+      bot_user: current :class:`apps.identity.models.BotUser` — the
+              buyer.
+      arguments: LLM-supplied ``{amount_rub, recipient_name?, buyer_email?}``.
+
+    Returns a :class:`BookingToolResult` with ``certificate`` populated.
+    On success ``keyboard`` carries an inline ``💳 Оплатить`` URL
+    button (the channel adapter renders it natively).
+
+    Error contract:
+
+    * ``amount_out_of_range`` — clarification, no Order created.
+    * ``certificate_provider_failure`` — YooKassa raised; Order row
+      saved with status=FAILED so the operator can see the attempt.
+
+    Validation order (matters for tests):
+
+    1. Parse + range-check the amount BEFORE creating the Order. An
+       out-of-range value MUST NOT leave an orphan Order row.
+    2. Create the Order in ``pending``.
+    3. Generate idempotence_key, call YooKassa.
+    4. On success: stamp the payment_id + URL onto the Order, flip to
+       ``awaiting_payment``. Build the keyboard.
+    5. On failure: flip Order to ``failed`` so admin sees the attempt.
+    """
+    # Local imports — avoid the top-level Django-import cycle that
+    # would otherwise force apps.orders to import at module load.
+    from apps.integrations.yookassa import (
+        YooKassaAPIError,
+        YooKassaUnavailableError,
+        get_yookassa_client,
+    )
+    from apps.bookings.keyboards import url_button
+    from apps.orders.models import Order
+
+    tenant_id = str(getattr(tenant, "id", ""))
+
+    # ── 1. Amount parsing + range guard ─────────────────────────────
+    amount = _coerce_decimal(arguments.get("amount_rub"))
+    if amount is None:
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="buy_certificate",
+            outcome="invalid_amount",
+        )
+        return BookingToolResult(
+            certificate=BuyCertificateResult(ok=False, error="amount_out_of_range"),
+            error="amount_out_of_range",
+            text=(
+                "Сумма сертификата должна быть числом от 500 до 100000 ₽. Какую сумму подобрать?"
+            ),
+        )
+    if amount < CERTIFICATE_AMOUNT_MIN or amount > CERTIFICATE_AMOUNT_MAX:
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="buy_certificate",
+            outcome="amount_out_of_range",
+            extra={"amount": str(amount)},
+        )
+        return BookingToolResult(
+            certificate=BuyCertificateResult(ok=False, error="amount_out_of_range"),
+            error="amount_out_of_range",
+            text=(
+                f"Сумма должна быть от {CERTIFICATE_AMOUNT_MIN:.0f} "
+                f"до {CERTIFICATE_AMOUNT_MAX:.0f} ₽. Какую сумму подобрать?"
+            ),
+        )
+
+    recipient_name = str(arguments.get("recipient_name") or "").strip()
+    buyer_email = str(arguments.get("buyer_email") or "").strip()
+
+    # ── 2. Persist the Order in pending ──────────────────────────────
+    description = f"Сертификат на {amount:.0f} ₽" + (
+        f" для {recipient_name}" if recipient_name else ""
+    )
+    order = Order.all_tenants.create(
+        tenant=tenant,
+        bot_user=bot_user,
+        kind=Order.Kind.CERTIFICATE,
+        amount_rub=amount,
+        recipient_name=recipient_name,
+        buyer_email=buyer_email,
+        description=description[:255],
+        status=Order.Status.PENDING,
+    )
+
+    # ── 3. YooKassa call ─────────────────────────────────────────────
+    from uuid import uuid4
+
+    idempotence_key = uuid4()
+    client = get_yookassa_client()
+    try:
+        result = client.create_payment(
+            amount_rub=amount,
+            description=description[:128],
+            order_id=order.id,
+            idempotence_key=idempotence_key,
+        )
+    except (YooKassaUnavailableError, YooKassaAPIError) as exc:
+        logger.warning(
+            "buy_certificate.provider_failure order_id=%s err=%s",
+            order.id,
+            type(exc).__name__,
+        )
+        Order.all_tenants.filter(pk=order.pk).update(status=Order.Status.FAILED)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="buy_certificate",
+            outcome="provider_failure",
+            extra={
+                "order_id": str(order.id),
+                "exception_type": type(exc).__name__,
+            },
+        )
+        write_audit(
+            EVENT_CERTIFICATE_CHECKOUT_FAILED,
+            target="BookingSkill",
+            target_id=order.id,
+            payload={
+                "tenant_id": tenant_id,
+                "order_id": str(order.id),
+                "exception_type": type(exc).__name__,
+            },
+        )
+        return BookingToolResult(
+            certificate=BuyCertificateResult(
+                ok=False,
+                order_id=str(order.id),
+                amount_rub=amount,
+                error="certificate_provider_failure",
+            ),
+            error="certificate_provider_failure",
+        )
+
+    # ── 4. Stamp the payment id + URL onto the Order ────────────────
+    Order.all_tenants.filter(pk=order.pk).update(
+        external_payment_id=result.payment_id,
+        checkout_url=result.checkout_url,
+        status=Order.Status.AWAITING_PAYMENT,
+    )
+
+    _audit_tool(
+        tenant_id=tenant_id,
+        tool="buy_certificate",
+        outcome="ok",
+        extra={
+            "order_id": str(order.id),
+            "amount": str(amount),
+            "test_mode": result.test,
+        },
+    )
+    write_audit(
+        EVENT_CERTIFICATE_CHECKOUT_REQUESTED,
+        target="BookingSkill",
+        target_id=order.id,
+        payload={
+            "tenant_id": tenant_id,
+            "order_id": str(order.id),
+            # Audit payload MUST NOT include the secret key. Shop id +
+            # payment id are safe (they're public-facing identifiers).
+            "external_payment_id": result.payment_id,
+            "amount_rub": str(amount),
+            "test_mode": result.test,
+        },
+    )
+
+    text = (
+        f"Сертификат на {amount:.0f} ₽ готов к оплате. "
+        "Нажмите кнопку ниже, чтобы перейти к безопасной оплате."
+    )
+    keyboard = url_button("💳 Оплатить", result.checkout_url)
+
+    return BookingToolResult(
+        text=text,
+        certificate=BuyCertificateResult(
+            ok=True,
+            order_id=str(order.id),
+            amount_rub=amount,
+            checkout_url=result.checkout_url,
+        ),
+        keyboard=keyboard,
+    )
+
+
+def _coerce_decimal(value: Any) -> Decimal | None:
+    """Convert an arbitrary JSON-decoded number into a Decimal.
+
+    Handles int / float / str / Decimal inputs. Floats are routed
+    through ``str()`` first so we don't pick up float-imprecision
+    noise (``Decimal(1.1)`` is a ~17-digit horror; ``Decimal(str(1.1))``
+    is the expected ``1.1``). Returns None on any parse error.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        # bool is a subclass of int — explicit guard so True doesn't
+        # silently become Decimal("1").
+        return None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(str(value))
+    try:
+        return Decimal(str(value).strip())
+    except (TypeError, ValueError, ArithmeticError):
+        return None
 
 
 # ---------------------------------------------------------------------------

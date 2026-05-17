@@ -125,6 +125,30 @@ def confirm_2_button(
     ]
 
 
+def url_button(label: str, url: str) -> list[dict[str, str]]:
+    """B7 / DRF-843 — single-button URL keyboard for payment checkout.
+
+    Args:
+      label: button label rendered in the inline keyboard. e.g.
+             ``"💳 Оплатить"`` for the buy_certificate flow.
+      url: external URL the button opens. For YooKassa checkout this
+             is :attr:`apps.orders.models.Order.checkout_url`.
+
+    Returns:
+      A one-element list with a ``{label, url}`` dict. The channel
+      adapter is responsible for translating this into MAX's URL-
+      button widget (or Telegram's ``InlineKeyboardButton(url=...)``,
+      or web JSON).
+
+    Distinct shape from :func:`confirm_2_button` — that helper emits
+    ``{label, callback}`` dicts (callback round-trips back to us);
+    this one emits ``{label, url}`` (browser opens the URL directly).
+    The channel adapter switches on the presence of ``url`` vs
+    ``callback`` to pick the widget kind.
+    """
+    return [{"label": label, "url": url}]
+
+
 def two_hours_keyboard(reminder_pk: str) -> None:
     """T-2h has no buttons — text-only soft nudge.
 

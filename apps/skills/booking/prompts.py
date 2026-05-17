@@ -58,6 +58,7 @@ def build_booking_prompt(
     pending: dict[str, Any] | None = None,
     user_bookings: list[dict[str, Any]] | None = None,
     price: dict[str, Any] | None = None,
+    certificate: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a ChatML messages list for one booking-skill LLM call.
 
@@ -90,6 +91,7 @@ def build_booking_prompt(
         pending=pending,
         user_bookings=user_bookings,
         price=price,
+        certificate=certificate,
     )
     return [
         {"role": "system", "content": system_text},
@@ -106,6 +108,7 @@ def _render_system_prompt(
     pending: dict[str, Any] | None,
     user_bookings: list[dict[str, Any]] | None,
     price: dict[str, Any] | None = None,
+    certificate: dict[str, Any] | None = None,
 ) -> str:
     sections: list[str] = [f"Ты — {brand_voice.persona}."]
 
@@ -117,7 +120,7 @@ def _render_system_prompt(
         sections.append("Запрещено: " + ", ".join(forbidden) + ".")
 
     sections.append(
-        "Ты помогаешь записаться в салон. У тебя 7 инструментов:\n"
+        "Ты помогаешь записаться в салон. У тебя 8 инструментов:\n"
         "• show_masters — список мастеров для услуги.\n"
         "• show_slots — свободные слоты для мастера.\n"
         "• confirm_booking — показать карточку подтверждения новой "
@@ -131,7 +134,13 @@ def _render_system_prompt(
         "• calc_price — посчитать цену услуги, опционально с "
         "промокодом. Вызывай, когда клиент спрашивает про цену "
         '("сколько стоит ...") или упоминает промокод. Передавай '
-        "promo_code ТОЛЬКО если клиент явно назвал код — не выдумывай."
+        "promo_code ТОЛЬКО если клиент явно назвал код — не выдумывай.\n"
+        "• buy_certificate — выпустить ссылку на оплату подарочного "
+        'сертификата. Вызывай, когда клиент просит "купить '
+        'сертификат" / "подарочный сертификат". amount_rub — сумма '
+        "в рублях (500–100000). recipient_name — на кого "
+        "сертификат (опционально). buyer_email — email для чека "
+        "(опционально, только если клиент сам назвал)."
     )
 
     sections.append(
@@ -154,9 +163,39 @@ def _render_system_prompt(
         sections.append(_format_bookings_block(user_bookings))
     if price is not None:
         sections.append(_format_price_block(price))
+    if certificate is not None:
+        sections.append(_format_certificate_block(certificate))
 
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
+
+
+def _format_certificate_block(certificate: dict[str, Any]) -> str:
+    """Splice the buy_certificate payload into the system prompt.
+
+    The LLM must preserve the amount + the checkout URL verbatim — the
+    URL is what the channel adapter renders into the inline ``💳
+    Оплатить`` button via :attr:`SkillResult.action_data`. On failure
+    paths (``ok=False``) the model picks an apologetic phrasing; on
+    success it should tell the user to tap the button.
+    """
+    ok = bool(certificate.get("ok"))
+    if not ok:
+        err = certificate.get("error", "")
+        return (
+            "СЕРТИФИКАТ (buy_certificate) — НЕУДАЧА:\n"
+            f"• Причина: {err}\n"
+            f"• Готовый текст: {certificate.get('rendered_text', '')}\n"
+            "Сообщи клиенту коротко и понятно, без технических деталей."
+        )
+    return (
+        "СЕРТИФИКАТ (buy_certificate) — УСПЕХ:\n"
+        f"• Сумма: {certificate.get('amount_rub', '—')} ₽\n"
+        f"• Ссылка на оплату: {certificate.get('checkout_url', '—')}\n"
+        f"• Готовый текст: {certificate.get('rendered_text', '')}\n"
+        "Скажи клиенту, что под сообщением появится кнопка для оплаты. "
+        "Сохрани сумму и ссылку как есть."
+    )
 
 
 def _format_pending_block(pending: dict[str, Any]) -> str:
