@@ -28,4 +28,9 @@ urlpatterns = [
         "api/v1/yclients/",
         include("apps.integrations.yclients.urls", namespace="yclients"),
     ),
+    # Phase 1 / B7 (DRF-843) — YooKassa hosted-checkout webhook receiver.
+    path(
+        "api/v1/yookassa/",
+        include("apps.integrations.yookassa.urls", namespace="yookassa"),
+    ),
 ]

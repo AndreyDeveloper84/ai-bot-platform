@@ -60,6 +60,7 @@ from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
+    BUY_CERTIFICATE_TOOL_SPEC,
     CALC_PRICE_TOOL_SPEC,
     CANCEL_BOOKING_TOOL_SPEC,
     CONFIRM_BOOKING_TOOL_SPEC,
@@ -70,6 +71,7 @@ from apps.skills.booking.tools import (
     BookingToolResult,
     build_master_lookup,
     build_service_lookup,
+    buy_certificate,
     calc_price,
     cancel_booking,
     confirm_booking,
@@ -135,6 +137,9 @@ _BOOKING_KEYWORDS: tuple[str, ...] = (
     "сколько будет",
     "цена",
     "промокод",
+    # B7 / DRF-843 — buy_certificate keyword fallback.
+    "сертификат",
+    "подарочн",
 )
 
 
@@ -262,6 +267,7 @@ class BookingSkill:
             pending=_pending_payload(tool_result),
             user_bookings=_bookings_payload(tool_result, tool_name),
             price=_price_payload(tool_result),
+            certificate=_certificate_payload(tool_result),
         )
         second = asyncio.run(provider.complete(second_messages, model=model))
 
@@ -403,6 +409,20 @@ def _execute_tool(
         # gets a polite "не нашла такой промокод" reply.
         return result, ""
 
+    if tool_name == BUY_CERTIFICATE_TOOL_SPEC["name"]:
+        result = buy_certificate(
+            tenant=tenant,
+            bot_user=bot_user,
+            arguments=arguments,
+        )
+        # ``amount_out_of_range`` is a clarification, NOT a handoff —
+        # the LLM rephrases the polite "сумма должна быть от ... до"
+        # response. Only the provider failure path triggers an
+        # operator handoff.
+        if result.error == "certificate_provider_failure":
+            return result, "certificate_provider_failure"
+        return result, ""
+
     return BookingToolResult(error="unknown_tool"), "booking_unknown_tool"
 
 
@@ -508,24 +528,47 @@ def _action_data_for_pending(result: BookingToolResult) -> dict[str, Any] | None
         {"attachments": [{"type": "inline_keyboard",
                           "payload": {"buttons": [...]}}]}
 
-    Returns ``None`` when the tool result has no pending preview —
-    keeps the SkillResult clean for non-destructive tool paths
-    (show_masters / show_slots / show_my_bookings).
+    Two tool families produce keyboards:
+
+    * Preview-gated destructive verbs (confirm / cancel / reschedule)
+      — keyboard lives on ``result.pending.keyboard``.
+    * ``buy_certificate`` (B7) — keyboard lives on ``result.keyboard``,
+      carries a single URL-button to the YooKassa checkout.
+
+    Returns ``None`` when neither is present — keeps the SkillResult
+    clean for non-destructive tool paths (show_masters / show_slots /
+    show_my_bookings / calc_price).
     """
-    if result.pending is None:
-        return None
-    return {
-        "attachments": [
-            {
-                "type": "inline_keyboard",
-                "payload": {"buttons": result.pending.keyboard},
+    if result.pending is not None:
+        return {
+            "attachments": [
+                {
+                    "type": "inline_keyboard",
+                    "payload": {"buttons": result.pending.keyboard},
+                }
+            ],
+            "pending_action": {
+                "kind": result.pending.kind,
+                "token": str(result.pending.token),
+            },
+        }
+    if result.keyboard:
+        out: dict[str, Any] = {
+            "attachments": [
+                {
+                    "type": "inline_keyboard",
+                    "payload": {"buttons": result.keyboard},
+                }
+            ],
+        }
+        if result.certificate is not None and result.certificate.ok:
+            out["certificate"] = {
+                "order_id": result.certificate.order_id,
+                "amount_rub": str(result.certificate.amount_rub),
+                "checkout_url": result.certificate.checkout_url,
             }
-        ],
-        "pending_action": {
-            "kind": result.pending.kind,
-            "token": str(result.pending.token),
-        },
-    }
+        return out
+    return None
 
 
 def _price_payload(result: BookingToolResult) -> dict[str, Any] | None:
@@ -540,6 +583,26 @@ def _price_payload(result: BookingToolResult) -> dict[str, Any] | None:
         "promo_status": p.promo_status,
         # Pre-rendered text — the deterministic fallback. The LLM may
         # rephrase but should preserve the numbers verbatim.
+        "rendered_text": result.text,
+    }
+
+
+def _certificate_payload(result: BookingToolResult) -> dict[str, Any] | None:
+    """Splice the ``buy_certificate`` payload for the second LLM call.
+
+    The LLM must preserve the amount + the checkout URL verbatim (the
+    URL goes into the inline button via ``action_data``). It picks
+    the conversational frame based on whether the issuance succeeded.
+    """
+    cert = result.certificate
+    if cert is None:
+        return None
+    return {
+        "ok": cert.ok,
+        "order_id": cert.order_id,
+        "amount_rub": str(cert.amount_rub),
+        "checkout_url": cert.checkout_url,
+        "error": cert.error,
         "rendered_text": result.text,
     }
 

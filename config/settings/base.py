@@ -70,6 +70,11 @@ LOCAL_APPS = [
     # Owns the Promotion model + promo-validation service; the
     # ``calc_price`` tool wiring lives in apps.skills.booking.
     "apps.promotions",
+    # Phase 1 / B7 (DRF-843) — orders (certificates today, extensible).
+    # Owns the Order + PaymentEvent models. The YooKassa client +
+    # webhook live in apps.integrations.yookassa; the buy_certificate
+    # LLM tool wiring lives in apps.skills.booking.
+    "apps.orders",
 ]
 
 INSTALLED_APPS = [
@@ -188,6 +193,31 @@ YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.co
 # Empty default keeps the receiver dormant: payloads get an audit row
 # + 200 (still no retries from YClients) until ops configures the slug.
 YCLIENTS_WEBHOOK_TENANT_SLUG = os.environ.get("YCLIENTS_WEBHOOK_TENANT_SLUG", "")
+
+# Phase 1 / B7 (DRF-843) — YooKassa hosted-checkout integration.
+# Powers the ``buy_certificate`` LLM tool. Empty defaults keep the
+# integration dormant until ops configures it; ``YOOKASSA_TEST_MODE``
+# defaults to True so any accidental call returns a stubbed checkout
+# URL and never hits api.yookassa.ru. Production deployments MUST set
+# ``YOOKASSA_TEST_MODE=false`` AND populate the shop id + secret key
+# AND override ``YOOKASSA_RETURN_URL`` to the public post-checkout
+# landing page.
+#
+# SECURITY: ``YOOKASSA_SECRET_KEY`` is a payments credential — never
+# log it, never include it in audit / event payloads, never include
+# it in any breaker-alert / observability path.
+YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
+YOOKASSA_RETURN_URL = os.environ.get(
+    "YOOKASSA_RETURN_URL",
+    "https://example.com/payment/return",
+)
+YOOKASSA_TEST_MODE = os.environ.get("YOOKASSA_TEST_MODE", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+    "on",
+)
 
 # Sprint 2 / E2 — admin chat for breaker state-transition alerts.
 # Empty (default) → telegram_alert is a no-op. Set to the operator's
