@@ -16,8 +16,19 @@ from apps.audit.models import AuditLog
 
 @admin.register(AuditLog)
 class AuditLogAdmin(admin.ModelAdmin):
-    list_display = ("created_at", "tenant", "action", "target", "target_id", "actor_id")
-    list_filter = ("action", "target", "tenant")
+    list_display = (
+        "created_at",
+        "tenant",
+        "action",
+        "target",
+        "target_id",
+        "actor_id",
+        "is_archived",
+    )
+    # is_archived filter exposes soft-deleted rows in admin without
+    # losing the default "live rows only" view — operators can flip
+    # the filter to inspect retention residue (DRF-851 / PI1).
+    list_filter = ("is_archived", "action", "target", "tenant")
     search_fields = ("action", "target", "target_id", "actor_id")
     readonly_fields = (
         "id",
@@ -28,6 +39,8 @@ class AuditLogAdmin(admin.ModelAdmin):
         "target_id",
         "payload",
         "created_at",
+        "is_archived",
+        "archived_at",
     )
     date_hierarchy = "created_at"
     ordering = ("-created_at",)

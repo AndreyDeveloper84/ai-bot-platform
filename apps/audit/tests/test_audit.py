@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from apps.audit.models import AuditLog
 from apps.audit.services import write_audit
-from apps.audit.tasks import cleanup_old_audit_logs
+from apps.audit.tasks import AUDIT_CLEANUP_ACTION, cleanup_old_audit_logs
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -117,8 +117,9 @@ class TestRetention:
 
         deleted = cleanup_old_audit_logs()
         assert deleted == 2
-        assert AuditLog.all_tenants.count() == 1
-        assert AuditLog.all_tenants.first().pk == new.pk
+        # 1 user "recent" row + 1 cleanup-run audit row (DRF-851).
+        assert AuditLog.all_tenants.exclude(action=AUDIT_CLEANUP_ACTION).count() == 1
+        assert AuditLog.all_tenants.exclude(action=AUDIT_CLEANUP_ACTION).first().pk == new.pk
 
     def test_default_retention_is_90_days(self, settings):
         # Don't override AUDIT_LOG_RETENTION_DAYS — base.py default.
@@ -140,4 +141,189 @@ class TestRetention:
         settings.AUDIT_LOG_RETENTION_DAYS = 30
         AuditLog.all_tenants.create(action="recent")
         deleted = cleanup_old_audit_logs()
+        # Expect 0 "user" rows deleted — the cleanup also writes its
+        # own audit row which is not counted in the return value.
         assert deleted == 0
+
+
+class TestCleanupAuditRow:
+    """Every cleanup run writes a `audit.retention.cleanup` row (DRF-851)."""
+
+    def test_hard_mode_writes_audit_row_with_deleted_count(self, settings):
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "hard"
+        now = timezone.now()
+
+        old1 = AuditLog.all_tenants.create(action="old.1")
+        old2 = AuditLog.all_tenants.create(action="old.2")
+        AuditLog.all_tenants.filter(pk__in=[old1.pk, old2.pk]).update(
+            created_at=now - timedelta(days=31),
+        )
+
+        cleanup_old_audit_logs()
+        row = AuditLog.all_tenants.get(action=AUDIT_CLEANUP_ACTION)
+        assert row.payload["deleted"] == 2
+        assert row.payload["mode"] == "hard"
+        assert row.payload["retention_days"] == 30
+        assert "cutoff" in row.payload
+        # System action — no tenant context.
+        assert row.tenant is None
+
+    def test_soft_mode_writes_audit_row_with_mode_soft(self, settings):
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "soft"
+        now = timezone.now()
+
+        old = AuditLog.all_tenants.create(action="old.soft")
+        AuditLog.all_tenants.filter(pk=old.pk).update(
+            created_at=now - timedelta(days=31),
+        )
+
+        cleanup_old_audit_logs()
+        row = AuditLog.all_tenants.get(action=AUDIT_CLEANUP_ACTION)
+        assert row.payload["mode"] == "soft"
+        assert row.payload["deleted"] == 1
+
+    def test_audit_row_subject_to_retention(self, settings):
+        # The cleanup-run audit row is itself a candidate for retention.
+        # Running the task twice with a fresh "ancient" cleanup row
+        # between the two runs proves the slug is NOT excluded.
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "hard"
+        now = timezone.now()
+        # Plant an "ancient" cleanup row from a previous run.
+        ancient = AuditLog.all_tenants.create(action=AUDIT_CLEANUP_ACTION)
+        AuditLog.all_tenants.filter(pk=ancient.pk).update(
+            created_at=now - timedelta(days=31),
+        )
+
+        cleanup_old_audit_logs()
+        # The ancient cleanup row was hard-deleted; only the new
+        # cleanup row remains.
+        rows = AuditLog.all_tenants.filter(action=AUDIT_CLEANUP_ACTION)
+        assert rows.count() == 1
+        assert rows.first().pk != ancient.pk
+
+
+class TestSoftDelete:
+    """Soft-delete mode + manager filtering (DRF-851 / PI1)."""
+
+    def test_soft_mode_archives_instead_of_deleting(self, settings):
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "soft"
+        now = timezone.now()
+
+        old = AuditLog.all_tenants.create(action="old.archive_me")
+        recent = AuditLog.all_tenants.create(action="recent.keep_me")
+        AuditLog.all_tenants.filter(pk=old.pk).update(
+            created_at=now - timedelta(days=31),
+        )
+
+        affected = cleanup_old_audit_logs()
+        assert affected == 1
+
+        # Row still exists, but archived.
+        archived_row = AuditLog.all_tenants.get(pk=old.pk)
+        assert archived_row.is_archived is True
+        assert archived_row.archived_at is not None
+        assert archived_row.archived_at >= now
+
+        # Recent row untouched.
+        recent_row = AuditLog.all_tenants.get(pk=recent.pk)
+        assert recent_row.is_archived is False
+        assert recent_row.archived_at is None
+
+    def test_soft_mode_is_idempotent(self, settings):
+        # Running soft cleanup twice — second run flips 0 additional rows.
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "soft"
+        now = timezone.now()
+        old = AuditLog.all_tenants.create(action="old.idempotent")
+        AuditLog.all_tenants.filter(pk=old.pk).update(
+            created_at=now - timedelta(days=31),
+        )
+
+        first = cleanup_old_audit_logs()
+        assert first == 1
+
+        second = cleanup_old_audit_logs()
+        assert second == 0
+
+    def test_hard_mode_is_idempotent(self, settings):
+        # Running hard cleanup twice — second run deletes 0 user rows
+        # (the row was already gone the first time).
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "hard"
+        now = timezone.now()
+        old = AuditLog.all_tenants.create(action="old.hard_idempotent")
+        AuditLog.all_tenants.filter(pk=old.pk).update(
+            created_at=now - timedelta(days=31),
+        )
+
+        first = cleanup_old_audit_logs()
+        assert first == 1
+
+        # Wipe the first cleanup-run audit row so the second run can't
+        # count its predecessor as a deletion.
+        AuditLog.all_tenants.filter(action=AUDIT_CLEANUP_ACTION).delete()
+        second = cleanup_old_audit_logs()
+        assert second == 0
+
+    def test_default_manager_hides_archived(self, settings):
+        # Regression: archived rows must NOT appear via objects on
+        # non-cleanup read paths.
+        t = Tenant.objects.create(slug="archive-t", name="ArchiveT")
+        # One live, one archived for the same tenant.
+        live = AuditLog.all_tenants.create(tenant=t, action="live.event")
+        archived = AuditLog.all_tenants.create(
+            tenant=t,
+            action="archived.event",
+            is_archived=True,
+            archived_at=timezone.now(),
+        )
+
+        with tenant_scope(t):
+            visible = list(AuditLog.objects.values_list("action", flat=True))
+        assert "live.event" in visible
+        assert "archived.event" not in visible
+
+        # all_tenants escape hatch sees both.
+        all_actions = set(
+            AuditLog.all_tenants.filter(pk__in=[live.pk, archived.pk]).values_list(
+                "action", flat=True
+            )
+        )
+        assert all_actions == {"live.event", "archived.event"}
+
+    def test_archived_manager_returns_only_archived(self):
+        t = Tenant.objects.create(slug="archive-t2", name="ArchiveT2")
+        AuditLog.all_tenants.create(tenant=t, action="live.x")
+        AuditLog.all_tenants.create(
+            tenant=t,
+            action="archived.x",
+            is_archived=True,
+            archived_at=timezone.now(),
+        )
+
+        with tenant_scope(t):
+            archived_actions = list(AuditLog.archived.values_list("action", flat=True))
+        assert archived_actions == ["archived.x"]
+
+    def test_invalid_mode_falls_back_to_hard(self, settings, caplog):
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "bogus"
+        now = timezone.now()
+        old = AuditLog.all_tenants.create(action="old.bogus_mode")
+        AuditLog.all_tenants.filter(pk=old.pk).update(
+            created_at=now - timedelta(days=31),
+        )
+
+        with caplog.at_level("WARNING", logger="apps.audit.tasks"):
+            affected = cleanup_old_audit_logs()
+
+        # Fell back to hard delete.
+        assert affected == 1
+        assert not AuditLog.all_tenants.filter(pk=old.pk).exists()
+        # Audit row records the fallback mode as "hard".
+        row = AuditLog.all_tenants.get(action=AUDIT_CLEANUP_ACTION)
+        assert row.payload["mode"] == "hard"
