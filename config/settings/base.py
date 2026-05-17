@@ -440,6 +440,23 @@ CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3")
 # SENTRY_DSN is set.
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALERTS_TELEGRAM_CHAT_ID = os.environ.get("ALERTS_TELEGRAM_CHAT_ID", "")
+
+# Phase 1 / CH1 (DRF-848) — Telegram outbound proxy mandate.
+#
+# api.telegram.org is blocked from Russian IPs (Roskomnadzor). Every
+# outbound call from the Telegram channel adapter (and the alerting
+# module above) MUST be routed through a proxy. The Telegram adapter's
+# ``apps.channels.telegram.proxy.get_proxies()`` helper reads
+# ``TELEGRAM_PROXY`` first, then falls back to ``OPENAI_PROXY`` — that
+# way a single shared proxy can serve both blocked endpoints. Missing
+# both in production → 100% silent delivery failure.
+#
+# Per-tenant Telegram BOT credentials (BotFather token + webhook
+# secret) live on the Tenant row, NOT as global settings — the platform
+# is multi-tenant and each salon registers its own bot. The
+# ``TELEGRAM_BOT_TOKEN`` setting above is for the global ALERTING
+# channel (operator pages) only, NOT for customer-facing channel
+# traffic.
 TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
 OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
 # Dedup window: identical (severity, dedup_key) pairs within this window
