@@ -348,6 +348,18 @@ CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECOND
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
 
+# KB-RAG Sub-4 (GH #117) — Google Docs service-account JSON key path.
+# The :class:`apps.kb.services.gdocs_client.GoogleDocsClient` reads this
+# path lazily on first fetch (NOT at import). Default matches the runbook
+# layout in ``docs/operations/google-docs-credentials.md`` so a freshly
+# cloned repo + a single ``cp gdocs-sa.json infra/secrets/`` is enough
+# to get going. The file itself is gitignored (.gitignore →
+# ``infra/secrets/*.json``) — only the path lives in config.
+GOOGLE_DOCS_SERVICE_ACCOUNT_FILE = os.environ.get(
+    "GOOGLE_DOCS_SERVICE_ACCOUNT_FILE",
+    "infra/secrets/gdocs-sa.json",
+)
+
 # Sprint 10 / O2 (DRF-863) — Alerting (Telegram-only, no PagerDuty).
 #
 # After the Sprint 10 day-15 decision to skip PagerDuty (cost / RF
