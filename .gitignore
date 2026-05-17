@@ -67,3 +67,12 @@ coverage.xml
 secrets/
 *.pem
 *.key
+
+# KB-RAG Sub-4 (GH #117) — Google Docs service-account JSON keys.
+# The runbook puts the file at `infra/secrets/gdocs-sa.json`. The
+# blanket `secrets/` rule above already covers this dir; we re-include
+# the dir itself so a `.gitkeep` can be tracked (giving operators a
+# stable mount point), then re-exclude every json inside it so a
+# rotated key dropped into the folder can't accidentally be committed.
+!infra/secrets/
+infra/secrets/*.json
