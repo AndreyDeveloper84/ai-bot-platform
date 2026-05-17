@@ -459,6 +459,17 @@ ALERTS_TELEGRAM_CHAT_ID = os.environ.get("ALERTS_TELEGRAM_CHAT_ID", "")
 # traffic.
 TELEGRAM_PROXY = os.environ.get("TELEGRAM_PROXY", "")
 OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
+
+# OpenAI auth — read by ``apps.orchestrator.llm.openai_provider.OpenAIProvider``
+# via ``getattr(settings, "OPENAI_API_KEY", "")``. Without this line the
+# provider silently constructs with an empty key, every embedding / chat
+# call returns 401, and the ingester's broad ``except`` swallows the
+# error as ``failed: N`` with no stack trace. Found by KB-RAG Sub-6 seed
+# run (PR #136) — embed_pending_kb_documents reported failures until the
+# key was patched in manually. The .env file at the repo root is now
+# auto-loaded (PR #135) so a local-dev `.env` line is enough; staging /
+# prod inject via their secret stores.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 # Dedup window: identical (severity, dedup_key) pairs within this window
 # collapse to a single page. Defaults to 5 minutes — same as PD's default
 # dedup behaviour. Lower in tests via override_settings.
