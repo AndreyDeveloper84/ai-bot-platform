@@ -66,6 +66,15 @@ LOCAL_APPS = [
     # dispatcher + cb:rem:* callback skill. Consumes apps.booking models;
     # owns the reminder lifecycle code paths.
     "apps.bookings",
+    # Phase 1 / B6 (DRF-842) — promo codes + calc_price LLM tool.
+    # Owns the Promotion model + promo-validation service; the
+    # ``calc_price`` tool wiring lives in apps.skills.booking.
+    "apps.promotions",
+    # Phase 1 / B7 (DRF-843) — orders (certificates today, extensible).
+    # Owns the Order + PaymentEvent models. The YooKassa client +
+    # webhook live in apps.integrations.yookassa; the buy_certificate
+    # LLM tool wiring lives in apps.skills.booking.
+    "apps.orders",
 ]
 
 INSTALLED_APPS = [
@@ -184,6 +193,31 @@ YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.co
 # Empty default keeps the receiver dormant: payloads get an audit row
 # + 200 (still no retries from YClients) until ops configures the slug.
 YCLIENTS_WEBHOOK_TENANT_SLUG = os.environ.get("YCLIENTS_WEBHOOK_TENANT_SLUG", "")
+
+# Phase 1 / B7 (DRF-843) — YooKassa hosted-checkout integration.
+# Powers the ``buy_certificate`` LLM tool. Empty defaults keep the
+# integration dormant until ops configures it; ``YOOKASSA_TEST_MODE``
+# defaults to True so any accidental call returns a stubbed checkout
+# URL and never hits api.yookassa.ru. Production deployments MUST set
+# ``YOOKASSA_TEST_MODE=false`` AND populate the shop id + secret key
+# AND override ``YOOKASSA_RETURN_URL`` to the public post-checkout
+# landing page.
+#
+# SECURITY: ``YOOKASSA_SECRET_KEY`` is a payments credential — never
+# log it, never include it in audit / event payloads, never include
+# it in any breaker-alert / observability path.
+YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
+YOOKASSA_RETURN_URL = os.environ.get(
+    "YOOKASSA_RETURN_URL",
+    "https://example.com/payment/return",
+)
+YOOKASSA_TEST_MODE = os.environ.get("YOOKASSA_TEST_MODE", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+    "on",
+)
 
 # Sprint 2 / E2 — admin chat for breaker state-transition alerts.
 # Empty (default) → telegram_alert is a no-op. Set to the operator's
@@ -347,6 +381,18 @@ MYSITE_CATALOG_SERVICE_TOKEN = os.environ.get("MYSITE_CATALOG_SERVICE_TOKEN", ""
 CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECONDS", str(25 * 60)))
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
+
+# KB-RAG Sub-4 (GH #117) — Google Docs service-account JSON key path.
+# The :class:`apps.kb.services.gdocs_client.GoogleDocsClient` reads this
+# path lazily on first fetch (NOT at import). Default matches the runbook
+# layout in ``docs/operations/google-docs-credentials.md`` so a freshly
+# cloned repo + a single ``cp gdocs-sa.json infra/secrets/`` is enough
+# to get going. The file itself is gitignored (.gitignore →
+# ``infra/secrets/*.json``) — only the path lives in config.
+GOOGLE_DOCS_SERVICE_ACCOUNT_FILE = os.environ.get(
+    "GOOGLE_DOCS_SERVICE_ACCOUNT_FILE",
+    "infra/secrets/gdocs-sa.json",
+)
 
 # Sprint 10 / O2 (DRF-863) — Alerting (Telegram-only, no PagerDuty).
 #

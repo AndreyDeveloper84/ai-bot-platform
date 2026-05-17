@@ -35,12 +35,28 @@ CALLBACK_CONFIRM_PREFIX = "cb:rem:confirm:"
 CALLBACK_RESCHEDULE_PREFIX = "cb:rem:reschedule:"
 CALLBACK_CANCEL_PREFIX = "cb:rem:cancel:"
 
+# B5 / DRF-841 — customer-initiated destructive-action prefixes. Distinct
+# namespace from the ``cb:rem:*`` reminder-button family so a misfired
+# parser (or a copy-pasted developer payload) can't cross paths. The
+# ``{pk}`` segment is a UUID pointing at a
+# :class:`apps.booking.models.PendingBookingAction` row.
+CALLBACK_BOOK_CONFIRM_PREFIX = "cb:book:confirm:"
+CALLBACK_BOOK_CANCEL_PREFIX = "cb:book:cancel:"
+
 
 # Button labels — Russian per the salon brand voice (see
 # ``apps.skills.booking.prompts`` for tone alignment).
 LABEL_CONFIRM = "✅ Подтверждаю"
 LABEL_RESCHEDULE = "🔄 Перенести"
 LABEL_CANCEL = "❌ Отменить"
+
+# B5 — the 2-button preview gate. Slightly different wording from
+# the reminder buttons (``Отмена`` not ``Отменить``) because the
+# preview-time semantic is "abort this booking flow", not "cancel
+# the underlying booking". Avoids the user thinking ❌ ANY time means
+# "cancel my upcoming appointment".
+LABEL_BOOK_CONFIRM = "✅ Подтверждаю"
+LABEL_BOOK_CANCEL = "❌ Отмена"
 
 
 def day_before_keyboard(reminder_pk: str) -> list[dict[str, str]]:
@@ -64,6 +80,73 @@ def day_before_keyboard(reminder_pk: str) -> list[dict[str, str]]:
         {"label": LABEL_RESCHEDULE, "callback": f"{CALLBACK_RESCHEDULE_PREFIX}{reminder_pk}"},
         {"label": LABEL_CANCEL, "callback": f"{CALLBACK_CANCEL_PREFIX}{reminder_pk}"},
     ]
+
+
+def confirm_2_button(
+    token: str,
+    *,
+    label_yes: str = LABEL_BOOK_CONFIRM,
+    label_no: str = LABEL_BOOK_CANCEL,
+) -> list[dict[str, str]]:
+    """B5 / DRF-841 — 2-button preview keyboard for destructive actions.
+
+    Args:
+      token: stringified
+        :attr:`apps.booking.models.PendingBookingAction.id` UUID. Threads
+        through both callbacks so the handler can look up the pending
+        row.
+      label_yes: override label for the affirmative button. Defaults to
+        ``"✅ Подтверждаю"`` — the salon brand voice's standard
+        affirmative.
+      label_no: override label for the cancellation button. Defaults to
+        ``"❌ Отмена"`` — note "Отмена" (abort this flow), NOT
+        "Отменить" (cancel my booking), to keep the semantic distinct
+        from the day-before reminder ❌ button.
+
+    Returns:
+      A list of two ``{label, callback}`` dicts: affirmative first
+      (happy-path minimises mis-click cost on mobile), cancellation
+      second.
+
+    Used by:
+
+    * ``confirm_booking`` tool — preview "create this YClients record?"
+    * ``cancel_booking`` tool — preview "cancel record #X?"
+    * ``reschedule_booking`` tool — preview "move record #X to time Y?"
+
+    The three tools share the same keyboard shape because the underlying
+    UX question is the same: "I'm about to do something destructive,
+    please confirm". Centralising the helper means the buttons can't
+    drift across the three flows.
+    """
+    return [
+        {"label": label_yes, "callback": f"{CALLBACK_BOOK_CONFIRM_PREFIX}{token}"},
+        {"label": label_no, "callback": f"{CALLBACK_BOOK_CANCEL_PREFIX}{token}"},
+    ]
+
+
+def url_button(label: str, url: str) -> list[dict[str, str]]:
+    """B7 / DRF-843 — single-button URL keyboard for payment checkout.
+
+    Args:
+      label: button label rendered in the inline keyboard. e.g.
+             ``"💳 Оплатить"`` for the buy_certificate flow.
+      url: external URL the button opens. For YooKassa checkout this
+             is :attr:`apps.orders.models.Order.checkout_url`.
+
+    Returns:
+      A one-element list with a ``{label, url}`` dict. The channel
+      adapter is responsible for translating this into MAX's URL-
+      button widget (or Telegram's ``InlineKeyboardButton(url=...)``,
+      or web JSON).
+
+    Distinct shape from :func:`confirm_2_button` — that helper emits
+    ``{label, callback}`` dicts (callback round-trips back to us);
+    this one emits ``{label, url}`` (browser opens the URL directly).
+    The channel adapter switches on the presence of ``url`` vs
+    ``callback`` to pick the widget kind.
+    """
+    return [{"label": label, "url": url}]
 
 
 def two_hours_keyboard(reminder_pk: str) -> None:

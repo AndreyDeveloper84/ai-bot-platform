@@ -55,7 +55,10 @@ def build_booking_prompt(
     candidate_masters: list[dict[str, Any]] | None = None,
     available_slots: list[dict[str, Any]] | None = None,
     confirmation: dict[str, Any] | None = None,
+    pending: dict[str, Any] | None = None,
     user_bookings: list[dict[str, Any]] | None = None,
+    price: dict[str, Any] | None = None,
+    certificate: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a ChatML messages list for one booking-skill LLM call.
 
@@ -70,6 +73,10 @@ def build_booking_prompt(
       confirmation: when set, payload from a successful
                     :func:`confirm_booking` call — the model phrases
                     the receipt message.
+      pending: when set, payload from one of the preview-card tools
+               (confirm / cancel / reschedule). The model phrases the
+               preview question; the channel adapter renders the
+               2-button card alongside the text.
       user_bookings: when set, the list from :func:`show_my_bookings`.
 
     Returns:
@@ -81,7 +88,10 @@ def build_booking_prompt(
         candidate_masters=candidate_masters,
         available_slots=available_slots,
         confirmation=confirmation,
+        pending=pending,
         user_bookings=user_bookings,
+        price=price,
+        certificate=certificate,
     )
     return [
         {"role": "system", "content": system_text},
@@ -95,7 +105,10 @@ def _render_system_prompt(
     candidate_masters: list[dict[str, Any]] | None,
     available_slots: list[dict[str, Any]] | None,
     confirmation: dict[str, Any] | None,
+    pending: dict[str, Any] | None,
     user_bookings: list[dict[str, Any]] | None,
+    price: dict[str, Any] | None = None,
+    certificate: dict[str, Any] | None = None,
 ) -> str:
     sections: list[str] = [f"Ты — {brand_voice.persona}."]
 
@@ -107,18 +120,35 @@ def _render_system_prompt(
         sections.append("Запрещено: " + ", ".join(forbidden) + ".")
 
     sections.append(
-        "Ты помогаешь записаться в салон. У тебя 4 инструмента:\n"
+        "Ты помогаешь записаться в салон. У тебя 8 инструментов:\n"
         "• show_masters — список мастеров для услуги.\n"
         "• show_slots — свободные слоты для мастера.\n"
-        "• confirm_booking — создать запись (только после явного "
-        "подтверждения пользователя).\n"
-        "• show_my_bookings — показать существующие записи."
+        "• confirm_booking — показать карточку подтверждения новой "
+        "записи (НЕ создаёт запись напрямую — ждёт нажатия ✅).\n"
+        "• cancel_booking — показать карточку подтверждения отмены "
+        "существующей записи. record_id берётся из show_my_bookings.\n"
+        "• reschedule_booking — показать карточку подтверждения "
+        "переноса записи. record_id из show_my_bookings, "
+        "new_datetime — будущее время в ISO формате.\n"
+        "• show_my_bookings — показать существующие записи.\n"
+        "• calc_price — посчитать цену услуги, опционально с "
+        "промокодом. Вызывай, когда клиент спрашивает про цену "
+        '("сколько стоит ...") или упоминает промокод. Передавай '
+        "promo_code ТОЛЬКО если клиент явно назвал код — не выдумывай.\n"
+        "• buy_certificate — выпустить ссылку на оплату подарочного "
+        'сертификата. Вызывай, когда клиент просит "купить '
+        'сертификат" / "подарочный сертификат". amount_rub — сумма '
+        "в рублях (500–100000). recipient_name — на кого "
+        "сертификат (опционально). buyer_email — email для чека "
+        "(опционально, только если клиент сам назвал)."
     )
 
     sections.append(
-        "СТРОГО: master_id и service_id ВСЕГДА берутся из результатов "
-        "предыдущих вызовов show_masters / show_slots. Никогда не "
-        "выдумывай ID."
+        "СТРОГО: master_id, service_id и record_id ВСЕГДА берутся из "
+        "результатов предыдущих вызовов show_masters / show_slots / "
+        "show_my_bookings. Никогда не выдумывай ID. Если пользователь "
+        "просит отменить или перенести запись и ID неизвестен — "
+        "сначала вызови show_my_bookings."
     )
 
     if candidate_masters:
@@ -127,11 +157,62 @@ def _render_system_prompt(
         sections.append(_format_slots_block(available_slots))
     if confirmation:
         sections.append(_format_confirmation_block(confirmation))
+    if pending:
+        sections.append(_format_pending_block(pending))
     if user_bookings is not None:
         sections.append(_format_bookings_block(user_bookings))
+    if price is not None:
+        sections.append(_format_price_block(price))
+    if certificate is not None:
+        sections.append(_format_certificate_block(certificate))
 
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
+
+
+def _format_certificate_block(certificate: dict[str, Any]) -> str:
+    """Splice the buy_certificate payload into the system prompt.
+
+    The LLM must preserve the amount + the checkout URL verbatim — the
+    URL is what the channel adapter renders into the inline ``💳
+    Оплатить`` button via :attr:`SkillResult.action_data`. On failure
+    paths (``ok=False``) the model picks an apologetic phrasing; on
+    success it should tell the user to tap the button.
+    """
+    ok = bool(certificate.get("ok"))
+    if not ok:
+        err = certificate.get("error", "")
+        return (
+            "СЕРТИФИКАТ (buy_certificate) — НЕУДАЧА:\n"
+            f"• Причина: {err}\n"
+            f"• Готовый текст: {certificate.get('rendered_text', '')}\n"
+            "Сообщи клиенту коротко и понятно, без технических деталей."
+        )
+    return (
+        "СЕРТИФИКАТ (buy_certificate) — УСПЕХ:\n"
+        f"• Сумма: {certificate.get('amount_rub', '—')} ₽\n"
+        f"• Ссылка на оплату: {certificate.get('checkout_url', '—')}\n"
+        f"• Готовый текст: {certificate.get('rendered_text', '')}\n"
+        "Скажи клиенту, что под сообщением появится кнопка для оплаты. "
+        "Сохрани сумму и ссылку как есть."
+    )
+
+
+def _format_pending_block(pending: dict[str, Any]) -> str:
+    """Splice the preview-card context into the system prompt.
+
+    The LLM should rephrase ``preview_text`` in its own voice but
+    preserve the structured fields (service, master, time). The
+    2-button card itself is rendered by the channel adapter via
+    ``SkillResult.action_data``; the LLM just produces the body text.
+    """
+    kind = pending.get("kind", "")
+    return (
+        "ПРЕДПРОСМОТР (2 кнопки появятся под ответом):\n"
+        f"• Тип: {kind}\n"
+        f"• Текст: {pending.get('preview_text', '')}\n"
+        "Перефразируй коротко, заверши вопросом 'Подтверждаете?'."
+    )
 
 
 def _format_masters_block(masters: list[dict[str, Any]]) -> str:
@@ -159,6 +240,26 @@ def _format_confirmation_block(confirmation: dict[str, Any]) -> str:
         f"• Услуга: {confirmation.get('service_name', '—')}\n"
         f"• Время: {confirmation.get('visit_at', '—')}\n"
         f"• ID записи: {confirmation.get('record_id', '—')}"
+    )
+
+
+def _format_price_block(price: dict[str, Any]) -> str:
+    """Splice the calc_price payload into the system prompt.
+
+    The LLM should preserve the numbers verbatim (no rounding, no
+    "примерно") and pick the conversational frame matching
+    ``promo_status``. ``rendered_text`` is the deterministic fallback;
+    the model may rephrase but should keep the price figures intact.
+    """
+    return (
+        "ЦЕНА (calc_price):\n"
+        f"• Услуга: {price.get('service_name', '—')}\n"
+        f"• Базовая цена: {price.get('original_price', '—')}\n"
+        f"• Финальная цена: {price.get('final_price', '—')}\n"
+        f"• Скидка: {price.get('discount_percent', '—')}\n"
+        f"• Статус промокода: {price.get('promo_status', '—')}\n"
+        f"• Готовый текст: {price.get('rendered_text', '')}\n"
+        "Сохрани числа без изменений. Подбери тон под promo_status."
     )
 
 

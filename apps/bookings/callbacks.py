@@ -50,14 +50,22 @@ from uuid import UUID
 from django.utils import timezone
 
 from apps.audit.services import write_audit
-from apps.booking.models import BookingReminder
+from apps.booking.models import BookingReminder, PendingBookingAction
 from apps.bookings.keyboards import (
+    CALLBACK_BOOK_CANCEL_PREFIX,
+    CALLBACK_BOOK_CONFIRM_PREFIX,
     CALLBACK_CANCEL_PREFIX,
     CALLBACK_CONFIRM_PREFIX,
     CALLBACK_RESCHEDULE_PREFIX,
 )
+from apps.bookings.pending_actions import consume_pending, discard_pending
 from apps.events.services import emit
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.booking.tools import (
+    execute_cancel,
+    execute_confirm,
+    execute_reschedule,
+)
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
@@ -79,6 +87,13 @@ REPLY_ALREADY_HANDLED = "Эта запись уже обработана."
 REPLY_NOT_FOUND = "Не нашла эту запись — возможно, она уже снята."
 REPLY_FORBIDDEN = "Эта запись не для этого профиля."
 
+# B5 / DRF-841 — replies for the 2-button preview gate.
+REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём слот заново."
+REPLY_BOOK_CANCELLED_PREVIEW = "Ок, не записываю."
+REPLY_BOOK_ALREADY_HANDLED = "Это действие уже выполнено."
+REPLY_BOOK_PARTIAL_FAILURE = "Не удалось завершить перенос — передал администратору, он свяжется."
+REPLY_BOOK_CANCEL_FAILED = "Не получилось отменить запись — передал администратору, скоро уточнит."
+
 
 # Audit slugs. Out-of-canonical-vocab; the audit subsystem accepts
 # any string (vocabulary check is on the Event emit path).
@@ -87,6 +102,13 @@ AUDIT_REMINDER_CANCELLED = "bookings.reminder.cancelled"
 AUDIT_REMINDER_RESCHEDULE = "bookings.reminder.reschedule_requested"
 AUDIT_REMINDER_REPLAY = "bookings.reminder.callback_replay"
 AUDIT_REMINDER_FORBIDDEN = "bookings.reminder.callback_forbidden"
+
+# B5 — preview-gate callback slugs.
+AUDIT_BOOK_GATE_EXECUTED = "bookings.gate.executed"
+AUDIT_BOOK_GATE_CANCELLED = "bookings.gate.cancelled"
+AUDIT_BOOK_GATE_EXPIRED = "bookings.gate.expired"
+AUDIT_BOOK_GATE_REPLAY = "bookings.gate.callback_replay"
+AUDIT_BOOK_GATE_FORBIDDEN = "bookings.gate.callback_forbidden"
 
 
 def _parse_reminder_pk(callback_text: str) -> tuple[str, UUID] | None:
@@ -308,6 +330,419 @@ class BookingReminderCallbackSkill:
             distinct_id=str(reminder.bot_user_id),
         )
         return SkillResult(reply_text=REPLY_RESCHEDULE)
+
+
+def _parse_gate_token(callback_text: str) -> tuple[str, UUID] | None:
+    """Decode ``cb:book:{action}:{token}`` → (action, UUID).
+
+    Returns ``None`` for malformed input (unrecognised prefix or the
+    token segment isn't a valid UUID). Same idiom as
+    :func:`_parse_reminder_pk` for symmetry.
+    """
+    for action, prefix in (
+        ("confirm", CALLBACK_BOOK_CONFIRM_PREFIX),
+        ("cancel", CALLBACK_BOOK_CANCEL_PREFIX),
+    ):
+        if callback_text.startswith(prefix):
+            raw = callback_text[len(prefix) :].strip()
+            try:
+                return action, UUID(raw)
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
+@register
+class BookingGateCallbackSkill:
+    """Handle the 2-button preview-gate callbacks (B5 / DRF-841).
+
+    Callback namespace: ``cb:book:confirm:<token>`` and
+    ``cb:book:cancel:<token>``. The ``<token>`` segment is the UUID pk
+    of a :class:`apps.booking.models.PendingBookingAction` row created
+    at preview time by one of the three destructive tools
+    (``confirm_booking`` / ``cancel_booking`` / ``reschedule_booking``).
+
+    ### Flow on ``cb:book:confirm:<token>``
+
+    1. Parse token; reject malformed payload with a polite reply.
+    2. Lookup the pending row (``all_tenants`` — token is globally
+       unique by UUID); reject missing / expired / already-consumed
+       with the corresponding canned reply.
+    3. Authorise: the row's ``bot_user`` must match the sender's
+       BotUser pk. Mismatch → forbidden reply + audit.
+    4. CAS-consume the row via :func:`consume_pending`. Loser of a
+       race short-circuits to "already handled".
+    5. Dispatch to the matching ``execute_*`` function in
+       :mod:`apps.skills.booking.tools` with the YClients client.
+    6. On YClients failure: handoff. On reschedule partial failure:
+       handoff + manager notification.
+
+    ### Flow on ``cb:book:cancel:<token>``
+
+    1. Parse token.
+    2. Discard the pending row (no destructive call).
+    3. Reply "ок, не записываю".
+
+    Symmetric design with :class:`BookingReminderCallbackSkill`: same
+    skill-registry registration, same matches() predicate shape, same
+    authorisation principle.
+    """
+
+    name: ClassVar[str] = "booking_gate_callback"
+
+    def matches(self, context: SkillContext) -> bool:
+        text = (context.message_text or "").strip()
+        return text.startswith(CALLBACK_BOOK_CONFIRM_PREFIX) or text.startswith(
+            CALLBACK_BOOK_CANCEL_PREFIX
+        )
+
+    def handle(self, context: SkillContext) -> SkillResult:
+        text = context.message_text.strip()
+        parsed = _parse_gate_token(text)
+        if parsed is None:
+            logger.info("bookings.gate.malformed text=%r", text)
+            return SkillResult(reply_text=REPLY_NOT_FOUND)
+
+        action, token = parsed
+        if action == "cancel":
+            return self._handle_cancel_tap(context, token)
+        # action == "confirm"
+        return self._handle_confirm_tap(context, token)
+
+    # ─── confirm-tap (executes the destructive verb) ─────────────────────
+
+    def _handle_confirm_tap(
+        self,
+        context: SkillContext,
+        token: UUID,
+    ) -> SkillResult:
+        """Execute the pending action when the user taps ✅.
+
+        Each error branch maps cleanly to one canned reply — keeps the
+        UX deterministic regardless of which destructive verb is
+        underneath.
+
+        Authorisation check fires BEFORE the consume CAS: a foreign
+        user tapping a leaked token must NOT race-claim the row out
+        from under the legitimate owner. Without this ordering, the
+        foreign user's tap would consume the row, then fail the
+        ownership check; the legitimate owner's next tap would then
+        get "already handled" — bad UX + security smell.
+        """
+        # Pre-lookup so we can ownership-check before CAS-consuming.
+        try:
+            row = PendingBookingAction.all_tenants.get(pk=token)
+        except PendingBookingAction.DoesNotExist:
+            return SkillResult(reply_text=REPLY_NOT_FOUND)
+
+        if not _gate_sender_matches(row, context.bot_user.pk):
+            write_audit(
+                action=AUDIT_BOOK_GATE_FORBIDDEN,
+                target="PendingBookingAction",
+                target_id=row.pk,
+                payload={"sender_id": str(context.bot_user.pk)},
+            )
+            return SkillResult(reply_text=REPLY_FORBIDDEN)
+
+        lookup = consume_pending(token)
+        if lookup.row is None:
+            return SkillResult(reply_text=REPLY_NOT_FOUND)
+
+        if lookup.expired:
+            write_audit(
+                action=AUDIT_BOOK_GATE_EXPIRED,
+                target="PendingBookingAction",
+                target_id=lookup.row.pk,
+                payload={"kind": lookup.row.kind},
+            )
+            return SkillResult(reply_text=REPLY_BOOK_EXPIRED)
+
+        if lookup.already_consumed:
+            write_audit(
+                action=AUDIT_BOOK_GATE_REPLAY,
+                target="PendingBookingAction",
+                target_id=lookup.row.pk,
+                payload={"kind": lookup.row.kind},
+            )
+            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+
+        # We claimed the row. Execute the matching verb.
+        row = lookup.row
+        try:
+            from apps.integrations.yclients import get_yclients_client
+
+            client = get_yclients_client()
+        except Exception as exc:  # noqa: BLE001 — misconfigured integration
+            logger.warning("bookings.gate.yclients_init_failed err=%s", exc)
+            return SkillResult(
+                reply_text=REPLY_BOOK_CANCEL_FAILED
+                if row.kind != PendingBookingAction.Kind.CONFIRM
+                else "Сейчас не могу записать, попробуйте чуть позже.",
+                should_handoff=True,
+                handoff_reason="booking_yclients_failure",
+            )
+
+        if row.kind == PendingBookingAction.Kind.CONFIRM:
+            return self._dispatch_confirm(client, row)
+        if row.kind == PendingBookingAction.Kind.CANCEL:
+            return self._dispatch_cancel(client, row)
+        # RESCHEDULE
+        return self._dispatch_reschedule(client, row)
+
+    def _dispatch_confirm(
+        self,
+        client: object,
+        row: PendingBookingAction,
+    ) -> SkillResult:
+        result = execute_confirm(
+            client=client,
+            payload=row.payload,
+            tenant=row.tenant,
+            bot_user=row.bot_user,
+        )
+        if result.error in {"yclients_unavailable", "yclients_api_error"}:
+            return SkillResult(
+                reply_text="Не удалось создать запись — переключаю на менеджера.",
+                should_handoff=True,
+                handoff_reason="booking_yclients_failure",
+            )
+        if result.error:
+            return SkillResult(
+                reply_text="Не удалось создать запись — переключаю на менеджера.",
+                should_handoff=True,
+                handoff_reason="booking_yclients_failure",
+            )
+        write_audit(
+            action=AUDIT_BOOK_GATE_EXECUTED,
+            target="PendingBookingAction",
+            target_id=row.pk,
+            payload={"kind": "confirm"},
+        )
+        return SkillResult(reply_text=result.text)
+
+    def _dispatch_cancel(
+        self,
+        client: object,
+        row: PendingBookingAction,
+    ) -> SkillResult:
+        result = execute_cancel(
+            client=client,
+            payload=row.payload,
+            tenant=row.tenant,
+            bot_user=row.bot_user,
+        )
+        if result.error == "yclients_cancel_failure":
+            return SkillResult(
+                reply_text=REPLY_BOOK_CANCEL_FAILED,
+                should_handoff=True,
+                handoff_reason="booking_cancel_yclients_failure",
+            )
+        if result.error == "invalid_record_id":
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND,
+                should_handoff=True,
+                handoff_reason="booking_invalid_record_id",
+            )
+        if result.error:
+            return SkillResult(
+                reply_text=REPLY_BOOK_CANCEL_FAILED,
+                should_handoff=True,
+                handoff_reason="booking_cancel_yclients_failure",
+            )
+        write_audit(
+            action=AUDIT_BOOK_GATE_EXECUTED,
+            target="PendingBookingAction",
+            target_id=row.pk,
+            payload={"kind": "cancel"},
+        )
+        return SkillResult(reply_text=result.text)
+
+    def _dispatch_reschedule(
+        self,
+        client: object,
+        row: PendingBookingAction,
+    ) -> SkillResult:
+        result = execute_reschedule(
+            client=client,
+            payload=row.payload,
+            tenant=row.tenant,
+            bot_user=row.bot_user,
+        )
+        if result.error == "booking_reschedule_partial_failure":
+            # Notify the salon manager so an operator can manually
+            # re-book — the user already lost their original slot.
+            _notify_manager_partial_reschedule(row)
+            return SkillResult(
+                reply_text=REPLY_BOOK_PARTIAL_FAILURE,
+                should_handoff=True,
+                handoff_reason="booking_reschedule_partial_failure",
+            )
+        if result.error == "yclients_cancel_failure":
+            return SkillResult(
+                reply_text=REPLY_BOOK_CANCEL_FAILED,
+                should_handoff=True,
+                handoff_reason="booking_cancel_yclients_failure",
+            )
+        if result.error == "invalid_record_id":
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND,
+                should_handoff=True,
+                handoff_reason="booking_invalid_record_id",
+            )
+        if result.error:
+            return SkillResult(
+                reply_text=REPLY_BOOK_CANCEL_FAILED,
+                should_handoff=True,
+                handoff_reason="booking_yclients_failure",
+            )
+
+        # Success — also notify the manager (informational, not a
+        # handoff) so the master is in the loop about the moved slot.
+        _notify_manager_reschedule_success(row, result)
+        write_audit(
+            action=AUDIT_BOOK_GATE_EXECUTED,
+            target="PendingBookingAction",
+            target_id=row.pk,
+            payload={"kind": "reschedule"},
+        )
+        return SkillResult(reply_text=result.text)
+
+    # ─── cancel-tap (discard preview, no destructive call) ───────────────
+
+    def _handle_cancel_tap(
+        self,
+        context: SkillContext,
+        token: UUID,
+    ) -> SkillResult:
+        # Look up first so we can authorisation-check + tell apart
+        # already-consumed / expired / unknown. Authoritative state
+        # change happens in :func:`discard_pending`.
+        try:
+            row = PendingBookingAction.all_tenants.get(pk=token)
+        except PendingBookingAction.DoesNotExist:
+            return SkillResult(reply_text=REPLY_NOT_FOUND)
+
+        if not _gate_sender_matches(row, context.bot_user.pk):
+            write_audit(
+                action=AUDIT_BOOK_GATE_FORBIDDEN,
+                target="PendingBookingAction",
+                target_id=row.pk,
+                payload={"sender_id": str(context.bot_user.pk)},
+            )
+            return SkillResult(reply_text=REPLY_FORBIDDEN)
+
+        if row.consumed_at is not None:
+            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+
+        ok = discard_pending(token)
+        if not ok:
+            # Either expired between the lookup and the discard CAS,
+            # or another tap raced and already consumed it. Either
+            # way, "already handled" is the right message.
+            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+
+        write_audit(
+            action=AUDIT_BOOK_GATE_CANCELLED,
+            target="PendingBookingAction",
+            target_id=row.pk,
+            payload={"kind": row.kind},
+        )
+        return SkillResult(reply_text=REPLY_BOOK_CANCELLED_PREVIEW)
+
+
+def _gate_sender_matches(
+    row: PendingBookingAction,
+    sender_pk: object,
+) -> bool:
+    """Authorisation check — sender must own the pending row.
+
+    Compare stringified UUIDs to dodge UUID-vs-str confusion across
+    caller contexts (same idiom as :func:`_sender_matches` for the
+    reminder family).
+    """
+    target_pk = getattr(row.bot_user_id, "hex", None) or str(row.bot_user_id)
+    incoming_pk = getattr(sender_pk, "hex", None) or str(sender_pk)
+    return target_pk == incoming_pk
+
+
+def _notify_manager_partial_reschedule(row: PendingBookingAction) -> None:
+    """Tell the salon manager about a reschedule partial failure.
+
+    Best-effort outbound to ``tenant.manager_chat_id``; failure to send
+    must NOT raise from the callback path (the destructive operation
+    already happened, the user's reply is already on the line).
+    """
+    tenant = row.tenant
+    chat_id = (tenant.manager_chat_id or "").strip()
+    if not chat_id:
+        logger.warning(
+            "bookings.gate.partial.no_manager_chat tenant=%s pk=%s",
+            tenant.slug,
+            row.pk,
+        )
+        return
+    text = _render_partial_failure_text(row)
+    try:
+        from apps.channels.max.outbound import send_message
+
+        send_message(chat_id=chat_id, text=text, attachments=None)
+    except Exception:  # noqa: BLE001 — manager-notification is best-effort
+        logger.exception("bookings.gate.partial.notify_failed pk=%s", row.pk)
+
+
+def _notify_manager_reschedule_success(
+    row: PendingBookingAction,
+    result: object,
+) -> None:
+    """Tell the salon manager about a successful reschedule.
+
+    Informational only — best-effort, same as the partial-failure
+    notification.
+    """
+    tenant = row.tenant
+    chat_id = (tenant.manager_chat_id or "").strip()
+    if not chat_id:
+        return
+    text = _render_reschedule_success_text(row, result)
+    try:
+        from apps.channels.max.outbound import send_message
+
+        send_message(chat_id=chat_id, text=text, attachments=None)
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.exception("bookings.gate.reschedule.notify_failed pk=%s", row.pk)
+
+
+def _render_partial_failure_text(row: PendingBookingAction) -> str:
+    payload = row.payload or {}
+    return (
+        "⚠️ Перенос записи не завершён.\n"
+        f"Старая запись (record_id={payload.get('record_id', '—')}) отменена, "
+        f"новая на {payload.get('new_datetime', '—')} НЕ создана.\n"
+        f"Услуга: {payload.get('service_name', '—')}\n"
+        f"Мастер: {payload.get('master_name', '—')}\n"
+        f"Клиент: {payload.get('client_name', '—')} "
+        f"({payload.get('client_phone', '—')})\n"
+        "Пожалуйста, перезапишите клиента вручную."
+    )
+
+
+def _render_reschedule_success_text(
+    row: PendingBookingAction,
+    result: object,
+) -> str:
+    payload = row.payload or {}
+    confirmation = getattr(result, "confirmation", None)
+    new_record_id = getattr(confirmation, "record_id", "") if confirmation else ""
+    return (
+        "🔄 Клиент перенёс запись.\n"
+        f"Старый record_id: {payload.get('record_id', '—')}\n"
+        f"Новый record_id: {new_record_id or '—'}\n"
+        f"Услуга: {payload.get('service_name', '—')}\n"
+        f"Мастер: {payload.get('master_name', '—')}\n"
+        f"Новое время: {payload.get('new_datetime', '—')}\n"
+        f"Клиент: {payload.get('client_name', '—')} "
+        f"({payload.get('client_phone', '—')})"
+    )
 
 
 def _try_yclients_cancel(yclients_record_id: str) -> bool:

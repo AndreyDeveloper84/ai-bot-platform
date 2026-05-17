@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from django.utils import timezone as dj_timezone
 
-from apps.booking.models import BookingReminder, BookingRequest
+from apps.booking.models import BookingRequest
 from apps.identity.models import BotUser
 from apps.integrations.yclients import (
     AvailableTime,
@@ -173,13 +173,18 @@ def _service(id_: int, title: str = "Массаж спины") -> Service:
 
 
 class TestToolSpecs:
-    def test_all_four_specs_registered(self) -> None:
+    def test_all_eight_specs_registered(self) -> None:
+        # B7 / DRF-843 — added buy_certificate as the 8th tool.
         names = {spec["name"] for spec in BOOKING_TOOL_SPECS}
         assert names == {
             "show_masters",
             "show_slots",
             "confirm_booking",
+            "cancel_booking",
+            "reschedule_booking",
             "show_my_bookings",
+            "calc_price",
+            "buy_certificate",
         }
 
     def test_specs_have_openai_shape(self) -> None:
@@ -318,9 +323,19 @@ class TestShowSlots:
 
 
 class TestConfirmBooking:
-    def test_happy_path_creates_request(self, tenant: Tenant, bot_user: BotUser) -> None:
+    """B5 / DRF-841: ``confirm_booking`` is now preview-only.
+
+    The actual YClients create + BookingRequest row write moved to
+    :func:`apps.skills.booking.tools.execute_confirm`; covered in
+    ``test_confirm_gate.py``. These tests only assert preview-time
+    behaviour: validation gates, pending row persistence, no
+    YClients side-effects.
+    """
+
+    def test_preview_persists_pending_action(self, tenant: Tenant, bot_user: BotUser) -> None:
+        from apps.booking.models import PendingBookingAction
+
         client = FakeYClients()
-        client.create_record_response = BookingRecord(record_id=777, record_hash="h", raw={})
         with tenant_scope(tenant):
             result = confirm_booking(
                 client=client,
@@ -336,73 +351,16 @@ class TestConfirmBooking:
                 master_lookup={11: "Ольга"},
                 service_lookup={22: "Массаж спины"},
             )
-        assert result.confirmation is not None
-        assert result.confirmation.ok is True
-        assert result.confirmation.record_id == 777
-
-        rows = BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user)
-        assert rows.count() == 1
-        first = rows.first()
-        assert first is not None
-        assert "yclients_record_id=777" in first.comment
-
-    def test_schedules_day_before_reminder(self, tenant: Tenant, bot_user: BotUser) -> None:
-        client = FakeYClients()
-        client.create_record_response = BookingRecord(record_id=888, record_hash="h", raw={})
-        future_iso = (dj_timezone.now() + timedelta(days=3)).replace(microsecond=0).isoformat()
-        with tenant_scope(tenant):
-            confirm_booking(
-                client=client,
-                arguments={
-                    "master_id": 11,
-                    "service_id": 22,
-                    "slot_datetime": future_iso,
-                },
-                tenant=tenant,
-                bot_user=bot_user,
-                allowed_master_ids={11},
-                allowed_service_ids={22},
-                master_lookup={11: "Ольга"},
-                service_lookup={22: "Массаж"},
-            )
-        reminder = BookingReminder.all_tenants.filter(
-            yclients_record_id="888",
-            kind=BookingReminder.Kind.DAY_BEFORE,
-        ).first()
-        assert reminder is not None
-        assert reminder.status == BookingReminder.Status.PENDING
-
-    def test_idempotent_on_duplicate_yclients_id(self, tenant: Tenant, bot_user: BotUser) -> None:
-        client = FakeYClients()
-        client.create_record_response = BookingRecord(record_id=555, record_hash="h", raw={})
-        args = {
-            "master_id": 11,
-            "service_id": 22,
-            "slot_datetime": "2026-05-20T14:00:00",
-        }
-        with tenant_scope(tenant):
-            confirm_booking(
-                client=client,
-                arguments=args,
-                tenant=tenant,
-                bot_user=bot_user,
-                allowed_master_ids={11},
-                allowed_service_ids={22},
-                master_lookup={11: "Ольга"},
-                service_lookup={22: "Массаж"},
-            )
-            # Second call with the same record id — no duplicate row.
-            confirm_booking(
-                client=client,
-                arguments=args,
-                tenant=tenant,
-                bot_user=bot_user,
-                allowed_master_ids={11},
-                allowed_service_ids={22},
-                master_lookup={11: "Ольга"},
-                service_lookup={22: "Массаж"},
-            )
-        assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user).count() == 1
+        # Preview path: no record created, no BookingRequest written.
+        assert client.create_calls == []
+        assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user).count() == 0
+        # ``pending`` populated with a UUID token + 2 buttons.
+        assert result.pending is not None
+        assert result.pending.kind == PendingBookingAction.Kind.CONFIRM
+        assert len(result.pending.keyboard) == 2
+        pending_row = PendingBookingAction.all_tenants.get(pk=result.pending.token)
+        assert pending_row.bot_user_id == bot_user.id
+        assert pending_row.payload["slot_datetime"] == "2026-05-20T14:00:00"
 
     def test_rejects_invalid_master_id(self, tenant: Tenant, bot_user: BotUser) -> None:
         client = FakeYClients()
@@ -422,7 +380,7 @@ class TestConfirmBooking:
                 service_lookup={22: "x"},
             )
         assert result.error == "invalid_master_id"
-        assert client.create_calls == []  # never POSTed to YClients
+        assert client.create_calls == []
 
     def test_rejects_invalid_service_id(self, tenant: Tenant, bot_user: BotUser) -> None:
         client = FakeYClients()
@@ -443,28 +401,24 @@ class TestConfirmBooking:
             )
         assert result.error == "invalid_service_id"
 
-    def test_yclients_failure_returns_handoff_signal(
-        self, tenant: Tenant, bot_user: BotUser
-    ) -> None:
+    def test_missing_slot_returns_error(self, tenant: Tenant, bot_user: BotUser) -> None:
         client = FakeYClients()
-        client.create_record_exc = YClientsAPIError("http_400: bad master")
         with tenant_scope(tenant):
             result = confirm_booking(
                 client=client,
                 arguments={
                     "master_id": 11,
                     "service_id": 22,
-                    "slot_datetime": "2026-05-20T14:00:00",
+                    "slot_datetime": "",
                 },
                 tenant=tenant,
                 bot_user=bot_user,
                 allowed_master_ids={11},
                 allowed_service_ids={22},
                 master_lookup={11: "Ольга"},
-                service_lookup={22: "x"},
+                service_lookup={22: "Массаж"},
             )
-        assert result.error == "yclients_api_error"
-        assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user).count() == 0
+        assert result.error == "missing_slot"
 
 
 # ---------------------------------------------------------------------------

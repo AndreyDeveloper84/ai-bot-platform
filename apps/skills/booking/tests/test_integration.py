@@ -1,8 +1,11 @@
-"""End-to-end booking flow test (DRF-839 / Phase 1 / B3).
+"""End-to-end booking flow test (DRF-839 / Phase 1 / B3 + B5).
 
-Drives the whole flow:
+Drives the whole flow with B5's 2-button confirm gate:
 
-    "запиши на массаж к Ольге"  →  show_slots  →  confirm_booking  →  BookingRequest row created
+    "запиши на массаж к Ольге"  →  show_slots
+                                →  confirm_booking (preview only)
+                                →  cb:book:confirm:<token> tap
+                                →  BookingRequest row created
 
 with mocked LLM provider + mocked YClients client.
 """
@@ -169,11 +172,37 @@ class TestEndToEnd:
             patch.object(OpenAIProvider, "complete", side_effect=completions),
         ):
             with tenant_scope(tenant):
-                result = BookingSkill().handle(context)
+                preview = BookingSkill().handle(context)
 
-        assert result.should_handoff is False
-        assert result.tool_calls_made == [tc]
-        # The booking actually persisted.
+        # Step 1: preview-only — no record yet.
+        assert preview.should_handoff is False
+        assert preview.tool_calls_made == [tc]
+        assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bu).count() == 0
+        assert client.create_calls == []
+        # Action data carries the inline keyboard with the gate token.
+        assert preview.action_data is not None
+        token = preview.action_data["pending_action"]["token"]
+
+        # Step 2: simulate the ✅ tap on the inline keyboard.
+        from apps.bookings.callbacks import BookingGateCallbackSkill
+
+        tap_context = SkillContext(
+            conversation=conv,
+            bot_user=bu,
+            message_text=f"cb:book:confirm:{token}",
+            trace_id="t-e2e-tap",
+        )
+        with (
+            patch(
+                "apps.integrations.yclients.get_yclients_client",
+                return_value=client,
+            ),
+        ):
+            with tenant_scope(tenant):
+                tap_result = BookingGateCallbackSkill().handle(tap_context)
+
+        # Step 3: confirm the actual booking + record created.
+        assert tap_result.should_handoff is False
         rows = BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bu)
         assert rows.count() == 1
         row = rows.first()
