@@ -127,6 +127,27 @@ STRICT_SCOPE_FLIP_AT = os.environ.get("STRICT_SCOPE_FLIP_AT", "")
 AUDIT_LOG_RETENTION_DAYS = int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "90"))
 IDEMPOTENCY_KEY_RETENTION_DAYS = int(os.environ.get("IDEMPOTENCY_KEY_RETENTION_DAYS", "7"))
 
+# Phase 1 / PI1 (DRF-851) — AuditLog retention sweep mode.
+#
+#   "hard"  — DELETE rows past the cutoff. Original behaviour;
+#             default to keep existing deployments backwards-compatible.
+#   "soft"  — UPDATE rows to is_archived=True + archived_at=now.
+#             Recommended for prod going forward; a future task can
+#             then hard-delete archived rows past a longer cutoff
+#             (out of scope for this PR — TODO in apps/audit/tasks.py).
+#
+# Trade-off: "soft" keeps a forensic trail of "what was retired and
+# when" at the cost of disk + index size. "hard" reclaims the disk
+# but loses the row entirely. For a single-tenant Phase 1 deployment
+# either is fine; we recommend operators flip this to "soft" once
+# disk usage is observed and bounded.
+AUDIT_LOG_RETENTION_MODE = os.environ.get("AUDIT_LOG_RETENTION_MODE", "hard")
+
+# Phase 1 / PI1 (DRF-851) — PaymentEvent retention.
+# Webhook idempotency ledger entries. Hard-delete only — these are
+# dedup tokens, not forensic data (Order carries the forensic trail).
+PAYMENT_EVENT_RETENTION_DAYS = int(os.environ.get("PAYMENT_EVENT_RETENTION_DAYS", "90"))
+
 # Sprint 5 / A3 — Replay infrastructure config (PHASE0_DESIGN §7.1).
 # Per-env sample rate so prod/staging stay at 100% (1 tenant, low traffic;
 # ~30MB/30d retention) while tests default to 0 to avoid noisy row creation
@@ -267,6 +288,16 @@ CELERY_BEAT_SCHEDULE = {
         # worker pool isn't slammed by both sweeps simultaneously.
         "schedule": crontab(hour="4", minute="0"),
     },
+    # Phase 1 / PI1 (DRF-851) — PaymentEvent dedup-ledger retention.
+    # Daily 04:30 UTC — slotted between the 04:00 replay sweep and the
+    # 05:00 shadow-delta compute so no two sweeps fire simultaneously
+    # against the same worker pool. PaymentEvent is a small table in
+    # Phase 1 (1 tenant, low webhook volume) but accumulates fast
+    # under YooKassa redelivery — daily hard-delete keeps it bounded.
+    "cleanup_old_payment_events": {
+        "task": "apps.orders.tasks.cleanup_old_payment_events",
+        "schedule": crontab(hour="4", minute="30"),
+    },
     "recompute_profiles_daily": {
         "task": "apps.identity.tasks.recompute_profiles_daily",
         # Daily 03:30 UTC — between the 03:00 audit cleanup and the
@@ -382,17 +413,11 @@ CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECOND
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
 
-# KB-RAG Sub-4 (GH #117) — Google Docs service-account JSON key path.
-# The :class:`apps.kb.services.gdocs_client.GoogleDocsClient` reads this
-# path lazily on first fetch (NOT at import). Default matches the runbook
-# layout in ``docs/operations/google-docs-credentials.md`` so a freshly
-# cloned repo + a single ``cp gdocs-sa.json infra/secrets/`` is enough
-# to get going. The file itself is gitignored (.gitignore →
-# ``infra/secrets/*.json``) — only the path lives in config.
-GOOGLE_DOCS_SERVICE_ACCOUNT_FILE = os.environ.get(
-    "GOOGLE_DOCS_SERVICE_ACCOUNT_FILE",
-    "infra/secrets/gdocs-sa.json",
-)
+# KB-RAG Sub-4b (GH #128) — Google Docs read-only client takes NO
+# credentials. It fetches source docs via the public Markdown export
+# endpoint and relies on per-doc link-sharing. See
+# ``docs/operations/google-docs-public-link.md`` for the per-doc setup
+# steps (one-time toggle in the Google Docs share dialog).
 
 # Sprint 10 / O2 (DRF-863) — Alerting (Telegram-only, no PagerDuty).
 #

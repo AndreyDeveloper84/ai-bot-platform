@@ -1,0 +1,36 @@
+# postgresql.conf snippet — required settings for base backups + PITR.
+#
+# Append (or merge) these into /etc/postgresql/14/main/postgresql.conf,
+# then restart Postgres:
+#   sudo systemctl restart postgresql
+#
+# Verify after restart:
+#   sudo -u postgres psql -c "SHOW wal_level;"        # → replica
+#   sudo -u postgres psql -c "SHOW archive_mode;"     # → on
+#   sudo -u postgres psql -c "SHOW archive_command;"  # → /usr/local/bin/pg_archive_wal.sh %p %f
+#
+# See docs/runbooks/disaster-recovery.md for full context.
+
+# wal_level=replica is the minimum that lets us stream WAL during base backup
+# (`pg_basebackup -X stream`) and replay it on a restored cluster. Logical is
+# also fine if you're using logical replication elsewhere; replica is enough
+# for PITR.
+wal_level = replica
+
+# archive_mode must be 'on' for archive_command to fire. Requires a restart
+# (cannot be changed via reload).
+archive_mode = on
+
+# archive_command is invoked once per completed WAL segment. %p = full path
+# to the segment, %f = filename. Postgres expects exit 0 on success and will
+# retry indefinitely on non-zero (good — means we won't silently lose WAL).
+archive_command = '/usr/local/bin/pg_archive_wal.sh %p %f'
+
+# max_wal_senders must be ≥ 1 for `pg_basebackup -X stream`. 5 gives headroom
+# for ad-hoc replicas or replay tooling without bumping the limit again.
+max_wal_senders = 5
+
+# wal_keep_size keeps recent WAL on disk in case a slow archiver falls behind
+# briefly. 1 GB is a reasonable buffer; tune up if pg_stat_archiver shows
+# frequent catch-up cycles. (Pre-PG13 name: wal_keep_segments.)
+wal_keep_size = 1GB

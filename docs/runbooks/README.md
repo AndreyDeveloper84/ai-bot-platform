@@ -20,6 +20,7 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`shadow-mode-launch.md`](shadow-mode-launch.md) | draft | Sprint 8 (N4 / DRF-703) | Platform Lead |
 | [`canary-ramp.md`](canary-ramp.md) | **complete** | Sprint 10 / X-criteria (DRF-871) | Lead |
 | [`on-call.md`](on-call.md) | **complete** | Sprint 10 / O3 (DRF-864) | Lead |
+| [`disaster-recovery.md`](disaster-recovery.md) | draft | Phase 1 / PI2 (DRF-852) | Lead |
 
 ## Setup (one-time procedures)
 
