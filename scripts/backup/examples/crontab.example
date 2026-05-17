@@ -1,0 +1,17 @@
+# /etc/cron.d/pg-backup — install as root, mode 644.
+#
+# See docs/runbooks/disaster-recovery.md for context.
+#
+# Replace <your-uuid> below with the healthcheck.io check UUID before installing.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=ops@formula-tela.example
+
+# Daily full backup at 03:00 UTC (06:00 МСК). Matches the existing audit-cleanup
+# window (PI1) — both run when traffic is lowest.
+0 3 * * * root /usr/local/bin/pg_base_backup.sh >> /var/log/pg_base_backup.log 2>&1
+
+# Hourly freshness check. On non-zero exit, ping healthcheck.io's /fail endpoint
+# so the on-call gets alerted via Telegram within ~1 minute.
+15 * * * * root /usr/local/bin/check_backup_freshness.sh >> /var/log/pg_backup_check.log 2>&1 || curl --silent --max-time 10 https://hc-ping.com/<your-uuid>/fail
