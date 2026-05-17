@@ -49,6 +49,12 @@ dependencies = [
     # orgs increasingly enforce `iam.disableServiceAccountKeyCreation`
     # ("Secure by Default") which blocks JSON key generation. Source docs
     # are link-shareable; no auth needed. httpx is already a project dep.
+    # KB-RAG Sub-5 (GH #118) — deterministic Russian → ASCII transliteration
+    # for the slug used in KbDocument.source_uri. Pure-Python, zero deps,
+    # MIT-licensed. Runtime dep (not dev-only) because the slug builder is
+    # called inside the seed_kb_from_gdocs management command which runs in
+    # production environments — never in tests alone.
+    "transliterate>=1.10",
 ]
 
 [project.optional-dependencies]
