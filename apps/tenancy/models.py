@@ -137,6 +137,20 @@ class Tenant(models.Model):
         ),
     )
 
+    # Phase 5 / KB-RAG Sub-1 (GH #114) — marks service tenants that hold
+    # shared infrastructure data (e.g. ``global_kb`` for the cross-salon
+    # knowledge-base corpus) rather than a real customer. ``TenantAdmin``
+    # refuses to delete rows with ``is_system=True``; real salons remain
+    # freely deletable. Sub-3's retriever extension reads the global tenant
+    # via slug lookup, not this flag — the flag's role is admin safety.
+    is_system = models.BooleanField(
+        default=False,
+        help_text=(
+            "Service tenant — not a real salon. Holds shared infrastructure "
+            "data (e.g. cross-salon KB corpus). Cannot be deleted from admin."
+        ),
+    )
+
     # Sprint 7 / C4 (DRF-575) — cursor for the catalog sync orchestrator.
     # NULL = full-resync on the next beat (initial bootstrap or admin
     # force-clear). Sync service writes the upstream `updated_at` of the

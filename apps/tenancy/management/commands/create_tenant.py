@@ -56,8 +56,16 @@ class Command(BaseCommand):
             action="store_true",
             help="Print intent without writing to the database.",
         )
+        parser.add_argument(
+            "--system",
+            action="store_true",
+            help=(
+                "Mark the tenant as a service tenant (e.g. shared KB corpus). "
+                "Service tenants cannot be deleted from admin. KB-RAG Sub-1 / GH #114."
+            ),
+        )
 
-    def handle(self, *, slug: str, name: str, dry_run: bool, **opts) -> None:
+    def handle(self, *, slug: str, name: str, dry_run: bool, system: bool, **opts) -> None:
         # Validate slug shape *before* hitting the DB. full_clean() runs the
         # custom ``Tenant.clean()`` which enforces the platform slug regex
         # (stricter than Django's stock SlugField — see apps/tenancy/models.py).
@@ -66,7 +74,7 @@ class Command(BaseCommand):
         # idempotent path, handled explicitly below via the ``all_objects``
         # lookup. Without this, re-running ``create_tenant`` with an existing
         # slug would surface as a CommandError instead of a no-op.
-        candidate = Tenant(slug=slug, name=name)
+        candidate = Tenant(slug=slug, name=name, is_system=system)
         try:
             candidate.full_clean(exclude=["id"], validate_unique=False)
         except ValidationError as exc:
@@ -86,14 +94,19 @@ class Command(BaseCommand):
             return
 
         if dry_run:
+            system_note = " [system]" if system else ""
             self.stdout.write(
-                self.style.WARNING(f"[dry-run] would create Tenant(slug={slug!r}, name={name!r})")
+                self.style.WARNING(
+                    f"[dry-run] would create Tenant(slug={slug!r}, name={name!r}){system_note}"
+                )
             )
             return
 
-        tenant = Tenant.objects.create(slug=slug, name=name)
+        tenant = Tenant.objects.create(slug=slug, name=name, is_system=system)
+        system_note = " [system]" if tenant.is_system else ""
         self.stdout.write(
             self.style.SUCCESS(
-                f"Created tenant {tenant.slug!r} (id={tenant.id}, name={tenant.name!r})"
+                f"Created tenant {tenant.slug!r} (id={tenant.id}, "
+                f"name={tenant.name!r}){system_note}"
             )
         )

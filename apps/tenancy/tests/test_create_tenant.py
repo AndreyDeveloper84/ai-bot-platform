@@ -120,6 +120,51 @@ class TestCreateTenantDryRun:
         assert "would-be" in rendered
 
 
+class TestCreateTenantSystemFlag:
+    def test_system_flag_marks_tenant_as_system(self):
+        out = StringIO()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "global-kb",
+            "--name",
+            "Global KB",
+            "--system",
+            stdout=out,
+        )
+
+        tenant = Tenant.all_objects.get(slug="global-kb")
+        assert tenant.is_system is True
+        assert tenant.is_active is True  # system tenants are still active
+
+    def test_without_flag_tenant_is_regular(self):
+        call_command(
+            "create_tenant",
+            "--slug",
+            "salon-regular",
+            "--name",
+            "Regular Salon",
+            stdout=StringIO(),
+        )
+
+        tenant = Tenant.all_objects.get(slug="salon-regular")
+        assert tenant.is_system is False
+
+    def test_dry_run_with_system_flag_writes_nothing(self):
+        out = StringIO()
+        call_command(
+            "create_tenant",
+            "--slug",
+            "ghost-kb",
+            "--name",
+            "Ghost",
+            "--system",
+            "--dry-run",
+            stdout=out,
+        )
+        assert not Tenant.all_objects.filter(slug="ghost-kb").exists()
+
+
 class TestCreateTenantSlugValidation:
     def test_uppercase_slug_rejected(self):
         with pytest.raises(CommandError) as exc_info:
