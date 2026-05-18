@@ -99,6 +99,12 @@ run_backup() {
         return 0
     fi
 
+    # Hand ownership of the tmp dir to PG_USER — pg_basebackup runs via
+    # `sudo -u "$PG_USER" ...` below and cannot write into a root-owned
+    # mktemp dir. Skipped in DRY_RUN because the test harness does not
+    # have a `postgres` user and chown would abort the run.
+    chown "$PG_USER:$PG_USER" "$tmp_dir"
+
     # pg_basebackup writes base.tar.gz + pg_wal.tar.gz into -D when -F tar.
     # We re-tar the whole dir to a single artifact for simpler restore.
     log "running pg_basebackup"
