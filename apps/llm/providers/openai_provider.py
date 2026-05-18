@@ -57,6 +57,7 @@ from apps.llm.protocol import (
     LLMTransportError,
     ToolCall,
 )
+from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -102,13 +103,33 @@ class OpenAIProvider:
     ) -> list[float]:
         """Embed ``text``. Returns the raw vector (no normalisation here —
         ChromaDB applies cosine on its end).
+
+        Phase 1 / PI9 (DRF-860): embedding calls count toward the per-tenant
+        daily token + cost cap too. Small per-call, but RAG hot paths can
+        run hundreds of embeddings in a minute — without capturing them
+        a runaway retrieval loop could outrun the cap entirely.
         """
         chosen_model = model or self.default_embedding_model
+        await _enforce_tenant_caps(projected_tokens=_estimate_embedding_tokens(text))
+
         client = self._get_client()
         try:
             response = await client.embeddings.create(model=chosen_model, input=text)
         except Exception as exc:
             self._reraise_as_llm_error(exc, op="embedding", model=chosen_model)
+
+        # Embedding endpoint usage block — present in modern OpenAI SDK
+        # responses. Total tokens = prompt_tokens (no completion side).
+        usage = getattr(response, "usage", None)
+        used_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        if used_tokens == 0:
+            used_tokens = _estimate_embedding_tokens(text)
+        await _record_tenant_usage(
+            model=chosen_model,
+            input_tokens=used_tokens,
+            output_tokens=0,
+        )
+
         return list(response.data[0].embedding)
 
     # ------------------------------------------------------------------
@@ -132,6 +153,13 @@ class OpenAIProvider:
         can fall back rather than silently drop the request.
         """
         chosen_model = model or self.default_completion_model
+
+        # Phase 1 / PI9 (DRF-860) — per-tenant cost cap pre-call gate.
+        # Same call shape on both providers via the shared cost_tracker
+        # module. Raises TenantQuotaExceeded; orchestrator catches and
+        # serves the static Russian fallback.
+        await _enforce_tenant_caps()
+
         client = self._get_client()
 
         kwargs: dict[str, Any] = {
@@ -170,12 +198,27 @@ class OpenAIProvider:
             parsed_tool_calls.append(ToolCall(id=raw.id, name=fn.name, arguments=args))
 
         usage = getattr(response, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        actual_model = getattr(response, "model", chosen_model) or chosen_model
+
+        # Phase 1 / PI9 (DRF-860) — post-call accounting. Use the
+        # vendor-resolved model id (response.model echoes the actual
+        # variant served, which may differ from the alias the caller
+        # passed). compute_cost falls back gracefully to chosen_model
+        # when the table doesn't know the resolved variant.
+        await _record_tenant_usage(
+            model=actual_model,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+        )
+
         return CompletionResult(
             text=text,
             tool_calls=parsed_tool_calls,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            model=response.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            model=actual_model,
             provider=self.name,
             finish_reason=(choice.finish_reason or "").lower(),
         )
@@ -225,3 +268,86 @@ class OpenAIProvider:
             raise LLMQuotaError(f"openai.{op}: rate-limited: {exc}") from exc
         # Catch-all — unknown SDK error class.
         raise LLMError(f"openai.{op}: {exc_name}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / PI9 (DRF-860) — per-tenant cost-cap glue
+# ---------------------------------------------------------------------------
+
+
+async def _enforce_tenant_caps(*, projected_tokens: int = 0) -> None:
+    """Call into the shared cost_tracker if a tenant is in scope.
+
+    Skips the gate entirely when ``current_tenant()`` is None — that
+    means we're outside any request/worker context (typically the
+    test suite or an admin shell). The gate exists to protect
+    operational tenants; system-context calls (migrations, management
+    commands without tenant_scope) shouldn't be billed.
+    """
+    tenant = current_tenant()
+    if tenant is None:
+        return
+    from apps.llm.cost_tracker import enforce_caps
+
+    await enforce_caps(str(tenant.id), projected_tokens=projected_tokens)
+
+
+async def _record_tenant_usage(
+    *,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """Compute cost via :mod:`apps.llm.pricing` and forward to
+    :func:`apps.llm.cost_tracker.record_usage`.
+
+    Unknown-model pricing failure → log + skip. We never want a missing
+    price-table entry to break the surrounding LLM call — the cost cap
+    will under-count for that one call and the cost-table audit (CI
+    test for compute_cost) will surface the omission separately.
+    """
+    tenant = current_tenant()
+    if tenant is None:
+        return
+    from apps.llm.cost_tracker import record_usage
+    from apps.llm.pricing import UnknownModelError, compute_cost
+
+    try:
+        cost_usd = compute_cost(
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    except UnknownModelError:
+        logger.warning(
+            "llm.openai.cost_unknown_model model=%s — usage recorded with cost=0",
+            model,
+        )
+        cost_usd = _ZERO_DECIMAL
+
+    await record_usage(
+        str(tenant.id),
+        tokens=max(0, int(input_tokens or 0)) + max(0, int(output_tokens or 0)),
+        cost_usd=cost_usd,
+    )
+
+
+def _estimate_embedding_tokens(text: str) -> int:
+    """Rough token estimate for embedding-call pre-gate budgeting.
+
+    Embedding endpoints don't expose a "would-be" usage; we estimate
+    1 token per 4 characters (the OpenAI rule-of-thumb for English /
+    Cyrillic mixed text). Used ONLY for the pre-call ``projected_tokens``
+    overshoot guard — the post-call ``record_usage`` always uses the
+    actual ``response.usage.total_tokens`` so the counter is exact.
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+# Module-level zero so the cost-fallback path doesn't allocate a fresh
+# Decimal on each call.
+from decimal import Decimal as _Decimal  # noqa: E402 — bottom-of-file constant
+
+_ZERO_DECIMAL: _Decimal = _Decimal(0)

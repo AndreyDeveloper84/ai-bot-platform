@@ -325,3 +325,124 @@ class TestErrorMapping:
         client.embeddings.create.side_effect = _FakeAPIConnectionError("network")
         with pytest.raises(LLMTransportError):
             await provider.embedding("x")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / PI9 (DRF-860) — per-tenant cost cap integration
+# ---------------------------------------------------------------------------
+
+
+def _make_embedding_response_with_usage(vec: list[float], total_tokens: int) -> MagicMock:
+    datum = MagicMock()
+    datum.embedding = vec
+    response = MagicMock()
+    response.data = [datum]
+    usage = MagicMock()
+    usage.total_tokens = total_tokens
+    response.usage = usage
+    return response
+
+
+@pytest.mark.django_db(transaction=True)
+class TestTenantCostCap:
+    """OpenAI provider must call into apps.llm.cost_tracker for both
+    completion and embedding endpoints, and respect TenantQuotaExceeded
+    at the gate."""
+
+    @pytest.fixture
+    def tenant(self):
+        from decimal import Decimal
+
+        from apps.tenancy.models import Tenant
+
+        return Tenant.objects.create(
+            slug="oai-cost",
+            name="OAI cost test",
+            daily_token_cap=10_000,
+            daily_cost_cap_usd=Decimal("5.00"),
+        )
+
+    @pytest.fixture(autouse=True)
+    def _cache_clear(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_complete_records_usage_under_tenant_scope(
+        self, patched_provider: tuple[OpenAIProvider, MagicMock], tenant
+    ) -> None:
+        from apps.llm.cost_tracker import get_current_usage
+        from apps.tenancy.context import tenant_scope
+
+        provider, client = patched_provider
+        client.chat.completions.create.return_value = _make_completion_response(
+            content="hi",
+            model="gpt-4o-mini",
+            prompt_tokens=100,
+            completion_tokens=50,
+        )
+
+        with tenant_scope(tenant):
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.tokens_used == 150
+        # gpt-4o-mini: input $0.00015/1k, output $0.0006/1k.
+        # 100 * 0.00015/1000 + 50 * 0.0006/1000 = 0.000015 + 0.00003 = 0.000045
+        from decimal import Decimal
+
+        assert usage.cost_used_usd == Decimal("0.000045")
+
+    @pytest.mark.asyncio
+    async def test_complete_rejected_when_cap_exhausted(
+        self, patched_provider: tuple[OpenAIProvider, MagicMock], tenant
+    ) -> None:
+        from decimal import Decimal
+
+        from apps.llm.cost_tracker import TenantQuotaExceeded, record_usage
+        from apps.tenancy.context import tenant_scope
+
+        # Pre-burn the tenant's daily token cap.
+        await record_usage(str(tenant.id), tokens=10_000, cost_usd=Decimal("0"))
+
+        provider, client = patched_provider
+        with tenant_scope(tenant), pytest.raises(TenantQuotaExceeded):
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        # SDK call MUST NOT have happened — gate ran first.
+        client.chat.completions.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_embedding_records_usage(
+        self, patched_provider: tuple[OpenAIProvider, MagicMock], tenant
+    ) -> None:
+        from apps.llm.cost_tracker import get_current_usage
+        from apps.tenancy.context import tenant_scope
+
+        provider, client = patched_provider
+        client.embeddings.create.return_value = _make_embedding_response_with_usage(
+            [0.1, 0.2, 0.3], total_tokens=42
+        )
+
+        with tenant_scope(tenant):
+            await provider.embedding("часы работы")
+
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.tokens_used == 42
+        assert usage.cost_used_usd > 0  # non-zero embedding cost recorded
+
+    @pytest.mark.asyncio
+    async def test_no_tenant_scope_skips_gate(
+        self, patched_provider: tuple[OpenAIProvider, MagicMock]
+    ) -> None:
+        # Sanity: outside any tenant context the provider still works
+        # (existing tests rely on this — e.g. all the SDK-mocking
+        # tests above). The cap helper short-circuits when
+        # current_tenant() is None.
+        provider, client = patched_provider
+        client.chat.completions.create.return_value = _make_completion_response()
+        result = await provider.complete([{"role": "user", "content": "hi"}])
+        assert result.text == "hello"

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from decimal import Decimal
 
 from django.db import models
 
@@ -191,6 +192,41 @@ class Tenant(models.Model):
             "setWebhook ?secret_token=…. Telegram sends it back in "
             "X-Telegram-Bot-Api-Secret-Token on every webhook POST; the "
             "webhook view verifies with hmac.compare_digest."
+        ),
+    )
+
+    # Phase 1 / PI9 (DRF-860) — per-tenant daily LLM cost ceiling.
+    #
+    # Two independent budgets enforced at the LLM call boundary
+    # (apps.llm.cost_tracker.enforce_caps): a raw token count and a
+    # USD spend. Either can trip; orchestrator catches
+    # TenantQuotaExceeded and serves the static
+    # "лимит исчерпан" Russian fallback. Caps reset at 00:00 UTC via
+    # the natural TTL expiry of the Redis day-key.
+    #
+    # Operational defaults (1M tokens / $50) match Sprint 7 / L7's
+    # org-wide Anthropic cap so existing tenants migrate without an
+    # observable budget change. Per-tenant overrides are mandatory
+    # operational guardrails — null=False, default= provided so the
+    # migration is backward-compatible for the existing rows.
+    daily_token_cap = models.BigIntegerField(
+        default=1_000_000,
+        help_text=(
+            "Daily LLM token budget (input + output, completion + "
+            "embedding). Reset at 00:00 UTC. The pre-call gate in "
+            "apps.llm.cost_tracker rejects with TenantQuotaExceeded "
+            "once the counter reaches this value."
+        ),
+    )
+    daily_cost_cap_usd = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("50.00"),
+        help_text=(
+            "Daily USD spend budget. Cost per call is computed from "
+            "apps.llm.pricing.compute_cost; once the day's accumulator "
+            "crosses this value the cost-tracker rejects further LLM "
+            "calls via TenantQuotaExceeded. Reset at 00:00 UTC."
         ),
     )
 

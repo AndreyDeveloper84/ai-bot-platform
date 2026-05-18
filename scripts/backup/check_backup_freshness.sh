@@ -124,21 +124,37 @@ main() {
         exit 1
     fi
 
-    # awscli ls output: "YYYY-MM-DD HH:MM:SS <size> <key>"
-    # Sort lexicographically by date+time (column 1 + 2) and take the last.
-    latest_line="$(echo "$listing" | sort -k1,2 | tail -1)"
-    latest_date="$(echo "$latest_line" | awk '{print $1}')"
-    latest_time="$(echo "$latest_line" | awk '{print $2}')"
+    # awscli ls output: "YYYY-MM-DD HH:MM:SS <size> <key>".
+    # The ls timestamp is LOCAL time (TZ of the host), which makes it
+    # unsafe to feed into date -u. Instead, parse the UTC timestamp
+    # embedded in the key itself (filename format
+    # base-YYYY-MM-DDTHH-MM-SSZ.tar.gz). Sort lexicographically by key
+    # (column 4) — since the timestamp is the first thing in the key,
+    # this is a chronological sort.
+    latest_line="$(echo "$listing" | sort -k4 | tail -1)"
+    latest_key="$(echo "$latest_line" | awk '{print $4}')"
 
-    if [[ -z "$latest_date" || -z "$latest_time" ]]; then
+    if [[ -z "$latest_key" ]]; then
         err "could not parse listing: $latest_line"
         exit 1
     fi
 
-    latest_epoch="$(epoch_of "${latest_date} ${latest_time}")" || {
-        err "could not parse timestamp: ${latest_date} ${latest_time}"
+    # base-2026-05-18T12-26-08Z.tar.gz → 2026-05-18T12:26:08Z (unambiguous UTC)
+    local latest_iso
+    latest_iso="$(echo "$latest_key" \
+        | sed -E 's/^base-([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2})-([0-9]{2})-([0-9]{2})Z.*$/\1T\2:\3:\4Z/')"
+
+    if [[ "$latest_iso" == "$latest_key" ]]; then
+        err "could not extract UTC timestamp from key: $latest_key"
+        exit 1
+    fi
+
+    latest_epoch="$(epoch_of "$latest_iso")" || {
+        err "could not parse timestamp: $latest_iso"
         exit 1
     }
+    latest_date="${latest_iso%T*}"
+    latest_time="${latest_iso#*T}"
 
     age_seconds=$(( now_epoch - latest_epoch ))
 
