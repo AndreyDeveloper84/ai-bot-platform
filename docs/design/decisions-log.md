@@ -40,6 +40,7 @@ ID prefix indicates origin area:
 - `Q-CR*` — Customer cancellation + reschedule spec
 - `Q-FT*` — Customer first-touch flow (entry sources + classification)
 - `Q-MAS*` — Mini App states catalog (loading/empty/error/offline patterns)
+- `Q-MO*` — Master onboarding M0-M7 flow
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -140,6 +141,11 @@ ID prefix indicates origin area:
 | **Q-FT10** | Source 8 CRM reactivation — suppress blast if customer in HUMAN_LOCKED conversation? | YES suppress per ownership-policy HUMAN_LOCKED priority over AI proactive. | PM | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
 | **Q-MAS4** | Offline queue conflict — customer cancelled offline but already cancelled by other path? | Toast «Эта запись уже отменена. Если что не так — напишите студии» + dismiss queued action. | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
 | **Q-MAS9** | Sync queue persistence — survives Mini App close / refresh? | Persists 24h via localStorage; cleared on explicit sync OR 24h timeout. | Eng | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MO4** | Bio AI-suggestion based on services + invite metadata? | YES generate suggested text in wizard; master edits or accepts | UX + AI | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO12** | Master uses «Расскажу помощнику» (escape hatch for service not in AI's proposed list) — what happens? | AI captures free-text → owner approval queue (NOT auto-add); never master-self-serve catalog edit. Per project_salon_catalog_vertical AI-first principle. | PM | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO13** | Onboarding analytics for founder cohort — which metrics? | Time-to-M4 (median, p90), time-to-M7, drop-off rate per stage, photo/bio completion rates | PM + Analytics | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO15** | First booking by owner/admin (test_admin) — counts as M5 transition? | NO — M5 fires only on customer-initiated first booking (actor_type='customer'); test_admin bookings don't transition | Eng + UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO16** | AI pre-checks 2-3 services for primary_specialty — which? | Platform-level vertical-template defaults (e.g., массажист → classical + lymph; бровист → окрашивание + ламинирование). Per-tenant override if catalog skews. Track usage analytics for adjustment. | PM + AI | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -268,6 +274,18 @@ ID prefix indicates origin area:
 | **Q-MAS7** | Disabled state tooltip explaining why? | YES on tap (mobile) / hover (desktop); accessibility win | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
 | **Q-MAS8** | Stale threshold — 5min or category-specific? | Per category: transactional 5min (slots); catalog 30min (less change-sensitive) | Eng + UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
 | **Q-MAS10** | Maximum sync queue depth cap? | Cap at 5 queued mutations; over → reject with «слишком много несохранённых изменений» | Eng | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MO1** | M0 → M1 expiry — fixed 14 days or per-tenant? | Fixed 14 days MVP per Q-MM9; per-tenant v1.1+ | PM | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO2** | Bot DM nudge if master accepts but doesn't open Mini App in 24h? | YES — one nudge at 24h post-M1; silent after | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO3** | Photo via Mini App camera OR gallery? | Both — invokes MAX webview file picker; covers both | Eng | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO5** | Tip cards rotation — fixed 3 or tenant-configurable? | Fixed 3 platform-level MVP: ScheduleChangeRequest / sick-self-mark / arrival-ping. v1.2+ tenant-customizable. | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO6** | M3 schedule confirm — explicit «Подходит» tap required even if no changes? | YES — explicit confirm. Prevents passive acceptance + later disputes. | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO7** | M5 «{{owner}} держит кулаки 🤞» line — appropriate? | One-time contextual. Remove if user feedback shows cringe. | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO8** | M7 digest delivery time — fixed or adaptive? | Master's local 9:00 (aligned with morning digest pattern §6.4 of master-conversational-templates). | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO9** | Owner notified on each onboarding stage transition? | NO MVP — aggregate widget §12 sufficient. v1.1+ opt-in per-master alerts. | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO10** | Mass-onboarding (chain salon 10+ masters) — different UX? | Same per-master MVP; aggregate widget for owner §11.10. v1.2+ batch tools. | PM | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO11** | Solo master = owner case — M7 digest content? | Combined «Первая неделя студии» with owner partner-tone; skip master-tone variant | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO14** | M7 fires even if no bookings in 7 days post-M4? | YES — calendar-driven not activity-driven. «Пока тихо» neutral framing. | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-MO17** | Master rejects all AI pre-checked services — pre-check 0 and start blank? | YES — all unchecked; gentle prompt «Не подошло из стандартных? Что обычно делаете?» → free-text → owner approval per Q-MO12 | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -456,16 +474,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-18 r14** — Customer first-touch + Mini App states catalog (combined spec). Added Q-FT1-10 + Q-MAS1-10 (20 new). 7 entry sources locked, 10-state Mini App catalog locked, per-screen state matrix for 4b's 6 screens. Unblocks 4b customer Mini App implementation.
+**2026-05-18 r15** — Master onboarding M0-M7 flow. Added Q-MO1-17 (17 new). 8-stage lifecycle locked. **AI-first service selection** reinforced per project_salon_catalog_vertical memory (master never manually creates services; AI proposes from 11-category templates + regional pricing). Unblocks Phase 2 master-mobile implementation.
 
-| Status | Count | Δ from r13 |
+| Status | Count | Δ from r14 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **65** (+Q-FT 2/6/8/10 + Q-MAS 4/9) | +6 |
-| 🟢 Later open | **116** (+Q-FT 1/3/4/5/7/9 + Q-MAS 1/2/3/5/6/7/8/10) | +14 |
+| 🟡 Soon open | **70** (+Q-MO 4/12/13/15/16) | +5 |
+| 🟢 Later open | **128** (+Q-MO 1/2/3/5/6/7/8/9/10/11/14/17) | +12 |
 | 🔬 Validating | **5** (V1–V5) | — |
 | ✅ Decided | **79** | — |
-| **Total tracked** | **269** | +20 |
+| **Total tracked** | **286** | +17 |
+
+**2026-05-18 r14** — Customer first-touch + Mini App states catalog (combined spec). Added Q-FT1-10 + Q-MAS1-10 (20 new). 7 entry sources locked, 10-state Mini App catalog locked, per-screen state matrix for 4b's 6 screens. Unblocks 4b customer Mini App implementation.
 
 **2026-05-18 r13** — Customer cancellation + reschedule spec. Added Q-CR1-15 (15 new). State machine, refund integration, cascade flows, reschedule cap, anti-abuse mechanics locked. Unblocks Schedule S2/S5 customer-side flows.
 
