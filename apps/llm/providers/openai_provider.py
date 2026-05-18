@@ -57,6 +57,14 @@ from apps.llm.protocol import (
     LLMTransportError,
     ToolCall,
 )
+from apps.llm.retry import (
+    RetriableLLMError,
+    RetryPolicy,
+    is_retriable_openai,
+    policy_from_settings,
+    run_with_retry,
+    write_retry_attempt_audit,
+)
 from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
@@ -83,6 +91,7 @@ class OpenAIProvider:
         proxy: str | None = None,
         default_completion_model: str = _DEFAULT_COMPLETION_MODEL,
         default_embedding_model: str = _DEFAULT_EMBEDDING_MODEL,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or getattr(settings, "OPENAI_API_KEY", "") or ""
         self._proxy = proxy if proxy is not None else getattr(settings, "OPENAI_PROXY", "") or ""
@@ -90,6 +99,12 @@ class OpenAIProvider:
         self.default_embedding_model = default_embedding_model
         # Cached SDK client — built on first call.
         self._client: Any = None
+        # Phase 1 / PI7 (DRF-858) — retry policy. Lazily defaulted on
+        # first use so unit tests that construct a provider without a
+        # Django settings module still work (the test suite has
+        # settings, but the dataclass-default pattern matches the rest
+        # of this provider's lazy initialisation).
+        self._retry_policy: RetryPolicy | None = retry_policy
 
     # ------------------------------------------------------------------
     # LLMProvider — embedding
@@ -113,8 +128,26 @@ class OpenAIProvider:
         await _enforce_tenant_caps(projected_tokens=_estimate_embedding_tokens(text))
 
         client = self._get_client()
+
+        # Phase 1 / PI7 (DRF-858) — wrap the SDK call in exponential-
+        # backoff retry. RAG bulk reindex (G2) can fire hundreds of
+        # embedding calls in a minute; 429s on this hot path were a
+        # major source of "не могу ответить" in incident reviews.
+        async def _do_embedding() -> Any:
+            return await client.embeddings.create(model=chosen_model, input=text)
+
         try:
-            response = await client.embeddings.create(model=chosen_model, input=text)
+            response = await run_with_retry(
+                _do_embedding,
+                policy=self._get_retry_policy(),
+                is_retriable=is_retriable_openai,
+                on_attempt_failed=self._make_on_attempt_failed(op="embedding", model=chosen_model),
+            )
+        except RetriableLLMError:
+            # Retries exhausted — propagate up. The orchestrator's
+            # outer boundary catches this and serves the static
+            # fallback + writes audit + emits manager alert.
+            raise
         except Exception as exc:
             self._reraise_as_llm_error(exc, op="embedding", model=chosen_model)
 
@@ -174,8 +207,25 @@ class OpenAIProvider:
             # specs into the SDK's `tools` envelope.
             kwargs["tools"] = [{"type": "function", "function": spec} for spec in tools]
 
+        # Phase 1 / PI7 (DRF-858) — wrap the SDK call in exponential-
+        # backoff retry. ~95% of OpenAI 429 / 5xx are transient and
+        # retry-successful within 1-2 attempts; absorbing them here
+        # spares the user the static "не могу ответить" fallback.
+        # Retries do NOT double-charge the tenant cap — record_usage
+        # runs ONCE on the final successful response below.
+        async def _do_completion() -> Any:
+            return await client.chat.completions.create(**kwargs)
+
         try:
-            response = await client.chat.completions.create(**kwargs)
+            response = await run_with_retry(
+                _do_completion,
+                policy=self._get_retry_policy(),
+                is_retriable=is_retriable_openai,
+                on_attempt_failed=self._make_on_attempt_failed(op="complete", model=chosen_model),
+            )
+        except RetriableLLMError:
+            # Retries exhausted — propagate to orchestrator outer boundary.
+            raise
         except Exception as exc:
             self._reraise_as_llm_error(exc, op="complete", model=chosen_model)
 
@@ -226,6 +276,43 @@ class OpenAIProvider:
     # ------------------------------------------------------------------
     # SDK plumbing
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Retry helpers — Phase 1 / PI7 (DRF-858)
+    # ------------------------------------------------------------------
+
+    def _get_retry_policy(self) -> RetryPolicy:
+        """Lazy retry-policy resolution.
+
+        Constructor-injected policy wins; otherwise we read from
+        Django settings on first use. Lazy because tests that
+        construct a provider without entering settings context still
+        work (rare but historically supported).
+        """
+        if self._retry_policy is not None:
+            return self._retry_policy
+        self._retry_policy = policy_from_settings()
+        return self._retry_policy
+
+    def _make_on_attempt_failed(self, *, op: str, model: str) -> Any:
+        """Build the per-attempt audit hook closure for ``run_with_retry``.
+
+        Closure pattern lets us bind ``op`` + ``model`` into the
+        callback without changing :func:`run_with_retry`'s signature
+        (which takes a fixed ``(attempt, exc)`` callable).
+        """
+        provider_name = self.name
+
+        async def _hook(attempt: int, exc: BaseException) -> None:
+            await write_retry_attempt_audit(
+                provider=provider_name,
+                model=model,
+                op=op,
+                attempt=attempt,
+                exc=exc,
+            )
+
+        return _hook
 
     def _get_client(self) -> Any:
         """Lazy SDK client with optional HTTP proxy."""

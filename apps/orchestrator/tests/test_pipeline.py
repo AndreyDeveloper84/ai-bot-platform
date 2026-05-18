@@ -451,3 +451,176 @@ class TestTenantQuotaExhaustedFallback:
         assert len(rows) >= 1
         assert rows[0].payload["which_cap"] == "cost"
         assert rows[0].payload["trace_id"] == result.trace_id
+
+
+class TestRetryExhaustedFallback:
+    """Phase 1 / PI7 (DRF-858) — when any LLM call site raises
+    RetriableLLMError inside turn() (all transient-retry attempts
+    failed), the orchestrator catches at the outer boundary and
+    serves the static Russian fallback + writes an audit row + emits
+    a Telegram alert to the salon manager (deduped per tenant per
+    hour).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    async def test_retry_exhausted_returns_fallback_reply(self, tenant):
+        from apps.llm.retry import RetriableLLMError
+
+        class _FakeUpstream(Exception):
+            pass
+
+        _FakeUpstream.__name__ = "RateLimitError"
+
+        def _raise(*args, **kwargs):
+            raise RetriableLLMError(attempts=3, last_error=_FakeUpstream("429"))
+
+        with patch("apps.orchestrator.pipeline.classify", side_effect=_raise):
+            result = await turn(_message(text="hi"))
+
+        assert result.ok is True
+        assert result.reply is not None
+        # Static Russian fallback line — the manager has been alerted.
+        assert "сейчас не могу ответить" in result.reply.text.lower()
+        assert "менедж" in result.reply.text.lower()
+        assert result.error == "llm_retry_exhausted"
+
+    async def test_retry_exhausted_writes_audit_row(self, tenant):
+        from apps.llm.retry import AUDIT_RETRY_EXHAUSTED, RetriableLLMError
+
+        class _FakeUpstream(Exception):
+            pass
+
+        _FakeUpstream.__name__ = "InternalServerError"
+
+        def _raise(*args, **kwargs):
+            raise RetriableLLMError(attempts=3, last_error=_FakeUpstream("503 service unavailable"))
+
+        with patch("apps.orchestrator.pipeline.classify", side_effect=_raise):
+            await turn(_message(text="hi"))
+
+        from apps.audit.models import AuditLog
+
+        rows = await sync_to_async(
+            lambda: list(AuditLog.all_tenants.filter(action=AUDIT_RETRY_EXHAUSTED))
+        )()
+        assert len(rows) >= 1
+        payload = rows[0].payload
+        assert payload["attempts"] == 3
+        assert payload["last_error_class"] == "InternalServerError"
+        assert payload["tenant_id"] == str(tenant.id)
+
+    async def test_retry_exhausted_sends_manager_alert(self, tenant):
+        """When manager_chat_id is set, the orchestrator sends one
+        Telegram alert to the manager so they can check the vendor's
+        status page."""
+        from apps.llm.retry import RetriableLLMError
+
+        # Set manager chat id so the alert is dispatched.
+        tenant.manager_chat_id = "100200300"
+        await sync_to_async(tenant.save)()
+
+        class _FakeUpstream(Exception):
+            pass
+
+        _FakeUpstream.__name__ = "RateLimitError"
+
+        def _raise(*args, **kwargs):
+            raise RetriableLLMError(attempts=3, last_error=_FakeUpstream("429"))
+
+        with (
+            patch("apps.orchestrator.pipeline.classify", side_effect=_raise),
+            patch("apps.channels.max.outbound.send_message") as mock_send,
+        ):
+            await turn(_message(text="hi"))
+
+        # The manager alert is one specific send_message call;
+        # the outbound to the user (the static fallback) is another.
+        # We look for the alert text marker "LLM провайдер недоступен".
+        alert_calls = [
+            c
+            for c in mock_send.call_args_list
+            if c.kwargs.get("chat_id") == "100200300"
+            and "LLM провайдер недоступен" in (c.kwargs.get("text") or "")
+        ]
+        assert len(alert_calls) == 1
+
+    async def test_retry_exhausted_alert_deduped_within_hour(self, tenant):
+        """Two retry-exhausted turns within the dedup window send
+        exactly ONE manager alert."""
+        from apps.llm.retry import RetriableLLMError
+
+        tenant.manager_chat_id = "200300400"
+        await sync_to_async(tenant.save)()
+
+        class _FakeUpstream(Exception):
+            pass
+
+        _FakeUpstream.__name__ = "RateLimitError"
+
+        def _raise(*args, **kwargs):
+            raise RetriableLLMError(attempts=3, last_error=_FakeUpstream("429"))
+
+        with (
+            patch("apps.orchestrator.pipeline.classify", side_effect=_raise),
+            patch("apps.channels.max.outbound.send_message") as mock_send,
+        ):
+            await turn(_message(text="hi"))
+            await turn(_message(text="hi again"))
+
+        alert_calls = [
+            c
+            for c in mock_send.call_args_list
+            if c.kwargs.get("chat_id") == "200300400"
+            and "LLM провайдер недоступен" in (c.kwargs.get("text") or "")
+        ]
+        # Dedup: exactly one alert despite two exhausted turns.
+        assert len(alert_calls) == 1
+
+    async def test_retry_exhausted_no_manager_chat_id_skips_alert(self, tenant):
+        """Empty manager_chat_id → no alert sent (log + skip), but
+        the user-facing fallback still happens and the audit row
+        still gets written."""
+        from apps.llm.retry import AUDIT_RETRY_EXHAUSTED, RetriableLLMError
+
+        # tenant fixture creates a Tenant without manager_chat_id.
+        assert not (tenant.manager_chat_id or "")
+
+        class _FakeUpstream(Exception):
+            pass
+
+        _FakeUpstream.__name__ = "RateLimitError"
+
+        def _raise(*args, **kwargs):
+            raise RetriableLLMError(attempts=3, last_error=_FakeUpstream("429"))
+
+        with (
+            patch("apps.orchestrator.pipeline.classify", side_effect=_raise),
+            patch("apps.channels.max.outbound.send_message") as mock_send,
+        ):
+            result = await turn(_message(text="hi"))
+
+        # User-facing fallback served as normal.
+        assert result.ok is True
+        assert result.error == "llm_retry_exhausted"
+        # No alert calls (only the user-facing outbound from step 19).
+        alert_calls = [
+            c
+            for c in mock_send.call_args_list
+            if "LLM провайдер недоступен" in (c.kwargs.get("text") or "")
+        ]
+        assert len(alert_calls) == 0
+        # Audit row written regardless.
+        from apps.audit.models import AuditLog
+
+        rows = await sync_to_async(
+            lambda: list(AuditLog.all_tenants.filter(action=AUDIT_RETRY_EXHAUSTED))
+        )()
+        assert len(rows) >= 1
+        assert rows[0].payload["trace_id"] == result.trace_id
