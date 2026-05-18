@@ -248,6 +248,48 @@ test_check_backup_freshness_stale() {
     record_result "test_check_backup_freshness_stale" "$status"
 }
 
+test_check_backup_freshness_uses_filename_utc_not_ls_localtime() {
+    # Regression: `aws s3 ls` prints LastModified in the host's local
+    # timezone. Earlier versions of this script parsed columns 1+2 as if
+    # they were UTC, producing a -3h skew on MSK hosts and rejecting
+    # legitimate-fresh backups as "in the future". The fix parses the
+    # unambiguous UTC timestamp embedded in the key (column 4).
+    start_test "check_backup_freshness.sh: parses key UTC, not ls local-time"
+    local out err rc status=0
+    out="$(mktemp)"; err="$(mktemp)"
+
+    # Simulate an MSK host: ls timestamp is 3h ahead of the filename's
+    # UTC stamp. With the buggy parser, age would be -3600s and the
+    # script would log "in the future". With the fix, it derives age
+    # from the filename and reports fresh.
+    mock_list_local_tz() {
+        echo "2026-05-17 05:00:00     1234567 base-2026-05-17T02-00-00Z.tar.gz"
+    }
+    export -f mock_list_local_tz
+
+    if AWS_LIST_FN=mock_list_local_tz \
+        bash "$SCRIPTS_DIR/check_backup_freshness.sh" \
+            --mock-now "2026-05-17T03:00:00Z" >"$out" 2>"$err"; then
+        rc=0
+    else
+        rc=$?
+    fi
+
+    assert_eq "tz-skew rc" "0" "$rc" || status=1
+    assert_contains "tz-skew log" "fresh:" "$out" || status=1
+    # The "in the future" diagnostic must NOT appear — that's the bug
+    # this test is guarding against.
+    if grep -q "in the future" "$err"; then
+        printf '  FAIL "in the future" emitted — fix regressed\n'
+        status=1
+    else
+        printf '  ok   no "in the future" diagnostic\n'
+    fi
+
+    rm -f "$out" "$err"
+    record_result "test_check_backup_freshness_uses_filename_utc_not_ls_localtime" "$status"
+}
+
 test_check_backup_freshness_empty_bucket() {
     start_test "check_backup_freshness.sh: empty bucket returns non-zero"
     local out err rc status=0
@@ -288,6 +330,7 @@ main() {
     test_pg_archive_wal_rejects_few_args
     test_check_backup_freshness_fresh
     test_check_backup_freshness_stale
+    test_check_backup_freshness_uses_filename_utc_not_ls_localtime
     test_check_backup_freshness_empty_bucket
 
     printf '\n========================================\n'
