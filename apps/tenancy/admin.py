@@ -35,6 +35,8 @@ class TenantAdmin(admin.ModelAdmin):
         "is_system",
         "shadow_mode",
         "telegram_bot_token_masked",
+        "daily_token_cap",
+        "daily_cost_cap_usd",
         "created_at",
     )
     list_filter = ("is_active", "is_system", "shadow_mode")
@@ -65,6 +67,19 @@ class TenantAdmin(admin.ModelAdmin):
                     "Telegram's setWebhook. The list view shows only the "
                     "last 4 token characters; full value is editable here. "
                     "See docs/runbooks/telegram-bot-onboarding.md."
+                ),
+            },
+        ),
+        (
+            "Cost Controls",
+            {
+                "fields": ("daily_token_cap", "daily_cost_cap_usd"),
+                "description": (
+                    "Per-tenant daily LLM budget (Phase 1 / PI9 / DRF-860). "
+                    "Either cap can trip independently and the bot serves a "
+                    "static 'лимит исчерпан' fallback once exhausted; reset "
+                    "at 00:00 UTC. The 80% threshold also pings the salon "
+                    "manager's MAX chat (manager_chat_id) once per day."
                 ),
             },
         ),
