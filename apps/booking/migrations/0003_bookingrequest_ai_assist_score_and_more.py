@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
     dependencies = [
         ("booking", "0002_pendingbookingaction_bookingrequest_status_and_more"),
         ("catalog", "0001_initial"),
-        ("conversations", "0008_remove_conversation_conversatio_tenant__e5cdfd_idx_and_more"),
+        ("conversations", "0006_conversation_skill_state"),
         ("identity", "0002_clientprofile"),
         ("tenancy", "0007_tenant_telegram_fields"),
     ]
