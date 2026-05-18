@@ -80,6 +80,18 @@ class BookingRequest(Model):
 3. **Query performance** — `WHERE billable=True` indexed query is way faster than recomputing per row for billing reports.
 4. **Audit trail simplicity** — change `billable` requires explicit admin action with audit event, not silent re-evaluation.
 
+### `billing_reason` populate convention (clarified r3, post-4a implementation)
+
+The field name reads «why **billable**» — semantically about billable cases. Populate rules:
+
+- **`billable=True`**: `billing_reason` is **REQUIRED**. Must explain why this row earns billing (e.g., `"ai_direct: customer-initiated, created via execute_confirm"`). Empty string fails validator.
+- **`billable=False`**: `billing_reason` is **OPTIONAL** but recommended for analytics clarity. Common patterns:
+  - `"NOT billable: actor_type=admin (test/admin)"` — when test_admin scenario warrants explanation
+  - `"manual booking — phone"` — when manual-booking flow surfaces useful context
+  - `""` (empty) — acceptable for default `external` rows from YC webhook where reason adds no clarity
+
+DB-level: `billing_reason TEXT NOT NULL DEFAULT ''` (per 4a implementation). Application-level validator: if `billable=True` AND `billing_reason=''` → raise. If `billable=False` → accept empty.
+
 ### Migration
 One-time at schema-add. Backfill rule for existing rows:
 - All pre-migration `BookingRequest` rows → `booking_source="external"`, `ai_assist_score=0.00`, `billable=False`, `billing_reason="backfilled: pre-attribution-policy"`, `attribution_metadata={"backfilled": True}`.
@@ -284,6 +296,18 @@ def compute_assist_score(booking_source, metadata):
 - If salons start to query «why is this 0.6 and that one 0.7»
 
 Until then: simple, deterministic, low-dispute.
+
+### Implementation note (post-4a — r3)
+
+The heuristic above requires **conversation context** (`tool_calls_count`, `bot_replies_count`, `human_replies_count_before_create`) which is NOT available inside `apps/booking/services/attribution.py::compute_assist_score`. That service runs at the BookingRequest insertion event and only sees the booking-side data.
+
+Per 4a implementation: `compute_assist_score` for `ai_assisted` returns `0.00` stub. The **writer** owns the heuristic call — when a writer creates an `ai_assisted` booking (handoff scenarios per [`conversation-ownership-policy.md`](./conversation-ownership-policy.md) §3), it MUST:
+
+1. Gather conversation context from `apps/conversations`
+2. Call `compute_ai_assisted_score(conversation_ctx)` helper (to be added when first ai_assisted writer ships — tracked as Q-ATT-IMPL2)
+3. Pass computed score to `BookingRequest.objects.create(ai_assist_score=...)` explicitly
+
+This split keeps `apps/booking` decoupled from `apps/conversations`. Heuristic body lives in `apps/booking/services/attribution.py::compute_ai_assisted_score(conversation_ctx)` as a documented stub until the first writer ships.
 
 ## 6. Billing rule (the strict subset — r2)
 
@@ -530,3 +554,68 @@ Per user product review (2026-05-18 r2), the oferta clause MUST contain 8 elemen
 - Decisions log entry: [`decisions-log.md`](../decisions-log.md) Q12
 - Booking skill tools: `apps/skills/booking/tools.py` (engineering)
 - YClients webhook: `apps/integrations/yclients/webhooks.py` (engineering)
+
+## 15. Implementation deviations & transition concessions (r3, post-4a)
+
+4a (BookingRequest attribution backend) shipped with three accepted deviations from this policy. Each is either pragmatic-final or documented-temporary.
+
+### 15.1 Validator skip for `booking_source = 'external'` — TEMPORARY
+
+**Deviation**: `BookingRequest._validate_attribution_metadata` fires only when `booking_source != 'external'`. External rows accept any `attribution_metadata` (including empty `{}`).
+
+**Why**: Legacy writers (admin webhook, bot tools, reminders factory, YC sync, manual admin entry — 5+ callsites) do not yet pass explicit `attribution_metadata`. Strict-always validation would break them on day 1 of 4a deploy.
+
+**Resolution path**: Q-ATT-IMPL1 — port each legacy writer to explicit attribution. When all 5+ writers send `actor_type` + `booking_source` correctly, flip validator to strict-always. Until then, `external` is the «I don't know yet» bucket.
+
+**Risk**: rows incorrectly tagged `external` produce no billing (correct) but pollute analytics (acceptable; flagged in attribution dashboards).
+
+### 15.2 `compute_assist_score` returns `0.00` stub for `ai_assisted` — DEFERRED
+
+**Deviation**: §5 specifies a heuristic in 0.30–0.90 range. 4a `compute_assist_score` returns `0.00` for `ai_assisted`.
+
+**Why**: Heuristic requires `conversation_ctx` (tool_calls_count + bot_replies_count) which lives in `apps/conversations`, not in `apps/booking`. Wiring it into the BookingRequest save event would entangle modules.
+
+**Resolution path**: Q-ATT-IMPL2 — when the first `ai_assisted` writer ships (handoff scenario producing booking), it calls a `compute_ai_assisted_score(conversation_ctx)` helper colocated in `apps/booking/services/attribution.py` and passes the result explicitly to `BookingRequest.create(ai_assist_score=…)`.
+
+**Risk**: until then, `ai_assisted` rows score 0.00. Analytics-only field; not billing-affecting (since `billable=False` for `ai_assisted` anyway).
+
+### 15.3 `billing_reason` populated only when `billable=True` — ACCEPTED FINAL
+
+**Deviation**: 4a populates `billing_reason` only on billable rows. Empty string for non-billable.
+
+**Why**: Field name semantics («why **billable**») — for non-billable, there's nothing to explain. Saves DB storage (5× more non-billable rows than billable on typical tenant) and matches engineering's natural mental model.
+
+**Resolution path**: This is now the final convention (per §2 r3 update above). Non-billable rows MAY optionally include `billing_reason` for analytics clarity (e.g., manual-booking writes `"manual booking — phone"`) but it's not enforced.
+
+### 15.4 `visit_at` required for non-external bookings — APPROVED ADD (Q-ATT-IMPL3)
+
+**Approved addition**: Engineering to add validator constraint in follow-up small PR:
+
+```python
+if booking_source != "external" and visit_at is None:
+    raise ValidationError("visit_at required for non-external bookings")
+```
+
+`external` rows can have NULL visit_at temporarily until YC webhook is ported (Q-ATT-IMPL7) to copy visit_at into BookingRequest. Slot resolver already correctly excludes NULL visit_at rows from occupancy.
+
+Test invariant: `tests/test_attribution.py::test_visit_at_required_for_non_external_writers`.
+
+### 15.5 `conversation` FK population by source — DOCUMENTED MIXED PATH (Q-ATT-IMPL5)
+
+Three writer sources, three behaviors:
+
+| Source | `conversation` FK behavior |
+|---|---|
+| Mini App via deeplink with `start_param` containing `conversation_id` | Parse `start_param` at view ingestion layer; pass through; `booking_source = 'ai_assisted'` |
+| Mini App direct open (no deeplink context) | `conversation = NULL`; `booking_source = 'human_direct'` |
+| Bot tools `execute_confirm` (Q-ATT-IMPL1 port) | MUST pass `conversation`; `booking_source = 'ai_direct'` |
+
+Parser belongs in `apps/miniapp_api/views.py` at request ingestion, not in `apps/booking/services` (separation of concerns).
+
+### 15.6 Backfill perf (Q-ATT-IMPL4) — NOT BLOCKING
+
+Current scale (50+ tenants × hundreds bookings) is fine with chunked iterator in migration 0004. Re-evaluate before prod migration touches 1000+ tenants. Optimization path: RAW SQL UPDATE with idempotent WHERE clause.
+
+### 15.7 Race-safety perf (Q-PERF-1) — TRACKED
+
+`create_booking` view re-runs slot resolver as belt-and-suspenders against concurrent double-booking, costing 2-3 extra DB queries per POST. Right answer: DB-level `UNIQUE (master_id, visit_at) WHERE status='confirmed'` partial index (added concurrently, no lock). Add to Schedule S5 or separate perf ticket.

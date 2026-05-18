@@ -35,6 +35,8 @@ ID prefix indicates origin area:
 - `Q-OC*` — Owner-conversational templates
 - `Q-MB*` — Manual Booking spec
 - `Q-SW*` — Schedule editor wireframes (S2 owner editor + S3 master mobile)
+- `Q-ATT-IMPL*` — Attribution implementation (Phase 4a post-ship questions)
+- `Q-PERF*` — Performance / scalability concerns
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -123,6 +125,13 @@ ID prefix indicates origin area:
 | **Q-MB3** | Bootstrap message — disclose admin's name or stay generic? | Disclose admin name (warmth + trust); generic if admin opted out | UX | [manual-booking §18](./policies/manual-booking-spec.md) |
 | **Q-MB10** | Admin types customer name matching multiple — disambiguation UX? | Show ≤5 matches with last-visit + phone-tail; admin picks; if 0 → «+ Новый» | UX | [manual-booking §18](./policies/manual-booking-spec.md) |
 | **Q-MB11** | YClients sync — booking cancelled in YC, what happens here? | Sync deletion → `booking.cancelled` event with `cancelled_by = external_system`; customer notified per consent | Eng | [manual-booking §18](./policies/manual-booking-spec.md) |
+| **Q-ATT-IMPL1** | Port 5+ legacy writers (admin webhook, bot tools, reminders factory, YC sync, manual admin entry) to explicit attribution model — when? | Phase 1 / 4c or Phase 2; until ported, validator skip for `booking_source='external'` (per attribution-policy §15.1). When all writers send explicit `actor_type` + `booking_source`, flip validator to strict-always. | Eng | [attribution-policy §15.1](./policies/attribution-policy.md) |
+| **Q-ATT-IMPL2** | `compute_ai_assisted_score(conversation_ctx)` helper — when written and where? | Add to `apps/booking/services/attribution.py` when first `ai_assisted` writer ships. Heuristic per attribution-policy §5 (tool_calls_count + bot_replies_count + human_replies). Writer owns the call; service stays decoupled from `apps/conversations`. | Eng | [attribution-policy §15.2](./policies/attribution-policy.md) |
+| **Q-ATT-IMPL3** | `visit_at` validator — require for non-external bookings? | YES — add validator: if `booking_source != 'external'` AND `visit_at IS NULL` raise. External rows allowed NULL until Q-ATT-IMPL7 ports YC webhook. Add `test_visit_at_required_for_non_external_writers`. | Eng | [attribution-policy §15.4](./policies/attribution-policy.md) |
+| **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
+| **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
+| **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
+| **Q-PERF-1** | Race-safety in `create_booking` — application-side re-check adds 2-3 DB queries per POST. Right answer? | DB-level partial index `UNIQUE (master_id, visit_at) WHERE status='confirmed'`, added concurrently (no lock). Application-side re-check stays as belt-and-suspenders during migration. Add to Schedule S5 or separate perf ticket. | Eng | [attribution-policy §15.7](./policies/attribution-policy.md) |
 | **Q-SW2** | Multi-master weekly overlay (Все мастера) — readable threshold? | ≤4 inline colour-coded; >4 collapses to per-master chips | UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW3** | TimeBlock «Сделать регулярным обедом» heuristic threshold (3 lunches/14d) — MVP or defer? | Defer to Phase 2; MVP shows hint always when reason=обед | Eng | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW11** | YClients-connected salon's owner opens S2 — show pending ScheduleChangeRequests? | YES — change-requests are our-side concept; banner «Применятся к нашей надстройке, не пушим в YClients» | PM + Eng | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -220,6 +229,7 @@ ID prefix indicates origin area:
 | **Q-MB13** | Customer later opts in — does AI reach out about past visits? | NO automatic recap; AI engages on next interaction normally | UX | [manual-booking §18](./policies/manual-booking-spec.md) |
 | **Q-MB14** | `slot_force_override` — should AI warn about overlap pattern? | YES — if 3+ overrides in 30 days for same master, surface insight to owner | UX | [manual-booking §18](./policies/manual-booking-spec.md) |
 | **Q-MB15** | Walk-in matched to existing customer — show prior history? | YES if last_visit < 90 days; subtle context line «был у вас 3 раза» | UX | [manual-booking §18](./policies/manual-booking-spec.md) |
+| **Q-ATT-IMPL4** | Backfill perf (migration 0004) — chunked iterator OK or RAW SQL UPDATE? | NOT BLOCKING current scale. Re-evaluate before prod migration touches 1000+ tenants. RAW SQL preferred at scale with idempotent WHERE. | Eng / DBA | [attribution-policy §15.6](./policies/attribution-policy.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -408,16 +418,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-18 r11** — Conversational trilogy + Wellness OS suite + Event taxonomy + Manual booking + Schedule impl + Schedule wireframes. +91 new questions tracked, 7 decided (Q-CV11/12 + Q-SC-IMPL1-5). Open questions span 8 new doc areas.
+**2026-05-18 r12** — Attribution 4a post-ship clarifications. Added Q-ATT-IMPL1-7 + Q-PERF-1 (8 new). Updated attribution-policy.md with §15 «Implementation deviations & transition concessions» documenting 3 accepted deviations (validator skip / score stub / billing_reason populate convention) + approved additions (visit_at validator Q-ATT-IMPL3) + tracked items (Q-PERF-1 / Q-ATT-IMPL4/6/7).
 
-| Status | Count | Δ from r10 |
+| Status | Count | Δ from r11 |
 |---|---|---|
-| 🔴 Critical open | **2** (Q-WI6, Q-MB1) | +2 |
-| 🟡 Soon open | **50** (+Q-WI 1/4/7/8/10/11 + Q-EV 1/2/4/6/8/9 + Q-CV 1/4/5/9 + Q-MC 1/3/6/8 + Q-OC 2/3/7/8/10/11 + Q-MB 2/3/10/11 + Q-SW 2/3/11) | +29 |
-| 🟢 Later open | **89** (+Q-WI 2/3/5/9/12/13 + Q-EV 3/5/7/10 + Q-CV 2/3/6/7/8/10 + Q-MC 2/4/5/7/9/10/11/12 + Q-OC 1/4/5/6/9/12 + Q-MB 4/5/6/7/8/9/12/13/14/15 + Q-SW 1/4/5/6/7/8/9/10/12) | +47 |
+| 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
+| 🟡 Soon open | **56** (+Q-ATT-IMPL 1/2/3/5/6/7 + Q-PERF-1) | +6 |
+| 🟢 Later open | **90** (+Q-ATT-IMPL4) | +1 |
 | 🔬 Validating | **5** (V1–V5) | — |
-| ✅ Decided | **79** (+Q-CV11 + Q-CV12 + Q-SC-IMPL1-5) | +7 |
-| **Total tracked** | **225** | +85 |
+| ✅ Decided | **79** | — |
+| **Total tracked** | **234** | +9 |
+
+**2026-05-18 r11** — Conversational trilogy + Wellness OS suite + Event taxonomy + Manual booking + Schedule impl + Schedule wireframes. +91 new questions tracked, 7 decided (Q-CV11/12 + Q-SC-IMPL1-5). Open questions span 8 new doc areas.
 
 **Doc areas now tracked**: onboarding (Q1-Q17), conversations module (Q-C, Q-CO, LQ), persona (P, Q-PE), ownership (OP), schedule (Q-SC + Q-SC-IMPL), master-mobile (Q-M), master-management (Q-MM), customer-first-time (Q-CX), analytics (Q-AD), loyalty (Q-L), **NEW r11**: wellness modules (Q-WI), event taxonomy (Q-EV), conversational-ux (Q-CV), master-conversational (Q-MC), owner-conversational (Q-OC), manual-booking (Q-MB).
 
