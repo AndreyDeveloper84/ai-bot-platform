@@ -38,6 +38,8 @@ ID prefix indicates origin area:
 - `Q-ATT-IMPL*` — Attribution implementation (Phase 4a post-ship questions)
 - `Q-PERF*` — Performance / scalability concerns
 - `Q-CR*` — Customer cancellation + reschedule spec
+- `Q-FT*` — Customer first-touch flow (entry sources + classification)
+- `Q-MAS*` — Mini App states catalog (loading/empty/error/offline patterns)
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -132,6 +134,12 @@ ID prefix indicates origin area:
 | **Q-CR7** | Reschedule cap override — only owner or also admin? | Admin with `permission.schedule.override` (per owner-templates §14 admin variants) | Policy | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
 | **Q-CR11** | `custom_hours` ScheduleChangeRequest — cascade only on bookings in non-overlapping window? | YES — bookings inside new working window stay CONFIRMED; only outside-window bookings cascade | Eng + UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
 | **Q-CR14** | Cancel-then-rebook within 1h same customer/master/service/slot — anti-abuse handling? | Soft-detection: don't refund original cancel (it wasn't a real cancel); mark `attribution_metadata.likely_misclick = true`. Prevents cancel-rebook to dodge billing. | Eng + Policy | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-FT2** | First-touch — include customer's MAX-known name if state ≠ DISCOVERED? | YES if state ≠ DISCOVERED. NO on DISCOVERED (don't reveal name pre-introduction; feels surveillant). | UX + Privacy | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT6** | Referral attribution — credit on arrival or only on booking? | Per Q-CX7: only on booking; arrival alone doesn't credit. Add `attribution_metadata.referred_by` at first-touch + `loyalty_referral_triggered_at` on booking. | PM | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT8** | First-touch via bot DM or direct Mini App deeplink? | Bot DM always first — establishes persona + identity. Then customer taps button to enter Mini App. Direct-to-Mini-App skips trust-building. | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT10** | Source 8 CRM reactivation — suppress blast if customer in HUMAN_LOCKED conversation? | YES suppress per ownership-policy HUMAN_LOCKED priority over AI proactive. | PM | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS4** | Offline queue conflict — customer cancelled offline but already cancelled by other path? | Toast «Эта запись уже отменена. Если что не так — напишите студии» + dismiss queued action. | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS9** | Sync queue persistence — survives Mini App close / refresh? | Persists 24h via localStorage; cleared on explicit sync OR 24h timeout. | Eng | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -246,6 +254,20 @@ ID prefix indicates origin area:
 | **Q-CR12** | Reschedule analytics for owner — surface in weekly digest? | YES per owner-templates §6.2; neutral metric, not «problem» framing | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
 | **Q-CR13** | Mini App offline cancel — queue or fail? | Queue with sync-on-connect; «изменения ждут сети» toast per Q-SW12 | Eng | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
 | **Q-CR15** | Reschedule to a different SERVICE supported? | NO MVP — cancel + new booking instead; v1.2+ if demand | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-FT1** | First-touch — instant or 1s delayed (typing indicator)? | Immediate with «typing...» indicator for 1s — feels human, less canned | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT3** | Repeat QR scan within 24h — send any message? | One message (§4.1 variant); then silent 24h | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT4** | Phase 2 IG post→service mapping — manual or auto-detect? | Manual MVP (tenant adds links with start_param); v1.2+ auto via IG API | PM + Eng | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT5** | Malformed start_param — fallback or silent error? | Fallback to source 5 generic; log + alert eng; never expose to customer | Eng | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT7** | Referral arrives but customer already tenant — acknowledge referrer? | NO — they're already our customer; process as returning per §5 | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-FT9** | DORMANT-LIGHT state between DISCOVERED-no-reply and full DORMANT — needed? | NO MVP; revisit if analytics shows confused 7-30-day silent resurrection | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS1** | Skeleton minimum display time — 200ms or 300ms? | 200ms MVP per industry standard; revisit on user testing | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS2** | Different empty state for «new tenant zero catalog» vs «filter zero results»? | YES — different copy. First: «У {{salon}} пока нет услуг»; second: «По вашему запросу ничего не нашлось» + reset filters CTA | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS3** | 5xx «Сообщить студии» CTA — open admin DM or pre-filled error message? | Pre-filled («У меня не работает Mini App, экран X») — gives admin context | UX + Eng | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS5** | Auto-retry on network error — silent or visible? | Silent first attempt (200ms-2s); explicit error UI on second fail | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS6** | RTL skeleton mirroring? | YES Phase 5+ with full RTL; MVP RU LTR only | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS7** | Disabled state tooltip explaining why? | YES on tap (mobile) / hover (desktop); accessibility win | UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS8** | Stale threshold — 5min or category-specific? | Per category: transactional 5min (slots); catalog 30min (less change-sensitive) | Eng + UX | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
+| **Q-MAS10** | Maximum sync queue depth cap? | Cap at 5 queued mutations; over → reject with «слишком много несохранённых изменений» | Eng | [customer-first-touch §16](./policies/customer-first-touch-and-mini-app-states.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -434,16 +456,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-18 r13** — Customer cancellation + reschedule spec. Added Q-CR1-15 (15 new). State machine, refund integration, cascade flows, reschedule cap, anti-abuse mechanics locked. Unblocks Schedule S2/S5 customer-side flows.
+**2026-05-18 r14** — Customer first-touch + Mini App states catalog (combined spec). Added Q-FT1-10 + Q-MAS1-10 (20 new). 7 entry sources locked, 10-state Mini App catalog locked, per-screen state matrix for 4b's 6 screens. Unblocks 4b customer Mini App implementation.
 
-| Status | Count | Δ from r12 |
+| Status | Count | Δ from r13 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **59** (+Q-CR 7/11/14) | +3 |
-| 🟢 Later open | **102** (+Q-CR 1/2/3/4/5/6/8/9/10/12/13/15) | +12 |
+| 🟡 Soon open | **65** (+Q-FT 2/6/8/10 + Q-MAS 4/9) | +6 |
+| 🟢 Later open | **116** (+Q-FT 1/3/4/5/7/9 + Q-MAS 1/2/3/5/6/7/8/10) | +14 |
 | 🔬 Validating | **5** (V1–V5) | — |
 | ✅ Decided | **79** | — |
-| **Total tracked** | **249** | +15 |
+| **Total tracked** | **269** | +20 |
+
+**2026-05-18 r13** — Customer cancellation + reschedule spec. Added Q-CR1-15 (15 new). State machine, refund integration, cascade flows, reschedule cap, anti-abuse mechanics locked. Unblocks Schedule S2/S5 customer-side flows.
 
 **2026-05-18 r12** — Attribution 4a post-ship clarifications. Added Q-ATT-IMPL1-7 + Q-PERF-1 (8 new). Updated attribution-policy.md with §15 «Implementation deviations & transition concessions» documenting 3 accepted deviations (validator skip / score stub / billing_reason populate convention) + approved additions (visit_at validator Q-ATT-IMPL3) + tracked items (Q-PERF-1 / Q-ATT-IMPL4/6/7).
 
