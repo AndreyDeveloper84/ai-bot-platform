@@ -1,0 +1,113 @@
+@import "./tokens.css";
+
+/* Reset — minimal, modern. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--c-bg);
+  color: var(--c-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeLegibility;
+}
+
+/* Mini App viewport — MAX has no viewport API per memory, use 100dvh. */
+#root {
+  min-height: 100dvh;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+a {
+  color: var(--c-accent);
+}
+
+/* Screen layout: content area with bottom padding equal to sticky CTA
+   height + safe-area, so CTA doesn't cover content (handoff §6 + skill
+   ref Part 6 Pattern 1). */
+.screen {
+  min-height: 100dvh;
+  padding: var(--s-4) var(--s-4)
+    calc(var(--cta-clearance) + var(--safe-bottom));
+}
+
+.screen__title {
+  font-size: var(--font-size-500);
+  line-height: var(--leading-tight);
+  font-weight: 600;
+  margin: var(--s-4) 0 var(--s-3);
+}
+
+.screen__body {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+/* Sticky bottom CTA — replaces MAX MainButton. */
+.cta-bar {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  padding: var(--s-3) var(--s-4)
+    calc(var(--s-3) + var(--safe-bottom));
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  z-index: 10;
+}
+
+.cta-bar__button {
+  display: block;
+  width: 100%;
+  min-height: 48px; /* a11y — handoff §16 */
+  padding: 0 var(--s-4);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  border-radius: var(--r-md);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.cta-bar__button:active {
+  background: var(--c-accent-pressed);
+}
+
+.cta-bar__button:disabled {
+  /* Disabled, never hidden — skill ref Part 6 Pattern 1. */
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  cursor: not-allowed;
+}
+
+/* Status callouts. */
+.callout {
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin: var(--s-3) 0;
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+
+.callout--danger {
+  background: color-mix(in srgb, var(--c-danger) 14%, var(--c-surface-2));
+  color: var(--c-danger);
+}

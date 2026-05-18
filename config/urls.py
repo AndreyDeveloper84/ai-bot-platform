@@ -43,4 +43,9 @@ urlpatterns = [
         "api/v1/channels/telegram/",
         include("apps.channels.telegram.urls", namespace="telegram"),
     ),
+    # Customer Mini App API (Phase 0b+).
+    path(
+        "api/v1/customer/",
+        include("apps.miniapp_api.urls", namespace="miniapp_api"),
+    ),
 ]
