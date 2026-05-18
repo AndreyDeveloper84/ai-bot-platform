@@ -261,7 +261,7 @@ def create_customer_booking(
             "booking_id": str(booking.id),
             "booking_source": booking.booking_source,
             "billable": booking.billable,
-            "visit_at": booking.visit_at.isoformat(),
+            "visit_at": inp.visit_at.isoformat(),
             "master_id": str(booking.master_id),
             "service_id": str(booking.service_id),
             "correlation_id": correlation_id or "",

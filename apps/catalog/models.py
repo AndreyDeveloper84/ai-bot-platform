@@ -189,8 +189,8 @@ class CatalogMaster(_MirrorBase):
     invited_at = models.DateTimeField(null=True, blank=True)
     max_handle = models.CharField(max_length=64, blank=True, default="")
 
-    objects = _MasterManager()
-    all_tenants = models.Manager()
+    objects = _MasterManager()  # type: ignore[misc]
+    all_tenants = models.Manager()  # type: ignore[misc]
 
     class Meta:
         verbose_name = "Catalog: master"

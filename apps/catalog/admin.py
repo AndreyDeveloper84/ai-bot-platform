@@ -56,7 +56,7 @@ class CatalogMasterAdmin(_MirrorAdminBase):
         "mode",
         "synced_at",
     )
-    list_filter = ("tenant", "is_active", "invite_status", "mode", "external_updated_at")
+    list_filter = ("tenant", "is_active", "invite_status", "mode", "external_updated_at")  # type: ignore[assignment]
     search_fields = ("name", "specialization", "external_id", "max_handle")
 
 

@@ -218,6 +218,8 @@ def _collect_occupied(
 
     intervals: list[tuple[datetime, datetime]] = []
     for visit_at, duration_min in qs:
+        if visit_at is None:  # belt-and-suspenders — filter already excludes
+            continue
         minutes = duration_min if duration_min else DEFAULT_OCCUPIED_DURATION_MIN
         intervals.append((visit_at, visit_at + timedelta(minutes=minutes)))
     return intervals
@@ -415,8 +417,10 @@ def masters_list(request: HttpRequest) -> HttpResponse:
     qs = CatalogMaster.objects.bookable().order_by("name")
     service_id = request.GET.get("service_id")
     if service_id:
-        # Existence join via MasterService.
-        master_ids = MasterService.objects.filter(service_id=service_id).values_list(
+        # Existence join via MasterService. Filter via FK lookup so
+        # Django coerces the string UUID; raw service_id= would fail
+        # mypy strict UUID type check.
+        master_ids = MasterService.objects.filter(service__id=service_id).values_list(
             "master_id", flat=True
         )
         qs = qs.filter(id__in=list(master_ids))
@@ -531,7 +535,7 @@ def create_booking(request: HttpRequest) -> HttpResponse:
                 "id": str(booking.id),
                 "service_name": booking.service_name,
                 "master_name": booking.master_name,
-                "visit_at": booking.visit_at.isoformat(),
+                "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
                 "duration_min": booking.duration_min,
                 "status": booking.status,
             }
