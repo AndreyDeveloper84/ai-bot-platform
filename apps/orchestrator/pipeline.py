@@ -150,6 +150,16 @@ _FALLBACK_CLARIFY = (
 _FALLBACK_HANDOFF = "Передаю менеджеру — ответят в течение 30 минут."
 _FALLBACK_ERROR = "Извините, что-то пошло не так. Попробуйте позже или напишите «оператор»."
 
+# Phase 1 / PI9 (DRF-860) — daily LLM cost-cap exhausted. Static Russian
+# fallback served when apps.llm.cost_tracker.TenantQuotaExceeded bubbles
+# up from any LLM call site inside the turn. The audit row pinpoints
+# WHICH cap (token vs cost) tripped so the operator can decide whether
+# to raise the cap or accept the natural reset at 00:00 UTC.
+_FALLBACK_QUOTA_EXHAUSTED = (
+    "Извините, дневной лимит обращений исчерпан. Менеджер уже знает — "
+    "обратитесь к нам напрямую или попробуйте завтра."
+)
+
 
 @dataclass(frozen=True)
 class ChannelMessage:
@@ -232,7 +242,42 @@ async def turn(message: ChannelMessage) -> TurnResult:
 
             if span is not None:
                 span.set_attribute("tenant.id", str(tenant.id))
-            return await _run_under_tenant(message, tenant, trace_id, span=span)
+            # Phase 1 / PI9 (DRF-860) — lazy import to keep apps.llm
+            # off the orchestrator's app-config import path.
+            from apps.llm.cost_tracker import TenantQuotaExceeded
+
+            try:
+                return await _run_under_tenant(message, tenant, trace_id, span=span)
+            except TenantQuotaExceeded as quota_exc:
+                # Phase 1 / PI9 (DRF-860) — graceful fallback when the
+                # per-tenant daily token or cost cap is exhausted. Any
+                # LLM call site inside the pipeline (intent classify,
+                # skill dispatch, KB embedding) can raise this; we
+                # catch once at the outer boundary so the cap behaviour
+                # is uniform regardless of WHERE in the 19-step flow
+                # the call landed.
+                logger.warning(
+                    "pipeline.tenant_quota_exhausted trace_id=%s tenant=%s "
+                    "which_cap=%s current=%s limit=%s",
+                    trace_id,
+                    getattr(quota_exc, "tenant_id", ""),
+                    getattr(quota_exc, "which_cap", ""),
+                    getattr(quota_exc, "current_value", ""),
+                    getattr(quota_exc, "cap_value", ""),
+                )
+                if span is not None:
+                    span.set_attribute("tenant_quota_exhausted", True)
+                    span.set_attribute("tenant_quota_cap", str(getattr(quota_exc, "which_cap", "")))
+                await sync_to_async(_write_quota_fallback_audit, thread_sensitive=False)(
+                    trace_id=trace_id, quota_exc=quota_exc
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=ComposedReply(text=_FALLBACK_QUOTA_EXHAUSTED, final_send=True),
+                    error="tenant_quota_exhausted",
+                    short_circuited_at_step=0,
+                )
 
         except Exception as exc:  # noqa: BLE001 — outer safety boundary
             logger.exception("pipeline.turn.unhandled trace_id=%s err=%s", trace_id, exc)
@@ -691,6 +736,36 @@ def _sentry_capture_pipeline_error(exc: BaseException, trace_id: str, message: A
             sentry_sdk.capture_exception(exc)
     except Exception:  # noqa: BLE001 — Sentry never breaks the request
         logger.warning("pipeline.sentry_capture_failed trace_id=%s", trace_id)
+
+
+def _write_quota_fallback_audit(*, trace_id: str, quota_exc: Any) -> None:
+    """Write the audit row used by the orchestrator's graceful fallback.
+
+    Phase 1 / PI9 (DRF-860). Uses the canonical
+    ``llm.quota_exhausted_fallback`` action so analytics can join this
+    against the ``llm.provider_quota_exceeded`` event that the
+    cost-tracker emitted at the gate. Payload carries which cap tripped
+    + the numeric current/cap pair.
+    """
+    from apps.audit.services import write_audit
+    from apps.events.services import emit
+    from apps.llm.cost_tracker import (
+        AUDIT_QUOTA_FALLBACK,
+        EVENT_PROVIDER_QUOTA_EXCEEDED,
+    )
+
+    payload = {
+        "trace_id": trace_id,
+        "tenant_id": getattr(quota_exc, "tenant_id", ""),
+        "which_cap": getattr(quota_exc, "which_cap", ""),
+        "current_value": str(getattr(quota_exc, "current_value", "")),
+        "cap_value": str(getattr(quota_exc, "cap_value", "")),
+        "source": "orchestrator_fallback",
+    }
+    write_audit(AUDIT_QUOTA_FALLBACK, target="TenantCostTracker", payload=payload)
+    # Mirror as event so analytics dashboards have the orchestrator-side
+    # signal alongside the gate-side emission.
+    emit(EVENT_PROVIDER_QUOTA_EXCEEDED, properties=payload)
 
 
 def _write_shadow_drop_audit(trace_id: str, conversation) -> None:

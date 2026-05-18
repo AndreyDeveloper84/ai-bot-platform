@@ -318,3 +318,81 @@ class TestErrorMapping:
         client.messages.create.side_effect = ValueError("weird")
         with pytest.raises(LLMError):
             await provider.complete([{"role": "user", "content": "x"}])
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / PI9 (DRF-860) — per-tenant cost cap integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+class TestTenantCostCap:
+    """Anthropic provider — the per-tenant cap coexists alongside the
+    pre-existing L7 per-model cap. Tenant cap is checked FIRST so
+    cap-exhausted tenants see TenantQuotaExceeded (graceful fallback)
+    instead of LLMProviderQuotaExceeded (router fallback)."""
+
+    @pytest.fixture
+    def tenant(self):
+        from decimal import Decimal
+
+        from apps.tenancy.models import Tenant
+
+        return Tenant.objects.create(
+            slug="anth-cost",
+            name="Anthropic cost test",
+            daily_token_cap=10_000,
+            daily_cost_cap_usd=Decimal("5.00"),
+        )
+
+    @pytest.fixture(autouse=True)
+    def _cache_clear(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_complete_records_usage(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock], tenant
+    ) -> None:
+        from apps.llm.cost_tracker import get_current_usage
+        from apps.tenancy.context import tenant_scope
+
+        provider, client = patched_provider
+        client.messages.create.return_value = _make_response(
+            input_tokens=200, output_tokens=100, model="claude-haiku-4-5"
+        )
+
+        with tenant_scope(tenant):
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.tokens_used == 300
+
+    @pytest.mark.asyncio
+    async def test_complete_rejected_when_tenant_cap_exhausted(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock], tenant
+    ) -> None:
+        from decimal import Decimal
+
+        from apps.llm.cost_tracker import TenantQuotaExceeded, record_usage
+        from apps.tenancy.context import tenant_scope
+
+        await record_usage(str(tenant.id), tokens=10_000, cost_usd=Decimal("0"))
+
+        provider, client = patched_provider
+        with tenant_scope(tenant), pytest.raises(TenantQuotaExceeded):
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        client.messages.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_tenant_scope_path_still_works(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        provider, client = patched_provider
+        client.messages.create.return_value = _make_response()
+        result = await provider.complete([{"role": "user", "content": "x"}])
+        assert result.text == "hello"

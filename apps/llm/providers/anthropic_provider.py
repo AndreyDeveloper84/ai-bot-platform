@@ -72,6 +72,7 @@ from apps.llm.protocol import (
     LLMTransportError,
     ToolCall,
 )
+from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,15 @@ class AnthropicProvider:
         """
         chosen_model = model or self.default_completion_model
 
+        # Phase 1 / PI9 (DRF-860) — per-tenant cost cap. Runs BEFORE
+        # the existing L7 per-model org-wide cap so tenants whose own
+        # budget is already exhausted see TenantQuotaExceeded (caught
+        # by the orchestrator → graceful fallback) instead of the
+        # router-fallback LLMProviderQuotaExceeded. Both caps coexist:
+        # tenant cap protects per-customer billing, model cap protects
+        # the org-wide Anthropic spend.
+        await _enforce_tenant_caps()
+
         # L7 — pre-call quota gate. Read the current counter; if at
         # or above cap, refuse the call rather than burning more
         # tokens. We choose pre-call (not post-call) so an in-flight
@@ -199,6 +209,15 @@ class AnthropicProvider:
         # L7 — post-call accounting. INCR by the actual tokens used so
         # the next caller sees the up-to-date counter.
         _record_token_usage(prompt_tokens + completion_tokens)
+
+        # Phase 1 / PI9 (DRF-860) — per-tenant accounting. Cost
+        # computed against the vendor-resolved model id.
+        actual_model = getattr(response, "model", chosen_model) or chosen_model
+        await _record_tenant_usage(
+            model=actual_model,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+        )
 
         return CompletionResult(
             text=text,
@@ -405,6 +424,67 @@ def _record_token_usage(tokens: int) -> None:
     # prod runs on django-redis which has native INCR above.
     current = _current_token_count()
     cache.set(key, current + tokens, timeout=_TOKEN_COUNTER_TTL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / PI9 (DRF-860) — per-tenant cost-cap glue
+# ---------------------------------------------------------------------------
+
+
+async def _enforce_tenant_caps() -> None:
+    """Forward to :func:`apps.llm.cost_tracker.enforce_caps` when a
+    tenant is in scope.
+
+    No-op outside a tenant context (matches the OpenAI provider).
+    """
+    tenant = current_tenant()
+    if tenant is None:
+        return
+    from apps.llm.cost_tracker import enforce_caps
+
+    await enforce_caps(str(tenant.id))
+
+
+async def _record_tenant_usage(
+    *,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """Compute cost and forward to :func:`apps.llm.cost_tracker.record_usage`.
+
+    Mirrors the OpenAI provider's helper — kept duplicated rather than
+    refactored into a shared module because the providers are
+    intentionally parallel modules (per L2/L4 docstrings) and a shared
+    helper would re-introduce the import-cycle the cost_tracker module
+    itself was designed to break.
+    """
+    tenant = current_tenant()
+    if tenant is None:
+        return
+    from decimal import Decimal
+
+    from apps.llm.cost_tracker import record_usage
+    from apps.llm.pricing import UnknownModelError, compute_cost
+
+    try:
+        cost_usd = compute_cost(
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    except UnknownModelError:
+        logger.warning(
+            "llm.anthropic.cost_unknown_model model=%s — usage recorded with cost=0",
+            model,
+        )
+        cost_usd = Decimal(0)
+
+    await record_usage(
+        str(tenant.id),
+        tokens=max(0, int(input_tokens or 0)) + max(0, int(output_tokens or 0)),
+        cost_usd=cost_usd,
+    )
 
 
 def _parse_content_blocks(blocks: Any) -> tuple[str, list[ToolCall]]:

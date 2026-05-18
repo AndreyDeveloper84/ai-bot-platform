@@ -394,3 +394,60 @@ class TestEventEmission:
             c for c in mock_emit.call_args_list if c.args and c.args[0] == "message_sent"
         ]
         assert len(event_calls) >= 1
+
+
+class TestTenantQuotaExhaustedFallback:
+    """Phase 1 / PI9 (DRF-860) — when any LLM call site raises
+    TenantQuotaExceeded inside turn(), the orchestrator catches once at
+    the outer boundary and serves the static Russian fallback."""
+
+    async def test_quota_exhausted_returns_fallback_reply(self, tenant):
+        from apps.llm.cost_tracker import TenantQuotaExceeded
+
+        # Make `classify` raise TenantQuotaExceeded — simulates the gate
+        # tripping inside the intent step.
+        def _raise(*args, **kwargs):
+            raise TenantQuotaExceeded(
+                tenant_id=str(tenant.id),
+                which_cap="token",
+                cap_value=10_000,
+                current_value=10_500,
+            )
+
+        with patch(
+            "apps.orchestrator.pipeline.classify",
+            side_effect=_raise,
+        ):
+            result = await turn(_message(text="hi"))
+
+        assert result.ok is True
+        assert result.reply is not None
+        assert "лимит" in result.reply.text.lower()
+        assert result.error == "tenant_quota_exhausted"
+
+    async def test_quota_exhausted_writes_audit_row(self, tenant):
+        from apps.llm.cost_tracker import (
+            AUDIT_QUOTA_FALLBACK,
+            TenantQuotaExceeded,
+        )
+
+        def _raise(*args, **kwargs):
+            raise TenantQuotaExceeded(
+                tenant_id=str(tenant.id),
+                which_cap="cost",
+                cap_value="5.00",
+                current_value="5.10",
+            )
+
+        with patch("apps.orchestrator.pipeline.classify", side_effect=_raise):
+            result = await turn(_message(text="hi"))
+
+        from apps.audit.models import AuditLog
+
+        def _fetch():
+            return list(AuditLog.all_tenants.filter(action=AUDIT_QUOTA_FALLBACK))
+
+        rows = await sync_to_async(_fetch)()
+        assert len(rows) >= 1
+        assert rows[0].payload["which_cap"] == "cost"
+        assert rows[0].payload["trace_id"] == result.trace_id
