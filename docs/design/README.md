@@ -34,6 +34,7 @@ Foundational policies that span all features. Handoffs reference these; updates 
 - **wellness-input-modules.md** — 7 wellness input modules spec: food scanner / water tracker / body / sleep / mood / AI Avatar / symptom diary; per-module UX, AI inference, privacy boundaries, phasing
 - **manual-booking-spec.md** — Owner/admin creates bookings on customer's behalf (phone, walk-in, YClients sync); conversation-thread bootstrap for cold customers; attribution = human_direct / external; Wellness Profile Layer 1 initialization
 - **schedule-editor-wireframes.md** — Schedule Management S2/S3 wireframes: owner editor (8 ASCII layouts incl. weekly grid, master selector, hours inline editor, exception/TimeBlock/SlotConfig modals, pending requests inbox) + master mobile (5 layouts incl. day/week view, change-request submit, own-requests inbox, self-sick mark); reusable patterns, edge cases EC-S2-1..7 + EC-S3-1..7, WCAG 2.2 AA
+- **customer-cancellation-reschedule-spec.md** — state machine (CONFIRMED → CANCEL_REQUESTED / RESCHEDULE_REQUESTED / AFFECTED_BY_SCHEDULE_CHANGE → terminal), bot DM + Mini App flows for cancel + reschedule, refund integration per attribution-policy §6 (auto −100₽ on cancel<1h + no_show), reschedule cap (3 per booking), master ScheduleChangeRequest cascade with per-customer individual offers, no-show next-morning gentle check, 15 edge cases, anti-abuse mechanics
 
 ### `handoffs/` — Per-feature design specifications
 

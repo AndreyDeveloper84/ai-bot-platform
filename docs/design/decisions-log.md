@@ -37,6 +37,7 @@ ID prefix indicates origin area:
 - `Q-SW*` — Schedule editor wireframes (S2 owner editor + S3 master mobile)
 - `Q-ATT-IMPL*` — Attribution implementation (Phase 4a post-ship questions)
 - `Q-PERF*` — Performance / scalability concerns
+- `Q-CR*` — Customer cancellation + reschedule spec
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -128,6 +129,9 @@ ID prefix indicates origin area:
 | **Q-ATT-IMPL1** | Port 5+ legacy writers (admin webhook, bot tools, reminders factory, YC sync, manual admin entry) to explicit attribution model — when? | Phase 1 / 4c or Phase 2; until ported, validator skip for `booking_source='external'` (per attribution-policy §15.1). When all writers send explicit `actor_type` + `booking_source`, flip validator to strict-always. | Eng | [attribution-policy §15.1](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL2** | `compute_ai_assisted_score(conversation_ctx)` helper — when written and where? | Add to `apps/booking/services/attribution.py` when first `ai_assisted` writer ships. Heuristic per attribution-policy §5 (tool_calls_count + bot_replies_count + human_replies). Writer owns the call; service stays decoupled from `apps/conversations`. | Eng | [attribution-policy §15.2](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL3** | `visit_at` validator — require for non-external bookings? | YES — add validator: if `booking_source != 'external'` AND `visit_at IS NULL` raise. External rows allowed NULL until Q-ATT-IMPL7 ports YC webhook. Add `test_visit_at_required_for_non_external_writers`. | Eng | [attribution-policy §15.4](./policies/attribution-policy.md) |
+| **Q-CR7** | Reschedule cap override — only owner or also admin? | Admin with `permission.schedule.override` (per owner-templates §14 admin variants) | Policy | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR11** | `custom_hours` ScheduleChangeRequest — cascade only on bookings in non-overlapping window? | YES — bookings inside new working window stay CONFIRMED; only outside-window bookings cascade | Eng + UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR14** | Cancel-then-rebook within 1h same customer/master/service/slot — anti-abuse handling? | Soft-detection: don't refund original cancel (it wasn't a real cancel); mark `attribution_metadata.likely_misclick = true`. Prevents cancel-rebook to dodge billing. | Eng + Policy | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -230,6 +234,18 @@ ID prefix indicates origin area:
 | **Q-MB14** | `slot_force_override` — should AI warn about overlap pattern? | YES — if 3+ overrides in 30 days for same master, surface insight to owner | UX | [manual-booking §18](./policies/manual-booking-spec.md) |
 | **Q-MB15** | Walk-in matched to existing customer — show prior history? | YES if last_visit < 90 days; subtle context line «был у вас 3 раза» | UX | [manual-booking §18](./policies/manual-booking-spec.md) |
 | **Q-ATT-IMPL4** | Backfill perf (migration 0004) — chunked iterator OK or RAW SQL UPDATE? | NOT BLOCKING current scale. Re-evaluate before prod migration touches 1000+ tenants. RAW SQL preferred at scale with idempotent WHERE. | Eng / DBA | [attribution-policy §15.6](./policies/attribution-policy.md) |
+| **Q-CR1** | Undo window after cancel — 5 sec or longer (15 sec)? | 5 sec MVP — match standard mobile undo patterns | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR2** | If late-cancel + non-billable from start — any «sorry» softening? | NO — non-billable is internal; customer same template either way | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR3** | Tenant configurable «brag» on EVENT exception («Маша на тренинге в Москве»)? | NO MVP — privacy default; v1.1+ tenant toggle | UX + Policy | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR4** | Cancellation reason chips per customer state? | All same chips MVP; per-state variants v1.1+ | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR5** | Reschedule allowed when master `is_active=False`? | NO — UI prevents selection; reschedule defaults to alternatives | Eng | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR6** | Customer asks to reschedule to TimeBlock-blocked slot (lunch)? | Resolver excludes blocked slots; if free-text request → offer nearest free per resolver | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR8** | Cascade timeout 48h — fixed or per-tenant? | Fixed 48h MVP; v1.1+ tenant adjustable (24h–7d) | PM | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR9** | Auto-cancel-after-no-reply message tone — apologetic or neutral? | Neutral («не было ответа — отменила; будет нужно — пишите») | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR10** | No-show check-in delivery time — fixed 9:00 or adaptive? | Fixed 9:00-10:00 customer TZ for MVP; adaptive Layer 5 Behavioral v1.2+ | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR12** | Reschedule analytics for owner — surface in weekly digest? | YES per owner-templates §6.2; neutral metric, not «problem» framing | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR13** | Mini App offline cancel — queue or fail? | Queue with sync-on-connect; «изменения ждут сети» toast per Q-SW12 | Eng | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
+| **Q-CR15** | Reschedule to a different SERVICE supported? | NO MVP — cancel + new booking instead; v1.2+ if demand | UX | [customer-cancellation-reschedule §14](./policies/customer-cancellation-reschedule-spec.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -418,16 +434,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-18 r12** — Attribution 4a post-ship clarifications. Added Q-ATT-IMPL1-7 + Q-PERF-1 (8 new). Updated attribution-policy.md with §15 «Implementation deviations & transition concessions» documenting 3 accepted deviations (validator skip / score stub / billing_reason populate convention) + approved additions (visit_at validator Q-ATT-IMPL3) + tracked items (Q-PERF-1 / Q-ATT-IMPL4/6/7).
+**2026-05-18 r13** — Customer cancellation + reschedule spec. Added Q-CR1-15 (15 new). State machine, refund integration, cascade flows, reschedule cap, anti-abuse mechanics locked. Unblocks Schedule S2/S5 customer-side flows.
 
-| Status | Count | Δ from r11 |
+| Status | Count | Δ from r12 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **56** (+Q-ATT-IMPL 1/2/3/5/6/7 + Q-PERF-1) | +6 |
-| 🟢 Later open | **90** (+Q-ATT-IMPL4) | +1 |
+| 🟡 Soon open | **59** (+Q-CR 7/11/14) | +3 |
+| 🟢 Later open | **102** (+Q-CR 1/2/3/4/5/6/8/9/10/12/13/15) | +12 |
 | 🔬 Validating | **5** (V1–V5) | — |
 | ✅ Decided | **79** | — |
-| **Total tracked** | **234** | +9 |
+| **Total tracked** | **249** | +15 |
+
+**2026-05-18 r12** — Attribution 4a post-ship clarifications. Added Q-ATT-IMPL1-7 + Q-PERF-1 (8 new). Updated attribution-policy.md with §15 «Implementation deviations & transition concessions» documenting 3 accepted deviations (validator skip / score stub / billing_reason populate convention) + approved additions (visit_at validator Q-ATT-IMPL3) + tracked items (Q-PERF-1 / Q-ATT-IMPL4/6/7).
 
 **2026-05-18 r11** — Conversational trilogy + Wellness OS suite + Event taxonomy + Manual booking + Schedule impl + Schedule wireframes. +91 new questions tracked, 7 decided (Q-CV11/12 + Q-SC-IMPL1-5). Open questions span 8 new doc areas.
 
