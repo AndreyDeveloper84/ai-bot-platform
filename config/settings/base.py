@@ -358,6 +358,21 @@ CELERY_BEAT_SCHEDULE = {
 # LLMProviderQuotaExceeded; the L5 router falls back to OpenAI.
 ANTHROPIC_DAILY_TOKEN_CAP = int(os.environ.get("ANTHROPIC_DAILY_TOKEN_CAP", "1000000"))
 
+# Phase 1 / PI7 (DRF-858) — exponential-backoff retry for OpenAI 429
+# and 5xx errors, applied uniformly to both OpenAI and Anthropic
+# providers via ``apps.llm.retry.run_with_retry``. Single set of
+# settings shared across both providers — per-provider tuning is
+# a future ticket if and when it becomes necessary.
+#
+# Defaults: 3 attempts (initial + 2 retries), 1s base delay with
+# exponential doubling (1s, 2s, 4s, …), 30s cap, ±25% jitter. With
+# these defaults the worst-case before exhaustion is ~3s of waiting
+# — well under the 4000ms p95 turn budget for the (~95%) of
+# transients that retry-successfully on the first or second retry.
+LLM_RETRY_MAX_ATTEMPTS = int(os.environ.get("LLM_RETRY_MAX_ATTEMPTS", "3"))
+LLM_RETRY_BASE_DELAY_S = float(os.environ.get("LLM_RETRY_BASE_DELAY_S", "1.0"))
+LLM_RETRY_MAX_DELAY_S = float(os.environ.get("LLM_RETRY_MAX_DELAY_S", "30.0"))
+
 
 # Sprint 1 / C1 channel token map. Format env CHANNEL_TOKEN_TO_TENANT_SLUG:
 # ``"token1=tenant-a,token2=tenant-b"``. Sprint 4 replaces with
