@@ -98,53 +98,76 @@ export function MyVisitsScreen() {
       {state.kind === "ok" &&
         state.items.length > 0 &&
         state.items.map((b) => (
-          <button
-            key={b.id}
-            type="button"
-            className="service-card"
-            data-testid="my-visit-card"
-            onClick={() => navigate(`/my-visits/${b.id}`)}
-            style={{ textAlign: "left", width: "100%" }}
-          >
-            <div style={{ fontWeight: 600 }}>{formatVisitFull(b.visit_at)}</div>
-            <div style={{ color: "var(--text-muted, #888)", marginTop: "var(--s-1)" }}>
-              {b.service_name}
-              {b.master_name ? ` · ${b.master_name}` : ""}
-            </div>
-            {b.status === "cancel_requested" && (
-              <div
-                style={{
-                  color: "var(--warning, #c70)",
-                  marginTop: "var(--s-1)",
-                  fontSize: "0.9em",
+          <div key={b.id} className="visit-row">
+            <button
+              type="button"
+              className="service-card"
+              data-testid="my-visit-card"
+              onClick={() => navigate(`/my-visits/${b.id}`)}
+              style={{ textAlign: "left", width: "100%" }}
+            >
+              <div style={{ fontWeight: 600 }}>{formatVisitFull(b.visit_at)}</div>
+              <div style={{ color: "var(--text-muted, #888)", marginTop: "var(--s-1)" }}>
+                {b.service_name}
+                {b.master_name ? ` · ${b.master_name}` : ""}
+              </div>
+              {b.status === "cancel_requested" && (
+                <div
+                  style={{
+                    color: "var(--warning, #c70)",
+                    marginTop: "var(--s-1)",
+                    fontSize: "0.9em",
+                  }}
+                >
+                  Отменяется…
+                </div>
+              )}
+              {b.status === "reschedule_requested" && (
+                <div
+                  style={{
+                    color: "var(--warning, #c70)",
+                    marginTop: "var(--s-1)",
+                    fontSize: "0.9em",
+                  }}
+                >
+                  Переносится…
+                </div>
+              )}
+              {(b.status === "cancelled" || b.status === "rescheduled") && (
+                <div
+                  style={{
+                    color: "var(--text-muted, #888)",
+                    marginTop: "var(--s-1)",
+                    fontSize: "0.9em",
+                  }}
+                >
+                  {b.status === "cancelled" ? "Отменена" : "Перенесена"}
+                </div>
+              )}
+              {b.rating !== null && (
+                <div
+                  className="visit-rating"
+                  aria-label={`Оценка ${b.rating} из 5`}
+                  style={{ marginTop: "var(--s-1)" }}
+                >
+                  {"★".repeat(b.rating)}
+                  {"☆".repeat(5 - b.rating)}
+                </div>
+              )}
+            </button>
+            {b.can_rate && (
+              <button
+                type="button"
+                className="btn-secondary visit-row__rate"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(`/feedback/${b.id}`);
                 }}
               >
-                Отменяется…
-              </div>
+                Оценить визит
+              </button>
             )}
-            {b.status === "reschedule_requested" && (
-              <div
-                style={{
-                  color: "var(--warning, #c70)",
-                  marginTop: "var(--s-1)",
-                  fontSize: "0.9em",
-                }}
-              >
-                Переносится…
-              </div>
-            )}
-            {(b.status === "cancelled" || b.status === "rescheduled") && (
-              <div
-                style={{
-                  color: "var(--text-muted, #888)",
-                  marginTop: "var(--s-1)",
-                  fontSize: "0.9em",
-                }}
-              >
-                {b.status === "cancelled" ? "Отменена" : "Перенесена"}
-              </div>
-            )}
-          </button>
+          </div>
         ))}
     </ScreenLayout>
   );
