@@ -86,6 +86,7 @@ from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingRequest, PendingBookingAction
+from apps.eventbus import services as eventbus_services
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
 from apps.bookings.reminders_factory import create_reminders_for_booking
@@ -1279,6 +1280,23 @@ def execute_cancel(
         target="BookingSkill",
         payload={"tenant_id": tenant_id, "record_id": record_id},
     )
+
+    # Domain bus — taxonomy §3.1 booking.cancelled. Swallow errors so a
+    # bus outage never unwinds the cancel side-effect.
+    try:
+        eventbus_services.emit_booking_cancelled(
+            booking_id=str(booking.pk),
+            cancelled_by="customer",
+            cancellation_reason=reason or "",
+            cancelled_at=dj_timezone.now().isoformat(),
+            actor_type="human",
+            actor_role="customer",
+            actor_id=str(bot_user.pk) if bot_user else None,
+            tenant=tenant,
+        )
+    except Exception:  # noqa: BLE001 — domain telemetry never breaks the tool
+        logger.exception("booking.cancel.eventbus_emit_failed booking=%s", booking.pk)
+
     text = "Готово, запись отменена."
     return BookingToolResult(text=text)
 
@@ -1525,6 +1543,27 @@ def execute_reschedule(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
+    # Domain bus — taxonomy §3.1 booking.rescheduled. Fresh correlation_id
+    # captured so the partial-failure cancel below (if it happens) can
+    # share it — subscribers then recognise the composite "old visit
+    # dead, no new visit booked" outcome.
+    _reschedule_correlation_id = eventbus_services.new_correlation_id()
+    try:
+        _old_visit_iso = booking.visit_at.isoformat() if getattr(booking, "visit_at", None) else ""
+        eventbus_services.emit_booking_rescheduled(
+            booking_id=str(booking.pk),
+            old_slot_start=_old_visit_iso,
+            new_slot_start=new_datetime,
+            rescheduled_by="customer",
+            actor_type="human",
+            actor_role="customer",
+            actor_id=str(bot_user.pk) if bot_user else None,
+            correlation_id=_reschedule_correlation_id,
+            tenant=tenant,
+        )
+    except Exception:  # noqa: BLE001 — domain telemetry never breaks the tool
+        logger.exception("booking.reschedule.eventbus_emit_failed booking=%s", booking.pk)
+
     # Step 2: create the new record. Partial-failure handling per
     # the module docstring.
     try:
@@ -1548,6 +1587,21 @@ def execute_reschedule(
         BookingRequest.all_tenants.filter(pk=booking.pk).update(
             status=BookingRequest.Status.CANCELLED,
         )
+        # Reschedule degraded to cancel — emit booking.cancelled with the
+        # SAME correlation_id as the booking.rescheduled above so subscribers
+        # see the composite outcome.
+        try:
+            eventbus_services.emit_booking_cancelled(
+                booking_id=str(booking.pk),
+                cancelled_by="system",
+                cancellation_reason="reschedule_partial_failure",
+                cancelled_at=dj_timezone.now().isoformat(),
+                actor_type="system",
+                correlation_id=_reschedule_correlation_id,
+                tenant=tenant,
+            )
+        except Exception:  # noqa: BLE001 — domain telemetry never breaks the tool
+            logger.exception("booking.reschedule.partial_cancel_emit_failed booking=%s", booking.pk)
         _audit_tool(
             tenant_id=tenant_id,
             tool="execute_reschedule",
