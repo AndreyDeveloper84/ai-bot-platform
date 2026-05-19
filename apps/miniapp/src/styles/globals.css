@@ -654,3 +654,15 @@ a {
   color: var(--c-text-primary);
   line-height: 1.5;
 }
+
+/* My-visits row wrapper — card + inline "Оценить" CTA. */
+.visit-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+.visit-row__rate {
+  align-self: flex-start;
+}
