@@ -102,7 +102,11 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
             return _error("unauthorized", str(exc), 401)
 
         bot_user = (
-            BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
+            BotUser.all_tenants.filter(
+                channel="max",
+                channel_user_id=verified.user_id,
+                deleted_at__isnull=True,
+            )
             .select_related("tenant")
             .order_by("-last_seen")
             .first()
@@ -664,3 +668,100 @@ def reschedule_booking(request: HttpRequest, booking_id) -> HttpResponse:
         },
         status=201,
     )
+
+
+# --- /me — profile read / update / delete (Phase 3 / F4) -------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_init_data
+def me(request: HttpRequest) -> HttpResponse:
+    """Read or partially update the current customer's profile.
+
+    GET — returns the F4 snapshot (BotUser core + UserPreferences +
+    favorites). PATCH — applies allowed field updates; unknown keys 400.
+    """
+    from apps.identity.services.profile import (
+        ProfileUpdateError,
+        get_profile,
+        update_profile,
+    )
+
+    import json
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        snap = get_profile(bot_user)
+        return JsonResponse(_profile_to_dict(snap))
+
+    # PATCH
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    try:
+        snap = update_profile(bot_user, body)
+    except ProfileUpdateError as exc:
+        return _error("invalid_field", str(exc), 400)
+    return JsonResponse(_profile_to_dict(snap))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def delete_me(request: HttpRequest) -> HttpResponse:
+    """Soft-delete the current customer (scrub PII + drop prefs).
+
+    Body: ``{"confirmation": "УДАЛИТЬ"}``. Mismatch → 400. After the
+    write the BotUser row is invisible to ``require_init_data`` (which
+    filters ``deleted_at__isnull=True``), so subsequent Mini App calls
+    return 404 user_not_registered until the user re-onboards via the
+    bot DM.
+    """
+    from apps.identity.services.profile import (
+        DELETE_CONFIRMATION_TOKEN,
+        DeletionConfirmationMismatch,
+        soft_delete_user,
+    )
+
+    import json
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    confirmation = body.get("confirmation", "")
+    try:
+        soft_delete_user(bot_user, confirmation)
+    except DeletionConfirmationMismatch:
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+    return JsonResponse({"deleted": True}, status=200)
+
+
+def _profile_to_dict(snap) -> dict:
+    """Serialise a :class:`ProfileSnapshot` for the JSON response."""
+    return {
+        "bot_user_id": snap.bot_user_id,
+        "display_name": snap.display_name,
+        "client_name": snap.client_name,
+        "phone_masked": snap.phone_masked,
+        "timezone": snap.timezone,
+        "joined_at": snap.joined_at,
+        "preferences": snap.preferences,
+        "favorites": {
+            "master_name": snap.favorite_master_name,
+            "service_name": snap.favorite_service_name,
+        },
+    }

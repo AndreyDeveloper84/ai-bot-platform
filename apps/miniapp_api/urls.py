@@ -25,4 +25,7 @@ urlpatterns = [
     path(
         "bookings/<uuid:booking_id>/reschedule", views.reschedule_booking, name="reschedule_booking"
     ),
+    # Phase 3 / F4 — profile read / update / data deletion
+    path("me", views.me, name="me"),
+    path("me/delete", views.delete_me, name="delete_me"),
 ]

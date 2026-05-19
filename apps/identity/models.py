@@ -115,8 +115,27 @@ class BotUser(models.Model):
         help_text="IANA timezone for time-of-day rendering in messages.",
     )
 
+    # GDPR-style soft delete (Phase 3 / F4). ``deleted_at`` set when the
+    # customer requests data deletion via the Mini App profile screen.
+    # ``soft_delete_user()`` scrubs PII (client_name/phone/context) at the
+    # same time. We keep the row so historical FKs (BookingRequest,
+    # Conversation) stay intact for salon reporting + audit.
+    deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When the customer requested data deletion. Non-null "
+        "means PII has been scrubbed and the user should be invisible to "
+        "default queries.",
+    )
+
     # Default manager scopes to current_tenant(). Use ``all_tenants`` for
     # admin / maintenance code that must see every row.
+    #
+    # Soft-deleted users (``deleted_at__isnull=False``) are NOT filtered
+    # at the manager layer — that would silently change semantics of
+    # every existing call site. Instead, auth (require_init_data) and
+    # profile views filter deleted_at explicitly.
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
@@ -132,6 +151,94 @@ class BotUser(models.Model):
     def __str__(self) -> str:
         label = self.display_name or self.client_name or self.channel_user_id
         return f"BotUser[{self.channel}:{label}]"
+
+
+class UserPreferences(models.Model):
+    """Customer-set notification + personal preferences (Phase 3 / F4).
+
+    OneToOne with :class:`BotUser` (primary key = bot_user_id, same shape
+    as :class:`ClientProfile`). Editable from the Mini App profile screen
+    (F4); read by the proactive scheduler before sending reminders /
+    retention / promo / birthday templates.
+
+    Per ``docs/design/handoffs/2026-05-18-customer-first-time-handoff.md``
+    §12 F4 — 4 toggles + birthday + allergies. Favorites are computed
+    elsewhere (top-master-by-bookings) and surfaced read-only on F4.
+
+    ### Why a separate model and not BotUser.context JSONB
+
+    Per Phase 3 design Q1 — preferences are *contractual*: the
+    proactive scheduler MUST honor them, retention SLA is measured
+    against opt-out timestamps, and analytics needs structured access
+    (count tenants by promo opt-in rate). JSONB hides those shapes
+    behind dict lookups and won't be migration-safe when v1.1 adds
+    new toggles.
+    """
+
+    bot_user = models.OneToOneField(
+        BotUser,
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="preferences",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="user_preferences",
+        help_text="Owning tenant. CASCADE — preferences die with the "
+        "tenant, no value in keeping them otherwise.",
+    )
+
+    # Notification toggles per handoff §12 F4 layout
+    notify_reminders = models.BooleanField(
+        default=True,
+        help_text="T-24h / T-2h / T-15m reminders for confirmed bookings. "
+        "Even when False, transactional confirmations still fire — only "
+        "soft reminders mute.",
+    )
+    notify_retention = models.BooleanField(
+        default=True,
+        help_text="Proactive «время обновить» nudge ~6 weeks after last visit.",
+    )
+    notify_promo = models.BooleanField(
+        default=False,
+        help_text="Promo / marketing campaigns. Default OFF — opt-in.",
+    )
+    notify_birthday = models.BooleanField(
+        default=True,
+        help_text="Birthday greeting + gift offer. Requires birthday_date to actually trigger.",
+    )
+
+    # Personal data per handoff §12 F4 — optional, can be skipped
+    birthday_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Optional birthday for the birthday greeting flow. Year "
+        "is preserved for age-conditional offers but never displayed back.",
+    )
+    allergies = models.TextField(
+        blank=True,
+        default="",
+        help_text="Free-text contraindications / allergies surfaced to the "
+        "master before each booking. Read by the booking confirm view.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "User preferences"
+        verbose_name_plural = "User preferences"
+        indexes = [
+            models.Index(fields=["tenant", "notify_promo"]),
+            models.Index(fields=["tenant", "notify_birthday", "birthday_date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"UserPreferences[{self.bot_user_id}]"
 
 
 class ClientProfile(models.Model):
