@@ -41,6 +41,7 @@ ID prefix indicates origin area:
 - `Q-FT*` — Customer first-touch flow (entry sources + classification)
 - `Q-MAS*` — Mini App states catalog (loading/empty/error/offline patterns)
 - `Q-MO*` — Master onboarding M0-M7 flow
+- `Q-NP*` — Notification preferences UX (customer/master/owner)
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -146,6 +147,13 @@ ID prefix indicates origin area:
 | **Q-MO13** | Onboarding analytics for founder cohort — which metrics? | Time-to-M4 (median, p90), time-to-M7, drop-off rate per stage, photo/bio completion rates | PM + Analytics | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
 | **Q-MO15** | First booking by owner/admin (test_admin) — counts as M5 transition? | NO — M5 fires only on customer-initiated first booking (actor_type='customer'); test_admin bookings don't transition | Eng + UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
 | **Q-MO16** | AI pre-checks 2-3 services for primary_specialty — which? | Platform-level vertical-template defaults (e.g., массажист → classical + lymph; бровист → окрашивание + ламинирование). Per-tenant override if catalog skews. Track usage analytics for adjustment. | PM + AI | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-NP5** | Master DND respect both `WorkingHours` AND `ScheduleException`? | YES — vacation = full DND; customer-related notifications batched to return date | Eng + UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP7** | Quiet hours for customer = customer TZ but tenant TZ might differ — which for delivery? | Customer TZ for delivery scheduling; tenant TZ only for business-context timestamps | Eng | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP8** | Frequency cap exceeded — drop or queue? | Queue (per §6.2) — never silent drop | Eng | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP11** | Customer toggles «без проактивных» mid-conversation in flight — affects current? | NO — current conversation continues; new state applies to NEXT proactive trigger | UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP15** | Audit log retention for preference changes — Layer 2 (365d) or Layer 3 (7y)? | Layer 2 for most; Layer 3 for operational-class re-enable (compliance traceability) | Legal | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP16** | Migration path for existing customers — default retroactively or behavior-based? | Default settings retroactively; behavior-based adds privacy risk + complexity | Eng + Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP17** | Tenant suspended (billing failed) — customer preferences still honored for queued reminders? | YES — operational reminders for existing bookings continue; only new dispatch suppressed | Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -286,6 +294,15 @@ ID prefix indicates origin area:
 | **Q-MO11** | Solo master = owner case — M7 digest content? | Combined «Первая неделя студии» with owner partner-tone; skip master-tone variant | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
 | **Q-MO14** | M7 fires even if no bookings in 7 days post-M4? | YES — calendar-driven not activity-driven. «Пока тихо» neutral framing. | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
 | **Q-MO17** | Master rejects all AI pre-checked services — pre-check 0 and start blank? | YES — all unchecked; gentle prompt «Не подошло из стандартных? Что обычно делаете?» → free-text → owner approval per Q-MO12 | UX | [master-onboarding §16](./policies/master-onboarding-m0-m7.md) |
+| **Q-NP2** | Wellness module toggles — show all or only activated? | Show ALL with state; turn ON requires activation flow with consent dialog; turn OFF direct | UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP3** | M2 wizard notification settings — full review or «defaults applied»? | Defaults + brief mention; full review on master initiative | UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP4** | Customer DND default 22-9 — per-tenant or platform fixed? | Platform fixed MVP (consistent CX); per-tenant v1.2+ | PM | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP6** | Owner DND tiered VIP escalation — MVP? | NO MVP — single owner DND + urgent exemption; v1.2+ tiered VIP | UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP9** | Master «не отключаются» list customer-facing copy? | Show explicitly «Не отключаются:» list — transparency | UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP10** | Aggregate stats for owner («N of M masters opted in») — surface? | Phase 2+; MVP not surfaced (privacy + low operational value initially) | PM | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP12** | Owner override customer «без проактивных»? | NEVER — customer consent absolute. Owner sees aggregate metric only | Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP13** | Settings UI search bar MVP? | Phase 2+; MVP linear scan sufficient | UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-NP14** | Preference rate-limit (anti-flapping)? | YES — max 10 changes/hour/user; over → 30min cooldown | Eng | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -474,16 +491,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-18 r15** — Master onboarding M0-M7 flow. Added Q-MO1-17 (17 new). 8-stage lifecycle locked. **AI-first service selection** reinforced per project_salon_catalog_vertical memory (master never manually creates services; AI proposes from 11-category templates + regional pricing). Unblocks Phase 2 master-mobile implementation.
+**2026-05-19 r16** — Notification Preferences UX (customer + master + owner). Added Q-NP1-17 (17 new; Q-NP1 ✅ confirmed-decided as single «без проактивных» toggle per Q-CX9). 3-axis matrix (audience × channel × event-type), 14 event types classified, per-audience preferences UI, frequency caps + DND windows. Unblocks Settings Hub refresh + cross-cutting opt-in/opt-out logic across customer-first-touch + cancellation/reschedule + wellness modules + escalations.
 
-| Status | Count | Δ from r14 |
+| Status | Count | Δ from r15 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **70** (+Q-MO 4/12/13/15/16) | +5 |
-| 🟢 Later open | **128** (+Q-MO 1/2/3/5/6/7/8/9/10/11/14/17) | +12 |
+| 🟡 Soon open | **77** (+Q-NP 5/7/8/11/15/16/17) | +7 |
+| 🟢 Later open | **137** (+Q-NP 2/3/4/6/9/10/12/13/14) | +9 |
 | 🔬 Validating | **5** (V1–V5) | — |
-| ✅ Decided | **79** | — |
-| **Total tracked** | **286** | +17 |
+| ✅ Decided | **80** (+Q-NP1) | +1 |
+| **Total tracked** | **303** | +17 |
+
+**2026-05-18 r15** — Master onboarding M0-M7 flow. Added Q-MO1-17 (17 new). 8-stage lifecycle locked. **AI-first service selection** reinforced per project_salon_catalog_vertical memory (master never manually creates services; AI proposes from 11-category templates + regional pricing). Unblocks Phase 2 master-mobile implementation.
 
 **2026-05-18 r14** — Customer first-touch + Mini App states catalog (combined spec). Added Q-FT1-10 + Q-MAS1-10 (20 new). 7 entry sources locked, 10-state Mini App catalog locked, per-screen state matrix for 4b's 6 screens. Unblocks 4b customer Mini App implementation.
 
