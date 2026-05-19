@@ -24,6 +24,10 @@ dependencies = [
     "django>=5.2,<6.0",
     "djangorestframework>=3.15",
     "celery[redis]>=5.4",
+    # Database-backed scheduler for celery beat. Required by
+    # config.settings.base INSTALLED_APPS + the systemd beat command
+    # `--scheduler django_celery_beat.schedulers:DatabaseScheduler`.
+    "django-celery-beat>=2.7",
     "redis>=5.0",
     "psycopg[binary]>=3.2",
     "chromadb>=0.5",

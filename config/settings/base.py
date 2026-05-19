@@ -105,6 +105,11 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    # Celery beat scheduler tables — required when systemd beat runs
+    # with `--scheduler django_celery_beat.schedulers:DatabaseScheduler`
+    # (infra/systemd/ai-bot-platform-beat.service.template). Without
+    # this entry the beat process crashes on import of SolarSchedule.
+    "django_celery_beat",
     *LOCAL_APPS,
 ]
 
