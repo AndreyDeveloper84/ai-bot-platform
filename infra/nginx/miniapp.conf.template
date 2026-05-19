@@ -32,10 +32,10 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
 
-    # CSP — restrict origins; MAX bridge loads from dev.max.ru (per
-    # apps/miniapp/index.html script src). Adjust as MAX docs lock URL.
+    # CSP — restrict origins; MAX bridge loads from st.max.ru per
+    # https://dev.max.ru/docs/webapps/bridge. Adjust as MAX docs lock URL.
     add_header Content-Security-Policy
-        "default-src 'self'; script-src 'self' https://dev.max.ru; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; font-src 'self' data:; frame-ancestors *;"
+        "default-src 'self'; script-src 'self' https://st.max.ru; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; font-src 'self' data:; frame-ancestors *;"
         always;
 
     access_log /var/log/nginx/miniapp-{SUBDOMAIN}-access.log;
