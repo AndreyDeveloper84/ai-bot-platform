@@ -5,6 +5,8 @@ import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { HelloScreen } from "./screens/HelloScreen";
+import { MasterDashboardPlaceholderScreen } from "./screens/MasterDashboardPlaceholderScreen";
+import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
 import { MyVisitsScreen } from "./screens/MyVisitsScreen";
@@ -30,6 +32,11 @@ export function App() {
       <Route path="/me" element={<ProfileScreen />} />
       {/* Phase 4 — post-visit rating (F5). */}
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
+      {/* Master surface — M0 onboarding + M1 placeholder
+          (master-mobile-handoff §M0). The route is opened from the MAX
+          bot DM deeplink `?start=master_invite_<token>`. */}
+      <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />
+      <Route path="/master/dashboard" element={<MasterDashboardPlaceholderScreen />} />
       <Route path="*" element={<HelloScreen />} />
     </Routes>
   );
