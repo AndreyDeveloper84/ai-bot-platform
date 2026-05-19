@@ -105,6 +105,15 @@ class DomainEvent(models.Model):
         default="",
         help_text="Most recent dispatcher error message. Truncated by caller.",
     )
+    dead_lettered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Set by dispatcher when dispatch_attempts crosses MAX_ATTEMPTS. "
+        "Dead-letter rows are excluded from re-claim; ops triage + replay action "
+        "in admin restarts them. Phase 2.2 — replaces Phase 2.1 forever-pending "
+        "workaround (taxonomy §18.5).",
+    )
 
     created_at = models.DateTimeField(
         auto_now_add=True,
@@ -136,6 +145,12 @@ class DomainEvent(models.Model):
                 name="evbus_correlation_idx",
             ),
         ]
+
+    @property
+    def is_dead_letter(self) -> bool:
+        """True iff this row has been quarantined by the dispatcher."""
+
+        return self.dead_lettered_at is not None
 
     def __str__(self) -> str:
         return f"DomainEvent[{self.event_name} {self.event_id}]"
