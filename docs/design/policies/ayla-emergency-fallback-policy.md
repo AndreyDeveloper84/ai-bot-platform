@@ -1243,14 +1243,14 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.19 emergency domain` (NEW s
 | **Q-AEF8** | Founder review queue across tenants — privacy? | Founder sees all data needed to resolve. NO cross-tenant share with other admins. Aggregate patterns only at §6.7 level. | Privacy + Founder | 🟢 |
 | **Q-AEF9** | Voice templates — multi-language Phase 3+? | YES Phase 3+ per `ayla-identity-and-brand Q-AYL3/4`. MVP Russian-only. | UX + I18N | 🟢 |
 | **Q-AEF10** | Customer requesting status repeatedly — rate-limit? | Soft: Ayla responds same status message; doesn't escalate or annoy. After 5 same-day repeats: «у меня нет новых данных, как только узнаю — напишу». | UX | 🟢 |
-| **Q-AEF11** | Sensitive keyword false positives — what if NLU mis-detects? | Admin reviews; can reclassify before customer sees. Audit captures original detection + reclass. Per Q-AEF13. | AI quality | 🔴 PRE-DEPLOY |
+| **Q-AEF11** | Sensitive keyword false positives — what if NLU mis-detects? | Admin reviews; can reclassify before customer sees. Audit captures original detection + reclass. Per Q-AEF13. | AI quality | 🟢 RESOLVED 2026-05-20 |
 | **Q-AEF12** | Migration script for in-flight conversations — when run? | Per `policy_deviation_pattern` discipline: run as part of deployment. Audit captures pre/post state per conversation. Customer not notified. | Eng | 🟡 |
 | **Q-AEF13** | Customer repeatedly triggering false emergencies — pattern flag? | Admin-side soft signal at 3+ in 90d (similar to no-show pattern). Anti-fraud Phase 4+. | Policy + Founder | 🟡 |
 | **Q-AEF14** | Admin mismarking tier for personal benefit — audit signal? | YES — founder reviews reclassifications + decision quality. Founder can revert + audit captures. | Policy + Founder | 🟡 |
-| **Q-AEF15** | LegalHoldAccessLog retention — 7 years or longer? | 7 years minimum; founder can mark «indefinite» for active legal cases. Per Russia consumer law + medical confidentiality conventions. | Legal | 🔴 PRE-DEPLOY |
-| **Q-AEF16** | Cross-tenant customer with `legally_sensitive` — both tenants notified? | Only tenant where incident happened. Founder may decide to inform other tenants if safety concern. Audit captures decision. | Privacy + Founder | 🔴 PRE-DEPLOY |
-| **Q-AEF17** | Customer < 18 emergency — minor protections additional to §3.4 medical-adjacent? | YES per `ayla-identity-and-brand Q-AYL13` + `ayla-memory Q-AML8`: minor emergencies auto-escalate to founder + parent contact required. Audit logged separately. | Privacy + Legal | 🔴 PRE-DEPLOY |
-| **Q-AEF18** | Wellness module emergency (e.g., suicidal mention in mood log) — emergency tier? | YES `legally_sensitive` subtier `mental_health_concern`. Per `wellness-symptom-handoff §10` medical routing — Ayla provides crisis resources immediately + founder informed. | Policy + AI | 🔴 PRE-DEPLOY |
+| **Q-AEF15** | LegalHoldAccessLog retention — 7 years or longer? | 7 years minimum; founder can mark «indefinite» for active legal cases. Per Russia consumer law + medical confidentiality conventions. | Legal | 🟢 RESOLVED 2026-05-20 |
+| **Q-AEF16** | Cross-tenant customer with `legally_sensitive` — both tenants notified? | Only tenant where incident happened. Founder may decide to inform other tenants if safety concern. Audit captures decision. | Privacy + Founder | 🟢 RESOLVED 2026-05-20 |
+| **Q-AEF17** | Customer < 18 emergency — minor protections additional to §3.4 medical-adjacent? | YES per `ayla-identity-and-brand Q-AYL13` + `ayla-memory Q-AML8`: minor emergencies auto-escalate to founder + parent contact required. Audit logged separately. | Privacy + Legal | 🟢 RESOLVED 2026-05-20 |
+| **Q-AEF18** | Wellness module emergency (e.g., suicidal mention in mood log) — emergency tier? | YES `legally_sensitive` subtier `mental_health_concern`. Per `wellness-symptom-handoff §10` medical routing — Ayla provides crisis resources immediately + founder informed. | Policy + AI | 🟢 RESOLVED 2026-05-20 |
 | **Q-AEF19** | Admin sees customer's wellness data during `payment_dispute` review? | NO — privacy hierarchy. Admin sees booking details + dispute claim + financial records. Customer's wellness data customer-only per Doc #2 §9. | Privacy | 🟢 |
 | **Q-AEF20** | Voice tone for `legally_sensitive` — softer than other tiers? | Slightly more grounded but NOT dramatic. Ayla acknowledges seriousness without panic. Per `ayla-identity-and-brand §3.2` situation tone modulation. | UX + AI prompt | 🟡 |
 
@@ -1320,11 +1320,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.19 emergency domain` (NEW s
 - ❌ Multi-language (Phase 3+)
 - ❌ Anti-fraud ML on emergency abuse
 - ❌ Cross-tenant emergency aggregation for admin
-- ❌ Skip Q-AEF11 (sensitive keyword false positives) — pre-deploy
-- ❌ Skip Q-AEF15 (LegalHoldAccessLog retention) — pre-deploy
-- ❌ Skip Q-AEF16 (cross-tenant `legally_sensitive` notification) — pre-deploy
-- ❌ Skip Q-AEF17 (minor emergency protections) — pre-deploy
-- ❌ Skip Q-AEF18 (wellness mental-health emergency) — pre-deploy
+- ✅ Q-AEF11 / Q-AEF15 / Q-AEF16 / Q-AEF17 / Q-AEF18 — resolved 2026-05-20 (founder confirmed provisional); implementation tickets unblocked
 
 ---
 
@@ -1333,13 +1329,13 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.19 emergency domain` (NEW s
 | Role | Approval | Date |
 |---|---|---|
 | UX Architect | ✅ | 2026-05-19 |
-| AI prompt eng (emergency templates per voice rules + Q-AEF20 tone) | ☐ | 🔴 PRE-DEPLOY |
-| AI quality steward (Q-AEF11 sensitive keyword false positives + template review) | ☐ | 🔴 PRE-DEPLOY |
+| AI prompt eng (emergency templates per voice rules + Q-AEF20 tone) | ☐ | 🟢 Q-AEF locks resolved 2026-05-20 |
+| AI quality steward (Q-AEF11 sensitive keyword false positives + template review) | ☐ | 🟢 Q-AEF11 resolved 2026-05-20 |
 | Refund-dispute steward (§11.1 integration alignment) | ☐ | |
 | Booking-conflict steward (§11.2 integration alignment) | ☐ | |
 | Master-reviews steward (§11.5 TIER-2 mapping) | ☐ | |
-| Privacy / Legal (§2.9 + §8 audit + Q-AEF15 retention + Q-AEF16 cross-tenant + Q-AEF17 minor + Q-AEF18 mental-health) | ☐ | 🔴 PRE-DEPLOY |
-| Founder (§6 escalation rules + Q-AEF13/14 abuse detection + cross-tenant queue) | ☐ | 🔴 PRE-DEPLOY |
+| Privacy / Legal (§2.9 + §8 audit + Q-AEF15 retention + Q-AEF16 cross-tenant + Q-AEF17 minor + Q-AEF18 mental-health) | ☐ | 🟢 Q-AEF15/16/17/18 resolved 2026-05-20 |
+| Founder (§6 escalation rules + Q-AEF13/14 abuse detection + cross-tenant queue) | ☐ | 🟢 Q-AEF locks resolved 2026-05-20 |
 | Engineering (4 models + 18 endpoints + migration + cron scanners) | ☐ | |
 | Mini App frontend (Ayla Pro queue + per-tier resolution screens + founder dashboard) | ☐ | |
 | Conversation-ownership-policy.md migration owner (§12 deprecate old) | ☐ | |

@@ -670,16 +670,16 @@ Any customer-side doc must satisfy:
 | **Q-AYL8** | Ayla mentioning competitor / 3rd-party tools — allowed? | Phase 1: no (focus on platform offering). Phase 3+: maybe for wellness recommendations («дневник можно вести в любом приложении»). | Policy | 🟢 |
 | **Q-AYL9** | If customer renames Ayla in their head («буду называть тебя Маша») — Ayla accepts? | Polite acknowledgment, but Ayla stays Ayla in all UI / system copy. «Можешь называть как хочешь, я остаюсь Ayla — так зовусь в системе.» | UX | 🟢 |
 | **Q-AYL10** | Multi-language session (customer switches RU→EN mid-chat) — Ayla switches? | Phase 3+. MVP: RU only. | Eng + UX | 🟢 |
-| **Q-AYL11** | When Ayla doesn't know answer — voice for «I don't know»? | Honest + actionable. «Не знаю, проверю и вернусь» or «Здесь лучше с врачом — это не моя территория». Never invent. | UX + AI quality | 🔴 PRE-DEPLOY |
-| **Q-AYL12** | Hallucination prevention — what if Ayla generates wrong information? | Per `ai-quality-observability` forbidden phrases + factual grounding. Wrong info detected → Ayla acknowledges + correction. «Извини, я тут перепутала — на самом деле…» | AI quality | 🔴 PRE-DEPLOY |
-| **Q-AYL13** | If customer < 18 — Ayla onboarding flow? | Per existing wellness-modules: medical-adjacent modules blocked < 18. Booking allowed with parent contact per tenant policy. Ayla never asks age proactively (yellow-zone-adjacent); customer self-discloses if parents register them. | Policy + Legal | 🔴 PRE-DEPLOY |
+| **Q-AYL11** | When Ayla doesn't know answer — voice for «I don't know»? | Honest + actionable. «Не знаю, проверю и вернусь» or «Здесь лучше с врачом — это не моя территория». Never invent. | UX + AI quality | 🟢 RESOLVED 2026-05-20 |
+| **Q-AYL12** | Hallucination prevention — what if Ayla generates wrong information? | Per `ai-quality-observability` forbidden phrases + factual grounding. Wrong info detected → Ayla acknowledges + correction. «Извини, я тут перепутала — на самом деле…» | AI quality | 🟢 RESOLVED 2026-05-20 |
+| **Q-AYL13** | If customer < 18 — Ayla onboarding flow? | Per existing wellness-modules: medical-adjacent modules blocked < 18. Booking allowed with parent contact per tenant policy. Ayla never asks age proactively (yellow-zone-adjacent); customer self-discloses if parents register them. | Policy + Legal | 🟢 RESOLVED 2026-05-20 |
 | **Q-AYL14** | Brand-protection on misuse (3rd party app uses «Ayla» name)? | Out of scope; trademark / legal. | Legal | 🟡 |
 | **Q-AYL15** | Customer with disability — accessibility of Ayla voice? | WCAG 2.2 AA on Mini App text. Voice support Phase 2+. Screen reader: chat thread accessible. | Accessibility | 🟡 |
 | **Q-AYL16** | Ayla mentioning founder / team — when allowed? | Rarely. If customer asks «кто за тобой стоит» → «Команда людей строит и улучшает меня. Если нужно — могу передать вопрос им.» NOT mentioning specific names. | UX + Privacy | 🟢 |
 | **Q-AYL17** | Ayla gendered self-reference («помогла», «я ходила») — locked feminine? | YES MVP. Female grammatical forms in Russian. Etymology + brand persona supports. | Brand + UX | 🟢 |
 | **Q-AYL18** | Persona drift detection — how do we monitor voice stays consistent? | `ai-quality-observability` quality gates + founder-50 cohort review observe samples. Phase 2+ ML-based drift detection. | AI quality | 🟡 |
 | **Q-AYL19** | Customer complains about Ayla's tone («слишком сладкая», «слишком сухая»)? | Take as feedback. Q-AYL5 tone slider may address Phase 2+. MVP: «спасибо за обратную связь, постараюсь учесть». | UX | 🟢 |
-| **Q-AYL20** | Ayla's «memory of past conversation» — how transparent? | Per §8 + `ayla-memory-and-personalization` Doc #2: dedicated «Что Ayla знает обо мне» surface. Per-field source attribution. Customer can delete. | Privacy | 🔴 PRE-DEPLOY |
+| **Q-AYL20** | Ayla's «memory of past conversation» — how transparent? | Per §8 + `ayla-memory-and-personalization` Doc #2: dedicated «Что Ayla знает обо мне» surface. Per-field source attribution. Customer can delete. | Privacy | 🟢 RESOLVED 2026-05-20 |
 
 ---
 
@@ -728,7 +728,7 @@ See migration list in memory `project_ayla_first_strategic_pivot.md` §«Existin
 - ❌ Multi-language — Phase 3+ (RU MVP)
 - ❌ Personality customization — Phase 2+ if Q-AYL5
 - ❌ ML-based persona drift detection — Phase 2+
-- ❌ Skip Q-AYL11 (hallucination handling), Q-AYL12 (wrong info correction), Q-AYL13 (minor protection), Q-AYL20 (memory transparency UX) — pre-deploy locks
+- ✅ Q-AYL11 / Q-AYL12 / Q-AYL13 / Q-AYL20 — resolved 2026-05-20 (founder confirmed provisional); implementation tickets unblocked
 - ❌ Visual brand assets (avatar PNG, crescent moon vector) — Phase 2+ brand pass
 - ❌ International expansion — Phase 4+
 - ❌ Legal trademark protection of «Ayla» name — separate legal scope
@@ -741,8 +741,8 @@ See migration list in memory `project_ayla_first_strategic_pivot.md` §«Existin
 |---|---|---|
 | UX Architect | ✅ | 2026-05-19 |
 | Brand owner / Founder | ☐ | 🔴 PRE-DEPLOY (brand decisions Q-AYL1/3/4/16/17) |
-| AI prompt eng (Ayla persona prompt rewrite per §3 + Q-AYL11/12 hallucination) | ☐ | 🔴 PRE-DEPLOY |
-| Privacy / Legal (§8 3-zone framework + Q-AYL13 minor + Q-AYL20 memory transparency) | ☐ | 🔴 PRE-DEPLOY |
+| AI prompt eng (Ayla persona prompt rewrite per §3 + Q-AYL11/12 hallucination) | ☐ | 🟢 Q-AYL11/12 resolved 2026-05-20 |
+| Privacy / Legal (§8 3-zone framework + Q-AYL13 minor + Q-AYL20 memory transparency) | ☐ | 🟢 Q-AYL13/20 resolved 2026-05-20 |
 | Mini App frontend (Ayla wordmark + avatar + sage-green chrome) | ☐ | |
 | Accessibility (WCAG 2.2 AA on chat thread + memory surface) | ☐ | |
 | Localization (Q-AYL3 EN + Q-AYL4 KZ — Phase 3+) | ☐ | |

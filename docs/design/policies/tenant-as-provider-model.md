@@ -1011,7 +1011,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.20 tenant lifecycle domain`
 | # | Question | Lean | Owner | Urgency |
 |---|---|---|---|---|
 | **Q-TP1** | Founder-50 cohort lock — terms permanent or N years? | Per `project_pricing_model_hybrid` r2 — «locked indefinitely for them» original. Maintain unless founder decision changes. | Founder | 🟢 |
-| **Q-TP2** | Tenant data export PII gated — what triggers? | Per §5.3 + §9.2: dispute resolution + legal subpoena + admin explicit «I need to contact this customer for [X]» with audit reason. Otherwise initials only. | Privacy + Policy | 🔴 PRE-DEPLOY |
+| **Q-TP2** | Tenant data export PII gated — what triggers? | Per §5.3 + §9.2: dispute resolution + legal subpoena + admin explicit «I need to contact this customer for [X]» with audit reason. Otherwise initials only. | Privacy + Policy | 🟢 RESOLVED 2026-05-20 |
 | **Q-TP3** | Tenant cancellation cooling-off — 30 days correct? | 30d per master-offboarding precedent. Founder can shorten on case-by-case. | Policy | 🟢 |
 | **Q-TP4** | Customer notification on tenant offboarding — when sent? | At founder approval (post cooling-off OR immediate for-cause). Customer gets ONE Ayla message + alt-tenant offer per §8.3. | UX | 🟡 |
 | **Q-TP5** | Tenant pause vs offboard — semantic difference? | SUSPENDED = temporary; offboarding = permanent intent. SUSPENDED > 90d may auto-trigger offboarding consideration (per §10.5). | Policy | 🟡 |
@@ -1020,10 +1020,10 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.20 tenant lifecycle domain`
 | **Q-TP8** | Tenant policy config bounds — who sets defaults? | Platform sets defaults + bounds (e.g., refund window 7-30d range). Tenant configures within. | Policy + Eng | 🟢 |
 | **Q-TP9** | Tenant export rate-limit / volume detection? | YES — unusual volume (10× normal) flags founder review (anti-abuse signal). | Privacy + Founder | 🟡 |
 | **Q-TP10** | Re-onboarding period — fresh start after how long? | After hard-delete + customer data anonymized (~37 days post offboarding completion). Re-onboarding then is fresh state. | Eng | 🟢 |
-| **Q-TP11** | Tenant for-cause termination — what counts as cause? | Defined per `contract-offer-acceptance-display-ux.md` contract terms. Examples: anti-fraud, customer abuse, repeat policy violations. Founder + 4-eye admin per §8.7. | Policy + Legal | 🔴 PRE-DEPLOY |
+| **Q-TP11** | Tenant for-cause termination — what counts as cause? | Defined per `contract-offer-acceptance-display-ux.md` contract terms. Examples: anti-fraud, customer abuse, repeat policy violations. Founder + 4-eye admin per §8.7. | Policy + Legal | 🟢 RESOLVED 2026-05-20 |
 | **Q-TP12** | Customer's per-tenant loyalty balance after tenant offboard — what? | Forfeit per `customer-loyalty-rewards-ux Q-CL13` (customer informed, no compensation). Audit captures. | Policy | 🟡 |
 | **Q-TP13** | Tenant marketing of customer outside Ayla — enforcement? | NOT enforced platform-side (tenant's external marketing is outside platform). But customer's `customer-notification-controls-ux §4.3` marketing opt-out applies to Ayla notifications. If tenant marketed customer outside Ayla after customer opted out — that's compliance violation per tenant's own data protection, not Ayla scope. | Legal + Policy | 🟡 |
-| **Q-TP14** | For-cause termination 4-eye — admin admin + founder OR admin + admin? | Founder + co-founder (or founder + senior admin). NOT 2 same-role admins (collusion risk). Per master-offboarding §10.2 precedent. | Policy | 🔴 PRE-DEPLOY |
+| **Q-TP14** | For-cause termination 4-eye — admin admin + founder OR admin + admin? | Founder + co-founder (or founder + senior admin). NOT 2 same-role admins (collusion risk). Per master-offboarding §10.2 precedent. | Policy | 🟢 RESOLVED 2026-05-20 |
 | **Q-TP15** | Multi-tenant analytics for tenants Phase 4+? | NO. Cross-tenant data is platform-only (founder aggregate). Anti-pattern §13.5. | PM | 🟢 |
 | **Q-TP16** | Customer's wellness goal aligned with services at tenant — tenant sees? | NO. Wellness data customer-only. Service recommendation per `customer-wellness-goal-setting-ux §7.4` uses goals SERVER-side; tenant sees only booking made, not goal that drove. | Privacy + Eng | 🟡 |
 | **Q-TP17** | Tenant cannot disable Ayla — confirmed? | Confirmed per §2.7. Even on tenant offboard, tenant doesn't «cancel» Ayla for customer; customer's Ayla persists. | Policy | 🟢 |
@@ -1096,9 +1096,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.20 tenant lifecycle domain`
 - ❌ B2B tier (chain salons) — Phase 4+
 - ❌ Multi-currency tenants — Phase 4+
 - ❌ Tenant marketing platform integration — Phase 4+
-- ❌ Skip Q-TP2 PII gated trigger policy — pre-deploy
-- ❌ Skip Q-TP11 for-cause termination criteria — pre-deploy
-- ❌ Skip Q-TP14 4-eye composition — pre-deploy
+- ✅ Q-TP2 / Q-TP11 / Q-TP14 — resolved 2026-05-20 (founder confirmed provisional); implementation tickets unblocked
 - ❌ Customer's per-tenant loyalty refund on tenant offboard (Q-TP12 — currently forfeit)
 - ❌ Tenant-side anti-fraud ML
 
@@ -1109,8 +1107,8 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.20 tenant lifecycle domain`
 | Role | Approval | Date |
 |---|---|---|
 | UX Architect | ✅ | 2026-05-19 |
-| Privacy / Legal (§4 scope + §9 export + Q-TP2 PII gated + Q-TP11 for-cause + Q-TP14 4-eye composition) | ☐ | 🔴 PRE-DEPLOY |
-| Founder (Q-TP1 founder-50 lock + Q-TP4 customer notification timing + Q-TP11 for-cause + Q-TP14 4-eye + Q-TP19 ownership change) | ☐ | 🔴 PRE-DEPLOY |
+| Privacy / Legal (§4 scope + §9 export + Q-TP2 PII gated + Q-TP11 for-cause + Q-TP14 4-eye composition) | ☐ | 🟢 Q-TP2/11/14 resolved 2026-05-20 |
+| Founder (Q-TP1 founder-50 lock + Q-TP4 customer notification timing + Q-TP11 for-cause + Q-TP14 4-eye + Q-TP19 ownership change) | ☐ | 🟢 Q-TP11/14 resolved 2026-05-20 |
 | Brand owner (§2.5 brand subordination + Q-TP20 Phase 4+ customization scope) | ☐ | |
 | Engineering (tenant data scope filters at API + cross-tenant 403 + onboarding state machine + offboarding cascade) | ☐ | |
 | Mini App frontend (Ayla Pro admin scope — high-level; full handoff separate) | ☐ | |
