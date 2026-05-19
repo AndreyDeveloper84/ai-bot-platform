@@ -1,0 +1,40 @@
+# ai-bot-platform — Redis Streams consumer systemd unit (TEMPLATE).
+#
+# Reads `ingress:max` (and any future `ingress:*` streams registered
+# via @apps.workers.registry.register) via XREADGROUP and dispatches
+# each entry to the matching TenantAwareTask handler. Distinct from
+# the Celery worker — that one runs @shared_task tasks; this one
+# drains Redis Streams.
+#
+# Without this unit running, MAX webhooks enqueued by
+# apps.ingress.views.max_webhook silently rot in Redis.
+#
+# Placeholders: see ai-bot-platform-web.service.template.
+# Install at: /etc/systemd/system/ai-bot-platform-{ENV}-consumer.service
+
+[Unit]
+Description=ai-bot-platform Redis Streams consumer — {ENV}
+After=network.target redis-server.service postgresql.service
+Wants=network.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=taximeter
+Group=taximeter
+WorkingDirectory={DEPLOY_PATH}
+EnvironmentFile={ENV_FILE}
+Environment="DJANGO_SETTINGS_MODULE=config.settings.production"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart={DEPLOY_PATH}/.venv/bin/python -m apps.workers.consumer --forever
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
+
+# Single-process consumer, small footprint. Cap conservatively.
+MemoryMax=256M
+MemoryHigh=200M
+
+[Install]
+WantedBy=multi-user.target

@@ -38,7 +38,7 @@ OUT="/tmp/ai-bot-platform-render-${ENV}"
 mkdir -p "${OUT}/systemd" "${OUT}/nginx"
 
 # Systemd units
-for svc in web worker beat; do
+for svc in web worker beat consumer; do
     SRC="${REPO_ROOT}/infra/systemd/ai-bot-platform-${svc}.service.template"
     DST_NAME="ai-bot-platform-${ENV}"
     [[ "$svc" != "web" ]] && DST_NAME="${DST_NAME}-${svc}"
