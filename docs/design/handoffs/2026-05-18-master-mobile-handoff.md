@@ -938,7 +938,7 @@ Master can opt-out of team-chat mentions in §M7 (future setting; v1.1).
 
 ### Pattern 1 — Sticky bottom CTA (replacing MainButton)
 
-Every screen with a primary action uses fixed-position bottom CTA bar. Pattern from [`max-mini-apps.md` Part 6](.../platforms/max-mini-apps.md):
+Every screen with a primary action uses fixed-position bottom CTA bar. Pattern from `max-mini-apps.md` Part 6 (skill ref at `~/.claude/skills/ux-architect/references/platforms/max-mini-apps.md`):
 
 ```css
 .cta-bar {
@@ -1005,7 +1005,7 @@ Inline keyboard buttons use `callback` for actions that route to Mini App, with 
 
 ### Pattern 6 — No screenshot protection for master
 
-Per [max-mini-apps Part 6 Pattern 5](.../platforms/max-mini-apps.md), `ScreenCapture.disableScreenCapture()` is for PII screens. Master never sees phone/LTV/medical, so **no screen capture lock**. Master's conversation detail does not need protection.
+Per max-mini-apps Part 6 Pattern 5 (skill ref at `~/.claude/skills/ux-architect/references/platforms/max-mini-apps.md`), `ScreenCapture.disableScreenCapture()` is for PII screens. Master never sees phone/LTV/medical, so **no screen capture lock**. Master's conversation detail does not need protection.
 
 ### Pattern 7 — Persona DM voice
 

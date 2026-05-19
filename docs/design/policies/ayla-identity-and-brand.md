@@ -1,7 +1,7 @@
 # Ayla — Identity & Brand Policy
 
 **Date:** 2026-05-19 r1
-**Status:** STRATEGIC FOUNDATION — supersedes [`single-assistant-identity.md`](./single-assistant-identity.md). All customer-facing UX cites this doc.
+**Status:** STRATEGIC FOUNDATION — supersedes the (deprecated) single-assistant-identity model from 2026-05-17 per memory `project_single_assistant_identity` (now deprecated; see `project_ayla_personal_ai`). All customer-facing UX cites this doc.
 **Reads:** memory `project_ayla_first_strategic_pivot`, memory `project_ayla_personal_ai`, Notion: Ayla — Product Vision (`1f8b0dab-2955-80af-a619-ceb7bf124efa`), Ayla — Brand Vision & Naming (`331b0dab-2955-8174-97eb-d6c76913089c`), Ayla AI Персонализация (`334b0dab-2955-81d5-87cf-eaf49efd2d5b`)
 
 > Customer's AI is **Ayla**, not «помощник салона». Ayla is a personal AI self-care companion that follows the user across all salons, all self-care domains, all sessions. Salons are providers Ayla helps user navigate; the salon's brand co-presents but does NOT own Ayla. This doc locks identity, voice, personality, naming, and brand co-presence rules. Everything else in customer-side UX builds on this.

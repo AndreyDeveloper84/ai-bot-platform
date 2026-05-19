@@ -445,7 +445,7 @@ Per memory `project_policy_deviation_pattern`: when shipped code or docs diverge
 - [`ai-quality-observability.md`](./ai-quality-observability.md) — quality gates run §9 checks
 
 ### Deprecated (do not use)
-- [`single-assistant-identity.md`](./single-assistant-identity.md) — superseded by Doc #1
+- Memory `project_single_assistant_identity` — superseded by Doc #1 (memory-only artifact; no policy doc existed)
 - [`conversation-ownership-policy.md`](./conversation-ownership-policy.md) r1 3-tier — being replaced by Doc #3
 
 ### Memory

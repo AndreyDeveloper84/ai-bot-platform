@@ -84,7 +84,7 @@ Substitute does NOT see:
 - Customer's reviews about original master
 
 ### 2.3 Customer always knows it's a substitute
-Per [`single-assistant-identity §2.2`](../policies/single-assistant-identity.md): customer told «{{original_master}} в декрете, {{substitute}} ведёт её клиентов до возвращения». Honest framing.
+Per [`ayla-identity-and-brand §2.2`](../policies/ayla-identity-and-brand.md): customer told «{{original_master}} в декрете, {{substitute}} ведёт её клиентов до возвращения». Honest framing.
 
 ### 2.4 Original master is informed of substitute's activity
 Master on extended leave sees (if opted in):
@@ -846,7 +846,7 @@ Add to [`event-taxonomy.md`](../policies/event-taxonomy.md) `3.9 master leave do
 - [`booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md) — customer rebooking machinery reused
 - [`customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md) — `CustomerServicePreference` reused for scoped view
 - [`core-wellness-profile.md`](../policies/core-wellness-profile.md) — wellness data NEVER exposed to substitute §2.12
-- [`single-assistant-identity.md`](../policies/single-assistant-identity.md) — §2.3 voice consistency
+- [`ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md) — §2.3 voice consistency
 - [`conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md) — Q-MS12 tier through substitution
 - [`event-taxonomy.md §3.9-3.10`](../policies/event-taxonomy.md) — 12 NEW events §11
 - [`../decisions-log.md`](../decisions-log.md) — Q-MS1..Q-MS20

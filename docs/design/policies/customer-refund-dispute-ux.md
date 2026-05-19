@@ -136,7 +136,7 @@ Default 14 days from `booking_completed_at`. Configurable per tenant. After wind
 Master can flag «не относится к моей работе» per master-reviews machinery §5.3 — admin's call. Audit captures.
 
 ### 2.12 Voice preserved
-Per [`single-assistant-identity §2.2`](./single-assistant-identity.md): customer ↔ AI messages neutral, calm. Customer never accused. Master not vilified.
+Per [`ayla-identity-and-brand §2.2`](./ayla-identity-and-brand.md): customer ↔ AI messages neutral, calm. Customer never accused. Master not vilified.
 
 ### 2.13 Sensitive disputes auto-flag founder
 Per Q-CR8: alleged harm (medical injury, allergic reaction, sexual misconduct, harassment, racism, theft) → automatic founder notification + admin TIER-2 protocol per master-reviews §6.5.
@@ -338,7 +338,7 @@ If customer DM's «не довольна», «верните деньги», «�
 
 ### 4.6 AI tone in dispute thread
 
-Per [`single-assistant-identity §2.2`](./single-assistant-identity.md): customer's voice in own-tone. AI:
+Per [`ayla-identity-and-brand §2.2`](./ayla-identity-and-brand.md): customer's voice in own-tone. AI:
 - NEVER «I understand your frustration» (assumes feelings)
 - NEVER defensive of salon
 - NEVER pushy («wouldn't a refund be enough?»)
@@ -1126,7 +1126,7 @@ Response (201):
 - [`master-admin-internal-chat-handoff §5.3`](../handoffs/2026-05-19-master-admin-internal-chat-handoff.md) — master-side communication channel
 - [`attribution-policy.md`](./attribution-policy.md) — billable / metadata update §9
 - [`master-offboarding-handoff §8.2`](../handoffs/2026-05-19-master-offboarding-handoff.md) — Q-CR18 offboarded master interaction
-- [`single-assistant-identity.md`](./single-assistant-identity.md) — voice §2.12
+- [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md) — voice §2.12
 - [`conversation-ownership-policy.md`](./conversation-ownership-policy.md) — tier escalation possible
 - [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md) — SUSPENDED state §2.16
 - [`event-taxonomy.md §3.14`](./event-taxonomy.md) — 14 events §14

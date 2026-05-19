@@ -645,7 +645,7 @@ Each emergency-bypass notification audit-tagged. Admin can review what was sent 
 
 ### 11.3 AI tone in emergency
 
-Per [`single-assistant-identity §2.2`](./single-assistant-identity.md): emergency notifications use customer voice — calm, factual, no «URGENT!!» framing. Just direct: «Запись на 17 мая отменилась — давайте подберу другое время».
+Per [`ayla-identity-and-brand §2.2`](./ayla-identity-and-brand.md): emergency notifications use customer voice — calm, factual, no «URGENT!!» framing. Just direct: «Запись на 17 мая отменилась — давайте подберу другое время».
 
 ---
 
@@ -946,7 +946,7 @@ Add to [`event-taxonomy.md §3.2 customer-domain`](./event-taxonomy.md) — exte
 - [`customer-wellness-dashboard-ux.md`](./customer-wellness-dashboard-ux.md) — ai_insights category §4
 - [`wellness-input-modules.md §11`](./wellness-input-modules.md) — wellness_modules per-module opt-in §4
 - [`master-time-off-handoff §5.7`](../handoffs/2026-05-19-master-time-off-handoff.md) — quiet hours alignment
-- [`single-assistant-identity.md §2.4`](./single-assistant-identity.md) — voice
+- [`ayla-identity-and-brand §2.4`](./ayla-identity-and-brand.md) — voice
 - [`event-taxonomy.md §3.2`](./event-taxonomy.md) — 9 NEW events §14
 - [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md) — SUSPENDED state notification behavior
 - [`../decisions-log.md`](../decisions-log.md) — Q-CN1..Q-CN20 + Q-CX9 update

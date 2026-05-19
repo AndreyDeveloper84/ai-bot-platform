@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-19 r1
 **Status:** Production-critical — closes operational gap between app-side bookings and YClients admin-side reality
-**Reads:** [`yclients-integration-architecture.md`](./yclients-integration-architecture.md), [`booking-policy.md`](./booking-policy.md), [`attribution-policy.md`](./attribution-policy.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`single-assistant-identity.md`](./single-assistant-identity.md), [`event-taxonomy.md`](./event-taxonomy.md), [`schedule-management-ux.md`](./schedule-management-ux.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`assistant-persona.md`](./assistant-persona.md), [`master-conversational-templates.md`](./master-conversational-templates.md)
+**Reads:** [`yclients-integration-architecture.md`](./yclients-integration-architecture.md), [`booking-policy.md`](./booking-policy.md), [`attribution-policy.md`](./attribution-policy.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`event-taxonomy.md`](./event-taxonomy.md), [`schedule-management-ux.md`](./schedule-management-ux.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`assistant-persona.md`](./assistant-persona.md), [`master-conversational-templates.md`](./master-conversational-templates.md)
 
 > YClients is salon's source of truth for schedule reality (admin's calendar). Our app is source of truth for AI conversation context + customer identity. Conflicts between these two views WILL happen — sync delays, admin manual edits in YC, customer phone collisions, catalog drift. This policy specifies HOW we detect, classify, resolve, and surface each conflict — without ever showing raw error to customer.
 
@@ -87,7 +87,7 @@ When app and YC disagree on slot reality (time, status, master assignment) → Y
 - ✅ «Запись подтвердилась» (after resolution)
 
 ### 2.3 Single-assistant identity preserved
-Per [`single-assistant-identity.md`](./single-assistant-identity.md) — AI NEVER says «у нас ошибка синхронизации с YClients». Customer sees one voice. Internal mechanism invisible.
+Per [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md) — AI NEVER says «у нас ошибка синхронизации с YClients». Customer sees one voice. Internal mechanism invisible.
 
 ### 2.4 Every conflict produces audit
 - `BookingConflict` row §10
@@ -1027,7 +1027,7 @@ Add to [`event-taxonomy.md §3.2 booking domain`](./event-taxonomy.md#32-booking
 - [`booking-policy.md`](./booking-policy.md) — booking lifecycle states
 - [`attribution-policy.md`](./attribution-policy.md) §15 — §4.5 adjustments stack
 - [`conversation-ownership-policy.md`](./conversation-ownership-policy.md) — §4.4 tier escalation
-- [`single-assistant-identity.md`](./single-assistant-identity.md) — §2.3 voice preservation
+- [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md) — §2.3 voice preservation
 - [`event-taxonomy.md §3.2`](./event-taxonomy.md#32-booking-domain) — 8 NEW events §12
 - [`schedule-management-ux.md`](./schedule-management-ux.md) — admin schedule view stacks with conflict tab
 - [`tenant-suspension-pause-ux.md §5`](./tenant-suspension-pause-ux.md) — SUSPENDED state pauses sync

@@ -1272,7 +1272,7 @@ Per [`event-taxonomy.md`](../policies/event-taxonomy.md): add 12 NEW to section 
 - [`master-onboarding-m0-m7.md M2`](../policies/master-onboarding-m0-m7.md) — compensation profile setup added
 - [`attribution-policy.md`](../policies/attribution-policy.md) — master earnings tracked independently from booking_source attribution; both audit streams coexist
 - [`booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md) — dispute audit pattern §10 mirrors; Q-ME12 cycle interaction
-- [`single-assistant-identity.md`](../policies/single-assistant-identity.md) — §2.4 voice preserved
+- [`ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md) — §2.4 voice preserved
 - [`tenant-suspension-pause-ux.md`](../policies/tenant-suspension-pause-ux.md) — §8.6 cycle pause
 - [`event-taxonomy.md §3.7`](../policies/event-taxonomy.md) — 12 NEW events §13
 - [`contract-offer-acceptance-display-ux.md`](../policies/contract-offer-acceptance-display-ux.md) — §2.10 platform-to-salon contract is salon's matter; master sees only salon-to-master

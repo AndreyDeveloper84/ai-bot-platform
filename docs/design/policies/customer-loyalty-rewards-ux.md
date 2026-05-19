@@ -137,7 +137,7 @@ This calibration differs from master-earnings (which forbids ALL gamification be
 Tier doesn't downgrade in MVP (per backend §3 — tier ratchets up only via EARN_VISIT). Q-CL5: if downgrade introduced Phase 4+, anti-shame framing strict.
 
 ### 2.5 Single-assistant identity
-Per [`single-assistant-identity §2.4`](./single-assistant-identity.md): AI delivers loyalty news in conversational voice, NOT «BOT POINTS+50»:
+Per [`ayla-identity-and-brand §2.4`](./ayla-identity-and-brand.md): AI delivers loyalty news in conversational voice, NOT «BOT POINTS+50»:
 - ✅ «У вас 250 баллов сейчас. Можете использовать на скидку до 750 ₽ в следующем визите.»
 - ❌ «🎉 EARN +50 POINTS! Total: 250. Spend now?»
 
@@ -1050,7 +1050,7 @@ Per [`event-taxonomy.md`](./event-taxonomy.md) — loyalty domain (extending exi
 - [`customer-first-touch-and-mini-app-states.md`](./customer-first-touch-and-mini-app-states.md) — referral landing flow §7.3
 - [`customer-refund-dispute-ux.md §9`](./customer-refund-dispute-ux.md) — attribution/refund interaction §10.3
 - [`master-reviews-feedback-handoff.md`](../handoffs/2026-05-19-master-reviews-feedback-handoff.md) — review.submitted triggers earn §5.4
-- [`single-assistant-identity.md`](./single-assistant-identity.md) — §2.5 voice consistency
+- [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md) — §2.5 voice consistency
 - [`assistant-persona.md`](./assistant-persona.md) — voice rules for §12 templates
 - [`conversational-ux-framework.md`](./conversational-ux-framework.md) — tone matrix
 - [`notification-preferences-ux.md`](./notification-preferences-ux.md) — Bot DM channel + quiet hours
