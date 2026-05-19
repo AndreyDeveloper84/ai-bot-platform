@@ -541,3 +541,282 @@ class TestCreateBooking:
         )
         assert resp.status_code == 409
         assert "slot_unavailable" in resp.json()["error"]
+
+
+# ----- customer cancel + reschedule endpoint tests -----------------------
+
+
+@pytest.fixture
+def confirmed_booking(
+    bot_user: BotUser,
+    master: CatalogMaster,
+    service: CatalogService,
+    master_service,
+) -> BookingRequest:
+    return BookingRequest.objects.create(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        service=service,
+        master=master,
+        service_name=service.name,
+        master_name=master.name,
+        client_name="Test",
+        client_phone="+7-000",
+        visit_at=datetime.now(timezone.utc) + timedelta(days=7),
+        duration_min=60,
+        status=BookingRequest.Status.CONFIRMED,
+        source="bot",
+        booking_source="ai_direct",
+        billable=True,
+        billing_reason="ai_direct + confirmed",
+        attribution_metadata={"actor_type": "customer", "created_by": "execute_confirm"},
+    )
+
+
+class TestBookingsList:
+    def test_default_returns_upcoming(
+        self, client: Client, bot_user: BotUser, confirmed_booking: BookingRequest
+    ) -> None:
+        resp = client.get(
+            reverse("miniapp_api:bookings_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["id"] == str(confirmed_booking.id)
+        assert data["items"][0]["cancellable"] is True
+        assert data["items"][0]["reschedulable"] is True
+
+    def test_past_view_includes_cancelled(
+        self, client: Client, bot_user: BotUser, confirmed_booking: BookingRequest
+    ) -> None:
+        confirmed_booking.status = BookingRequest.Status.CANCELLED
+        confirmed_booking.save()
+        resp = client.get(
+            reverse("miniapp_api:bookings_list") + "?status=past",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["items"]) == 1
+
+    def test_cross_user_isolation(
+        self,
+        client: Client,
+        tenant: Tenant,
+        bot_user: BotUser,
+        confirmed_booking: BookingRequest,
+    ) -> None:
+        # Stranger has no bookings.
+        BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="99999",
+            chat_id="99999",
+        )
+        resp = client.get(
+            reverse("miniapp_api:bookings_list"),
+            HTTP_AUTHORIZATION=_init_data_header("99999"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+
+
+class TestBookingDetail:
+    def test_happy_path(
+        self, client: Client, bot_user: BotUser, confirmed_booking: BookingRequest
+    ) -> None:
+        resp = client.get(
+            reverse(
+                "miniapp_api:booking_detail",
+                kwargs={"booking_id": str(confirmed_booking.id)},
+            ),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["booking"]["id"] == str(confirmed_booking.id)
+
+    def test_other_user_404(
+        self,
+        client: Client,
+        tenant: Tenant,
+        confirmed_booking: BookingRequest,
+    ) -> None:
+        BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="99999",
+            chat_id="99999",
+        )
+        resp = client.get(
+            reverse(
+                "miniapp_api:booking_detail",
+                kwargs={"booking_id": str(confirmed_booking.id)},
+            ),
+            HTTP_AUTHORIZATION=_init_data_header("99999"),
+        )
+        assert resp.status_code == 404
+
+
+class TestCancelEndpoints:
+    def test_cancel_request_then_confirm(
+        self, client: Client, bot_user: BotUser, confirmed_booking: BookingRequest
+    ) -> None:
+        url_req = reverse(
+            "miniapp_api:booking_cancel_request",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(
+            url_req,
+            data=json.dumps({"reason_class": "timing"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert r.status_code == 200, r.json()
+        assert r.json()["booking"]["status"] == "cancel_requested"
+
+        # Server confirms after 5s — emulate by direct call.
+        url_conf = reverse(
+            "miniapp_api:booking_cancel_confirm",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(url_conf, HTTP_AUTHORIZATION=_init_data_header("12345"))
+        assert r.status_code == 200
+        assert r.json()["booking"]["status"] == "cancelled"
+
+    def test_cancel_undo_within_window(
+        self, client: Client, bot_user: BotUser, confirmed_booking: BookingRequest
+    ) -> None:
+        url_req = reverse(
+            "miniapp_api:booking_cancel_request",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        client.post(
+            url_req,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        url_undo = reverse(
+            "miniapp_api:booking_cancel_undo",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(url_undo, HTTP_AUTHORIZATION=_init_data_header("12345"))
+        assert r.status_code == 200
+        assert r.json()["booking"]["status"] == "confirmed"
+
+    def test_cancel_undo_after_window_fails(
+        self, client: Client, bot_user: BotUser, confirmed_booking: BookingRequest
+    ) -> None:
+        from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
+
+        url_req = reverse(
+            "miniapp_api:booking_cancel_request",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        client.post(
+            url_req,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        # Force the timestamp past the window.
+        past = datetime.now(timezone.utc) - timedelta(seconds=UNDO_WINDOW_SECONDS + 5)
+        BookingRequest.all_tenants.filter(pk=confirmed_booking.pk).update(cancel_requested_at=past)
+        url_undo = reverse(
+            "miniapp_api:booking_cancel_undo",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(url_undo, HTTP_AUTHORIZATION=_init_data_header("12345"))
+        assert r.status_code == 409
+        assert r.json()["error"] == "undo_window_elapsed"
+
+    def test_cancel_cross_user_404(
+        self,
+        client: Client,
+        tenant: Tenant,
+        confirmed_booking: BookingRequest,
+    ) -> None:
+        BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="99999",
+            chat_id="99999",
+        )
+        url_req = reverse(
+            "miniapp_api:booking_cancel_request",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(url_req, HTTP_AUTHORIZATION=_init_data_header("99999"))
+        assert r.status_code == 404
+
+
+class TestRescheduleEndpoints:
+    def test_request_reschedule_then_confirm(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        confirmed_booking: BookingRequest,
+        master: CatalogMaster,
+        service: CatalogService,
+        master_service,
+        working_hours,
+    ) -> None:
+        # Reschedule to a different time on same master.
+        target_date = date.today() + timedelta(days=21)
+        while target_date.weekday() != 0:
+            target_date += timedelta(days=1)
+        new_visit_at = f"{target_date.isoformat()}T14:00:00+03:00"
+
+        url_req = reverse(
+            "miniapp_api:booking_reschedule_request",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(
+            url_req,
+            data=json.dumps(
+                {
+                    "new_master_id": str(master.id),
+                    "new_service_id": str(service.id),
+                    "new_visit_at": new_visit_at,
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert r.status_code == 200, r.json()
+        assert r.json()["booking"]["status"] == "reschedule_requested"
+
+        url_conf = reverse(
+            "miniapp_api:booking_reschedule_confirm",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(url_conf, HTTP_AUTHORIZATION=_init_data_header("12345"))
+        assert r.status_code == 200, r.json()
+        body = r.json()
+        assert body["old_booking"]["status"] == "rescheduled"
+        assert body["new_booking"]["status"] == "confirmed"
+
+    def test_reschedule_visit_in_past_rejected(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        confirmed_booking: BookingRequest,
+        master: CatalogMaster,
+        service: CatalogService,
+    ) -> None:
+        url_req = reverse(
+            "miniapp_api:booking_reschedule_request",
+            kwargs={"booking_id": str(confirmed_booking.id)},
+        )
+        r = client.post(
+            url_req,
+            data=json.dumps(
+                {
+                    "new_master_id": str(master.id),
+                    "new_service_id": str(service.id),
+                    "new_visit_at": "2020-01-01T10:00:00+03:00",
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert r.status_code == 400
