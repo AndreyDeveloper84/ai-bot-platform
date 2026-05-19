@@ -33,6 +33,9 @@ the gate fires, returns ``should_handoff=True`` with reason
 
 * ``booking_no_masters`` — show_masters returned empty.
 * ``booking_yclients_failure`` — any YClients failure path.
+* ``booking_provider_failure`` — LLM router lookup failed (missing API
+  key, GrowthBook flag off, circuit-broken). Same friendly handoff text
+  as the YClients path so the customer never sees a raw 500.
 * ``booking_invalid_master_id`` — LLM hallucinated.
 * ``booking_invalid_service_id`` — LLM hallucinated.
 * ``booking_health_check_required`` — gated service.
@@ -172,7 +175,21 @@ class BookingSkill:
 
         tenant = context.conversation.tenant
         tenant_id = str(tenant.id)
-        provider = get_router().get_provider(tenant, skill=self.name, op="complete")
+        # Skills retro residual #8: wrap the LLM router lookup in the same
+        # fail-soft envelope as the YClients prefetch below. A misconfigured
+        # provider (missing API key, circuit-broken, GrowthBook flag off)
+        # used to surface as a raw 500 to the customer; now they get the
+        # same friendly handoff text + audit row as a YClients outage.
+        try:
+            provider = get_router().get_provider(tenant, skill=self.name, op="complete")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("booking.provider.lookup_failed err=%s", exc)
+            return _handoff(
+                tool_calls_made=[],
+                reason="booking_provider_failure",
+                text=_FALLBACK_HANDOFF_TEXT,
+                tenant_id=tenant_id,
+            )
         model = getattr(provider, "default_completion_model", None) or ""
 
         # Pre-fetch service catalog up front — used for service_id
