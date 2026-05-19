@@ -261,6 +261,13 @@ CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 
+# Modules whose tasks Celery autodiscover_tasks() misses because the
+# package isn't a Django app in INSTALLED_APPS. Producer-side imports
+# (e.g. apps.booking.services.create) register the task on the web
+# process, but the worker only autoloads INSTALLED_APPS; without this
+# list it would reject tasks with KeyError on dispatch.
+CELERY_IMPORTS = ("apps.integrations.yclients.tasks",)
+
 # Beat schedule — keep retention tasks on separate cadences per the
 # 6A-split rule (AuditLog 90d daily sweep vs IdempotencyKey 7d hourly
 # sweep). Cron times in UTC; the Django Celery beat runs in
