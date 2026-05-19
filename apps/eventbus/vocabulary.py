@@ -31,6 +31,9 @@ CUSTOMER_PROFILE_LAYER_UPDATED = "customer.profile.layer.updated"
 CUSTOMER_CONSENT_CHANGED = "customer.consent.changed"
 CUSTOMER_OPTED_OUT = "customer.opted_out"
 CUSTOMER_DELETED_REQUEST = "customer.deleted_request"
+# Phase 2.a — Loyalty tier transition. Fires only when the tier value
+# actually changes (no-op recomputes do not emit).
+CUSTOMER_TIER_CHANGED = "customer.tier.changed"
 
 # ── §3.10 Admin / System domain (Phase 2.2 — DLQ + health) ────────────
 SYSTEM_MODULE_HEALTH_DEGRADED = "system.module.health.degraded"
@@ -76,6 +79,7 @@ PAYLOAD_REQUIRED_KEYS: dict[str, frozenset[str]] = {
     CUSTOMER_CONSENT_CHANGED: frozenset({"customer_id", "consent_type", "granted", "granted_at"}),
     CUSTOMER_OPTED_OUT: frozenset({"customer_id", "opt_out_scope", "reason"}),
     CUSTOMER_DELETED_REQUEST: frozenset({"customer_id", "requested_at"}),
+    CUSTOMER_TIER_CHANGED: frozenset({"customer_id", "old_tier", "new_tier", "reason"}),
     # §3.3 Master
     MASTER_INVITED: frozenset({"master_id", "invited_by", "invite_method"}),
     MASTER_INVITE_ACCEPTED: frozenset({"master_id", "accepted_at"}),

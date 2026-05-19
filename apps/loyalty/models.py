@@ -77,6 +77,37 @@ class LoyaltyAccount(models.Model):
         "LoyaltyEvent sum; cached here for O(1) reads at every booking "
         "checkout. Reconciliation cron (future) verifies the cache.",
     )
+
+    class Tier(models.TextChoices):
+        """Loyalty tier per handoff §3.
+
+        Derived from completed-visit count (Phase 2.a) and LTV (deferred).
+        Persisted here as a denormalised cache; the LoyaltyEvent log is
+        the source of truth (each TIER_CHANGED row records the
+        transition).
+        """
+
+        STARTER = "starter", "Стартовый"
+        REGULAR = "regular", "Постоянный"
+        FAVORITE = "favorite", "Любимый"
+
+    tier = models.CharField(
+        max_length=16,
+        choices=Tier.choices,
+        default=Tier.STARTER,
+        db_index=True,
+        help_text="Current loyalty tier per handoff §3. Recomputed after "
+        "every EARN_VISIT and REFUND_REVOKE via "
+        "apps.loyalty.services.recompute_tier. Stamps tier_changed_at "
+        "and writes a TIER_CHANGED LoyaltyEvent + emits "
+        "customer.tier.changed envelope only when the value differs.",
+    )
+    tier_changed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the account last transitioned tier. NULL on "
+        "accounts that have always been Стартовый.",
+    )
     enrolled = models.BooleanField(
         default=True,
         help_text="Per Q-L5 — automatic enrollment on first earning event. "
@@ -132,6 +163,7 @@ class LoyaltyEvent(models.Model):
         REDEEM = "redeem", "Redeem — discount applied"
         MANUAL_ADJUST = "manual_adjust", "Manual — admin adjustment"
         REFUND_REVOKE = "refund_revoke", "Revoke — booking refunded/cancelled"
+        TIER_CHANGED = "tier_changed", "Tier — threshold crossed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(

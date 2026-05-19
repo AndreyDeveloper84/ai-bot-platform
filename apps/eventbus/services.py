@@ -283,6 +283,37 @@ def emit_customer_state_changed(
     )
 
 
+def emit_customer_tier_changed(
+    *,
+    customer_id: str,
+    old_tier: str,
+    new_tier: str,
+    reason: str,
+    actor_type: ActorType = "system",
+    correlation_id: str | None = None,
+    tenant: Any = None,
+) -> Envelope:
+    """Emit ``customer.tier.changed`` — taxonomy §3.2.
+
+    Phase 2.a Loyalty: fires when LoyaltyAccount.tier flips. ``reason``
+    is a free-form descriptor of why the recompute crossed the threshold
+    (e.g. "earn_visit count=4 → regular").
+    """
+
+    return emit(
+        V.CUSTOMER_TIER_CHANGED,
+        {
+            "customer_id": customer_id,
+            "old_tier": old_tier,
+            "new_tier": new_tier,
+            "reason": reason,
+        },
+        actor_type=actor_type,
+        correlation_id=correlation_id,
+        tenant=tenant,
+    )
+
+
 def emit_customer_consent_changed(
     *,
     customer_id: str,
