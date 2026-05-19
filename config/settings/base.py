@@ -568,6 +568,13 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# Phase 0 deploy (DRF-891 / server-deployment.md §2.5) — collectstatic
+# target. Required for prod/staging gunicorn deploys; local dev with
+# runserver works without it (Django serves static directly via
+# staticfiles.views in DEBUG). Sub-directory of BASE_DIR keeps
+# everything inside the deploy checkout; nginx serves from
+# ``{DEPLOY_PATH}/staticfiles/`` per the api vhost template.
+STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Phase 1 / PI8 (DRF-859) — PII-redacting log filter wired into every
