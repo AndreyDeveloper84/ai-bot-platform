@@ -287,9 +287,22 @@ def _find_bot_user(phone: str) -> BotUser | None:
 
     BotUser.phone is supposed to be E.164-normalised at write time
     (Sprint 2 / D1 normalisation policy), but in practice we see raw
-    values from older migrations. The double-check loop covers both
-    shapes without scanning the whole table — index is on ``phone``,
-    the ``contains last10`` filter is cheap.
+    values from older migrations.
+
+    YClients retro B4: the previous ``.filter(phone__contains=last10)
+    .first()`` returned a NON-DETERMINISTIC row when multiple BotUsers
+    in the same tenant share their last 10 digits (the exact mixed-
+    format reality the model docstring acknowledges: one customer
+    stored as ``+79991234567``, another as ``89991234567``). Picking
+    «whichever Django returns first» would silently link an inbound
+    booking to a stranger and send them the welcome message + reminders.
+    Post-fix:
+
+      1. Order by ``-created_at`` so the most-recent registration wins
+         on a tie — that's the customer most likely just booked.
+      2. On multi-match, write a deterministic-tiebreak audit row so
+         ops can spot the collision; still return the most-recent so
+         the inbound flow continues, but the audit makes it recoverable.
     """
     if not phone:
         return None
@@ -297,12 +310,34 @@ def _find_bot_user(phone: str) -> BotUser | None:
     if not digits:
         return None
     last10 = digits[-10:]
-    # Index-friendly fast path first.
-    candidate = BotUser.objects.filter(phone__contains=last10).first()
-    if candidate is not None:
-        return candidate
+    # Index-friendly fast path first. Deterministic ordering by
+    # registration recency — most recent wins.
+    candidates = list(
+        BotUser.objects.filter(phone__contains=last10)
+        .only("id", "phone", "chat_id", "first_seen")
+        .order_by("-first_seen")[:5]
+    )
+    if candidates:
+        if len(candidates) > 1:
+            # Surface the collision without breaking the flow.
+            # ``write_audit`` is contractually exception-safe
+            # (apps/audit/services.py — swallows internally), so no
+            # outer try/except is needed here. Closes reviewer B4-1.
+            write_audit(
+                action="yclients.webhook.phone_match_ambiguous",
+                target="BotUser",
+                target_id=candidates[0].pk,
+                payload={
+                    "match_count": len(candidates),
+                    "last4": last10[-4:],
+                    "candidate_ids": [str(c.pk) for c in candidates],
+                },
+            )
+        return candidates[0]
     # Slow path: scan rows with non-empty phone (still tenant-scoped).
-    for bu in BotUser.objects.exclude(phone="").only("id", "phone", "chat_id"):
+    for bu in (
+        BotUser.objects.exclude(phone="").only("id", "phone", "chat_id").order_by("-first_seen")
+    ):
         if _phone_matches(bu.phone, phone):
             return bu
     return None
@@ -411,24 +446,41 @@ def _handle_create(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
     # Both writers emit ``"<source> | yclients_record_id=<id>"`` — the
     # pipe character is reserved in our comment format and not injectable
     # through normal user-input paths.
+    #
+    # YClients retro Y9: wrap the lookup+create in ``transaction.atomic``
+    # + ``select_for_update`` on a deterministic anchor row (the bot_user)
+    # so two parallel YClients retries of the same ``record.create`` event
+    # can't both pass the existence check and both create a row. The
+    # at-least-once webhook contract means duplicates ARE arriving in
+    # practice; the lock on ``bot_user`` serialises the dedup window per
+    # customer (per-tenant by extension since bot_user is tenant-scoped).
     yc_marker = f" | yclients_record_id={yc_id}"
-    booking = BookingRequest.objects.filter(
-        bot_user=bot_user,
-        comment__contains=yc_marker,
-    ).first()
-    if booking is None:
-        booking = BookingRequest.objects.create(
-            tenant=tenant,
+    with transaction.atomic():
+        # Lock the bot_user row to serialise concurrent record.create
+        # deliveries for this customer. SELECT FOR UPDATE on the bot_user
+        # row is cheap (single PK lookup) and tenant-scoped via the
+        # default manager. ``.exists()`` makes the intent explicit
+        # («acquire row lock; we don't need the row body») so a future
+        # refactor can't silently drop the lock by removing what looks
+        # like a dead ``.first()`` call. Closes reviewer Y9-1.
+        BotUser.objects.select_for_update().filter(pk=bot_user.pk).exists()
+        booking = BookingRequest.objects.filter(
             bot_user=bot_user,
-            category_name="",
-            service_name=service_name or "—",
-            master_name=master_name or "—",
-            client_name=(str(client.get("name") or "") or bot_user.client_name or "Client"),
-            client_phone=phone or bot_user.phone or "",
-            comment=f"YClients admin booking | {yc_marker}",
-            source="yclients_admin",
-            is_processed=True,
-        )
+            comment__contains=yc_marker,
+        ).first()
+        if booking is None:
+            booking = BookingRequest.objects.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                category_name="",
+                service_name=service_name or "—",
+                master_name=master_name or "—",
+                client_name=(str(client.get("name") or "") or bot_user.client_name or "Client"),
+                client_phone=phone or bot_user.phone or "",
+                comment=f"YClients admin booking | {yc_marker}",
+                source="yclients_admin",
+                is_processed=True,
+            )
 
     # ── BookingReminders: idempotent via unique_together. R1 (DRF-844)
     # routes both writes through the factory so reminder scheduling

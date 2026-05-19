@@ -44,6 +44,7 @@ B1 ticket spec calls this out explicitly.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -58,6 +59,39 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 30.0
 DEFAULT_BASE_URL = "https://api.yclients.com/api/v1"
+
+# YClients retro Y11: PII redaction patterns for 4xx response previews.
+# YClients error bodies routinely echo the submitted phone / email
+# back («Invalid phone: +7903…», «Email already used: x@y.z»), and we
+# log those previews + propagate them into ``YClientsAPIError`` messages
+# that bubble up the call chain into Sentry / ELK without the
+# eventbus §6 PII walker getting a look.
+#
+# Phone: international ``+`` prefix OR Russian-format leading ``7`` / ``8``
+# at a word boundary, then 7+ digits/separators. The eventbus §6 PII
+# walker uses a conservative ``+``-only pattern because event payloads
+# carry structured fields; here we redact log-line free-text where
+# YClients tenant-traffic phones routinely arrive as ``8 999 123 45 67``
+# without a ``+`` (mixed-format reality acknowledged in the
+# ``_find_bot_user`` docstring). Closes reviewer Y11-1.
+# Email: standard local@host.tld.
+_PII_PHONE_RE = re.compile(r"(?:\+\d|\b[78])\d[\d\s\-\(\)]{7,}")
+_PII_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.\w{2,}")
+
+
+def _redact_pii(text: str) -> str:
+    """Replace phone / email patterns with `[REDACTED:phone]` / `[REDACTED:email]`.
+
+    Best-effort: anchored on shape, not exhaustive. The goal is to stop
+    YClients-echoed PII from landing in log aggregators or exception
+    messages, not to certify the string is PII-free for downstream
+    consumers.
+    """
+
+    redacted = _PII_PHONE_RE.sub("[REDACTED:phone]", text)
+    redacted = _PII_EMAIL_RE.sub("[REDACTED:email]", redacted)
+    return redacted
+
 
 # Match nutrition_client's CR-3-aligned breaker policy.
 CIRCUIT_FAILURE_WINDOW_S = 60.0
@@ -254,13 +288,24 @@ class YClientsAPI:
         }
 
         # Session reuses TCP+TLS; urllib3 Retry handles WAF transient 5xx.
+        #
+        # YClients retro B2: ``allowed_methods`` is intentionally limited
+        # to idempotent verbs (GET / HEAD / OPTIONS). Pre-fix POST / PUT /
+        # DELETE were also retried; a successful YClients write followed
+        # by a transient 5xx on the response leg would re-POST and
+        # silently create a duplicate booking with no compensate path.
+        # Per HTTP semantics, non-idempotent verbs must not be retried
+        # without an idempotency key the upstream understands — YClients
+        # has no such header, so we treat ``YClientsUnavailableError`` on
+        # a write as «unknown outcome, caller schedules reconciliation»
+        # rather than «failed».
         self._session = requests.Session()
         self._session.headers.update(self._headers)
         retry = Retry(
             total=3,
             backoff_factor=0.5,  # 0.5s, 1s, 2s
             status_forcelist=[502, 503, 504],
-            allowed_methods=["GET", "POST", "PUT", "DELETE"],
+            allowed_methods=["GET", "HEAD", "OPTIONS"],
             raise_on_status=False,
         )
         self._session.mount("https://", HTTPAdapter(max_retries=retry))
@@ -341,7 +386,13 @@ class YClientsAPI:
 
         if status >= 400:
             # Don't trip the breaker on 4xx — those are caller / business errors.
-            body_preview = (response.text or "")[:300]
+            # YClients retro Y11: redact PII patterns before logging /
+            # surfacing the response body. YClients 4xx bodies often echo
+            # the submitted phone / email back («Invalid phone: +79...»),
+            # which would leak into INFO logs + into the exception
+            # message that propagates up the stack. Redact before the
+            # body touches either surface.
+            body_preview = _redact_pii((response.text or "")[:300])
             logger.info(
                 "yclients_client.4xx method=%s url=%s status=%d body=%s",
                 method,
@@ -561,8 +612,24 @@ class YClientsAPI:
         if not isinstance(first, dict):
             raise YClientsAPIError("create_record_malformed_data")
 
+        # YClients retro Y12: refuse to fabricate a zero record_id on
+        # missing / malformed response. Pre-fix ``int(first.get(...) or 0)``
+        # silently produced ``BookingRecord(record_id=0, ...)`` which
+        # then flowed through callers — Hotfix D's compensating
+        # ``cancel_record(record_id=0)`` would call YClients with a
+        # garbage id, succeed-with-NOT_FOUND, and the original split-
+        # brain would be hidden. Caller treats this as a YClients API
+        # contract violation, NOT a transient error.
+        raw_record_id: Any = first.get("record_id")
+        if raw_record_id in (None, "", 0, "0"):
+            raise YClientsAPIError("create_record_missing_record_id")
+        try:
+            record_id_int = int(raw_record_id)
+        except (TypeError, ValueError) as exc:
+            raise YClientsAPIError(f"create_record_malformed_record_id: {raw_record_id!r}") from exc
+
         return BookingRecord(
-            record_id=int(first.get("record_id") or 0),
+            record_id=record_id_int,
             record_hash=str(first.get("record_hash") or ""),
             raw=first,
         )
