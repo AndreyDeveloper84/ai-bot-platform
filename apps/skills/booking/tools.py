@@ -2030,6 +2030,16 @@ def _find_yclients_user_record(*, client: Any, record_id: int) -> Any:
     the API is unreachable OR the id isn't in the user's records (the
     record may be salon-side only, or the user_token doesn't have
     access).
+
+    Perf note (skills retro residual #9): YClients exposes only
+    ``GET /user/records`` — no single-record-by-id endpoint. We iterate
+    the full list and return on first match. Customer record history is
+    typically dozens of entries (Q-CO5 — user_token is per-customer), so
+    the O(N) is bounded by individual customer activity, not platform-
+    wide volume. If a power-user customer's record list ever grows to
+    hundreds and reschedule latency regresses, file an enhancement on
+    the YClients integration to cache the records-by-id map per tenant
+    request.
     """
     try:
         records = client.get_user_records()
@@ -2062,10 +2072,28 @@ def show_my_bookings(
     tenant_id = str(getattr(tenant, "id", ""))
     now = dj_timezone.now()
 
+    # Skills retro residual #10: exclude terminal-cancelled and
+    # replaced-by-reschedule rows. Without this filter the LLM sees
+    # «ghost» bookings in show_my_bookings → the user gets a confusing
+    # list that mixes live + dead rows, and a subsequent cancel/reschedule
+    # tool call routed at a ghost row dies inside _find_user_booking
+    # (which already filters terminal statuses) with «not found».
+    # CANCEL_REQUESTED / RESCHEDULE_REQUESTED stay excluded too — those
+    # are transient states for the in-flight 2-button preview, not
+    # something to surface as «your upcoming booking».
+    #
+    # Reader/writer asymmetry note: _find_user_booking (the cancel/
+    # reschedule reader) excludes only CANCELLED + RESCHEDULED — it
+    # accepts CANCEL_REQUESTED / RESCHEDULE_REQUESTED so the same record
+    # the customer is mid-confirming can be actioned by ✅ tap. This is
+    # the intended split: show_my_bookings is the LLM's «what's live»
+    # view (no transient rows); _find_user_booking is the gate executor's
+    # «can the customer act on this id» view (transient rows included).
     rows = list(
         BookingRequest.all_tenants.filter(
             tenant=tenant,
             bot_user=bot_user,
+            status=BookingRequest.Status.CONFIRMED,
         ).order_by("-created_at")[:20]
     )
 

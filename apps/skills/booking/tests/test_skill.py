@@ -487,6 +487,19 @@ class TestHandoffPaths:
         assert result.should_handoff is True
         assert result.handoff_reason == "booking_yclients_failure"
 
+    def test_provider_lookup_failure_handoff(self, context: SkillContext, tenant: Tenant) -> None:
+        # Skills retro residual #8: a misconfigured / circuit-broken LLM
+        # provider used to surface as a raw 500 — now it produces the
+        # same friendly handoff as a YClients outage.
+        with patch(
+            "apps.llm.router.get_router",
+            side_effect=RuntimeError("provider config missing"),
+        ):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_provider_failure"
+
 
 # ---------------------------------------------------------------------------
 # Tool spec wiring
