@@ -117,19 +117,58 @@ export function FeedbackScreen() {
 }
 
 function StarPicker({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  // Roving tabindex: only the selected (or first when empty) star takes
+  // tab focus. Arrow + 1-5 keys + Home/End move within the group.
+  const onKey = (e: React.KeyboardEvent<HTMLButtonElement>, n: number) => {
+    const set = (v: number) => {
+      e.preventDefault();
+      onChange(Math.max(1, Math.min(5, v)));
+    };
+    switch (e.key) {
+      case "ArrowRight":
+      case "ArrowUp":
+        set(n + 1);
+        return;
+      case "ArrowLeft":
+      case "ArrowDown":
+        set(n - 1);
+        return;
+      case "Home":
+        set(1);
+        return;
+      case "End":
+        set(5);
+        return;
+      case " ":
+      case "Enter":
+        set(n);
+        return;
+    }
+    if (e.key >= "1" && e.key <= "5") {
+      set(Number(e.key));
+    }
+  };
+
   return (
     <div className="star-picker" role="radiogroup" aria-label="Оценка">
       {[1, 2, 3, 4, 5].map((n) => {
         const filled = n <= value;
+        const checked = value === n;
+        // When value is 0 (nothing selected yet), 1st star is tabbable
+        // so keyboard users can land on the group; otherwise only the
+        // selected one. Standard roving-tabindex pattern.
+        const tabIndex = checked || (value === 0 && n === 1) ? 0 : -1;
         return (
           <button
             key={n}
             type="button"
             role="radio"
-            aria-checked={value === n}
+            aria-checked={checked}
             aria-label={`${n} из 5`}
+            tabIndex={tabIndex}
             className={`star-picker__star${filled ? " star-picker__star--filled" : ""}`}
             onClick={() => onChange(n)}
+            onKeyDown={(e) => onKey(e, n)}
           >
             {filled ? "★" : "☆"}
           </button>

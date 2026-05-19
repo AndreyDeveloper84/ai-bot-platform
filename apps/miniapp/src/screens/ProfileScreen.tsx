@@ -5,7 +5,7 @@
  * → birthday + allergies → Save → privacy section with 2-step delete.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton } from "../components/Skeleton";
@@ -46,7 +46,8 @@ export function ProfileScreen() {
 
   useBackButton({ onBack: () => navigate(-1) });
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    setState({ kind: "loading" });
     let cancelled = false;
     fetchProfile()
       .then((profile) => {
@@ -60,6 +61,8 @@ export function ProfileScreen() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => load(), [load]);
 
   const setDraft = useCallback((updater: (d: Draft) => Draft) => {
     setState((s) => (s.kind === "ok" ? { ...s, draft: updater(s.draft), dirty: true } : s));
@@ -95,7 +98,7 @@ export function ProfileScreen() {
   if (state.kind === "error") {
     return (
       <ScreenLayout title="Профиль">
-        <StateError err={state.err} onRetry={() => location.reload()} screenId="profile" />
+        <StateError err={state.err} onRetry={load} screenId="profile" />
       </ScreenLayout>
     );
   }
@@ -259,6 +262,7 @@ function DeleteConfirm({
   const [typed, setTyped] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
 
   const valid = typed === "УДАЛИТЬ";
 
@@ -276,10 +280,57 @@ function DeleteConfirm({
     }
   };
 
+  // Esc → cancel; Tab/Shift+Tab → focus stays inside the card.
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+        return;
+      }
+      if (e.key === "Tab" && cardRef.current) {
+        const focusables = cardRef.current.querySelectorAll<HTMLElement>(
+          'input:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        );
+        const arr = Array.from(focusables);
+        if (arr.length === 0) return;
+        const first = arr[0]!;
+        const last = arr[arr.length - 1]!;
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey && active === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && active === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      // Restore focus to whatever opened the modal — usually the
+      // "Удалить мои данные" button. Guard for unmount in mid-delete.
+      previouslyFocused?.focus?.();
+    };
+  }, [onCancel]);
+
   return (
-    <div className="modal-scrim" role="dialog" aria-modal="true">
-      <div className="modal-card">
-        <h2 className="modal-card__title">Удалить все данные?</h2>
+    <div
+      className="modal-scrim"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-confirm-title"
+      onClick={(e) => {
+        // Click on the dim backdrop (not on the card itself) cancels.
+        if (e.target === e.currentTarget) onCancel();
+      }}
+    >
+      <div className="modal-card" ref={cardRef}>
+        <h2 className="modal-card__title" id="delete-confirm-title">
+          Удалить все данные?
+        </h2>
         <p className="modal-card__body">
           Мы сотрём ваше имя, телефон и предпочтения. История визитов останется у салона
           для отчётности, но без привязки к вам. Действие необратимо.
@@ -290,6 +341,7 @@ function DeleteConfirm({
         <input
           autoFocus
           className="profile-input"
+          aria-label="Подтверждение удаления"
           value={typed}
           onChange={(e) => setTyped(e.target.value)}
           placeholder="УДАЛИТЬ"

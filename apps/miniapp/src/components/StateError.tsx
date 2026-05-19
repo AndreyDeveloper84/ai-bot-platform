@@ -7,8 +7,12 @@
  *   - 403 → "Этот раздел сейчас недоступен."
  *   - other → falls back to detail
  *
- * Always offers retry button. Server error path also offers «Сообщить
- * студии» which deeplinks the bot DM with pre-filled context.
+ * Always offers retry. The escalation button («Сообщить студии») used
+ * to deeplink to `https://max.ru/?prefill=…`, but that URL never opened
+ * the bot DM — placeholder from an early Q-FT8 stub. Removed in P5-4.
+ * Customers can reach the studio from the bot chat directly; a proper
+ * "report to studio" path will land with the bot-side handle config
+ * (deferred to 5b).
  */
 
 import { ApiError } from "../lib/api";
@@ -16,47 +20,28 @@ import { ApiError } from "../lib/api";
 interface Props {
   err: unknown;
   onRetry: () => void;
+  /** @deprecated kept for the existing call sites; no longer surfaced. */
   screenId?: string;
 }
 
-function pickCopy(err: unknown): { headline: string; offerEscalate: boolean } {
+function pickCopy(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status >= 500) {
-      return { headline: "Что-то у нас не получается прямо сейчас.", offerEscalate: true };
-    }
-    if (err.status === 403) {
-      return { headline: "Этот раздел сейчас недоступен.", offerEscalate: false };
-    }
-    return { headline: err.detail || "Не получилось загрузить.", offerEscalate: false };
+    if (err.status >= 500) return "Что-то у нас не получается прямо сейчас.";
+    if (err.status === 403) return "Этот раздел сейчас недоступен.";
+    return err.detail || "Не получилось загрузить.";
   }
-  return {
-    headline: "Не получилось загрузить. Проверьте интернет и попробуйте снова.",
-    offerEscalate: false,
-  };
+  return "Не получилось загрузить. Проверьте интернет и попробуйте снова.";
 }
 
-export function StateError({ err, onRetry, screenId }: Props) {
-  const { headline, offerEscalate } = pickCopy(err);
+export function StateError({ err, onRetry }: Props) {
+  const headline = pickCopy(err);
   return (
     <div className="callout callout--danger" role="alert">
       <p style={{ margin: 0 }}>{headline}</p>
-      <div style={{ marginTop: "var(--s-3)", display: "flex", gap: "var(--s-2)" }}>
+      <div style={{ marginTop: "var(--s-3)" }}>
         <button type="button" className="btn-secondary" onClick={onRetry}>
           Попробовать снова
         </button>
-        {offerEscalate && screenId && (
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={() => {
-              // Q-FT8: opens bot DM via MAX deeplink so customer can
-              // reach staff. Implementation lands in 4b polish.
-              window.location.href = `https://max.ru/?prefill=miniapp-error:${screenId}`;
-            }}
-          >
-            Сообщить студии
-          </button>
-        )}
       </div>
     </div>
   );

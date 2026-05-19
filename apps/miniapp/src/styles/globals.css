@@ -640,3 +640,17 @@ a {
   letter-spacing: 2px;
   font-size: var(--font-size-300);
 }
+
+/* HelloScreen error panel — warmer than the generic .callout--danger. */
+.hello-error {
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  border: 1px solid var(--c-divider);
+}
+
+.hello-error p {
+  margin: 0;
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
