@@ -1,10 +1,14 @@
 # Wellness AI Avatar Module — engineering handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Engineering-ready — Phase 3 wellness module (strategic «WOW» retention feature)
-**Reads:** [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §7, [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/core-user-states.md`](../policies/core-user-states.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/information-architecture.md`](../policies/information-architecture.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`./2026-05-19-wellness-mood-handoff.md`](./2026-05-19-wellness-mood-handoff.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/ayla-memory-and-personalization.md`](../policies/ayla-memory-and-personalization.md), [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §7, [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/core-user-states.md`](../policies/core-user-states.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/information-architecture.md`](../policies/information-architecture.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`./2026-05-19-wellness-mood-handoff.md`](./2026-05-19-wellness-mood-handoff.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md)
 
 > Ports [wellness-input-modules §7](../policies/wellness-input-modules.md) AI Avatar (до/после photo progression) module to engineering-ready handoff. THIS is the wellness OS «WOW» feature — customer sees real photo-tracked progress over time with AI commentary. Strict privacy-first design. Independent app scope: `apps/wellness_avatar/`.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: AI Avatar photos are **Ayla's memory of user** per [`ayla-memory-and-personalization §9`](../policies/ayla-memory-and-personalization.md) — cross-tenant. Client-side AES-GCM encryption preserved; server never sees plaintext; 24h key purge on revoke. `HUMAN_LOCKED` references → emergency fallback per [`ayla-emergency-fallback-policy §3`](../policies/ayla-emergency-fallback-policy.md). AI voice uses Ayla per [`ayla-identity-and-brand §2`](../policies/ayla-identity-and-brand.md).
 
 ---
 
