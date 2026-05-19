@@ -284,6 +284,22 @@ def create_customer_booking(
         booking.visit_at,
         booking.billable,
     )
+
+    # YC push — async, best-effort. Platform = source of truth; YC is
+    # eventual mirror. Task is no-op if tenant has no YClients integration
+    # (features.yclients_integration=false) or master/service lacks YC ids.
+    # Failure modes documented in apps.integrations.yclients.tasks.
+    try:
+        from apps.integrations.yclients.tasks import push_booking_to_yclients
+
+        push_booking_to_yclients.delay(booking_id=str(booking.id))
+    except Exception as exc:  # noqa: BLE001 — never let YC push break booking flow
+        logger.warning(
+            "yclients.push.enqueue_failed booking=%s exc=%s",
+            booking.id,
+            exc,
+        )
+
     return booking
 
 
