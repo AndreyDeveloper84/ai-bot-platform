@@ -43,4 +43,20 @@ urlpatterns = [
         "api/v1/channels/telegram/",
         include("apps.channels.telegram.urls", namespace="telegram"),
     ),
+    # Customer Mini App API (Phase 0b+).
+    path(
+        "api/v1/customer/",
+        include("apps.miniapp_api.urls", namespace="miniapp_api"),
+    ),
+    # Phase 5 / KB-SYNC — Shiro-Py salon-knowledge consumer.
+    # POST /api/v1/salon-knowledge/webhook/approved/ receives
+    # ``knowledge.approved`` events from the colleague's service and
+    # writes them as ``KbDocument`` rows in the matching tenant. HMAC
+    # gate uses ``settings.SALON_KNOWLEDGE_WEBHOOK_SECRET``. See
+    # ``apps/kb/webhooks.py`` + the architectural decision in
+    # ``docs/design/2026-05-18-phase-5-architecture-comparison.md``.
+    path(
+        "api/v1/salon-knowledge/",
+        include("apps.kb.urls", namespace="salon_knowledge_webhooks"),
+    ),
 ]

@@ -75,6 +75,10 @@ LOCAL_APPS = [
     # webhook live in apps.integrations.yookassa; the buy_certificate
     # LLM tool wiring lives in apps.skills.booking.
     "apps.orders",
+    # Customer Mini App Phase 0a — master schedule + slot resolver.
+    "apps.scheduling",
+    # Customer Mini App Phase 0b — HTTP API for the MAX Mini App webview.
+    "apps.miniapp_api",
     # 2026-05-19 — domain event bus (Postgres outbox per Q-EV-IMPL3).
     # Distinct from apps.events (analytics, snake_case, sync fanout):
     # apps.eventbus carries dot.notation domain events per
@@ -491,6 +495,16 @@ OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
 # auto-loaded (PR #135) so a local-dev `.env` line is enough; staging /
 # prod inject via their secret stores.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
+# Phase 5 / KB-SYNC — shared HMAC-SHA256 secret for inbound webhooks from
+# the colleague's ``Shiro-Py/salon-knowledge`` service. The webhook view at
+# ``/api/v1/salon-knowledge/webhook/approved/`` rejects every request with
+# 500 (not 200) when this is empty — a silent-200 on misconfigured prod
+# would let approved-knowledge events vanish without raising any alarm.
+# Coordinate value with the colleague's ``WebhookEndpoint.secret`` row
+# pointing at our URL.
+SALON_KNOWLEDGE_WEBHOOK_SECRET = os.environ.get("SALON_KNOWLEDGE_WEBHOOK_SECRET", "")
+
 # Dedup window: identical (severity, dedup_key) pairs within this window
 # collapse to a single page. Defaults to 5 minutes — same as PD's default
 # dedup behaviour. Lower in tests via override_settings.
@@ -561,3 +575,51 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Phase 1 / PI8 (DRF-859) — PII-redacting log filter wired into every
+# persistent-destination handler (console / file / journald). This is
+# defence-in-depth on top of Sprint 8 / E1's Sentry ``before_send``
+# scrubber (apps.observability.sentry.scrub_event), which only handles
+# Sentry-bound events — JSON / stdout / file logs would otherwise reach
+# disk with raw phone / email / card numbers in them.
+#
+# The Sentry handler intentionally does NOT get this filter: Sentry's
+# own scrubber runs at ``before_send`` already, and layering two
+# scrubbers risks corrupting already-placeholdered text.
+#
+# ``disable_existing_loggers=False`` preserves Django + Celery + library
+# loggers; this config only ADDS the filter on top of stdlib defaults.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "pii_redactor": {
+            "()": "apps.observability.pii_filter.PIIRedactingFilter",
+        },
+        "context": {
+            "()": "apps.observability.logging.ContextFilter",
+        },
+    },
+    "formatters": {
+        "json": {
+            "()": "apps.observability.logging.JsonFormatter",
+        },
+        "simple": {
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        # Persistent destination (stdout → journald in prod). PII filter
+        # runs BEFORE the formatter so the JSON line lands clean on disk.
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",
+            "filters": ["pii_redactor", "context"],
+            "formatter": "json",
+        },
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["console"],
+    },
+}

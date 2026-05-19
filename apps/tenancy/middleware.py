@@ -68,6 +68,9 @@ STRICT_OPT_OUT_PREFIXES = (
     # X-Telegram-Bot-Api-Secret-Token header). The X-Tenant header is
     # never present on inbound Telegram updates.
     "/api/v1/channels/telegram/",
+    # Customer Mini App API: tenant resolved from verified initData →
+    # BotUser → tenant inside @require_init_data.
+    "/api/v1/customer/",
 )
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.
