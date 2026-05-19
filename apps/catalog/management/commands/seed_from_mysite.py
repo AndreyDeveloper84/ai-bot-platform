@@ -76,17 +76,19 @@ class Command(BaseCommand):
                 "mysite DB password missing. Pass --mysite-password or set MYSITE_DB_PASSWORD."
             )
 
-        conn_kwargs = {
-            "host": mysite_host,
-            "port": int(mysite_port),
-            "dbname": mysite_db,
-            "user": mysite_user,
-            "password": mysite_password,
-        }
         self.stdout.write(
             f"connecting to mysite postgres at {mysite_host}:{mysite_port}/{mysite_db}"
         )
-        with psycopg.connect(**conn_kwargs) as conn, conn.cursor() as cur:
+        with (
+            psycopg.connect(
+                host=mysite_host,
+                port=int(mysite_port),
+                dbname=mysite_db,
+                user=mysite_user,
+                password=mysite_password,
+            ) as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute(
                 """
                 SELECT id, name, short_description, description, price, price_from,
