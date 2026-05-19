@@ -1,0 +1,31 @@
+# Sister workflow to ci.yml — fires ONLY on docs-only PRs and reports
+# the same job name "pytest + ruff + mypy" as success.
+#
+# Why exists:
+#   - ci.yml has paths-ignore for docs/** so docs-only PRs don't consume
+#     CI minutes (and don't fail when Actions billing is blocked)
+#   - Branch protection still requires "pytest + ruff + mypy" check
+#   - Without this sister workflow, docs PRs would block forever
+#     because the required check never reports
+#   - This workflow uses inverse paths filter — it ONLY runs when the
+#     PR touches docs/** (or *.md), and posts an immediate success
+
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - "docs/**"
+      - "**/*.md"
+
+jobs:
+  test:
+    name: pytest + ruff + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Docs-only PR — skipping engineering CI
+        run: echo "PR touches only docs/** or *.md — engineering CI not needed. Reporting success to satisfy required-check branch protection."

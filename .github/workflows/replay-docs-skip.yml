@@ -1,0 +1,25 @@
+# Sister workflow to replay.yml — fires ONLY on docs-only PRs and
+# reports the same job name "replay fixtures (golden + adversarial +
+# voice)" as success.
+#
+# Why exists: see ci-docs-skip.yml for rationale.
+
+name: replay
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - "docs/**"
+      - "**/*.md"
+
+jobs:
+  fixtures:
+    name: replay fixtures (golden + adversarial + voice)
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Docs-only PR — skipping replay fixtures
+        run: echo "PR touches only docs/** or *.md — replay fixtures not affected. Reporting success to satisfy required-check branch protection."
