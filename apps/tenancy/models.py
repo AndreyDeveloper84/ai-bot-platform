@@ -310,6 +310,34 @@ class Tenant(models.Model):
                 }
             )
 
+    def save(self, *args, **kwargs):  # noqa: ANN001,ANN002,ANN003
+        """Enforce slug immutability post-creation.
+
+        Tenancy retro B3: the field docstring above promises «Cannot be
+        changed after creation» but nothing enforced it at save() time.
+        A renamed slug would let the middleware resolver rebind a known
+        slug to a different tenant — cross-tenant attack vector for
+        stale links / cached webhook URLs / bookmarked customer pages
+        pointing at the old slug.
+
+        Lookup uses ``_base_manager`` so it sees soft-deleted (``is_active
+        =False``) rows too — otherwise a deactivated tenant's slug
+        rename would slip past via the ``_ActiveTenantManager`` default.
+        Raises ``ValueError`` on rename. Admin tooling that genuinely
+        needs to rename should bypass through a documented data migration.
+        """
+
+        if self.pk is not None and self.slug:
+            prior_slug = (
+                type(self)._base_manager.filter(pk=self.pk).values_list("slug", flat=True).first()
+            )
+            if prior_slug is not None and prior_slug != self.slug:
+                raise ValueError(
+                    f"Tenant.slug is immutable after creation "
+                    f"(was {prior_slug!r}, attempted {self.slug!r})"
+                )
+        super().save(*args, **kwargs)
+
 
 class TenantStaff(models.Model):
     """Per-tenant staff role assignment (PR 1.5 / ADR-0008).
