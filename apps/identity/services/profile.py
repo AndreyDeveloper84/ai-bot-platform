@@ -135,12 +135,16 @@ def update_profile(bot_user: BotUser, payload: dict[str, Any]) -> ProfileSnapsho
     if unknown:
         raise ProfileUpdateError(f"unknown fields: {sorted(unknown)}")
 
+    # Field max_lengths mirror apps/identity/models.py: BotUser.client_name(150) +
+    # BotUser.timezone(64). Hardcoded to avoid runtime _meta walks on every
+    # PATCH (and to keep mypy happy with the Field | ForeignObjectRel union).
+    _USER_MAX_LEN = {"client_name": 150, "timezone": 64}
     user_dirty = False
     for key in _EDITABLE_USER_FIELDS & payload.keys():
         value = payload[key]
         if not isinstance(value, str):
             raise ProfileUpdateError(f"{key} must be a string")
-        setattr(bot_user, key, value.strip()[: BotUser._meta.get_field(key).max_length])
+        setattr(bot_user, key, value.strip()[: _USER_MAX_LEN[key]])
         user_dirty = True
     if user_dirty:
         bot_user.save(update_fields=[*(_EDITABLE_USER_FIELDS & payload.keys()), "last_seen"])
