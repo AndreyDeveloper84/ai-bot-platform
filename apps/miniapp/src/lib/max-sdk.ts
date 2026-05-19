@@ -17,6 +17,21 @@ interface MaxWebAppGlobal {
     onClick: (handler: () => void) => void;
     offClick: (handler: () => void) => void;
   };
+  DeviceStorage?: {
+    setItem: (
+      key: string,
+      value: string,
+      cb?: (err: string | null, ok?: boolean) => void,
+    ) => void;
+    getItem?: (
+      key: string,
+      cb: (err: string | null, value?: string) => void,
+    ) => void;
+    removeItem?: (
+      key: string,
+      cb?: (err: string | null, ok?: boolean) => void,
+    ) => void;
+  };
   enableClosingConfirmation?: () => void;
   disableClosingConfirmation?: () => void;
   requestScreenMaxBrightness?: () => void;
@@ -78,4 +93,47 @@ export function onBackButton(handler: () => void): () => void {
   if (!b) return () => undefined;
   b.onClick(handler);
   return () => b.offClick?.(handler);
+}
+
+/**
+ * Persist a value in MAX's per-app device storage. Used for the master
+ * session token after Step 3 (§M0 line 268). Degrades to localStorage
+ * when the bridge is absent (dev browser).
+ */
+export function setDeviceStorage(key: string, value: string): void {
+  const ds = maxBridge()?.DeviceStorage;
+  if (ds?.setItem) {
+    try {
+      ds.setItem(key, value);
+      return;
+    } catch (err) {
+      console.warn("[max-sdk] DeviceStorage.setItem failed, falling back", err);
+    }
+  }
+  if (typeof window !== "undefined" && window.localStorage) {
+    try {
+      window.localStorage.setItem(`max:${key}`, value);
+    } catch {
+      /* private mode / quota — best effort */
+    }
+  }
+}
+
+/**
+ * Ask MAX to close the Mini App. Falls back to ``history.back()`` when
+ * the bridge isn't available — at least navigates the dev browser away.
+ */
+export function closeApp(): void {
+  const b = maxBridge();
+  if (b?.close) {
+    try {
+      b.close();
+      return;
+    } catch (err) {
+      console.warn("[max-sdk] close() failed", err);
+    }
+  }
+  if (typeof window !== "undefined" && window.history?.length > 1) {
+    window.history.back();
+  }
 }
