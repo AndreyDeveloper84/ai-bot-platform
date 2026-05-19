@@ -1,0 +1,96 @@
+/*
+ * Design tokens — salon-warmth defaults.
+ *
+ * These HEX values are PLACEHOLDERS chosen to be:
+ *   - warm beige / dusty rose family (not purple gradient — anti-slop §18)
+ *   - sufficient contrast for AA on body text
+ *   - distinct light + dark variants (MAX has no theme API — we drive
+ *     via `prefers-color-scheme`)
+ *
+ * To swap to the brand palette: change `--c-*` HEX values only. Spacing,
+ * radii and typography are also single sources of truth here.
+ *
+ * Radii follow handoff §18 anti-slop check: 8 / 12 in Mini App.
+ */
+
+:root {
+  /* Surface — light theme. */
+  --c-bg: #fbf6f1;            /* page background */
+  --c-surface-1: #ffffff;     /* cards, sheets */
+  --c-surface-2: #f3ece4;     /* secondary fill */
+  --c-divider: #e8ddd1;
+  --c-overlay: rgb(20 12 6 / 0.4);
+
+  /* Text. */
+  --c-text-primary: #1f1812;
+  --c-text-secondary: #6b5b4a;
+  --c-text-on-accent: #ffffff;
+
+  /* Brand accent — warm dusty rose. */
+  --c-accent: #c47b6c;
+  --c-accent-pressed: #a45e50;
+  --c-accent-subtle: #f5e1dc;
+
+  /* Semantic. */
+  --c-success: #4a7c5b;
+  --c-warning: #b9842a;
+  --c-danger: #b14a3a;
+
+  /* Radii — handoff §18. */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  /* Spacing. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+
+  /* Typography — system / MAX UI native (NOT Inter, anti-slop §18 #1). */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-size-100: 13px;
+  --font-size-200: 15px;
+  --font-size-300: 17px;
+  --font-size-400: 20px;
+  --font-size-500: 24px;
+  --leading-tight: 1.2;
+  --leading-base: 1.4;
+
+  /* Layout. */
+  --cta-height: 56px;
+  --cta-clearance: calc(var(--cta-height) + var(--s-5));
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  /* Motion — restrained (anti-slop §18 #11). */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-bg: #19130d;
+    --c-surface-1: #221a13;
+    --c-surface-2: #2c2218;
+    --c-divider: #3a2d20;
+    --c-overlay: rgb(0 0 0 / 0.55);
+
+    --c-text-primary: #f3ece4;
+    --c-text-secondary: #b3a08c;
+    --c-text-on-accent: #ffffff;
+
+    --c-accent: #d99586;
+    --c-accent-pressed: #b9695a;
+    --c-accent-subtle: #3a2620;
+
+    --c-success: #6ea27e;
+    --c-warning: #d3a04a;
+    --c-danger: #d57565;
+  }
+}

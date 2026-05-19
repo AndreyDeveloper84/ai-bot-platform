@@ -72,6 +72,14 @@ from apps.llm.protocol import (
     LLMTransportError,
     ToolCall,
 )
+from apps.llm.retry import (
+    RetriableLLMError,
+    RetryPolicy,
+    is_retriable_anthropic,
+    policy_from_settings,
+    run_with_retry,
+    write_retry_attempt_audit,
+)
 from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
@@ -108,6 +116,7 @@ class AnthropicProvider:
         api_key: str | None = None,
         proxy: str | None = None,
         default_completion_model: str = _DEFAULT_REPLY_MODEL,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or getattr(settings, "ANTHROPIC_API_KEY", "") or ""
         if proxy is not None:
@@ -120,6 +129,10 @@ class AnthropicProvider:
             )
         self.default_completion_model = default_completion_model
         self._client: Any = None
+        # Phase 1 / PI7 (DRF-858) — retry policy. Lazy-defaulted on
+        # first use (same pattern as OpenAIProvider) so tests that
+        # build a provider outside Django settings still work.
+        self._retry_policy: RetryPolicy | None = retry_policy
 
     # ------------------------------------------------------------------
     # LLMProvider — embedding (Anthropic has none)
@@ -196,8 +209,21 @@ class AnthropicProvider:
         if tools:
             kwargs["tools"] = [_to_anthropic_tool(spec) for spec in tools]
 
+        # Phase 1 / PI7 (DRF-858) — wrap the SDK call in exponential-
+        # backoff retry. Symmetric with OpenAIProvider — same policy,
+        # same audit shape, anthropic-specific predicate.
+        async def _do_completion() -> Any:
+            return await client.messages.create(**kwargs)
+
         try:
-            response = await client.messages.create(**kwargs)
+            response = await run_with_retry(
+                _do_completion,
+                policy=self._get_retry_policy(),
+                is_retriable=is_retriable_anthropic,
+                on_attempt_failed=self._make_on_attempt_failed(op="complete", model=chosen_model),
+            )
+        except RetriableLLMError:
+            raise
         except Exception as exc:
             self._reraise_as_llm_error(exc, op="complete", model=chosen_model)
 
@@ -232,6 +258,32 @@ class AnthropicProvider:
     # ------------------------------------------------------------------
     # SDK plumbing
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Retry helpers — Phase 1 / PI7 (DRF-858)
+    # ------------------------------------------------------------------
+
+    def _get_retry_policy(self) -> RetryPolicy:
+        """Lazy retry-policy resolution (mirror of OpenAIProvider)."""
+        if self._retry_policy is not None:
+            return self._retry_policy
+        self._retry_policy = policy_from_settings()
+        return self._retry_policy
+
+    def _make_on_attempt_failed(self, *, op: str, model: str) -> Any:
+        """Build the audit hook closure used by :func:`run_with_retry`."""
+        provider_name = self.name
+
+        async def _hook(attempt: int, exc: BaseException) -> None:
+            await write_retry_attempt_audit(
+                provider=provider_name,
+                model=model,
+                op=op,
+                attempt=attempt,
+                exc=exc,
+            )
+
+        return _hook
 
     def _get_client(self) -> Any:
         """Lazy SDK client with optional HTTP proxy."""

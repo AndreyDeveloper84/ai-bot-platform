@@ -160,6 +160,35 @@ _FALLBACK_QUOTA_EXHAUSTED = (
     "обратитесь к нам напрямую или попробуйте завтра."
 )
 
+# Phase 1 / PI7 (DRF-858) — LLM retry exhausted. Distinct from the PI9
+# quota fallback above — that one fires when the tenant's own daily
+# budget is gone; THIS one fires when the upstream provider (OpenAI /
+# Anthropic) is repeatedly returning 429 / 5xx so the call has been
+# retried up to ``LLM_RETRY_MAX_ATTEMPTS`` times and STILL failed.
+# User-facing line is intentionally generic; the manager Telegram alert
+# carries the operational detail (provider, model, attempts, last
+# error class).
+_FALLBACK_RETRY_EXHAUSTED = "Извините, сейчас не могу ответить. Я уже сообщил менеджеру."
+
+# Manager alert template. Sent to ``tenant.manager_chat_id`` (when set)
+# whenever the retry layer exhausts for that tenant. Dedup window =
+# one alert per tenant per hour to avoid spamming the manager during
+# an OpenAI / Anthropic outage that affects every turn.
+_ALERT_RETRY_EXHAUSTED_TEMPLATE = (
+    "⚠️ LLM провайдер недоступен после {attempts} попыток "
+    "(provider={provider}, error={error_class}). "
+    "Бот переключился на fallback. Возможно, OpenAI / Anthropic outage — "
+    "проверьте статус-страницу."
+)
+
+# Redis key + TTL for the per-tenant retry-exhausted alert dedup flag.
+# 3600s (1 hour) is the same dedup window we use for the PI9
+# cost-cap warning escalation. Long enough to avoid manager-side spam
+# during a sustained vendor outage; short enough that a new event the
+# next hour does get surfaced.
+_RETRY_ALERT_DEDUP_PREFIX = "llm_retry_alert:"
+_RETRY_ALERT_DEDUP_TTL_S = 3600
+
 
 @dataclass(frozen=True)
 class ChannelMessage:
@@ -245,6 +274,7 @@ async def turn(message: ChannelMessage) -> TurnResult:
             # Phase 1 / PI9 (DRF-860) — lazy import to keep apps.llm
             # off the orchestrator's app-config import path.
             from apps.llm.cost_tracker import TenantQuotaExceeded
+            from apps.llm.retry import RetriableLLMError
 
             try:
                 return await _run_under_tenant(message, tenant, trace_id, span=span)
@@ -276,6 +306,39 @@ async def turn(message: ChannelMessage) -> TurnResult:
                     trace_id=trace_id,
                     reply=ComposedReply(text=_FALLBACK_QUOTA_EXHAUSTED, final_send=True),
                     error="tenant_quota_exhausted",
+                    short_circuited_at_step=0,
+                )
+            except RetriableLLMError as retry_exc:
+                # Phase 1 / PI7 (DRF-858) — LLM provider returned
+                # transient errors (429 / 5xx / timeout) for every
+                # retry attempt. The user sees a static Russian
+                # fallback; the salon manager gets a Telegram alert
+                # (deduped per tenant per hour) so they can check
+                # the vendor's status page.
+                logger.warning(
+                    "pipeline.retry_exhausted trace_id=%s tenant=%s attempts=%d last_error=%s",
+                    trace_id,
+                    tenant.id,
+                    retry_exc.attempts,
+                    type(retry_exc.last_error).__name__,
+                )
+                if span is not None:
+                    span.set_attribute("llm_retry_exhausted", True)
+                    span.set_attribute(
+                        "llm_retry_last_error",
+                        type(retry_exc.last_error).__name__,
+                    )
+                await sync_to_async(_write_retry_exhausted_telemetry, thread_sensitive=False)(
+                    trace_id=trace_id, tenant=tenant, retry_exc=retry_exc
+                )
+                await sync_to_async(_send_retry_exhausted_alert, thread_sensitive=False)(
+                    tenant=tenant, retry_exc=retry_exc
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=ComposedReply(text=_FALLBACK_RETRY_EXHAUSTED, final_send=True),
+                    error="llm_retry_exhausted",
                     short_circuited_at_step=0,
                 )
 
@@ -766,6 +829,112 @@ def _write_quota_fallback_audit(*, trace_id: str, quota_exc: Any) -> None:
     # Mirror as event so analytics dashboards have the orchestrator-side
     # signal alongside the gate-side emission.
     emit(EVENT_PROVIDER_QUOTA_EXCEEDED, properties=payload)
+
+
+def _write_retry_exhausted_telemetry(*, trace_id: str, tenant: Any, retry_exc: Any) -> None:
+    """Write audit + emit event for the retry-exhausted fallback path.
+
+    Phase 1 / PI7 (DRF-858). Sync ORM writes wrapped via sync_to_async
+    at the call site. Payload covers everything an operator needs to
+    triage a vendor outage:
+
+      * tenant_id — which tenant's call tripped
+      * provider / model — which vendor + which model (best-effort
+        recovery from the wrapped exception's MRO; not always reachable)
+      * attempts — how many tries the retry layer made
+      * last_error_class — the final retriable exception type
+      * last_status_code — HTTP status if the SDK exposed one
+
+    Schema mirrors the per-attempt audit slug
+    (``llm.retry_attempt_failed``) so dashboards can join the two
+    streams on ``trace_id`` / ``tenant_id``.
+    """
+    from apps.audit.services import write_audit
+    from apps.events.services import emit
+    from apps.llm.retry import (
+        AUDIT_RETRY_EXHAUSTED,
+        EVENT_RETRY_EXHAUSTED,
+        _extract_status_code,
+    )
+
+    last_error = getattr(retry_exc, "last_error", None)
+    payload = {
+        "trace_id": trace_id,
+        "tenant_id": str(getattr(tenant, "id", "")),
+        "attempts": int(getattr(retry_exc, "attempts", 0)),
+        "last_error_class": type(last_error).__name__ if last_error else "",
+        "last_status_code": _extract_status_code(last_error) if last_error else None,
+        "last_message": str(last_error)[:200] if last_error else "",
+    }
+    write_audit(AUDIT_RETRY_EXHAUSTED, target="LLMRetry", payload=payload)
+    emit(EVENT_RETRY_EXHAUSTED, properties=payload)
+
+
+def _send_retry_exhausted_alert(*, tenant: Any, retry_exc: Any) -> None:
+    """Send the salon-manager Telegram alert when LLM retries exhaust.
+
+    Phase 1 / PI7 (DRF-858). Deduplicated via a per-tenant Redis flag
+    with a 1-hour TTL so a sustained vendor outage that touches every
+    turn doesn't spam the manager. Empty ``manager_chat_id`` → log +
+    skip (matches the cost-tracker alert path).
+
+    The dedup flag is checked AND set via ``cache.add`` so the
+    check-then-set is atomic (cache.add returns False when key
+    already exists), avoiding a race where two concurrent turns
+    both think they're the first to alert.
+    """
+    from django.core.cache import cache
+
+    manager_chat_id = str(getattr(tenant, "manager_chat_id", "") or "")
+    tenant_id = str(getattr(tenant, "id", ""))
+
+    if not manager_chat_id:
+        logger.warning(
+            "pipeline.retry_alert_skipped_no_manager_chat_id tenant=%s",
+            tenant_id,
+        )
+        return
+
+    # Dedup: cache.add returns False when the key already exists.
+    # Setting + checking atomically prevents two concurrent retry-
+    # exhausted turns from both sending the alert.
+    dedup_key = f"{_RETRY_ALERT_DEDUP_PREFIX}{tenant_id}"
+    if not cache.add(dedup_key, 1, timeout=_RETRY_ALERT_DEDUP_TTL_S):
+        logger.info(
+            "pipeline.retry_alert_dedup_suppressed tenant=%s key=%s",
+            tenant_id,
+            dedup_key,
+        )
+        return
+
+    last_error = getattr(retry_exc, "last_error", None)
+    # Provider is not in RetriableLLMError directly — best-effort
+    # inference from the exception's module (openai.* vs anthropic.*).
+    # Falls back to "unknown" when the module path is opaque.
+    provider = "unknown"
+    if last_error is not None:
+        module = type(last_error).__module__ or ""
+        if "openai" in module:
+            provider = "openai"
+        elif "anthropic" in module:
+            provider = "anthropic"
+
+    text = _ALERT_RETRY_EXHAUSTED_TEMPLATE.format(
+        attempts=getattr(retry_exc, "attempts", 0),
+        provider=provider,
+        error_class=type(last_error).__name__ if last_error else "Unknown",
+    )
+
+    try:
+        from apps.channels.max.outbound import send_message
+
+        send_message(chat_id=manager_chat_id, text=text)
+    except Exception:  # noqa: BLE001 — alerting must never break the request
+        logger.warning(
+            "pipeline.retry_alert_send_failed tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
 
 
 def _write_shadow_drop_audit(trace_id: str, conversation) -> None:

@@ -11,8 +11,6 @@ from apps.llm.protocol import (
     CompletionResult,
     LLMError,
     LLMProvider,
-    LLMQuotaError,
-    LLMTransportError,
     ToolCall,
 )
 from apps.llm.providers.anthropic_provider import (
@@ -292,23 +290,9 @@ _FakeRateLimitError.__name__ = "RateLimitError"
 
 
 class TestErrorMapping:
-    @pytest.mark.asyncio
-    async def test_connection_error_becomes_transport_error(
-        self, patched_provider: tuple[AnthropicProvider, MagicMock]
-    ) -> None:
-        provider, client = patched_provider
-        client.messages.create.side_effect = _FakeAPIConnectionError("boom")
-        with pytest.raises(LLMTransportError):
-            await provider.complete([{"role": "user", "content": "x"}])
-
-    @pytest.mark.asyncio
-    async def test_rate_limit_becomes_quota_error(
-        self, patched_provider: tuple[AnthropicProvider, MagicMock]
-    ) -> None:
-        provider, client = patched_provider
-        client.messages.create.side_effect = _FakeRateLimitError("limit")
-        with pytest.raises(LLMQuotaError):
-            await provider.complete([{"role": "user", "content": "x"}])
+    """Non-retriable exception mapping. Retriable transients are now
+    handled by the PI7 retry layer — see TestRetryAnthropic below.
+    """
 
     @pytest.mark.asyncio
     async def test_unknown_error_becomes_llm_error(
@@ -396,3 +380,106 @@ class TestTenantCostCap:
         client.messages.create.return_value = _make_response()
         result = await provider.complete([{"role": "user", "content": "x"}])
         assert result.text == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / PI7 (DRF-858) — exponential-backoff retry integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fast_retry_provider() -> tuple[AnthropicProvider, MagicMock]:
+    """Provider configured with a zero-delay retry policy.
+
+    Tests in this section assert retry BEHAVIOUR — they don't simulate
+    wall-clock backoff. The backoff math has its own unit tests in
+    ``apps/llm/tests/test_retry.py``.
+    """
+    from apps.llm.retry import RetryPolicy
+
+    policy = RetryPolicy(max_attempts=3, base_delay_s=0.0, max_delay_s=0.0, jitter=0.0)
+    provider = AnthropicProvider(api_key="ci-fake-key", retry_policy=policy)
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock()
+    provider._client = fake_client  # type: ignore[attr-defined]
+    return provider, fake_client
+
+
+class TestRetryAnthropic:
+    """Verify retry layer wraps the Anthropic SDK call site.
+
+    Symmetric with TestRetryOpenAI — same retry math, anthropic-
+    specific predicate.
+    """
+
+    @pytest.mark.asyncio
+    async def test_retries_on_rate_limit_then_succeeds(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        provider, client = fast_retry_provider
+        client.messages.create.side_effect = [
+            _FakeRateLimitError("rate"),
+            _FakeRateLimitError("still rate"),
+            _make_response(content=[_text_block("finally")]),
+        ]
+        result = await provider.complete([{"role": "user", "content": "hi"}])
+        assert result.text == "finally"
+        assert client.messages.create.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_fails_fast_on_400(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        from apps.llm.protocol import LLMError
+
+        provider, client = fast_retry_provider
+
+        class _BadReq(Exception):
+            pass
+
+        _BadReq.__name__ = "BadRequestError"
+        client.messages.create.side_effect = _BadReq("bad")
+        with pytest.raises(LLMError):
+            await provider.complete([{"role": "user", "content": "x"}])
+        assert client.messages.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_raises_retriable_llm_error(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        from apps.llm.retry import RetriableLLMError
+
+        provider, client = fast_retry_provider
+        client.messages.create.side_effect = _FakeRateLimitError("persistent")
+
+        with pytest.raises(RetriableLLMError) as exc_info:
+            await provider.complete([{"role": "user", "content": "x"}])
+
+        assert exc_info.value.attempts == 3
+        assert client.messages.create.await_count == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_audit_row_per_failed_attempt(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        from asgiref.sync import sync_to_async
+
+        from apps.audit.models import AuditLog
+        from apps.llm.retry import AUDIT_RETRY_ATTEMPT_FAILED
+
+        provider, client = fast_retry_provider
+        client.messages.create.side_effect = [
+            _FakeRateLimitError("first"),
+            _make_response(content=[_text_block("ok")]),
+        ]
+        await provider.complete([{"role": "user", "content": "hi"}])
+
+        rows = await sync_to_async(
+            lambda: list(AuditLog.all_tenants.filter(action=AUDIT_RETRY_ATTEMPT_FAILED))
+        )()
+        assert len(rows) == 1
+        payload = rows[0].payload
+        assert payload["provider"] == "anthropic"
+        assert payload["op"] == "complete"
+        assert payload["attempt"] == 1

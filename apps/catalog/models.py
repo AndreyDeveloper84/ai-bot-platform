@@ -121,8 +121,41 @@ class CatalogService(_MirrorBase):
         return f"CatalogService[{self.slug}@{self.external_id}]"
 
 
+class _MasterManager(TenantScopedManager):
+    """Tenant-scoped + ``bookable()`` filter for customer-facing reads.
+
+    Per master-management handoff §3 line 164 — only ``is_active=True``
+    AND ``invite_status='accepted'`` masters are bookable.
+    """
+
+    def bookable(self):
+        return self.filter(
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+
+
 class CatalogMaster(_MirrorBase):
-    """Mirror of `mysite/services_app.Master`."""
+    """Master record — originally a mysite mirror, now first-class with
+    platform-side state (invite flow, soft-archive, MAX handle).
+
+    See ``docs/design/handoffs/2026-05-18-master-management-handoff.md``.
+
+    Sync (``upserter._master_fields``) overwrites: name, specialization,
+    bio, experience, rating, is_active, yclients_staff_id, raw.
+    Platform fields NEVER touched by sync: invite_status, mode,
+    photo_url, archived_at, invited_at, max_handle.
+    """
+
+    class InviteStatus(models.TextChoices):
+        PENDING = "pending", "Pending invite"
+        ACCEPTED = "accepted", "Accepted"
+        EXPIRED = "expired", "Expired"
+        CANCELLED = "cancelled", "Cancelled"
+
+    class Mode(models.TextChoices):
+        INVITE = "invite", "Invite-based access"
+        CATALOG_ONLY = "catalog_only", "Catalog only (no login)"
 
     name = models.CharField(max_length=200)
     specialization = models.CharField(max_length=255, blank=True, default="")
@@ -138,6 +171,27 @@ class CatalogMaster(_MirrorBase):
     )
     raw = models.JSONField(default=dict, blank=True)
 
+    invite_status = models.CharField(
+        max_length=16,
+        choices=InviteStatus.choices,
+        default=InviteStatus.ACCEPTED,
+        db_index=True,
+        help_text="Default ACCEPTED so backfilled/sync masters are "
+        "bookable. Invite create-path writes PENDING.",
+    )
+    mode = models.CharField(
+        max_length=16,
+        choices=Mode.choices,
+        default=Mode.CATALOG_ONLY,
+    )
+    photo_url = models.URLField(max_length=500, blank=True, default="")
+    archived_at = models.DateTimeField(null=True, blank=True)
+    invited_at = models.DateTimeField(null=True, blank=True)
+    max_handle = models.CharField(max_length=64, blank=True, default="")
+
+    objects = _MasterManager()  # type: ignore[misc]
+    all_tenants = models.Manager()  # type: ignore[misc]
+
     class Meta:
         verbose_name = "Catalog: master"
         verbose_name_plural = "Catalog: masters"
@@ -146,10 +200,62 @@ class CatalogMaster(_MirrorBase):
         indexes = [
             models.Index(fields=["tenant", "-external_updated_at"]),
             models.Index(fields=["tenant", "yclients_staff_id"]),
+            models.Index(fields=["tenant", "is_active", "invite_status"]),
         ]
 
     def __str__(self) -> str:
         return f"CatalogMaster[{self.name}@{self.external_id}]"
+
+
+class MasterService(models.Model):
+    """Master ↔ Service M2M (which services this master performs).
+
+    Per master-management handoff §MM4 — admin maintains via matrix UI.
+    Customer booking endpoints MUST check this mapping before assigning
+    ``BookingRequest.master_id``.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="master_services",
+    )
+    master = models.ForeignKey(
+        "catalog.CatalogMaster",
+        on_delete=models.CASCADE,
+        related_name="services_offered",
+    )
+    service = models.ForeignKey(
+        "catalog.CatalogService",
+        on_delete=models.CASCADE,
+        related_name="masters_offering",
+    )
+    created_by = models.ForeignKey(
+        "auth.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Catalog: master-service mapping"
+        verbose_name_plural = "Catalog: master-service mappings"
+        ordering = ["master_id", "service_id"]
+        unique_together = (("master", "service"),)
+        indexes = [
+            models.Index(fields=["tenant", "master"]),
+            models.Index(fields=["tenant", "service"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"MasterService[{self.master_id} → {self.service_id}]"
 
 
 class CatalogFaq(_MirrorBase):

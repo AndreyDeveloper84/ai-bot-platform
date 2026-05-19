@@ -1,0 +1,332 @@
+@import "./tokens.css";
+
+/* Reset — minimal, modern. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--c-bg);
+  color: var(--c-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeLegibility;
+}
+
+/* Mini App viewport — MAX has no viewport API per memory, use 100dvh. */
+#root {
+  min-height: 100dvh;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+a {
+  color: var(--c-accent);
+}
+
+/* Screen layout: content area with bottom padding equal to sticky CTA
+   height + safe-area, so CTA doesn't cover content (handoff §6 + skill
+   ref Part 6 Pattern 1). */
+.screen {
+  min-height: 100dvh;
+  padding: var(--s-4) var(--s-4)
+    calc(var(--cta-clearance) + var(--safe-bottom));
+}
+
+.screen__title {
+  font-size: var(--font-size-500);
+  line-height: var(--leading-tight);
+  font-weight: 600;
+  margin: var(--s-4) 0 var(--s-3);
+}
+
+.screen__body {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+/* Sticky bottom CTA — replaces MAX MainButton. */
+.cta-bar {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  padding: var(--s-3) var(--s-4)
+    calc(var(--s-3) + var(--safe-bottom));
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  z-index: 10;
+}
+
+.cta-bar__button {
+  display: block;
+  width: 100%;
+  min-height: 48px; /* a11y — handoff §16 */
+  padding: 0 var(--s-4);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  border-radius: var(--r-md);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.cta-bar__button:active {
+  background: var(--c-accent-pressed);
+}
+
+.cta-bar__button:disabled {
+  /* Disabled, never hidden — skill ref Part 6 Pattern 1. */
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  cursor: not-allowed;
+}
+
+/* Status callouts. */
+.callout {
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin: var(--s-3) 0;
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+
+.callout--danger {
+  background: color-mix(in srgb, var(--c-danger) 14%, var(--c-surface-2));
+  color: var(--c-danger);
+}
+
+/* Secondary button used in error / empty / not-found states. */
+.btn-secondary {
+  display: inline-block;
+  padding: var(--s-2) var(--s-4);
+  min-height: 44px;
+  background: var(--c-surface-1);
+  color: var(--c-accent);
+  border: 1px solid var(--c-accent);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-secondary:active {
+  background: var(--c-accent-subtle);
+}
+
+/* Skeleton placeholders — spec §7.1 + §9. */
+@keyframes skeleton-shimmer {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+.skeleton {
+  display: inline-block;
+  background: var(--c-surface-2);
+  animation: skeleton-shimmer 1.8s ease-in-out infinite;
+}
+
+/* Service / master cards — F1 / F2 list rows. */
+.service-card,
+.master-card {
+  display: block;
+  width: 100%;
+  text-align: start;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  margin-bottom: var(--s-2);
+  min-height: 48px;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+.service-card:active,
+.master-card:active {
+  background: var(--c-surface-2);
+}
+
+.service-card__name {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.service-card__meta {
+  margin-top: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.master-card {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.master-card--selected {
+  border-color: var(--c-accent);
+  background: var(--c-accent-subtle);
+}
+
+.master-card__avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--c-surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.master-card__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.master-card__name {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+
+.master-card__spec {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.master-card__rating {
+  margin-top: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-accent);
+}
+
+/* Date strip + slot grid (booking flow). */
+.date-strip {
+  display: flex;
+  gap: var(--s-2);
+  overflow-x: auto;
+  padding: var(--s-2) 0;
+  margin: 0 calc(-1 * var(--s-4));
+  padding-inline: var(--s-4);
+  scroll-snap-type: x mandatory;
+}
+
+.date-strip__day {
+  flex: 0 0 auto;
+  min-width: 64px;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  text-align: center;
+  scroll-snap-align: start;
+  cursor: pointer;
+}
+
+.date-strip__day--active {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+
+.date-strip__day-name {
+  font-size: var(--font-size-100);
+  opacity: 0.8;
+}
+
+.date-strip__day-num {
+  font-size: var(--font-size-400);
+  font-weight: 600;
+}
+
+.slot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
+.slot-grid__cell {
+  padding: var(--s-3);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  min-height: 48px;
+  cursor: pointer;
+}
+
+.slot-grid__cell--active {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+
+.slot-grid__empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: var(--s-5);
+  color: var(--c-text-secondary);
+}
+
+/* Confirmation card / Success screen. */
+.confirm-card {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  margin: var(--s-3) 0;
+}
+
+.confirm-card dt {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  margin-top: var(--s-2);
+}
+
+.confirm-card dt:first-child {
+  margin-top: 0;
+}
+
+.confirm-card dd {
+  margin: var(--s-1) 0 0 0;
+  font-size: var(--font-size-300);
+  font-weight: 500;
+}
+
+.success-headline {
+  font-size: var(--font-size-500);
+  font-weight: 600;
+  text-align: center;
+  margin: var(--s-5) 0 var(--s-3);
+}
+
+.success-sub {
+  text-align: center;
+  color: var(--c-text-secondary);
+  margin-bottom: var(--s-5);
+}
