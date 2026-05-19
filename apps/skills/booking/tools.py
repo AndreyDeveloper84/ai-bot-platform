@@ -1011,11 +1011,19 @@ def execute_confirm(
 
     yc_id = str(record.record_id)
     yc_marker = f"yclients_record_id={yc_id}"
+    # Skills retro hotfix #1: anchor the idempotency lookup to the
+    # documented comment prefix instead of substring-matching a
+    # free-text field. A spoofed service_name / client_name carrying
+    # ``yclients_record_id=<other-id>`` would otherwise short-circuit
+    # a legitimate confirm. Both writers use this exact prefix:
+    #   - execute_confirm:    "Bot booking | yclients_record_id=<id>"
+    #   - execute_reschedule: "Bot booking | yclients_record_id=<id> | rescheduled_from=..."
+    _idem_prefix = f"Bot booking | {yc_marker}"
 
     existing = BookingRequest.all_tenants.filter(
         tenant=tenant,
         bot_user=bot_user,
-        comment__contains=yc_marker,
+        comment__startswith=_idem_prefix,
     ).first()
 
     # visit_at_dt was parsed above (pre-YClients), reuse here.
@@ -1035,28 +1043,80 @@ def execute_confirm(
             booking_source="ai_direct",
             status=BookingRequest.Status.CONFIRMED,
         )
-        BookingRequest.all_tenants.create(
-            tenant=tenant,
-            bot_user=bot_user,
-            category_name="",
-            service_name=service_name or "—",
-            master_name=master_name or "—",
-            client_name=client_name,
-            client_phone=phone,
-            comment=f"Bot booking | {yc_marker}",
-            source="bot",
-            is_processed=False,
-            status=BookingRequest.Status.CONFIRMED,
-            visit_at=visit_at_dt,
-            booking_source="ai_direct",
-            ai_assist_score=compute_assist_score(booking_source="ai_direct"),
-            billable=billable,
-            billing_reason=billing_reason,
-            attribution_metadata=build_customer_attribution_metadata(
-                booking_created_at=dj_timezone.now().isoformat(),
-                test_mode=False,
-            ),
-        )
+        # Skills retro hotfix #2: mirror Hotfix D's split-brain recovery
+        # for the confirm path. YClients create_record already succeeded
+        # (record exists on their side). If the local BookingRequest
+        # write raises — DB transient, future model-validator addition,
+        # JSONField surprise — we MUST compensate by cancelling the
+        # YClients record. Otherwise the customer holds a real
+        # appointment that our DB / reminders / Loyalty cannot see.
+        try:
+            BookingRequest.all_tenants.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                category_name="",
+                service_name=service_name or "—",
+                master_name=master_name or "—",
+                client_name=client_name,
+                client_phone=phone,
+                comment=_idem_prefix,
+                source="bot",
+                is_processed=False,
+                status=BookingRequest.Status.CONFIRMED,
+                visit_at=visit_at_dt,
+                booking_source="ai_direct",
+                ai_assist_score=compute_assist_score(booking_source="ai_direct"),
+                billable=billable,
+                billing_reason=billing_reason,
+                attribution_metadata=build_customer_attribution_metadata(
+                    booking_created_at=dj_timezone.now().isoformat(),
+                    test_mode=False,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — recover, do not propagate
+            logger.exception(
+                "booking.confirm.local_create_failed yc_id=%s err=%s",
+                yc_id,
+                exc,
+            )
+            compensate_ok = False
+            try:
+                client.cancel_record(record_id=int(yc_id))
+                compensate_ok = True
+            except Exception:  # noqa: BLE001 — compensate is best-effort
+                logger.exception(
+                    "booking.confirm.compensate_cancel_failed yc_id=%s",
+                    yc_id,
+                )
+
+            _audit_tool(
+                tenant_id=tenant_id,
+                tool="execute_confirm",
+                outcome="local_create_failed_compensated"
+                if compensate_ok
+                else "local_create_failed_split_brain",
+            )
+            write_audit(
+                EVENT_BOOKING_CONFIRM_FAILED,
+                target="BookingSkill",
+                payload={
+                    "tenant_id": tenant_id,
+                    "yclients_record_id": yc_id,
+                    "reason": "local_create_failed",
+                    "compensate_ok": compensate_ok,
+                },
+            )
+            # Don't lie to the caller: if compensate failed, split-brain
+            # persists. Either way the confirm did not complete from the
+            # customer's perspective on our side, so report failure and
+            # let the caller hand off to a human operator.
+            return BookingToolResult(
+                confirmation=ConfirmationResult(
+                    ok=False,
+                    error="booking_confirm_partial_failure",
+                ),
+                error="booking_confirm_partial_failure",
+            )
         _schedule_reminders(
             tenant=tenant,
             bot_user=bot_user,
@@ -1576,6 +1636,58 @@ def execute_reschedule(
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="invalid_record_id")
         return BookingToolResult(error="invalid_record_id")
 
+    # Skills retro hotfix #4: re-check slot availability at execute time.
+    # The preview-time check (reschedule_booking) is up to 10 min stale
+    # (pending-action expiry window). Between preview ✓ and ✅ tap,
+    # another customer can claim the slot. If we proceed to cancel the
+    # old record first and the new slot is already taken, YClients
+    # rejects create_record → user loses their old booking AND has no
+    # new one. Re-checking here shrinks the race window from minutes to
+    # milliseconds (still not zero — another concurrent execute could
+    # squeak in — but the broker semantics of YClients' create_record
+    # close that residual window on their side).
+    try:
+        _avail_times = client.get_available_times(
+            staff_id=master_id,
+            date=visit_at_dt.date().isoformat(),
+            service_ids=[service_id],
+        )
+    except YClientsUnavailableError as exc:
+        logger.warning("booking.reschedule.recheck.unavailable err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="recheck_unavailable",
+        )
+        return BookingToolResult(error="yclients_unavailable")
+    except YClientsAPIError as exc:
+        logger.info("booking.reschedule.recheck.api_error err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="recheck_api_error",
+        )
+        return BookingToolResult(error="yclients_api_error")
+    if not _slot_available(
+        _avail_times,
+        visit_at_dt.strftime("%H:%M"),
+        new_datetime,
+    ):
+        # Old record stays intact — no destructive action yet. Surface a
+        # clear «slot taken» error so the caller can ask for another
+        # time without losing the current booking.
+        logger.info(
+            "booking.reschedule.recheck.slot_taken record_id=%s new_datetime=%s",
+            record_id,
+            new_datetime,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="slot_taken_at_execute",
+        )
+        return BookingToolResult(error="slot_unavailable")
+
     # Step 1: cancel the old record.
     try:
         client.cancel_record(record_id=record_id)
@@ -1691,10 +1803,16 @@ def execute_reschedule(
     # visit_at_dt was parsed at the top of this function (pre-cancel).
     visit_at_iso = visit_at_dt.isoformat()
 
+    # Skills retro hotfix #1: anchor on the documented Bot-booking prefix
+    # (see execute_confirm for rationale). The reschedule writer below
+    # uses ``"Bot booking | yclients_record_id=<id> | rescheduled_from=..."``
+    # — startswith on the first two tokens is sufficient and not spoofable
+    # via free-text comment payload.
+    _new_idem_prefix = f"Bot booking | {new_yc_marker}"
     existing_new = BookingRequest.all_tenants.filter(
         tenant=tenant,
         bot_user=bot_user,
-        comment__contains=new_yc_marker,
+        comment__startswith=_new_idem_prefix,
     ).first()
     if existing_new is None:
         # Phase 4a-IMPL1 closure: reschedule produces a NEW BookingRequest
@@ -1880,8 +1998,18 @@ def _find_user_booking(
     Filters out terminal-cancelled rows so a user can't re-cancel an
     already-cancelled booking — the LLM would otherwise see the row
     in show_my_bookings and accidentally route to cancel_booking.
+
+    Skills retro hotfix #1 (cont'd): anchor on the pipe-space-prefixed
+    marker rather than the bare ``yclients_record_id=<id>`` substring.
+    Both legitimate writers ship the marker right after ``" | "``:
+      - skill:         ``"Bot booking | yclients_record_id=<id>"``
+      - admin webhook: ``"YClients admin booking | yclients_record_id=<id>"``
+    The pipe character is structurally reserved in our comment format,
+    so an attacker can't inject `` | yclients_record_id=<victim-id>``
+    via a free-text service_name / client_name. This closes the reader-
+    side half of the spoof vector the previous PR closed for writers.
     """
-    marker = f"yclients_record_id={int(record_id)}"
+    marker = f" | yclients_record_id={int(record_id)}"
     return (
         BookingRequest.all_tenants.filter(
             tenant=tenant,
