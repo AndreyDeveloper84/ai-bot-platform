@@ -818,7 +818,7 @@ class ServiceCommissionOverride(models.Model):
 
 ### 11.3 `MasterEarning`
 
-Computed per completed booking.
+Computed per completed booking. Extended per [`customer-no-show-policy-ux §7.2`](../policies/customer-no-show-policy-ux.md) Q-NS11 resolution — adds `event_type` discriminator + `no_show_coverage_percent` field + idempotency unique constraint.
 
 ```python
 class MasterEarning(models.Model):
@@ -826,6 +826,14 @@ class MasterEarning(models.Model):
     tenant = models.ForeignKey('tenancy.Tenant', on_delete=CASCADE, related_name='+')
     master = models.ForeignKey('staff.Master', on_delete=CASCADE, related_name='earnings')
     booking = models.OneToOneField('booking.Booking', on_delete=CASCADE, related_name='master_earning')
+
+    EVENT_TYPE_CHOICES = [
+        ('regular_visit', 'Regular completed visit'),
+        ('no_show_payout', 'No-show salon-side coverage (Q-NS11)'),
+        ('refund_revoke', 'Refund claw-back adjustment'),
+        ('manual_adjust', 'Manual admin adjustment'),
+    ]
+    event_type = models.CharField(max_length=32, choices=EVENT_TYPE_CHOICES, default='regular_visit')
 
     profile_snapshot_id = models.UUIDField()
     # MasterCompensationProfile.id at time of booking — frozen per §2.6
@@ -835,14 +843,23 @@ class MasterEarning(models.Model):
     master_share = models.DecimalField(max_digits=10, decimal_places=2)
     # = service_price * commission_percent_applied / 100
 
+    # Q-NS11 — populated for event_type='no_show_payout' per
+    # customer-no-show-policy §7.2. 0/50/100 mapping from tenant policy mode.
+    # For other event types, defaults to 100 (no reduction applied).
+    no_show_coverage_percent = models.IntegerField(default=100)
+
     tip_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     tip_percent_to_master = models.DecimalField(max_digits=5, decimal_places=2, default=100.00)
     tip_master_share = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
     total_master_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    # = master_share + tip_master_share
+    # For regular_visit: master_share + tip_master_share
+    # For no_show_payout:
+    #   service_price × commission_percent_applied × no_show_coverage_percent / 10000
+    #   (tip fields always 0 for no-show — customer wasn't present)
 
     booking_completed_at = models.DateTimeField()
+    # For no_show_payout: this is booking.slot_start (when service WOULD have happened)
     cycle_id = models.ForeignKey('PayoutCycle', null=True, on_delete=SET_NULL, related_name='earnings')
     # Assigned when cycle closes
 
@@ -865,8 +882,20 @@ class MasterEarning(models.Model):
         indexes = [
             Index(fields=['master', 'tenant', 'booking_completed_at']),
             Index(fields=['cycle_id', 'status']),
+            Index(fields=['event_type', 'booking']),  # No-show payout lookup
+        ]
+        constraints = [
+            # Q-NS11 idempotency: one earning row per (booking, event_type).
+            # Prevents double-credit on subscriber retries (regular_visit OR
+            # no_show_payout OR refund_revoke each get exactly one row per booking).
+            UniqueConstraint(
+                fields=['master', 'booking', 'event_type'],
+                name='master_earning_unique_per_booking_event',
+            ),
         ]
 ```
+
+**Migration note:** existing rows backfill `event_type='regular_visit'` + `no_show_coverage_percent=100`. Unique constraint added in same migration; pre-check no duplicates exist (one-to-one booking ↔ earning is the pre-Q-NS11 invariant).
 
 ### 11.4 `PayoutCycle`
 
@@ -1133,7 +1162,8 @@ Per [`event-taxonomy.md`](../policies/event-taxonomy.md): add 12 NEW to section 
 
 | Trigger | Event | Notes |
 |---|---|---|
-| Booking COMPLETED → earning computed | NEW: `earning.computed` | `master_id`, `amount`, `commission_percent_applied` |
+| Booking COMPLETED → earning computed | NEW: `earning.computed` | `master_id`, `amount`, `commission_percent_applied`, `event_type='regular_visit'` |
+| Booking confirmed NO_SHOW → no-show payout credited | NEW: `earning.no_show_payout_credited` | `master_id`, `amount`, `no_show_coverage_percent`, `tenant_policy_mode` (Q-NS11 §7.2) |
 | Tip captured | NEW: `tip.captured` | `mode`, `amount_to_master` |
 | Tip intent recorded (external mode) | NEW: `tip.intended` | `mode='external'` |
 | Master acknowledges tip | NEW: `tip.master_acknowledged` | |
