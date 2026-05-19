@@ -81,11 +81,13 @@ class LoyaltySubscriber:
     """
 
     def handle(self, envelope: "Envelope") -> None:
-        if envelope.event_name != "booking.completed":
-            return
-
         try:
-            self._credit_visit(envelope)
+            if envelope.event_name == "booking.completed":
+                self._credit_visit(envelope)
+            elif envelope.event_name == "booking.cancelled":
+                self._revoke_visit(envelope)
+            # All other event names: silently ignore — one selector per
+            # subscriber, dispatcher hands us the full stream.
         except Exception:  # noqa: BLE001 — subscriber must never propagate
             logger.exception(
                 "loyalty.subscriber.failed event=%s envelope=%s",
@@ -143,6 +145,61 @@ class LoyaltySubscriber:
                     "correlation_id": envelope.correlation_id or "",
                     "event_id": envelope.event_id,
                     "service_price_rub": _service_price(booking),
+                },
+            )
+
+    def _revoke_visit(self, envelope: "Envelope") -> None:
+        """Phase 1.b — revoke previously earned points on booking.cancelled.
+
+        Handoff §4 «refunded visit» path. Looks up the BookingRequest,
+        loads (or skips) the LoyaltyAccount, and asks the service layer
+        to revoke. Service layer handles all the edge cases:
+        - No EARN_VISIT for this booking → silent no-op (most common
+          case: customer cancelled before visit completed).
+        - Already revoked → idempotent no-op.
+        - Balance underflow (already redeemed) → clamps at 0 + logs.
+        """
+
+        booking_id = envelope.data.get("booking_id")
+        if not booking_id:
+            logger.warning(
+                "loyalty.subscriber.cancel.missing_booking_id envelope=%s",
+                envelope.event_id,
+            )
+            return
+
+        from apps.booking.models import BookingRequest
+        from apps.loyalty.models import LoyaltyAccount
+
+        booking = BookingRequest.all_tenants.filter(pk=booking_id).first()
+        if booking is None:
+            logger.info(
+                "loyalty.subscriber.cancel.booking_not_found booking_id=%s",
+                booking_id,
+            )
+            return
+
+        if booking.bot_user is None:
+            return  # GDPR-purged — nothing to revoke against
+
+        account = LoyaltyAccount.all_tenants.filter(customer=booking.bot_user).first()
+        if account is None:
+            # No account = customer never earned anything here. Nothing
+            # to revoke. (get_or_create_account is only called on credit
+            # path; we don't want to create an empty account during
+            # revoke flow.)
+            return
+
+        with tenant_scope(booking.tenant):
+            loyalty_services.revoke_visit_points(
+                account,
+                booking=booking,
+                reason=f"booking cancelled (event {envelope.event_id})",
+                metadata={
+                    "correlation_id": envelope.correlation_id or "",
+                    "event_id": envelope.event_id,
+                    "cancelled_by": envelope.data.get("cancelled_by", ""),
+                    "cancellation_reason": envelope.data.get("cancellation_reason", ""),
                 },
             )
 

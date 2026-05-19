@@ -200,6 +200,16 @@ class LoyaltyEvent(models.Model):
                 condition=models.Q(event_type="earn_visit", booking__isnull=False),
                 name="loyalty_earn_visit_unique_per_booking",
             ),
+            # Phase 1.b: same idempotency promise for REFUND_REVOKE. A
+            # booking.cancelled redelivery from the dispatcher must NOT
+            # revoke points twice — the second revoke would double-debit
+            # the balance and could push it negative if the customer earned
+            # elsewhere meanwhile.
+            models.UniqueConstraint(
+                fields=["account", "event_type", "booking"],
+                condition=models.Q(event_type="refund_revoke", booking__isnull=False),
+                name="loyalty_refund_revoke_unique_per_booking",
+            ),
         ]
         indexes = [
             # Customer history page: per-account most-recent N events.

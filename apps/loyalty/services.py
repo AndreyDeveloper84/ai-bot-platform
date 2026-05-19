@@ -232,6 +232,114 @@ def redeem_points(
     return event
 
 
+def revoke_visit_points(
+    account: LoyaltyAccount,
+    *,
+    booking: "BookingRequest",
+    reason: str = "",
+    metadata: dict | None = None,
+) -> LoyaltyEvent | None:
+    """Revoke previously earned EARN_VISIT points for ``booking``.
+
+    Handoff §4 «Edge case: refunded visit»: when a visit is cancelled
+    after points were credited (typically a post-completion cancel via
+    admin or a YClients-side status flip), we negate the original
+    earning so the balance reflects the real state.
+
+    Returns:
+      The created LoyaltyEvent (REFUND_REVOKE), OR None when:
+      - No EARN_VISIT exists for this booking (cancellation happened
+        before completion — normal path, nothing to revoke).
+      - A REFUND_REVOKE already exists for this booking (idempotent
+        replay of the booking.cancelled envelope).
+
+    Balance clamp:
+      Per handoff §14 «Refund chain breaks balance to negative»: balance
+      MUST NOT go below 0. If the revoke amount exceeds current balance
+      (customer redeemed the points already), we revoke only the amount
+      down to 0 and log a «недосостояние» note in the event metadata.
+    """
+
+    metadata = metadata or {}
+
+    earn_event = (
+        LoyaltyEvent.all_tenants.filter(
+            account=account,
+            event_type=LoyaltyEvent.EventType.EARN_VISIT,
+            booking=booking,
+        )
+        .order_by("occurred_at")
+        .first()
+    )
+    if earn_event is None:
+        # No earning to revoke — cancellation happened before the visit
+        # completed. Silent no-op.
+        logger.info(
+            "loyalty.revoke.no_earn_event account=%s booking=%s",
+            account.pk,
+            booking.pk,
+        )
+        return None
+
+    # Idempotency: already revoked?
+    existing = LoyaltyEvent.all_tenants.filter(
+        account=account,
+        event_type=LoyaltyEvent.EventType.REFUND_REVOKE,
+        booking=booking,
+    ).first()
+    if existing is not None:
+        logger.info(
+            "loyalty.revoke.idempotent_replay account=%s booking=%s",
+            account.pk,
+            booking.pk,
+        )
+        return None
+
+    earned_amount = earn_event.points_delta  # positive integer
+
+    with transaction.atomic():
+        locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=account.pk)
+        # Balance clamp: cannot debit below 0. Customer may have already
+        # redeemed those points elsewhere — accept partial revoke + log it.
+        revoke_amount = min(earned_amount, locked.balance)
+        underflow = earned_amount - revoke_amount
+        new_balance = locked.balance - revoke_amount
+
+        event_metadata = dict(metadata)
+        event_metadata["earned_points"] = earned_amount
+        event_metadata["revoke_amount"] = revoke_amount
+        if underflow > 0:
+            event_metadata["underflow"] = underflow
+            event_metadata["clamp_reason"] = "balance_already_redeemed"
+
+        event = LoyaltyEvent.objects.create(
+            tenant=locked.tenant,
+            account=locked,
+            event_type=LoyaltyEvent.EventType.REFUND_REVOKE,
+            points_delta=-revoke_amount,
+            balance_after=new_balance,
+            reason=reason[:200] or f"booking cancelled → revoke earn ({earn_event.pk})",
+            booking=booking,
+            metadata=event_metadata,
+        )
+        locked.balance = new_balance
+        locked.save(update_fields=["balance", "updated_at"])
+
+    write_audit(
+        action="loyalty.refund_revoke",
+        target="LoyaltyAccount",
+        target_id=account.pk,
+        payload={
+            "points_delta": -revoke_amount,
+            "balance_after": new_balance,
+            "booking_id": str(booking.pk),
+            "earned_points": earned_amount,
+            "underflow": underflow,
+        },
+    )
+    return event
+
+
 def opt_out(account: LoyaltyAccount) -> None:
     """Customer opt-out per Q-L12. Stops accrual, retains balance.
 
