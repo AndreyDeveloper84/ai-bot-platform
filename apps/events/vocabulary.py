@@ -64,6 +64,14 @@ BOOKING_RESCHEDULE_REQUESTED = "booking.reschedule_requested"
 BOOKING_RESCHEDULE_ABANDONED = "booking.reschedule_abandoned"
 BOOKING_RESCHEDULED = "booking.rescheduled"
 
+# --- Master M0 onboarding (master-mobile §M0 + master-management MM2) ---
+# Audit slugs registered here so out-of-vocab warnings stay silent in CI.
+# Payload contract: {tenant_id, master_id, bot_user_id, ...extra}.
+MASTER_ONBOARDING_STARTED = "master.onboarding_started"
+MASTER_ONBOARDING_ACCEPTED = "master.onboarding_accepted"
+MASTER_ONBOARDING_REJECTED = "master.onboarding_rejected"
+MASTER_PROFILE_INITIALIZED = "master.profile_initialized"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -86,6 +94,10 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         BOOKING_RESCHEDULE_REQUESTED,
         BOOKING_RESCHEDULE_ABANDONED,
         BOOKING_RESCHEDULED,
+        MASTER_ONBOARDING_STARTED,
+        MASTER_ONBOARDING_ACCEPTED,
+        MASTER_ONBOARDING_REJECTED,
+        MASTER_PROFILE_INITIALIZED,
     }
 )
 
