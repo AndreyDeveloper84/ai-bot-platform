@@ -139,11 +139,12 @@ class TestEnvelopeMapping:
 
 
 class TestDirectInvocation:
-    def test_subscriber_handle_idempotent_per_call(self):
-        # Two handle() calls on the same envelope → two AuditLog rows.
-        # Idempotency at the audit level is by event_id stamped in
-        # payload — admin replay query can dedupe. Loyalty/billing
-        # subscribers (future PRs) will need DB-level uniqueness.
+    def test_subscriber_handle_dedupes_on_event_id(self):
+        # Phase 2.2 cleanup #6: second handle() call on the same envelope
+        # short-circuits via the event_id existence check, so AuditLog
+        # ends up with exactly one row. This guards the dispatcher
+        # at-least-once contract: a re-dispatched row (one subscriber in
+        # the chain failed) won't grow the audit log linearly with retries.
         t = Tenant.objects.create(slug="aud-c", name="C")
         with tenant_scope(t):
             env = _emit_booking_created(tenant=t)
@@ -153,4 +154,70 @@ class TestDirectInvocation:
         sub.handle(env)
 
         rows = AuditLog.all_tenants.filter(payload__event_id=env.event_id)
-        assert rows.count() == 2
+        assert rows.count() == 1
+
+    def test_dedup_holds_across_dispatcher_ticks(self, settings):
+        # Phase 2.2 cleanup #6 — the scenario that originally motivated
+        # the dedup: a multi-subscriber chain where one downstream
+        # subscriber fails. The dispatcher commits AuditLog from the
+        # successful AuditSubscriber but leaves is_dispatched=False;
+        # next tick re-dispatches the row → AuditSubscriber runs again
+        # → dedup must short-circuit.
+        from apps.eventbus.dispatcher import reset_registry_cache as _reset
+
+        class _FlakySub:
+            calls = 0
+
+            def handle(self, envelope):
+                _FlakySub.calls += 1
+                if _FlakySub.calls == 1:
+                    raise RuntimeError("first tick fail")
+
+        # Register Audit first (writes), Flaky second (fails on tick 1).
+        settings.DOMAIN_EVENT_SUBSCRIBERS = [
+            "apps.eventbus.subscribers.AuditSubscriber",
+            f"{__name__}._FlakySubLocator",
+        ]
+        # Patch the dotted-path resolver to return our local class.
+        import apps.eventbus.dispatcher as disp
+
+        original_resolver = disp._resolve
+        flaky_instance = _FlakySub()
+
+        def _patched_resolve(path):
+            if path.endswith("_FlakySubLocator"):
+                return flaky_instance
+            return original_resolver(path)
+
+        disp._resolve = _patched_resolve
+        _reset()
+
+        try:
+            t = Tenant.objects.create(slug="aud-e", name="E")
+            with tenant_scope(t):
+                env = _emit_booking_created(tenant=t)
+
+            dispatcher.dispatch_pending_events()  # tick 1: flaky raises
+            dispatcher.dispatch_pending_events()  # tick 2: flaky succeeds
+
+            rows = AuditLog.all_tenants.filter(payload__event_id=env.event_id)
+            assert rows.count() == 1  # dedup held across ticks
+        finally:
+            disp._resolve = original_resolver
+            _reset()
+
+    def test_dedup_isolates_by_event_id(self):
+        # Two distinct envelopes (different event_ids) both land — dedup
+        # is strictly per-event_id, not per event_name / tenant.
+        t = Tenant.objects.create(slug="aud-d", name="D")
+        with tenant_scope(t):
+            env_one = _emit_booking_created(tenant=t)
+            env_two = _emit_booking_created(tenant=t)
+
+        sub = AuditSubscriber()
+        sub.handle(env_one)
+        sub.handle(env_two)
+
+        assert env_one.event_id != env_two.event_id
+        assert AuditLog.all_tenants.filter(payload__event_id=env_one.event_id).count() == 1
+        assert AuditLog.all_tenants.filter(payload__event_id=env_two.event_id).count() == 1

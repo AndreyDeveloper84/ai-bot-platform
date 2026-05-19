@@ -135,3 +135,63 @@ class TestLintPii:
         # UUIDs and short numeric ids must not trip the phone regex.
         assert lint_pii({"booking_id": str(uuid.uuid4())}) == []
         assert lint_pii({"score": 0.85}) == []
+
+    def test_deeply_nested_payload_truncates_without_recursion_error(self):
+        # Phase 2.2 cleanup #5: a payload nested past _PII_MAX_DEPTH (16)
+        # must abort the walk with a single «truncated» violation, not
+        # raise RecursionError. We build a 30-level chain to comfortably
+        # exceed the limit.
+        from apps.eventbus.validation import _PII_MAX_DEPTH
+
+        payload: dict = {}
+        cursor = payload
+        for _ in range(30):
+            cursor["next"] = {}
+            cursor = cursor["next"]
+        cursor["customer_phone"] = "+71234567890"  # past the limit
+
+        violations = lint_pii(payload)
+
+        assert any(f"depth={_PII_MAX_DEPTH}" in v for v in violations)
+        # The phone-key at depth 30 is past the cap, so it's NOT flagged
+        # individually — but the truncation marker surfaces the issue.
+        assert not any("customer_phone" in v for v in violations)
+
+    def test_truncation_blocks_emit_fail_closed(self):
+        # Phase 2.2 cleanup #5 security: a payload deep enough to trip
+        # the depth cap must NOT silently emit. lint_pii returns a
+        # «truncated» violation → services.emit raises
+        # EventbusPiiViolation → no event reaches the outbox. This
+        # guards against an adversary deep-burying PII past the cap.
+        from apps.eventbus import services
+
+        payload: dict = {}
+        cursor = payload
+        for _ in range(30):
+            cursor["next"] = {}
+            cursor = cursor["next"]
+
+        import pytest as _pytest
+
+        with _pytest.raises(services.EventbusPiiViolation):
+            services.emit(
+                V.BOOKING_CREATED,
+                {
+                    "booking_id": "bk-1",
+                    "customer_id": "c",
+                    "service_id": "s",
+                    "slot_start": "2026-05-19T10:00:00Z",
+                    "booking_source": "ai_direct",
+                    "metadata_field": payload,
+                },
+                actor_type="ai",
+            )
+
+    def test_shallow_payload_within_depth_cap_still_walks(self):
+        # Regression-guard: depth-cap must not break legitimate nested
+        # payloads (analytics envelopes with attribution_metadata are
+        # typically 3-4 levels). Build a 5-level structure with a PII
+        # key at the bottom and confirm it IS flagged.
+        violations = lint_pii({"a": {"b": {"c": {"d": {"customer_phone": "+71234567890"}}}}})
+        assert any("customer_phone" in v for v in violations)
+        assert not any("truncated" in v for v in violations)
