@@ -42,7 +42,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
-from apps.loyalty.models import LoyaltyAccount, LoyaltyEvent
+from apps.loyalty.models import LoyaltyAccount, LoyaltyEvent, LoyaltyReferral
 from apps.tenancy.context import current_tenant
 
 if TYPE_CHECKING:
@@ -56,6 +56,11 @@ logger = logging.getLogger(__name__)
 # platform defaults.
 MIN_REDEMPTION_POINTS = 50
 REDEMPTION_CAP_PERCENT = 30  # of visit_price_rub
+
+# Phase 2.d bonus event parameters (handoff §4 «Trigger events»).
+LONG_RETURN_GAP_DAYS = 90
+LONG_RETURN_BONUS_POINTS = 30
+REFERRAL_BONUS_POINTS = 50
 
 
 def get_or_create_account(customer: "BotUser") -> LoyaltyAccount:
@@ -167,6 +172,12 @@ def credit_points(
         },
     )
 
+    # Phase 2.d: bonus events tied to this EARN_VISIT (long-return,
+    # referral completion). Run BEFORE recompute_tier so a tier transition
+    # caused by this visit is reported once with both events in DB.
+    if event_type == LoyaltyEvent.EventType.EARN_VISIT:
+        _apply_visit_bonuses(account, current_event=event, booking=booking)
+
     # Phase 2.a: tier may have crossed a threshold on this EARN_VISIT.
     # Recompute eagerly — handoff §3 promises immediate tier-up celebration
     # on the visit that crossed. Skipped for non-EARN_VISIT types (manual
@@ -179,6 +190,272 @@ def credit_points(
         )
 
     return event
+
+
+def _apply_visit_bonuses(
+    account: LoyaltyAccount,
+    *,
+    current_event: LoyaltyEvent,
+    booking: "BookingRequest | None",
+) -> None:
+    """Dispatch Phase 2.d bonus events triggered by an EARN_VISIT.
+
+    Two bonuses (handoff §4):
+      1. Long-return — previous EARN_VISIT > 90d ago → +30 EARN_RETURN
+         to the visiting customer.
+      2. Referral completion — this is the visiting customer's FIRST
+         EARN_VISIT AND a PENDING LoyaltyReferral marks them as referee
+         → +50 EARN_REFERRAL to the referrer + mark referral COMPLETED.
+
+    Each path swallows its own errors so one bonus failure can't block
+    the other or unwind the original EARN_VISIT credit.
+    """
+
+    try:
+        _maybe_credit_long_return(account, current_event=current_event)
+    except Exception:  # noqa: BLE001 — bonus failure never unwinds main credit
+        logger.exception(
+            "loyalty.bonus.long_return_failed account=%s booking=%s",
+            account.pk,
+            booking.pk if booking else None,
+        )
+
+    try:
+        _maybe_complete_referral(account, booking=booking)
+    except Exception:  # noqa: BLE001 — bonus failure never unwinds main credit
+        logger.exception(
+            "loyalty.bonus.referral_failed account=%s booking=%s",
+            account.pk,
+            booking.pk if booking else None,
+        )
+
+
+def _maybe_credit_long_return(
+    account: LoyaltyAccount, *, current_event: LoyaltyEvent
+) -> LoyaltyEvent | None:
+    """Credit EARN_RETURN if the previous EARN_VISIT was > 90 days ago.
+
+    First-ever visit: no «previous» → no bonus (we don't reward day-one
+    sign-ups). Idempotency: one EARN_RETURN per booking — we anchor the
+    event to the same booking as the triggering EARN_VISIT.
+    """
+
+    from datetime import timedelta
+
+    if current_event.booking_id is None:
+        return None  # safety — long-return is per-booking
+
+    # Idempotent: already credited for this booking?
+    existing = LoyaltyEvent.all_tenants.filter(
+        account=account,
+        event_type=LoyaltyEvent.EventType.EARN_RETURN,
+        booking_id=current_event.booking_id,
+    ).first()
+    if existing is not None:
+        return None
+
+    prior = (
+        LoyaltyEvent.all_tenants.filter(
+            account=account,
+            event_type=LoyaltyEvent.EventType.EARN_VISIT,
+        )
+        .exclude(pk=current_event.pk)
+        .order_by("-occurred_at")
+        .first()
+    )
+    if prior is None:
+        return None  # first-ever visit
+
+    gap = current_event.occurred_at - prior.occurred_at
+    if gap < timedelta(days=LONG_RETURN_GAP_DAYS):
+        return None
+
+    with transaction.atomic():
+        locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=account.pk)
+        new_balance = locked.balance + LONG_RETURN_BONUS_POINTS
+        return_event = LoyaltyEvent.objects.create(
+            tenant=locked.tenant,
+            account=locked,
+            event_type=LoyaltyEvent.EventType.EARN_RETURN,
+            points_delta=LONG_RETURN_BONUS_POINTS,
+            balance_after=new_balance,
+            reason=f"long-return bonus (gap {gap.days}d ≥ {LONG_RETURN_GAP_DAYS}d)",
+            booking_id=current_event.booking_id,
+            metadata={
+                "gap_days": gap.days,
+                "prior_event_id": str(prior.pk),
+                "trigger_event_id": str(current_event.pk),
+            },
+        )
+        locked.balance = new_balance
+        locked.save(update_fields=["balance", "updated_at"])
+
+    write_audit(
+        action="loyalty.earn_return",
+        target="LoyaltyAccount",
+        target_id=account.pk,
+        payload={
+            "points_delta": LONG_RETURN_BONUS_POINTS,
+            "balance_after": new_balance,
+            "gap_days": gap.days,
+            "booking_id": str(current_event.booking_id),
+        },
+    )
+    return return_event
+
+
+def _maybe_complete_referral(
+    account: LoyaltyAccount, *, booking: "BookingRequest | None"
+) -> LoyaltyEvent | None:
+    """Complete a PENDING referral if this is the customer's first visit.
+
+    Handoff §3 «Referral»: 50 points to the referrer when the referee
+    completes their first visit. Idempotent — once the LoyaltyReferral
+    flips to COMPLETED, subsequent visits don't re-credit.
+
+    Tenancy: same-tenant referrer + referee per Q-CO5 isolation (the
+    unique constraint enforces 1 referee per tenant; cross-tenant has
+    no link to find).
+    """
+
+    # «First visit» = current customer has exactly 1 EARN_VISIT event
+    # (this just-written one). count==1 ⇒ this is it.
+    visit_count = LoyaltyEvent.all_tenants.filter(
+        account=account,
+        event_type=LoyaltyEvent.EventType.EARN_VISIT,
+    ).count()
+    if visit_count != 1:
+        return None  # not first
+
+    pending = LoyaltyReferral.all_tenants.filter(
+        tenant=account.tenant,
+        referee_customer=account.customer,
+        status=LoyaltyReferral.Status.PENDING,
+    ).first()
+    if pending is None:
+        return None
+
+    # Credit the referrer — load/create their account in the same tenant.
+    referrer_account, _created = LoyaltyAccount.all_tenants.get_or_create(
+        customer=pending.referrer_customer,
+        defaults={
+            "tenant": account.tenant,
+            "balance": 0,
+            "enrolled": True,
+        },
+    )
+
+    if referrer_account.opted_out_at is not None or not referrer_account.enrolled:
+        # Referrer opted out — mark referral completed (so it doesn't
+        # keep blocking re-credits) but skip the payout.
+        LoyaltyReferral.all_tenants.filter(pk=pending.pk).update(
+            status=LoyaltyReferral.Status.COMPLETED,
+            completed_booking=booking,
+            completed_at=timezone.now(),
+        )
+        logger.info(
+            "loyalty.referral.referrer_opted_out referral=%s referrer=%s",
+            pending.pk,
+            pending.referrer_customer_id,
+        )
+        return None
+
+    with transaction.atomic():
+        # Lock referrer's account row + double-check we're the winner
+        # (CAS: status=PENDING). Two concurrent first-visits on the same
+        # referee would race; the loser sees status=COMPLETED and skips.
+        rowcount = LoyaltyReferral.all_tenants.filter(
+            pk=pending.pk,
+            status=LoyaltyReferral.Status.PENDING,
+        ).update(
+            status=LoyaltyReferral.Status.COMPLETED,
+            completed_booking=booking,
+            completed_at=timezone.now(),
+        )
+        if rowcount == 0:
+            return None  # lost the race; another worker credited
+
+        locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=referrer_account.pk)
+        new_balance = locked.balance + REFERRAL_BONUS_POINTS
+        event = LoyaltyEvent.objects.create(
+            tenant=locked.tenant,
+            account=locked,
+            event_type=LoyaltyEvent.EventType.EARN_REFERRAL,
+            points_delta=REFERRAL_BONUS_POINTS,
+            balance_after=new_balance,
+            reason=f"referral converted (referee {pending.referee_customer_id})",
+            booking=booking,
+            metadata={
+                "referral_id": str(pending.pk),
+                "referee_customer_id": str(pending.referee_customer_id),
+            },
+        )
+        locked.balance = new_balance
+        locked.save(update_fields=["balance", "updated_at"])
+
+    write_audit(
+        action="loyalty.earn_referral",
+        target="LoyaltyAccount",
+        target_id=referrer_account.pk,
+        payload={
+            "points_delta": REFERRAL_BONUS_POINTS,
+            "balance_after": new_balance,
+            "referral_id": str(pending.pk),
+            "referee_customer_id": str(pending.referee_customer_id),
+        },
+    )
+    return event
+
+
+def create_referral(
+    *,
+    referrer: "BotUser",
+    referee: "BotUser",
+) -> LoyaltyReferral | None:
+    """Create a PENDING LoyaltyReferral linking referrer→referee.
+
+    Caller must be in tenant_scope; referrer and referee must be in the
+    same tenant (Q-CO5 — cross-tenant customers are separate identities).
+
+    Returns:
+      The new LoyaltyReferral, OR None when the referee already has a
+      referral row (per-tenant unique constraint). The «already referred»
+      case is silent (the existing referrer keeps their claim).
+
+    No-op cases:
+      - Self-referral: referrer == referee → ValueError
+      - Cross-tenant: referrer.tenant_id != referee.tenant_id → ValueError
+    """
+
+    if referrer.pk == referee.pk:
+        raise ValueError("loyalty.referral: self-referral not allowed")
+    if referrer.tenant_id != referee.tenant_id:
+        raise ValueError("loyalty.referral: referrer and referee must share tenant")
+
+    tenant = current_tenant()
+    if tenant is None:
+        raise ValueError("loyalty.create_referral requires a tenant in scope.")
+
+    referral, created = LoyaltyReferral.objects.get_or_create(
+        tenant=tenant,
+        referee_customer=referee,
+        defaults={
+            "referrer_customer": referrer,
+            "status": LoyaltyReferral.Status.PENDING,
+        },
+    )
+    if not created:
+        return None  # silent: referee already has a referrer
+    write_audit(
+        action="loyalty.referral.created",
+        target="LoyaltyReferral",
+        target_id=referral.pk,
+        payload={
+            "referrer_id": str(referrer.pk),
+            "referee_id": str(referee.pk),
+        },
+    )
+    return referral
 
 
 def redeem_points(

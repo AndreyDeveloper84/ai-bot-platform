@@ -253,3 +253,109 @@ class LoyaltyEvent(models.Model):
     def __str__(self) -> str:
         sign = "+" if self.points_delta >= 0 else ""
         return f"LoyaltyEvent[{self.event_type} {sign}{self.points_delta} → {self.balance_after}]"
+
+
+class LoyaltyReferral(models.Model):
+    """Phase 2.d — referrer→referee linkage with deferred credit.
+
+    Handoff §3 «Referral»: 50 points credited to the referrer when the
+    referee completes their first visit. The bonus is one-time per
+    referee — re-using the same referee across multiple referrers is
+    blocked by the unique constraint on ``referee_customer``.
+
+    ### Lifecycle
+
+    - PENDING — referee linked, awaiting their first visit completion.
+    - COMPLETED — referee's first EARN_VISIT fired; referrer credited.
+      ``completed_booking`` snapshots which booking triggered the
+      credit. ``completed_at`` stamps when.
+    - EXPIRED — referee never completed a visit within the (future)
+      expiration window. Not implemented in Phase 2.d-1 — handoff §17
+      Q-L7 sets a 10/quarter cap but no per-referral expiration.
+      Reserved choice for forward-compat.
+
+    ### Why a separate model (not metadata on BotUser)
+
+    Q-CX7 leaned «metadata silent tracking». The reality is that
+    referral has lifecycle (pending → completed) + needs idempotency
+    against re-credit (subscriber retries, manual data fixes). A JSON
+    blob on BotUser can't enforce uniqueness or carry the lifecycle
+    state machine. The dedicated model is the forensically defensible
+    surface.
+
+    ### Tenant scoping
+
+    Referrals are tenant-bound — Q-CO5 says customer profiles are
+    different per tenant, so referrals are too. A referrer at salon A
+    cannot earn from a referee's visit at salon B.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending — awaiting referee's first visit"
+        COMPLETED = "completed", "Completed — referrer credited"
+        EXPIRED = "expired", "Expired (forward-compat)"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="loyalty_referrals",
+    )
+    referrer_customer = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.CASCADE,
+        related_name="referrals_made",
+        help_text="The customer who invited (will be credited). CASCADE: "
+        "if the referrer is GDPR-purged, their referral rows go with them; "
+        "audit log retains the credit fact.",
+    )
+    referee_customer = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.CASCADE,
+        related_name="referrals_as_referee",
+        help_text="The new customer being invited (referrer earns when this "
+        "user's first visit completes). UNIQUE per tenant — see constraint.",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    completed_booking = models.ForeignKey(
+        "booking.BookingRequest",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="referral_completions",
+        help_text="The booking whose completion triggered the credit. "
+        "SET_NULL — the referral fact outlives the booking row.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Loyalty referral"
+        verbose_name_plural = "Loyalty referrals"
+        ordering = ["-created_at"]
+        constraints = [
+            # A referee can be referred only ONCE per tenant. Prevents
+            # multi-referrer collusion (two friends each claim to have
+            # invited the same person to farm 50pts × 2).
+            models.UniqueConstraint(
+                fields=["tenant", "referee_customer"],
+                name="loyalty_referral_unique_referee_per_tenant",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "referrer_customer", "-created_at"]),
+            models.Index(fields=["tenant", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"LoyaltyReferral[{self.referrer_customer_id}→{self.referee_customer_id} {self.status}]"
+        )
