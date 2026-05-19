@@ -42,10 +42,12 @@ Why ORM-level instead of view-level (Ayla's IsTenantMember pattern):
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 
 from apps.tenancy.context import current_tenant
 from apps.tenancy.exceptions import CrossTenantError
@@ -58,6 +60,23 @@ logger = logging.getLogger(__name__)
 
 
 VALID_SCOPE_MODES = ("strict", "audit", "off")
+
+# Tenancy retro B1: lookup aliases that reach the ``tenant`` FK on a
+# ``TenantScopedModel``. Without these the cross-tenant detector in
+# ``TenantScopedManager.filter()`` inspects only ``tenant`` / ``tenant_id``
+# bare kwargs and is silently bypassed by Django's standard lookup syntax
+# (``tenant__id``, ``tenant_id__in``, ``tenant_id__exact``, ``tenant__pk``,
+# etc.). The intersection with the ``get_queryset()`` scope filter is
+# empty, but the audit row never gets written — bad telemetry on a real
+# attempt + a latent vector if a future refactor changes the join shape.
+#
+# Matches any kwarg whose key starts with ``tenant`` and either equals it
+# exactly OR continues with a Django lookup suffix (``__``). Examples
+# caught: ``tenant``, ``tenant_id``, ``tenant__id``, ``tenant_id__in``,
+# ``tenant__pk__exact``, ``tenant_id__isnull``. Not caught (correctly):
+# unrelated field names that just happen to contain "tenant" as a
+# substring later in the name (e.g. ``other_tenant_label``).
+_TENANT_LOOKUP_RE = re.compile(r"^tenant(?:_id)?(?:__|$)")
 
 
 def _mode() -> str:
@@ -128,27 +147,27 @@ class TenantScopedManager(models.Manager):
         ``tenant=...``) with a value that disagrees with the current
         tenant, the intersection is empty *for the right reason*, but we
         want to flag the attempt instead of silently returning empty.
+
+        Tenancy retro B1: the cross-tenant detector walks both ``kwargs``
+        (for Django lookup aliases like ``tenant__id``, ``tenant_id__in``)
+        AND positional ``Q`` nodes in ``args``. Previously inspecting only
+        ``kwargs.get("tenant")`` / ``kwargs.get("tenant_id")`` left a
+        silent-bypass hole — ``filter(Q(tenant_id=other))`` AND'd with
+        the scope filter yielded empty without an audit row.
         """
 
         mode = _mode()
         tenant = current_tenant()
 
         if mode != "off" and tenant is not None:
-            tenant_kwarg = kwargs.get("tenant")
-            requested = kwargs.get("tenant_id") or (
-                getattr(tenant_kwarg, "pk", None)
-                if isinstance(tenant_kwarg, models.Model)
-                else None
-            )
-            # Normalise to string before equality. Django accepts both
-            # ``tenant_id=uuid_instance`` and ``tenant_id=str(uuid)`` in
-            # ORM filters, so we must too. Without normalisation,
-            # ``str(uuid)`` != ``UUID(uuid)`` and legitimate callers
-            # trip a false cross-tenant detection.
-            if requested is not None and str(requested) != str(tenant.id):
+            mismatched = _collect_mismatched_tenant_values(args, kwargs, tenant.id)
+            if mismatched:
+                # Stringify the first offender for the error message;
+                # log all mismatches in the audit payload for triage.
+                first = mismatched[0]
                 if mode == "strict":
                     raise CrossTenantError(
-                        f"{self.model.__name__}.objects.filter(tenant_id={requested}) "
+                        f"{self.model.__name__}.objects.filter(tenant_id={first}) "
                         f"attempted while current_tenant()={tenant.id}. "
                         "Use `.all_tenants.filter(...)` for legitimate "
                         "cross-tenant access.",
@@ -157,11 +176,99 @@ class TenantScopedManager(models.Manager):
                     "explicit_cross_tenant_filter",
                     model=self.model.__name__,
                     current=str(tenant.id),
-                    requested=str(requested),
+                    requested=[str(m) for m in mismatched],
                     mode=mode,
                 )
                 # audit: short-circuit to empty (the intersection is
-                # empty anyway, but we want the audit-log breadcrumb)
-                return super().get_queryset().none()
+                # empty anyway, but we want the audit-log breadcrumb).
+                # Use ``self.none()`` so the empty queryset still carries
+                # the scope filter — a future refactor that swaps
+                # ``.none()`` for a returning queryset doesn't downgrade
+                # to unscoped.
+                return self.none()
 
         return super().filter(*args, **kwargs)
+
+
+def _collect_mismatched_tenant_values(args: tuple, kwargs: dict, current_id: Any) -> list[Any]:
+    """Return all ``tenant`` filter values that disagree with ``current_id``.
+
+    Walks ``kwargs`` for any key matching :data:`_TENANT_LOOKUP_RE` AND
+    positional ``Q`` nodes (recursing into nested ``Q`` children) for
+    tuple-children whose key matches the same regex.
+
+    Tenancy retro B1.1: ``__in`` lookups carry a LIST/tuple/set of ids,
+    not a single value. The previous implementation compared the whole
+    list-as-string against ``current_id``, which (a) false-positived on
+    legitimate ``filter(tenant_id__in=[own.id])`` and (b) degraded
+    audit telemetry on real mixed lists. Walk container values element
+    by element so each id is compared individually.
+
+    Skips negated Q nodes (``~Q(tenant_id=X)`` means «not this tenant»,
+    not «cross-tenant lookup»). A defensive exclusion shouldn't trip
+    the cross-tenant detector.
+    """
+
+    current_str = str(current_id)
+    mismatches: list[Any] = []
+    for key, value in kwargs.items():
+        if _TENANT_LOOKUP_RE.match(key):
+            mismatches.extend(_mismatches_from_value(key, value, current_str))
+    for arg in args:
+        if isinstance(arg, Q):
+            mismatches.extend(_walk_q_for_mismatches(arg, current_str))
+    return mismatches
+
+
+def _mismatches_from_value(key: str, value: Any, current_str: str) -> list[Any]:
+    """Return ``[value]`` if it disagrees with ``current_str``, else ``[]``.
+
+    ``__in`` / ``__range`` lookups carry an iterable of ids; walk each
+    element. Plain lookups carry a single id; treat as a one-element list
+    of itself. ``__isnull`` lookups carry a bool — compare its
+    stringified form against ``current_str`` (always disagrees → trip;
+    that's the intended behavior, no one should call ``tenant__isnull``
+    on a scoped manager).
+    """
+
+    # ``__in`` / ``__range`` → iterate elements.
+    if key.endswith("__in") or key.endswith("__range"):
+        if not isinstance(value, (list, tuple, set, frozenset)):
+            # Defensive — Django would normally raise on a non-iterable
+            # here, but better to surface the suspicious shape via the
+            # audit row than crash inside the manager.
+            return [value]
+        out: list[Any] = []
+        for elem in value:
+            elem_id = getattr(elem, "pk", elem)
+            if str(elem_id) != current_str:
+                out.append(elem_id)
+        return out
+    # Plain lookup or unrelated suffix → single-value comparison.
+    raw = getattr(value, "pk", value)
+    if str(raw) != current_str:
+        return [raw]
+    return []
+
+
+def _walk_q_for_mismatches(node: Q, current_str: str) -> list[Any]:
+    """Recurse a ``Q`` tree returning every tenant-lookup mismatch.
+
+    Negated nodes (``~Q(tenant_id=X)``) are skipped — they semantically
+    mean «not this tenant», a defensive exclusion, not a cross-tenant
+    lookup. The detector targets *positive* cross-tenant predicates.
+    """
+
+    if node.negated:
+        return []
+
+    out: list[Any] = []
+    for child in node.children:
+        if isinstance(child, Q):
+            out.extend(_walk_q_for_mismatches(child, current_str))
+            continue
+        if isinstance(child, tuple) and len(child) == 2:
+            key, value = child
+            if isinstance(key, str) and _TENANT_LOOKUP_RE.match(key):
+                out.extend(_mismatches_from_value(key, value, current_str))
+    return out
