@@ -83,6 +83,12 @@ LOCAL_APPS = [
     # linkage + session-token issuance. See
     # ``docs/design/handoffs/2026-05-18-master-mobile-handoff.md`` §M0.
     "apps.master_api",
+    # Admin REST API PR 2 — master roster CRUD (MM1 list + MM3 detail/edit).
+    # See ``docs/design/handoffs/2026-05-18-master-management-handoff.md``.
+    # Distinct from apps.adminconsole (which is reserved for Django admin
+    # chrome). PR 2 owns the REST surface that the Ayla Pro web dashboard
+    # + admin Mini App consume.
+    "apps.admin_api",
     # 2026-05-19 — domain event bus (Postgres outbox per Q-EV-IMPL3).
     # Distinct from apps.events (analytics, snake_case, sync fanout):
     # apps.eventbus carries dot.notation domain events per

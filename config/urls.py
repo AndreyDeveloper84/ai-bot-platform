@@ -64,6 +64,14 @@ urlpatterns = [
         "api/v1/master/",
         include("apps.master_api.urls", namespace="master_api"),
     ),
+    # Admin REST API (PR 2 / MM1-MM3) — owner/admin master roster CRUD.
+    # Role-gated via apps.admin_api.auth.require_admin_role (owner OR
+    # admin; receptionist/master/customer → 403). See
+    # ``docs/design/handoffs/2026-05-18-master-management-handoff.md``.
+    path(
+        "api/v1/admin/",
+        include("apps.admin_api.urls", namespace="admin_api"),
+    ),
     # Phase 5 / KB-SYNC — Shiro-Py salon-knowledge consumer.
     # POST /api/v1/salon-knowledge/webhook/approved/ receives
     # ``knowledge.approved`` events from the colleague's service and
