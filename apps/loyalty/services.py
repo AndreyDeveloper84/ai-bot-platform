@@ -274,19 +274,32 @@ def _maybe_credit_long_return(
 
     with transaction.atomic():
         locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=account.pk)
-        new_balance = locked.balance + LONG_RETURN_BONUS_POINTS
+        # Phase 2.b: tier multiplier on bonus earnings (handoff §3).
+        # Read tier from the locked row, NOT from the parameter — the
+        # in-memory `account` may be stale (caller threaded it across
+        # multiple credit_points calls without refresh_from_db). The
+        # locked.tier is the canonical "what the customer is right
+        # now, pre-recompute" value.
+        # Multiplier: starter=1×, regular=2×, favorite=3×.
+        multiplier = _tier_multiplier(locked.tier)
+        bonus_points = LONG_RETURN_BONUS_POINTS * multiplier
+
+        new_balance = locked.balance + bonus_points
         return_event = LoyaltyEvent.objects.create(
             tenant=locked.tenant,
             account=locked,
             event_type=LoyaltyEvent.EventType.EARN_RETURN,
-            points_delta=LONG_RETURN_BONUS_POINTS,
+            points_delta=bonus_points,
             balance_after=new_balance,
-            reason=f"long-return bonus (gap {gap.days}d ≥ {LONG_RETURN_GAP_DAYS}d)",
+            reason=f"long-return bonus (gap {gap.days}d ≥ {LONG_RETURN_GAP_DAYS}d) ×{multiplier}",
             booking_id=current_event.booking_id,
             metadata={
                 "gap_days": gap.days,
                 "prior_event_id": str(prior.pk),
                 "trigger_event_id": str(current_event.pk),
+                "tier_at_credit": locked.tier,
+                "multiplier": multiplier,
+                "base_points": LONG_RETURN_BONUS_POINTS,
             },
         )
         locked.balance = new_balance
@@ -297,13 +310,32 @@ def _maybe_credit_long_return(
         target="LoyaltyAccount",
         target_id=account.pk,
         payload={
-            "points_delta": LONG_RETURN_BONUS_POINTS,
+            "points_delta": bonus_points,
             "balance_after": new_balance,
             "gap_days": gap.days,
             "booking_id": str(current_event.booking_id),
+            "tier_at_credit": locked.tier,
+            "multiplier": multiplier,
         },
     )
     return return_event
+
+
+# Phase 2.b — tier multipliers for bonus earnings (handoff §3).
+# Applies to EARN_RETURN (this PR) and EARN_BIRTHDAY (when birthday
+# bonus ships in Phase 2.d-2). Does NOT apply to base EARN_VISIT or
+# EARN_REFERRAL — those have fixed amounts per handoff §4 «Trigger events».
+_TIER_MULTIPLIERS: dict[str, int] = {
+    LoyaltyAccount.Tier.STARTER: 1,
+    LoyaltyAccount.Tier.REGULAR: 2,
+    LoyaltyAccount.Tier.FAVORITE: 3,
+}
+
+
+def _tier_multiplier(tier_value: str) -> int:
+    """Bonus-points multiplier for a tier. Unknown tier → 1× (safe default)."""
+
+    return _TIER_MULTIPLIERS.get(tier_value, 1)
 
 
 def _maybe_complete_referral(
@@ -599,6 +631,12 @@ def revoke_visit_points(
         event_metadata = dict(metadata)
         event_metadata["earned_points"] = earned_amount
         event_metadata["revoke_amount"] = revoke_amount
+        # Phase 2.b: propagate the original visit's price so LTV math
+        # correctly subtracts the cancelled visit. Legacy earn rows
+        # without service_price_rub in metadata fall back to 0.
+        if "service_price_rub" not in event_metadata:
+            price_from_earn = (earn_event.metadata or {}).get("service_price_rub", 0)
+            event_metadata["service_price_rub"] = int(price_from_earn or 0)
         if underflow > 0:
             event_metadata["underflow"] = underflow
             event_metadata["clamp_reason"] = "balance_already_redeemed"
@@ -642,26 +680,48 @@ def revoke_visit_points(
 
 
 # ── Tier thresholds (handoff §3) ────────────────────────────────────────
-# Phase 2.a uses visit count only. LTV-based crossing (8 000 ₽ / 30 000 ₽)
-# is deferred to Phase 2.b together with bonus-event multipliers.
+# Either-or per handoff §3. Phase 2.b adds the LTV side; Phase 2.a
+# shipped only the visit-count side.
 TIER_REGULAR_VISIT_THRESHOLD = 4
 TIER_FAVORITE_VISIT_THRESHOLD = 12
+TIER_REGULAR_LTV_THRESHOLD_RUB = 8_000
+TIER_FAVORITE_LTV_THRESHOLD_RUB = 30_000
 
 
-def _effective_visit_count(account: LoyaltyAccount) -> int:
-    """Count EARN_VISIT events minus REFUND_REVOKE events for ``account``.
+class _TierMetrics:
+    """Effective visit count + LTV used for tier derivation.
 
-    REFUND_REVOKE is uniquely keyed by booking, so subtracting its count
-    correctly cancels out the original earn — a cancelled-after-completed
-    visit doesn't keep contributing to tier progress.
+    Both metrics respect :attr:`LoyaltyAccount.tier_reset_at` (Phase 2.c
+    inactivity floor). Plain class instead of dataclass for cheap
+    constructability inside tight loops; no validation needed.
+    """
 
-    Phase 2.c floor: when ``tier_reset_at`` is set (hard inactivity
-    downgrade), only events with ``occurred_at > tier_reset_at`` count.
-    Historic visits before the reset cease to contribute, so a
-    returning customer climbs the ladder fresh.
+    __slots__ = ("visit_count", "ltv_rub")
 
-    Reads ``all_tenants`` because the caller may not be inside a tenant
-    scope; the account-level filter is the security boundary.
+    def __init__(self, visit_count: int, ltv_rub: int) -> None:
+        self.visit_count = visit_count
+        self.ltv_rub = ltv_rub
+
+
+def _effective_metrics(account: LoyaltyAccount) -> _TierMetrics:
+    """Compute (visit_count, ltv_rub) for the tier ladder.
+
+    visit_count = EARN_VISIT minus REFUND_REVOKE rows.
+    ltv_rub     = sum(EARN_VISIT.metadata.service_price_rub)
+                  − sum(REFUND_REVOKE.metadata.service_price_rub)
+
+    Both metrics honor ``tier_reset_at`` (Phase 2.c) — events at or
+    before the reset don't contribute.
+
+    Why iterate Python-side rather than SQL aggregate:
+    ``metadata`` is JSONField; cross-DB aggregation on JSON keys is
+    inconsistent (SQLite tests vs Postgres prod). Iteration is O(N)
+    on the account's event rows — for a typical customer this is
+    dozens of events, not millions. Reconciliation cron (future) can
+    optimise if needed.
+
+    Legacy events with no ``service_price_rub`` in metadata contribute
+    0 to LTV (visit_count side still counts them) — backward-compatible.
     """
 
     earn_qs = LoyaltyEvent.all_tenants.filter(
@@ -674,15 +734,41 @@ def _effective_visit_count(account: LoyaltyAccount) -> int:
         earn_qs = earn_qs.filter(occurred_at__gt=account.tier_reset_at)
         revoke_qs = revoke_qs.filter(occurred_at__gt=account.tier_reset_at)
 
-    return earn_qs.count() - revoke_qs.count()
+    visit_count = earn_qs.count() - revoke_qs.count()
+
+    ltv_rub = 0
+    for ev in earn_qs.only("metadata"):
+        ltv_rub += int(ev.metadata.get("service_price_rub", 0) or 0)
+    for ev in revoke_qs.only("metadata"):
+        ltv_rub -= int(ev.metadata.get("service_price_rub", 0) or 0)
+
+    return _TierMetrics(visit_count=visit_count, ltv_rub=max(ltv_rub, 0))
 
 
-def _derive_tier(visit_count: int) -> str:
-    """Map visit count to the tier per handoff §3 thresholds."""
+def _effective_visit_count(account: LoyaltyAccount) -> int:
+    """Backward-compat shim — kept for any external caller. New code
+    uses :func:`_effective_metrics` directly."""
 
-    if visit_count >= TIER_FAVORITE_VISIT_THRESHOLD:
+    return _effective_metrics(account).visit_count
+
+
+def _derive_tier(metrics: _TierMetrics) -> str:
+    """Map (visit count, LTV) to tier — handoff §3 «4 visits OR 8000₽».
+
+    Either threshold being met suffices. Favorite-level checks run
+    first so a single big-ticket visit (price ≥30 000₽) lands the
+    customer directly at favorite without intermediate regular state.
+    """
+
+    if (
+        metrics.visit_count >= TIER_FAVORITE_VISIT_THRESHOLD
+        or metrics.ltv_rub >= TIER_FAVORITE_LTV_THRESHOLD_RUB
+    ):
         return LoyaltyAccount.Tier.FAVORITE
-    if visit_count >= TIER_REGULAR_VISIT_THRESHOLD:
+    if (
+        metrics.visit_count >= TIER_REGULAR_VISIT_THRESHOLD
+        or metrics.ltv_rub >= TIER_REGULAR_LTV_THRESHOLD_RUB
+    ):
         return LoyaltyAccount.Tier.REGULAR
     return LoyaltyAccount.Tier.STARTER
 
@@ -720,8 +806,8 @@ def recompute_tier(
 
     from apps.eventbus import services as eventbus_services
 
-    visit_count = _effective_visit_count(account)
-    new_tier = _derive_tier(visit_count)
+    metrics = _effective_metrics(account)
+    new_tier = _derive_tier(metrics)
 
     with transaction.atomic():
         locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=account.pk)
@@ -734,7 +820,9 @@ def recompute_tier(
         locked.tier_changed_at = now
         locked.save(update_fields=["tier", "tier_changed_at", "updated_at"])
 
-        reason = f"visits={visit_count} crossed {old_tier}→{new_tier}"
+        reason = (
+            f"visits={metrics.visit_count} ltv={metrics.ltv_rub}₽ crossed {old_tier}→{new_tier}"
+        )
         LoyaltyEvent.objects.create(
             tenant=locked.tenant,
             account=locked,
@@ -745,7 +833,8 @@ def recompute_tier(
             metadata={
                 "old_tier": old_tier,
                 "new_tier": new_tier,
-                "visit_count": visit_count,
+                "visit_count": metrics.visit_count,
+                "ltv_rub": metrics.ltv_rub,
                 "trigger_event_id": trigger_event_id or "",
             },
         )
@@ -775,7 +864,8 @@ def recompute_tier(
         payload={
             "old_tier": old_tier,
             "new_tier": new_tier,
-            "visit_count": visit_count,
+            "visit_count": metrics.visit_count,
+            "ltv_rub": metrics.ltv_rub,
         },
     )
 
