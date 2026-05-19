@@ -1,10 +1,14 @@
 # Wellness Symptom Diary Module — engineering handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Engineering-ready — Phase 2 wellness module №5 (after Mood + Water + Body + Sleep)
-**Reads:** [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §8 (Module 7 Symptom Diary), [`./2026-05-19-wellness-mood-handoff.md`](./2026-05-19-wellness-mood-handoff.md), [`./2026-05-19-wellness-water-handoff.md`](./2026-05-19-wellness-water-handoff.md), [`./2026-05-19-wellness-body-handoff.md`](./2026-05-19-wellness-body-handoff.md), [`./2026-05-19-wellness-sleep-handoff.md`](./2026-05-19-wellness-sleep-handoff.md), [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/ayla-memory-and-personalization.md`](../policies/ayla-memory-and-personalization.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §8 (Module 7 Symptom Diary), [`./2026-05-19-wellness-mood-handoff.md`](./2026-05-19-wellness-mood-handoff.md), [`./2026-05-19-wellness-water-handoff.md`](./2026-05-19-wellness-water-handoff.md), [`./2026-05-19-wellness-body-handoff.md`](./2026-05-19-wellness-body-handoff.md), [`./2026-05-19-wellness-sleep-handoff.md`](./2026-05-19-wellness-sleep-handoff.md), [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md)
 
 > Ports [wellness-input-modules §8 Symptom Diary](../policies/wellness-input-modules.md#8-module-7--symptom-diary) to engineering-ready spec. **Most medical-adjacent module on the platform** — strictest anti-pattern enforcement + explicit medical-routing protocol. Phase 2 basic structured entry; Phase 3+ pattern detection + service correlation.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: symptom data is **red-zone** in Ayla's memory per [`ayla-memory-and-personalization §2.3`](../policies/ayla-memory-and-personalization.md) — encrypted, 90d unused → auto-delete, NEVER mentioned without customer initiation. Medical injury allegations fire [`ayla-emergency-fallback-policy §3.4`](../policies/ayla-emergency-fallback-policy.md) `legally_sensitive` tier (founder auto-engaged). AI voice samples use Ayla per [`ayla-identity-and-brand §2`](../policies/ayla-identity-and-brand.md).
 
 ---
 
@@ -94,7 +98,7 @@ These are the strictest in the platform. Engineering reviewer rejects ANY PR vio
 
 ### 2.3 Explicit medical-routing protocol §10
 - If severity thresholds met → AI suggests «обратиться к врачу» (generic, NOT specific specialist)
-- AI ALWAYS says: «Я помощник студии, не врач. Это наблюдение, не диагноз.»
+- AI ALWAYS says: «Я Ayla — AI-помощник, не врач. Это наблюдение, не диагноз.»
 - Customer's decision to seek medical care is theirs
 
 ### 2.4 Privacy hierarchy
