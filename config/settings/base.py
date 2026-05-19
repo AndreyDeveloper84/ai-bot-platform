@@ -192,6 +192,12 @@ MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 
+# Phase 5 lazy-onboarding (apps/miniapp_api/views.py:require_init_data).
+# Single-bot mode binds the bot's HMAC token to exactly one tenant; this
+# slug picks which one. Multi-tenant ingress will replace this with the
+# CHANNEL_TOKEN_TO_TENANT_SLUG map already wired for /api/v1/ingress/max/.
+MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
+
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
 # than silently 500ing on a misconfigured prod box.
