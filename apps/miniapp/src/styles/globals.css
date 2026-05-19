@@ -666,3 +666,28 @@ a {
 .visit-row__rate {
   align-self: flex-start;
 }
+
+/* Filter chips (My visits §3.4). */
+.chip-row {
+  display: flex;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+}
+
+.chip {
+  padding: var(--s-1) var(--s-3);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-divider);
+  border-radius: 999px;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.chip--active {
+  background: var(--c-accent-subtle);
+  border-color: var(--c-accent);
+  color: var(--c-accent-pressed);
+  font-weight: 600;
+}
