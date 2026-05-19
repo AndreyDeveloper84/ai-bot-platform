@@ -555,3 +555,51 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Phase 1 / PI8 (DRF-859) — PII-redacting log filter wired into every
+# persistent-destination handler (console / file / journald). This is
+# defence-in-depth on top of Sprint 8 / E1's Sentry ``before_send``
+# scrubber (apps.observability.sentry.scrub_event), which only handles
+# Sentry-bound events — JSON / stdout / file logs would otherwise reach
+# disk with raw phone / email / card numbers in them.
+#
+# The Sentry handler intentionally does NOT get this filter: Sentry's
+# own scrubber runs at ``before_send`` already, and layering two
+# scrubbers risks corrupting already-placeholdered text.
+#
+# ``disable_existing_loggers=False`` preserves Django + Celery + library
+# loggers; this config only ADDS the filter on top of stdlib defaults.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "pii_redactor": {
+            "()": "apps.observability.pii_filter.PIIRedactingFilter",
+        },
+        "context": {
+            "()": "apps.observability.logging.ContextFilter",
+        },
+    },
+    "formatters": {
+        "json": {
+            "()": "apps.observability.logging.JsonFormatter",
+        },
+        "simple": {
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        # Persistent destination (stdout → journald in prod). PII filter
+        # runs BEFORE the formatter so the JSON line lands clean on disk.
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",
+            "filters": ["pii_redactor", "context"],
+            "formatter": "json",
+        },
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["console"],
+    },
+}
