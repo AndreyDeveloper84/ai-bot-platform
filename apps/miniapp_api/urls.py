@@ -28,4 +28,10 @@ urlpatterns = [
     # Phase 3 / F4 — profile read / update / data deletion
     path("me", views.me, name="me"),
     path("me/delete", views.delete_me, name="delete_me"),
+    # Phase 4 / F5 — post-visit feedback
+    path(
+        "bookings/<uuid:booking_id>/feedback",
+        views.submit_feedback,
+        name="submit_feedback",
+    ),
 ]

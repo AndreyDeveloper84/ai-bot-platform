@@ -257,6 +257,36 @@ class BookingRequest(models.Model):
         related_name="bookings",
     )
 
+    # Phase 4 / F5 — post-visit feedback. Filled when the customer
+    # submits the rating form; before that all four fields are NULL.
+    # ``rating <= 3`` triggers a HUMAN_LOCKED handoff (apps.handoff
+    # AdminTask + Conversation.state=HUMAN_HANDOFF), see
+    # apps/booking/services/feedback.py.
+    rating = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Customer rating 1-5. NULL until they submit the F5 form. "
+        "Values <= 3 fire the handoff flow.",
+    )
+    feedback_comment = models.TextField(
+        blank=True,
+        default="",
+        help_text="Optional free-text comment from the F5 form (≤500 chars enforced at the API).",
+    )
+    feedback_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Wall-clock when the rating was submitted. Idempotency anchor: "
+        "submit_feedback raises 'already_rated' when this is non-NULL.",
+    )
+    feedback_prompt_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When the post-visit DM prompt was dispatched. NULL = not yet sent. "
+        "Phase 4b will scan WHERE NULL and visit_at < now()-1h.",
+    )
+
     def save(self, *args, **kwargs):
         self._validate_attribution_metadata()
         super().save(*args, **kwargs)
@@ -310,6 +340,11 @@ class BookingRequest(models.Model):
                 fields=["master", "visit_at"],
                 condition=models.Q(status="confirmed", visit_at__isnull=False),
                 name="booking_unique_master_confirmed_visit_at",
+            ),
+            # Phase 4 — rating must be NULL or in 1..5.
+            models.CheckConstraint(
+                condition=models.Q(rating__isnull=True) | models.Q(rating__gte=1, rating__lte=5),
+                name="booking_rating_in_range_or_null",
             ),
         ]
 

@@ -556,9 +556,15 @@ def create_booking(request: HttpRequest) -> HttpResponse:
 # --- Phase 2: visits + reschedule -----------------------------------------
 
 
-def _visit_to_dict(b) -> dict[str, Any]:
-    """Serialise a BookingRequest for the customer's visit list."""
+def _visit_to_dict(b, *, now=None) -> dict[str, Any]:
+    """Serialise a BookingRequest for the customer's visit list.
 
+    `now` is injected so the visits_list view can compute `can_rate`
+    against a single wall-clock for the whole batch.
+    """
+    moment = now or timezone.now()
+    is_past = bool(b.visit_at and b.visit_at < moment)
+    can_rate = is_past and b.status == "confirmed" and b.rating is None
     return {
         "id": str(b.id),
         "service_name": b.service_name,
@@ -568,6 +574,9 @@ def _visit_to_dict(b) -> dict[str, Any]:
         "status": b.status,
         "service_id": str(b.service_id) if b.service_id else None,
         "master_id": str(b.master_id) if b.master_id else None,
+        # Phase 4 — F5 rating exposure
+        "rating": b.rating,
+        "can_rate": can_rate,
     }
 
 
@@ -610,7 +619,7 @@ def visits_list(request: HttpRequest) -> HttpResponse:
     else:
         return _error("bad_request", "status must be one of upcoming/past/all", 400)
 
-    return JsonResponse({"visits": [_visit_to_dict(b) for b in qs]})
+    return JsonResponse({"visits": [_visit_to_dict(b, now=now) for b in qs]})
 
 
 @csrf_exempt
@@ -765,3 +774,68 @@ def _profile_to_dict(snap) -> dict:
             "service_name": snap.favorite_service_name,
         },
     }
+
+
+# --- /bookings/<id>/feedback — post-visit rating (Phase 4 / F5) ------------
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: ignore[no-untyped-def]
+    """Persist a 1-5 rating for a past visit; rating ≤ 3 escalates.
+
+    Body: ``{"rating": int, "comment": str?}``. The service module
+    handles attribution-policy fields + handoff; the view's job is to
+    parse, scope-check the booking to ``request.bot_user``, and map
+    service errors to HTTP statuses.
+    """
+    from apps.booking.models import BookingRequest
+    from apps.booking.services.feedback import (
+        AlreadyRated,
+        FeedbackError,
+        InvalidRating,
+        NotCompletedYet,
+        submit_feedback as service_submit_feedback,
+    )
+
+    import json
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    booking = (
+        BookingRequest.objects.filter(pk=booking_id, bot_user=bot_user)
+        .select_related("conversation")
+        .first()
+    )
+    if booking is None:
+        return _error("not_found", "booking does not belong to this user", 404)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+
+    rating = body.get("rating")
+    comment = body.get("comment", "")
+
+    try:
+        result = service_submit_feedback(booking, rating=rating, comment=comment)
+    except (InvalidRating, AlreadyRated, NotCompletedYet) as exc:
+        return _error(exc.slug, str(exc), 400)
+    except FeedbackError as exc:
+        return _error(exc.slug, str(exc), 400)
+
+    return JsonResponse(
+        {
+            "booking_id": result.booking_id,
+            "rating": result.rating,
+            "comment": result.comment,
+            "feedback_at": result.feedback_at,
+            "handoff_created": result.handoff_created,
+            "task_id": result.task_id,
+        },
+        status=200,
+    )
