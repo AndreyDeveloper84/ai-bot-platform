@@ -75,6 +75,10 @@ LOCAL_APPS = [
     # webhook live in apps.integrations.yookassa; the buy_certificate
     # LLM tool wiring lives in apps.skills.booking.
     "apps.orders",
+    # Customer Mini App Phase 0a — master schedule + slot resolver.
+    "apps.scheduling",
+    # Customer Mini App Phase 0b — HTTP API for the MAX Mini App webview.
+    "apps.miniapp_api",
 ]
 
 INSTALLED_APPS = [

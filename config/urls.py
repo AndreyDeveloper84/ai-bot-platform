@@ -43,6 +43,11 @@ urlpatterns = [
         "api/v1/channels/telegram/",
         include("apps.channels.telegram.urls", namespace="telegram"),
     ),
+    # Customer Mini App API (Phase 0b+).
+    path(
+        "api/v1/customer/",
+        include("apps.miniapp_api.urls", namespace="miniapp_api"),
+    ),
     # Phase 5 / KB-SYNC — Shiro-Py salon-knowledge consumer.
     # POST /api/v1/salon-knowledge/webhook/approved/ receives
     # ``knowledge.approved`` events from the colleague's service and

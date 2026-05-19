@@ -17,6 +17,7 @@ from apps.catalog.models import (
     CatalogHelpArticle,
     CatalogMaster,
     CatalogService,
+    MasterService,
 )
 
 
@@ -46,8 +47,28 @@ class CatalogServiceAdmin(_MirrorAdminBase):
 
 @admin.register(CatalogMaster)
 class CatalogMasterAdmin(_MirrorAdminBase):
-    list_display = ("name", "specialization", "tenant", "is_active", "synced_at")
-    search_fields = ("name", "specialization", "external_id")
+    list_display = (
+        "name",
+        "specialization",
+        "tenant",
+        "is_active",
+        "invite_status",
+        "mode",
+        "synced_at",
+    )
+    list_filter = ("tenant", "is_active", "invite_status", "mode", "external_updated_at")  # type: ignore[assignment]
+    search_fields = ("name", "specialization", "external_id", "max_handle")
+
+
+@admin.register(MasterService)
+class MasterServiceAdmin(admin.ModelAdmin):
+    list_display = ("master", "service", "tenant", "created_at")
+    list_filter = ("tenant",)
+    search_fields = ("master__name", "service__name")
+    raw_id_fields = ("master", "service", "created_by")
+
+    def get_queryset(self, request):
+        return self.model.all_tenants.all().select_related("master", "service", "tenant")
 
 
 @admin.register(CatalogFaq)

@@ -61,6 +61,24 @@ BOOKING_SOURCE_CHOICES = [
 ]
 
 
+ATTRIBUTION_BOOKING_SOURCE_CHOICES = [
+    ("ai_direct", "AI created booking directly"),
+    ("ai_assisted", "AI participated; human finished"),
+    ("human_direct", "Salon staff only, no AI"),
+    ("external", "From outside (YClients UI, phone)"),
+    ("test_admin", "Test or admin/master-created"),
+]
+
+ATTRIBUTION_ACTOR_TYPES = {
+    "customer",
+    "owner",
+    "admin",
+    "receptionist",
+    "master",
+    "system",
+}
+
+
 class BookingRequest(models.Model):
     """A booking intent — created by the wizard, the bot skill, or the
     YClients admin webhook (when a salon employee books a client via the
@@ -174,6 +192,105 @@ class BookingRequest(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # --- 4a additions: visit time + catalog FKs + attribution ----------
+    visit_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When the appointment is scheduled. Required for new "
+        "(non-external) rows; legacy backfilled rows have NULL.",
+    )
+    duration_min = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Service duration at booking time (snapshot).",
+    )
+    service = models.ForeignKey(
+        "catalog.CatalogService",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="booking_requests",
+    )
+    master = models.ForeignKey(
+        "catalog.CatalogMaster",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="booking_requests",
+    )
+    booking_source = models.CharField(
+        max_length=20,
+        choices=ATTRIBUTION_BOOKING_SOURCE_CHOICES,
+        default="external",
+        db_index=True,
+        help_text="Per attribution-policy. ai_direct only is billable.",
+    )
+    ai_assist_score = models.DecimalField(
+        max_digits=3,
+        decimal_places=2,
+        default=0,
+        help_text="0.00–1.00 internal analytics estimate of AI contribution.",
+    )
+    billable = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Locked rule: True iff booking_source='ai_direct' AND "
+        "status=='confirmed'. Set once, never recomputed.",
+    )
+    billing_reason = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Required when billable=True (audit trail).",
+    )
+    attribution_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Audit context. Required key: actor_type (validator).",
+    )
+    conversation = models.ForeignKey(
+        "conversations.Conversation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="bookings",
+    )
+
+    def save(self, *args, **kwargs):
+        self._validate_attribution_metadata()
+        super().save(*args, **kwargs)
+
+    def _validate_attribution_metadata(self) -> None:
+        """Reject saves with missing/invalid attribution metadata when
+        the writer opted into the new model (booking_source != 'external').
+
+        Per attribution-policy.md §4 + Q-ATT-IMPL3.
+        Legacy writers (admin webhook, bot tools, reminders pre-port)
+        leave booking_source='external' and bypass the validator.
+        """
+
+        if self.booking_source == "external":
+            return
+
+        from django.core.exceptions import ValidationError
+
+        meta = self.attribution_metadata or {}
+        actor_type = meta.get("actor_type")
+        if actor_type is None:
+            raise ValidationError(
+                "attribution_metadata.actor_type is required (per attribution-policy.md §4)"
+            )
+        if actor_type not in ATTRIBUTION_ACTOR_TYPES:
+            raise ValidationError(
+                f"attribution_metadata.actor_type {actor_type!r} not in "
+                f"{sorted(ATTRIBUTION_ACTOR_TYPES)}"
+            )
+        if self.visit_at is None:
+            raise ValidationError(
+                f"visit_at is required when booking_source={self.booking_source!r} (Q-ATT-IMPL3)"
+            )
+
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
@@ -185,6 +302,15 @@ class BookingRequest(models.Model):
             models.Index(fields=["tenant", "-created_at"]),
             models.Index(fields=["tenant", "bot_user"]),
             models.Index(fields=["tenant", "status"]),
+        ]
+        # 4a-hardening: partial UNIQUE on (master, visit_at) WHERE
+        # status='confirmed' — DB-level backstop against double-bookings.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["master", "visit_at"],
+                condition=models.Q(status="confirmed", visit_at__isnull=False),
+                name="booking_unique_master_confirmed_visit_at",
+            ),
         ]
 
     def __str__(self) -> str:
