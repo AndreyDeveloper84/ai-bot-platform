@@ -79,6 +79,12 @@ LOCAL_APPS = [
     "apps.scheduling",
     # Customer Mini App Phase 0b — HTTP API for the MAX Mini App webview.
     "apps.miniapp_api",
+    # 2026-05-19 — domain event bus (Postgres outbox per Q-EV-IMPL3).
+    # Distinct from apps.events (analytics, snake_case, sync fanout):
+    # apps.eventbus carries dot.notation domain events per
+    # docs/design/policies/event-taxonomy.md §3 catalog. Two-bus
+    # architecture by design — see memory two-bus-event-architecture.
+    "apps.eventbus",
 ]
 
 INSTALLED_APPS = [
