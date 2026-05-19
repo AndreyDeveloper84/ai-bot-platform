@@ -8,10 +8,16 @@ on:
       - "feat/**"
       - "fix/**"
       - "chore/**"
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   pull_request:
     branches:
       - main
       - dev
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
 
 concurrency:
