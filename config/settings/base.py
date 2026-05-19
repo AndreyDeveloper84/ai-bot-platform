@@ -509,6 +509,17 @@ OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
 # prod inject via their secret stores.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
+# DeepSeek auth — read by ``apps.llm.providers.deepseek_provider.DeepSeekProvider``
+# (DRF-280 / EPIC-P T2). Same env-var shape as ``OPENAI_API_KEY``; missing in
+# prod will silently 401 every DeepSeek call so injectors (CI / staging /
+# prod secret stores) MUST set it before the L5 router is configured to route
+# any traffic to ``deepseek``. Per DRF-279 spike: api.deepseek.com is
+# reachable from RU directly; ``DEEPSEEK_PROXY`` is intentionally separate
+# from ``OPENAI_PROXY`` (NO fallback) so routing the call through the OpenAI
+# proxy doesn't accidentally defeat the design goal of a direct-RU path.
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_PROXY = os.environ.get("DEEPSEEK_PROXY", "")
+
 # Phase 5 / KB-SYNC — shared HMAC-SHA256 secret for inbound webhooks from
 # the colleague's ``Shiro-Py/salon-knowledge`` service. The webhook view at
 # ``/api/v1/salon-knowledge/webhook/approved/`` rejects every request with

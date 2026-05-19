@@ -83,6 +83,25 @@ MODEL_PRICES: dict[str, tuple[Decimal, Decimal]] = {
     "claude-3-5-sonnet": (Decimal("0.00300"), Decimal("0.01500")),
     "claude-sonnet-3.5": (Decimal("0.00300"), Decimal("0.01500")),
     "claude-haiku": (Decimal("0.00080"), Decimal("0.00400")),
+    # --- DeepSeek completion (DRF-280 T2 / EPIC-P) ---
+    # Sourced from https://api-docs.deepseek.com/quick_start/pricing
+    # snapshot 2026-05-18. Aliases ``deepseek-chat`` and
+    # ``deepseek-reasoner`` deprecate on 2026-07-24 but are kept here
+    # so in-flight calls before that date cost-account correctly.
+    #
+    # NB: ``deepseek-v4-pro`` is under a 75%-off promotion until
+    # 2026-05-31 ($0.435 / $0.87 per 1M). After 2026-05-31 the regular
+    # tariff resumes at $1.74 / $3.48. We enter the REGULAR price here
+    # so the per-tenant cost cap is sized for the post-promo world —
+    # under-charging during the promo is benign; mis-sizing for the
+    # ×4 cliff would not be.
+    "deepseek-v4-flash": (Decimal("0.00014"), Decimal("0.00028")),
+    "deepseek-v4-pro": (Decimal("0.00174"), Decimal("0.00348")),
+    # Legacy aliases — map to the same prices as the v4 IDs they
+    # currently resolve to (per DeepSeek docs ``chat`` ≡ v4-flash
+    # non-thinking; ``reasoner`` ≡ v4-flash thinking).
+    "deepseek-chat": (Decimal("0.00014"), Decimal("0.00028")),
+    "deepseek-reasoner": (Decimal("0.00014"), Decimal("0.00028")),
 }
 
 

@@ -48,6 +48,27 @@ class TestKnownModels:
     def test_zero_tokens_zero_cost(self) -> None:
         assert compute_cost("gpt-4o", input_tokens=0, output_tokens=0) == Decimal("0")
 
+    def test_deepseek_v4_flash_combined(self) -> None:
+        # DRF-280 T2 / EPIC-P. v4-flash at $0.00014 / $0.00028 per 1k.
+        # 1000 input + 500 output: 0.00014 * 1 + 0.00028 * 0.5 = 0.00028
+        cost = compute_cost("deepseek-v4-flash", input_tokens=1000, output_tokens=500)
+        assert cost == Decimal("0.00028")
+
+    def test_deepseek_v4_pro_uses_regular_pricing(self) -> None:
+        # The 75%-off promo expires 2026-05-31; we enter REGULAR pricing
+        # in MODEL_PRICES so the cost cap is sized for the post-promo
+        # world. 1000 input + 500 output at $0.00174 / $0.00348 per 1k:
+        # 0.00174 * 1 + 0.00348 * 0.5 = 0.00174 + 0.00174 = 0.00348
+        cost = compute_cost("deepseek-v4-pro", input_tokens=1000, output_tokens=500)
+        assert cost == Decimal("0.00348")
+
+    def test_deepseek_legacy_aliases_match_v4_flash(self) -> None:
+        # ``deepseek-chat`` and ``deepseek-reasoner`` deprecate 2026-07-24;
+        # they currently resolve to v4-flash modes. Pricing must match so
+        # in-flight calls before the cutoff cost-account correctly.
+        assert MODEL_PRICES["deepseek-chat"] == MODEL_PRICES["deepseek-v4-flash"]
+        assert MODEL_PRICES["deepseek-reasoner"] == MODEL_PRICES["deepseek-v4-flash"]
+
 
 class TestUnknownModel:
     def test_unknown_model_raises(self) -> None:
