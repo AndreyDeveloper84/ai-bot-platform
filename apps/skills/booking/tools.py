@@ -1549,7 +1549,7 @@ def execute_reschedule(
     # dead, no new visit booked" outcome.
     _reschedule_correlation_id = eventbus_services.new_correlation_id()
     try:
-        _old_visit_iso = booking.visit_at.isoformat() if getattr(booking, "visit_at", None) else ""
+        _old_visit_iso = booking.visit_at.isoformat() if booking.visit_at else ""
         eventbus_services.emit_booking_rescheduled(
             booking_id=str(booking.pk),
             old_slot_start=_old_visit_iso,
