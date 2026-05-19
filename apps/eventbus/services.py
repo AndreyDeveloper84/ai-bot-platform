@@ -190,6 +190,71 @@ def emit_booking_attribution_assigned(
     )
 
 
+def emit_booking_cancelled(
+    *,
+    booking_id: str,
+    cancelled_by: str,
+    cancellation_reason: str,
+    cancelled_at: str,
+    actor_type: ActorType = "human",
+    actor_id: str | None = None,
+    actor_role: ActorRole | None = None,
+    correlation_id: str | None = None,
+    tenant: Any = None,
+) -> Envelope:
+    """Emit ``booking.cancelled`` — taxonomy §3.1.
+
+    ``cancelled_by`` is a free-text descriptor of the actor for the
+    audit payload (e.g., "customer", "admin", "system"). The typed
+    ``actor.*`` fields on the envelope carry the canonical identity.
+    """
+
+    return emit(
+        V.BOOKING_CANCELLED,
+        {
+            "booking_id": booking_id,
+            "cancelled_by": cancelled_by,
+            "cancellation_reason": cancellation_reason,
+            "cancelled_at": cancelled_at,
+        },
+        actor_type=actor_type,
+        actor_id=actor_id,
+        actor_role=actor_role,
+        correlation_id=correlation_id,
+        tenant=tenant,
+    )
+
+
+def emit_booking_rescheduled(
+    *,
+    booking_id: str,
+    old_slot_start: str,
+    new_slot_start: str,
+    rescheduled_by: str,
+    actor_type: ActorType = "human",
+    actor_id: str | None = None,
+    actor_role: ActorRole | None = None,
+    correlation_id: str | None = None,
+    tenant: Any = None,
+) -> Envelope:
+    """Emit ``booking.rescheduled`` — taxonomy §3.1."""
+
+    return emit(
+        V.BOOKING_RESCHEDULED,
+        {
+            "booking_id": booking_id,
+            "old_slot_start": old_slot_start,
+            "new_slot_start": new_slot_start,
+            "rescheduled_by": rescheduled_by,
+        },
+        actor_type=actor_type,
+        actor_id=actor_id,
+        actor_role=actor_role,
+        correlation_id=correlation_id,
+        tenant=tenant,
+    )
+
+
 def emit_customer_state_changed(
     *,
     customer_id: str,
