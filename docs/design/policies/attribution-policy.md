@@ -619,3 +619,75 @@ Current scale (50+ tenants × hundreds bookings) is fine with chunked iterator i
 ### 15.7 Race-safety perf (Q-PERF-1) — TRACKED
 
 `create_booking` view re-runs slot resolver as belt-and-suspenders against concurrent double-booking, costing 2-3 extra DB queries per POST. Right answer: DB-level `UNIQUE (master_id, visit_at) WHERE status='confirmed'` partial index (added concurrently, no lock). Add to Schedule S5 or separate perf ticket.
+
+---
+
+## 16. No-show billing rules (Q-NS13 RESOLVED — Option C proportional)
+
+Per [`customer-no-show-policy-ux §13`](./customer-no-show-policy-ux.md): confirmed no-show bookings bill proportionally to tenant policy mode (Option C — «процент salon recovery = процент billable»).
+
+### 16.1 Decision per tenant mode
+
+| Mode | `no_show_billing_factor` | Effective bill |
+|---|---|---|
+| Lenient | 0.0 | 0₽ (salon doesn't charge customer, platform doesn't bill salon) |
+| Standard | 0.5 | 50₽ on base 100₽ rate |
+| Firm | 1.0 | 100₽ (full bill — salon recovers via penalty) |
+| Deposit (forfeit collected) | 1.0 | 100₽ |
+| Deposit (no forfeit — admin waived) | 0.0 | 0₽ |
+| Strict | 1.0 | 100₽ |
+
+Supersedes §7 row #20 («as original, ✅ then refunded, Q12-c refund auto») which treated no-show as auto-refund. New behavior: NO automatic refund cascade on no-show; billing factor applied directly.
+
+### 16.2 booking_source preserved
+
+`booking_source` stays as original (last-touch rule unchanged). Customer's commitment was real, just unfulfilled. `ai_direct` no-show stays `ai_direct` for analytics; only `billable` flag and metadata change.
+
+### 16.3 `attribution_metadata` schema addition
+
+Added keys on confirmed no-show (per §4 conditional-keys pattern):
+
+```json
+{
+  "no_show_recorded": true,
+  "no_show_at": "ISO-8601 timestamp",
+  "tenant_policy_mode": "standard",
+  "no_show_billing_factor": 0.5,
+  "deposit_collected": false,
+  "deposit_amount": 0
+}
+```
+
+### 16.4 `billable` recomputation on no-show confirmation
+
+`BookingRequest.billable` set to `no_show_billing_factor > 0`. Billing system multiplies invoice line item by factor:
+
+```python
+def compute_billing_amount(booking, base_rate=100):
+    if not booking.billable:
+        return 0
+    factor = booking.attribution_metadata.get("no_show_billing_factor", 1.0)
+    return base_rate * factor
+```
+
+### 16.5 Founder-50 cohort signal (Q-NS14 RESOLVED — Option B)
+
+Per [`customer-no-show-policy-ux §13.3`](./customer-no-show-policy-ux.md): `FounderCohortReview` aggregation gains read-only `no_show_rate_in_cohort` per-customer field. NO auto-revoke, NO auto-threshold. Founder sees high-no-show cohort customers in Q12-δ review UI and decides per-case with audit reason.
+
+### 16.6 Tests required
+
+- `test_no_show_billing_factor_per_mode` — 5 modes × correct factor
+- `test_no_show_preserves_booking_source` — ai_direct stays ai_direct
+- `test_billable_recompute_on_no_show_confirmation` — flag flips correctly per factor
+- `test_attribution_metadata_no_show_keys_populated` — schema
+- `test_lenient_mode_no_billing` — 0₽ invoice line
+- `test_founder_cohort_no_show_rate_computed` — aggregation accuracy
+
+### 16.7 Edge case: dispute resolves «no-show was wrong»
+
+Customer disputes per [`customer-refund-dispute-ux §3.2`](./customer-refund-dispute-ux.md) NO_SHOW_MASTER type, admin agrees customer was actually present + master no-show'd → no_show flag removed:
+- `no_show_billing_factor` cleared
+- `billable` recomputed per booking's normal rules
+- `attribution_metadata.no_show_dispute_resolved_at` captured
+- Master earnings `NO_SHOW_PAYOUT` row reverses via adjustment_history per master-earnings §8.3
+- Standard `regular_visit` earning created if service was actually performed

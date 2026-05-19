@@ -362,26 +362,41 @@ If customer disputes no-show classification §12 → deposit held until resoluti
 
 ### 7.1 No-show booking earnings (per `master-earnings §8.2` extension)
 
-| Tenant policy | Master's no-show earning |
-|---|---|
-| Lenient | 0 (master absorbs time loss; salon doesn't claw, doesn't pay) |
-| Standard | 50% of master_share (salon covers half; protects against complete loss) |
-| Firm | 100% of master_share (salon covers fully) |
-| Deposit (deposit collected) | 50% (deposit funds half) |
-| Strict | 100% + late-cancellation also pays master |
+| Tenant policy | `no_show_coverage_percent` | Master's no-show payout |
+|---|---|---|
+| Lenient | 0 | 0 (master absorbs time loss; salon doesn't claw, doesn't pay) |
+| Standard | 50 | 50% of `service_price × commission_percent_applied / 100` |
+| Firm | 100 | 100% of `service_price × commission_percent_applied / 100` |
+| Deposit (deposit collected) | 50 | 50% (deposit funds half) |
+| Strict | 100 | 100% + late-cancellation also pays master |
 
 Configurable per tenant; admin sees per-master no-show earnings preview.
 
-### 7.2 New `MasterEarning` row for no-show
+### 7.2 New `MasterEarning` event_type — `NO_SHOW_PAYOUT` (Q-NS11 RESOLVED — Option A)
 
-```
-event_type = NO_SHOW_PAYOUT (new type)
-booking → linked
-master_share = per tenant policy table §7.1
-note = "No-show salon-side coverage"
-```
+Per Q-NS11 resolved decisions (sub-options A on all 4):
 
-Per Q-NS11: requires `master-earnings-handoff §11.3` extension — add NO_SHOW_PAYOUT event type.
+1. **Idempotency:** unique constraint on `(master, booking, event_type='no_show_payout')` — one no-show = one payout regardless of retry. Same pattern as REFUND_REVOKE in loyalty.
+
+2. **Booking FK retained:** booking remains in DB with `status='no_show'`. `MasterEarning` row references it. Required for audit + dispute path.
+
+3. **Full fields populated:** record nominal `service_price` + `commission_percent_applied` (as if service performed) + new field `no_show_coverage_percent` (0/50/100). Master sees breakdown in Mini App «Доход» — full transparency:
+   ```
+   total_master_amount = service_price
+                       × commission_percent_applied
+                       × no_show_coverage_percent
+                       / 10000
+   ```
+   Lenient mode creates the row with `total_master_amount=0` (still tracked for audit + master sees «не пришёл клиент, оплата 0»).
+
+4. **Post-cycle no-show:** if payout created AFTER cycle closes, applies via same machinery as refund claw-back per [`master-earnings §8.3`](../handoffs/2026-05-19-master-earnings-handoff.md): «корректировка прошлого периода» line in current cycle. NO bank-claim from master (consistent with refund flow §8.4).
+
+5. **Tip handling:** no-show + tip impossible (tip requires customer present). `tip_amount` and `tip_master_share` are always 0 for no-show rows.
+
+Requires `master-earnings-handoff §11.3` model extension:
+- Add `event_type` field (was implicit «earn from booking»; now explicit: `regular_visit | no_show_payout | refund_revoke | manual_adjust`)
+- Add `no_show_coverage_percent` field
+- Add unique constraint `(master, booking, event_type)`
 
 ### 7.3 No-show doesn't affect master review aggregate
 Per §master-reviews — only completed bookings can have reviews. No-show = no review.
@@ -565,21 +580,56 @@ Refund-dispute flow handles. If dispute resolves in customer's favor → no-show
 
 ---
 
-## 13. Attribution policy interaction
+## 13. Attribution policy interaction (Q-NS13 RESOLVED — Option C proportional)
 
-### 13.1 No-show booking is NOT a refunded booking
+### 13.1 No-show billing factor per tenant mode
 
-Per [`attribution-policy.md`](./attribution-policy.md): no-show booking still counts as `ai_direct` (or whatever original source) — customer's commitment was real, just unfulfilled.
+Per Q-NS13 resolved decision (Option C — proportional):
 
-`billable` remains true UNLESS tenant policy = lenient (no charge ever). Per Q-NS13.
+| Mode | `no_show_billing_factor` | Effective bill per booking (base 100₽) |
+|---|---|---|
+| Lenient | 0.0 | 0₽ (salon absorbs entirely; platform doesn't bill) |
+| Standard | 0.5 | 50₽ (salon recovers half; platform bills half) |
+| Firm | 1.0 | 100₽ (full bill — salon recovers fully via penalty) |
+| Deposit (forfeit collected) | 1.0 | 100₽ |
+| Deposit (no forfeit — admin waived) | 0.0 | 0₽ |
+| Strict | 1.0 | 100₽ |
 
-### 13.2 `attribution_metadata` update
+Rationale: «процент salon recovery = процент billable». Customer didn't receive value, but if salon recovers via penalty / deposit, attribution proportionally bills. Lenient tenants don't charge → platform doesn't either.
 
-`{ "no_show_recorded": true, "no_show_at": "...", "tenant_policy": "standard" }`
+`booking_source` stays as original (`ai_direct` if AI created booking) — customer's commitment was real, just unfulfilled. Last-touch source rule unchanged.
 
-### 13.3 Founder-50 cohort
+### 13.2 `attribution_metadata` update on confirmed no-show
 
-No-show rate per cohort customer tracked. High no-show rate may invalidate billing-attribution per Q12-δ founder review. Per Q-NS14 — pre-deploy verify.
+```json
+{
+  "no_show_recorded": true,
+  "no_show_at": "2026-05-19T14:25:00Z",
+  "tenant_policy": "standard",
+  "no_show_billing_factor": 0.5,
+  "deposit_collected": false,
+  "deposit_amount": 0
+}
+```
+
+`billable` field on `BookingRequest` updated to `no_show_billing_factor > 0`. Billing system multiplies base rate by factor when generating invoice line item.
+
+### 13.3 Founder-50 cohort no-show signal (Q-NS14 RESOLVED — Option B signal-only)
+
+Per Q-NS14 resolved decision (Option B — signal to founder, no auto-action):
+
+- Per-cohort-customer `no_show_rate_in_cohort` computed metric added to `FounderCohortReview` aggregation
+- Founder sees in Q12-δ review UI: «cohort customer Мария И. has 70% no-show rate (7 of 10)»
+- NO auto-revoke from cohort
+- NO auto-invalidate of billable flag
+- Founder may decide per-customer to adjust attribution manually with audit reason
+
+Rationale:
+- Auto-revoke breaks customer trust («you're out because of pattern»)
+- Hard threshold poorly handles edge cases (medical, life events, force majeure)
+- Existing Q12-δ founder review process is the right place for nuanced decisions
+
+Implementation: `FounderCohortReview` (existing per attribution-extensible-model memory) gets computed read-only field. No new auto-action logic.
 
 ---
 
@@ -853,10 +903,10 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.17 no-show domain` (NEW):
 | **Q-NS8** | Master flag-no-show + admin reject — same dispute path? | YES — admin clearly says «no, customer was there»; master sees rejection in internal-admin-chat. | Policy | 🟢 |
 | **Q-NS9** | Reschedule from within-cancel-window — grace? | YES per §5.3. Reschedule within 14 days = no penalty. Encourages retention vs cancellation. | UX + Policy | 🟡 |
 | **Q-NS10** | Deposit default ON or OFF? | OFF MVP. Tenant opts in. | PM | 🟢 |
-| **Q-NS11** | Master earnings event type — extend master-earnings? | YES — add NO_SHOW_PAYOUT event type to master-earnings models §11.3. Coordinate with master-earnings steward. | Eng + Policy | 🔴 PRE-DEPLOY |
+| **Q-NS11** | Master earnings event type — extend master-earnings? | ✅ **RESOLVED** — Option A on all 4 sub-questions per §7.2: idempotency key `(master, booking, no_show_payout)`, booking FK retained, full fields populated with `no_show_coverage_percent` field, post-cycle uses claw-back machinery. Master-earnings §11.3 extended. | Eng + Policy | ✅ |
 | **Q-NS12** | Deposit refund SLA — 5 days? | YES MVP. Card processor norm. | Eng | 🟢 |
-| **Q-NS13** | Attribution policy on no-show booking — billable? | Lenient → false; standard/firm/deposit/strict → true. Per §13.1. | Attribution + Policy | 🔴 PRE-DEPLOY |
-| **Q-NS14** | Founder-50 cohort no-show rate threshold for billing dispute? | Per Q12-δ founder review. > 25% cohort no-show invalidates billing attribution? Need explicit threshold. | Founder | 🔴 PRE-DEPLOY |
+| **Q-NS13** | Attribution policy on no-show booking — billable? | ✅ **RESOLVED** — Option C proportional per §13.1. `no_show_billing_factor`: Lenient 0.0 / Standard 0.5 / Firm 1.0 / Deposit-forfeit 1.0 / Deposit-waived 0.0 / Strict 1.0. Billing multiplies base by factor. | Attribution + Policy | ✅ |
+| **Q-NS14** | Founder-50 cohort no-show rate threshold for billing dispute? | ✅ **RESOLVED** — Option B signal-only per §13.3. No auto-threshold, no auto-revoke. `no_show_rate_in_cohort` exposed to founder Q12-δ review UI; founder decides per-customer with audit reason. | Founder | ✅ |
 | **Q-NS15** | Multi-tenant customer pattern — per-tenant only? | Per-tenant strictly per §2.8 + Q-CO5. | Privacy | 🟢 |
 | **Q-NS16** | Customer who disputes no-show — admin auto-review or only refund-dispute path? | Customer initiates dispute → routes through refund-dispute flow §12. Admin reviews same channel. | Policy | 🟢 |
 | **Q-NS17** | Force majeure — customer can self-report without dispute? | Customer can write «срочно, болезнь» in dispute submission. Admin discretion to waive penalty. Audit captures. | Policy | 🟡 |
@@ -915,10 +965,10 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.17 no-show domain` (NEW):
 | Booking backend lead | ☐ | |
 | Mini App frontend (customer + admin + master decisions) | ☐ | |
 | AI prompt eng (8 Bot DM templates) | ☐ | |
-| Master-earnings steward (Q-NS11 NO_SHOW_PAYOUT event type extension) | ☐ | 🔴 PRE-DEPLOY |
+| Master-earnings steward (Q-NS11 ✅ resolved Option A; verify §11.3 extension implemented) | ☐ | |
 | Refund-dispute steward (§12 integration) | ☐ | |
-| Attribution steward (§13 Q-NS13) | ☐ | 🔴 PRE-DEPLOY |
-| Founder (Q-NS14 cohort threshold + 5 tenant policy mode review) | ☐ | 🔴 PRE-DEPLOY |
+| Attribution steward (Q-NS13 ✅ resolved Option C proportional factor; verify billing system multiplies by `no_show_billing_factor`) | ☐ | |
+| Founder (Q-NS14 ✅ resolved Option B signal-only; verify `no_show_rate_in_cohort` exposed in Q12-δ review UI; 5 tenant policy mode review) | ☐ | |
 | Privacy / Legal (§2.8 per-tenant pattern + Russia consumer-protection deposits) | ☐ | 🔴 PRE-DEPLOY |
 | Notification-controls steward (Bot DM channel + quiet hours integration) | ☐ | |
 | Accessibility (WCAG 2.2 AA) | ☐ | |
