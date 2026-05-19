@@ -203,3 +203,43 @@ class TestTierChangedMetadata:
         assert latest.metadata["cutoff_days"] == INACTIVITY_HARD_DOWNGRADE_DAYS
         assert latest.metadata["old_tier"] == "regular"
         assert latest.metadata["new_tier"] == "starter"
+
+
+class TestSingleEmit:
+    """Hotfix B retro review #5: confirm inactivity downgrade emits
+    customer.tier.changed EXACTLY ONCE per account transition.
+
+    Before Hotfix B, both `recompute_tier` and the outer task emitted,
+    so subscribers saw 2 envelopes per flip — UI would show «вы стали
+    Стартовым» twice.
+    """
+
+    def test_exactly_one_customer_tier_changed_per_account(self, tenant, customer, service):
+        from apps.eventbus.models import DomainEvent
+
+        account = _earn_regular_tier(tenant, customer, service)
+        _backdate_all_visits(account, days_ago=400)
+
+        before = DomainEvent.objects.filter(event_name="customer.tier.changed").count()
+        apply_inactivity_downgrades()
+        after = DomainEvent.objects.filter(event_name="customer.tier.changed").count()
+
+        # +1 per account flipped, not +2.
+        assert after - before == 1
+
+    def test_envelope_carries_inactivity_reason(self, tenant, customer, service):
+        from apps.eventbus.models import DomainEvent
+
+        account = _earn_regular_tier(tenant, customer, service)
+        _backdate_all_visits(account, days_ago=400)
+        apply_inactivity_downgrades()
+
+        ev = (
+            DomainEvent.objects.filter(event_name="customer.tier.changed")
+            .order_by("-occurred_at")
+            .first()
+        )
+        assert ev is not None
+        assert ev.data["reason"] == "inactivity_hard_downgrade"
+        assert ev.data["old_tier"] == "regular"
+        assert ev.data["new_tier"] == "starter"

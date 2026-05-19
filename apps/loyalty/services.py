@@ -805,6 +805,8 @@ def recompute_tier(
     *,
     trigger_event_id: str | None = None,
     correlation_id: str | None = None,
+    extra_metadata: dict | None = None,
+    reason_override: str | None = None,
 ) -> str | None:
     """Derive the account's current tier and persist if it changed.
 
@@ -813,22 +815,24 @@ def recompute_tier(
         caused this recompute (carried into the TIER_CHANGED metadata
         for forensic linking).
       correlation_id: optional ULID for cross-bus correlation.
+      extra_metadata: caller-supplied keys merged into the TIER_CHANGED
+        row's metadata at write time (single atomic INSERT — replaces
+        the post-write backfill pattern, see Hotfix B retro).
+      reason_override: replaces the auto-built reason string in BOTH
+        the LoyaltyEvent row and the eventbus envelope. Used by
+        inactivity downgrade to carry «inactivity_hard_downgrade»
+        through the single emit (caller no longer re-emits).
 
     Returns:
-      The new tier value when it changed, OR None for a no-op
-      recompute (most calls are no-ops — only every 4th and 12th
-      visit cross a threshold).
+      The new tier value when it changed, OR None for a no-op recompute.
 
     Side effects on change:
       - LoyaltyAccount.tier + tier_changed_at updated
-      - LoyaltyEvent (TIER_CHANGED, points_delta=0, metadata={old, new})
-      - customer.tier.changed envelope emitted on the domain bus
+      - LoyaltyEvent (TIER_CHANGED, points_delta=0, full metadata)
+      - customer.tier.changed envelope emitted ONCE on the domain bus
       - Audit log row
 
     Concurrency: per-account select_for_update inside transaction.atomic.
-    Two concurrent EARN_VISIT calls won't double-fire TIER_CHANGED — the
-    second one re-derives off the already-updated tier and finds nothing
-    to change.
     """
 
     from apps.eventbus import services as eventbus_services
@@ -847,9 +851,30 @@ def recompute_tier(
         locked.tier_changed_at = now
         locked.save(update_fields=["tier", "tier_changed_at", "updated_at"])
 
-        reason = (
-            f"visits={metrics.visit_count} ltv={metrics.ltv_rub}₽ crossed {old_tier}→{new_tier}"
-        )
+        # Build the canonical reason; caller may override (inactivity path).
+        # Truncated to LoyaltyEvent.reason max_length so a defensive override
+        # from a future caller can't cause DataError at INSERT time.
+        if reason_override is not None:
+            reason = reason_override[:200]
+        else:
+            reason = (
+                f"visits={metrics.visit_count} ltv={metrics.ltv_rub}₽ crossed {old_tier}→{new_tier}"
+            )
+
+        # Hotfix B (retro review #6): merge caller-supplied extra metadata
+        # into the TIER_CHANGED row at write time — atomic, no race with
+        # concurrent recomputes that previously could land between this
+        # write and the backfill update.
+        tier_metadata: dict = {
+            "old_tier": old_tier,
+            "new_tier": new_tier,
+            "visit_count": metrics.visit_count,
+            "ltv_rub": metrics.ltv_rub,
+            "trigger_event_id": trigger_event_id or "",
+        }
+        if extra_metadata:
+            tier_metadata.update(extra_metadata)
+
         LoyaltyEvent.objects.create(
             tenant=locked.tenant,
             account=locked,
@@ -857,16 +882,12 @@ def recompute_tier(
             points_delta=0,
             balance_after=locked.balance,
             reason=reason,
-            metadata={
-                "old_tier": old_tier,
-                "new_tier": new_tier,
-                "visit_count": metrics.visit_count,
-                "ltv_rub": metrics.ltv_rub,
-                "trigger_event_id": trigger_event_id or "",
-            },
+            metadata=tier_metadata,
         )
 
-    # Emit AFTER commit so subscribers see the row.
+    # Emit AFTER commit so subscribers see the row. The reason carried
+    # here is the same one in the TIER_CHANGED metadata — single emit
+    # per transition, no duplicate even when caller overrides reason.
     try:
         eventbus_services.emit_customer_tier_changed(
             customer_id=str(account.customer_id),
@@ -945,8 +966,6 @@ def apply_inactivity_downgrades(
 
     from django.db.models import Max, Q
 
-    from apps.eventbus import services as eventbus_services
-
     if now is None:
         now = timezone.now()
     cutoff = now - timedelta(days=INACTIVITY_HARD_DOWNGRADE_DAYS)
@@ -966,50 +985,33 @@ def apply_inactivity_downgrades(
 
     for account in candidates:
         old_tier = account.tier
-        # Stamp the floor BEFORE recompute so _effective_visit_count
-        # sees count=0 and derives STARTER.
+        # Stamp the floor BEFORE recompute so _effective_metrics sees
+        # count=0 and derives STARTER.
         LoyaltyAccount.all_tenants.filter(pk=account.pk).update(tier_reset_at=now)
-        account.tier_reset_at = now  # in-memory for recompute_tier's audit
+        account.tier_reset_at = now  # in-memory for recompute_tier
 
-        # recompute_tier writes TIER_CHANGED + emits envelope + audit.
-        # Pass a synthetic correlation_id derived from the run so all
-        # downgrades in one beat tick share a trail.
-        result = recompute_tier(account, trigger_event_id="inactivity_hard_downgrade")
+        # Hotfix B (retro review #5 + #6): pass inactivity-trigger
+        # metadata + reason via recompute_tier kwargs so:
+        #   - the TIER_CHANGED row carries the trigger atomically
+        #     (no post-write backfill race)
+        #   - the customer.tier.changed envelope fires EXACTLY ONCE
+        #     with the inactivity reason (no duplicate outer emit)
+        result = recompute_tier(
+            account,
+            trigger_event_id="inactivity_hard_downgrade",
+            extra_metadata={
+                "trigger": "inactivity_hard_downgrade",
+                "cutoff_days": INACTIVITY_HARD_DOWNGRADE_DAYS,
+            },
+            reason_override="inactivity_hard_downgrade",
+        )
         if result is not None:
             counters["downgraded"] += 1
-            # Augment the just-written TIER_CHANGED event metadata with
-            # the inactivity flag — recompute_tier doesn't know the
-            # caller's intent. Backfill via update on the latest row.
-            latest = (
-                LoyaltyEvent.all_tenants.filter(
-                    account=account,
-                    event_type=LoyaltyEvent.EventType.TIER_CHANGED,
-                )
-                .order_by("-occurred_at")
-                .first()
-            )
-            if latest is not None:
-                latest.metadata["trigger"] = "inactivity_hard_downgrade"
-                latest.metadata["cutoff_days"] = INACTIVITY_HARD_DOWNGRADE_DAYS
-                latest.save(update_fields=["metadata"])
             logger.info(
                 "loyalty.inactivity.hard_downgrade account=%s %s→starter",
                 account.pk,
                 old_tier,
             )
-            # Re-emit customer.tier.changed with the inactivity reason for
-            # downstream subscribers (UI «вы стали Стартовым после долгого
-            # перерыва» messaging).
-            try:
-                eventbus_services.emit_customer_tier_changed(
-                    customer_id=str(account.customer_id),
-                    old_tier=old_tier,
-                    new_tier=result,
-                    reason="inactivity_hard_downgrade",
-                    tenant=account.tenant,
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("loyalty.inactivity.emit_failed account=%s", account.pk)
         else:
             counters["skipped"] += 1
 
