@@ -75,6 +75,12 @@ LOCAL_APPS = [
     # webhook live in apps.integrations.yookassa; the buy_certificate
     # LLM tool wiring lives in apps.skills.booking.
     "apps.orders",
+    # 2026-05-19 — domain event bus (Postgres outbox per Q-EV-IMPL3).
+    # Distinct from apps.events (analytics, snake_case, sync fanout):
+    # apps.eventbus carries dot.notation domain events per
+    # docs/design/policies/event-taxonomy.md §3 catalog. Two-bus
+    # architecture by design — see memory two-bus-event-architecture.
+    "apps.eventbus",
 ]
 
 INSTALLED_APPS = [
