@@ -1,10 +1,14 @@
 # Master Offboarding / Termination — Engineering Handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — master separations happen weekly across portfolio; need clean termination flow
-**Reads:** [`./2026-05-19-master-substitution-handoff.md`](./2026-05-19-master-substitution-handoff.md), [`./2026-05-19-master-time-off-handoff.md`](./2026-05-19-master-time-off-handoff.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`../policies/single-assistant-identity.md`](../policies/single-assistant-identity.md), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/tenant-as-provider-model.md`](../policies/tenant-as-provider-model.md), [`./2026-05-19-master-substitution-handoff.md`](./2026-05-19-master-substitution-handoff.md), [`./2026-05-19-master-time-off-handoff.md`](./2026-05-19-master-time-off-handoff.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md) (r2), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
 
 > Master leaves the salon. Could be voluntary (new job, moving city), mutual (career change), or terminated (admin decision). Either way: existing bookings, customer relationships, earnings settlement, reviews, master's data — all need clean closure with audit. No silent removals, no customer surprises, no orphaned bookings.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master offboarding is **Ayla Pro** tenant-side per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md). Customer-facing reassignment uses Ayla voice — neutral «{{master}} больше не работает в {{salon_name}}», never reveals reason. For-cause termination invokes emergency fallback per [`ayla-emergency-fallback-policy §6`](../policies/ayla-emergency-fallback-policy.md) founder review when sensitive. Deprecated refs preserved as backend mechanic.
 
 ---
 

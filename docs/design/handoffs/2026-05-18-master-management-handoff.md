@@ -2,12 +2,16 @@
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-05-18 r1 |
+| **Date** | 2026-05-19 r2 (Ayla-first voice-sweep) |
 | **Designer** | UX-architect skill |
 | **Status** | Draft for review |
-| **Surfaces** | Web dashboard (primary, desktop-first for table density) + MAX Mini App (parity, mobile-friendly) + MAX manager-bot DMs (invite delivery + master change-request approvals) |
-| **Scope** | Owner-side UI for managing the salon's roster: add/invite, list, detail/edit, services mapping, deactivation/reactivation, audit |
-| **Auth** | Role-gated per [`conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md) §4 — Owner full, Admin most operations, Receptionist read-only, Master own-only |
+| **Surfaces** | Ayla Pro web dashboard (primary, desktop-first) + Ayla Pro Mini App (parity, mobile) + manager-bot DMs (invite delivery + change-request approvals) |
+| **Scope** | Tenant-side UI for managing salon's roster: add/invite, list, detail/edit, services mapping, deactivation/reactivation, audit |
+| **Auth** | Role-gated per [`tenant-as-provider-model §2.10`](../policies/tenant-as-provider-model.md) (replaces conversation-ownership-policy §4 deprecated 2026-05-19) — Owner full, Admin most operations, Receptionist read-only, Master own-only |
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master management is **Ayla Pro** (tenant's provider tool per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md)) — admin operates in admin UI, not Ayla customer chat. Permissions matrix moved to tenant-as-provider §2.10. References to deprecated `conversation-ownership-policy.md` preserved as backend mechanic for engineering reference.
 | **Screens** | 5 (MM1 list · MM2 add modal · MM3 detail · MM4 services-master matrix · MM5 deactivation flow) |
 | **Critical for** | Operational integrity — every onboarding, every customer-flow, every bot suggestion depends on a correctly populated master roster |
 | **Anti-pattern** | This doc DOES NOT design schedule editing (see Schedule Management) nor master's own profile (see Master Mobile §M4) nor master analytics (see Analytics with master filter) |

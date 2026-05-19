@@ -1,10 +1,14 @@
 # Master Substitution / Long-Term Handover — Engineering Handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking for masters who take 30+ day leave (maternity, surgery, extended vacation, sabbatical)
-**Reads:** [`./2026-05-19-master-time-off-handoff.md`](./2026-05-19-master-time-off-handoff.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md), [`../policies/single-assistant-identity.md`](../policies/single-assistant-identity.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/ayla-memory-and-personalization.md`](../policies/ayla-memory-and-personalization.md), [`../policies/tenant-as-provider-model.md`](../policies/tenant-as-provider-model.md), [`./2026-05-19-master-time-off-handoff.md`](./2026-05-19-master-time-off-handoff.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md) (r2), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
 
 > Time-off-handoff covers leave ≤ 30 days. Long-term absence (30-180 days) is a different beast: customer relationships transfer, master's preference-data could leak between masters, returning master needs «catch-up» context. This handoff handles 30-180 day Substitution. Beyond 180 days = effective separation per offboarding-handoff (doc #5).
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master substitution is **Ayla Pro** tenant-side per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md). Customer's Ayla memory (10-layer wellness profile) NEVER inherited by substitute master per [`ayla-memory-and-personalization §9.3`](../policies/ayla-memory-and-personalization.md) — only scoped service context. Customer-facing rebooking uses Ayla voice. Deprecated refs preserved as backend mechanic.
 
 ---
 
