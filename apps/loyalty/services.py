@@ -1,0 +1,252 @@
+"""Loyalty service-layer helpers.
+
+Three entry points cover Phase 1.a needs:
+
+  * :func:`get_or_create_account` — lazy upsert when a customer first
+    earns or redeems. No migration step for new customers.
+  * :func:`credit_points` — append a positive event + bump balance.
+    Idempotent on (account, EARN_VISIT, booking) — the subscriber's
+    safety net against eventbus retries.
+  * :func:`redeem_points` — append a negative event with bounds:
+    ≥ MIN_REDEMPTION, ≤ floor balance, ≤ cap of visit price.
+
+### Why service-layer, not model methods
+
+- Each operation writes LoyaltyEvent + bumps account.balance in one
+  transaction. That's a unit-of-work — service-layer concern.
+- Anti-abuse rules (≥50 min, ≤30% cap) live here so future Owner
+  config (Q-L4 → §10.3) can override them per tenant without
+  touching the model.
+
+### Audit
+
+Every points mutation also writes an :class:`apps.audit.AuditLog`
+row. Loyalty disputes are billing-grade — the audit trail and the
+event log are both required for forensic defensibility.
+
+### Idempotency
+
+``credit_points`` for ``EARN_VISIT`` uses ``get_or_create`` on the
+``(account, event_type=earn_visit, booking)`` key — guarded by the
+:class:`LoyaltyEvent`'s partial unique constraint. A second invocation
+with the same booking quietly returns the existing row without
+double-counting.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from django.db import transaction
+from django.utils import timezone
+
+from apps.audit.services import write_audit
+from apps.loyalty.models import LoyaltyAccount, LoyaltyEvent
+from apps.tenancy.context import current_tenant
+
+if TYPE_CHECKING:
+    from apps.booking.models import BookingRequest
+    from apps.identity.models import BotUser
+
+logger = logging.getLogger(__name__)
+
+# Anti-abuse parameters (handoff §5 «Redemption rules»).
+# Future Owner config will override per tenant; constants here are the
+# platform defaults.
+MIN_REDEMPTION_POINTS = 50
+REDEMPTION_CAP_PERCENT = 30  # of visit_price_rub
+
+
+def get_or_create_account(customer: "BotUser") -> LoyaltyAccount:
+    """Lazy upsert of a LoyaltyAccount for ``customer``.
+
+    Reads ``current_tenant()`` from ContextVar; caller must enter
+    ``tenant_scope(t)`` first. ValueError if no tenant.
+
+    The account starts with ``balance=0, enrolled=True`` (per Q-L5
+    automatic enrollment).
+    """
+
+    tenant = current_tenant()
+    if tenant is None:
+        raise ValueError("loyalty.get_or_create_account requires a tenant in scope.")
+
+    account, _created = LoyaltyAccount.objects.get_or_create(
+        customer=customer,
+        defaults={"tenant": tenant, "balance": 0, "enrolled": True},
+    )
+    return account
+
+
+def credit_points(
+    account: LoyaltyAccount,
+    *,
+    points: int,
+    event_type: str,
+    reason: str = "",
+    booking: "BookingRequest | None" = None,
+    metadata: dict | None = None,
+) -> LoyaltyEvent | None:
+    """Credit positive points to ``account`` and append a LoyaltyEvent.
+
+    Args:
+      points: positive integer. Caller computes per earning rules
+              (handoff §4).
+      event_type: one of :class:`LoyaltyEvent.EventType` earn values.
+      reason: human-readable note for the event row + audit log.
+      booking: source BookingRequest for EARN_VISIT idempotency.
+      metadata: implementation tags (correlation_id, calc breakdown).
+
+    Returns:
+      The created LoyaltyEvent, OR None when the credit was a no-op
+      because (a) account opted out (Q-L12), or (b) idempotency hit —
+      this booking already earned (EARN_VISIT path).
+
+    Notes:
+      The mutation happens inside ``transaction.atomic`` with row-level
+      locking on the account — concurrent earners on the same account
+      serialize correctly.
+    """
+
+    if points <= 0:
+        raise ValueError(f"credit_points needs positive points, got {points}")
+
+    metadata = metadata or {}
+
+    if account.opted_out_at is not None or not account.enrolled:
+        logger.info(
+            "loyalty.credit.skipped_opt_out account=%s type=%s",
+            account.pk,
+            event_type,
+        )
+        return None
+
+    # Idempotency: for EARN_VISIT, the (account, type, booking) triple is
+    # the natural dedup key. A retry of the same booking.completed envelope
+    # finds the row and returns it without bumping balance.
+    if event_type == LoyaltyEvent.EventType.EARN_VISIT and booking is not None:
+        existing = LoyaltyEvent.all_tenants.filter(
+            account=account,
+            event_type=LoyaltyEvent.EventType.EARN_VISIT,
+            booking=booking,
+        ).first()
+        if existing is not None:
+            logger.info(
+                "loyalty.credit.idempotent_replay account=%s booking=%s",
+                account.pk,
+                booking.pk,
+            )
+            return None
+
+    with transaction.atomic():
+        locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=account.pk)
+        new_balance = locked.balance + points
+        event = LoyaltyEvent.objects.create(
+            tenant=locked.tenant,
+            account=locked,
+            event_type=event_type,
+            points_delta=points,
+            balance_after=new_balance,
+            reason=reason[:200],
+            booking=booking,
+            metadata=metadata,
+        )
+        locked.balance = new_balance
+        locked.save(update_fields=["balance", "updated_at"])
+
+    write_audit(
+        action=f"loyalty.{event_type}",
+        target="LoyaltyAccount",
+        target_id=account.pk,
+        payload={
+            "points_delta": points,
+            "balance_after": new_balance,
+            "reason": reason[:80],
+            "booking_id": str(booking.pk) if booking else None,
+        },
+    )
+    return event
+
+
+def redeem_points(
+    account: LoyaltyAccount,
+    *,
+    points: int,
+    visit_price_rub: int,
+    booking: "BookingRequest",
+    reason: str = "",
+) -> LoyaltyEvent:
+    """Redeem ``points`` against a booking. Returns the LoyaltyEvent.
+
+    Bounds (handoff §5):
+      - ``points`` must be ≥ :data:`MIN_REDEMPTION_POINTS`
+      - ``points`` must be ≤ account.balance (no negative balance)
+      - ``points`` must be ≤ floor(visit_price_rub × CAP%) — 30% default
+
+    Raises:
+      ValueError: any bound violated. Caller decides the user-facing
+        message (Mini App preview endpoint owns the UX text).
+    """
+
+    if account.opted_out_at is not None or not account.enrolled:
+        raise ValueError("loyalty: account opted out of program")
+    if points < MIN_REDEMPTION_POINTS:
+        raise ValueError(f"loyalty: minimum redemption is {MIN_REDEMPTION_POINTS} points")
+    if points > account.balance:
+        raise ValueError(f"loyalty: insufficient balance ({account.balance})")
+    max_allowed = visit_price_rub * REDEMPTION_CAP_PERCENT // 100
+    if points > max_allowed:
+        raise ValueError(
+            f"loyalty: redemption capped at {max_allowed} points "
+            f"({REDEMPTION_CAP_PERCENT}% of {visit_price_rub} ₽)"
+        )
+
+    with transaction.atomic():
+        locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=account.pk)
+        new_balance = locked.balance - points
+        event = LoyaltyEvent.objects.create(
+            tenant=locked.tenant,
+            account=locked,
+            event_type=LoyaltyEvent.EventType.REDEEM,
+            points_delta=-points,
+            balance_after=new_balance,
+            reason=reason[:200] or f"redeemed against booking {booking.pk}",
+            booking=booking,
+            metadata={"visit_price_rub": visit_price_rub},
+        )
+        locked.balance = new_balance
+        locked.save(update_fields=["balance", "updated_at"])
+
+    write_audit(
+        action="loyalty.redeem",
+        target="LoyaltyAccount",
+        target_id=account.pk,
+        payload={
+            "points_delta": -points,
+            "balance_after": new_balance,
+            "booking_id": str(booking.pk),
+            "visit_price_rub": visit_price_rub,
+        },
+    )
+    return event
+
+
+def opt_out(account: LoyaltyAccount) -> None:
+    """Customer opt-out per Q-L12. Stops accrual, retains balance.
+
+    Existing points stay redeemable until the customer explicitly
+    forfeits or the tenant disables redemption.
+    """
+
+    if account.opted_out_at is not None:
+        return  # already out
+    account.opted_out_at = timezone.now()
+    account.enrolled = False
+    account.save(update_fields=["enrolled", "opted_out_at", "updated_at"])
+    write_audit(
+        action="loyalty.opt_out",
+        target="LoyaltyAccount",
+        target_id=account.pk,
+        payload={"balance_at_opt_out": account.balance},
+    )
