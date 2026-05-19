@@ -32,6 +32,9 @@ CUSTOMER_CONSENT_CHANGED = "customer.consent.changed"
 CUSTOMER_OPTED_OUT = "customer.opted_out"
 CUSTOMER_DELETED_REQUEST = "customer.deleted_request"
 
+# ── §3.10 Admin / System domain (Phase 2.2 — DLQ + health) ────────────
+SYSTEM_MODULE_HEALTH_DEGRADED = "system.module.health.degraded"
+
 # ── §3.3 Master domain ────────────────────────────────────────────────
 MASTER_INVITED = "master.invited"
 MASTER_INVITE_ACCEPTED = "master.invite.accepted"
@@ -82,6 +85,8 @@ PAYLOAD_REQUIRED_KEYS: dict[str, frozenset[str]] = {
     MASTER_UNARCHIVED: frozenset({"master_id", "unarchived_by"}),
     MASTER_SERVICE_ADDED: frozenset({"master_id", "service_id", "added_by"}),
     MASTER_SERVICE_REMOVED: frozenset({"master_id", "service_id", "removed_by"}),
+    # §3.10 System
+    SYSTEM_MODULE_HEALTH_DEGRADED: frozenset({"module_name", "severity", "metric"}),
 }
 
 

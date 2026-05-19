@@ -1,6 +1,6 @@
 # Event Taxonomy — canonical event names + payload contract
 
-**Date:** 2026-05-19 r2
+**Date:** 2026-05-19 r3
 **Status:** Foundational — locks event names + envelope structure across all modules
 **Reads:** [`attribution-policy.md`](./attribution-policy.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`core-wellness-profile.md`](./core-wellness-profile.md)
 
@@ -588,20 +588,22 @@ apps/eventbus/ Phase 2.1 shipped 2026-05-19. Five deviations from the as-designe
 
 **Risk**: developer hits unexpected REJECT in production and event is lost. Mitigation: PII heuristics are conservative (forbidden key list + phone-with-+-prefix value heuristic + email regex); false positives unlikely on well-shaped payloads. Documented in test suite (`tests/test_validation.py::TestLintPii`).
 
-### 18.5 Dead-letter = forever-pending row, no separate queue — DEFERRED
+### 18.5 Dead-letter — RESOLVED (Phase 2.2 PR-A)
 
-**Deviation**: §5 mentions a dead-letter queue with engineering alerting and manual triage. Phase 2.1 dispatcher implements dead-letter as «row stops being re-claimed after `dispatch_attempts >= 3`» — no separate DLQ table, no automatic alerting.
+**Original deviation (Phase 2.1)**: §5 mentions a DLQ with engineering alerting and manual triage. Phase 2.1 dispatcher implemented dead-letter as «row stops being re-claimed after `dispatch_attempts >= 3`» — no separate field, no alerting, no replay surface.
 
-**Why**: a proper DLQ pipeline (separate table, ops alerting, replay tooling) is meaningful only when there are real subscribers that can actually fail. Phase 2.1 ships NoopSubscriber (§18.2) which never fails. Building DLQ infra ahead of real failure modes is premature.
+**Resolution shipped 2026-05-19 (Phase 2.2 PR-A)**:
+- `DomainEvent.dead_lettered_at` field added (migration `0002_domainevent_dead_lettered_at`) + `is_dead_letter` property
+- Dispatcher claim query: `is_dispatched=False AND dead_lettered_at IS NULL` (cleaner than attempts-based filter)
+- On threshold crossing: `dead_lettered_at = now()` set explicitly inside the same transaction; dispatcher then emits `system.module.health.degraded` event (taxonomy §3.10, tenant-less per §8) with `metric=dlq_count_in_run=<N>` AFTER commit
+- Admin: `DeadLetterFilter` + bulk «Replay selected dead-letter events» action calling `replay_dead_letter(event_ids)` which resets `dead_lettered_at=None`, `dispatch_attempts=0`, `last_error=''`
+- `system.module.health.degraded` added to vocabulary (catalog §3.10 first entry) with payload `{module_name, severity, metric}`
 
-**Resolution path**: Phase 2.2 — when the first real (failable) subscriber lands, ship the DLQ surface alongside:
-- Separate `dead_letter_at` field (or dedicated table) for explicit DLQ status
-- Ops alert via `system.module.health.degraded` event when dead-letter count > threshold
-- Admin UI to inspect + replay dead-letter rows
+**Tests**: 11 dispatcher tests covering happy path, retry, threshold crossing, DLQ exclusion from claim, replay idempotency, replay re-claim, alert emission, clean-run no-alert.
 
-**Risk**: Phase 2.1 rows that fail 3× sit forever-pending in `apps/eventbus_domainevent` without operator visibility beyond log lines. With NoopSubscriber this is impossible; with future real subscribers, the Phase 2.2 DLQ ships before failure becomes real.
+**Status**: ACCEPTED FINAL. No longer a deviation.
 
 ---
 
 ## Last verified
-2026-05-19 r2 — Phase 2.1 shipped (apps/eventbus/ landed, Q-EV-IMPL1-5 → DECIDED, §18 deviations added). Earlier verifications: 2026-05-18 r1 (initial draft, catalog locked).
+2026-05-19 r3 — Phase 2.2 PR-A shipped (DLQ + replay + health-degraded alert); §18.5 status RESOLVED. Earlier: 2026-05-19 r2 (Phase 2.1 ship), 2026-05-18 r1 (initial draft, catalog locked).
