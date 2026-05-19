@@ -39,8 +39,11 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from django.conf import settings
+
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
+from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import (
     InitDataBadSignature,
     InitDataError,
@@ -67,6 +70,44 @@ logger = logging.getLogger(__name__)
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
+
+
+def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUser:
+    """Create a BotUser from a verified initData on first Mini App tap.
+
+    Used when the customer DM'd the bot through the legacy mysite
+    backend (so the row exists in mysite_stage but not in the platform
+    DB) — or, post-cutover, simply hadn't opened the bot yet but found
+    the Mini App URL another way. Either way, the HMAC proves they
+    have legitimate access to the bot.
+    """
+    user = verified.user
+    first = (user.get("first_name") or "").strip()
+    last = (user.get("last_name") or "").strip()
+    display = (f"{first} {last}".strip() or f"max:{verified.user_id}")[:200]
+
+    chat_id = ""
+    if verified.chat and "id" in verified.chat:
+        chat_id = str(verified.chat.get("id", ""))[:128]
+
+    bot_user, created = BotUser.all_tenants.get_or_create(
+        tenant=tenant,
+        channel="max",
+        channel_user_id=verified.user_id,
+        defaults={
+            "display_name": display,
+            "chat_id": chat_id,
+            "timezone": tenant.timezone,
+        },
+    )
+    if created:
+        logger.info(
+            "miniapp_api.auth.lazy_register tenant=%s channel_user_id=%s display=%r",
+            tenant.slug,
+            verified.user_id,
+            display,
+        )
+    return bot_user
 
 
 def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
@@ -101,18 +142,56 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
         except InitDataError as exc:  # safety net
             return _error("unauthorized", str(exc), 401)
 
-        bot_user = (
-            BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
+        # Tenant resolution: in single-bot mode the env binds the bot to
+        # exactly one tenant. Multi-tenant ingress will rewire this later
+        # via the channel-token map (CHANNEL_TOKEN_TO_TENANT_SLUG).
+        bot_tenant_slug = getattr(settings, "MAX_BOT_TENANT_SLUG", "")
+        bot_tenant = (
+            Tenant.objects.filter(slug=bot_tenant_slug).first() if bot_tenant_slug else None
+        )
+
+        # Look up scoped to that tenant — including soft-deleted rows so
+        # we can return a distinct error for those users (they need to
+        # contact support, not silently re-onboard).
+        existing = (
+            BotUser.all_tenants.filter(
+                tenant=bot_tenant,
+                channel="max",
+                channel_user_id=verified.user_id,
+            )
             .select_related("tenant")
             .order_by("-last_seen")
             .first()
+            if bot_tenant is not None
+            else None
         )
-        if bot_user is None:
+
+        if existing is not None and existing.deleted_at is not None:
             return _error(
-                "user_not_registered",
-                "first interact with the bot before opening the Mini App",
-                404,
+                "user_deleted",
+                "Аккаунт удалён. Чтобы восстановить, напишите в поддержку студии.",
+                403,
             )
+
+        if existing is not None:
+            bot_user = existing
+        else:
+            # Lazy-create. The HMAC has already proven the user is a
+            # legitimate MAX user of the bot owning this Mini App; we
+            # don't gate twice. Pre-cutover, this fills the gap where
+            # webhook is still pointing at mysite and no BotUser exists
+            # in ai_bot_platform_dev yet.
+            if bot_tenant is None:
+                logger.error(
+                    "miniapp_api.auth.no_tenant_configured slug=%r — cannot lazy-create BotUser",
+                    bot_tenant_slug,
+                )
+                return _error(
+                    "server_misconfigured",
+                    "Bot tenant not configured — contact support.",
+                    500,
+                )
+            bot_user = _lazy_register_bot_user(bot_tenant, verified)
 
         request.verified_init_data = verified  # type: ignore[attr-defined]
         request.bot_user = bot_user  # type: ignore[attr-defined]
@@ -574,7 +653,7 @@ _BOOKINGS_PAGE_DEFAULT = 20
 _BOOKINGS_PAGE_MAX = 50
 
 
-def _booking_to_dict(b) -> dict[str, Any]:
+def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
     from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
 
     visit_at_iso = b.visit_at.isoformat() if b.visit_at else ""
@@ -586,6 +665,11 @@ def _booking_to_dict(b) -> dict[str, Any]:
         "reschedule_requested",
     )
     reschedulable = b.status == "confirmed"
+    # Phase 4 — post-visit rating exposure. can_rate is computed against
+    # the shared `now` so a batch listing is internally consistent.
+    moment = now or timezone.now()
+    is_past = bool(b.visit_at and b.visit_at < moment)
+    can_rate = is_past and b.status == "confirmed" and b.rating is None
     return {
         "id": str(b.id),
         "status": b.status,
@@ -599,6 +683,9 @@ def _booking_to_dict(b) -> dict[str, Any]:
         "undo_window_seconds": UNDO_WINDOW_SECONDS,
         "cancellable": cancellable,
         "reschedulable": reschedulable,
+        # Phase 4 — F5 rating exposure
+        "rating": b.rating,
+        "can_rate": can_rate,
     }
 
 
@@ -914,4 +1001,150 @@ def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpRes
             "old_booking": _booking_to_dict(old_row),
             "new_booking": _booking_to_dict(new_row),
         }
+    )
+
+
+# --- /me — profile read / update / delete (Phase 3 / F4) -------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_init_data
+def me(request: HttpRequest) -> HttpResponse:
+    """Read or partially update the current customer's profile."""
+    import json
+
+    from apps.identity.services.profile import (
+        ProfileUpdateError,
+        get_profile,
+        update_profile,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        snap = get_profile(bot_user)
+        return JsonResponse(_profile_to_dict(snap))
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    try:
+        snap = update_profile(bot_user, body)
+    except ProfileUpdateError as exc:
+        return _error("invalid_field", str(exc), 400)
+    return JsonResponse(_profile_to_dict(snap))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def delete_me(request: HttpRequest) -> HttpResponse:
+    """Soft-delete the current customer (scrub PII + drop prefs)."""
+    import json
+
+    from apps.identity.services.profile import (
+        DELETE_CONFIRMATION_TOKEN,
+        DeletionConfirmationMismatch,
+        soft_delete_user,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    confirmation = body.get("confirmation", "")
+    try:
+        soft_delete_user(bot_user, confirmation)
+    except DeletionConfirmationMismatch:
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+    return JsonResponse({"deleted": True}, status=200)
+
+
+def _profile_to_dict(snap) -> dict:
+    """Serialise a :class:`ProfileSnapshot` for the JSON response."""
+    return {
+        "bot_user_id": snap.bot_user_id,
+        "display_name": snap.display_name,
+        "client_name": snap.client_name,
+        "phone_masked": snap.phone_masked,
+        "timezone": snap.timezone,
+        "joined_at": snap.joined_at,
+        "preferences": snap.preferences,
+        "favorites": {
+            "master_name": snap.favorite_master_name,
+            "service_name": snap.favorite_service_name,
+        },
+    }
+
+
+# --- /bookings/<id>/feedback — post-visit rating (Phase 4 / F5) ------------
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: ignore[no-untyped-def]
+    """Persist a 1-5 rating for a past visit; rating ≤ 3 escalates."""
+    import json
+
+    from apps.booking.models import BookingRequest
+    from apps.booking.services.feedback import (
+        AlreadyRated,
+        FeedbackError,
+        InvalidRating,
+        NotCompletedYet,
+        submit_feedback as service_submit_feedback,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    booking = (
+        BookingRequest.objects.filter(pk=booking_id, bot_user=bot_user)
+        .select_related("conversation")
+        .first()
+    )
+    if booking is None:
+        return _error("not_found", "booking does not belong to this user", 404)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+
+    rating_raw = body.get("rating")
+    comment_raw = body.get("comment", "")
+    rating: int = rating_raw  # type: ignore[assignment]
+    comment: str = comment_raw  # type: ignore[assignment]
+
+    try:
+        result = service_submit_feedback(booking, rating=rating, comment=comment)
+    except (InvalidRating, AlreadyRated, NotCompletedYet) as exc:
+        return _error(exc.slug, str(exc), 400)
+    except FeedbackError as exc:
+        return _error(exc.slug, str(exc), 400)
+
+    return JsonResponse(
+        {
+            "booking_id": result.booking_id,
+            "rating": result.rating,
+            "comment": result.comment,
+            "feedback_at": result.feedback_at,
+            "handoff_created": result.handoff_created,
+            "task_id": result.task_id,
+        },
+        status=200,
     )

@@ -142,6 +142,9 @@ export interface BookingItem {
   undo_window_seconds: number;
   cancellable: boolean;
   reschedulable: boolean;
+  // Phase 4 — post-visit feedback. NULL until customer rates.
+  rating: number | null;
+  can_rate: boolean;
 }
 
 export const fetchMyBookings = (params?: {
@@ -190,3 +193,59 @@ export const rescheduleBookingConfirm = (
   id: string,
 ): Promise<{ old_booking: BookingItem; new_booking: BookingItem }> =>
   request(`/bookings/${id}/reschedule/confirm`, { method: "POST" });
+
+// --- profile (Phase 3 / F4) ---
+export interface Preferences {
+  notify_reminders: boolean;
+  notify_retention: boolean;
+  notify_promo: boolean;
+  notify_birthday: boolean;
+  birthday_date: string | null; // ISO 8601 yyyy-mm-dd
+  allergies: string;
+}
+
+export interface Profile {
+  bot_user_id: string;
+  display_name: string;
+  client_name: string;
+  phone_masked: string;
+  timezone: string;
+  joined_at: string; // ISO 8601 datetime
+  preferences: Preferences;
+  favorites: {
+    master_name: string | null;
+    service_name: string | null;
+  };
+}
+
+export const fetchProfile = (): Promise<Profile> => request("/me", { method: "GET" });
+
+export const updateProfile = (
+  patch: Partial<Pick<Profile, "client_name" | "timezone">> & Partial<Preferences>,
+): Promise<Profile> =>
+  request("/me", { method: "PATCH", body: JSON.stringify(patch) });
+
+export const deleteAccount = (): Promise<{ deleted: true }> =>
+  request("/me/delete", {
+    method: "POST",
+    body: JSON.stringify({ confirmation: "УДАЛИТЬ" }),
+  });
+
+// --- feedback (Phase 4 / F5) ---
+export interface FeedbackResult {
+  booking_id: string;
+  rating: number;
+  comment: string;
+  feedback_at: string;
+  handoff_created: boolean;
+  task_id: string | null;
+}
+
+export const submitFeedback = (
+  bookingId: string,
+  body: { rating: number; comment?: string },
+): Promise<FeedbackResult> =>
+  request(`/bookings/${bookingId}/feedback`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });

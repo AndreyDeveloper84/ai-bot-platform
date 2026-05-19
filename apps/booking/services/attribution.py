@@ -23,7 +23,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 
-def compute_billable(*, booking_source: str, status: str) -> tuple[bool, str]:
+def compute_billable(
+    *,
+    booking_source: str,
+    status: str,
+    created_by: str = "execute_confirm",
+) -> tuple[bool, str]:
     """Return ``(billable, billing_reason)`` per locked rule.
 
     ``status`` must be one of :class:`BookingRequest.Status` values
@@ -41,6 +46,10 @@ def compute_billable(*, booking_source: str, status: str) -> tuple[bool, str]:
         return (False, f"NOT billable: booking_source={booking_source}")
     if status != "confirmed":
         return (False, f"NOT billable: status={status} (must be confirmed)")
+    if created_by == "execute_reschedule":
+        # Q12-α — reschedule is retention, not acquisition; not billable
+        # even when source=ai_direct + status=confirmed.
+        return (False, "NOT billable: execute_reschedule (Q12-α retention)")
     return (True, "ai_direct + confirmed: customer-initiated via execute_confirm")
 
 
@@ -63,6 +72,7 @@ def build_customer_attribution_metadata(
     conversation_id: str | None = None,
     test_mode: bool = False,
     booking_created_at: str | None = None,
+    created_by: str = "execute_confirm",
 ) -> dict:
     """Build the minimal valid ``attribution_metadata`` for a customer
     booking from the Mini App's ``POST /api/v1/customer/bookings``.
@@ -82,7 +92,7 @@ def build_customer_attribution_metadata(
     meta: dict = {
         "actor_type": "customer",
         "started_by": "customer",
-        "created_by": "execute_confirm",
+        "created_by": created_by,
         "test_mode": test_mode,
     }
     if conversation_id is not None:

@@ -1,0 +1,81 @@
+# Customer Mini App static SPA — nginx vhost (TEMPLATE).
+#
+# Placeholders:
+#   {SUBDOMAIN}      miniapp.gobeauty.site | miniapp-dev.gobeauty.site
+#   {DIST_PATH}      /home/taximeter/ai-bot-platform{,-dev}/apps/miniapp/dist
+#   {GUNICORN_PORT}  8013 (prod) | 8014 (dev) — Django backend on 127.0.0.1
+#   {API_HOST}       api.gobeauty.site | api-dev.gobeauty.site — value
+#                    of the Host header forwarded to gunicorn; must be in
+#                    Django ALLOWED_HOSTS
+#
+# MAX Mini App requires HTTPS public URL.
+
+server {
+    listen 80;
+    server_name {SUBDOMAIN};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name {SUBDOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/{SUBDOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{SUBDOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+
+    # Security headers tuned for MAX webview embedding
+    # X-Frame-Options NOT set — MAX renders our Mini App in a webview;
+    # we need to allow framing from MAX domain.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    # CSP — restrict origins; MAX bridge loads from st.max.ru per
+    # https://dev.max.ru/docs/webapps/bridge. Adjust as MAX docs lock URL.
+    add_header Content-Security-Policy
+        "default-src 'self'; script-src 'self' https://st.max.ru; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; font-src 'self' data:; frame-ancestors *;"
+        always;
+
+    access_log /var/log/nginx/miniapp-{SUBDOMAIN}-access.log;
+    error_log /var/log/nginx/miniapp-{SUBDOMAIN}-error.log warn;
+
+    root {DIST_PATH};
+    index index.html;
+
+    # API proxy — same-origin /api/ avoids CORS preflight in MAX webview.
+    # Fronts apps/miniapp_api on the Django gunicorn that serves
+    # api-{,dev-}gobeauty.site too. Keep ports in sync with that vhost.
+    #
+    # Host header is forced to {API_HOST} so the request passes Django's
+    # ALLOWED_HOSTS without adding the miniapp subdomain to it.
+    location /api/ {
+        proxy_pass http://127.0.0.1:{GUNICORN_PORT};
+        proxy_set_header Host {API_HOST};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+        proxy_connect_timeout 10s;
+    }
+
+    # SPA fallback — React Router uses BrowserRouter, every path must
+    # serve index.html so client-side routing works on direct deeplink.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Long-cache hashed assets (Vite stamps content hash on filenames).
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # index.html — never cache (must fetch latest pointer to current
+    # hashed bundle).
+    location = /index.html {
+        add_header Cache-Control "no-store, must-revalidate";
+        expires 0;
+    }
+}

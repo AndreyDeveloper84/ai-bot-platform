@@ -93,6 +93,13 @@ class CreateBookingInput:
     service_id: str
     master_id: str
     visit_at: datetime  # timezone-aware, in the future
+    created_by: str = "execute_confirm"
+    """Attribution tag — 'execute_confirm' (default) or 'execute_reschedule'.
+
+    The reschedule service (apps.booking.services.reschedule) passes
+    'execute_reschedule' so compute_billable returns billable=False
+    per Q12-α.
+    """
 
 
 def _occupied_intervals(*, tenant, master, on_date, tz):
@@ -234,10 +241,12 @@ def create_customer_booking(
             attribution_metadata = build_customer_attribution_metadata(
                 booking_created_at=now_iso,
                 test_mode=False,
+                created_by=inp.created_by,
             )
             billable, billing_reason = compute_billable(
                 booking_source="ai_direct",
                 status=BookingRequest.Status.CONFIRMED,
+                created_by=inp.created_by,
             )
             ai_assist_score = compute_assist_score(booking_source="ai_direct")
 
@@ -282,6 +291,22 @@ def create_customer_booking(
         booking.visit_at,
         booking.billable,
     )
+
+    # YC push — async, best-effort. Platform = source of truth; YC is
+    # eventual mirror. Task is no-op if tenant has no YClients integration
+    # (features.yclients_integration=false) or master/service lacks YC ids.
+    # Failure modes documented in apps.integrations.yclients.tasks.
+    try:
+        from apps.integrations.yclients.tasks import push_booking_to_yclients
+
+        push_booking_to_yclients.delay(booking_id=str(booking.id))
+    except Exception as exc:  # noqa: BLE001 — never let YC push break booking flow
+        logger.warning(
+            "yclients.push.enqueue_failed booking=%s exc=%s",
+            booking.id,
+            exc,
+        )
+
     return booking
 
 
