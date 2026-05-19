@@ -330,3 +330,28 @@ a {
   color: var(--c-text-secondary);
   margin-bottom: var(--s-5);
 }
+
+/* Tabs (My visits F3). */
+.tabs {
+  display: flex;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  border-bottom: 1px solid var(--c-divider);
+}
+
+.tab {
+  padding: var(--s-2) var(--s-3);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  cursor: pointer;
+  min-height: 44px;
+}
+
+.tab--active {
+  color: var(--c-accent);
+  border-bottom-color: var(--c-accent);
+}

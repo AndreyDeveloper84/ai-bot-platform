@@ -20,4 +20,9 @@ urlpatterns = [
     path("masters", views.masters_list, name="masters_list"),
     path("masters/<uuid:master_id>", views.master_detail, name="master_detail"),
     path("bookings", views.create_booking, name="create_booking"),
+    # Phase 2 / 5 — visits + reschedule
+    path("visits", views.visits_list, name="visits_list"),
+    path(
+        "bookings/<uuid:booking_id>/reschedule", views.reschedule_booking, name="reschedule_booking"
+    ),
 ]

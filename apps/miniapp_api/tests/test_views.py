@@ -541,3 +541,118 @@ class TestCreateBooking:
         )
         assert resp.status_code == 409
         assert "slot_unavailable" in resp.json()["error"]
+
+
+class TestVisitsList:
+    def _picked_slot(self) -> str:
+        target_date = date.today() + timedelta(days=30)
+        while target_date.weekday() != 0:
+            target_date += timedelta(days=1)
+        return f"{target_date.isoformat()}T12:00:00+03:00"
+
+    def test_empty(self, client: Client, bot_user: BotUser) -> None:
+        resp = client.get(
+            reverse("miniapp_api:visits_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"visits": []}
+
+    def test_upcoming_filters_to_future_confirmed(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        master: CatalogMaster,
+        service: CatalogService,
+        master_service,
+        working_hours,
+    ) -> None:
+        resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {
+                    "service_id": str(service.id),
+                    "master_id": str(master.id),
+                    "visit_at": self._picked_slot(),
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 201, resp.json()
+        list_resp = client.get(
+            reverse("miniapp_api:visits_list") + "?status=upcoming",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert list_resp.status_code == 200
+        visits = list_resp.json()["visits"]
+        assert len(visits) == 1
+        assert visits[0]["status"] == "confirmed"
+
+    def test_bad_status_rejected(self, client: Client, bot_user: BotUser) -> None:
+        resp = client.get(
+            reverse("miniapp_api:visits_list") + "?status=bogus",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 400
+
+
+class TestRescheduleEndpoint:
+    def _picked_slot(self, hour: int) -> str:
+        target_date = date.today() + timedelta(days=30)
+        while target_date.weekday() != 0:
+            target_date += timedelta(days=1)
+        return f"{target_date.isoformat()}T{hour:02d}:00:00+03:00"
+
+    def test_happy_path(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        master: CatalogMaster,
+        service: CatalogService,
+        master_service,
+        working_hours,
+    ) -> None:
+        # Create initial booking.
+        create_resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {
+                    "service_id": str(service.id),
+                    "master_id": str(master.id),
+                    "visit_at": self._picked_slot(12),
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        old_id = create_resp.json()["booking"]["id"]
+
+        # Reschedule.
+        resp = client.post(
+            reverse("miniapp_api:reschedule_booking", kwargs={"booking_id": old_id}),
+            data=json.dumps({"visit_at": self._picked_slot(15)}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 201, resp.json()
+        new_id = resp.json()["booking"]["id"]
+        assert new_id != old_id
+
+        # Old must be RESCHEDULED, new is CONFIRMED + non-billable.
+        old = BookingRequest.all_tenants.get(id=old_id)
+        new = BookingRequest.all_tenants.get(id=new_id)
+        assert old.status == "rescheduled"
+        assert new.status == "confirmed"
+        assert new.billable is False
+
+    def test_not_found(self, client: Client, bot_user: BotUser, master: CatalogMaster) -> None:
+        import uuid
+
+        resp = client.post(
+            reverse("miniapp_api:reschedule_booking", kwargs={"booking_id": str(uuid.uuid4())}),
+            data=json.dumps({"visit_at": self._picked_slot(12)}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 404

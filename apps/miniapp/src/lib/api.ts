@@ -118,3 +118,28 @@ export const createBooking = (body: {
   visit_at: string;
 }): Promise<{ booking: CreatedBooking }> =>
   request("/bookings", { method: "POST", body: JSON.stringify(body) });
+
+// --- visits / reschedule ---
+export interface Visit {
+  id: string;
+  service_name: string;
+  master_name: string;
+  visit_at: string | null;
+  duration_min: number | null;
+  status: string;
+  service_id: string | null;
+  master_id: string | null;
+}
+
+export const fetchVisits = (status: "upcoming" | "past" | "all" = "upcoming"): Promise<{
+  visits: Visit[];
+}> => request(`/visits?status=${status}`, { method: "GET" });
+
+export const rescheduleBooking = (
+  oldId: string,
+  body: { visit_at: string },
+): Promise<{ booking: CreatedBooking }> =>
+  request(`/bookings/${oldId}/reschedule`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });

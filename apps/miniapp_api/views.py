@@ -470,6 +470,11 @@ _ERROR_SLUG_TO_STATUS = {
     "slot_unavailable": 409,
     "master_archived": 409,
     "tenant_mismatch": 403,
+    # Phase 2 reschedule slugs
+    "not_found": 404,
+    "forbidden": 403,
+    "not_reschedulable": 409,
+    "legacy_row": 409,
 }
 
 
@@ -524,6 +529,123 @@ def create_booking(request: HttpRequest) -> HttpResponse:
                 master_id=master_id,
                 visit_at=visit_at,
             ),
+            correlation_id=correlation_id or None,
+        )
+    except BookingCreateError as exc:
+        return _error(exc.slug, exc.detail, _ERROR_SLUG_TO_STATUS.get(exc.slug, 400))
+
+    return JsonResponse(
+        {
+            "booking": {
+                "id": str(booking.id),
+                "service_name": booking.service_name,
+                "master_name": booking.master_name,
+                "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
+                "duration_min": booking.duration_min,
+                "status": booking.status,
+            }
+        },
+        status=201,
+    )
+
+
+# --- Phase 2: visits + reschedule -----------------------------------------
+
+
+def _visit_to_dict(b) -> dict[str, Any]:
+    """Serialise a BookingRequest for the customer's visit list."""
+
+    return {
+        "id": str(b.id),
+        "service_name": b.service_name,
+        "master_name": b.master_name,
+        "visit_at": b.visit_at.isoformat() if b.visit_at else None,
+        "duration_min": b.duration_min,
+        "status": b.status,
+        "service_id": str(b.service_id) if b.service_id else None,
+        "master_id": str(b.master_id) if b.master_id else None,
+    }
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def visits_list(request: HttpRequest) -> HttpResponse:
+    """List the calling customer's bookings.
+
+    Per customer-handoff §12 F3 — three tabs (upcoming / past / all).
+    Query ``?status=upcoming|past|all`` (default ``upcoming``).
+
+    Rules:
+    * Scoped to ``bot_user`` (customer sees only own bookings).
+    * Past = ``visit_at < now`` regardless of status; upcoming =
+      ``visit_at >= now AND status=CONFIRMED``.
+    * Returned sorted: upcoming asc by visit_at, past desc.
+    """
+
+    from apps.booking.models import BookingRequest
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    tenant = bot_user.tenant
+    status_filter = request.GET.get("status", "upcoming")
+
+    qs = BookingRequest.all_tenants.filter(
+        tenant_id=tenant.id,
+        bot_user_id=bot_user.id,
+        visit_at__isnull=False,
+    )
+
+    now = timezone.now()
+    if status_filter == "upcoming":
+        qs = qs.filter(visit_at__gte=now, status=BookingRequest.Status.CONFIRMED).order_by(
+            "visit_at"
+        )
+    elif status_filter == "past":
+        qs = qs.filter(visit_at__lt=now).order_by("-visit_at")
+    elif status_filter == "all":
+        qs = qs.order_by("-visit_at")
+    else:
+        return _error("bad_request", "status must be one of upcoming/past/all", 400)
+
+    return JsonResponse({"visits": [_visit_to_dict(b) for b in qs]})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def reschedule_booking(request: HttpRequest, booking_id) -> HttpResponse:
+    """Reschedule customer's existing booking.
+
+    Body: ``{"visit_at": "<new ISO 8601>"}``. Returns 201 with the NEW
+    booking. The old row gets ``status=RESCHEDULED`` (terminal) per
+    customer-handoff §11 + Q12-α (new row is ai_direct +
+    created_by=execute_reschedule → billable=False).
+    """
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    tenant = bot_user.tenant
+
+    import json
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _error("bad_request", "invalid JSON body", 400)
+
+    new_visit_at = _parse_iso_datetime(body.get("visit_at"))
+    if new_visit_at is None:
+        return _error("bad_request", "visit_at (ISO 8601) is required", 400)
+
+    from apps.booking.services.create import BookingCreateError
+    from apps.booking.services.reschedule import reschedule_customer_booking
+
+    correlation_id = request.headers.get("X-Correlation-Id", "")
+
+    try:
+        booking = reschedule_customer_booking(
+            tenant=tenant,
+            bot_user=bot_user,
+            old_booking_id=str(booking_id),
+            new_visit_at=new_visit_at,
             correlation_id=correlation_id or None,
         )
     except BookingCreateError as exc:

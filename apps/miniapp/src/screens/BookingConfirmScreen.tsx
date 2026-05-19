@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, createBooking } from "../lib/api";
+import { ApiError, createBooking, rescheduleBooking } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { useBackButton } from "../hooks/useBackButton";
@@ -37,11 +37,13 @@ export function BookingConfirmScreen() {
     setSubmitting(true);
     setErr(null);
     try {
-      const { booking } = await createBooking({
-        service_id: draft.serviceId,
-        master_id: draft.masterId,
-        visit_at: draft.visitAt,
-      });
+      const { booking } = draft.rescheduleOf
+        ? await rescheduleBooking(draft.rescheduleOf, { visit_at: draft.visitAt })
+        : await createBooking({
+            service_id: draft.serviceId,
+            master_id: draft.masterId,
+            visit_at: draft.visitAt,
+          });
       haptics.notify("success");
       resetBooking();
       navigate(`/book/success/${booking.id}`, {
@@ -69,10 +71,16 @@ export function BookingConfirmScreen() {
 
   return (
     <ScreenLayout
-      title="Подтверждение"
+      title={draft.rescheduleOf ? "Перенос записи" : "Подтверждение"}
       cta={
         <StickyCta onClick={onConfirm} disabled={submitting}>
-          {submitting ? "Записываю…" : "Подтвердить запись"}
+          {submitting
+            ? draft.rescheduleOf
+              ? "Переношу…"
+              : "Записываю…"
+            : draft.rescheduleOf
+              ? "Подтвердить перенос"
+              : "Подтвердить запись"}
         </StickyCta>
       }
     >
