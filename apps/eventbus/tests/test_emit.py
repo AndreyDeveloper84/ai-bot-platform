@@ -136,7 +136,8 @@ class TestVocabularyCoverage:
         customer = [n for n in V.CANONICAL_EVENTS if n.startswith("customer.")]
         master = [n for n in V.CANONICAL_EVENTS if n.startswith("master.")]
         assert len(booking) == 8  # taxonomy §3.1
-        assert len(customer) == 6  # taxonomy §3.2
+        # §3.2: 6 original + customer.tier.changed (Loyalty Phase 2.a)
+        assert len(customer) == 7
         assert len(master) == 8  # taxonomy §3.3
 
     def test_every_event_has_required_keys_schema(self):

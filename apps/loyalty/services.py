@@ -166,6 +166,18 @@ def credit_points(
             "booking_id": str(booking.pk) if booking else None,
         },
     )
+
+    # Phase 2.a: tier may have crossed a threshold on this EARN_VISIT.
+    # Recompute eagerly — handoff §3 promises immediate tier-up celebration
+    # on the visit that crossed. Skipped for non-EARN_VISIT types (manual
+    # adjustments don't progress the tier ladder).
+    if event_type == LoyaltyEvent.EventType.EARN_VISIT:
+        recompute_tier(
+            account,
+            trigger_event_id=metadata.get("event_id", ""),
+            correlation_id=metadata.get("correlation_id"),
+        )
+
     return event
 
 
@@ -337,7 +349,150 @@ def revoke_visit_points(
             "underflow": underflow,
         },
     )
+
+    # Phase 2.a: a revoke may push the customer below the regular/favorite
+    # threshold (post-completion cancellation downgrade). Recompute eagerly
+    # — handoff §3 «Tier downgrade policy» kicks in on visit-count revocation.
+    recompute_tier(
+        account,
+        trigger_event_id=metadata.get("event_id", ""),
+        correlation_id=metadata.get("correlation_id"),
+    )
+
     return event
+
+
+# ── Tier thresholds (handoff §3) ────────────────────────────────────────
+# Phase 2.a uses visit count only. LTV-based crossing (8 000 ₽ / 30 000 ₽)
+# is deferred to Phase 2.b together with bonus-event multipliers.
+TIER_REGULAR_VISIT_THRESHOLD = 4
+TIER_FAVORITE_VISIT_THRESHOLD = 12
+
+
+def _effective_visit_count(account: LoyaltyAccount) -> int:
+    """Count EARN_VISIT events minus REFUND_REVOKE events for ``account``.
+
+    REFUND_REVOKE is uniquely keyed by booking, so subtracting its count
+    correctly cancels out the original earn — a cancelled-after-completed
+    visit doesn't keep contributing to tier progress.
+
+    Reads ``all_tenants`` because the caller may not be inside a tenant
+    scope; the account-level filter is the security boundary.
+    """
+
+    return (
+        LoyaltyEvent.all_tenants.filter(
+            account=account, event_type=LoyaltyEvent.EventType.EARN_VISIT
+        ).count()
+        - LoyaltyEvent.all_tenants.filter(
+            account=account, event_type=LoyaltyEvent.EventType.REFUND_REVOKE
+        ).count()
+    )
+
+
+def _derive_tier(visit_count: int) -> str:
+    """Map visit count to the tier per handoff §3 thresholds."""
+
+    if visit_count >= TIER_FAVORITE_VISIT_THRESHOLD:
+        return LoyaltyAccount.Tier.FAVORITE
+    if visit_count >= TIER_REGULAR_VISIT_THRESHOLD:
+        return LoyaltyAccount.Tier.REGULAR
+    return LoyaltyAccount.Tier.STARTER
+
+
+def recompute_tier(
+    account: LoyaltyAccount,
+    *,
+    trigger_event_id: str | None = None,
+    correlation_id: str | None = None,
+) -> str | None:
+    """Derive the account's current tier and persist if it changed.
+
+    Args:
+      trigger_event_id: optional ULID of the eventbus envelope that
+        caused this recompute (carried into the TIER_CHANGED metadata
+        for forensic linking).
+      correlation_id: optional ULID for cross-bus correlation.
+
+    Returns:
+      The new tier value when it changed, OR None for a no-op
+      recompute (most calls are no-ops — only every 4th and 12th
+      visit cross a threshold).
+
+    Side effects on change:
+      - LoyaltyAccount.tier + tier_changed_at updated
+      - LoyaltyEvent (TIER_CHANGED, points_delta=0, metadata={old, new})
+      - customer.tier.changed envelope emitted on the domain bus
+      - Audit log row
+
+    Concurrency: per-account select_for_update inside transaction.atomic.
+    Two concurrent EARN_VISIT calls won't double-fire TIER_CHANGED — the
+    second one re-derives off the already-updated tier and finds nothing
+    to change.
+    """
+
+    from apps.eventbus import services as eventbus_services
+
+    visit_count = _effective_visit_count(account)
+    new_tier = _derive_tier(visit_count)
+
+    with transaction.atomic():
+        locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=account.pk)
+        if locked.tier == new_tier:
+            return None  # no change
+
+        old_tier = locked.tier
+        now = timezone.now()
+        locked.tier = new_tier
+        locked.tier_changed_at = now
+        locked.save(update_fields=["tier", "tier_changed_at", "updated_at"])
+
+        reason = f"visits={visit_count} crossed {old_tier}→{new_tier}"
+        LoyaltyEvent.objects.create(
+            tenant=locked.tenant,
+            account=locked,
+            event_type=LoyaltyEvent.EventType.TIER_CHANGED,
+            points_delta=0,
+            balance_after=locked.balance,
+            reason=reason,
+            metadata={
+                "old_tier": old_tier,
+                "new_tier": new_tier,
+                "visit_count": visit_count,
+                "trigger_event_id": trigger_event_id or "",
+            },
+        )
+
+    # Emit AFTER commit so subscribers see the row.
+    try:
+        eventbus_services.emit_customer_tier_changed(
+            customer_id=str(account.customer_id),
+            old_tier=old_tier,
+            new_tier=new_tier,
+            reason=reason,
+            correlation_id=correlation_id,
+            tenant=account.tenant,
+        )
+    except Exception:  # noqa: BLE001 — telemetry never breaks the tier flip
+        logger.exception(
+            "loyalty.tier.emit_failed account=%s old=%s new=%s",
+            account.pk,
+            old_tier,
+            new_tier,
+        )
+
+    write_audit(
+        action="loyalty.tier_changed",
+        target="LoyaltyAccount",
+        target_id=account.pk,
+        payload={
+            "old_tier": old_tier,
+            "new_tier": new_tier,
+            "visit_count": visit_count,
+        },
+    )
+
+    return new_tier
 
 
 def opt_out(account: LoyaltyAccount) -> None:
