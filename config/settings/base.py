@@ -221,6 +221,12 @@ MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 
+# Phase 5 lazy-onboarding (apps/miniapp_api/views.py:require_init_data).
+# Single-bot mode binds the bot's HMAC token to exactly one tenant; this
+# slug picks which one. Multi-tenant ingress will replace this with the
+# CHANNEL_TOKEN_TO_TENANT_SLUG map already wired for /api/v1/ingress/max/.
+MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
+
 # Master Mini App session token (PR 1 / M0 onboarding).
 #
 # Issued by POST /api/v1/master/onboarding/accept. The Mini App stores it
@@ -305,6 +311,13 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "")
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# Modules whose tasks Celery autodiscover_tasks() misses because the
+# package isn't a Django app in INSTALLED_APPS. Producer-side imports
+# (e.g. apps.booking.services.create) register the task on the web
+# process, but the worker only autoloads INSTALLED_APPS; without this
+# list it would reject tasks with KeyError on dispatch.
+CELERY_IMPORTS = ("apps.integrations.yclients.tasks",)
 
 # Beat schedule — keep retention tasks on separate cadences per the
 # 6A-split rule (AuditLog 90d daily sweep vs IdempotencyKey 7d hourly
@@ -632,6 +645,13 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# Phase 0 deploy (DRF-891 / server-deployment.md §2.5) — collectstatic
+# target. Required for prod/staging gunicorn deploys; local dev with
+# runserver works without it (Django serves static directly via
+# staticfiles.views in DEBUG). Sub-directory of BASE_DIR keeps
+# everything inside the deploy checkout; nginx serves from
+# ``{DEPLOY_PATH}/staticfiles/`` per the api vhost template.
+STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Phase 1 / PI8 (DRF-859) — PII-redacting log filter wired into every
