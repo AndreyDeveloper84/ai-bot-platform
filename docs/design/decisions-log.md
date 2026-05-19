@@ -46,6 +46,9 @@ ID prefix indicates origin area:
 - `Q-NP*` — Notification preferences UX (customer/master/owner)
 - `Q-QO*` — AI Quality Observability dashboard
 - `Q-CP*` — Customer profile management UX
+- `Q-SH*` — Settings Hub handoff (Q-SH16-22 added r20 post-trilogy refresh)
+- `Q-AV*` — Wellness AI Avatar handoff
+- `Q-TS*` — Tenant suspension / pause UX
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -170,6 +173,25 @@ ID prefix indicates origin area:
 | **Q-CP14** | Customer in PAUSED tenant — show export/delete or disable? | Show disabled with explainer «Доступно когда студия снова в работе» | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
 | **Q-CP16** | Owner can refuse deletion request indefinitely? | Owner can DELAY (legal hold per Q-C3); cannot REFUSE — hard-delete after 90d even with legal hold absent fresh court order | Legal | [customer-profile §16](./policies/customer-profile-management-ux.md) |
 | **Q-CP17** | «Связаться со студией» — direct DM or via assistant routing? | Via assistant routing per ownership-policy (assistant tags HUMAN_LOCKED handoff; owner replies as themselves) | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-SH16** | SH3 ↔ canonical notification-preferences-ux migration — backward compat for admin r1 settings? | Default 1:1 mapping r1→r2 canonical; one-time banner «Настройки уведомлений обновлены — проверьте» | Eng + UX | [settings-hub §18](./handoffs/2026-05-18-settings-hub-handoff.md) |
+| **Q-SH20** | Founder access to SH1 of OTHER tenants — «founder view» switcher? | YES — founder-only chip «Тенант: {{name}} ▾» switches tenant context; multi-tenant CSM tooling | Founder | [settings-hub §18](./handoffs/2026-05-18-settings-hub-handoff.md) |
+| **Q-AV1** | Photo encryption: client-side AES-GCM enough or full E2E master key escrow? | Client-side AES-GCM MVP; full E2E escrow Phase 4+ if regulatory tightens | Eng + Legal | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV2** | AI commentary model — GPT-4V or open-source (LLaVA)? | GPT-4V MVP (quality + team complexity); evaluate cost at 10k+ comparisons/month | Eng + Founder | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV3** | Per-photo encryption keys stored where? | Postgres separate AvatarKeyStore table with row-level encryption per §12.4 | Eng | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV5** | Photo upload from gallery — strip EXIF metadata (location)? | YES — server strips EXIF before encryption (location privacy) | Eng | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV7** | Grants on archived master — auto-revoke? | YES — `master.archived` event subscription cascades | Eng | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV9** | Customer-pays tier — AI Avatar premium-only or free? | Premium per Q-WI12; free up to 2 zones; 4-6 zones premium | Founder | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV13** | Permanent grant to master who later archived + un-archived — auto-restore? | NO — customer must re-issue grant after un-archive; security default | Eng + Privacy | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV16** | Photo retention if customer inactive 12 months — auto-delete? | NO automatic deletion based on inactivity; customer-initiated only | Privacy | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-TS6** | Customer who paid for service (loyalty redemption) right before SUSPENDED — refund? | Auto-refund per attribution-policy §6 Q12-β — same as tenant-state-cancellation; refund includes points restoration | Policy | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS8** | YClients sync during SUSPENDED — accept webhooks or reject? | Accept + queue (don't crash external); log; respond with state metadata. On resume: process queue. | Eng | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS12** | Notification cascade timing — fire all at once or throttle? | Throttle per customer-cancellation-reschedule §6.5 batch pattern (max 5 / min) | Eng | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS13** | Customer with active AI Avatar grant during SUSPENDED — what happens? | Grant remains valid but master cannot access (Mini App locked). On resume: auto-active. On ARCHIVED: purged per wellness-ai-avatar §12.3 | Eng + Privacy | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS14** | Tenant PAUSED + emergency happens — how does customer reach help? | Standard HUMAN_LOCKED escalation; AI in PAUSED still acknowledges critical safety + routes immediately | Policy | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS15** | SUSPENDED blocking modal — dismissable for read-only view? | NO — modal blocks; forces «pay or contact CSM». CSM observability for stuck tenants | Founder + UX | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS16** | SUSPENDED — auto-cancel ALL future bookings or preserve in-progress? | Auto-cancel all future ≥ now+1h; preserve same-day + in-progress (don't disrupt mid-service) | Eng + UX | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS1** | AT_RISK_BILLING grace — 7d fixed or per-tenant? | Fixed 7d MVP; per-tenant v1.2+ with founder-set max 14d cap | Founder + Eng | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS2** | PAUSED voluntary — platform fees continue accruing? | NO — paused tenant doesn't pay during pause (per Q9 hybrid pricing model spirit); resume when ACTIVE | Founder | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) 🔴 before first PAUSED tenant |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -339,6 +361,29 @@ ID prefix indicates origin area:
 | **Q-CP13** | «Записаться снова» pre-fill — same master/service/time? | Same master + service; date picker fresh (no time pre-fill) | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
 | **Q-CP15** | Export with multi-tenant customer — disambiguation? | Scoped to current tenant only; explainer «Это данные из студии {{name}}» | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
 | **Q-CP18** | Mini App «back button» on profile — return source or always Главная? | Return to source (deep-link pattern); fallback Главная | Eng | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-SH17** | Cascade dashboard card on SH1 — counter or just title? | Counter («3 cascades in progress») | UX | [settings-hub §18](./handoffs/2026-05-18-settings-hub-handoff.md) |
+| **Q-SH18** | AI quality card on SH1 — KPI surface or title? | Title only on SH1; KPIs inside dashboard | UX | [settings-hub §18](./handoffs/2026-05-18-settings-hub-handoff.md) |
+| **Q-SH19** | Deletion request queue card on SH1 — counter? | YES counter («3 requests waiting») | UX | [settings-hub §18](./handoffs/2026-05-18-settings-hub-handoff.md) |
+| **Q-SH21** | Two-bus audit display — same filter UI or split tabs? | Same filter UI; source badge per row | UX | [settings-hub §18](./handoffs/2026-05-18-settings-hub-handoff.md) |
+| **Q-SH22** | apps/eventbus/ migration — auto-merge audit history or dual-source forever? | Dual-source forever (history doesn't migrate); UI unified | Eng | [settings-hub §18](./handoffs/2026-05-18-settings-hub-handoff.md) |
+| **Q-AV4** | Customer's MAX account lost — photos un-decryptable. Recovery? | NO — acceptable data loss per privacy-paranoid design; customer informed in consent dialog | Policy | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV6** | Master Mini App photo view duration limit? | 5 min idle timeout; refresh requires re-fetch | Eng | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV8** | Founder breakglass — UI tool or DB-only? | DB-only Phase 3; UI tool Phase 5+ with 4-eye approval | Founder + Legal | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV10** | Mini App offline photo capture? | NO Phase 3 (encryption requires session); explore Phase 4+ | Eng | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV11** | Comparison AI commentary localization? | RU MVP; Phase 4+ per language with cultural review | UX + AI | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV12** | Share comparison — rewrite commentary for external audience? | NO — share shows EXACT same commentary customer saw; honesty consistency | Policy | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV14** | Multi-tenant customer — photos shared across tenants? | NO — strict per-tenant separate consent + photos | Privacy | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV15** | 14-day throttle — strict or soft cap? | Strict for same zone; customer can capture different zones same day | UX | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV17** | AI commentary if photos too similar (no change)? | «Изменения тонкие — продолжайте текущий курс» honest fallback | UX | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-AV18** | Founder-50 cohort review of Avatar comparisons in scope? | NO — privacy boundary. Founder reviews attribution + bookings only, NOT customer photos | Founder + Privacy | [wellness-ai-avatar §16](./handoffs/2026-05-19-wellness-ai-avatar-handoff.md) |
+| **Q-TS3** | SUSPENDED 60d → ARCHIVED — fixed or per-tenant? | Fixed 60d MVP; provides predictability | Founder | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS4** | At ARCHIVED — delete or anonymize history immediately or wait 1y? | Wait 1y (legal retention); then anonymize per §14.3 | Legal | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS5** | Owner-paused tenant — master see schedule? | Read-only YES (they plan), no new booking notifications | UX | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS7** | Multiple tenants on same business owner — independent suspension? | YES — per-tenant lifecycle | Policy | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS9** | «Связаться с владельцем» link during SUSPENDED — bot DM or MAX direct? | MAX direct chat with owner (bypassing bot); §4.3 shows owner_max_handle directly | UX | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS10** | Master payments / payouts during SUSPENDED — earnings owed? | Out of scope this doc; CSM handles per business agreement | Founder | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS11** | Owner «cancel pause + immediately re-pause» — anti-abuse? | NO rate limit MVP; v1.2+ if observed gaming | UX | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
+| **Q-TS17** | Founder dashboard — suspended tenants list with «attempt revival» action? | YES — founder-only view in ai-quality-observability extended OR new admin tool | Founder | [tenant-suspension §15](./policies/tenant-suspension-pause-ux.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -366,6 +411,10 @@ Hypotheses being tested before locking decisions. Not decisions themselves.
 ---
 
 ## ✅ DECIDED — chronological reverse (newest first)
+
+### 2026-05-19 r21 — Restore Q-SH16-22 + Q-AV1-18 (lost in r20 merge) + add Q-TS1-17 (tenant suspension)
+
+Q-SH16-22 (Settings Hub r2 refresh — 7) + Q-AV1-18 (Wellness AI Avatar handoff — 18) rows were lost during r20 merge with origin/dev (parallel agent's eventbus r20 entry overwrote my docs r20 batch). r21 restores those 25 + adds Q-TS1-17 tenant suspension (17 new) = 42 total. Tenant suspension/pause UX shipped (749 lines, cross-audience policy with 5-state lifecycle + per-state per-audience UX + recovery flow + API matrix + notification cascade).
 
 ### 2026-05-19 r20 — Event bus Phase 2.1 implementation shipped (Q-EV-IMPL1-5 locked)
 
@@ -546,11 +595,11 @@ Sources currently containing question lists:
 | Status | Count | Δ from r18 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **88** (post-r20: −Q-EV-IMPL 1/2/3/4/5; r19: +Q-CP 4/7/8/14/16/17) | −5 (vs r19) |
-| 🟢 Later open | **157** (+Q-CP 1/2/3/5/6/9/10/11/12/13/15/18) | +12 |
+| 🟡 Soon open | **107** (r21: +Q-SH 16/20 + Q-AV 1/2/3/5/7/9/13/16 + Q-TS 1/2/6/8/12/13/14/15/16) | +19 (r21) |
+| 🟢 Later open | **180** (r21: +Q-SH 17/18/19/21/22 + Q-AV 4/6/8/10/11/12/14/15/17/18 + Q-TS 3/4/5/7/9/10/11/17) | +23 (r21) |
 | 🔬 Validating | **5** (V1–V5) | — |
 | ✅ Decided | **87** (+Q-EV-IMPL 1/2/3/4/5 — r20) | +5 (vs r19) |
-| **Total tracked** | **340** | — (r20 only redistributed) |
+| **Total tracked** | **382** | +42 (r21 restore + tenant suspension) |
 
 **2026-05-19 r18** — AI Quality Observability dashboard. Added Q-QO1-15 (14 new; Q-QO8 ✅ confirmed-decided as Quality Reviewer = same role as Q-CO3). Owner + founder dashboard for monitoring persona violations, CSAT per template, model drift, sampling-based review, founder-50 cohort workflow (Q12-δ implementation). Unblocks founder cohort review tooling + persona-editor feedback loop + Quality Reviewer role tools.
 
