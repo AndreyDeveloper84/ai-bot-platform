@@ -111,9 +111,9 @@ class Migration(migrations.Migration):
                         name="identity_us_tenant__c3e9d8_idx",
                     ),
                 ],
-                "managers": [
-                    ("objects", apps.tenancy.managers.TenantScopedManager()),
-                ],
             },
+            managers=[
+                ("objects", apps.tenancy.managers.TenantScopedManager()),
+            ],
         ),
     ]
