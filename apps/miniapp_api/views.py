@@ -818,8 +818,13 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
     if not isinstance(body, dict):
         return _error("malformed", "body must be a JSON object", 400)
 
-    rating = body.get("rating")
-    comment = body.get("comment", "")
+    rating_raw = body.get("rating")
+    comment_raw = body.get("comment", "")
+    # Service runs its own isinstance checks and raises InvalidRating /
+    # FeedbackError with the slug. The cast keeps mypy happy without
+    # duplicating validation here.
+    rating: int = rating_raw  # type: ignore[assignment]
+    comment: str = comment_raw  # type: ignore[assignment]
 
     try:
         result = service_submit_feedback(booking, rating=rating, comment=comment)

@@ -139,7 +139,8 @@ def _try_create_handoff(booking: BookingRequest, *, rating: int, comment: str) -
 
     log = logging.getLogger(__name__)
 
-    if booking.conversation_id is None:
+    conv = booking.conversation
+    if conv is None:
         log.warning(
             "feedback.handoff.no_conversation booking=%s rating=%s — escalation skipped",
             booking.id,
@@ -150,7 +151,7 @@ def _try_create_handoff(booking: BookingRequest, *, rating: int, comment: str) -
     priority = AdminTask.Priority.HIGH.value if rating <= 2 else AdminTask.Priority.NORMAL.value
     snippet = (comment or "no comment")[:200]
     task = create_admin_task(
-        booking.conversation,
+        conv,
         task_type=AdminTask.TaskType.COMPLAINT.value,
         priority=priority,
         reason=f"[post-visit rating] {rating}/5: {snippet}",
