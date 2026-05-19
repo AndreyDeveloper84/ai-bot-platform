@@ -85,6 +85,12 @@ LOCAL_APPS = [
     # docs/design/policies/event-taxonomy.md §3 catalog. Two-bus
     # architecture by design — see memory two-bus-event-architecture.
     "apps.eventbus",
+    # Loyalty (Volna 4) — points tracking. Phase 1.a ships the data
+    # layer + LoyaltySubscriber listening to booking.completed.
+    # Tiers / redemption flow / referrals / config UI deferred.
+    # Subscriber activates by adding apps.loyalty.subscribers.LoyaltySubscriber
+    # to DOMAIN_EVENT_SUBSCRIBERS env var.
+    "apps.loyalty",
 ]
 
 INSTALLED_APPS = [
