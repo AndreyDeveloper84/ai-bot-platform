@@ -663,9 +663,6 @@ a {
   margin-bottom: var(--s-3);
 }
 
-.visit-row__rate {
-  align-self: flex-start;
-}
 
 /* Filter chips (My visits §3.4). */
 .chip-row {
@@ -690,4 +687,15 @@ a {
   border-color: var(--c-accent);
   color: var(--c-accent-pressed);
   font-weight: 600;
+}
+
+/* Inline action row under each visit card. */
+.visit-row__actions {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.visit-row__actions .btn-secondary {
+  flex: 0 1 auto;
 }

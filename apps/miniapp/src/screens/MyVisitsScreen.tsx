@@ -155,17 +155,47 @@ export function MyVisitsScreen() {
                 </div>
               )}
             </button>
-            {b.can_rate && (
-              <button
-                type="button"
-                className="btn-secondary visit-row__rate"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  navigate(`/feedback/${b.id}`);
-                }}
-              >
-                Оценить визит
-              </button>
+            {(b.reschedulable || b.cancellable || b.can_rate) && (
+              <div className="visit-row__actions">
+                {b.reschedulable && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/my-visits/${b.id}/reschedule`);
+                    }}
+                  >
+                    Перенести
+                  </button>
+                )}
+                {b.cancellable && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-secondary--danger"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // Cancel lives on the detail screen — the undo-window
+                      // countdown UI is heavier than a list-row can hold.
+                      navigate(`/my-visits/${b.id}`);
+                    }}
+                  >
+                    Отменить
+                  </button>
+                )}
+                {b.can_rate && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/feedback/${b.id}`);
+                    }}
+                  >
+                    Оценить визит
+                  </button>
+                )}
+              </div>
             )}
           </div>
         ))}
