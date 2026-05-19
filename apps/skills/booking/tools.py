@@ -1714,25 +1714,125 @@ def execute_reschedule(
         )
         reschedule_metadata["created_by"] = "execute_reschedule"
         reschedule_metadata["rescheduled_from_record_id"] = record_id
-        BookingRequest.all_tenants.create(
-            tenant=tenant,
-            bot_user=bot_user,
-            category_name="",
-            service_name=service_name or booking.service_name or "—",
-            master_name=master_name or booking.master_name or "—",
-            client_name=client_name,
-            client_phone=phone,
-            comment=(f"Bot booking | {new_yc_marker} | rescheduled_from={record_id}"),
-            source="bot",
-            is_processed=False,
-            status=BookingRequest.Status.CONFIRMED,
-            visit_at=visit_at_dt,
-            booking_source="ai_direct",
-            ai_assist_score=compute_assist_score(booking_source="ai_direct"),
-            billable=billable,
-            billing_reason=billing_reason,
-            attribution_metadata=reschedule_metadata,
-        )
+
+        # Hotfix D (retro review #2): the window between YClients-create
+        # success and local-write success is the last split-brain gap
+        # the Q-ATT-IMPL1 closure didn't seal. The early _parse_iso_datetime
+        # guard rejected unparseable slots before any YClients call, but
+        # the local create can still fail on DB transients, JSONField
+        # validation surprises, or any future model-level validator
+        # additions. If we land here without recovery, YClients has the
+        # customer's new appointment but our DB and reminders + Loyalty
+        # don't know about it.
+        try:
+            BookingRequest.all_tenants.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                category_name="",
+                service_name=service_name or booking.service_name or "—",
+                master_name=master_name or booking.master_name or "—",
+                client_name=client_name,
+                client_phone=phone,
+                comment=(f"Bot booking | {new_yc_marker} | rescheduled_from={record_id}"),
+                source="bot",
+                is_processed=False,
+                status=BookingRequest.Status.CONFIRMED,
+                visit_at=visit_at_dt,
+                booking_source="ai_direct",
+                ai_assist_score=compute_assist_score(booking_source="ai_direct"),
+                billable=billable,
+                billing_reason=billing_reason,
+                attribution_metadata=reschedule_metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 — recover, do not propagate
+            # Split-brain recovery: try to cancel the new YClients record
+            # so the customer isn't double-booked on their side. Then
+            # treat this as a reschedule_partial_failure for analytics.
+            logger.exception(
+                "booking.reschedule.local_create_failed yc_id=%s err=%s",
+                new_yc_id,
+                exc,
+            )
+            compensate_ok = False
+            try:
+                client.cancel_record(record_id=int(new_yc_id))
+                compensate_ok = True
+            except Exception:  # noqa: BLE001 — compensate is best-effort
+                logger.exception(
+                    "booking.reschedule.compensate_cancel_failed yc_id=%s",
+                    new_yc_id,
+                )
+
+            # If compensate succeeded, the rescheduled-from-old is now a
+            # plain cancel (no new visit anywhere). Flip the old row from
+            # RESCHEDULED to CANCELLED to keep analytics honest and emit
+            # booking.cancelled with the SHARED correlation_id so
+            # subscribers (Loyalty, analytics) see the composite outcome.
+            #
+            # When compensate FAILS (else branch below — we don't take any
+            # action there), we intentionally LEAVE the old row in
+            # RESCHEDULED. Customer still has a visit on YClients side
+            # that we can't link to locally; marking the old row CANCELLED
+            # would tell Loyalty «no visit happens» when in fact one might.
+            # The critical-severity health alert below is the ops hook to
+            # reconcile manually.
+            if compensate_ok:
+                BookingRequest.all_tenants.filter(pk=booking.pk).update(
+                    status=BookingRequest.Status.CANCELLED,
+                )
+                try:
+                    eventbus_services.emit_booking_cancelled(
+                        booking_id=str(booking.pk),
+                        cancelled_by="system",
+                        cancellation_reason="reschedule_local_create_failed",
+                        cancelled_at=dj_timezone.now().isoformat(),
+                        actor_type="system",
+                        correlation_id=_reschedule_correlation_id,
+                        tenant=tenant,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "booking.reschedule.recovery_cancel_emit_failed booking=%s",
+                        booking.pk,
+                    )
+
+            # Always audit + alert — ops needs visibility regardless of
+            # whether compensate succeeded.
+            write_audit(
+                "bookings.reschedule.local_create_failed",
+                target="BookingSkill",
+                payload={
+                    "tenant_id": tenant_id,
+                    "old_record_id": record_id,
+                    "new_yc_record_id": new_yc_id,
+                    "compensate_succeeded": compensate_ok,
+                    "error": str(exc)[:200],
+                },
+            )
+            try:
+                eventbus_services.emit(
+                    "system.module.health.degraded",
+                    {
+                        "module_name": "booking.execute_reschedule",
+                        "severity": "critical" if not compensate_ok else "warning",
+                        "metric": (
+                            f"split_brain_unresolved_yc_id={new_yc_id}"
+                            if not compensate_ok
+                            else f"split_brain_recovered_yc_id={new_yc_id}"
+                        ),
+                    },
+                    actor_type="system",
+                    tenant=tenant,
+                )
+            except Exception:  # noqa: BLE001 — alert never breaks the tool
+                logger.exception("booking.reschedule.alert_emit_failed")
+            _audit_tool(
+                tenant_id=tenant_id,
+                tool="execute_reschedule",
+                outcome=("split_brain_recovered" if compensate_ok else "split_brain_unresolved"),
+            )
+            return BookingToolResult(error="booking_reschedule_local_create_failed")
+
         _schedule_reminders(
             tenant=tenant,
             bot_user=bot_user,
