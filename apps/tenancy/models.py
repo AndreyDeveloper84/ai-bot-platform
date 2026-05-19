@@ -22,6 +22,8 @@ from decimal import Decimal
 
 from django.db import models
 
+from apps.tenancy.managers import TenantScopedManager
+
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,49}$")
 
 
@@ -307,3 +309,125 @@ class Tenant(models.Model):
                     ),
                 }
             )
+
+
+class TenantStaff(models.Model):
+    """Per-tenant staff role assignment (PR 1.5 / ADR-0008).
+
+    The admin-side half of the platform's 5-role model. Carries roles that
+    grant *admin chrome* — Owner, Admin, Receptionist — without trying to
+    describe the person's service-delivery profile (that's
+    :class:`apps.catalog.models.CatalogMaster`).
+
+    Master detection lives on ``CatalogMaster.linked_bot_user`` (PR #203)
+    and is deliberately NOT duplicated here. A master can ALSO hold a
+    ``TenantStaff`` row if they have admin privileges in addition (rare —
+    a salon's owner-master, for instance); the role resolver in
+    :mod:`apps.identity.services.role_resolver` reads both tables and
+    combines them per ADR-0008's additive-roles decision.
+
+    Customer is NEVER a row in this table — customer access is the implicit
+    baseline for every BotUser regardless of staff status (ADR-0008
+    decision 6).
+
+    See ``docs/adr/ADR-0008-role-detection-and-staff-model.md`` for the
+    storage choice rationale and ``docs/design/policies/conversation-ownership-policy.md``
+    §4 for the capability matrix this table makes enforceable.
+    """
+
+    class Role(models.TextChoices):
+        """Admin-side roles. Listed in increasing privilege per ADR-0008.
+
+        Master is intentionally absent — it lives on ``CatalogMaster``.
+        Customer is intentionally absent — it's the implicit baseline.
+        """
+
+        RECEPTIONIST = "receptionist", "Receptionist"
+        ADMIN = "admin", "Admin"
+        OWNER = "owner", "Owner"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="staff",
+        help_text="Owning tenant. PROTECT — dropping a tenant must not "
+        "silently nuke the audit trail of who held what role.",
+    )
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.PROTECT,
+        related_name="staff_assignments",
+        help_text="The person holding this role, identified by their "
+        "channel-scoped BotUser. PROTECT mirrors the tenant FK — a "
+        "delete must not silently drop role history.",
+    )
+    role = models.CharField(
+        max_length=16,
+        choices=Role.choices,
+        db_index=True,
+        help_text="One of owner / admin / receptionist (ADR-0008). "
+        "Owner uniqueness is enforced per-tenant via partial unique "
+        "constraint below.",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When the staff row was created.",
+    )
+    created_by = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="BotUser who created this assignment — audit trail for "
+        "operator-led promotions. NULL allowed for system-created rows "
+        "(seed data, management commands, migrations).",
+    )
+    deactivated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the role was revoked. NULL = active. Soft "
+        "deactivation preserves the historical assignment for audit; "
+        "the role resolver ignores rows with this set, and the partial "
+        "unique-Owner constraint only counts active rows so an Owner "
+        "handover can deactivate the old row then create the new one.",
+    )
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Tenant staff"
+        verbose_name_plural = "Tenant staff"
+        unique_together = (("tenant", "bot_user", "role"),)
+        constraints = [
+            # ADR-0008 decision 5: each tenant has exactly one active
+            # Owner. Partial unique index lets handover work as
+            # deactivate-then-create without a transient state where two
+            # rows briefly satisfy uniqueness because the old one is
+            # being soft-archived.
+            models.UniqueConstraint(
+                fields=["tenant"],
+                condition=models.Q(role="owner", deactivated_at__isnull=True),
+                name="unique_active_owner_per_tenant",
+            ),
+        ]
+        indexes = [
+            # Resolver hot path: "all active staff rows for this BotUser
+            # in this tenant" — we filter by (tenant, bot_user) and then
+            # rely on the active-vs-deactivated check in Python. A
+            # composite index on (tenant, role, deactivated_at) also
+            # serves admin filters ("list active admins of tenant X").
+            models.Index(fields=["tenant", "role", "deactivated_at"]),
+            models.Index(fields=["bot_user"]),
+        ]
+
+    def __str__(self) -> str:
+        suffix = " (deactivated)" if self.deactivated_at is not None else ""
+        return f"TenantStaff[{self.tenant_id}/{self.bot_user_id}={self.role}]{suffix}"
+
+    @property
+    def is_active(self) -> bool:
+        """True if this row is the live assignment (not soft-deactivated)."""
+        return self.deactivated_at is None

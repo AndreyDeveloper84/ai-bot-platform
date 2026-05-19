@@ -48,6 +48,14 @@ urlpatterns = [
         "api/v1/customer/",
         include("apps.miniapp_api.urls", namespace="miniapp_api"),
     ),
+    # PR 1.5 / ADR-0008 — unified identity surface. Today carries the
+    # /api/v1/me endpoint used by every Mini App on launch to learn the
+    # caller's role + capabilities. Mounted at the bare /api/v1/ prefix
+    # because /me is shared across customer / master / admin surfaces.
+    path(
+        "api/v1/",
+        include("apps.identity.urls", namespace="identity"),
+    ),
     # Master Mini App API (PR 1 / M0 onboarding) — claim-invite, accept,
     # reject, profile init, /me. Init-data verified on every call;
     # tenant resolved via the linked BotUser. See
