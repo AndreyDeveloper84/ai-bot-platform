@@ -406,7 +406,12 @@ def _handle_create(tenant: Tenant, data: dict[str, Any]) -> dict[str, Any]:
     # serialises per record (single retry loop), so the race window
     # is small and the audit log catches the duplicate if it ever
     # happens.
-    yc_marker = f"yclients_record_id={yc_id}"
+    # Skills retro hotfix #1 (cont'd): anchor on the pipe-space prefix so
+    # a free-text comment fragment can't spoof the idempotency lookup.
+    # Both writers emit ``"<source> | yclients_record_id=<id>"`` — the
+    # pipe character is reserved in our comment format and not injectable
+    # through normal user-input paths.
+    yc_marker = f" | yclients_record_id={yc_id}"
     booking = BookingRequest.objects.filter(
         bot_user=bot_user,
         comment__contains=yc_marker,

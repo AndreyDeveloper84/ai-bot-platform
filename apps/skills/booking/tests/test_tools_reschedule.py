@@ -121,6 +121,18 @@ def _future_iso(hours: int = 48) -> str:
     return (dj_timezone.now() + timedelta(hours=hours)).replace(microsecond=0).isoformat()
 
 
+def _slot_at(new_dt: str) -> AvailableTime:
+    """Build an :class:`AvailableTime` matching ``new_dt`` so the
+    execute_reschedule slot-recheck (skills retro hotfix #4) finds the
+    target slot still free.
+    """
+    return AvailableTime(
+        time=new_dt.split("T", 1)[1][:5],
+        datetime=new_dt,
+        seance_length_s=3600,
+    )
+
+
 # ---------------------------------------------------------------------------
 # reschedule_booking — preview path
 # ---------------------------------------------------------------------------
@@ -262,6 +274,7 @@ class TestExecuteReschedule:
         client = FakeClient()
         client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
         new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
         with tenant_scope(tenant):
             result = execute_reschedule(
                 client=client,
@@ -311,12 +324,14 @@ class TestExecuteReschedule:
         booking = _make_booking(tenant, bot_user, yc_id=555)
         client = FakeClient()
         client.cancel_exc = YClientsAPIError("http_404")
+        new_dt = _future_iso(48)
+        client.times = [_slot_at(new_dt)]
         with tenant_scope(tenant):
             result = execute_reschedule(
                 client=client,
                 payload={
                     "record_id": 555,
-                    "new_datetime": _future_iso(48),
+                    "new_datetime": new_dt,
                     "master_id": 11,
                     "service_id": 22,
                     "master_name": "Ольга",
@@ -348,12 +363,14 @@ class TestExecuteReschedule:
         booking = _make_booking(tenant, bot_user, yc_id=555)
         client = FakeClient()
         client.create_exc = YClientsAPIError("http_400: slot collision")
+        new_dt = _future_iso(48)
+        client.times = [_slot_at(new_dt)]
         with tenant_scope(tenant):
             result = execute_reschedule(
                 client=client,
                 payload={
                     "record_id": 555,
-                    "new_datetime": _future_iso(48),
+                    "new_datetime": new_dt,
                     "master_id": 11,
                     "service_id": 22,
                     "master_name": "Ольга",
@@ -416,6 +433,7 @@ class TestExecuteReschedule:
         client = FakeClient()
         client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
         new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
         with tenant_scope(tenant):
             execute_reschedule(
                 client=client,
@@ -474,6 +492,156 @@ class TestExecuteReschedule:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Skills retro hotfix #4 — TOCTOU recheck before destructive cancel
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestRescheduleTocTouRecheck:
+    """Between the preview's get_available_times call and the ✅ tap (up
+    to 10 min of pending-action TTL) another customer can take the slot.
+    Without the execute-time recheck, ``execute_reschedule`` would cancel
+    the old record FIRST and only then learn the new slot is gone —
+    leaving the user with no booking at all. The recheck guard makes
+    the operation safely abort with ``slot_unavailable`` so the caller
+    can ask for a different time, old booking intact.
+    """
+
+    def test_slot_taken_at_execute_aborts_before_cancel(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        booking = _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        # client.times left empty → recheck reports the slot taken.
+        with tenant_scope(tenant):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": 555,
+                    "new_datetime": _future_iso(72),
+                    "master_id": 11,
+                    "service_id": 22,
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "slot_unavailable"
+        # Critically: old booking is NOT touched. No destructive action.
+        booking.refresh_from_db()
+        assert booking.status == BookingRequest.Status.CONFIRMED
+        assert client.cancel_calls == []
+        assert client.create_calls == []
+
+    def test_yclients_recheck_unreachable_aborts_before_cancel(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        # Recheck infrastructure failure must also fail closed — old
+        # booking stays intact, surface yclients_unavailable so caller
+        # can retry without data loss.
+        booking = _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.times_exc = YClientsUnavailableError("network down")
+        with tenant_scope(tenant):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": 555,
+                    "new_datetime": _future_iso(72),
+                    "master_id": 11,
+                    "service_id": 22,
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "yclients_unavailable"
+        booking.refresh_from_db()
+        assert booking.status == BookingRequest.Status.CONFIRMED
+        assert client.cancel_calls == []
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Skills retro hotfix #1 — anchor idempotency lookup to documented prefix
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestIdempotencyMarkerAnchored:
+    """Substring-match on ``comment`` would let a spoofed service_name /
+    client_name carrying ``yclients_record_id=<other-id>`` short-circuit
+    a legitimate reschedule. The anchored ``startswith`` check on the
+    documented ``"Bot booking | yclients_record_id="`` prefix is not
+    spoofable via free-text payload.
+    """
+
+    def test_spoofed_substring_does_not_short_circuit_reschedule(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        # A pre-existing row with the spoofed marker in a NON-prefix
+        # position (e.g. a free-text service_name carrying the string).
+        # Without the anchor fix, this row would short-circuit
+        # `existing_new` and skip writing the legitimate NEW row.
+        _make_booking(tenant, bot_user, yc_id=555)
+        with tenant_scope(tenant):
+            BookingRequest.objects.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_name="totally legitimate",
+                master_name="—",
+                client_name="someone-else",
+                client_phone="79990000000",
+                # Marker buried mid-string, no "Bot booking | " prefix:
+                comment="user note: see yclients_record_id=888 for prior visit",
+                source="bot",
+                status=BookingRequest.Status.CONFIRMED,
+            )
+
+        client = FakeClient()
+        client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
+        with tenant_scope(tenant):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": 555,
+                    "new_datetime": new_dt,
+                    "master_id": 11,
+                    "service_id": 22,
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == ""
+        # The legitimate NEW row was written with the proper prefix
+        # marker (substring spoof was correctly ignored).
+        legit_new = BookingRequest.all_tenants.filter(
+            comment__startswith="Bot booking | yclients_record_id=888",
+        ).first()
+        assert legit_new is not None
+        assert legit_new.status == BookingRequest.Status.CONFIRMED
+        # Hardened assertion (Code Reviewer Y2): exactly ONE anchored
+        # row exists. The spoofed row carries the bare substring but no
+        # prefix, so it MUST NOT count toward the anchored query — that
+        # pins the contract: anchor is real, not coincidentally passing.
+        assert (
+            BookingRequest.all_tenants.filter(
+                comment__startswith="Bot booking | yclients_record_id=888",
+            ).count()
+            == 1
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Hotfix D — split-brain recovery between YClients-create and local-write
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -493,10 +661,10 @@ class TestLocalCreateSplitBrainRecovery:
     - Always audit, always return error to caller.
     """
 
-    def _payload(self) -> dict[str, Any]:
+    def _payload(self, *, new_dt: str | None = None) -> dict[str, Any]:
         return {
             "record_id": 555,
-            "new_datetime": _future_iso(72),
+            "new_datetime": new_dt or _future_iso(72),
             "master_id": 11,
             "service_id": 22,
             "master_name": "Ольга",
@@ -513,6 +681,8 @@ class TestLocalCreateSplitBrainRecovery:
         booking = _make_booking(tenant, bot_user, yc_id=555)
         client = FakeClient()
         client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
 
         # Force local BookingRequest.create to raise.
         from apps.skills.booking import tools as tools_module
@@ -531,7 +701,7 @@ class TestLocalCreateSplitBrainRecovery:
         with tenant_scope(tenant):
             result = execute_reschedule(
                 client=client,
-                payload=self._payload(),
+                payload=self._payload(new_dt=new_dt),
                 tenant=tenant,
                 bot_user=bot_user,
             )
@@ -572,6 +742,8 @@ class TestLocalCreateSplitBrainRecovery:
         booking = _make_booking(tenant, bot_user, yc_id=555)
         client = FakeClient()
         client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
 
         from apps.skills.booking import tools as tools_module
 
@@ -597,7 +769,7 @@ class TestLocalCreateSplitBrainRecovery:
         with tenant_scope(tenant):
             result = execute_reschedule(
                 client=client,
-                payload=self._payload(),
+                payload=self._payload(new_dt=new_dt),
                 tenant=tenant,
                 bot_user=bot_user,
             )

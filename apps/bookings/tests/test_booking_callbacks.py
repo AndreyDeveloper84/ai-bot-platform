@@ -41,7 +41,7 @@ from apps.bookings.callbacks import (
 from apps.bookings.pending_actions import create_pending
 from apps.conversations.models import Conversation
 from apps.identity.models import BotUser
-from apps.integrations.yclients import BookingRecord, YClientsAPIError
+from apps.integrations.yclients import AvailableTime, BookingRecord, YClientsAPIError
 from apps.skills.base import SkillContext
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
@@ -155,7 +155,7 @@ def _make_booking(
 
 
 class FakeYClients:
-    """Minimal stub — only the three methods the gate executor calls."""
+    """Minimal stub — only the methods the gate executor calls."""
 
     def __init__(self) -> None:
         self.create_calls: list[dict] = []
@@ -163,6 +163,15 @@ class FakeYClients:
         self.create_response: BookingRecord | None = None
         self.create_exc: Exception | None = None
         self.cancel_exc: Exception | None = None
+        # Skills retro hotfix #4: execute_reschedule re-checks slot
+        # availability at execute time. Default = the requested slot is
+        # still free (matches `time`/`datetime` via `_slot_available`'s
+        # `if t.time` and `if t.datetime` branches with explicit None →
+        # which would short-circuit). We expose a list of AvailableTime
+        # rows; tests covering the "slot taken" race must leave this
+        # list empty.
+        self.times: list[AvailableTime] = []
+        self.times_exc: Exception | None = None
 
     def create_record(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -175,6 +184,11 @@ class FakeYClients:
         if self.cancel_exc is not None:
             raise self.cancel_exc
         return True
+
+    def get_available_times(self, **_: Any) -> list[AvailableTime]:
+        if self.times_exc is not None:
+            raise self.times_exc
+        return list(self.times)
 
 
 def _patch_yclients(client: FakeYClients):
@@ -514,6 +528,10 @@ class TestConfirmTapReschedule:
         )
         client = FakeYClients()
         client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
+        # Slot still free at execute time — passes the hotfix #4 recheck.
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-06-01T14:00:00", seance_length_s=3600)
+        ]
         ctx = _ctx(
             f"cb:book:confirm:{token}",
             bot_user=bot_user,
@@ -541,6 +559,11 @@ class TestConfirmTapReschedule:
         )
         client = FakeYClients()
         client.create_exc = YClientsAPIError("http_400")
+        # Recheck passes; failure happens later at create_record (partial-
+        # failure path covered by this test).
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-06-01T14:00:00", seance_length_s=3600)
+        ]
         ctx = _ctx(
             f"cb:book:confirm:{token}",
             bot_user=bot_user,
