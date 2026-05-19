@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import time
 from decimal import Decimal
+from typing import Any
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
@@ -31,7 +32,9 @@ from apps.tenancy.models import Tenant
 TENANT_SLUG = "formula-tela"
 TENANT_NAME = "Формула тела"
 
-SERVICES = [
+# `Any` because the seed dicts mix str/int/Decimal/bool/list values.
+# TypedDicts would be more precise but this is one-shot dev seed data.
+SERVICES: list[dict[str, Any]] = [
     {
         "external_id": 1001,
         "slug": "lpg-massage",
@@ -64,7 +67,7 @@ SERVICES = [
     },
 ]
 
-MASTERS = [
+MASTERS: list[dict[str, Any]] = [
     {
         "external_id": 2001,
         "name": "Анна Иванова",
