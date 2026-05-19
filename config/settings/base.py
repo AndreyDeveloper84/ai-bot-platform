@@ -79,6 +79,10 @@ LOCAL_APPS = [
     "apps.scheduling",
     # Customer Mini App Phase 0b — HTTP API for the MAX Mini App webview.
     "apps.miniapp_api",
+    # Master Mini App PR 1 (M0 onboarding) — claim-invite flow + BotUser
+    # linkage + session-token issuance. See
+    # ``docs/design/handoffs/2026-05-18-master-mobile-handoff.md`` §M0.
+    "apps.master_api",
     # 2026-05-19 — domain event bus (Postgres outbox per Q-EV-IMPL3).
     # Distinct from apps.events (analytics, snake_case, sync fanout):
     # apps.eventbus carries dot.notation domain events per
@@ -216,6 +220,22 @@ SHORT_TERM_MEMORY_TTL_SECONDS = int(os.environ.get("SHORT_TERM_MEMORY_TTL_SECOND
 MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
+
+# Master Mini App session token (PR 1 / M0 onboarding).
+#
+# Issued by POST /api/v1/master/onboarding/accept. The Mini App stores it
+# in ``WebApp.DeviceStorage.setItem('master_token', ...)`` and (later
+# PRs) replays it on dashboard endpoints. PR 1 only ISSUES the token —
+# consumption / middleware decode lands when the dashboard endpoints
+# do (PR 7+).
+#
+# Format: signed JSON via ``django.core.signing.TimestampSigner`` (we do
+# not have PyJWT in deps and the spec is intentionally compatible with
+# any future JWT migration — the payload is the same shape). Signing key
+# defaults to SECRET_KEY when MASTER_SESSION_SECRET is unset, matching
+# the rest of the platform's session-data signing pattern.
+MASTER_SESSION_SECRET = os.environ.get("MASTER_SESSION_SECRET", "")
+MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
 
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather

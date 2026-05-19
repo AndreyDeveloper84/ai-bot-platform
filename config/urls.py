@@ -48,6 +48,14 @@ urlpatterns = [
         "api/v1/customer/",
         include("apps.miniapp_api.urls", namespace="miniapp_api"),
     ),
+    # Master Mini App API (PR 1 / M0 onboarding) — claim-invite, accept,
+    # reject, profile init, /me. Init-data verified on every call;
+    # tenant resolved via the linked BotUser. See
+    # ``docs/design/handoffs/2026-05-18-master-mobile-handoff.md`` §M0.
+    path(
+        "api/v1/master/",
+        include("apps.master_api.urls", namespace="master_api"),
+    ),
     # Phase 5 / KB-SYNC — Shiro-Py salon-knowledge consumer.
     # POST /api/v1/salon-knowledge/webhook/approved/ receives
     # ``knowledge.approved`` events from the colleague's service and

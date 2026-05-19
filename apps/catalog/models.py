@@ -189,6 +189,39 @@ class CatalogMaster(_MirrorBase):
     invited_at = models.DateTimeField(null=True, blank=True)
     max_handle = models.CharField(max_length=64, blank=True, default="")
 
+    # M0 onboarding (master mobile handoff §M0 + master-management MM2).
+    # invite_token: opaque UUID emitted by MM2 POST /api/v1/masters/invite,
+    # carried in the Mini App deeplink as ?token=<uuid>. UUID format (not
+    # HMAC) per the MM2 response contract; cleared on accept (one-shot).
+    # invite_expires_at: invited_at + 7d; checked on every onboarding/*
+    # endpoint. After expiry, the row stays PENDING but the token can no
+    # longer be claimed — operator must re-issue.
+    # linked_bot_user: OneToOne to BotUser. SET_NULL on BotUser delete so
+    # the master row survives (audit trail). A master has exactly one
+    # MAX/Telegram identity in Phase 1; multi-device is later.
+    invite_token = models.UUIDField(
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="One-shot opaque token from MM2 invite-create. Cleared "
+        "on accept; uniqueness enforced so a stale token can't collide.",
+    )
+    invite_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="invited_at + 7d (Q-MM2). Past-expiry tokens 410.",
+    )
+    linked_bot_user = models.OneToOneField(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="master_identity",
+        help_text="MAX/Telegram BotUser this master signs in with. "
+        "SET_NULL on BotUser delete preserves the master audit trail.",
+    )
+
     objects = _MasterManager()  # type: ignore[misc]
     all_tenants = models.Manager()  # type: ignore[misc]
 
