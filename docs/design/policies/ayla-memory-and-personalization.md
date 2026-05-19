@@ -1334,9 +1334,9 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.18 ayla memory domain` (NEW
 | **Q-AML3** | Inferred fact confidence threshold — store < 0.50 confidence? | NO — threshold 0.50. Below = noise. Configurable per vocabulary entry Phase 3+. | Eng | 🟢 |
 | **Q-AML4** | Behavioral extraction frequency — nightly or more often? | Nightly MVP per Notion. More often Phase 3+ if data shows value. | Eng | 🟢 |
 | **Q-AML5** | Customer deletes same inferred field 3 times — do-not-re-infer list? | YES per §6.3. Customer can clear list in settings. | Policy + Eng | 🟡 |
-| **Q-AML6** | Wellness module integration — wellness data IS memory or REFERENCES memory? | References. Wellness modules own their data (mood/water/etc.). Ayla memory has lightweight derived facts (e.g., `sleep_deficit_pattern`) that REFERENCE wellness data without duplicating. | Eng | 🔴 PRE-DEPLOY |
+| **Q-AML6** | Wellness module integration — wellness data IS memory or REFERENCES memory? | References. Wellness modules own their data (mood/water/etc.). Ayla memory has lightweight derived facts (e.g., `sleep_deficit_pattern`) that REFERENCE wellness data without duplicating. | Eng | 🟢 RESOLVED 2026-05-20 |
 | **Q-AML7** | LLM prompt audit storage — keep all prompts or sample? | Sample MVP (1 in 100 per user). Full audit Phase 3+ if quality concern. Cost driver. | Eng + AI quality | 🟡 |
-| **Q-AML8** | Customer < 18 — memory collection at all? | Per existing wellness rules: minors can use Ayla for booking but NO wellness-module data + NO behavioral inference + ONLY explicit facts customer states. Red-zone fully disabled for minors. | Privacy + Legal | 🔴 PRE-DEPLOY |
+| **Q-AML8** | Customer < 18 — memory collection at all? | Per existing wellness rules: minors can use Ayla for booking but NO wellness-module data + NO behavioral inference + ONLY explicit facts customer states. Red-zone fully disabled for minors. | Privacy + Legal | 🟢 RESOLVED 2026-05-20 |
 | **Q-AML9** | Session boundary — 30-min correct? | 30-min MVP per §10.7. Tune based on conversation pattern data. | UX | 🟢 |
 | **Q-AML10** | Auto-supersede vs explicit conflict resolution | Auto-supersede MVP §6.2. Phase 3+ may surface «Я раньше думала X, теперь говоришь Y — что верно?» if conflict significant. | UX | 🟡 |
 | **Q-AML11** | Red-zone retention 90 days unused — tune? | 90d MVP per Notion. Could shorten to 60 if data abuse concern; longer 180 if customers complain about loss. | Policy + Privacy | 🟢 |
@@ -1345,7 +1345,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.18 ayla memory domain` (NEW
 | **Q-AML14** | Multi-tenant Ayla — one MemoryEntry across all tenants? | YES per §9.1. Tenant is context not partition. | Eng | 🟢 |
 | **Q-AML15** | Cross-tenant analytics on memory patterns — founder-level? | YES with anonymization — founder sees «X% of customers have evening preference». NEVER per-customer named. | Privacy + Founder | 🟡 |
 | **Q-AML16** | Founder zone override notification to customer? | NO MVP — would expose backend logic. Audit only. Phase 3+ may surface in memory entry source («команда отметила вручную»). | Privacy + Policy | 🟢 |
-| **Q-AML17** | Hallucination defense in extraction — what if Claude extracts wrong fact? | Confidence threshold §Q-AML3 + customer can delete + audit. Phase 2+ post-hoc validation against booking patterns. | AI quality | 🔴 PRE-DEPLOY |
+| **Q-AML17** | Hallucination defense in extraction — what if Claude extracts wrong fact? | Confidence threshold §Q-AML3 + customer can delete + audit. Phase 2+ post-hoc validation against booking patterns. | AI quality | 🟢 RESOLVED 2026-05-20 |
 | **Q-AML18** | Memory access by Ayla itself — does Ayla need to «remember» it accessed? | Cumulative `last_used_at` update is enough MVP. Per-access trace via MemoryAccessLog. | Eng | 🟢 |
 | **Q-AML19** | Voice (Phase 2+) memory commands — same UX as chat? | YES. Voice transcribed → same chat-side commands § 8 apply. | UX (Phase 2+) | 🟢 |
 | **Q-AML20** | Tone of voice for memory chat replies — same Ayla voice? | YES per `ayla-identity-and-brand §3.1`. Calm, action-oriented, no apology for «I remembered», honest about deletion («забыла»). | UX | 🟢 |
@@ -1414,9 +1414,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.18 ayla memory domain` (NEW
 - ❌ ML persona drift detection
 - ❌ Customer-to-customer memory sharing
 - ❌ Family / shared accounts
-- ❌ Skip Q-AML6 (wellness integration model) — pre-deploy
-- ❌ Skip Q-AML8 (minor protection) — pre-deploy
-- ❌ Skip Q-AML17 (hallucination defense) — pre-deploy
+- ✅ Q-AML6 / Q-AML8 / Q-AML17 — resolved 2026-05-20 (founder confirmed provisional); implementation tickets unblocked
 
 ---
 
@@ -1425,13 +1423,13 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.18 ayla memory domain` (NEW
 | Role | Approval | Date |
 |---|---|---|
 | UX Architect | ✅ | 2026-05-19 |
-| AI prompt eng (Ayla memory access in LLM prompts + §13 sanitization + Q-AML17 hallucination) | ☐ | 🔴 PRE-DEPLOY |
-| Privacy / Legal (152-ФЗ compliance §12 + §2 3-zone + Q-AML8 minor + Q-AML15/16 founder access) | ☐ | 🔴 PRE-DEPLOY |
+| AI prompt eng (Ayla memory access in LLM prompts + §13 sanitization + Q-AML17 hallucination) | ☐ | 🟢 Q-AML17 resolved 2026-05-20 |
+| Privacy / Legal (152-ФЗ compliance §12 + §2 3-zone + Q-AML8 minor + Q-AML15/16 founder access) | ☐ | 🟢 Q-AML8 resolved 2026-05-20 |
 | Mini App frontend (memory transparency surface §5 + edit/delete flows + red-zone reveal) | ☐ | |
-| Wellness OS steward (Q-AML6 wellness integration boundary) | ☐ | 🔴 PRE-DEPLOY |
+| Wellness OS steward (Q-AML6 wellness integration boundary) | ☐ | 🟢 Q-AML6 resolved 2026-05-20 |
 | Brand owner / Founder (Q-AYL voice for memory replies + Q-AML1 zone override authority) | ☐ | |
 | Engineering (behavioral extraction Celery + contextual Claude API + retention scanners + cross-tenant model) | ☐ | |
-| AI quality steward (per-LLM-call audit + Q-AML7 sampling rate + Q-AML17) | ☐ | 🔴 PRE-DEPLOY |
+| AI quality steward (per-LLM-call audit + Q-AML7 sampling rate + Q-AML17) | ☐ | 🟢 Q-AML17 resolved 2026-05-20 |
 | Accessibility (WCAG 2.2 AA on memory surface) | ☐ | |
 
 ## Last verified

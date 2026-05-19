@@ -431,7 +431,7 @@ If customer interacts via MAX Bot DM (NOT Mini App):
 - MAX bot DM identity is MAX-username (already a form of identity)
 - Per Notion: bot DM users may always be at least pseudonymous via MAX
 - This doc focuses on Mini App anonymous; bot DM is borderline (likely auto-registered upon first interaction since MAX identity available)
-- Per Q-AN1 — TBD whether Bot DM has anonymous tier at all
+- Per Q-AN1 (resolved 2026-05-20): Bot DM = **auto-register** on first interaction. No anonymous tier for the DM channel — MAX identity is implicit so registration is implicit too. Anonymous tier remains only for Mini App browse-only.
 
 ---
 
@@ -812,11 +812,9 @@ When gate fires + customer taps «Зарегистрироваться чере�
 Customer can also interact via @Ayla Bot DM (not Mini App):
 - Same Ayla persona
 - Customer's MAX username is implicit (Bot DM requires MAX identity)
-- Per Q-AN1: Bot DM users may be auto-registered on first interaction (since MAX identity available) — TBD
+- Per Q-AN1 (resolved 2026-05-20): Bot DM users **are auto-registered** on first interaction since MAX identity is available.
 
-If auto-registered, gate is implicit. No browsing anonymous via Bot DM.
-
-If NOT auto-registered (Q-AN1 decision pending), Bot DM has anonymous tier same as Mini App.
+The gate is implicit. No anonymous browsing via Bot DM — MAX identity + chose-to-DM-Ayla = implicit registration intent. Anonymous tier exists only for the Mini App browse-only flow.
 
 ### 10.5 Multi-app MAX (5-bot limit per `project_max_platform_capabilities`)
 
@@ -1026,7 +1024,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.21 anonymous flow domain` (
 
 | # | Question | Lean | Owner | Urgency |
 |---|---|---|---|---|
-| **Q-AN1** | Bot DM users — auto-register or anonymous tier? | TBD. If auto-register: simpler model, MAX identity always present. If anonymous tier: consistent with Mini App. Lean auto-register (since MAX identity exists, customer chose to message Ayla = implicit registration intent). | Policy + Eng | 🔴 PRE-DEPLOY |
+| **Q-AN1** | Bot DM users — auto-register or anonymous tier? | **Auto-register** (founder decision 2026-05-20). MAX identity always present and customer chose to message Ayla = implicit registration intent. Simpler data model, no extra anonymous→registered path for the DM channel. Anonymous tier remains for Mini App browse-only flow. | Policy + Eng | 🟢 RESOLVED 2026-05-20 |
 | **Q-AN2** | Anonymous session retention — 24h correct? | YES MVP. Tune based on data — if customers commonly return at 30-48h, extend. | UX + Data | 🟢 |
 | **Q-AN3** | Cross-device anonymous linking — Phase 3+? | YES Phase 3+ if value demonstrated. MVP per-device. | Eng | 🟡 |
 | **Q-AN4** | Soft gate (10 chats → prompt) — Phase 3+ or MVP? | Phase 3+ MVP only explicit triggers. Don't push. | UX | 🟢 |
@@ -1034,7 +1032,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.21 anonymous flow domain` (
 | **Q-AN6** | «Registration benefit» mention frequency — once per session correct? | YES MVP §7.5. Tune if data shows higher conversion at 2× / session (unlikely). | UX | 🟢 |
 | **Q-AN7** | Carry-forward UX — when offered? | At post-registration acknowledgment §4.5 + §6.3. After customer completed first booking would also be candidate. Phase 3+ optimize. | UX | 🟡 |
 | **Q-AN8** | Anti-abuse: rate-limit on anonymous session per device fingerprint | 100 sessions per device per 24h MVP soft cap. Phase 4+ ML. | Eng + Anti-fraud | 🟡 |
-| **Q-AN9** | Anonymous customer in wellness emergency mention — special handling? | Per §9.6: full medical routing per `wellness-symptom-handoff §10`. Cannot open formal emergency (no account). Customer encouraged to register if wants formal pathway. | Policy + Privacy | 🔴 PRE-DEPLOY |
+| **Q-AN9** | Anonymous customer in wellness emergency mention — special handling? | Per §9.6: full medical routing per `wellness-symptom-handoff §10`. Cannot open formal emergency (no account). Customer encouraged to register if wants formal pathway. | Policy + Privacy | 🟢 RESOLVED 2026-05-20 |
 | **Q-AN10** | Tenant SUSPENDED with anonymous customer mid-search — re-search? | Search re-evaluates each query. If tenant transitions to SUSPENDED, next query excludes. Customer's in-flight chat references tenant — Ayla mentions «временно недоступен». | UX + Eng | 🟡 |
 | **Q-AN11** | Mini App localStorage cleared by customer (incognito browsing pattern) — what happens? | New session_token each open → fresh anonymous session. Privacy-protecting; no link to prior. | Eng + Privacy | 🟢 |
 | **Q-AN12** | Multi-language anonymous customer — Phase 3+? | YES Phase 3+ per `ayla-identity-and-brand Q-AYL3/4`. Russian MVP. | UX + I18N | 🟢 |
@@ -1105,8 +1103,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.21 anonymous flow domain` (
 - ❌ Multi-language anonymous (Phase 3+ Kazakh)
 - ❌ «Browse as guest» mode for registered users (Phase 4+)
 - ❌ Phone-only registration without MAX (Phase 4+ if needed)
-- ❌ Skip Q-AN1 Bot DM auto-register vs anonymous — pre-deploy
-- ❌ Skip Q-AN9 wellness emergency for anonymous — pre-deploy
+- ✅ Q-AN1 / Q-AN9 — resolved 2026-05-20 (founder confirmed provisional: Bot DM = auto-register, anonymous wellness emergency = medical routing + register-encouragement); implementation tickets unblocked
 
 ---
 
@@ -1118,8 +1115,8 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.21 anonymous flow domain` (
 | Identity / BotUser backend lead (MAX OAuth + AnonymousSession + conversion flow) | ☐ | |
 | Mini App frontend (Mini App opens functional + gate UX + carry-forward offer) | ☐ | |
 | AI prompt eng (Ayla voice for anonymous + §7 behavior rules) | ☐ | |
-| Privacy / Legal (§8 anonymous data retention + §2.5 + §6.5 + Q-AN9 emergency policy) | ☐ | 🔴 PRE-DEPLOY |
-| Founder (Q-AN1 Bot DM auto-register decision + anonymous funnel analytics scope) | ☐ | 🔴 PRE-DEPLOY |
+| Privacy / Legal (§8 anonymous data retention + §2.5 + §6.5 + Q-AN9 emergency policy) | ☐ | 🟢 Q-AN9 resolved 2026-05-20 |
+| Founder (Q-AN1 Bot DM auto-register decision + anonymous funnel analytics scope) | ☐ | 🟢 Q-AN1 resolved 2026-05-20 (auto-register) |
 | Tenant-as-provider steward (anonymous data NOT visible to tenant — §11) | ☐ | |
 | Memory steward (anonymous → registered carry-forward consent + §6.3) | ☐ | |
 | Emergency policy steward (anonymous cannot open emergency — §2.12 + §9.7) | ☐ | |
