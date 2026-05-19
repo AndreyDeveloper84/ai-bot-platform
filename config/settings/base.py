@@ -187,6 +187,19 @@ EVENT_FANOUTS: list[str] = [
     if p.strip()
 ]
 
+# Phase 2.2 PR-B — `apps.eventbus` (domain bus) subscriber registry.
+# Comma-separated dotted paths to ``apps.eventbus.dispatcher.Subscriber``
+# implementations. Default ships ``NoopSubscriber`` so the dispatcher has
+# something to call against until real subscribers (AuditSubscriber, etc.)
+# land in follow-up PRs. Distinct from ``EVENT_FANOUTS`` (analytics bus).
+DOMAIN_EVENT_SUBSCRIBERS: list[str] = [
+    p.strip()
+    for p in os.environ.get(
+        "DOMAIN_EVENT_SUBSCRIBERS", "apps.eventbus.dispatcher.NoopSubscriber"
+    ).split(",")
+    if p.strip()
+]
+
 # Sprint 2 / C1 — short-term Redis memory window depth + TTL.
 # Caller (apps/orchestrator/memory/short_term.py) reads these on every
 # append; runtime-changeable via settings override in tests.

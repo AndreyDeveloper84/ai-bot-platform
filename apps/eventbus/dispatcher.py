@@ -36,9 +36,11 @@ wired to that event by the observability stack.
 from __future__ import annotations
 
 import logging
+from importlib import import_module
 from typing import Protocol, runtime_checkable
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -71,14 +73,55 @@ class NoopSubscriber:
         logger.debug("eventbus.noop_subscriber.handled event=%s", envelope.event_name)
 
 
-def _subscribers() -> list[Subscriber]:
-    """Return configured subscribers. Phase 2.1 hard-codes Noop.
+_REGISTRY_CACHE: list[Subscriber] | None = None
 
-    PR-B replaces this with ``settings.DOMAIN_EVENT_SUBSCRIBERS``
-    dotted-path resolution similar to ``apps.events.fanout``.
+
+def _resolve(path: str) -> Subscriber:
+    """Resolve a dotted path like ``apps.eventbus.dispatcher.NoopSubscriber`` to an instance.
+
+    Mirrors :func:`apps.events.fanout._resolve` (kept independent to
+    avoid cross-bus coupling).
     """
 
-    return [NoopSubscriber()]
+    module_path, _, class_name = path.rpartition(".")
+    module = import_module(module_path)
+    cls = getattr(module, class_name)
+    return cls()
+
+
+def _subscribers() -> list[Subscriber]:
+    """Return configured subscribers from ``settings.DOMAIN_EVENT_SUBSCRIBERS``.
+
+    Default = ``["apps.eventbus.dispatcher.NoopSubscriber"]`` (Phase 2.1
+    behavior preserved when settings is silent). Cached after first
+    resolution; tests + ``setting_changed`` reset via
+    :func:`reset_registry_cache`.
+
+    Why a list of dotted paths instead of class objects in settings:
+    - Settings files are loaded before app modules — keeping class
+      references textual avoids import-order traps.
+    - Per-environment overrides work via environment variable parsing
+      in settings/base.py (same idiom as ``EVENT_FANOUTS``).
+    """
+
+    global _REGISTRY_CACHE
+    if _REGISTRY_CACHE is None:
+        paths: list[str] = list(
+            getattr(
+                settings,
+                "DOMAIN_EVENT_SUBSCRIBERS",
+                ["apps.eventbus.dispatcher.NoopSubscriber"],
+            )
+        )
+        _REGISTRY_CACHE = [_resolve(p) for p in paths]
+    return _REGISTRY_CACHE
+
+
+def reset_registry_cache() -> None:
+    """Drop the cached subscriber list. Tests + Django ``setting_changed`` use this."""
+
+    global _REGISTRY_CACHE
+    _REGISTRY_CACHE = None
 
 
 @shared_task(name="apps.eventbus.dispatch_pending_events")
