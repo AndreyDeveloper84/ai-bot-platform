@@ -178,6 +178,14 @@ class BookingRequest(models.Model):
         """
 
         CONFIRMED = "confirmed", "Confirmed"
+        CANCEL_REQUESTED = (
+            "cancel_requested",
+            "Cancel requested (within undo window)",
+        )
+        RESCHEDULE_REQUESTED = (
+            "reschedule_requested",
+            "Reschedule requested (candidate stashed)",
+        )
         CANCELLED = "cancelled", "Cancelled"
         RESCHEDULED = "rescheduled", "Rescheduled (replaced)"
 
@@ -194,13 +202,46 @@ class BookingRequest(models.Model):
         "happened yet, was cancelled, or where the producer hasn't run yet.",
     )
     status = models.CharField(
-        max_length=16,
+        max_length=24,
         choices=Status.choices,
         default=Status.CONFIRMED,
         db_index=True,
-        help_text="Lifecycle: confirmed (default), cancelled (customer "
-        "cancel), rescheduled (replaced by a new row after a "
-        "cancel-and-create reschedule).",
+        help_text=(
+            "Lifecycle: confirmed (default) → cancel_requested → "
+            "cancelled OR reschedule_requested → rescheduled. "
+            "cancel_requested and reschedule_requested are interim "
+            "states reversible by the customer."
+        ),
+    )
+    cancel_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Set when state flips to CANCEL_REQUESTED. Used to compute "
+            "the undo window expiry (5s per customer-cancellation-"
+            "reschedule-spec §3.4 / Q-CR1)."
+        ),
+    )
+    rescheduled_from = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="rescheduled_into",
+        help_text=(
+            "Self-FK: the old BookingRequest this row replaced after a "
+            "customer-initiated reschedule. PROTECT so the audit linkage "
+            "cannot be silently broken by deleting the old row."
+        ),
+    )
+    reschedule_candidate = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Stashed candidate slot for an in-flight reschedule: "
+            "{'new_master_id', 'new_service_id', 'new_visit_at'}. "
+            "Cleared on commit/abandon."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -315,13 +356,22 @@ class BookingRequest(models.Model):
             models.Index(fields=["tenant", "bot_user"]),
             models.Index(fields=["tenant", "status"]),
         ]
-        # 4a-hardening: partial UNIQUE on (master, visit_at) WHERE
-        # status='confirmed' — DB-level backstop against double-bookings.
+        # 4a-hardening + customer-cancel-reschedule spec §2 partial
+        # UNIQUE on (master, visit_at) WHERE status is one of the
+        # "this row still holds the slot" states — DB-level backstop
+        # against double-bookings even mid-cancel-undo.
         constraints = [
             models.UniqueConstraint(
                 fields=["master", "visit_at"],
-                condition=models.Q(status="confirmed", visit_at__isnull=False),
-                name="booking_unique_master_confirmed_visit_at",
+                condition=models.Q(
+                    status__in=(
+                        "confirmed",
+                        "cancel_requested",
+                        "reschedule_requested",
+                    ),
+                    visit_at__isnull=False,
+                ),
+                name="booking_unique_master_active_visit_at",
             ),
         ]
 

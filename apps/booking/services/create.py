@@ -100,10 +100,17 @@ def _occupied_intervals(*, tenant, master, on_date, tz):
     here so the lock window stays short.
     """
 
+    # Match the slot-API filter — CONFIRMED + interim reversible
+    # states still occupy the slot (customer-cancellation-reschedule
+    # spec §2 / 5-sec undo window).
     qs = BookingRequest.all_tenants.filter(
         tenant_id=tenant.id,
         master_id=master.id,
-        status=BookingRequest.Status.CONFIRMED,
+        status__in=(
+            BookingRequest.Status.CONFIRMED,
+            BookingRequest.Status.CANCEL_REQUESTED,
+            BookingRequest.Status.RESCHEDULE_REQUESTED,
+        ),
         visit_at__isnull=False,
         visit_at__date=on_date,
     ).values_list("visit_at", "duration_min")
