@@ -311,6 +311,16 @@ CELERY_BEAT_SCHEDULE = {
         "task": "bookings.detect_completed_bookings",
         "schedule": crontab(minute="*/30"),
     },
+    # Phase 2.c (Loyalty) — daily inactivity hard-downgrade. Scans
+    # LoyaltyAccount rows with no EARN_VISIT in ≥ 365 days, drops tier
+    # to STARTER + stamps tier_reset_at. Soft 6-month notification
+    # deferred (requires notification surface). Daily 05:00 UTC —
+    # offset from the 04:00/04:30 cleanup sweeps to keep the worker pool
+    # from being slammed by overlapping batch jobs.
+    "loyalty_apply_inactivity_downgrades": {
+        "task": "loyalty.apply_inactivity_downgrades",
+        "schedule": crontab(hour="5", minute="0"),
+    },
     "catalog_sync_every_15min": {
         # Sprint 7 / C5 (DRF-579) — fan-out catalog sync across every
         # active tenant. Cadence matched to apps.catalog.services.sync

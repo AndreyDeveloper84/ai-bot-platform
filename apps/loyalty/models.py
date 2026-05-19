@@ -108,6 +108,16 @@ class LoyaltyAccount(models.Model):
         help_text="When the account last transitioned tier. NULL on "
         "accounts that have always been Стартовый.",
     )
+    tier_reset_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Phase 2.c — floor for tier-recompute visit count. "
+        "Stamped by apps.loyalty.services.apply_inactivity_downgrades "
+        "when a customer goes 12+ months without an EARN_VISIT. "
+        "After reset, recompute_tier only counts EARN_VISIT events "
+        "with occurred_at > tier_reset_at — historic visits cease to "
+        "contribute, so a returning customer climbs the ladder fresh.",
+    )
     enrolled = models.BooleanField(
         default=True,
         help_text="Per Q-L5 — automatic enrollment on first earning event. "

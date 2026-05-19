@@ -35,7 +35,9 @@ double-counting.
 
 from __future__ import annotations
 
+import datetime as dt  # noqa: F401  — used in apply_inactivity_downgrades signature
 import logging
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from django.db import transaction
@@ -653,18 +655,26 @@ def _effective_visit_count(account: LoyaltyAccount) -> int:
     correctly cancels out the original earn — a cancelled-after-completed
     visit doesn't keep contributing to tier progress.
 
+    Phase 2.c floor: when ``tier_reset_at`` is set (hard inactivity
+    downgrade), only events with ``occurred_at > tier_reset_at`` count.
+    Historic visits before the reset cease to contribute, so a
+    returning customer climbs the ladder fresh.
+
     Reads ``all_tenants`` because the caller may not be inside a tenant
     scope; the account-level filter is the security boundary.
     """
 
-    return (
-        LoyaltyEvent.all_tenants.filter(
-            account=account, event_type=LoyaltyEvent.EventType.EARN_VISIT
-        ).count()
-        - LoyaltyEvent.all_tenants.filter(
-            account=account, event_type=LoyaltyEvent.EventType.REFUND_REVOKE
-        ).count()
+    earn_qs = LoyaltyEvent.all_tenants.filter(
+        account=account, event_type=LoyaltyEvent.EventType.EARN_VISIT
     )
+    revoke_qs = LoyaltyEvent.all_tenants.filter(
+        account=account, event_type=LoyaltyEvent.EventType.REFUND_REVOKE
+    )
+    if account.tier_reset_at is not None:
+        earn_qs = earn_qs.filter(occurred_at__gt=account.tier_reset_at)
+        revoke_qs = revoke_qs.filter(occurred_at__gt=account.tier_reset_at)
+
+    return earn_qs.count() - revoke_qs.count()
 
 
 def _derive_tier(visit_count: int) -> str:
@@ -770,6 +780,130 @@ def recompute_tier(
     )
 
     return new_tier
+
+
+# Phase 2.c inactivity-downgrade parameters (handoff §3, Q-L2).
+# Soft notification at 6mo is deferred — requires notification surface.
+INACTIVITY_HARD_DOWNGRADE_DAYS = 365
+INACTIVITY_DOWNGRADE_BATCH_LIMIT = 500
+
+
+def apply_inactivity_downgrades(
+    *,
+    now: "dt.datetime | None" = None,
+    batch_size: int = INACTIVITY_DOWNGRADE_BATCH_LIMIT,
+) -> dict[str, int]:
+    """Hard-downgrade accounts inactive ≥ 365 days (handoff §3, Q-L2 hard).
+
+    Returns counters: ``{scanned, downgraded, skipped}``.
+
+    ### Selection
+
+    An account is a candidate if:
+      - ``tier != STARTER`` (no point downgrading what's already at the floor)
+      - The most recent EARN_VISIT is older than the cutoff,
+        OR no EARN_VISIT exists at all (corner case: tier was set by
+        non-visit means; defensive).
+
+    ### Action
+
+    For each candidate:
+      1. Stamp ``tier_reset_at = now`` — historic visits stop counting
+         for tier purposes. The customer climbs the ladder fresh on
+         their next EARN_VISIT.
+      2. Call ``recompute_tier()`` — sees count=0 → derives STARTER →
+         writes TIER_CHANGED with metadata.trigger=inactivity_hard.
+
+    ### Concurrency / idempotency
+
+    A second run on the same account is a no-op because:
+      - After downgrade, ``tier == STARTER`` → excluded from selection.
+      - If somehow re-selected, ``recompute_tier`` returns None (no change).
+
+    Operator override (manual tier promotion via service-level API
+    when added later) sets a fresh ``tier_reset_at`` of NULL — the
+    next beat run would re-downgrade unless a fresh EARN_VISIT lands
+    first. Documented behavior.
+    """
+
+    from django.db.models import Max, Q
+
+    from apps.eventbus import services as eventbus_services
+
+    if now is None:
+        now = timezone.now()
+    cutoff = now - timedelta(days=INACTIVITY_HARD_DOWNGRADE_DAYS)
+
+    candidates = list(
+        LoyaltyAccount.all_tenants.exclude(tier=LoyaltyAccount.Tier.STARTER)
+        .annotate(
+            last_visit_at=Max(
+                "events__occurred_at",
+                filter=Q(events__event_type=LoyaltyEvent.EventType.EARN_VISIT),
+            )
+        )
+        .filter(Q(last_visit_at__lt=cutoff) | Q(last_visit_at__isnull=True))[:batch_size]
+    )
+
+    counters = {"scanned": len(candidates), "downgraded": 0, "skipped": 0}
+
+    for account in candidates:
+        old_tier = account.tier
+        # Stamp the floor BEFORE recompute so _effective_visit_count
+        # sees count=0 and derives STARTER.
+        LoyaltyAccount.all_tenants.filter(pk=account.pk).update(tier_reset_at=now)
+        account.tier_reset_at = now  # in-memory for recompute_tier's audit
+
+        # recompute_tier writes TIER_CHANGED + emits envelope + audit.
+        # Pass a synthetic correlation_id derived from the run so all
+        # downgrades in one beat tick share a trail.
+        result = recompute_tier(account, trigger_event_id="inactivity_hard_downgrade")
+        if result is not None:
+            counters["downgraded"] += 1
+            # Augment the just-written TIER_CHANGED event metadata with
+            # the inactivity flag — recompute_tier doesn't know the
+            # caller's intent. Backfill via update on the latest row.
+            latest = (
+                LoyaltyEvent.all_tenants.filter(
+                    account=account,
+                    event_type=LoyaltyEvent.EventType.TIER_CHANGED,
+                )
+                .order_by("-occurred_at")
+                .first()
+            )
+            if latest is not None:
+                latest.metadata["trigger"] = "inactivity_hard_downgrade"
+                latest.metadata["cutoff_days"] = INACTIVITY_HARD_DOWNGRADE_DAYS
+                latest.save(update_fields=["metadata"])
+            logger.info(
+                "loyalty.inactivity.hard_downgrade account=%s %s→starter",
+                account.pk,
+                old_tier,
+            )
+            # Re-emit customer.tier.changed with the inactivity reason for
+            # downstream subscribers (UI «вы стали Стартовым после долгого
+            # перерыва» messaging).
+            try:
+                eventbus_services.emit_customer_tier_changed(
+                    customer_id=str(account.customer_id),
+                    old_tier=old_tier,
+                    new_tier=result,
+                    reason="inactivity_hard_downgrade",
+                    tenant=account.tenant,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("loyalty.inactivity.emit_failed account=%s", account.pk)
+        else:
+            counters["skipped"] += 1
+
+    if counters["downgraded"]:
+        logger.info(
+            "loyalty.inactivity.summary scanned=%d downgraded=%d skipped=%d",
+            counters["scanned"],
+            counters["downgraded"],
+            counters["skipped"],
+        )
+    return counters
 
 
 def opt_out(account: LoyaltyAccount) -> None:
