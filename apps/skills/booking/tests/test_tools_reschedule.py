@@ -401,3 +401,73 @@ class TestExecuteReschedule:
             )
         assert result.error == "invalid_record_id"
         assert client.cancel_calls == []
+
+    def test_new_row_carries_ai_direct_attribution(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """Phase 4a-IMPL1 closure: reschedule produces a NEW row with
+        ai_direct attribution + reschedule-discriminator metadata.
+
+        Without this the new row would default to booking_source='external'
+        and fall out of the billing pipeline (and break LTV computation
+        for Loyalty Phase 2.b).
+        """
+        from decimal import Decimal
+
+        _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
+        new_dt = _future_iso(72)
+        with tenant_scope(tenant):
+            execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": 555,
+                    "new_datetime": new_dt,
+                    "master_id": 11,
+                    "service_id": 22,
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        new_row = BookingRequest.all_tenants.get(
+            comment__contains="yclients_record_id=888",
+        )
+        assert new_row.booking_source == "ai_direct"
+        assert new_row.billable is True
+        assert new_row.ai_assist_score == Decimal("1.00")
+        assert new_row.attribution_metadata["actor_type"] == "customer"
+        assert new_row.attribution_metadata["created_by"] == "execute_reschedule"
+        assert new_row.attribution_metadata["rescheduled_from_record_id"] == 555
+        assert new_row.visit_at is not None
+
+    def test_unparseable_new_datetime_rejects_before_cancel(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Phase 4a-IMPL1 split-brain guard: unparseable new_datetime
+        rejects BEFORE the cancel + create round-trip so we don't leave
+        the old record cancelled and the new BookingRequest unwritten.
+        """
+        _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        with tenant_scope(tenant):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": 555,
+                    "new_datetime": "totally-not-iso",
+                    "master_id": 11,
+                    "service_id": 22,
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "invalid_payload"
+        assert client.cancel_calls == []
+        assert client.create_calls == []

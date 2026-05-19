@@ -80,10 +80,6 @@ def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUs
     DB) — or, post-cutover, simply hadn't opened the bot yet but found
     the Mini App URL another way. Either way, the HMAC proves they
     have legitimate access to the bot.
-
-    Display name is built from the verified ``user.first_name`` +
-    ``last_name`` (HMAC-bound, safe to trust). chat_id is captured
-    when MAX includes a chat payload — outbound bot DMs need it.
     """
     user = verified.user
     first = (user.get("first_name") or "").strip()
@@ -290,10 +286,19 @@ def _collect_occupied(
 
     window_start_local = datetime.combine(date_from, datetime.min.time(), tzinfo=tz)
     window_end_local = datetime.combine(date_to + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+    # Active states that still hold the slot — CONFIRMED plus the two
+    # interim "reversible" states from customer-cancellation-reschedule
+    # spec §2. A booking in CANCEL_REQUESTED is still bookable to the
+    # original customer (5-sec undo); a booking in RESCHEDULE_REQUESTED
+    # has stashed a candidate but the original slot is still theirs.
     qs = BookingRequest.all_tenants.filter(
         tenant_id=tenant_id,
         master_id=master_id,
-        status=BookingRequest.Status.CONFIRMED,
+        status__in=(
+            BookingRequest.Status.CONFIRMED,
+            BookingRequest.Status.CANCEL_REQUESTED,
+            BookingRequest.Status.RESCHEDULE_REQUESTED,
+        ),
         visit_at__isnull=False,
         visit_at__gte=window_start_local,
         visit_at__lt=window_end_local,
@@ -553,11 +558,6 @@ _ERROR_SLUG_TO_STATUS = {
     "slot_unavailable": 409,
     "master_archived": 409,
     "tenant_mismatch": 403,
-    # Phase 2 reschedule slugs
-    "not_found": 404,
-    "forbidden": 403,
-    "not_reschedulable": 409,
-    "legacy_row": 409,
 }
 
 
@@ -632,27 +632,57 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     )
 
 
-# --- Phase 2: visits + reschedule -----------------------------------------
+# --- bookings: list / detail / cancel / reschedule -------------------------
+# Customer cancel + reschedule per
+# docs/design/policies/customer-cancellation-reschedule-spec.md §3-§5.
 
 
-def _visit_to_dict(b, *, now=None) -> dict[str, Any]:
-    """Serialise a BookingRequest for the customer's visit list.
+_TERMINAL_STATUSES = (
+    "cancelled",
+    "rescheduled",
+)
+_ACTIVE_STATUSES = (
+    "confirmed",
+    "cancel_requested",
+    "reschedule_requested",
+)
+"""States where the booking still exists from the customer's POV."""
 
-    `now` is injected so the visits_list view can compute `can_rate`
-    against a single wall-clock for the whole batch.
-    """
+
+_BOOKINGS_PAGE_DEFAULT = 20
+_BOOKINGS_PAGE_MAX = 50
+
+
+def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
+    from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
+
+    visit_at_iso = b.visit_at.isoformat() if b.visit_at else ""
+    cancel_requested_iso = b.cancel_requested_at.isoformat() if b.cancel_requested_at else None
+    # Cancellable + reschedulable derived flags. Action buttons in the
+    # Mini App use these directly — spec §3.4 + §5.3.
+    cancellable = b.status in (
+        "confirmed",
+        "reschedule_requested",
+    )
+    reschedulable = b.status == "confirmed"
+    # Phase 4 — post-visit rating exposure. can_rate is computed against
+    # the shared `now` so a batch listing is internally consistent.
     moment = now or timezone.now()
     is_past = bool(b.visit_at and b.visit_at < moment)
     can_rate = is_past and b.status == "confirmed" and b.rating is None
     return {
         "id": str(b.id),
-        "service_name": b.service_name,
-        "master_name": b.master_name,
-        "visit_at": b.visit_at.isoformat() if b.visit_at else None,
-        "duration_min": b.duration_min,
         "status": b.status,
         "service_id": str(b.service_id) if b.service_id else None,
+        "service_name": b.service_name,
         "master_id": str(b.master_id) if b.master_id else None,
+        "master_name": b.master_name,
+        "visit_at": visit_at_iso,
+        "duration_min": b.duration_min,
+        "cancel_requested_at": cancel_requested_iso,
+        "undo_window_seconds": UNDO_WINDOW_SECONDS,
+        "cancellable": cancellable,
+        "reschedulable": reschedulable,
         # Phase 4 — F5 rating exposure
         "rating": b.rating,
         "can_rate": can_rate,
@@ -661,60 +691,246 @@ def _visit_to_dict(b, *, now=None) -> dict[str, Any]:
 
 @require_http_methods(["GET"])
 @require_init_data
-def visits_list(request: HttpRequest) -> HttpResponse:
-    """List the calling customer's bookings.
+def bookings_list(request: HttpRequest) -> HttpResponse:
+    """List the bot_user's bookings.
 
-    Per customer-handoff §12 F3 — three tabs (upcoming / past / all).
-    Query ``?status=upcoming|past|all`` (default ``upcoming``).
+    Query
+    -----
+    ``status`` (optional, repeatable) — filter to specific statuses.
+       Special value ``past`` toggles the past-bookings view (visit_at
+       < now, terminal statuses).
+       Default (no ``status`` param): upcoming — visit_at >= now,
+       active statuses (CONFIRMED + RESCHEDULE_REQUESTED).
+    ``limit`` (optional, default 20, max 50) — page size.
+    ``before`` (optional, ISO datetime) — cursor: only items with
+       visit_at < ``before`` (descending pagination).
 
-    Rules:
-    * Scoped to ``bot_user`` (customer sees only own bookings).
-    * Past = ``visit_at < now`` regardless of status; upcoming =
-      ``visit_at >= now AND status=CONFIRMED``.
-    * Returned sorted: upcoming asc by visit_at, past desc.
+    Returns
+    -------
+    ``{"items": [...], "next_cursor": "ISO" | null}``
     """
 
     from apps.booking.models import BookingRequest
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-    tenant = bot_user.tenant
-    status_filter = request.GET.get("status", "upcoming")
+    statuses = request.GET.getlist("status")
+    is_past_view = "past" in statuses
+    if is_past_view:
+        statuses = [s for s in statuses if s != "past"]
+
+    try:
+        limit = int(request.GET.get("limit", _BOOKINGS_PAGE_DEFAULT))
+    except ValueError:
+        return _error("bad_request", "limit must be integer", 400)
+    if limit <= 0 or limit > _BOOKINGS_PAGE_MAX:
+        return _error("bad_request", f"limit must be 1..{_BOOKINGS_PAGE_MAX}", 400)
+
+    before = _parse_iso_datetime(request.GET.get("before"))
+
+    from django.db.models import Q
 
     qs = BookingRequest.all_tenants.filter(
-        tenant_id=tenant.id,
-        bot_user_id=bot_user.id,
-        visit_at__isnull=False,
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
     )
-
     now = timezone.now()
-    if status_filter == "upcoming":
-        qs = qs.filter(visit_at__gte=now, status=BookingRequest.Status.CONFIRMED).order_by(
-            "visit_at"
-        )
-    elif status_filter == "past":
-        qs = qs.filter(visit_at__lt=now).order_by("-visit_at")
-    elif status_filter == "all":
-        qs = qs.order_by("-visit_at")
+    if is_past_view:
+        # Past = either visit_at strictly before now OR a terminal status.
+        # Covers customers who cancelled (terminal but visit_at could be
+        # in either direction) AND walk-aways still on CONFIRMED whose
+        # visit time has passed.
+        qs = qs.filter(Q(visit_at__lt=now) | Q(status__in=_TERMINAL_STATUSES))
+        qs = qs.order_by("-visit_at", "-created_at")
     else:
-        return _error("bad_request", "status must be one of upcoming/past/all", 400)
+        # Upcoming: visit_at >= now, status in CONFIRMED /
+        # RESCHEDULE_REQUESTED (default) OR caller-supplied list.
+        wanted = statuses or [
+            BookingRequest.Status.CONFIRMED,
+            BookingRequest.Status.RESCHEDULE_REQUESTED,
+        ]
+        qs = qs.filter(status__in=wanted, visit_at__gte=now)
+        qs = qs.order_by("visit_at", "created_at")
 
-    return JsonResponse({"visits": [_visit_to_dict(b, now=now) for b in qs]})
+    if before is not None:
+        qs = qs.filter(visit_at__lt=before)
+
+    # Fetch one extra to compute next_cursor without a second query.
+    rows = list(qs[: limit + 1])
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    next_cursor: str | None = None
+    if has_more and rows:
+        last = rows[-1]
+        next_cursor = last.visit_at.isoformat() if last.visit_at else None
+
+    return JsonResponse({"items": [_booking_to_dict(b) for b in rows], "next_cursor": next_cursor})
+
+
+def _get_booking_owned(bot_user: BotUser, booking_id: str):
+    """Fetch a BookingRequest scoped to (tenant, bot_user).
+
+    Returns the row or None. Tenant + bot_user guard prevents
+    cross-customer + cross-tenant access (spec §11).
+    """
+    from apps.booking.models import BookingRequest
+
+    try:
+        return BookingRequest.all_tenants.get(
+            id=booking_id,
+            tenant=bot_user.tenant,
+            bot_user=bot_user,
+        )
+    except BookingRequest.DoesNotExist:
+        return None
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def booking_detail(request: HttpRequest, booking_id: str) -> HttpResponse:
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    return JsonResponse({"booking": _booking_to_dict(booking)})
+
+
+_TRANSITION_SLUG_TO_STATUS = {
+    "invalid_state": 409,
+    "forbidden": 403,
+    "undo_window_elapsed": 409,
+    "master_not_found": 404,
+    "master_archived": 409,
+    "master_not_bookable": 409,
+    "service_not_found": 404,
+    "service_unbookable": 409,
+    "service_not_offered": 404,
+    "slot_unavailable": 409,
+}
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
-def reschedule_booking(request: HttpRequest, booking_id) -> HttpResponse:
-    """Reschedule customer's existing booking.
+def booking_cancel_request(request: HttpRequest, booking_id: str) -> HttpResponse:
+    """POST /bookings/{id}/cancel — request cancel, returns immediately.
 
-    Body: ``{"visit_at": "<new ISO 8601>"}``. Returns 201 with the NEW
-    booking. The old row gets ``status=RESCHEDULED`` (terminal) per
-    customer-handoff §11 + Q12-α (new row is ai_direct +
-    created_by=execute_reschedule → billable=False).
+    Body (optional)::
+
+        {"reason_class": "timing" | "plans_changed" | "not_needed" | "other",
+         "reason_text": "..."}
     """
 
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        request_cancel,
+    )
+
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-    tenant = bot_user.tenant
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+
+    import json
+
+    try:
+        body = json.loads(request.body or b"{}") if request.body else {}
+    except json.JSONDecodeError:
+        return _error("bad_request", "invalid JSON body", 400)
+    reason_class = body.get("reason_class") or None
+    reason_text = body.get("reason_text") or None
+
+    try:
+        row = request_cancel(
+            booking,
+            actor=bot_user,
+            reason_class=reason_class,
+            reason_text=reason_text,
+        )
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_cancel_confirm(request: HttpRequest, booking_id: str) -> HttpResponse:
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        commit_cancel,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    try:
+        row = commit_cancel(booking, actor=bot_user)
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+
+    # BILLING_REFUND_STUB_LOG: refund evaluation (spec §4) is engineering
+    # / billing scope. Stub the call so the audit trail captures the
+    # intent; no payment provider integration here.
+    if booking.visit_at and booking.billable:
+        minutes_before = (booking.visit_at - timezone.now()).total_seconds() / 60
+        if minutes_before < 60:
+            logger.info(
+                "BILLING_REFUND_STUB_LOG: refund_eligible=True amount=100 "
+                "reason=late_cancel_auto booking_id=%s",
+                booking.id,
+            )
+
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_cancel_undo(request: HttpRequest, booking_id: str) -> HttpResponse:
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        undo_cancel,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    try:
+        row = undo_cancel(booking, actor=bot_user)
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpResponse:
+    """POST /bookings/{id}/reschedule — stash a candidate slot.
+
+    Body::
+
+        {"new_master_id": "...", "new_service_id": "...",
+         "new_visit_at": "ISO 8601"}
+
+    The candidate is validated lightly here (parse + future check)
+    and re-validated under-lock in
+    :func:`commit_reschedule`. Slot collision is caught there too.
+    """
+
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        request_reschedule,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
 
     import json
 
@@ -722,39 +938,69 @@ def reschedule_booking(request: HttpRequest, booking_id) -> HttpResponse:
         body = json.loads(request.body or b"{}")
     except json.JSONDecodeError:
         return _error("bad_request", "invalid JSON body", 400)
+    new_master_id = body.get("new_master_id") or ""
+    new_service_id = body.get("new_service_id") or ""
+    new_visit_at = _parse_iso_datetime(body.get("new_visit_at"))
 
-    new_visit_at = _parse_iso_datetime(body.get("visit_at"))
-    if new_visit_at is None:
-        return _error("bad_request", "visit_at (ISO 8601) is required", 400)
-
-    from apps.booking.services.create import BookingCreateError
-    from apps.booking.services.reschedule import reschedule_customer_booking
-
-    correlation_id = request.headers.get("X-Correlation-Id", "")
+    if not new_master_id or not new_service_id or new_visit_at is None:
+        return _error(
+            "bad_request",
+            "new_master_id, new_service_id, new_visit_at (ISO 8601) are required",
+            400,
+        )
+    if new_visit_at <= timezone.now():
+        return _error("visit_in_past", "new_visit_at must be in the future", 400)
 
     try:
-        booking = reschedule_customer_booking(
-            tenant=tenant,
-            bot_user=bot_user,
-            old_booking_id=str(booking_id),
+        row = request_reschedule(
+            booking,
+            actor=bot_user,
+            new_master_id=new_master_id,
+            new_service_id=new_service_id,
             new_visit_at=new_visit_at,
-            correlation_id=correlation_id or None,
         )
-    except BookingCreateError as exc:
-        return _error(exc.slug, exc.detail, _ERROR_SLUG_TO_STATUS.get(exc.slug, 400))
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpResponse:
+    """POST /bookings/{id}/reschedule/confirm — actually rotate to new booking.
+
+    On slot collision (409 inside commit_reschedule): roll the old
+    row back to CONFIRMED so the customer can pick again.
+    """
+
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        abandon_reschedule,
+        commit_reschedule,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    try:
+        old_row, new_row = commit_reschedule(booking, actor=bot_user)
+    except InvalidBookingTransition as exc:
+        # On slot collision, roll back the old row to CONFIRMED so
+        # the customer's original visit is still on the books.
+        if exc.slug == "slot_unavailable":
+            try:
+                abandon_reschedule(booking, actor=bot_user)
+            except InvalidBookingTransition:
+                pass
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
 
     return JsonResponse(
         {
-            "booking": {
-                "id": str(booking.id),
-                "service_name": booking.service_name,
-                "master_name": booking.master_name,
-                "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
-                "duration_min": booking.duration_min,
-                "status": booking.status,
-            }
-        },
-        status=201,
+            "old_booking": _booking_to_dict(old_row),
+            "new_booking": _booking_to_dict(new_row),
+        }
     )
 
 
@@ -765,18 +1011,14 @@ def reschedule_booking(request: HttpRequest, booking_id) -> HttpResponse:
 @require_http_methods(["GET", "PATCH"])
 @require_init_data
 def me(request: HttpRequest) -> HttpResponse:
-    """Read or partially update the current customer's profile.
+    """Read or partially update the current customer's profile."""
+    import json
 
-    GET — returns the F4 snapshot (BotUser core + UserPreferences +
-    favorites). PATCH — applies allowed field updates; unknown keys 400.
-    """
     from apps.identity.services.profile import (
         ProfileUpdateError,
         get_profile,
         update_profile,
     )
-
-    import json
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
@@ -784,7 +1026,6 @@ def me(request: HttpRequest) -> HttpResponse:
         snap = get_profile(bot_user)
         return JsonResponse(_profile_to_dict(snap))
 
-    # PATCH
     try:
         body = json.loads(request.body or b"{}")
     except ValueError:
@@ -802,21 +1043,14 @@ def me(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["POST"])
 @require_init_data
 def delete_me(request: HttpRequest) -> HttpResponse:
-    """Soft-delete the current customer (scrub PII + drop prefs).
+    """Soft-delete the current customer (scrub PII + drop prefs)."""
+    import json
 
-    Body: ``{"confirmation": "УДАЛИТЬ"}``. Mismatch → 400. After the
-    write the BotUser row is invisible to ``require_init_data`` (which
-    filters ``deleted_at__isnull=True``), so subsequent Mini App calls
-    return 404 user_not_registered until the user re-onboards via the
-    bot DM.
-    """
     from apps.identity.services.profile import (
         DELETE_CONFIRMATION_TOKEN,
         DeletionConfirmationMismatch,
         soft_delete_user,
     )
-
-    import json
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
@@ -862,13 +1096,9 @@ def _profile_to_dict(snap) -> dict:
 @require_http_methods(["POST"])
 @require_init_data
 def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: ignore[no-untyped-def]
-    """Persist a 1-5 rating for a past visit; rating ≤ 3 escalates.
+    """Persist a 1-5 rating for a past visit; rating ≤ 3 escalates."""
+    import json
 
-    Body: ``{"rating": int, "comment": str?}``. The service module
-    handles attribution-policy fields + handoff; the view's job is to
-    parse, scope-check the booking to ``request.bot_user``, and map
-    service errors to HTTP statuses.
-    """
     from apps.booking.models import BookingRequest
     from apps.booking.services.feedback import (
         AlreadyRated,
@@ -877,8 +1107,6 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
         NotCompletedYet,
         submit_feedback as service_submit_feedback,
     )
-
-    import json
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
@@ -899,9 +1127,6 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
 
     rating_raw = body.get("rating")
     comment_raw = body.get("comment", "")
-    # Service runs its own isinstance checks and raises InvalidRating /
-    # FeedbackError with the slug. The cast keeps mypy happy without
-    # duplicating validation here.
     rating: int = rating_raw  # type: ignore[assignment]
     comment: str = comment_raw  # type: ignore[assignment]
 

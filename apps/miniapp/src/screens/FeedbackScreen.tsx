@@ -66,7 +66,7 @@ export function FeedbackScreen() {
   }
 
   if (phase.kind === "thanks") {
-    return <ThankYou result={phase.result} onClose={() => navigate("/visits")} />;
+    return <ThankYou result={phase.result} onClose={() => navigate("/my-visits")} />;
   }
 
   const canSubmit = phase.rating > 0 && !phase.submitting;

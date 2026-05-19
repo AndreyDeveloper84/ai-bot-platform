@@ -157,7 +157,7 @@ export function HelloScreen() {
     >
       <p>Помогу записаться в студию {tenant.name}.</p>
       <nav className="hello-nav" aria-label="Разделы">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/visits")}>
+        <button type="button" className="btn-secondary" onClick={() => navigate("/my-visits")}>
           Мои записи
         </button>
         <button type="button" className="btn-secondary" onClick={() => navigate("/me")}>

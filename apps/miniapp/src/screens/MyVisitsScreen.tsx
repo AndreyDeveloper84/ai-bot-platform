@@ -1,80 +1,71 @@
-/** F3 — My visits. Three tabs (Предстоящие / Прошедшие / Все). */
+/** F-myvisits — list of customer's bookings.
+ *
+ * Spec §3.4 / customer-first-touch-and-mini-app-states §8 — filter
+ * chips «Предстоящие» / «История» + empty / loading / error states.
+ */
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { fetchVisits, type Visit } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
-import { useHaptics } from "../hooks/useHaptics";
+import { fetchMyBookings, type BookingItem } from "../lib/api";
 import { formatVisitFull } from "../lib/format";
-import { setRescheduleContext, setService } from "../state/booking";
 
-type Tab = "upcoming" | "past" | "all";
+type Mode = "upcoming" | "past";
 
 type State =
   | { kind: "loading" }
-  | { kind: "ok"; visits: Visit[] }
+  | { kind: "ok"; items: BookingItem[] }
   | { kind: "error"; err: unknown };
 
 export function MyVisitsScreen() {
   const navigate = useNavigate();
-  const haptics = useHaptics();
-  const [tab, setTab] = useState<Tab>("upcoming");
+  const [mode, setMode] = useState<Mode>("upcoming");
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
+  const load = useCallback(
+    (m: Mode) => {
+      setState({ kind: "loading" });
+      let cancelled = false;
+      fetchMyBookings({ past: m === "past" })
+        .then(({ items }) => {
+          if (!cancelled) setState({ kind: "ok", items });
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) setState({ kind: "error", err });
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [],
+  );
 
-  const load = useCallback(() => {
-    setState({ kind: "loading" });
-    let cancelled = false;
-    fetchVisits(tab)
-      .then(({ visits }) => {
-        if (!cancelled) setState({ kind: "ok", visits });
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setState({ kind: "error", err });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [tab]);
-
-  useEffect(() => load(), [load]);
-
-  function onReschedule(v: Visit) {
-    if (!v.service_id || !v.master_id) return;
-    haptics.selection();
-    setRescheduleContext(v.id, v.service_id, v.service_name, v.master_id, v.master_name);
-    navigate("/book/when");
-  }
-
-  function onRebook(v: Visit) {
-    if (!v.service_id) return;
-    haptics.selection();
-    setService(v.service_id, v.service_name);
-    navigate(`/catalog/${v.service_id}`);
-  }
+  useEffect(() => load(mode), [mode, load]);
 
   return (
-    <ScreenLayout title="Мои визиты">
-      <div role="tablist" className="tabs">
-        {(["upcoming", "past", "all"] as Tab[]).map((t) => (
-          <button
-            type="button"
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            className={`tab ${tab === t ? "tab--active" : ""}`}
-            onClick={() => {
-              haptics.selection();
-              setTab(t);
-            }}
-          >
-            {t === "upcoming" ? "Предстоящие" : t === "past" ? "Прошедшие" : "Все"}
-          </button>
-        ))}
+    <ScreenLayout title="Мои записи">
+      {/* Filter chips per spec §3.4 list view */}
+      <div className="chip-row" role="tablist" aria-label="Фильтр записей">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === "upcoming"}
+          className={`chip ${mode === "upcoming" ? "chip--active" : ""}`}
+          onClick={() => setMode("upcoming")}
+        >
+          Предстоящие
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === "past"}
+          className={`chip ${mode === "past" ? "chip--active" : ""}`}
+          onClick={() => setMode("past")}
+        >
+          История
+        </button>
       </div>
 
       {state.kind === "loading" && (
@@ -85,18 +76,13 @@ export function MyVisitsScreen() {
         </DelayedSkeleton>
       )}
 
-      {state.kind === "error" && (
-        <StateError err={state.err} onRetry={load} screenId="visits" />
-      )}
+      {state.kind === "error" && <StateError err={state.err} onRetry={() => load(mode)} screenId="my-visits" />}
 
-      {state.kind === "ok" && state.visits.length === 0 && (
+      {state.kind === "ok" && state.items.length === 0 && (
+        // Empty-state copy per customer-first-touch-and-mini-app-states §7.3.
         <div className="callout">
-          <p style={{ margin: 0 }}>
-            {tab === "upcoming"
-              ? "У вас нет активных записей."
-              : "Записей пока нет."}
-          </p>
-          {tab === "upcoming" && (
+          <p style={{ margin: 0 }}>У вас нет активных записей.</p>
+          {mode === "upcoming" && (
             <button
               type="button"
               className="btn-secondary"
@@ -110,66 +96,55 @@ export function MyVisitsScreen() {
       )}
 
       {state.kind === "ok" &&
-        state.visits.map((v) => (
-          <div className="confirm-card" key={v.id}>
-            <dl>
-              <dt>Услуга</dt>
-              <dd>{v.service_name}</dd>
-              <dt>Мастер</dt>
-              <dd>{v.master_name}</dd>
-              {v.visit_at && (
-                <>
-                  <dt>Время</dt>
-                  <dd>{formatVisitFull(v.visit_at)}</dd>
-                </>
-              )}
-              {v.rating !== null && (
-                <>
-                  <dt>Оценка</dt>
-                  <dd>
-                    <span className="visit-rating" aria-label={`${v.rating} из 5`}>
-                      {"★".repeat(v.rating)}
-                      {"☆".repeat(5 - v.rating)}
-                    </span>
-                  </dd>
-                </>
-              )}
-            </dl>
-            {v.status === "confirmed" && tab !== "past" && (
-              <button
-                type="button"
-                className="btn-secondary"
-                style={{ marginTop: "var(--s-3)" }}
-                onClick={() => onReschedule(v)}
-              >
-                Перенести
-              </button>
-            )}
-            {v.can_rate && (
-              <button
-                type="button"
-                className="btn-secondary"
-                style={{ marginTop: "var(--s-3)" }}
-                onClick={() => {
-                  haptics.selection();
-                  navigate(`/feedback/${v.id}`);
+        state.items.length > 0 &&
+        state.items.map((b) => (
+          <button
+            key={b.id}
+            type="button"
+            className="service-card"
+            data-testid="my-visit-card"
+            onClick={() => navigate(`/my-visits/${b.id}`)}
+            style={{ textAlign: "left", width: "100%" }}
+          >
+            <div style={{ fontWeight: 600 }}>{formatVisitFull(b.visit_at)}</div>
+            <div style={{ color: "var(--text-muted, #888)", marginTop: "var(--s-1)" }}>
+              {b.service_name}
+              {b.master_name ? ` · ${b.master_name}` : ""}
+            </div>
+            {b.status === "cancel_requested" && (
+              <div
+                style={{
+                  color: "var(--warning, #c70)",
+                  marginTop: "var(--s-1)",
+                  fontSize: "0.9em",
                 }}
               >
-                Оценить визит
-              </button>
+                Отменяется…
+              </div>
             )}
-            {(tab === "past" || v.status === "cancelled" || v.status === "rescheduled") &&
-              v.service_id && (
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  style={{ marginTop: "var(--s-3)" }}
-                  onClick={() => onRebook(v)}
-                >
-                  Повторить запись
-                </button>
-              )}
-          </div>
+            {b.status === "reschedule_requested" && (
+              <div
+                style={{
+                  color: "var(--warning, #c70)",
+                  marginTop: "var(--s-1)",
+                  fontSize: "0.9em",
+                }}
+              >
+                Переносится…
+              </div>
+            )}
+            {(b.status === "cancelled" || b.status === "rescheduled") && (
+              <div
+                style={{
+                  color: "var(--text-muted, #888)",
+                  marginTop: "var(--s-1)",
+                  fontSize: "0.9em",
+                }}
+              >
+                {b.status === "cancelled" ? "Отменена" : "Перенесена"}
+              </div>
+            )}
+          </button>
         ))}
     </ScreenLayout>
   );

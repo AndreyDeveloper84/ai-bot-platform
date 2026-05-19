@@ -79,6 +79,18 @@ LOCAL_APPS = [
     "apps.scheduling",
     # Customer Mini App Phase 0b — HTTP API for the MAX Mini App webview.
     "apps.miniapp_api",
+    # 2026-05-19 — domain event bus (Postgres outbox per Q-EV-IMPL3).
+    # Distinct from apps.events (analytics, snake_case, sync fanout):
+    # apps.eventbus carries dot.notation domain events per
+    # docs/design/policies/event-taxonomy.md §3 catalog. Two-bus
+    # architecture by design — see memory two-bus-event-architecture.
+    "apps.eventbus",
+    # Loyalty (Volna 4) — points tracking. Phase 1.a ships the data
+    # layer + LoyaltySubscriber listening to booking.completed.
+    # Tiers / redemption flow / referrals / config UI deferred.
+    # Subscriber activates by adding apps.loyalty.subscribers.LoyaltySubscriber
+    # to DOMAIN_EVENT_SUBSCRIBERS env var.
+    "apps.loyalty",
 ]
 
 INSTALLED_APPS = [
@@ -178,6 +190,19 @@ REPLAY_REDACTION_ALLOWLIST: list[str] = [
 EVENT_FANOUTS: list[str] = [
     p.strip()
     for p in os.environ.get("EVENT_FANOUTS", "apps.events.fanout.NoopFanout").split(",")
+    if p.strip()
+]
+
+# Phase 2.2 PR-B — `apps.eventbus` (domain bus) subscriber registry.
+# Comma-separated dotted paths to ``apps.eventbus.dispatcher.Subscriber``
+# implementations. Default ships ``NoopSubscriber`` so the dispatcher has
+# something to call against until real subscribers (AuditSubscriber, etc.)
+# land in follow-up PRs. Distinct from ``EVENT_FANOUTS`` (analytics bus).
+DOMAIN_EVENT_SUBSCRIBERS: list[str] = [
+    p.strip()
+    for p in os.environ.get(
+        "DOMAIN_EVENT_SUBSCRIBERS", "apps.eventbus.dispatcher.NoopSubscriber"
+    ).split(",")
     if p.strip()
 ]
 
@@ -289,6 +314,25 @@ CELERY_BEAT_SCHEDULE = {
         # Hourly :15 — offset from on-the-hour spikes (webhook bursts,
         # cron jobs from other systems often fire at :00).
         "schedule": crontab(minute="15"),
+    },
+    # Phase 2.3 — booking.completed producer. Scans CONFIRMED bookings
+    # whose visit time has passed and emits taxonomy §3.1 booking.completed
+    # exactly once per booking. Unblocks LoyaltySubscriber (no-op without
+    # a producer). Cadence 30 min: tight enough to credit loyalty points
+    # within an hour of visit end, sparse enough to spare worker pool.
+    "detect_completed_bookings": {
+        "task": "bookings.detect_completed_bookings",
+        "schedule": crontab(minute="*/30"),
+    },
+    # Phase 2.c (Loyalty) — daily inactivity hard-downgrade. Scans
+    # LoyaltyAccount rows with no EARN_VISIT in ≥ 365 days, drops tier
+    # to STARTER + stamps tier_reset_at. Soft 6-month notification
+    # deferred (requires notification surface). Daily 05:00 UTC —
+    # offset from the 04:00/04:30 cleanup sweeps to keep the worker pool
+    # from being slammed by overlapping batch jobs.
+    "loyalty_apply_inactivity_downgrades": {
+        "task": "loyalty.apply_inactivity_downgrades",
+        "schedule": crontab(hour="5", minute="0"),
     },
     "catalog_sync_every_15min": {
         # Sprint 7 / C5 (DRF-579) — fan-out catalog sync across every

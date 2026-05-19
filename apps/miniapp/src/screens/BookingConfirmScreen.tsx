@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, createBooking, rescheduleBooking } from "../lib/api";
+import { ApiError, createBooking } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { useBackButton } from "../hooks/useBackButton";
@@ -37,13 +37,14 @@ export function BookingConfirmScreen() {
     setSubmitting(true);
     setErr(null);
     try {
-      const { booking } = draft.rescheduleOf
-        ? await rescheduleBooking(draft.rescheduleOf, { visit_at: draft.visitAt })
-        : await createBooking({
-            service_id: draft.serviceId,
-            master_id: draft.masterId,
-            visit_at: draft.visitAt,
-          });
+      // Reschedule flow now lives in dev's dedicated RescheduleScreen
+      // (route /my-visits/:bookingId/reschedule); this confirm screen is
+      // create-only post-merge.
+      const { booking } = await createBooking({
+        service_id: draft.serviceId,
+        master_id: draft.masterId,
+        visit_at: draft.visitAt,
+      });
       haptics.notify("success");
       resetBooking();
       navigate(`/book/success/${booking.id}`, {
@@ -71,14 +72,14 @@ export function BookingConfirmScreen() {
 
   return (
     <ScreenLayout
-      title={draft.rescheduleOf ? "Перенос записи" : "Подтверждение"}
+      title={false ? "Перенос записи" : "Подтверждение"}
       cta={
         <StickyCta onClick={onConfirm} disabled={submitting}>
           {submitting
-            ? draft.rescheduleOf
+            ? false
               ? "Переношу…"
               : "Записываю…"
-            : draft.rescheduleOf
+            : false
               ? "Подтвердить перенос"
               : "Подтвердить запись"}
         </StickyCta>

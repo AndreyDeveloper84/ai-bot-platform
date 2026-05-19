@@ -41,6 +41,7 @@ from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
 from apps.events.services import emit
 from apps.events.vocabulary import CONSENT_GRANTED, CONSENT_WITHDRAWN
+from apps.eventbus import services as eventbus_services
 from apps.tenancy.context import current_tenant
 
 if TYPE_CHECKING:
@@ -113,6 +114,24 @@ def grant(
                 "document_version": document_version,
             },
         )
+        # Domain bus — taxonomy §3.2 customer.consent.changed.
+        # Swallowed so a bus outage never breaks the grant.
+        try:
+            eventbus_services.emit_customer_consent_changed(
+                customer_id=str(bot_user.id),
+                consent_type=consent_type,
+                granted=True,
+                granted_at=record.captured_at.isoformat(),
+                granted_via=source[:80],
+                actor_id=str(bot_user.id),
+                tenant=tenant,
+            )
+        except Exception:  # noqa: BLE001 — domain telemetry never breaks the grant
+            logger.exception(
+                "consent.grant.eventbus_emit_failed bot_user=%s type=%s",
+                bot_user.id,
+                consent_type,
+            )
 
     transaction.on_commit(_emit_grant)
     logger.info(
@@ -204,6 +223,26 @@ def withdraw(
                 "source": source[:80],
             },
         )
+        # Domain bus — taxonomy §3.2 customer.consent.changed
+        # (granted=False). ``granted_at`` carries the withdrawal
+        # timestamp; the bus has no separate ``withdrawn_at`` field —
+        # the granted flag is the lifecycle bit.
+        try:
+            eventbus_services.emit_customer_consent_changed(
+                customer_id=str(bot_user.id),
+                consent_type=consent_type,
+                granted=False,
+                granted_at=now.isoformat(),
+                granted_via=source[:80],
+                actor_id=str(bot_user.id),
+                tenant=tenant,
+            )
+        except Exception:  # noqa: BLE001 — domain telemetry never breaks the withdraw
+            logger.exception(
+                "consent.withdraw.eventbus_emit_failed bot_user=%s type=%s",
+                bot_user.id,
+                consent_type,
+            )
 
     transaction.on_commit(_emit_withdraw)
     logger.info(

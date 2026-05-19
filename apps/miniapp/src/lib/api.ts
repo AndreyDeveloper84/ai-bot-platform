@@ -119,32 +119,80 @@ export const createBooking = (body: {
 }): Promise<{ booking: CreatedBooking }> =>
   request("/bookings", { method: "POST", body: JSON.stringify(body) });
 
-// --- visits / reschedule ---
-export interface Visit {
+// --- bookings: list / detail / cancel / reschedule ---
+// Mirrors `apps/miniapp_api/views.py` per
+// customer-cancellation-reschedule-spec §3-§5.
+export type BookingStatus =
+  | "confirmed"
+  | "cancel_requested"
+  | "reschedule_requested"
+  | "cancelled"
+  | "rescheduled";
+
+export interface BookingItem {
   id: string;
-  service_name: string;
-  master_name: string;
-  visit_at: string | null;
-  duration_min: number | null;
-  status: string;
+  status: BookingStatus;
   service_id: string | null;
+  service_name: string;
   master_id: string | null;
+  master_name: string;
+  visit_at: string;
+  duration_min: number | null;
+  cancel_requested_at: string | null;
+  undo_window_seconds: number;
+  cancellable: boolean;
+  reschedulable: boolean;
+  // Phase 4 — post-visit feedback. NULL until customer rates.
   rating: number | null;
   can_rate: boolean;
 }
 
-export const fetchVisits = (status: "upcoming" | "past" | "all" = "upcoming"): Promise<{
-  visits: Visit[];
-}> => request(`/visits?status=${status}`, { method: "GET" });
+export const fetchMyBookings = (params?: {
+  past?: boolean;
+  limit?: number;
+  before?: string;
+}): Promise<{ items: BookingItem[]; next_cursor: string | null }> => {
+  const q = new URLSearchParams();
+  if (params?.past) q.append("status", "past");
+  if (params?.limit) q.set("limit", String(params.limit));
+  if (params?.before) q.set("before", params.before);
+  const qs = q.toString();
+  return request(`/bookings/list${qs ? `?${qs}` : ""}`, { method: "GET" });
+};
 
-export const rescheduleBooking = (
-  oldId: string,
-  body: { visit_at: string },
-): Promise<{ booking: CreatedBooking }> =>
-  request(`/bookings/${oldId}/reschedule`, {
+export const fetchBooking = (id: string): Promise<{ booking: BookingItem }> =>
+  request(`/bookings/${id}`, { method: "GET" });
+
+export type CancelReasonClass = "timing" | "plans_changed" | "not_needed" | "other";
+
+export const cancelBookingRequest = (
+  id: string,
+  body?: { reason_class?: CancelReasonClass; reason_text?: string },
+): Promise<{ booking: BookingItem }> =>
+  request(`/bookings/${id}/cancel`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+
+export const cancelBookingConfirm = (id: string): Promise<{ booking: BookingItem }> =>
+  request(`/bookings/${id}/cancel/confirm`, { method: "POST" });
+
+export const cancelBookingUndo = (id: string): Promise<{ booking: BookingItem }> =>
+  request(`/bookings/${id}/cancel/undo`, { method: "POST" });
+
+export const rescheduleBookingRequest = (
+  id: string,
+  body: { new_master_id: string; new_service_id: string; new_visit_at: string },
+): Promise<{ booking: BookingItem }> =>
+  request(`/bookings/${id}/reschedule`, {
     method: "POST",
     body: JSON.stringify(body),
   });
+
+export const rescheduleBookingConfirm = (
+  id: string,
+): Promise<{ old_booking: BookingItem; new_booking: BookingItem }> =>
+  request(`/bookings/${id}/reschedule/confirm`, { method: "POST" });
 
 // --- profile (Phase 3 / F4) ---
 export interface Preferences {
@@ -170,8 +218,7 @@ export interface Profile {
   };
 }
 
-export const fetchProfile = (): Promise<Profile> =>
-  request("/me", { method: "GET" });
+export const fetchProfile = (): Promise<Profile> => request("/me", { method: "GET" });
 
 export const updateProfile = (
   patch: Partial<Pick<Profile, "client_name" | "timezone">> & Partial<Preferences>,

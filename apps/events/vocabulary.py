@@ -53,6 +53,17 @@ CONSENT_WITHDRAWN = "consent_withdrawn"
 CLIENT_PROFILE_RECOMPUTED = "client_profile_recomputed"
 REPLAY_CAPTURED = "replay_captured"
 
+# --- Booking lifecycle (customer-cancellation-reschedule-spec) ----------
+# Slugs use dotted notation (booking.cancelled etc.) to match the
+# attribution + event-taxonomy conventions in
+# `docs/design/policies/event-taxonomy.md` §3.1.
+BOOKING_CANCEL_REQUESTED = "booking.cancel_requested"
+BOOKING_CANCEL_UNDONE = "booking.cancel_undone"
+BOOKING_CANCELLED = "booking.cancelled"
+BOOKING_RESCHEDULE_REQUESTED = "booking.reschedule_requested"
+BOOKING_RESCHEDULE_ABANDONED = "booking.reschedule_abandoned"
+BOOKING_RESCHEDULED = "booking.rescheduled"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -69,6 +80,12 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         CONSENT_WITHDRAWN,
         CLIENT_PROFILE_RECOMPUTED,
         REPLAY_CAPTURED,
+        BOOKING_CANCEL_REQUESTED,
+        BOOKING_CANCEL_UNDONE,
+        BOOKING_CANCELLED,
+        BOOKING_RESCHEDULE_REQUESTED,
+        BOOKING_RESCHEDULE_ABANDONED,
+        BOOKING_RESCHEDULED,
     }
 )
 
