@@ -302,6 +302,15 @@ CELERY_BEAT_SCHEDULE = {
         # cron jobs from other systems often fire at :00).
         "schedule": crontab(minute="15"),
     },
+    # Phase 2.3 — booking.completed producer. Scans CONFIRMED bookings
+    # whose visit time has passed and emits taxonomy §3.1 booking.completed
+    # exactly once per booking. Unblocks LoyaltySubscriber (no-op without
+    # a producer). Cadence 30 min: tight enough to credit loyalty points
+    # within an hour of visit end, sparse enough to spare worker pool.
+    "detect_completed_bookings": {
+        "task": "bookings.detect_completed_bookings",
+        "schedule": crontab(minute="*/30"),
+    },
     "catalog_sync_every_15min": {
         # Sprint 7 / C5 (DRF-579) — fan-out catalog sync across every
         # active tenant. Cadence matched to apps.catalog.services.sync

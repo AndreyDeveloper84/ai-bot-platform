@@ -181,6 +181,18 @@ class BookingRequest(models.Model):
         CANCELLED = "cancelled", "Cancelled"
         RESCHEDULED = "rescheduled", "Rescheduled (replaced)"
 
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Stamped by apps.bookings.tasks.detect_completed_bookings "
+        "when the periodic scan finds the visit has ended (visit_at + "
+        "duration + grace < now()) AND status is still CONFIRMED. Acts as "
+        "the idempotency lock for the booking.completed eventbus producer: "
+        "the task SET ... WHERE completed_at IS NULL — rowcount tells "
+        "whether we won the race. NULL on rows where the visit hasn't "
+        "happened yet, was cancelled, or where the producer hasn't run yet.",
+    )
     status = models.CharField(
         max_length=16,
         choices=Status.choices,
