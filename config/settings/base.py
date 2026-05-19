@@ -589,19 +589,39 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
+
 # Database routing:
-#   - When POSTGRES_HOST is set (docker compose / staging / prod) → Postgres.
+#   - When POSTGRES_HOST or DB_HOST is set → Postgres.
 #   - Otherwise SQLite for fast local boot without docker.
+#
+# Two env naming schemes are accepted side-by-side:
+#   - POSTGRES_HOST / POSTGRES_DB / ...  — docker-compose convention,
+#     used by the Phase 0 platform stack and CI.
+#   - DB_HOST / DB_NAME / ...            — the Phase 0 dev-server
+#     env template (infra/env/dev.env.example) used these. Kept as
+#     aliases so existing /etc/ai-bot-platform/*.env files keep working
+#     after the merge that introduced the POSTGRES_* scheme.
+#
 # Full DATABASE_URL parsing lands in Sprint 9 (production hardening).
-if os.environ.get("POSTGRES_HOST"):
+def _pg_env(*keys: str, default: str | None = None) -> str | None:
+    """Return the first non-empty environment value across ``keys``."""
+    for key in keys:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return default
+
+
+_PG_HOST = _pg_env("POSTGRES_HOST", "DB_HOST")
+if _PG_HOST:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB", "ai_bot_platform"),
-            "USER": os.environ.get("POSTGRES_USER", "platform"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "platform"),
-            "HOST": os.environ["POSTGRES_HOST"],
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            "NAME": _pg_env("POSTGRES_DB", "DB_NAME", default="ai_bot_platform"),
+            "USER": _pg_env("POSTGRES_USER", "DB_USER", default="platform"),
+            "PASSWORD": _pg_env("POSTGRES_PASSWORD", "DB_PASSWORD", default="platform"),
+            "HOST": _PG_HOST,
+            "PORT": _pg_env("POSTGRES_PORT", "DB_PORT", default="5432"),
         }
     }
 else:
