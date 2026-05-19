@@ -1,10 +1,14 @@
 # Customer Loyalty / Rewards / Referral — UX Policy
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — loyalty backend (`apps/loyalty/`) ships in parallel (PRs #173, #181, #184); customer-facing UX gap fills here
-**Reads:** `apps/loyalty/models.py`, `apps/loyalty/services.py`, [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`customer-first-touch-and-mini-app-states.md`](./customer-first-touch-and-mini-app-states.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`single-assistant-identity.md`](./single-assistant-identity.md), [`assistant-persona.md`](./assistant-persona.md), [`event-taxonomy.md`](./event-taxonomy.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`notification-preferences-ux.md`](./notification-preferences-ux.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`../handoffs/2026-05-19-master-earnings-handoff.md`](../handoffs/2026-05-19-master-earnings-handoff.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), `apps/loyalty/models.py`, `apps/loyalty/services.py`, [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`customer-first-touch-and-mini-app-states.md`](./customer-first-touch-and-mini-app-states.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`assistant-persona.md`](./assistant-persona.md) (r2), [`event-taxonomy.md`](./event-taxonomy.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`notification-preferences-ux.md`](./notification-preferences-ux.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`../handoffs/2026-05-19-master-earnings-handoff.md`](../handoffs/2026-05-19-master-earnings-handoff.md)
 
 > Loyalty backend is in-flight: 3 tiers (Стартовый / Постоянный / Любимый), 9 event types (earn_visit / earn_referral / earn_birthday / earn_review / earn_return / redeem / manual_adjust / refund_revoke / tier_changed), append-only event log, auto-enrollment, per-tenant opt-out. Customer never sees any of this without a UX spec. This policy makes loyalty feel natural without slipping into points-grinding shame.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: loyalty stays **per-tenant** (each salon's provider reward program) per [`tenant-as-provider-model §6.1`](./tenant-as-provider-model.md). Ayla mediates customer-facing surfaces. Customer's Ayla memory is cross-tenant; loyalty balance per-tenant — these are different scopes. Bot DM templates use Ayla voice per [`ayla-identity-and-brand §2`](./ayla-identity-and-brand.md). Deprecated `single-assistant-identity.md` reference removed.
 
 ---
 

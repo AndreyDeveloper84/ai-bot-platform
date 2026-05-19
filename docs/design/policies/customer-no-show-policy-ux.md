@@ -1,10 +1,14 @@
 # Customer No-Show / Late Cancellation Policy — UX
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — master earnings + tenant economics + customer trust intersection
-**Reads:** [`customer-cancellation-reschedule-spec.md`](./customer-cancellation-reschedule-spec.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`customer-loyalty-rewards-ux.md`](./customer-loyalty-rewards-ux.md), [`customer-privacy-data-closure-ux.md`](./customer-privacy-data-closure-ux.md), [`../handoffs/2026-05-19-master-earnings-handoff.md`](../handoffs/2026-05-19-master-earnings-handoff.md), [`attribution-policy.md`](./attribution-policy.md), [`single-assistant-identity.md`](./single-assistant-identity.md), [`booking-conflict-resolution-ux.md`](./booking-conflict-resolution-ux.md), [`event-taxonomy.md`](./event-taxonomy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`customer-cancellation-reschedule-spec.md`](./customer-cancellation-reschedule-spec.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`customer-loyalty-rewards-ux.md`](./customer-loyalty-rewards-ux.md), [`customer-privacy-data-closure-ux.md`](./customer-privacy-data-closure-ux.md), [`../handoffs/2026-05-19-master-earnings-handoff.md`](../handoffs/2026-05-19-master-earnings-handoff.md), [`attribution-policy.md`](./attribution-policy.md), [`booking-conflict-resolution-ux.md`](./booking-conflict-resolution-ux.md), [`event-taxonomy.md`](./event-taxonomy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md)
 
 > Customer doesn't show up. Customer is 25 minutes late and master can't fit them in. Customer cancels 30 minutes before slot. Today no consistent UX — admin tells master via WhatsApp, master loses time, customer maybe gets penalty maybe doesn't, repeat offenders bleed the salon. This policy gives the operational + customer-trust UX.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: no-show policy modes are **per-tenant configurable** per [`tenant-as-provider-model §3.1`](./tenant-as-provider-model.md). Customer-facing voice uses Ayla per [`ayla-identity-and-brand §2`](./ayla-identity-and-brand.md). Disputes route through emergency fallback per [`ayla-emergency-fallback-policy §3.1`](./ayla-emergency-fallback-policy.md) `payment_dispute` tier. Cross-tenant pattern visibility strictly forbidden per Doc #4 Q-CO5. Deprecated `single-assistant-identity.md` reference removed.
 
 ---
 
