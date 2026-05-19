@@ -256,17 +256,32 @@ def _maybe_credit_long_return(
     if existing is not None:
         return None
 
+    # Phase 2.d-1 hotfix (retro review #2): exclude EARN_VISIT events
+    # whose booking was later REFUND_REVOKE'd. A revoked prior visit
+    # doesn't establish a recency floor — the customer effectively
+    # hasn't visited at all, so a 30-day-ago revoked visit shouldn't
+    # block the >90d long-return bonus for the next real visit.
+    #
+    # `values_list` stays lazy so Django inlines it as a subquery
+    # (no extra round-trip).
+    revoked_booking_ids = LoyaltyEvent.all_tenants.filter(
+        account=account,
+        event_type=LoyaltyEvent.EventType.REFUND_REVOKE,
+        booking_id__isnull=False,
+    ).values_list("booking_id", flat=True)
+
     prior = (
         LoyaltyEvent.all_tenants.filter(
             account=account,
             event_type=LoyaltyEvent.EventType.EARN_VISIT,
         )
         .exclude(pk=current_event.pk)
+        .exclude(booking_id__in=revoked_booking_ids)
         .order_by("-occurred_at")
         .first()
     )
     if prior is None:
-        return None  # first-ever visit
+        return None  # first-ever visit (or all priors revoked)
 
     gap = current_event.occurred_at - prior.occurred_at
     if gap < timedelta(days=LONG_RETURN_GAP_DAYS):
@@ -352,13 +367,25 @@ def _maybe_complete_referral(
     no link to find).
     """
 
-    # «First visit» = current customer has exactly 1 EARN_VISIT event
-    # (this just-written one). count==1 ⇒ this is it.
-    visit_count = LoyaltyEvent.all_tenants.filter(
+    # «First visit» = current customer has exactly 1 effective EARN_VISIT
+    # (this just-written one). Phase 2.d-1 hotfix (retro review #1): we
+    # subtract REFUND_REVOKE rows so a cancelled-then-recompleted first
+    # visit doesn't make the second visit look like «not first» and
+    # silently skip the referrer credit.
+    #
+    # Independent of tier_reset_at floor by design — the referral
+    # semantic is «did this referee effectively complete a visit before
+    # this one», which is tier-agnostic.
+    earn_count = LoyaltyEvent.all_tenants.filter(
         account=account,
         event_type=LoyaltyEvent.EventType.EARN_VISIT,
     ).count()
-    if visit_count != 1:
+    revoke_count = LoyaltyEvent.all_tenants.filter(
+        account=account,
+        event_type=LoyaltyEvent.EventType.REFUND_REVOKE,
+    ).count()
+    effective_visits = earn_count - revoke_count
+    if effective_visits != 1:
         return None  # not first
 
     pending = LoyaltyReferral.all_tenants.filter(
