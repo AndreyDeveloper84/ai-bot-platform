@@ -29,7 +29,9 @@ class TestBookingCreatedSignal:
         assert rows.count() == 1
         row = rows.first()
         assert row.data["booking_id"] == str(booking.id)
-        assert row.data["booking_source"] == "bot"
+        # Defaults to 'external' when not set explicitly (Q-ATT-IMPL1 legacy
+        # writer path — strict-attribution per writer ports Q-ATT-IMPL1).
+        assert row.data["booking_source"] == "external"
         assert row.tenant_id == t.id
 
     def test_update_does_not_re_emit(self):
