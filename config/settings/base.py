@@ -485,6 +485,16 @@ OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
 # auto-loaded (PR #135) so a local-dev `.env` line is enough; staging /
 # prod inject via their secret stores.
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
+# Phase 5 / KB-SYNC — shared HMAC-SHA256 secret for inbound webhooks from
+# the colleague's ``Shiro-Py/salon-knowledge`` service. The webhook view at
+# ``/api/v1/salon-knowledge/webhook/approved/`` rejects every request with
+# 500 (not 200) when this is empty — a silent-200 on misconfigured prod
+# would let approved-knowledge events vanish without raising any alarm.
+# Coordinate value with the colleague's ``WebhookEndpoint.secret`` row
+# pointing at our URL.
+SALON_KNOWLEDGE_WEBHOOK_SECRET = os.environ.get("SALON_KNOWLEDGE_WEBHOOK_SECRET", "")
+
 # Dedup window: identical (severity, dedup_key) pairs within this window
 # collapse to a single page. Defaults to 5 minutes — same as PD's default
 # dedup behaviour. Lower in tests via override_settings.
