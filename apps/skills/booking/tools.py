@@ -86,6 +86,11 @@ from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingRequest, PendingBookingAction
+from apps.booking.services.attribution import (
+    build_customer_attribution_metadata,
+    compute_assist_score,
+    compute_billable,
+)
 from apps.eventbus import services as eventbus_services
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
@@ -945,6 +950,28 @@ def execute_confirm(
             error="invalid_payload",
         )
 
+    # Phase 4a-IMPL1 closure: validate visit_at BEFORE the YClients call
+    # so a parse failure can't leave a YClients record without our
+    # corresponding BookingRequest. The model validator at
+    # apps/booking/models.py::_validate_attribution_metadata raises when
+    # booking_source != 'external' AND visit_at IS NULL (Q-ATT-IMPL3);
+    # we're about to flip booking_source to 'ai_direct', so guard up-front.
+    visit_at_dt = _parse_iso_datetime(slot_datetime)
+    if visit_at_dt is None:
+        logger.warning(
+            "booking.confirm.exec.unparseable_slot slot=%s",
+            slot_datetime,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_confirm",
+            outcome="invalid_slot_datetime",
+        )
+        return BookingToolResult(
+            confirmation=ConfirmationResult(ok=False, error="invalid_payload"),
+            error="invalid_payload",
+        )
+
     try:
         record: BookingRecord = client.create_record(
             staff_id=master_id,
@@ -991,10 +1018,23 @@ def execute_confirm(
         comment__contains=yc_marker,
     ).first()
 
-    visit_at_dt = _parse_iso_datetime(slot_datetime)
-    visit_at_iso = visit_at_dt.isoformat() if visit_at_dt else slot_datetime
+    # visit_at_dt was parsed above (pre-YClients), reuse here.
+    visit_at_iso = visit_at_dt.isoformat()
 
+    # The `existing` lookup is the idempotency short-circuit for tool
+    # replay (LLM retry, double-tap). Rows written before this PR have
+    # booking_source='external' and we deliberately do NOT update them
+    # here — backfilling legacy rows is a separate migration question.
     if existing is None:
+        # Phase 4a-IMPL1 closure: bot-confirm path = ai_direct attribution.
+        # Without this, BookingRequest.booking_source defaults to
+        # "external" and the row is NOT billable — bot bookings would
+        # silently fall out of the billing pipeline (per attribution
+        # policy §6 «billable = ai_direct AND CONFIRMED»).
+        billable, billing_reason = compute_billable(
+            booking_source="ai_direct",
+            status=BookingRequest.Status.CONFIRMED,
+        )
         BookingRequest.all_tenants.create(
             tenant=tenant,
             bot_user=bot_user,
@@ -1007,6 +1047,15 @@ def execute_confirm(
             source="bot",
             is_processed=False,
             status=BookingRequest.Status.CONFIRMED,
+            visit_at=visit_at_dt,
+            booking_source="ai_direct",
+            ai_assist_score=compute_assist_score(booking_source="ai_direct"),
+            billable=billable,
+            billing_reason=billing_reason,
+            attribution_metadata=build_customer_attribution_metadata(
+                booking_created_at=dj_timezone.now().isoformat(),
+                test_mode=False,
+            ),
         )
         _schedule_reminders(
             tenant=tenant,
@@ -1505,6 +1554,23 @@ def execute_reschedule(
     if record_id is None or master_id is None or service_id is None or not new_datetime:
         return BookingToolResult(error="invalid_payload")
 
+    # Phase 4a-IMPL1 closure: validate new_datetime BEFORE the YClients
+    # cancel call so a parse failure can't leave us in a half-state
+    # (old record cancelled but new BookingRequest write fails on the
+    # ai_direct + visit_at=NULL validator). Mirrors execute_confirm.
+    visit_at_dt = _parse_iso_datetime(new_datetime)
+    if visit_at_dt is None:
+        logger.warning(
+            "booking.reschedule.exec.unparseable_slot slot=%s",
+            new_datetime,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="invalid_new_datetime",
+        )
+        return BookingToolResult(error="invalid_payload")
+
     booking = _find_user_booking(tenant=tenant, bot_user=bot_user, record_id=record_id)
     if booking is None:
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="invalid_record_id")
@@ -1622,8 +1688,8 @@ def execute_reschedule(
 
     new_yc_id = str(record.record_id)
     new_yc_marker = f"yclients_record_id={new_yc_id}"
-    visit_at_dt = _parse_iso_datetime(new_datetime)
-    visit_at_iso = visit_at_dt.isoformat() if visit_at_dt else new_datetime
+    # visit_at_dt was parsed at the top of this function (pre-cancel).
+    visit_at_iso = visit_at_dt.isoformat()
 
     existing_new = BookingRequest.all_tenants.filter(
         tenant=tenant,
@@ -1631,6 +1697,23 @@ def execute_reschedule(
         comment__contains=new_yc_marker,
     ).first()
     if existing_new is None:
+        # Phase 4a-IMPL1 closure: reschedule produces a NEW BookingRequest
+        # row with ai_direct attribution. Per Q12-α the locked rule today
+        # marks any ai_direct + CONFIRMED as billable; the «reschedule is
+        # not billable» refinement lives in policy but is not yet enforced
+        # in compute_billable (canonical create_customer_booking has the
+        # same behavior). attribution_metadata.created_by carries the
+        # discriminator so future billing logic can opt out cleanly.
+        billable, billing_reason = compute_billable(
+            booking_source="ai_direct",
+            status=BookingRequest.Status.CONFIRMED,
+        )
+        reschedule_metadata = build_customer_attribution_metadata(
+            booking_created_at=dj_timezone.now().isoformat(),
+            test_mode=False,
+        )
+        reschedule_metadata["created_by"] = "execute_reschedule"
+        reschedule_metadata["rescheduled_from_record_id"] = record_id
         BookingRequest.all_tenants.create(
             tenant=tenant,
             bot_user=bot_user,
@@ -1643,6 +1726,12 @@ def execute_reschedule(
             source="bot",
             is_processed=False,
             status=BookingRequest.Status.CONFIRMED,
+            visit_at=visit_at_dt,
+            booking_source="ai_direct",
+            ai_assist_score=compute_assist_score(booking_source="ai_direct"),
+            billable=billable,
+            billing_reason=billing_reason,
+            attribution_metadata=reschedule_metadata,
         )
         _schedule_reminders(
             tenant=tenant,
