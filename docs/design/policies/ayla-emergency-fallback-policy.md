@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-19 r1
 **Status:** STRATEGIC FOUNDATION — Doc #3 of 5 in Ayla-first foundation set. Rewrites [`conversation-ownership-policy.md`](./conversation-ownership-policy.md). Per Ayla-first pivot: zero human handoff in customer UX; system fallback for genuine emergencies only.
-**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-memory-and-personalization.md`](./ayla-memory-and-personalization.md), memory `project_ayla_first_strategic_pivot`, memory `project_conversation_ownership_tiers` (revised), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`booking-conflict-resolution-ux.md`](./booking-conflict-resolution-ux.md), [`single-assistant-identity.md`](./single-assistant-identity.md) (deprecated; for trace), Notion: PRD Ayla v2.0 + AI-01/AI-02/BOOK-02 user flows
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-memory-and-personalization.md`](./ayla-memory-and-personalization.md), memory `project_ayla_first_strategic_pivot`, memory `project_conversation_ownership_tiers` (revised), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`booking-conflict-resolution-ux.md`](./booking-conflict-resolution-ux.md), memory `project_single_assistant_identity` (deprecated; for trace only), Notion: PRD Ayla v2.0 + AI-01/AI-02/BOOK-02 user flows
 
 > Ayla is **always** the conversational partner. Period. Admin/master/founder never "takes over" the chat. When something serious happens, Ayla collects facts, hands off to backend team via separate channels, and returns to customer with the answer. This policy specifies what counts as "serious", how admin work happens invisibly, and what Ayla says while customer waits.
 
@@ -1288,7 +1288,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.19 emergency domain` (NEW s
 
 ### Old / deprecated
 - [`conversation-ownership-policy.md`](./conversation-ownership-policy.md) — deprecated by this doc per §12.4
-- [`single-assistant-identity.md`](./single-assistant-identity.md) — already deprecated by Doc #1
+- Memory `project_single_assistant_identity` — already deprecated by Doc #1 (no policy doc; memory-only artifact)
 
 ### Memory
 - `project_ayla_first_strategic_pivot` — full pivot context

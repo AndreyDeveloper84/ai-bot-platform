@@ -130,7 +130,7 @@ Specific words/phrases trigger 4-eye admin review BEFORE master sees:
 - Master sees raw counts + admin's aggregate
 
 ### 2.12 Voice preserved
-Per [`single-assistant-identity.md`](../policies/single-assistant-identity.md) — AI delivers reviews to master via single-assistant voice, NOT bot persona.
+Per [`ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md) — AI delivers reviews to master via single-assistant voice, NOT bot persona.
 
 ---
 
@@ -997,7 +997,7 @@ Layer 3 fallback: 4-eye queue (admin sees all rating-≤2 anyway).
 - [`master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md) — new section in Profile tab §5.0
 - [`master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md) — §2.4 reviews never affect compensation; cross-doc consistency
 - [`ai-quality-observability.md`](../policies/ai-quality-observability.md) — sensitive-keyword detection layer §11.4
-- [`single-assistant-identity.md`](../policies/single-assistant-identity.md) — voice §2.12
+- [`ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md) — voice §2.12
 - [`conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md) — tier escalation possible on Q-MR11 admin discussion
 - [`event-taxonomy.md §3.8`](../policies/event-taxonomy.md) — 13 NEW events §10 (new domain)
 - [`assistant-persona.md`](../policies/assistant-persona.md) — mediation phrase rules §11.2

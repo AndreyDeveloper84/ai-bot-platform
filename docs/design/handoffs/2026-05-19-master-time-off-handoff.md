@@ -84,7 +84,7 @@ Single source for:
 Master cannot lock themselves out without admin awareness; admin cannot override an emergency SICK_DAY but can challenge after-the-fact.
 
 ### 2.2 Customer never sees raw schedule change
-Per [`single-assistant-identity §2.2`](../policies/single-assistant-identity.md): customer sees rebooking offer framed naturally («у {{master}} планы поменялись на этот день») — NEVER «sick day» / «vacation» / «cancellation» / raw labels.
+Per [`ayla-identity-and-brand §2.2`](../policies/ayla-identity-and-brand.md): customer sees rebooking offer framed naturally («у {{master}} планы поменялись на этот день») — NEVER «sick day» / «vacation» / «cancellation» / raw labels.
 
 ### 2.3 NEVER share medical reason with customer
 Master can optionally note reason in admin-visible field, but customer never sees. Privacy boundary.
@@ -911,7 +911,7 @@ Per [`master-conversational-templates §5`](../policies/master-conversational-te
 - [`booking-conflict-resolution-ux §3.6b`](../policies/booking-conflict-resolution-ux.md) — customer rebooking machinery reused
 - [`customer-cancellation-reschedule-spec.md`](../policies/customer-cancellation-reschedule-spec.md) — alt-date / cancellation flows extended
 - [`conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md) — Q-MTL11 HUMAN_LOCKED handling
-- [`single-assistant-identity.md`](../policies/single-assistant-identity.md) — §2.2 customer voice preserved
+- [`ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md) — §2.2 customer voice preserved
 - [`event-taxonomy.md §3.9`](../policies/event-taxonomy.md) — 14 NEW events §11
 - [`schedule-editor-wireframes.md`](../policies/schedule-editor-wireframes.md) — recurring pattern changes flow integrates
 - [`tenant-suspension-pause-ux.md`](../policies/tenant-suspension-pause-ux.md) — Q-MTL18

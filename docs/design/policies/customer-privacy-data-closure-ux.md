@@ -122,7 +122,7 @@ Hard-delete is final FROM THIS SALON'S DATA. Customer can re-onboard fresh (new 
 Customer at A + B requests deletion at A → ONLY tenant A's customer record cleared. Tenant B untouched. Per [`master-substitution-handoff §2.9`](../handoffs/2026-05-19-master-substitution-handoff.md) precedent on per-tenant data.
 
 ### 2.12 Single-assistant identity in messaging
-Per [`single-assistant-identity §2.4`](./single-assistant-identity.md): AI's deletion confirmations / cooling-off reminders use customer's voice — neutral, calm. NEVER «sad to see you go!» / «one more chance!».
+Per [`ayla-identity-and-brand §2.4`](./ayla-identity-and-brand.md): AI's deletion confirmations / cooling-off reminders use customer's voice — neutral, calm. NEVER «sad to see you go!» / «one more chance!».
 
 ### 2.13 No dark patterns
 - ❌ «Wait! Here's 30% off if you stay»
@@ -1190,7 +1190,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.16 customer privacy domain`
 - [`wellness-input-modules.md §11`](./wellness-input-modules.md) — per-module consent paused during soft-delete §6.2
 - [`master-offboarding-handoff.md`](../handoffs/2026-05-19-master-offboarding-handoff.md) — pattern reuse (30d cooling-off, founder approval, audit retention)
 - [`attribution-policy.md`](./attribution-policy.md) — anonymization §9.5
-- [`single-assistant-identity.md §2.4`](./single-assistant-identity.md) — voice §2.12
+- [`ayla-identity-and-brand §2.4`](./ayla-identity-and-brand.md) — voice §2.12
 - [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md) — SUSPENDED interaction §2.18 / §11.3
 - [`event-taxonomy.md §3.16`](./event-taxonomy.md) — 12 NEW events §15
 - [`../decisions-log.md`](../decisions-log.md) — Q-CP1..Q-CP20

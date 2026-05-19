@@ -85,7 +85,7 @@ Single source for:
 Master sees this clearly as «Со студией» — separate tab. NEVER mixed with customer threads.
 
 ### 2.2 NOT AI-mediated
-AI is silent here. Per [`single-assistant-identity §2.4`](../policies/single-assistant-identity.md): single-assistant identity is for CUSTOMER touchpoints. Internal admin-master communication = professional, direct.
+AI is silent here. Per [`ayla-identity-and-brand §2.4`](../policies/ayla-identity-and-brand.md): single-assistant identity is for CUSTOMER touchpoints. Internal admin-master communication = professional, direct.
 
 If master DM's «помощник» about an admin topic, AI redirects: «Это лучше обсудить со студией. Открываю чат?» — opens thread.
 
@@ -764,7 +764,7 @@ Add to [`event-taxonomy.md`](../policies/event-taxonomy.md) `3.12 master-admin-c
 - [`master-offboarding-handoff.md §4.2`](./2026-05-19-master-offboarding-handoff.md) — notice discussion entry point
 - [`master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md) — new tab on bottom nav §3.1
 - [`master-conversational-templates.md`](../policies/master-conversational-templates.md) — voice does NOT apply (this is non-AI channel)
-- [`single-assistant-identity.md §2.4`](../policies/single-assistant-identity.md) — AI silence per §2.2
+- [`ayla-identity-and-brand §2.4`](../policies/ayla-identity-and-brand.md) — AI silence per §2.2
 - [`conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md) — HUMAN_LOCKED Q-IAC17
 - [`event-taxonomy.md §3.12`](../policies/event-taxonomy.md) — 6 NEW events §10
 - [`../decisions-log.md`](../decisions-log.md) — Q-IAC1..Q-IAC20

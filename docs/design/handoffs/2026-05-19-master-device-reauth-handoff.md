@@ -93,7 +93,7 @@ Per Q-MD3: challenges escalate with risk:
 - Brute force suspected → all sessions revoked
 
 ### 2.4 Customer never sees raw recovery state
-Per [`single-assistant-identity §2.2`](../policies/single-assistant-identity.md): if master is mid-recovery and customer messages, AI handles per HUMAN_SUPERVISED tier (master temporarily unavailable). NEVER «master's account is locked».
+Per [`ayla-identity-and-brand §2.2`](../policies/ayla-identity-and-brand.md): if master is mid-recovery and customer messages, AI handles per HUMAN_SUPERVISED tier (master temporarily unavailable). NEVER «master's account is locked».
 
 ### 2.5 Earnings data not deletable via re-auth
 Even if account «recovered» = new identity link, earnings history persists. Cannot inject fake re-auth to clean slate (per audit immutability §8.4).
@@ -830,7 +830,7 @@ Add to [`event-taxonomy.md`](../policies/event-taxonomy.md) `3.13 auth & device 
 - [`master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md) — read-only earnings during recovery §4.7
 - [`master-offboarding-handoff.md`](./2026-05-19-master-offboarding-handoff.md) — locked-state interactions
 - [`conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md) — HUMAN_SUPERVISED during master lockout §2.4 / §9.4 / Q-MD15
-- [`single-assistant-identity.md §2.2`](../policies/single-assistant-identity.md) — customer never sees lock state §2.4
+- [`ayla-identity-and-brand §2.2`](../policies/ayla-identity-and-brand.md) — customer never sees lock state §2.4
 - [`event-taxonomy.md §3.13`](../policies/event-taxonomy.md) — 8 NEW events §12
 - [`tenant-suspension-pause-ux.md`](../policies/tenant-suspension-pause-ux.md) — tenant lifecycle interactions
 - [`../decisions-log.md`](../decisions-log.md) — Q-MD1..Q-MD20

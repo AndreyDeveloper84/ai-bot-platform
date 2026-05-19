@@ -86,7 +86,7 @@ Single source for:
 - ❌ «Третий раз не приходите!»
 - ✅ «Время прошло, не получилось встретиться. Что-то случилось?»
 
-Per [`single-assistant-identity §2.2`](./single-assistant-identity.md): AI tone empathetic but informational.
+Per [`ayla-identity-and-brand §2.2`](./ayla-identity-and-brand.md): AI tone empathetic but informational.
 
 ### 2.2 Master compensated for no-show
 Per [`master-earnings §8.2`](../handoffs/2026-05-19-master-earnings-handoff.md) extension §7: no-show booking creates partial-or-full no-show earnings record. Salon (NOT customer directly) covers; tenant policy §10 determines what salon recovers from customer.
@@ -928,7 +928,7 @@ Add to [`event-taxonomy.md`](./event-taxonomy.md) `3.17 no-show domain` (NEW):
 - [`master-earnings-handoff §8.2`](../handoffs/2026-05-19-master-earnings-handoff.md) — earnings impact §7 + NO_SHOW_PAYOUT event type extension (Q-NS11)
 - [`master-reviews-feedback-handoff §6.4`](../handoffs/2026-05-19-master-reviews-feedback-handoff.md) — master flag-no-show recourse
 - [`attribution-policy.md`](./attribution-policy.md) — §13 billable rules
-- [`single-assistant-identity.md §2.4`](./single-assistant-identity.md) — voice §2.10
+- [`ayla-identity-and-brand §2.4`](./ayla-identity-and-brand.md) — voice §2.10
 - [`booking-conflict-resolution-ux.md`](./booking-conflict-resolution-ux.md) — master-side no-show distinct from sync conflict
 - [`customer-privacy-data-closure-ux.md`](./customer-privacy-data-closure-ux.md) — no-show records included in customer data export
 - [`customer-notification-controls-ux.md`](./customer-notification-controls-ux.md) — operational category §11

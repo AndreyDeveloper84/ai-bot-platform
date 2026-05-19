@@ -66,7 +66,7 @@ Single source for:
 ## 2. Strategic constraints — non-negotiable
 
 ### 2.1 Customer never told why master left
-Per [`single-assistant-identity §2.2`](../policies/single-assistant-identity.md): customer message uses neutral «{{master}} больше не работает в {{salon_name}}». NEVER:
+Per [`ayla-identity-and-brand §2.2`](../policies/ayla-identity-and-brand.md): customer message uses neutral «{{master}} больше не работает в {{salon_name}}». NEVER:
 - ❌ «{{master}} уволилась»
 - ❌ «{{master}} ушла к нам в декрет... [navigates to permanent]»
 - ❌ «{{master}} обвинена в...»
@@ -997,7 +997,7 @@ Add to [`event-taxonomy.md`](../policies/event-taxonomy.md) `3.11 master offboar
 - [`master-conversational-templates.md`](../policies/master-conversational-templates.md) — farewell touchpoints
 - [`booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md) — customer reassignment machinery
 - [`conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md) — Q-MO13 HUMAN_LOCKED handling
-- [`single-assistant-identity.md`](../policies/single-assistant-identity.md) — voice §2.1
+- [`ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md) — voice §2.1
 - [`tenant-suspension-pause-ux.md`](../policies/tenant-suspension-pause-ux.md) — Q-MO17 owner offboarding
 - [`core-wellness-profile.md`](../policies/core-wellness-profile.md) — Q-MO11 wellness data privacy
 - [`event-taxonomy.md §3.11`](../policies/event-taxonomy.md) — 14 NEW events §14
