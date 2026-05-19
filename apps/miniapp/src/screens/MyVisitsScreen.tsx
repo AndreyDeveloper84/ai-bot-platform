@@ -123,6 +123,17 @@ export function MyVisitsScreen() {
                   <dd>{formatVisitFull(v.visit_at)}</dd>
                 </>
               )}
+              {v.rating !== null && (
+                <>
+                  <dt>Оценка</dt>
+                  <dd>
+                    <span className="visit-rating" aria-label={`${v.rating} из 5`}>
+                      {"★".repeat(v.rating)}
+                      {"☆".repeat(5 - v.rating)}
+                    </span>
+                  </dd>
+                </>
+              )}
             </dl>
             {v.status === "confirmed" && tab !== "past" && (
               <button
@@ -132,6 +143,19 @@ export function MyVisitsScreen() {
                 onClick={() => onReschedule(v)}
               >
                 Перенести
+              </button>
+            )}
+            {v.can_rate && (
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ marginTop: "var(--s-3)" }}
+                onClick={() => {
+                  haptics.selection();
+                  navigate(`/feedback/${v.id}`);
+                }}
+              >
+                Оценить визит
               </button>
             )}
             {(tab === "past" || v.status === "cancelled" || v.status === "rescheduled") &&

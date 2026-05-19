@@ -129,6 +129,8 @@ export interface Visit {
   status: string;
   service_id: string | null;
   master_id: string | null;
+  rating: number | null;
+  can_rate: boolean;
 }
 
 export const fetchVisits = (status: "upcoming" | "past" | "all" = "upcoming"): Promise<{
@@ -180,4 +182,23 @@ export const deleteAccount = (): Promise<{ deleted: true }> =>
   request("/me/delete", {
     method: "POST",
     body: JSON.stringify({ confirmation: "УДАЛИТЬ" }),
+  });
+
+// --- feedback (Phase 4 / F5) ---
+export interface FeedbackResult {
+  booking_id: string;
+  rating: number;
+  comment: string;
+  feedback_at: string;
+  handoff_created: boolean;
+  task_id: string | null;
+}
+
+export const submitFeedback = (
+  bookingId: string,
+  body: { rating: number; comment?: string },
+): Promise<FeedbackResult> =>
+  request(`/bookings/${bookingId}/feedback`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });

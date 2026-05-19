@@ -5,6 +5,7 @@ import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
+import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { MyVisitsScreen } from "./screens/MyVisitsScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
@@ -21,6 +22,7 @@ export function App() {
       <Route path="/book/success/:bookingId" element={<BookingSuccessScreen />} />
       <Route path="/visits" element={<MyVisitsScreen />} />
       <Route path="/me" element={<ProfileScreen />} />
+      <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
       <Route path="*" element={<HelloScreen />} />
     </Routes>
   );

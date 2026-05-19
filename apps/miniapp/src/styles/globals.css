@@ -573,3 +573,70 @@ a {
   margin-top: var(--s-4);
   flex-wrap: wrap;
 }
+
+/* Feedback (F5). */
+.feedback-intro {
+  color: var(--c-text-secondary);
+  margin: 0 0 var(--s-4);
+  font-size: var(--font-size-200);
+}
+
+.star-picker {
+  display: flex;
+  justify-content: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-4);
+}
+
+.star-picker__star {
+  background: none;
+  border: 0;
+  font-size: 44px;
+  line-height: 1;
+  color: var(--c-divider);
+  cursor: pointer;
+  padding: var(--s-1);
+  min-width: 56px;
+  min-height: 56px;
+  transition: transform 0.12s ease, color 0.12s ease;
+}
+
+.star-picker__star:active {
+  transform: scale(0.92);
+}
+
+.star-picker__star--filled {
+  color: var(--c-accent);
+}
+
+.feedback-thanks {
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  margin-top: var(--s-3);
+  text-align: center;
+}
+
+.feedback-thanks--lowrating {
+  border: 1px solid var(--c-warning);
+}
+
+.feedback-thanks__stars {
+  font-size: 36px;
+  color: var(--c-accent);
+  letter-spacing: 4px;
+  margin-bottom: var(--s-3);
+}
+
+.feedback-thanks__body {
+  color: var(--c-text-secondary);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* Rating badge on visit cards. */
+.visit-rating {
+  color: var(--c-accent);
+  letter-spacing: 2px;
+  font-size: var(--font-size-300);
+}
