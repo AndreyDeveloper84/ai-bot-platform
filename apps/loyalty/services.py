@@ -36,16 +36,46 @@ double-counting.
 from __future__ import annotations
 
 import datetime as dt  # noqa: F401  — used in apply_inactivity_downgrades signature
+import functools
 import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.loyalty.models import LoyaltyAccount, LoyaltyEvent, LoyaltyReferral
 from apps.tenancy.context import current_tenant
+
+
+def _audit_on_commit(**kwargs) -> None:
+    """Schedule ``write_audit`` to fire on the enclosing atomic's commit.
+
+    Phase 2.b-retro hotfix (Loyalty deferred #4): every Loyalty service
+    entry used to ``write_audit(...)`` AFTER its ``with transaction.atomic():``
+    block. A DB connection drop between commit and audit-write left the
+    mutation durable but the audit row absent — billing-grade audit gap.
+
+    Wrapping the call in ``transaction.on_commit`` ties the audit-write
+    to the same atomic boundary as the mutation:
+      - successful commit → audit fires
+      - rollback → audit does NOT fire (no orphan audit rows about
+        events that never happened)
+      - no enclosing atomic → fires immediately (Django default —
+        behavioural parity with the pre-fix code path for direct
+        non-atomic callers like opt_out)
+
+    ``functools.partial`` is preferred over a lambda because it captures
+    keyword values at scheduling time; a lambda capturing locals would
+    pick up mutations between schedule and commit. write_audit itself
+    never raises (apps.audit.services contract), so the on_commit
+    callback is fail-safe.
+    """
+
+    transaction.on_commit(functools.partial(write_audit, **kwargs))
+
 
 if TYPE_CHECKING:
     from apps.booking.models import BookingRequest
@@ -162,17 +192,17 @@ def credit_points(
         locked.balance = new_balance
         locked.save(update_fields=["balance", "updated_at"])
 
-    write_audit(
-        action=f"loyalty.{event_type}",
-        target="LoyaltyAccount",
-        target_id=account.pk,
-        payload={
-            "points_delta": points,
-            "balance_after": new_balance,
-            "reason": reason[:80],
-            "booking_id": str(booking.pk) if booking else None,
-        },
-    )
+        _audit_on_commit(
+            action=f"loyalty.{event_type}",
+            target="LoyaltyAccount",
+            target_id=account.pk,
+            payload={
+                "points_delta": points,
+                "balance_after": new_balance,
+                "reason": reason[:80],
+                "booking_id": str(booking.pk) if booking else None,
+            },
+        )
 
     # Phase 2.d: bonus events tied to this EARN_VISIT (long-return,
     # referral completion). Run BEFORE recompute_tier so a tier transition
@@ -320,19 +350,19 @@ def _maybe_credit_long_return(
         locked.balance = new_balance
         locked.save(update_fields=["balance", "updated_at"])
 
-    write_audit(
-        action="loyalty.earn_return",
-        target="LoyaltyAccount",
-        target_id=account.pk,
-        payload={
-            "points_delta": bonus_points,
-            "balance_after": new_balance,
-            "gap_days": gap.days,
-            "booking_id": str(current_event.booking_id),
-            "tier_at_credit": locked.tier,
-            "multiplier": multiplier,
-        },
-    )
+        _audit_on_commit(
+            action="loyalty.earn_return",
+            target="LoyaltyAccount",
+            target_id=account.pk,
+            payload={
+                "points_delta": bonus_points,
+                "balance_after": new_balance,
+                "gap_days": gap.days,
+                "booking_id": str(current_event.booking_id),
+                "tier_at_credit": locked.tier,
+                "multiplier": multiplier,
+            },
+        )
     return return_event
 
 
@@ -422,9 +452,9 @@ def _maybe_complete_referral(
         return None
 
     with transaction.atomic():
-        # Lock referrer's account row + double-check we're the winner
-        # (CAS: status=PENDING). Two concurrent first-visits on the same
-        # referee would race; the loser sees status=COMPLETED and skips.
+        # CAS on the referral row: two concurrent first-visits on the
+        # same referee race here; the loser sees status=COMPLETED and
+        # skips. ``rowcount == 0`` is the natural «I lost» signal.
         rowcount = LoyaltyReferral.all_tenants.filter(
             pk=pending.pk,
             status=LoyaltyReferral.Status.PENDING,
@@ -436,11 +466,48 @@ def _maybe_complete_referral(
         if rowcount == 0:
             return None  # lost the race; another worker credited
 
-        locked = LoyaltyAccount.all_tenants.select_for_update().get(pk=referrer_account.pk)
-        new_balance = locked.balance + REFERRAL_BONUS_POINTS
+        # Phase 2.b-retro hotfix (Loyalty deferred #3): mutual-referral
+        # deadlock prevention. The outer credit_points already holds a
+        # row-lock on the REFEREE's account (via select_for_update inside
+        # the dispatcher's outer transaction.atomic). Acquiring a SECOND
+        # select_for_update here on the REFERRER's account opens a
+        # classic A→B / B→A deadlock window: customer A refers B and B
+        # refers A, two concurrent EARN_VISIT events fire, worker 1 owns
+        # A's lock and waits for B, worker 2 owns B's and waits for A,
+        # Postgres aborts one (SQLSTATE 40P01) → swallowed exception →
+        # silently lost referral credit.
+        #
+        # Fix: replace the second select_for_update with an atomic UPDATE
+        # using F() — Postgres serialises row-level updates internally,
+        # so two concurrent F('balance') + 50 writes both land correctly
+        # without any application-level lock to deadlock on. The CAS on
+        # LoyaltyReferral.status above is the only «I won the race»
+        # gate we need; once that succeeded, the points credit is a
+        # straight INCREMENT no other writer competes for.
+        #
+        # Trade-off: ``balance_after`` on the EARN_REFERRAL event row
+        # reflects the post-update balance read back via refresh_from_db,
+        # which is NOT strictly serialisable across concurrent events on
+        # the same account. For a billing-grade ledger this is acceptable
+        # — the event stream is the source of truth; balance_after is a
+        # forensic snapshot, not an invariant.
+        LoyaltyAccount.all_tenants.filter(pk=referrer_account.pk).update(
+            balance=F("balance") + REFERRAL_BONUS_POINTS,
+            updated_at=timezone.now(),
+        )
+        # Read the post-update balance via ``all_tenants`` to bypass the
+        # default tenant-scoped manager. ``refresh_from_db`` routes through
+        # the default manager which would raise ``DoesNotExist`` if the
+        # current tenant_scope happens to differ from referrer_account.tenant
+        # (cross-tenant call sites are forbidden by schema today but the
+        # safer read avoids a latent foot-gun for future callers).
+        new_balance = LoyaltyAccount.all_tenants.values_list("balance", flat=True).get(
+            pk=referrer_account.pk
+        )
+        referrer_account.balance = new_balance
         event = LoyaltyEvent.objects.create(
-            tenant=locked.tenant,
-            account=locked,
+            tenant=referrer_account.tenant,
+            account=referrer_account,
             event_type=LoyaltyEvent.EventType.EARN_REFERRAL,
             points_delta=REFERRAL_BONUS_POINTS,
             balance_after=new_balance,
@@ -451,20 +518,18 @@ def _maybe_complete_referral(
                 "referee_customer_id": str(pending.referee_customer_id),
             },
         )
-        locked.balance = new_balance
-        locked.save(update_fields=["balance", "updated_at"])
 
-    write_audit(
-        action="loyalty.earn_referral",
-        target="LoyaltyAccount",
-        target_id=referrer_account.pk,
-        payload={
-            "points_delta": REFERRAL_BONUS_POINTS,
-            "balance_after": new_balance,
-            "referral_id": str(pending.pk),
-            "referee_customer_id": str(pending.referee_customer_id),
-        },
-    )
+        _audit_on_commit(
+            action="loyalty.earn_referral",
+            target="LoyaltyAccount",
+            target_id=referrer_account.pk,
+            payload={
+                "points_delta": REFERRAL_BONUS_POINTS,
+                "balance_after": new_balance,
+                "referral_id": str(pending.pk),
+                "referee_customer_id": str(pending.referee_customer_id),
+            },
+        )
     return event
 
 
@@ -497,25 +562,26 @@ def create_referral(
     if tenant is None:
         raise ValueError("loyalty.create_referral requires a tenant in scope.")
 
-    referral, created = LoyaltyReferral.objects.get_or_create(
-        tenant=tenant,
-        referee_customer=referee,
-        defaults={
-            "referrer_customer": referrer,
-            "status": LoyaltyReferral.Status.PENDING,
-        },
-    )
-    if not created:
-        return None  # silent: referee already has a referrer
-    write_audit(
-        action="loyalty.referral.created",
-        target="LoyaltyReferral",
-        target_id=referral.pk,
-        payload={
-            "referrer_id": str(referrer.pk),
-            "referee_id": str(referee.pk),
-        },
-    )
+    with transaction.atomic():
+        referral, created = LoyaltyReferral.objects.get_or_create(
+            tenant=tenant,
+            referee_customer=referee,
+            defaults={
+                "referrer_customer": referrer,
+                "status": LoyaltyReferral.Status.PENDING,
+            },
+        )
+        if not created:
+            return None  # silent: referee already has a referrer
+        _audit_on_commit(
+            action="loyalty.referral.created",
+            target="LoyaltyReferral",
+            target_id=referral.pk,
+            payload={
+                "referrer_id": str(referrer.pk),
+                "referee_id": str(referee.pk),
+            },
+        )
     return referral
 
 
@@ -568,17 +634,17 @@ def redeem_points(
         locked.balance = new_balance
         locked.save(update_fields=["balance", "updated_at"])
 
-    write_audit(
-        action="loyalty.redeem",
-        target="LoyaltyAccount",
-        target_id=account.pk,
-        payload={
-            "points_delta": -points,
-            "balance_after": new_balance,
-            "booking_id": str(booking.pk),
-            "visit_price_rub": visit_price_rub,
-        },
-    )
+        _audit_on_commit(
+            action="loyalty.redeem",
+            target="LoyaltyAccount",
+            target_id=account.pk,
+            payload={
+                "points_delta": -points,
+                "balance_after": new_balance,
+                "booking_id": str(booking.pk),
+                "visit_price_rub": visit_price_rub,
+            },
+        )
     return event
 
 
@@ -681,18 +747,18 @@ def revoke_visit_points(
         locked.balance = new_balance
         locked.save(update_fields=["balance", "updated_at"])
 
-    write_audit(
-        action="loyalty.refund_revoke",
-        target="LoyaltyAccount",
-        target_id=account.pk,
-        payload={
-            "points_delta": -revoke_amount,
-            "balance_after": new_balance,
-            "booking_id": str(booking.pk),
-            "earned_points": earned_amount,
-            "underflow": underflow,
-        },
-    )
+        _audit_on_commit(
+            action="loyalty.refund_revoke",
+            target="LoyaltyAccount",
+            target_id=account.pk,
+            payload={
+                "points_delta": -revoke_amount,
+                "balance_after": new_balance,
+                "booking_id": str(booking.pk),
+                "earned_points": earned_amount,
+                "underflow": underflow,
+            },
+        )
 
     # Phase 2.a: a revoke may push the customer below the regular/favorite
     # threshold (post-completion cancellation downgrade). Recompute eagerly
@@ -885,6 +951,18 @@ def recompute_tier(
             metadata=tier_metadata,
         )
 
+        _audit_on_commit(
+            action="loyalty.tier_changed",
+            target="LoyaltyAccount",
+            target_id=account.pk,
+            payload={
+                "old_tier": old_tier,
+                "new_tier": new_tier,
+                "visit_count": metrics.visit_count,
+                "ltv_rub": metrics.ltv_rub,
+            },
+        )
+
     # Emit AFTER commit so subscribers see the row. The reason carried
     # here is the same one in the TIER_CHANGED metadata — single emit
     # per transition, no duplicate even when caller overrides reason.
@@ -904,18 +982,6 @@ def recompute_tier(
             old_tier,
             new_tier,
         )
-
-    write_audit(
-        action="loyalty.tier_changed",
-        target="LoyaltyAccount",
-        target_id=account.pk,
-        payload={
-            "old_tier": old_tier,
-            "new_tier": new_tier,
-            "visit_count": metrics.visit_count,
-            "ltv_rub": metrics.ltv_rub,
-        },
-    )
 
     return new_tier
 
@@ -1034,12 +1100,13 @@ def opt_out(account: LoyaltyAccount) -> None:
 
     if account.opted_out_at is not None:
         return  # already out
-    account.opted_out_at = timezone.now()
-    account.enrolled = False
-    account.save(update_fields=["enrolled", "opted_out_at", "updated_at"])
-    write_audit(
-        action="loyalty.opt_out",
-        target="LoyaltyAccount",
-        target_id=account.pk,
-        payload={"balance_at_opt_out": account.balance},
-    )
+    with transaction.atomic():
+        account.opted_out_at = timezone.now()
+        account.enrolled = False
+        account.save(update_fields=["enrolled", "opted_out_at", "updated_at"])
+        _audit_on_commit(
+            action="loyalty.opt_out",
+            target="LoyaltyAccount",
+            target_id=account.pk,
+            payload={"balance_at_opt_out": account.balance},
+        )
