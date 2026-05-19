@@ -54,6 +54,7 @@ Engineering-ready handoff packages. Each contains: scope, JTBD, screens, compone
 - **2026-05-18-persona-editor-handoff.md** — Owner UI to tune assistant persona: tone slider, forbidden phrases, explicit-human policy radio
 - **2026-05-18-schedule-management-handoff.md** — Owner schedule editor: working hours, slot params, exceptions, block time, master change-request inbox
 - **2026-05-18-settings-hub-handoff.md** — (To be moved when in-progress draft completes)
+- **2026-05-19-wellness-mood-handoff.md** — Engineering-ready spec for Phase 1 Wellness Mood module (`apps/wellness/`). Activation Paths A+B, consent dialog, `WellnessModuleConsent` + `WellnessMoodEvent` models, 5 API endpoints, per-state behavior matrix, throttling + non-response logic, bot DM morning prompt template, Mini App Самочувствие tab + quick chip, Phase 1 simple-rules insights view, privacy enforcement (customer-only at API), events emitted per event-taxonomy §3.6, 15 open questions Q-WM1-15
 
 ### `briefings/` — Meeting preparation
 
