@@ -15,7 +15,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("booking", "0004_backfill_attribution"),
+        ("booking", "0006_cancel_reschedule_state"),
     ]
 
     operations = [
