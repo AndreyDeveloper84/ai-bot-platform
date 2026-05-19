@@ -1,10 +1,14 @@
 # Customer Wellness Goal Setting — Layer 2 UX
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Foundational — Layer 2 of Core Wellness Profile; pulls all 7 modules together
-**Reads:** [`core-wellness-profile.md`](./core-wellness-profile.md) §2 (Layer 2 Goals), [`wellness-input-modules.md`](./wellness-input-modules.md), [`customer-wellness-dashboard-ux.md`](./customer-wellness-dashboard-ux.md), [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`product-ux-vision.md`](./product-ux-vision.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`assistant-persona.md`](./assistant-persona.md), [`event-taxonomy.md`](./event-taxonomy.md), [`core-user-states.md`](./core-user-states.md), [`../handoffs/2026-05-19-wellness-food-handoff.md`](../handoffs/2026-05-19-wellness-food-handoff.md), [`../handoffs/2026-05-19-wellness-body-handoff.md`](../handoffs/2026-05-19-wellness-body-handoff.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-memory-and-personalization.md`](./ayla-memory-and-personalization.md), [`core-wellness-profile.md`](./core-wellness-profile.md) §2 (Layer 2 Goals), [`wellness-input-modules.md`](./wellness-input-modules.md), [`customer-wellness-dashboard-ux.md`](./customer-wellness-dashboard-ux.md), [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`product-ux-vision.md`](./product-ux-vision.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`assistant-persona.md`](./assistant-persona.md) (r2), [`event-taxonomy.md`](./event-taxonomy.md), [`core-user-states.md`](./core-user-states.md), [`../handoffs/2026-05-19-wellness-food-handoff.md`](../handoffs/2026-05-19-wellness-food-handoff.md), [`../handoffs/2026-05-19-wellness-body-handoff.md`](../handoffs/2026-05-19-wellness-body-handoff.md)
 
 > Per `core-wellness-profile.md`, Layer 2 = customer's wellness GOALS. Without goals, the 7 wellness modules are «record-keeping». With goals, modules + observations become «movement toward what matters to you». This is the layer that turns wellness OS from passive tracker into companion.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: goals stored in **Ayla's memory of user** per [`ayla-memory-and-personalization §3`](./ayla-memory-and-personalization.md) — cross-tenant persistent. Service recommendations aligned with goals respect [`tenant-as-provider-model §4`](./tenant-as-provider-model.md) — tenant sees booking made, NOT goal that drove it. AI voice samples reference Ayla per [`ayla-identity-and-brand §2`](./ayla-identity-and-brand.md).
 
 ---
 

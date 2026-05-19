@@ -1,8 +1,12 @@
 # Customer Notification Controls — Extended UX Policy
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — granular controls extending foundational notification-preferences-ux; GDPR-aligned customer consent
-**Reads:** [`notification-preferences-ux.md`](./notification-preferences-ux.md), [`customer-loyalty-rewards-ux.md`](./customer-loyalty-rewards-ux.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`customer-cancellation-reschedule-spec.md`](./customer-cancellation-reschedule-spec.md), [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`customer-wellness-dashboard-ux.md`](./customer-wellness-dashboard-ux.md), [`wellness-input-modules.md`](./wellness-input-modules.md), [`single-assistant-identity.md`](./single-assistant-identity.md), [`assistant-persona.md`](./assistant-persona.md), [`event-taxonomy.md`](./event-taxonomy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`notification-preferences-ux.md`](./notification-preferences-ux.md), [`customer-loyalty-rewards-ux.md`](./customer-loyalty-rewards-ux.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`customer-cancellation-reschedule-spec.md`](./customer-cancellation-reschedule-spec.md), [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`customer-wellness-dashboard-ux.md`](./customer-wellness-dashboard-ux.md), [`wellness-input-modules.md`](./wellness-input-modules.md), [`assistant-persona.md`](./assistant-persona.md) (r2), [`event-taxonomy.md`](./event-taxonomy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md)
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: notification sender = «Ayla» (not «помощник {{salon_name}}»). Emergency notifications bypass snooze + quiet hours per [`ayla-emergency-fallback-policy §11`](./ayla-emergency-fallback-policy.md). `single-assistant-identity.md` reference removed (deprecated 2026-05-19).
 
 > Existing notification-preferences-ux locked Q-CX9 «single toggle» for customer (anti-decision-fatigue). Production reality has expanded — customer now has loyalty notifications, refund disputes, AI proactive insights, wellness goals, referrals. Single toggle is too blunt. This policy adds optional ADVANCED tier (collapsed by default — simple UX preserved) + quiet hours + snooze + GDPR audit + multi-tenant prefs.
 
@@ -155,7 +159,7 @@ Q-CX9 «single toggle» preserved:
 ┌────────────────────────────────────────┐
 │ ← Уведомления                            │
 ├────────────────────────────────────────┤
-│ От помощника {{salon_name}}              │
+│ От Ayla (в {{salon_name}})              │
 │                                        │
 │ ── Всегда приходит ──                    │
 │ ✓ Подтверждение и напоминания о записи  │
@@ -260,7 +264,7 @@ Confirms before reset; audit captures.
 | 1 | `bookings_operational` | Записи и напоминания | YES (always on) | ON | NO |
 | 2 | `loyalty` | Бонусы и баллы | NO | ON | YES (delegates to loyalty section) |
 | 3 | `wellness_modules` | Самочувствие модули | NO | OFF (per-module) | YES (delegates to module) |
-| 4 | `ai_insights` | Подсказки помощника | NO | ON | YES |
+| 4 | `ai_insights` | Подсказки Ayla | NO | ON | YES |
 | 5 | `service_recommendations` | Рекомендации процедур | NO | ON | YES |
 | 6 | `refund_disputes` | Возврат и претензии | YES (always on) | ON | NO |
 | 7 | `master_changes` | Изменения мастеров | NO | ON | YES |
@@ -418,7 +422,7 @@ Excludes operational + emergency §11. Customer sees confirmation:
 ┌────────────────────────────────────────┐
 │ Тише на 30 дней                          │
 ├────────────────────────────────────────┤
-│ С сегодня до 18 июня помощник будет     │
+│ С сегодня до 18 июня Ayla будет         │
 │ писать только по записям и срочным      │
 │ вопросам.                                │
 │                                        │
@@ -436,7 +440,7 @@ Excludes operational + emergency §11. Customer sees confirmation:
 Last day of snooze, Bot DM:
 
 ```
-{{customer_first_name}}, завтра помощник снова сможет писать первым.
+{{customer_first_name}}, завтра Ayla снова сможет писать первой.
 Хотите оставить тихий режим — продлите в настройках.
 
 [Открыть настройки]   [Спасибо, всё ок]

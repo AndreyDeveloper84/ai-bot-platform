@@ -1,10 +1,16 @@
 # Customer Profile Management UX — Mini App «Профиль» tab
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Foundational — unblocks Phase 1 4d / Phase 2 customer profile screens + OP6 deletion request UX
-**Reads:** [`information-architecture.md`](./information-architecture.md), [`notification-preferences-ux.md`](./notification-preferences-ux.md), [`wellness-input-modules.md`](./wellness-input-modules.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`product-ux-vision.md`](./product-ux-vision.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`customer-first-touch-and-mini-app-states.md`](./customer-first-touch-and-mini-app-states.md), [`../handoffs/2026-05-18-customer-first-time-handoff.md`](../handoffs/2026-05-18-customer-first-time-handoff.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-memory-and-personalization.md`](./ayla-memory-and-personalization.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`anonymous-to-registered-gate.md`](./anonymous-to-registered-gate.md), [`information-architecture.md`](./information-architecture.md), [`notification-preferences-ux.md`](./notification-preferences-ux.md), [`wellness-input-modules.md`](./wellness-input-modules.md), [`product-ux-vision.md`](./product-ux-vision.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`customer-first-touch-and-mini-app-states.md`](./customer-first-touch-and-mini-app-states.md), [`../handoffs/2026-05-18-customer-first-time-handoff.md`](../handoffs/2026-05-18-customer-first-time-handoff.md)
 
-> «Профиль» tab in customer Mini App. Read/edit personal info, view visit history, manage wellness modules + notifications, privacy & data controls (including OP6 deletion request + data export), help. Consolidates customer-facing self-service.
+> «Профиль» tab in customer Mini App. Read/edit personal info, view visit history, manage wellness modules + notifications, privacy & data controls (including OP6 deletion request + data export), help. Consolidates customer-facing self-service. Profile is **Ayla's memory of user** (cross-tenant per `ayla-memory-and-personalization §9`) PLUS per-tenant booking history.
+
+---
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: «помощник {{salon_name}}» / «помощник студии» framing throughout this doc updated to **Ayla**. Profile model also reflects: customer's profile is Ayla's memory (cross-tenant) + per-tenant booking history (per-tenant per `tenant-as-provider-model §6`). Memory transparency surface §8.4 → see [`ayla-memory-and-personalization §5`](./ayla-memory-and-personalization.md) «Что Ayla знает обо мне».
 
 ---
 
@@ -90,7 +96,7 @@ Single source for Mini App «Профиль» tab:
 │ ──── Помощник студии ────             │
 │                                      │
 │ Эту запись помогает вести AI-         │
-│ помощник «{{salon_name}}».            │
+│ Ayla — твой AI-помощник.              │
 │ [Подробнее →]                        │
 │                                      │
 └──────────────────────────────────────┘
@@ -110,7 +116,7 @@ Summary lines stay short (≤ 5 words) — quick scan.
 
 ### 2.3 Footer disclosure
 
-«Эту запись помогает вести AI-помощник» — honesty mandate per [`product-ux-vision.md §10`](./product-ux-vision.md). Single-assistant identity preserved («помощник студии», never «бот»). «Подробнее» opens info card §8.4.
+«Эту запись помогает вести Ayla» — honesty mandate per [`product-ux-vision.md §10`](./product-ux-vision.md). Ayla identity preserved per [`ayla-identity-and-brand §2`](./ayla-identity-and-brand.md). «Подробнее» opens [`ayla-memory-and-personalization §5`](./ayla-memory-and-personalization.md) memory transparency surface.
 
 ---
 
@@ -273,7 +279,7 @@ The trust-foundation section. Every privacy/data control lives here.
 │ ── Что хранится ──                    │
 │                                      │
 │ • История записей · 3 года            │
-│ • Переписка с помощником · 180 дней   │
+│ • Переписка с Ayla · 180 дней   │
 │ • Данные модулей самочувствия · видите│
 │   только вы                           │
 │ • Анонимные метрики · бессрочно       │
@@ -320,7 +326,7 @@ Tap «Запросить →» opens modal:
 │                                      │
 │ Что будет в экспорте:                 │
 │ • Все ваши записи и их статусы        │
-│ • История переписки с помощником      │
+│ • История переписки с Ayla      │
 │ • Данные модулей самочувствия         │
 │ • Ваши заметки и оценки               │
 │                                      │
@@ -364,7 +370,7 @@ Tap «Подать запрос →» opens warning modal:
 │                                      │
 │ Будут удалены:                        │
 │ • Ваш профиль в студии «{{salon}}»   │
-│ • История переписки с помощником      │
+│ • История переписки с Ayla      │
 │ • Данные модулей самочувствия         │
 │ • Ваши заметки и оценки               │
 │                                      │
