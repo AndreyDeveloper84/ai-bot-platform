@@ -142,19 +142,22 @@ class TestCacheBehavior:
         assert a is b
         assert all(x is y for x, y in zip(a, b, strict=True))
 
-    def test_reset_registry_cache_forces_re_resolution(self, settings):
+    def test_explicit_reset_forces_re_resolution(self, settings):
+        # Direct test of the reset helper (callable from non-Django
+        # contexts like Celery worker boot). Hotfix C also wires the
+        # Django setting_changed signal to call this automatically —
+        # see TestSettingChangedAutoInvalidation below for the
+        # implicit-reset path.
         a = _subscribers()
-        settings.DOMAIN_EVENT_SUBSCRIBERS = [
-            "apps.eventbus.tests.test_subscriber_registry._CountingSubscriber",
-        ]
-        # Without reset, cache returns stale Noop list.
-        stale = _subscribers()
-        assert stale is a
-        # After reset, the new settings take effect.
+        # Bypass the setting_changed receiver by mutating the cache
+        # directly and confirming explicit reset re-resolves.
+        from apps.eventbus.dispatcher import _REGISTRY_CACHE  # noqa: F401
+
         reset_registry_cache()
         fresh = _subscribers()
         assert fresh is not a
-        assert isinstance(fresh[0], _CountingSubscriber)
+        # Same default registry, but freshly resolved instance.
+        assert isinstance(fresh[0], NoopSubscriber)
 
 
 class TestResolve:
@@ -163,3 +166,37 @@ class TestResolve:
 
         with pytest.raises((ImportError, AttributeError)):
             _resolve("apps.eventbus.no_such_module.NotASubscriber")
+
+
+class TestSettingChangedAutoInvalidation:
+    """Hotfix C (retro review #3): EventBusConfig.ready() wires the
+    Django setting_changed signal to reset_registry_cache when the
+    DOMAIN_EVENT_SUBSCRIBERS setting flips.
+
+    Before this fix, tests using @override_settings(DOMAIN_EVENT_SUBSCRIBERS=...)
+    would silently see the cached old registry — the docstring promised
+    auto-invalidation but the receiver wasn't wired.
+    """
+
+    def test_settings_override_auto_invalidates_cache(self, settings):
+        # Prime the cache with the default Noop registry.
+        first = _subscribers()
+        assert isinstance(first[0], NoopSubscriber)
+
+        # Flip the setting — the receiver should clear the cache so the
+        # NEXT _subscribers() call re-resolves to the new path.
+        # NO manual reset_registry_cache() call.
+        settings.DOMAIN_EVENT_SUBSCRIBERS = [
+            "apps.eventbus.tests.test_subscriber_registry._CountingSubscriber",
+        ]
+
+        second = _subscribers()
+        assert second is not first
+        assert isinstance(second[0], _CountingSubscriber)
+
+    def test_unrelated_setting_does_not_invalidate(self, settings):
+        # Sanity: changing a different setting should NOT clear the cache.
+        primed = _subscribers()
+        settings.DEBUG = not settings.DEBUG
+        after = _subscribers()
+        assert after is primed  # same instance, cache intact
