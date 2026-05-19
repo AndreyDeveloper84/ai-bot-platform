@@ -44,6 +44,7 @@ ID prefix indicates origin area:
 - `Q-MAS*` — Mini App states catalog (loading/empty/error/offline patterns)
 - `Q-MO*` — Master onboarding M0-M7 flow
 - `Q-NP*` — Notification preferences UX (customer/master/owner)
+- `Q-QO*` — AI Quality Observability dashboard
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -161,6 +162,12 @@ ID prefix indicates origin area:
 | **Q-EV-IMPL3** | Outbox poller technology — Celery beat, dedicated worker, or pg-pubsub LISTEN/NOTIFY? | Celery beat MVP (already in stack); evaluate pg-pubsub or Kafka at 1M+ events/day per Q-EV1 | Eng | [event-taxonomy §14](./policies/event-taxonomy.md) |
 | **Q-EV-IMPL4** | Wellness Mood module (handoff shipped 2026-05-19) — emit to apps/events/ analytics OR wait for apps/eventbus/? | Both — phase 1 wellness.consent.* + wellness.input.recorded fire ONLY to apps/events/ with snake_case names (`mood_consent_granted` / `mood_event_saved`) until eventbus lands. Migrate to dot.notation when eventbus ships. Document as deviation per attribution-policy §15 pattern. | Eng | [wellness-mood-handoff §10](./handoffs/2026-05-19-wellness-mood-handoff.md) + [event-taxonomy §14](./policies/event-taxonomy.md) |
 | **Q-EV-IMPL5** | Cross-bus correlation — `correlation_id` shape — UUID, ULID, or trace-context (W3C)? | ULID MVP (sortable, compact); upgrade to W3C trace-context if/when OpenTelemetry adoption | Eng | [event-taxonomy §14.7](./policies/event-taxonomy.md) |
+| **Q-QO2** | Alert default thresholds — platform-fixed or per-tenant baseline? | Platform-fixed MVP; per-tenant tuning v1.1+ when CSM observes false-positive patterns | UX + PM | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO5** | Founder cohort review — accuracy 90% (between 85% «pause» and 95% «auto-enable»)? | Continue manual review window for cohort #51-100; auto-enable attempt at cohort 100. Founder discretion. | Founder | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO6** | Model deploy rollback — owner or founder-only? | Founder-only; tenant doesn't choose model. Owner sees deploy alert + can request rollback via CSM. | Founder | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO10** | Owner can opt tenant out of «founder reviews us» cohort? | NO — cohort first-50 mandatory per Q12-δ for billing trust. Tenant accepts at onboarding terms. | Founder + Legal | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO12** | Quality Reviewer sees what when conversation is HUMAN_LOCKED (admin owns)? | AI portion + handoff context; admin's manual replies redacted (admin privacy + scope) | UX + Privacy | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO14** | Persona drift — surface general «AI getting longer / more emoji / more apologetic» chart? | YES — drift detector chart (avg word count, emoji count, exclamation count over 30d) per persona variant | UX | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -310,6 +317,14 @@ ID prefix indicates origin area:
 | **Q-NP12** | Owner override customer «без проактивных»? | NEVER — customer consent absolute. Owner sees aggregate metric only | Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-NP13** | Settings UI search bar MVP? | Phase 2+; MVP linear scan sufficient | UX | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-NP14** | Preference rate-limit (anti-flapping)? | YES — max 10 changes/hour/user; over → 30min cooldown | Eng | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-QO1** | Default random sample rate — 5% sufficient or tenant-size-dependent? | 5% MVP; per-tenant configurable in alert settings; cap 50/week per §5.1 | PM | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO3** | Persona linter false-positive rate — when triggers persona-editor review prompt? | N=10 false positives in 7d → founder gets «linter may need tuning» alert | UX | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO4** | Conversation review lock duration — 5min enough? | 5min MVP; auto-release on browser close; revisit on observed collisions | Eng | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO7** | Dashboard refresh — real-time/polling/on-demand? | Polling every 5min for KPIs; on-demand for sub-pages (aligned with Q-AD7) | Eng | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO9** | A/B test results MVP or Phase 2? | Phase 2 per Q-PE2; MVP shows «A/B (скоро)» disabled tab | PM | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO11** | Cross-tenant aggregate — shared with investors / public benchmarks? | NEVER without explicit founder + legal sign-off; default private | Founder + Legal | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO13** | Reviewer skip-rate alerting threshold? | > 70% skip rate in 7d → Quality Reviewer Lead alert | PM | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-QO15** | Persona violation alert body — count or template + snippet? | Template id + first violation snippet excerpt (anonymized) | UX | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -498,16 +513,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-19 r17** — Two-bus event architecture decision (A) locked. event-taxonomy.md §14 «Scope separation from apps/events/» added. `apps/events/` (existing) stays for product analytics tracking (snake_case + sync fanout). `apps/eventbus/` (NEW) for domain events per taxonomy (dot.notation + Postgres outbox). NOT a replacement — two systems by design, different concerns. Wellness Mood handoff added under handoffs/ (2026-05-19-wellness-mood-handoff.md, 827 lines). Added Q-EV-IMPL1-5 (5 new). Q-EV-IMPL1 ✅ confirmed-decided as (A) per founder sign-off.
+**2026-05-19 r18** — AI Quality Observability dashboard. Added Q-QO1-15 (14 new; Q-QO8 ✅ confirmed-decided as Quality Reviewer = same role as Q-CO3). Owner + founder dashboard for monitoring persona violations, CSAT per template, model drift, sampling-based review, founder-50 cohort workflow (Q12-δ implementation). Unblocks founder cohort review tooling + persona-editor feedback loop + Quality Reviewer role tools.
 
-| Status | Count | Δ from r16 |
+| Status | Count | Δ from r17 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **81** (+Q-EV-IMPL 2/3/4/5) | +4 |
-| 🟢 Later open | **137** | — |
+| 🟡 Soon open | **87** (+Q-QO 2/5/6/10/12/14) | +6 |
+| 🟢 Later open | **145** (+Q-QO 1/3/4/7/9/11/13/15) | +8 |
 | 🔬 Validating | **5** (V1–V5) | — |
-| ✅ Decided | **81** (+Q-EV-IMPL1) | +1 |
-| **Total tracked** | **308** | +5 |
+| ✅ Decided | **82** (+Q-QO8) | +1 |
+| **Total tracked** | **322** | +14 |
+
+**2026-05-19 r17** — Two-bus event architecture decision (A) locked. event-taxonomy.md §14 «Scope separation from apps/events/» added. `apps/events/` (existing) stays for product analytics tracking (snake_case + sync fanout). `apps/eventbus/` (NEW) for domain events per taxonomy (dot.notation + Postgres outbox). NOT a replacement — two systems by design, different concerns. Wellness Mood handoff added under handoffs/ (2026-05-19-wellness-mood-handoff.md, 827 lines). Added Q-EV-IMPL1-5 (5 new). Q-EV-IMPL1 ✅ confirmed-decided as (A) per founder sign-off.
 
 **2026-05-19 r16** — Notification Preferences UX (customer + master + owner). Added Q-NP1-17 (17 new; Q-NP1 ✅ confirmed-decided as single «без проактивных» toggle per Q-CX9). 3-axis matrix (audience × channel × event-type), 14 event types classified, per-audience preferences UI, frequency caps + DND windows. Unblocks Settings Hub refresh + cross-cutting opt-in/opt-out logic across customer-first-touch + cancellation/reschedule + wellness modules + escalations.
 
