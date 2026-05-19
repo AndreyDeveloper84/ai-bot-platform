@@ -1,16 +1,10 @@
-/**
- * Phase 0c — auth round-trip smoke test screen.
- *
- * On mount calls POST /api/v1/customer/auth/verify and renders the
- * resolved identity. Real screens land in Phase 1+; this exists so we
- * can prove the full stack (MAX SDK → fetch → initData header → HMAC
- * verify → BotUser resolve → tenant_scope → response) works end-to-end
- * before building UI on top.
- */
+/** Root — auth round-trip + CTA into catalog. */
 
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify, type AuthVerifyResponse } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
+import { StickyCta } from "../components/StickyCta";
 import { signalReady } from "../lib/max-sdk";
 
 type State =
@@ -19,6 +13,7 @@ type State =
   | { kind: "error"; status: number; slug: string; detail: string };
 
 export function HelloScreen() {
+  const navigate = useNavigate();
   const [state, setState] = useState<State>({ kind: "loading" });
 
   useEffect(() => {
@@ -64,18 +59,11 @@ export function HelloScreen() {
   const { user, tenant } = state.data;
   const name = user.client_name || user.display_name || "гость";
   return (
-    <ScreenLayout title={`Здравствуйте, ${name}!`}>
-      <div className="callout">
-        Это шелл мини-приложения. Дальше — каталог, мастера, запись.
-      </div>
-      <dl style={{ margin: 0 }}>
-        <dt style={{ color: "var(--c-text-secondary)" }}>Студия</dt>
-        <dd style={{ margin: "0 0 var(--s-3)" }}>
-          {tenant.name} ({tenant.slug})
-        </dd>
-        <dt style={{ color: "var(--c-text-secondary)" }}>Часовой пояс</dt>
-        <dd style={{ margin: 0 }}>{tenant.timezone}</dd>
-      </dl>
+    <ScreenLayout
+      title={`Здравствуйте, ${name}!`}
+      cta={<StickyCta onClick={() => navigate("/catalog")}>Записаться</StickyCta>}
+    >
+      <p>Помогу записаться в студию {tenant.name}.</p>
     </ScreenLayout>
   );
 }
