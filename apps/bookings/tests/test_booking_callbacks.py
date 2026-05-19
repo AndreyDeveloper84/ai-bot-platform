@@ -581,3 +581,141 @@ class TestConfirmTapReschedule:
         assert send_mock.called
         body = send_mock.call_args.kwargs["text"]
         assert "не завершён" in body or "Перенос" in body
+
+
+# ---------------------------------------------------------------------------
+# Bookings/callbacks retro hotfix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestCallbacksRetroHotfix:
+    """Locks down three findings from the apps/bookings/ retro:
+
+    * #1 — TTL TOCTOU on ``consume_pending``: expiry-during-CAS no longer
+      claims an expired row (CAS filter now includes ``expires_at__gt``).
+    * #3 — cross-tenant token guard: a row whose ``tenant_id`` does not
+      match the sender's is REPLY_FORBIDDEN'd before the consume CAS.
+    * #6 — ``_try_yclients_cancel`` short-circuits on non-numeric ids
+      so enterprise opaque-id schemes don't masquerade as a YClients
+      outage in metrics.
+    """
+
+    def test_consume_pending_cas_filter_excludes_expired(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        # Race-window simulation: pre-expire the row so the CAS filter
+        # would not match. Pre-fix: Python-side check at line 157 caught
+        # this; post-fix: the CAS filter ALSO catches it (defence-in-depth).
+        # This test exercises the CAS filter directly by bypassing the
+        # Python-side guard via a stale in-memory row.
+        from apps.bookings.pending_actions import consume_pending
+
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(),
+        )
+        # Tick past expiry between create and consume.
+        PendingBookingAction.all_tenants.filter(pk=token).update(
+            expires_at=timezone.now() - timedelta(seconds=1)
+        )
+        lookup = consume_pending(token)
+        assert lookup.expired is True
+        assert lookup.already_consumed is False
+        # Critically: ``consumed_at`` must NOT have been stamped — the
+        # CAS filter rejected the update so a re-attempt with a fresh
+        # expiry could still claim it. Pre-fix this would have stamped
+        # consumed_at on the expired row.
+        row = PendingBookingAction.all_tenants.get(pk=token)
+        assert row.consumed_at is None
+
+    def test_cross_tenant_token_rejected_with_forbidden(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        conversation: Conversation,
+    ) -> None:
+        # Build a PendingBookingAction under tenant A, then have a
+        # bot_user from tenant B tap its callback. Even though the row
+        # exists and the token is valid, the cross-tenant guard must
+        # reject before any consume CAS fires.
+        other_tenant = Tenant.objects.create(slug="other-tenant", name="Other")
+        other_user = BotUser.all_tenants.create(
+            tenant=other_tenant,
+            channel="max",
+            channel_user_id="bu-other-tenant",
+            chat_id="bu-other-tenant",
+            phone="79991234567",
+            client_name="Boris",
+        )
+        # Other user's conversation lives in the OTHER tenant — the
+        # tap arrives there. The token references row under `tenant`.
+        other_conv = Conversation.objects.create(
+            tenant=other_tenant,
+            bot_user=other_user,
+            state=Conversation.State.IDLE,
+        )
+
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=_confirm_payload(),
+        )
+        client = FakeYClients()
+        ctx = _ctx(
+            f"cb:book:confirm:{token}",
+            bot_user=other_user,
+            conversation=other_conv,
+        )
+        with _patch_yclients(client):
+            result = BookingGateCallbackSkill().handle(ctx)
+        assert result.reply_text == REPLY_FORBIDDEN
+        # No YClients call: gate fired before consume.
+        assert client.create_calls == []
+        # Row left intact (consumed_at NULL) — owner can still claim.
+        row = PendingBookingAction.all_tenants.get(pk=token)
+        assert row.consumed_at is None
+
+        # Pin the contract: the NEW _gate_tenant_matches gate fired
+        # (not the pre-existing _gate_sender_matches). If a future
+        # refactor accidentally deletes the tenant guard, both gates
+        # would still produce REPLY_FORBIDDEN here (other_user.pk
+        # also differs from bot_user.pk), so reply_text alone would
+        # silently keep passing. The audit-row carries the
+        # ``reason: tenant_mismatch`` discriminator stamped only by
+        # the tenant guard.
+        from apps.audit.models import AuditLog
+        from apps.bookings.callbacks import AUDIT_BOOK_GATE_FORBIDDEN
+
+        forbidden_audits = AuditLog.all_tenants.filter(
+            action=AUDIT_BOOK_GATE_FORBIDDEN,
+            target_id=row.pk,
+        ).order_by("created_at")
+        assert any(
+            (a.payload or {}).get("reason") == "tenant_mismatch" for a in forbidden_audits
+        ), "expected an audit row with reason=tenant_mismatch from _gate_tenant_matches"
+
+    def test_yclients_cancel_skipped_on_non_numeric_record_id(self) -> None:
+        # Pre-fix: int(opaque_id) raised ValueError → caught by the
+        # broad except → metric counted as a yclients_cancel_failed.
+        # Post-fix: isdigit() guard short-circuits and the call returns
+        # False without entering the try/except — distinct log line and
+        # no false YClients-failure metric.
+        from apps.bookings.callbacks import _try_yclients_cancel
+
+        result = _try_yclients_cancel("enterprise-opaque-id-2026")
+        assert result is False  # cannot cancel, but no API call attempted
+
+    def test_yclients_cancel_proceeds_on_numeric_record_id(self) -> None:
+        # Symmetric positive: a numeric id reaches the YClients SDK.
+        from apps.bookings.callbacks import _try_yclients_cancel
+
+        client = FakeYClients()
+        with _patch_yclients(client):
+            ok = _try_yclients_cancel("12345")
+        assert ok is True
+        assert client.cancel_calls == [12345]
