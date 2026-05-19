@@ -1,6 +1,6 @@
 # Event Taxonomy — canonical event names + payload contract
 
-**Date:** 2026-05-18 r1
+**Date:** 2026-05-19 r2
 **Status:** Foundational — locks event names + envelope structure across all modules
 **Reads:** [`attribution-policy.md`](./attribution-policy.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`core-wellness-profile.md`](./core-wellness-profile.md)
 
@@ -496,12 +496,12 @@ product_events.emit("consent_granted", distinct_id=user.id, trace_id=correlation
 domain_bus.emit("customer.consent.changed", actor=user, correlation_id=correlation_id, ...)
 ```
 
-### 14.8 Implementation status (as of r1)
+### 14.8 Implementation status (as of r2)
 
-- **apps/events/** — exists, 13 vocabulary events, sync fanout to Mixpanel/GA4/Warehouse skeletons, ~60 call sites.
-- **apps/eventbus/** — does NOT exist yet. Q-EV-IMPL1-3 track implementation gating.
+- **apps/events/** — exists, 13 vocabulary events, sync fanout to Mixpanel/GA4/Warehouse skeletons, ~60 call sites. Unchanged.
+- **apps/eventbus/** — **shipped 2026-05-19 (Phase 2.1)**. DomainEvent outbox table + ULID generator + Envelope dataclass + emit() helper + 6 typed emit helpers + Celery beat dispatcher + 22 Phase 1 event names (booking + customer + master domains, §3.1 / §3.2 / §3.3) + NoopSubscriber default + signal-based wireup of `booking.created` only. 44 tests passing. Q-EV-IMPL1-5 → DECIDED (decisions-log r20). Phase 2.1 deviations documented in §18.
 
-Until apps/eventbus/ exists, domain events listed in §3 catalog are **specifications**, not running code. Subscribers (billing, loyalty, etc.) reference them when designing reactions but cannot wire them up.
+Phase 2.2 (next): real subscribers (billing / loyalty / retention / AI inference) wired by their owning modules; remaining domain events auto-emitted from their domain code as those modules touch the lifecycle.
 
 ---
 
@@ -534,5 +534,74 @@ Until apps/eventbus/ exists, domain events listed in §3 catalog are **specifica
 | Legal (PII rules §6) | ☐ | |
 | Security (cross-tenant §8) | ☐ | |
 
+---
+
+## 18. Implementation deviations & transition concessions (r2, post-Phase-2.1-ship)
+
+apps/eventbus/ Phase 2.1 shipped 2026-05-19. Five deviations from the as-designed policy are documented here per the [attribution-policy §15 pattern](./attribution-policy.md#15-implementation-deviations--transition-concessions-r3-post-4a). Each is classified ACCEPTED FINAL / TEMPORARY / DEFERRED, with the resolution path captured.
+
+§14 (Scope separation from `apps/events/`) is the **architectural** decision and is not duplicated here. §18 covers Phase 2.1 **implementation** concessions only.
+
+### 18.1 Phase 1 auto-wired events = `booking.created` only — TEMPORARY
+
+**Deviation**: §3 catalog spec'd 50+ events across 10 domains; Phase 1 §3.1/§3.2/§3.3 lists 22 events across booking/customer/master. Phase 2.1 ship auto-emits only **one**: `booking.created` (via post_save signal on `BookingRequest`). All other 21 Phase 1 events are exposed as typed emit helpers in `apps/eventbus/services.py` but have no call-site wireup.
+
+**Why**: status-transition events (`booking.cancelled` / `booking.completed` / `booking.rescheduled`) need service-layer diff detection — that's the cancellation/reschedule PR's scope, not the bus PR's. `customer.*` events need identity / consent bridges still being designed. `master.*` events need Master models that don't exist yet (Phase 2 master CRUD).
+
+**Resolution path**: per-domain auto-wire ships in PRs that touch those lifecycle modules:
+- `booking.cancelled` / `booking.rescheduled` → customer-cancellation-reschedule handoff implementation (handoff exists, Q-CR1-15 closed)
+- `booking.attribution.assigned` → 4a attribution backend follow-up
+- `booking.completed` / `booking.no_show` → YClients webhook + reminder factory (Q-ATT-IMPL7)
+- `customer.consent.changed` → consent module audit-event integration
+- `customer.state.changed` → core-user-states FSM module (deferred per Q-US pending integration)
+- `master.*` → master-management implementation (Q-MM open)
+
+**Risk**: subscribers built against future events see no traffic until the auto-wire PR ships. Acceptable; Phase 2.1 NoopSubscriber means no observable side-effect waiting on auto-wire anyway. Documented in Q-EV-IMPL2.
+
+### 18.2 Phase 2.1 subscriber set = NoopSubscriber only — TEMPORARY
+
+**Deviation**: §4 lists real subscribers per event (analytics, audit, AI inference, loyalty, marketing, billing, slot resolver). Phase 2.1 ships with **only** `NoopSubscriber` registered in `apps/eventbus/dispatcher.py::_subscribers()`.
+
+**Why**: real subscribers belong to their owning modules (billing/loyalty/retention/AI), and those modules need their own integration work. Shipping the bus infra first lets each subscriber land independently without blocking on a monolithic «subscriber framework» PR.
+
+**Resolution path**: Phase 2.2 — each real subscriber lands in its own PR per [§10 «Adding a new event»](#10-adding-a-new-event) procedure (extended to «adding a subscriber»: subscriber + tests + settings registration). Subscriber registration moves from hard-coded list to dotted-path-in-settings (`DOMAIN_EVENT_SUBSCRIBERS`) when the second real subscriber lands.
+
+**Risk**: outbox accumulates rows that get dispatched to Noop only. Storage cost is bounded (taxonomy §5 90-day retention applies; cleanup task ships with Phase 2.2 subscribers). Acceptable in Phase 2.1.
+
+### 18.3 ULID — inline implementation, no new dependency — ACCEPTED FINAL
+
+**Deviation**: §2 requires ULID `event_id` but does not dictate a library. Phase 2.1 ships an inline ULID generator (`apps/eventbus/ulid.py`, ~30 LOC) instead of adding `python-ulid` to `pyproject.toml`.
+
+**Why**: avoid a new runtime dependency for a 30-line algorithm. The Crockford-base32 ULID format is a public spec; our implementation produces compliant 26-char IDs.
+
+**Resolution path**: ACCEPTED FINAL. If ULID requirements grow (strict monotonicity within same ms, parsing utilities, timestamp extraction APIs), revisit and swap to `python-ulid` then.
+
+**Risk**: strict monotonicity within the same millisecond is NOT guaranteed (random suffix per call; no monotonic counter). Outbox FIFO order is correct across millisecond boundaries; same-ms collisions sort arbitrarily. Acceptable — dispatcher does not depend on intra-ms ordering.
+
+### 18.4 PII §6 enforcement asymmetry vs `apps/events/` — ACCEPTED FINAL
+
+**Deviation**: §6 says «forbidden in event payloads». `apps/events/` (analytics) implements §6 as warn-and-still-insert (telemetry never drops). `apps/eventbus/` (domain) implements §6 as **REJECT** — `emit()` raises `EventbusPiiViolation` and no row is written.
+
+**Why**: the two buses have different blast radii. Analytics events flow to external warehouses where rotation/redaction is easier; domain events feed durable internal subscribers (billing, retention, audit), where PII contamination is a legal-grade issue. REJECT for the domain bus is the correct asymmetry.
+
+**Resolution path**: ACCEPTED FINAL. Both buses honor §6 by intent — only the severity of the response differs. Engineering review rule (§14.5) catches violations at PR time; runtime REJECT is the last-line defense.
+
+**Risk**: developer hits unexpected REJECT in production and event is lost. Mitigation: PII heuristics are conservative (forbidden key list + phone-with-+-prefix value heuristic + email regex); false positives unlikely on well-shaped payloads. Documented in test suite (`tests/test_validation.py::TestLintPii`).
+
+### 18.5 Dead-letter = forever-pending row, no separate queue — DEFERRED
+
+**Deviation**: §5 mentions a dead-letter queue with engineering alerting and manual triage. Phase 2.1 dispatcher implements dead-letter as «row stops being re-claimed after `dispatch_attempts >= 3`» — no separate DLQ table, no automatic alerting.
+
+**Why**: a proper DLQ pipeline (separate table, ops alerting, replay tooling) is meaningful only when there are real subscribers that can actually fail. Phase 2.1 ships NoopSubscriber (§18.2) which never fails. Building DLQ infra ahead of real failure modes is premature.
+
+**Resolution path**: Phase 2.2 — when the first real (failable) subscriber lands, ship the DLQ surface alongside:
+- Separate `dead_letter_at` field (or dedicated table) for explicit DLQ status
+- Ops alert via `system.module.health.degraded` event when dead-letter count > threshold
+- Admin UI to inspect + replay dead-letter rows
+
+**Risk**: Phase 2.1 rows that fail 3× sit forever-pending in `apps/eventbus_domainevent` without operator visibility beyond log lines. With NoopSubscriber this is impossible; with future real subscribers, the Phase 2.2 DLQ ships before failure becomes real.
+
+---
+
 ## Last verified
-2026-05-18 (initial draft, locked event catalog)
+2026-05-19 r2 — Phase 2.1 shipped (apps/eventbus/ landed, Q-EV-IMPL1-5 → DECIDED, §18 deviations added). Earlier verifications: 2026-05-18 r1 (initial draft, catalog locked).

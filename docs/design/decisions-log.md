@@ -158,11 +158,6 @@ ID prefix indicates origin area:
 | **Q-NP15** | Audit log retention for preference changes — Layer 2 (365d) or Layer 3 (7y)? | Layer 2 for most; Layer 3 for operational-class re-enable (compliance traceability) | Legal | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-NP16** | Migration path for existing customers — default retroactively or behavior-based? | Default settings retroactively; behavior-based adds privacy risk + complexity | Eng + Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-NP17** | Tenant suspended (billing failed) — customer preferences still honored for queued reminders? | YES — operational reminders for existing bookings continue; only new dispatch suppressed | Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
-| **Q-EV-IMPL1** | Create new `apps/eventbus/` Django app for domain events (separate from `apps/events/` analytics)? | YES — locked decision (A) two-bus architecture per [event-taxonomy §14](./policies/event-taxonomy.md#14-scope-separation-from-appsevents-product-analytics). Phase 2 implementation; Phase 1 domain events remain spec-only | Eng + Founder | [event-taxonomy §14](./policies/event-taxonomy.md) |
-| **Q-EV-IMPL2** | `apps/eventbus/` first MVP scope — which 3-5 domains to wire first? | booking + customer + master (highest billing/loyalty impact). Schedule + wellness deferred to second tranche. | Eng + PM | [event-taxonomy §14](./policies/event-taxonomy.md) |
-| **Q-EV-IMPL3** | Outbox poller technology — Celery beat, dedicated worker, or pg-pubsub LISTEN/NOTIFY? | Celery beat MVP (already in stack); evaluate pg-pubsub or Kafka at 1M+ events/day per Q-EV1 | Eng | [event-taxonomy §14](./policies/event-taxonomy.md) |
-| **Q-EV-IMPL4** | Wellness Mood module (handoff shipped 2026-05-19) — emit to apps/events/ analytics OR wait for apps/eventbus/? | Both — phase 1 wellness.consent.* + wellness.input.recorded fire ONLY to apps/events/ with snake_case names (`mood_consent_granted` / `mood_event_saved`) until eventbus lands. Migrate to dot.notation when eventbus ships. Document as deviation per attribution-policy §15 pattern. | Eng | [wellness-mood-handoff §10](./handoffs/2026-05-19-wellness-mood-handoff.md) + [event-taxonomy §14](./policies/event-taxonomy.md) |
-| **Q-EV-IMPL5** | Cross-bus correlation — `correlation_id` shape — UUID, ULID, or trace-context (W3C)? | ULID MVP (sortable, compact); upgrade to W3C trace-context if/when OpenTelemetry adoption | Eng | [event-taxonomy §14.7](./policies/event-taxonomy.md) |
 | **Q-QO2** | Alert default thresholds — platform-fixed or per-tenant baseline? | Platform-fixed MVP; per-tenant tuning v1.1+ when CSM observes false-positive patterns | UX + PM | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-QO5** | Founder cohort review — accuracy 90% (between 85% «pause» and 95% «auto-enable»)? | Continue manual review window for cohort #51-100; auto-enable attempt at cohort 100. Founder discretion. | Founder | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-QO6** | Model deploy rollback — owner or founder-only? | Founder-only; tenant doesn't choose model. Owner sees deploy alert + can request rollback via CSM. | Founder | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
@@ -372,6 +367,18 @@ Hypotheses being tested before locking decisions. Not decisions themselves.
 
 ## ✅ DECIDED — chronological reverse (newest first)
 
+### 2026-05-19 r20 — Event bus Phase 2.1 implementation shipped (Q-EV-IMPL1-5 locked)
+
+`apps/eventbus/` shipped: DomainEvent outbox table + ULID generator + Envelope + emit() + 6 typed helpers + Celery beat dispatcher + 22 Phase 1 event names (booking + customer + master) + NoopSubscriber default + `booking.created` signal wireup + 44 passing tests. event-taxonomy.md bumped to r2 with §18 «Implementation deviations» (5 deviations: Phase 1 wireup scope / Noop subscribers / inline ULID / PII REJECT asymmetry / dead-letter forever-pending).
+
+| # | Question | Decision | Source |
+|---|---|---|---|
+| **Q-EV-IMPL1** | Create new `apps/eventbus/` Django app for domain events (separate from `apps/events/` analytics)? | **YES — two-bus architecture (A) shipped.** `apps/eventbus/` lives alongside `apps/events/`. Naming = bus selector (snake_case → analytics; dot.notation → domain). No mirroring. Cross-bus correlation via shared `correlation_id` ULID. See [event-taxonomy §14](./policies/event-taxonomy.md) for the architectural separation; [§18](./policies/event-taxonomy.md#18-implementation-deviations--transition-concessions-r2-post-phase-21-ship) for Phase 2.1 ship deviations. | [event-taxonomy §14](./policies/event-taxonomy.md), `apps/eventbus/` |
+| **Q-EV-IMPL2** | `apps/eventbus/` first MVP scope — which 3 domains to wire first? | **booking + customer + master.** 22 typed event names + payload schemas locked in `apps/eventbus/vocabulary.py` (8 booking + 6 customer + 8 master per taxonomy §3.1/§3.2/§3.3). Auto-wire scope in Phase 2.1 limited to `booking.created` (§18.1); remaining 21 events ship as typed emit-helpers, wired per-domain in follow-up PRs (cancellation/reschedule, attribution backend, master CRUD, etc.). | [event-taxonomy §3.1/§3.2/§3.3 + §18.1](./policies/event-taxonomy.md), `apps/eventbus/vocabulary.py` |
+| **Q-EV-IMPL3** | Outbox poller technology — Celery beat, dedicated worker, or pg-pubsub LISTEN/NOTIFY? | **Celery beat MVP** (already in stack). Implemented as `apps.eventbus.dispatch_pending_events` Celery task using `SELECT FOR UPDATE SKIP LOCKED` so multiple workers can run the beat concurrently without contention. Batch size 100, max 3 attempts → dead-letter (§18.5 — forever-pending row, proper DLQ ships with Phase 2.2 real subscribers). Re-evaluate at 1M+ events/day per Q-EV1. | [event-taxonomy §5 + §18.5](./policies/event-taxonomy.md), `apps/eventbus/dispatcher.py` |
+| **Q-EV-IMPL4** | Wellness Mood module — emit to apps/events/ analytics OR wait for apps/eventbus/? | **Both buses by design, snake_case first.** Wellness Mood handoff (shipped 2026-05-19) emits `mood_consent_granted` / `mood_event_saved` to `apps/events/` snake_case immediately. When real `apps/eventbus/` subscribers go live (Phase 2.2), Mood emits ADDITIONALLY to dot.notation names (`wellness.consent.module.granted` / `wellness.input.recorded`) — NOT replacement, both fire (§14.3 overlap policy). Mood handoff §10 documents this transition per attribution-policy §15 deviation pattern. | [wellness-mood-handoff §10](./handoffs/2026-05-19-wellness-mood-handoff.md), [event-taxonomy §14.3](./policies/event-taxonomy.md) |
+| **Q-EV-IMPL5** | Cross-bus correlation — `correlation_id` shape — UUID, ULID, or trace-context (W3C)? | **ULID MVP** (time-sortable, compact, 26 chars). Inline implementation in `apps/eventbus/ulid.py` (§18.3 — no new runtime dep). Same ULID flows through both buses when fired in same request: `apps/events/.emit(..., trace_id=correlation_id)` + `apps.eventbus.emit(..., correlation_id=correlation_id)`. Upgrade to W3C trace-context if/when OpenTelemetry adoption demands it. | [event-taxonomy §14.7 + §18.3](./policies/event-taxonomy.md), `apps/eventbus/ulid.py` |
+
 ### 2026-05-18 r11 — Conversational trilogy + Schedule impl decisions
 
 Decisions locked by UX Architect for conversational-template trilogy (customer / master / owner) shipping + Schedule MVP S1 implementation decisions from parallel coding agent.
@@ -532,16 +539,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
+**2026-05-19 r20** — Event bus Phase 2.1 implementation shipped. `apps/eventbus/` Django app landed: DomainEvent outbox model + ULID generator + Envelope dataclass + emit() + 6 typed helpers + Celery beat dispatcher + 22 Phase 1 event names (booking + customer + master per §3.1/§3.2/§3.3) + NoopSubscriber + `booking.created` signal wireup + 44 passing tests. event-taxonomy.md → r2 with §18 «Implementation deviations & transition concessions» (5 deviations: Phase 1 wireup scope / Noop subscribers / inline ULID / PII REJECT asymmetry / dead-letter forever-pending). Q-EV-IMPL1-5 moved from OPEN 🟡 → DECIDED (5 closed). §14.8 status bumped: `apps/eventbus/` no longer «does NOT exist» — Phase 2.1 shipped. Counts shift: 🟡 -5, ✅ +5.
+
 **2026-05-19 r19** — Customer Profile Management UX. Added Q-CP1-18 (18 new). Mini App «Профиль» tab fully designed: 6 sections, visit history with cancel/reschedule actions, wellness module activation panel, OP6 deletion request flow (30-day grace + admin verification), data export request (rate-limited), help section with honesty modal. Unblocks Phase 1 4d + OP6 implementation.
 
 | Status | Count | Δ from r18 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **93** (+Q-CP 4/7/8/14/16/17) | +6 |
+| 🟡 Soon open | **88** (post-r20: −Q-EV-IMPL 1/2/3/4/5; r19: +Q-CP 4/7/8/14/16/17) | −5 (vs r19) |
 | 🟢 Later open | **157** (+Q-CP 1/2/3/5/6/9/10/11/12/13/15/18) | +12 |
 | 🔬 Validating | **5** (V1–V5) | — |
-| ✅ Decided | **82** | — |
-| **Total tracked** | **340** | +18 |
+| ✅ Decided | **87** (+Q-EV-IMPL 1/2/3/4/5 — r20) | +5 (vs r19) |
+| **Total tracked** | **340** | — (r20 only redistributed) |
 
 **2026-05-19 r18** — AI Quality Observability dashboard. Added Q-QO1-15 (14 new; Q-QO8 ✅ confirmed-decided as Quality Reviewer = same role as Q-CO3). Owner + founder dashboard for monitoring persona violations, CSAT per template, model drift, sampling-based review, founder-50 cohort workflow (Q12-δ implementation). Unblocks founder cohort review tooling + persona-editor feedback loop + Quality Reviewer role tools.
 

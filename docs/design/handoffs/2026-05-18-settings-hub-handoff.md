@@ -1173,4 +1173,112 @@ Sensitive note: SH2 audit log includes events involving PII (phone hash, custome
 - Russian copy reviewed for «AI-ese» (post-implementation copy pass)
 - Audit immutability enforced at DB level (no UPDATE/DELETE granted on audit table for any application user)
 
+---
+
+## 18. r2 Refresh — 2026-05-19 (post-conversational-trilogy reconciliation)
+
+### 18.1 What changed since r1
+
+Since this handoff (r1) shipped 2026-05-18, the conversational template trilogy + 5 new foundational policies have shipped, several of which overlap with this Settings Hub. This section reconciles.
+
+**New canonical references** (this handoff defers to them on overlap):
+
+| New doc | What it owns now | Impact on Settings Hub |
+|---|---|---|
+| [`../policies/owner-conversational-templates.md`](../policies/owner-conversational-templates.md) | Owner-voice copy across all surfaces | All SH1-SH4 copy strings should match this voice (partner-tone, no sycophancy, info-dense) |
+| [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md) (657 lines) | 3-axis canonical notification preferences | **SH3 partially superseded** — see §18.3 |
+| [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md) | Voice anchors + tone modulation | All user-facing copy throughout SH1-SH4 |
+| [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md) | Master-tone | SH3 «Team notifications» tab uses master-tone for master-facing copy |
+| [`../policies/customer-cancellation-reschedule-spec.md`](../policies/customer-cancellation-reschedule-spec.md) | Cancellation cascade dashboard §6.5 | NEW: SH1 should route to cascade dashboard («Изменения расписания» card per §18.4) |
+| [`../policies/ai-quality-observability.md`](../policies/ai-quality-observability.md) | AI quality dashboard (owner + founder) | NEW: SH1 should route to «Качество помощника» card per §18.4 |
+| [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md) | OP6 deletion request flow customer side | NEW: SH1 should route admin's «deletion requests inbox» card per §18.4 |
+| [`../policies/master-onboarding-m0-m7.md`](../policies/master-onboarding-m0-m7.md) §12 | Onboarding aggregate widget | NEW: SH1 «Команда» should show onboarding progress widget per §18.4 |
+| [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md) §14 | Two-bus architecture (apps/events/ vs apps/eventbus/) | SH2 audit reads from BOTH buses — see §18.5 |
+
+### 18.2 Voice tone reconciliation
+
+Most copy in r1 SH1-SH4 is functional and brand-safe. Two minor adjustments per [`owner-conversational-templates.md`](../policies/owner-conversational-templates.md):
+
+| r1 phrase | Reason for change | r2 replacement |
+|---|---|---|
+| «Уведомления приходят в личку MAX-бота» | OK but slightly informal | Keep — falls within owner-tone partner-register |
+| «Назначить администратора» | OK | Keep |
+| Any «Поздравляем» / «Спасибо за выбор» / «Не упустите» elsewhere | Forbidden per owner-templates §9 anti-patterns | NEVER appear — pre-ship copy audit per §13 anti-slop should catch |
+
+### 18.3 SH3 «Notification Preferences» — partial supersession
+
+The original SH3 (lines 545-731 in this doc) designed a self-contained notification preferences surface. Since then, [`notification-preferences-ux.md`](../policies/notification-preferences-ux.md) shipped as the **canonical 3-axis matrix** (audience × channel × event-type) across customer / master / owner.
+
+**Resolution** — SH3 retains role as the **owner-side entry point**, but delegates content to canonical doc:
+
+- SH3 default config table (lines 552-569) — **deprecated as authoritative**; refer to [`notification-preferences-ux.md`](../policies/notification-preferences-ux.md) §5 owner-side preferences.
+- SH3 desktop layout (lines 571+) — still valid as design reference; reconciles 1:1 with canonical doc's UI patterns.
+- 14 event types per [`notification-preferences-ux.md`](../policies/notification-preferences-ux.md) §2.3 supersedes the role-by-row matrix in SH3 default config.
+- SH3 «Команда» sub-tab (owner views all admins' settings) — confirmed UNIQUE to this handoff; not in canonical doc. KEEP this section.
+
+**Action for engineering**: when implementing SH3, build from [`notification-preferences-ux.md`](../policies/notification-preferences-ux.md) §5 as primary spec; refer to SH3 §7 of this handoff for owner-aggregate-view extension only.
+
+### 18.4 New SH1 cards (added since r1)
+
+Add to SH1 homepage routing (per §5 / per Settings IA in [`information-architecture.md`](../policies/information-architecture.md)):
+
+| New card | Routes to | Owned by | Visibility |
+|---|---|---|---|
+| **Изменения расписания** (cascade dashboard) | [`customer-cancellation-reschedule-spec.md §6.5`](../policies/customer-cancellation-reschedule-spec.md) — batch cascade processing | Schedule module | Owner + Admin |
+| **Качество помощника** (AI quality) | [`ai-quality-observability.md`](../policies/ai-quality-observability.md) main dashboard | AI quality module | Owner + Admin (founder gets extended view) |
+| **Запросы на удаление** (deletion requests) | [`customer-profile-management-ux.md §6.5`](../policies/customer-profile-management-ux.md) — admin verification queue for OP6 | Customer support | Owner + Admin |
+| **Onboarding мастеров** (aggregate widget) | [`master-onboarding-m0-m7.md §12`](../policies/master-onboarding-m0-m7.md) widget + per-master M0-M7 progress | Team management | Owner + Admin |
+
+These belong in SH1's IA. Suggested IA group placement (extending original §1 / §5):
+
+- Группа «Помощник» → add **Качество помощника**
+- Группа «Расписание» → add **Изменения расписания**
+- Группа «Команда» → add **Onboarding мастеров** widget at top
+- Группа «Аккаунт» → add **Запросы на удаление**
+
+### 18.5 SH2 Audit Log Viewer — two-bus consumption
+
+Per [`event-taxonomy.md §14`](../policies/event-taxonomy.md), audit data now comes from TWO event sources:
+
+- **`apps/events/`** — product analytics events (snake_case, 13+ events, customer behavior tracking)
+- **`apps/eventbus/`** (Phase 2 implementation; spec only for now) — domain events per [event-taxonomy §3 catalog](../policies/event-taxonomy.md) (dot.notation, 50+ events, business state transitions)
+
+**Resolution for SH2**: audit log reads from BOTH stores when both have data; presents unified view. Per Q-EV-IMPL2 first MVP wires booking + customer + master domains in eventbus.
+
+UI implication: SH2 filter dropdown adds «Источник» column showing «product» / «domain» badge per event row (subtle visual distinction; both visible by default).
+
+When `apps/eventbus/` not yet implemented (Phase 1): SH2 reads only `apps/events/` and shows banner «Расширенные события домена скоро будут доступны».
+
+### 18.6 SH4 Conversation Policy aggregator — alignment notes
+
+SH4 (lines 732-824) references conversation-ownership-policy §3 SLA tiers + §4 permissions. Still valid; no supersession.
+
+Add reference to [`master-conversational-templates.md`](../policies/master-conversational-templates.md) §6 handoff-transition templates as the canonical source for handoff-related copy that SH4 surfaces.
+
+### 18.7 Updated open questions (Q-SH continuation)
+
+| # | Question | Lean | Owner | Urgency |
+|---|---|---|---|---|
+| **Q-SH16** | When SH3 ships with canonical notification-preferences-ux integration — backward compat for admins who configured SH3 r1 settings before refresh? | Default migration: r1 settings map 1:1 onto r2 canonical schema. Show one-time banner «Настройки уведомлений обновлены — проверьте» | Eng + UX | 🟡 |
+| **Q-SH17** | Cascade dashboard card on SH1 — show counter «X активных» or just title? | Counter — operational visibility («3 cascades in progress») drives action; consistent with §5 IA pattern | UX | 🟢 |
+| **Q-SH18** | AI quality dashboard card on SH1 — surface a KPI («персона 0.8%») or just title? | Title only on SH1 (avoid cognitive overload on homepage). KPIs live INSIDE [`ai-quality-observability §4.1`](../policies/ai-quality-observability.md). | UX | 🟢 |
+| **Q-SH19** | Deletion request queue card on SH1 — counter visibility? | Counter — admin must act («3 requests waiting»). Same pattern as Q-SH17. | UX | 🟢 |
+| **Q-SH20** | Founder access to SH1 of OTHER tenants — show «founder view» switcher? | YES — founder-only chip at top «Тенант: {{name}} ▾» switches tenant context. Behaves like multi-tenant CSM tooling. | Founder | 🟡 |
+| **Q-SH21** | Two-bus audit display — same filter UI as r1 OR split tabs? | Same filter UI per §18.5; source badge per row. Split tabs cognitive overhead. | UX | 🟢 |
+| **Q-SH22** | When apps/eventbus/ lands — auto-migration of existing audit records OR maintain dual-source visibility forever? | Maintain dual-source forever (history doesn't migrate); UI presents unified. | Eng | 🟢 |
+
+### 18.8 Refresh sign-off
+
+| Role | r2 approval | Date |
+|---|---|---|
+| UX Architect | ✅ | 2026-05-19 |
+| Settings Hub frontend lead (consume new policy refs) | ☐ | |
+| Notification preferences integration (SH3 ↔ canonical doc) | ☐ | |
+| Audit log dual-source query (SH2 two-bus) | ☐ | |
+
+### 18.9 Refresh changelog
+
+- 2026-05-19 r2: New §18 refresh notes. SH3 partially superseded by [`notification-preferences-ux.md`](../policies/notification-preferences-ux.md). 4 new SH1 cards added (cascade / AI quality / deletion queue / onboarding widget). Voice reconciled with [`owner-conversational-templates.md`](../policies/owner-conversational-templates.md). SH2 expanded for two-bus audit per [`event-taxonomy §14`](../policies/event-taxonomy.md). Q-SH16-22 added.
+- 2026-05-18 r1: Initial draft per [`docs/superpowers/specs/2026-05-18-settings-hub-design.md`](../superpowers/specs/2026-05-18-settings-hub-design.md). 4 screens (SH1/SH2/SH3/SH4). 15 Q-SH open questions.
+
 — END —
