@@ -39,7 +39,7 @@ import logging
 from importlib import import_module
 from typing import Protocol, runtime_checkable
 
-from celery import shared_task
+from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
