@@ -1,10 +1,14 @@
 # Master Time-Off / Vacation / Sick Leave — Engineering Handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — masters need formal leave flow vs ad-hoc «убери записи»
-**Reads:** [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/schedule-editor-wireframes.md`](../policies/schedule-editor-wireframes.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/customer-cancellation-reschedule-spec.md`](../policies/customer-cancellation-reschedule-spec.md), [`../policies/single-assistant-identity.md`](../policies/single-assistant-identity.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/tenant-as-provider-model.md`](../policies/tenant-as-provider-model.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md) (r2), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/schedule-editor-wireframes.md`](../policies/schedule-editor-wireframes.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/customer-cancellation-reschedule-spec.md`](../policies/customer-cancellation-reschedule-spec.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
 
 > Master is sick. Master needs 2 weeks off. Master wants every Thursday afternoon free. Today these scenarios are handled ad-hoc via Slack to admin or manual schedule edit — no audit, no automatic customer rebooking, no earnings impact transparency. This handoff specifies the formal flow.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master leave flow is **Ayla Pro** tenant-side per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md). Customer rebooking on master leave uses booking-conflict-resolution machinery → routes through emergency fallback `booking_conflict` tier per [`ayla-emergency-fallback-policy §3.2`](../policies/ayla-emergency-fallback-policy.md). Customer sees Ayla framing «{{master}} планы поменялись» — never «master sick». Deprecated `single-assistant-identity.md` + `conversation-ownership-policy.md` refs preserved as backend mechanic.
 
 ---
 

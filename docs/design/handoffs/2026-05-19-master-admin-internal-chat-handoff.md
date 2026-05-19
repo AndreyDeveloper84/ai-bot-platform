@@ -1,10 +1,14 @@
 # Master ↔ Admin Internal Chat — Engineering Handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — referenced by reviews / time-off / substitution / offboarding / earnings disputes
-**Reads:** [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`./2026-05-19-master-time-off-handoff.md`](./2026-05-19-master-time-off-handoff.md), [`./2026-05-19-master-substitution-handoff.md`](./2026-05-19-master-substitution-handoff.md), [`./2026-05-19-master-offboarding-handoff.md`](./2026-05-19-master-offboarding-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`../policies/single-assistant-identity.md`](../policies/single-assistant-identity.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/tenant-as-provider-model.md`](../policies/tenant-as-provider-model.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-reviews-feedback-handoff.md`](./2026-05-19-master-reviews-feedback-handoff.md), [`./2026-05-19-master-time-off-handoff.md`](./2026-05-19-master-time-off-handoff.md), [`./2026-05-19-master-substitution-handoff.md`](./2026-05-19-master-substitution-handoff.md), [`./2026-05-19-master-offboarding-handoff.md`](./2026-05-19-master-offboarding-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md) (r2), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
 
 > Master needs to ask salon owner: «can I switch Thursdays off?», «I disagree with this earnings number», «I want to talk about my schedule», «I'm thinking about leaving». These conversations happen TODAY via WhatsApp/Telegram outside the platform — losing audit, losing context, losing professionalism. This handoff specifies the formal internal-admin-chat channel.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master ↔ admin internal chat is **Ayla Pro internal** per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md) — humans communicating in tenant operational tone, **NOT Ayla persona**. Ayla doesn't relay these messages or have voice here. Used for emergencies escalating to founder per [`ayla-emergency-fallback-policy §3`](../policies/ayla-emergency-fallback-policy.md). Deprecated `single-assistant-identity.md` references removed (no longer applicable to this internal channel).
 
 ---
 

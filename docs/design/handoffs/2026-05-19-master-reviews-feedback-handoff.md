@@ -1,10 +1,14 @@
 # Master Reviews & Customer Feedback Receipt — Engineering Handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking for master psychological retention — customer feedback flows to master via mediated, non-shaming surfaces
-**Reads:** [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/assistant-persona.md`](../policies/assistant-persona.md), [`../policies/single-assistant-identity.md`](../policies/single-assistant-identity.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md), [`../policies/ai-quality-observability.md`](../policies/ai-quality-observability.md), [`../policies/customer-cancellation-reschedule-spec.md`](../policies/customer-cancellation-reschedule-spec.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/tenant-as-provider-model.md`](../policies/tenant-as-provider-model.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md) (r2), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/assistant-persona.md`](../policies/assistant-persona.md) (r2), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/ai-quality-observability.md`](../policies/ai-quality-observability.md), [`../policies/customer-cancellation-reschedule-spec.md`](../policies/customer-cancellation-reschedule-spec.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md)
 
 > Customer feedback reaches masters every day. WITHOUT mediated UX, this flow becomes psychologically toxic — masters quit because of one bad anonymous review. WITH it, feedback becomes a calm professional channel: aggregate trends + per-review mediated framing + master autonomy in response. Never streaks, never leaderboards, never shame.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: customer feedback received by Ayla on customer's behalf (per [`ayla-identity-and-brand §2`](../policies/ayla-identity-and-brand.md)); relayed to master via Ayla Pro per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md) with mediated framing. TIER-2 sensitive allegations fire emergency fallback per [`ayla-emergency-fallback-policy §3.4`](../policies/ayla-emergency-fallback-policy.md) `legally_sensitive` tier. Deprecated `single-assistant-identity.md` + `conversation-ownership-policy.md` references preserved as backend mechanic.
 
 ---
 

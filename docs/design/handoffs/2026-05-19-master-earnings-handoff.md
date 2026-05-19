@@ -1,10 +1,14 @@
 # Master Earnings / Payout / Tips — Engineering Handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking for master retention — full money UX spec
-**Reads:** [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md), [`../policies/master-onboarding-m0-m7.md`](../policies/master-onboarding-m0-m7.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/attribution-policy.md`](../policies/attribution-policy.md), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/single-assistant-identity.md`](../policies/single-assistant-identity.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md), [`../policies/tenant-suspension-pause-ux.md`](../policies/tenant-suspension-pause-ux.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/contract-offer-acceptance-display-ux.md`](../policies/contract-offer-acceptance-display-ux.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/tenant-as-provider-model.md`](../policies/tenant-as-provider-model.md), [`../policies/master-conversational-templates.md`](../policies/master-conversational-templates.md) (r2), [`../policies/master-onboarding-m0-m7.md`](../policies/master-onboarding-m0-m7.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/attribution-policy.md`](../policies/attribution-policy.md), [`../policies/booking-conflict-resolution-ux.md`](../policies/booking-conflict-resolution-ux.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/tenant-suspension-pause-ux.md`](../policies/tenant-suspension-pause-ux.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/contract-offer-acceptance-display-ux.md`](../policies/contract-offer-acceptance-display-ux.md)
 
 > Master will not stay on a platform where they don't see the money. This handoff makes earnings transparent (per booking, per tip, per cycle), supports the 3 common Russian compensation models (employee / samozanyatyy / IP), surfaces disputes with full audit, and never gamifies money.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master earnings is **Ayla Pro** tenant-side feature per [`tenant-as-provider-model §5.2`](../policies/tenant-as-provider-model.md). Master ↔ Ayla notifications (cycle summary, payout confirmations) use functional Ayla voice. Master earnings disputes fire emergency fallback per [`ayla-emergency-fallback-policy §3.1`](../policies/ayla-emergency-fallback-policy.md) `payment_dispute` tier. Deprecated `single-assistant-identity.md` + `conversation-ownership-policy.md` references in §-marked rows preserved as backend mechanic.
 
 ---
 

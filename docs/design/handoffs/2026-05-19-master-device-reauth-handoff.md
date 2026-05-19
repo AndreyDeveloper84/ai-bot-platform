@@ -1,10 +1,14 @@
 # Master Device Loss / Re-Auth — Engineering Handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — edge case but high-impact (master locked out of account = no work, no earnings visibility)
-**Reads:** [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-onboarding-m0-m7.md`](../policies/master-onboarding-m0-m7.md), [`./2026-05-19-master-admin-internal-chat-handoff.md`](./2026-05-19-master-admin-internal-chat-handoff.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-offboarding-handoff.md`](./2026-05-19-master-offboarding-handoff.md), [`../policies/single-assistant-identity.md`](../policies/single-assistant-identity.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/tenant-as-provider-model.md`](../policies/tenant-as-provider-model.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](./2026-05-18-master-mobile-handoff.md), [`../policies/master-onboarding-m0-m7.md`](../policies/master-onboarding-m0-m7.md), [`./2026-05-19-master-admin-internal-chat-handoff.md`](./2026-05-19-master-admin-internal-chat-handoff.md), [`./2026-05-19-master-earnings-handoff.md`](./2026-05-19-master-earnings-handoff.md), [`./2026-05-19-master-offboarding-handoff.md`](./2026-05-19-master-offboarding-handoff.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md)
 
 > Master loses phone. Master switches phone number. Master's MAX account compromised. Master is at a customer's appointment and Mini App won't load. Without a smooth re-auth path: master is locked out, customer's booking is in limbo, admin gets emergency call. This handoff specifies the recovery flow.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master device re-auth is **Ayla Pro** tenant-side flow per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md). MAX account compromise escalates to founder per [`ayla-emergency-fallback-policy §3.4`](../policies/ayla-emergency-fallback-policy.md) `legally_sensitive` tier. Customer-facing impact during master lockout uses Ayla voice (alt-master offer). Deprecated `single-assistant-identity.md` reference removed.
 
 ---
 

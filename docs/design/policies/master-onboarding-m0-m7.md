@@ -1,10 +1,14 @@
 # Master Onboarding M0-M7 Flow — invite to first-week-complete
 
-**Date:** 2026-05-18 r1
-**Status:** Foundational — preemptive spec for Phase 2 master-mobile implementation
-**Reads:** [`master-conversational-templates.md`](./master-conversational-templates.md), [`product-ux-vision.md`](./product-ux-vision.md), [`information-architecture.md`](./information-architecture.md), [`../handoffs/2026-05-18-master-management-handoff.md`](../handoffs/2026-05-18-master-management-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](../handoffs/2026-05-18-master-mobile-handoff.md), [`event-taxonomy.md`](./event-taxonomy.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md)
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
+**Status:** Foundational — preemptive spec for Phase 2 master-mobile (Ayla Pro) implementation
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`master-conversational-templates.md`](./master-conversational-templates.md) (r2), [`product-ux-vision.md`](./product-ux-vision.md), [`information-architecture.md`](./information-architecture.md), [`../handoffs/2026-05-18-master-management-handoff.md`](../handoffs/2026-05-18-master-management-handoff.md), [`../handoffs/2026-05-18-master-mobile-handoff.md`](../handoffs/2026-05-18-master-mobile-handoff.md), [`event-taxonomy.md`](./event-taxonomy.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md)
 
-> Owner sends invite to master. What happens between «invite sent» and «master is a productive part of the team a week later»? Eight stages — M0 through M7 — with per-stage triggers, templates, Mini App states, and completion conditions.
+> Owner sends invite to master. What happens between «invite sent» and «master is a productive part of the team a week later»? Eight stages — M0 through M7 — with per-stage triggers, templates, Mini App states, and completion conditions. **Ayla Pro context** per [`tenant-as-provider-model §5`](./tenant-as-provider-model.md) — master onboards into tenant's provider role, not as Ayla customer.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: master onboards into **Ayla Pro** (tenant's provider tool). Master ↔ Ayla messages during onboarding (e.g., welcome notification) use functional Ayla voice per master-conversational-templates r2. Master ↔ Admin (tenant owner) internal channel uses operational tone per [`master-admin-internal-chat-handoff`](../handoffs/2026-05-19-master-admin-internal-chat-handoff.md). Deprecated `conversation-ownership-policy.md` references preserved as backend mechanic.
 
 ---
 
