@@ -1,10 +1,14 @@
 # Wellness Body Tracker Module — engineering handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Engineering-ready — Phase 2 wellness module №3 (after Mood + Water)
-**Reads:** [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §4, [`./2026-05-19-wellness-mood-handoff.md`](./2026-05-19-wellness-mood-handoff.md), [`./2026-05-19-wellness-water-handoff.md`](./2026-05-19-wellness-water-handoff.md), [`./2026-05-19-wellness-ai-avatar-handoff.md`](./2026-05-19-wellness-ai-avatar-handoff.md), [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/core-user-states.md`](../policies/core-user-states.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/information-architecture.md`](../policies/information-architecture.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/ayla-memory-and-personalization.md`](../policies/ayla-memory-and-personalization.md), [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §4, [`./2026-05-19-wellness-mood-handoff.md`](./2026-05-19-wellness-mood-handoff.md), [`./2026-05-19-wellness-water-handoff.md`](./2026-05-19-wellness-water-handoff.md), [`./2026-05-19-wellness-ai-avatar-handoff.md`](./2026-05-19-wellness-ai-avatar-handoff.md), [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/core-user-states.md`](../policies/core-user-states.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/information-architecture.md`](../policies/information-architecture.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md), [`../policies/customer-profile-management-ux.md`](../policies/customer-profile-management-ux.md)
 
 > Ports [wellness-input-modules §4](../policies/wellness-input-modules.md#4-module-3--body-tracking) Body Tracking module. Phase 2 (sibling to Mood + Water). Bi-weekly cadence, anti-OCD + anti-shame critical, privacy near-AI-Avatar tier. Simplest Phase 2 AI insights; Phase 3+ cross-correlation with services.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: body data is **Ayla's memory of user** — cross-tenant. Anti-OCD + anti-shame preserved. `HUMAN_LOCKED` → emergency fallback per [`ayla-emergency-fallback-policy §3`](../policies/ayla-emergency-fallback-policy.md). AI voice uses Ayla per [`ayla-identity-and-brand §2`](../policies/ayla-identity-and-brand.md).
 
 ---
 

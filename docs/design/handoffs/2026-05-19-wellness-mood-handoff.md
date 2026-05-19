@@ -1,10 +1,14 @@
 # Wellness Mood Module — engineering handoff
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Engineering-ready — Phase 1 first wellness module
-**Reads:** [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §6, [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/core-user-states.md`](../policies/core-user-states.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/information-architecture.md`](../policies/information-architecture.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/conversation-ownership-policy.md`](../policies/conversation-ownership-policy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md)
+**Reads:** [`../policies/ayla-identity-and-brand.md`](../policies/ayla-identity-and-brand.md), [`../policies/ayla-memory-and-personalization.md`](../policies/ayla-memory-and-personalization.md), [`../policies/wellness-input-modules.md`](../policies/wellness-input-modules.md) §6, [`../policies/notification-preferences-ux.md`](../policies/notification-preferences-ux.md), [`../policies/core-user-states.md`](../policies/core-user-states.md), [`../policies/conversational-ux-framework.md`](../policies/conversational-ux-framework.md), [`../policies/information-architecture.md`](../policies/information-architecture.md), [`../policies/event-taxonomy.md`](../policies/event-taxonomy.md), [`../policies/ayla-emergency-fallback-policy.md`](../policies/ayla-emergency-fallback-policy.md), [`../policies/core-wellness-profile.md`](../policies/core-wellness-profile.md)
 
 > Ports [wellness-input-modules §6](../policies/wellness-input-modules.md) Mood / Energy / Stress module to engineering-ready handoff. Activation flow + consent dialog + model fields + API contracts + per-state behavior + Mini App screens + insights view. Independent app scope: `apps/wellness/`.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: mood data is **Ayla's memory of user** per [`ayla-memory-and-personalization §9`](../policies/ayla-memory-and-personalization.md) — cross-tenant. `HUMAN_LOCKED` references preserved as backend mechanic; customer-facing flow via emergency fallback per [`ayla-emergency-fallback-policy §3`](../policies/ayla-emergency-fallback-policy.md). AI voice uses Ayla per [`ayla-identity-and-brand §2`](../policies/ayla-identity-and-brand.md).
 
 ---
 
