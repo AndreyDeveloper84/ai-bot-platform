@@ -81,3 +81,19 @@ if not MYSITE_WEBHOOK_HMAC_SECRET:
         "(see Phase 1 / DRF-726). The receiver fails-closed when "
         "the secret is empty — every webhook delivery is rejected."
     )
+
+
+# Phase 2.2 — domain bus subscriber registry. Production activates
+# AuditSubscriber by default so every dispatched DomainEvent gets
+# mirrored into AuditLog (forensic chain-of-custody for billing
+# disputes + 152-ФЗ compliance evidence). Operator can override by
+# setting DOMAIN_EVENT_SUBSCRIBERS in the environment — the env value
+# wins (base.py applies env first; this override only fires when env
+# is silent).
+#
+# Rollback: set DOMAIN_EVENT_SUBSCRIBERS=apps.eventbus.dispatcher.NoopSubscriber
+# in the deploy environment and restart workers. AuditLog stops growing
+# from the bus; existing rows are untouched. See
+# docs/runbooks/eventbus-subscriber-activation.md.
+if not os.environ.get("DOMAIN_EVENT_SUBSCRIBERS"):
+    DOMAIN_EVENT_SUBSCRIBERS = ["apps.eventbus.subscribers.AuditSubscriber"]
