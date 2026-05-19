@@ -417,7 +417,95 @@ Forbidden:
 
 ---
 
-## 14. What this unblocks
+## 14. Scope separation from `apps/events/` (product analytics)
+
+### 14.1 Two separate buses by deliberate design
+
+The codebase has **two event systems by deliberate design**, NOT one with conflicting names:
+
+| System | Path | Purpose | Naming | Delivery | Catalog size |
+|---|---|---|---|---|---|
+| **Product analytics events** | `apps/events/` (exists) | Tracking user actions for Mixpanel / GA4 / Warehouse funnels | `snake_case` (e.g., `consent_granted`, `message_sent`) | Sync fanout to analytics tools | 13 (Sprint 3 vocabulary) |
+| **Domain event bus** | `apps/eventbus/` (NEW per Q-EV-IMPL1) | Durable domain lifecycle events for internal subscribers (billing, loyalty, retention, AI inference, audit) | `domain.entity.action` (e.g., `customer.consent.changed`, `booking.attribution.assigned`) | Postgres outbox + poller per [§5 replay](#5-replay--dead-letter) | 50+ across 10 domains |
+
+This doc (`event-taxonomy.md`) is **authoritative for the domain bus only**. It does NOT replace `apps/events/`.
+
+### 14.2 When to use which (decision tree)
+
+```
+Am I emitting an event because…
+│
+├─ I want to track a user action for product funnels / engagement analytics?
+│  └─ Use apps/events/ — sync, snake_case, fast-and-forgiving delivery
+│
+├─ Something happened that changes business state and other internal modules
+│  need to react reliably (charge billing, update loyalty, update profile,
+│  trigger AI inference, audit-log)?
+│  └─ Use apps/eventbus/ (NEW) — durable outbox, dot.notation, guaranteed delivery
+│
+└─ Both?
+   └─ Emit to BOTH. Deliberately. This IS the right pattern — analytics tracks
+      «user did X»; domain bus signals «X state happened, react». Different
+      consumers, different SLAs.
+```
+
+### 14.3 Overlap policy
+
+Some lifecycle moments fire on BOTH buses by design. Example:
+
+| Moment | apps/events/ (analytics) | apps/eventbus/ (domain) |
+|---|---|---|
+| Customer grants wellness module consent | `consent_granted` (Mixpanel funnel «module activations per week») | `customer.consent.changed` + `wellness.module.activated` (wellness aggregator subscribes; profile layer updates) |
+| Customer sends first message to bot | `message_sent` (engagement metric for product team) | `conversation.started` + `conversation.message.sent` (AI persona violation linter subscribes; state machine evaluates) |
+| Booking attribution assigned | (typically NOT in analytics — internal-state only) | `booking.attribution.assigned` (billing subscribes; analytics dashboard derives KPIs) |
+
+**Overlap is OK. Coordination is NOT required.** Emitter explicitly calls both APIs when both are relevant. No silent mirroring (anti-magical pattern).
+
+### 14.4 Naming convention difference is intentional
+
+- `snake_case` in `apps/events/` signals «this is analytics-side, fire-and-forget» to readers
+- `dot.notation` in `apps/eventbus/` signals «this is domain-side, durable, subscriber-binding» to readers
+
+If we unified naming, engineers couldn't tell which API to call. Different conventions = decision aid.
+
+### 14.5 Engineering review rule
+
+Every PR that emits events must answer in PR description:
+> «This emits to: [ ] apps/events/ (product analytics) — for {{funnel/metric}} / [ ] apps/eventbus/ (domain bus) — for {{subscriber}}. Both / neither / one — and why.»
+
+Code reviewer rejects vague «emit event» commits without this clarity.
+
+### 14.6 Migration policy
+
+- `apps/events/` STAYS as-is. 60+ existing call sites unaffected.
+- `apps/eventbus/` is NEW work — port-as-needed, not big-bang migration.
+- When a NEW domain event is needed → add to `apps/eventbus/` per §10 «Adding a new event» procedure
+- When new analytics tracking is needed → add to `apps/events/vocabulary.py`
+- If a domain event is found to be missing analytics-side tracking (or vice versa) → add to other bus deliberately, NEVER silently mirror via interceptor
+
+### 14.7 Cross-bus correlation
+
+Both buses share `correlation_id` (or `apps/events/`-equivalent `trace_id`) when fired in same request context. Allows joining «user click → analytics event + domain event» in observability tooling.
+
+Engineering convention: pass `correlation_id` through both emitter APIs in same handler:
+```python
+correlation_id = generate_correlation_id()
+# Analytics
+product_events.emit("consent_granted", distinct_id=user.id, trace_id=correlation_id)
+# Domain
+domain_bus.emit("customer.consent.changed", actor=user, correlation_id=correlation_id, ...)
+```
+
+### 14.8 Implementation status (as of r1)
+
+- **apps/events/** — exists, 13 vocabulary events, sync fanout to Mixpanel/GA4/Warehouse skeletons, ~60 call sites.
+- **apps/eventbus/** — does NOT exist yet. Q-EV-IMPL1-3 track implementation gating.
+
+Until apps/eventbus/ exists, domain events listed in §3 catalog are **specifications**, not running code. Subscribers (billing, loyalty, etc.) reference them when designing reactions but cannot wire them up.
+
+---
+
+## 15. What this unblocks
 
 - **4a attribution backend** has canonical event names to emit
 - **Schedule rebuild (PR A)** knows what events to fire on WorkingHours/TimeBlock/etc.
@@ -426,15 +514,17 @@ Forbidden:
 - **Loyalty / marketing** have firm event names to listen for
 - **New modules** added in future can extend without renaming chaos
 
-## 15. What this does NOT unblock
+## 16. What this does NOT unblock
 
 - ❌ Replace event-bus technology decision (Q-EV1 still open)
 - ❌ Skip PII review on payloads (every PR with new event MUST be reviewed)
 - ❌ Allow ad-hoc event emission outside this catalog
+- ❌ Replace `apps/events/` (product analytics — stays per §14)
+- ❌ Silently mirror events between buses via interceptor (§14.6 — explicit emission only)
 
 ---
 
-## 16. Sign-off
+## 17. Sign-off
 
 | Role | Approval | Date |
 |---|---|---|

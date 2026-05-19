@@ -37,6 +37,8 @@ ID prefix indicates origin area:
 - `Q-SW*` — Schedule editor wireframes (S2 owner editor + S3 master mobile)
 - `Q-ATT-IMPL*` — Attribution implementation (Phase 4a post-ship questions)
 - `Q-PERF*` — Performance / scalability concerns
+- `Q-EV-IMPL*` — Event bus implementation (apps/eventbus/ — domain bus separate from apps/events/ analytics)
+- `Q-WM*` — Wellness Mood module handoff
 - `Q-CR*` — Customer cancellation + reschedule spec
 - `Q-FT*` — Customer first-touch flow (entry sources + classification)
 - `Q-MAS*` — Mini App states catalog (loading/empty/error/offline patterns)
@@ -154,6 +156,11 @@ ID prefix indicates origin area:
 | **Q-NP15** | Audit log retention for preference changes — Layer 2 (365d) or Layer 3 (7y)? | Layer 2 for most; Layer 3 for operational-class re-enable (compliance traceability) | Legal | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-NP16** | Migration path for existing customers — default retroactively or behavior-based? | Default settings retroactively; behavior-based adds privacy risk + complexity | Eng + Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
 | **Q-NP17** | Tenant suspended (billing failed) — customer preferences still honored for queued reminders? | YES — operational reminders for existing bookings continue; only new dispatch suppressed | Policy | [notification-preferences §16](./policies/notification-preferences-ux.md) |
+| **Q-EV-IMPL1** | Create new `apps/eventbus/` Django app for domain events (separate from `apps/events/` analytics)? | YES — locked decision (A) two-bus architecture per [event-taxonomy §14](./policies/event-taxonomy.md#14-scope-separation-from-appsevents-product-analytics). Phase 2 implementation; Phase 1 domain events remain spec-only | Eng + Founder | [event-taxonomy §14](./policies/event-taxonomy.md) |
+| **Q-EV-IMPL2** | `apps/eventbus/` first MVP scope — which 3-5 domains to wire first? | booking + customer + master (highest billing/loyalty impact). Schedule + wellness deferred to second tranche. | Eng + PM | [event-taxonomy §14](./policies/event-taxonomy.md) |
+| **Q-EV-IMPL3** | Outbox poller technology — Celery beat, dedicated worker, or pg-pubsub LISTEN/NOTIFY? | Celery beat MVP (already in stack); evaluate pg-pubsub or Kafka at 1M+ events/day per Q-EV1 | Eng | [event-taxonomy §14](./policies/event-taxonomy.md) |
+| **Q-EV-IMPL4** | Wellness Mood module (handoff shipped 2026-05-19) — emit to apps/events/ analytics OR wait for apps/eventbus/? | Both — phase 1 wellness.consent.* + wellness.input.recorded fire ONLY to apps/events/ with snake_case names (`mood_consent_granted` / `mood_event_saved`) until eventbus lands. Migrate to dot.notation when eventbus ships. Document as deviation per attribution-policy §15 pattern. | Eng | [wellness-mood-handoff §10](./handoffs/2026-05-19-wellness-mood-handoff.md) + [event-taxonomy §14](./policies/event-taxonomy.md) |
+| **Q-EV-IMPL5** | Cross-bus correlation — `correlation_id` shape — UUID, ULID, or trace-context (W3C)? | ULID MVP (sortable, compact); upgrade to W3C trace-context if/when OpenTelemetry adoption | Eng | [event-taxonomy §14.7](./policies/event-taxonomy.md) |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -491,16 +498,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-19 r16** — Notification Preferences UX (customer + master + owner). Added Q-NP1-17 (17 new; Q-NP1 ✅ confirmed-decided as single «без проактивных» toggle per Q-CX9). 3-axis matrix (audience × channel × event-type), 14 event types classified, per-audience preferences UI, frequency caps + DND windows. Unblocks Settings Hub refresh + cross-cutting opt-in/opt-out logic across customer-first-touch + cancellation/reschedule + wellness modules + escalations.
+**2026-05-19 r17** — Two-bus event architecture decision (A) locked. event-taxonomy.md §14 «Scope separation from apps/events/» added. `apps/events/` (existing) stays for product analytics tracking (snake_case + sync fanout). `apps/eventbus/` (NEW) for domain events per taxonomy (dot.notation + Postgres outbox). NOT a replacement — two systems by design, different concerns. Wellness Mood handoff added under handoffs/ (2026-05-19-wellness-mood-handoff.md, 827 lines). Added Q-EV-IMPL1-5 (5 new). Q-EV-IMPL1 ✅ confirmed-decided as (A) per founder sign-off.
 
-| Status | Count | Δ from r15 |
+| Status | Count | Δ from r16 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **77** (+Q-NP 5/7/8/11/15/16/17) | +7 |
-| 🟢 Later open | **137** (+Q-NP 2/3/4/6/9/10/12/13/14) | +9 |
+| 🟡 Soon open | **81** (+Q-EV-IMPL 2/3/4/5) | +4 |
+| 🟢 Later open | **137** | — |
 | 🔬 Validating | **5** (V1–V5) | — |
-| ✅ Decided | **80** (+Q-NP1) | +1 |
-| **Total tracked** | **303** | +17 |
+| ✅ Decided | **81** (+Q-EV-IMPL1) | +1 |
+| **Total tracked** | **308** | +5 |
+
+**2026-05-19 r16** — Notification Preferences UX (customer + master + owner). Added Q-NP1-17 (17 new; Q-NP1 ✅ confirmed-decided as single «без проактивных» toggle per Q-CX9). 3-axis matrix (audience × channel × event-type), 14 event types classified, per-audience preferences UI, frequency caps + DND windows. Unblocks Settings Hub refresh + cross-cutting opt-in/opt-out logic across customer-first-touch + cancellation/reschedule + wellness modules + escalations.
 
 **2026-05-18 r15** — Master onboarding M0-M7 flow. Added Q-MO1-17 (17 new). 8-stage lifecycle locked. **AI-first service selection** reinforced per project_salon_catalog_vertical memory (master never manually creates services; AI proposes from 11-category templates + regional pricing). Unblocks Phase 2 master-mobile implementation.
 
