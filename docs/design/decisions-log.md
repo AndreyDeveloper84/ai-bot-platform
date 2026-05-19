@@ -45,6 +45,7 @@ ID prefix indicates origin area:
 - `Q-MO*` — Master onboarding M0-M7 flow
 - `Q-NP*` — Notification preferences UX (customer/master/owner)
 - `Q-QO*` — AI Quality Observability dashboard
+- `Q-CP*` — Customer profile management UX
 - `Q-IA*` — Information Architecture (pending integration)
 - `Q-WP*` — Wellness Profile (pending integration)
 - `Q-US*` — Core User States (pending integration)
@@ -168,6 +169,12 @@ ID prefix indicates origin area:
 | **Q-QO10** | Owner can opt tenant out of «founder reviews us» cohort? | NO — cohort first-50 mandatory per Q12-δ for billing trust. Tenant accepts at onboarding terms. | Founder + Legal | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-QO12** | Quality Reviewer sees what when conversation is HUMAN_LOCKED (admin owns)? | AI portion + handoff context; admin's manual replies redacted (admin privacy + scope) | UX + Privacy | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-QO14** | Persona drift — surface general «AI getting longer / more emoji / more apologetic» chart? | YES — drift detector chart (avg word count, emoji count, exclamation count over 30d) per persona variant | UX | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-CP4** | Data export rate limit — 1 per 90 days? | YES MVP (anti-abuse); revisit if legit demand for more | Legal + Policy | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP7** | Pending deletion + new booking attempt — block or allow? | BLOCK; show «Запрос на удаление в обработке — отмените запрос если хотите бронировать» | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP8** | Cancel deletion mid-grace — restore everything or partial? | Full restore — soft-delete preserves all data until hard-delete trigger | Eng | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP14** | Customer in PAUSED tenant — show export/delete or disable? | Show disabled with explainer «Доступно когда студия снова в работе» | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP16** | Owner can refuse deletion request indefinitely? | Owner can DELAY (legal hold per Q-C3); cannot REFUSE — hard-delete after 90d even with legal hold absent fresh court order | Legal | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP17** | «Связаться со студией» — direct DM or via assistant routing? | Via assistant routing per ownership-policy (assistant tags HUMAN_LOCKED handoff; owner replies as themselves) | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
 | **Q-ATT-IMPL5** | `conversation` FK population — Mini App deeplink parser source? | Parse `start_param` at `apps/miniapp_api/views.py` request ingestion (NOT in `apps/booking/services`). Three sources × three behaviors per attribution-policy §15.5. Bot tools (Q-ATT-IMPL1 port) MUST pass conversation. | PM + Eng | [attribution-policy §15.5](./policies/attribution-policy.md) |
 | **Q-ATT-IMPL6** | Customer phone snapshot — MAX often returns empty phone; how to handle reminder factory? | Graceful skip in reminder factory if both `phone` AND `chat_id` missing. Log warning + emit `system.module.health.degraded` event. Customer/admin gets follow-up via [owner-templates §6.3](./policies/owner-conversational-templates.md). Tie to [manual-booking §3](./policies/manual-booking-spec.md) explicit «no contact» selection. | Eng | 4a surprising finding #1 |
 | **Q-ATT-IMPL7** | YC webhook port — copy `visit_at` from BookingReminder → BookingRequest? | YES — add to Phase 1 / B2 yclients-webhook follow-up scope. Until ported, YC bookings remain `external` + `visit_at=NULL`; slot resolver excludes them; customer-facing impact = potential double-booking on YC-only flows (workaround: master cross-check via master mobile). | Eng | 4a surprising finding #5 |
@@ -325,6 +332,18 @@ ID prefix indicates origin area:
 | **Q-QO11** | Cross-tenant aggregate — shared with investors / public benchmarks? | NEVER without explicit founder + legal sign-off; default private | Founder + Legal | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-QO13** | Reviewer skip-rate alerting threshold? | > 70% skip rate in 7d → Quality Reviewer Lead alert | PM | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
 | **Q-QO15** | Persona violation alert body — count or template + snippet? | Template id + first violation snippet excerpt (anonymized) | UX | [ai-quality-observability §15](./policies/ai-quality-observability.md) |
+| **Q-CP1** | Phase 1 personal info — any editable fields or read-only? | Read-only Phase 1; nickname/pronouns v1.2+ | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP2** | Visit history pagination — 10 default? | 10 active + 10 past; «load more» pages of 10 | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP3** | Section 2 «Самочувствие» — show un-shipped modules as «Скоро»? | Phase 1: show only Mood activatable; hide others. Phase 2+ progressively reveal. | PM | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP5** | Data export delivery — MAX bot DM only or also email? | MAX bot DM MVP; email fallback if delivery fails | Eng + UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP6** | Account deletion 30-day grace — fixed or per-tenant? | Fixed 30d MVP per OP6; per-tenant v1.1+ | Legal | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP9** | FAQ content — platform-baseline only or tenant-customizable? | Platform baseline Phase 1; tenant v1.2+ via Settings Hub | PM | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP10** | «AI or human?» FAQ — fixed or per-tenant? | Fixed copy per honesty mandate; tenant can ONLY change `salon_name` variable | Policy | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP11** | «New since last visit» indicator on sections? | NO MVP (avoid FOMO hook); summary lines tell state | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP12** | Customer revokes wellness consent — existing data? | 30-day soft-delete window per Q-WM4 consistency | Privacy | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP13** | «Записаться снова» pre-fill — same master/service/time? | Same master + service; date picker fresh (no time pre-fill) | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP15** | Export with multi-tenant customer — disambiguation? | Scoped to current tenant only; explainer «Это данные из студии {{name}}» | UX | [customer-profile §16](./policies/customer-profile-management-ux.md) |
+| **Q-CP18** | Mini App «back button» on profile — return source or always Главная? | Return to source (deep-link pattern); fallback Главная | Eng | [customer-profile §16](./policies/customer-profile-management-ux.md) |
 | **Q-SW1** | S2 default landing tab on first open after onboarding — Weekly grid or Working-hours editor? | Weekly grid if any master has hours set; else Working-hours editor for first-unset master (auto-route to setup task) | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW4** | Master quick-action «Я болен сегодня» reachable from where besides schedule tab? | Also from M1 dashboard top-card («Сегодня 6 клиентов · [🏥 не выхожу]») | PM + UX | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
 | **Q-SW5** | Master self-sick quarter counter — visible always or only near limit? | Always visible in W3-E modal; not in main schedule view (avoid stigma) | UX + PM | [schedule-editor-wireframes §9](./policies/schedule-editor-wireframes.md) |
@@ -513,16 +532,18 @@ Sources currently containing question lists:
 
 ## Summary counts
 
-**2026-05-19 r18** — AI Quality Observability dashboard. Added Q-QO1-15 (14 new; Q-QO8 ✅ confirmed-decided as Quality Reviewer = same role as Q-CO3). Owner + founder dashboard for monitoring persona violations, CSAT per template, model drift, sampling-based review, founder-50 cohort workflow (Q12-δ implementation). Unblocks founder cohort review tooling + persona-editor feedback loop + Quality Reviewer role tools.
+**2026-05-19 r19** — Customer Profile Management UX. Added Q-CP1-18 (18 new). Mini App «Профиль» tab fully designed: 6 sections, visit history with cancel/reschedule actions, wellness module activation panel, OP6 deletion request flow (30-day grace + admin verification), data export request (rate-limited), help section with honesty modal. Unblocks Phase 1 4d + OP6 implementation.
 
-| Status | Count | Δ from r17 |
+| Status | Count | Δ from r18 |
 |---|---|---|
 | 🔴 Critical open | **2** (Q-WI6, Q-MB1) | — |
-| 🟡 Soon open | **87** (+Q-QO 2/5/6/10/12/14) | +6 |
-| 🟢 Later open | **145** (+Q-QO 1/3/4/7/9/11/13/15) | +8 |
+| 🟡 Soon open | **93** (+Q-CP 4/7/8/14/16/17) | +6 |
+| 🟢 Later open | **157** (+Q-CP 1/2/3/5/6/9/10/11/12/13/15/18) | +12 |
 | 🔬 Validating | **5** (V1–V5) | — |
-| ✅ Decided | **82** (+Q-QO8) | +1 |
-| **Total tracked** | **322** | +14 |
+| ✅ Decided | **82** | — |
+| **Total tracked** | **340** | +18 |
+
+**2026-05-19 r18** — AI Quality Observability dashboard. Added Q-QO1-15 (14 new; Q-QO8 ✅ confirmed-decided as Quality Reviewer = same role as Q-CO3). Owner + founder dashboard for monitoring persona violations, CSAT per template, model drift, sampling-based review, founder-50 cohort workflow (Q12-δ implementation). Unblocks founder cohort review tooling + persona-editor feedback loop + Quality Reviewer role tools.
 
 **2026-05-19 r17** — Two-bus event architecture decision (A) locked. event-taxonomy.md §14 «Scope separation from apps/events/» added. `apps/events/` (existing) stays for product analytics tracking (snake_case + sync fanout). `apps/eventbus/` (NEW) for domain events per taxonomy (dot.notation + Postgres outbox). NOT a replacement — two systems by design, different concerns. Wellness Mood handoff added under handoffs/ (2026-05-19-wellness-mood-handoff.md, 827 lines). Added Q-EV-IMPL1-5 (5 new). Q-EV-IMPL1 ✅ confirmed-decided as (A) per founder sign-off.
 
