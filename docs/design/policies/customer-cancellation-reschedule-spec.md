@@ -1,10 +1,14 @@
 # Customer Cancellation & Reschedule — flow + state machine + templates
 
-**Date:** 2026-05-18 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Foundational — preemptive spec for Schedule MVP phase S2 (cancellation) + S4-aligned (reschedule)
-**Reads:** [`attribution-policy.md`](./attribution-policy.md), [`manual-booking-spec.md`](./manual-booking-spec.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`master-conversational-templates.md`](./master-conversational-templates.md), [`owner-conversational-templates.md`](./owner-conversational-templates.md), [`event-taxonomy.md`](./event-taxonomy.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`attribution-policy.md`](./attribution-policy.md), [`manual-booking-spec.md`](./manual-booking-spec.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`master-conversational-templates.md`](./master-conversational-templates.md), [`owner-conversational-templates.md`](./owner-conversational-templates.md), [`event-taxonomy.md`](./event-taxonomy.md)
 
 > Cancellation and reschedule share a state machine, refund rules, notification cascade, and tone constraints. This doc locks both before Schedule S2/S5 implementation.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: cancellation/reschedule flows mediated by **Ayla** (not «помощник салона»). Late-cancel disputes route through [`ayla-emergency-fallback-policy §3.1`](./ayla-emergency-fallback-policy.md) `payment_dispute` tier. AI voice samples reference Ayla per [`ayla-identity-and-brand §2`](./ayla-identity-and-brand.md). Removed reference to deprecated `conversation-ownership-policy` (3-tier model superseded by emergency fallback).
 
 ---
 
@@ -196,7 +200,7 @@ Reason is OPTIONAL — customer can ignore the chips. If chosen, recorded in `at
 If cancellation triggers refund per §4, message includes line:
 
 ```
-Salon-side: помощник возвратит платный учёт по этой записи студии.
+Salon-side: Ayla возвратит платный учёт по этой записи студии.
 ```
 
 If NO refund (e.g., cancel >24h before, never billable to begin with):

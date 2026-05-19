@@ -54,13 +54,37 @@ class AuditSubscriber:
         bridge — so it can ship as the first real consumer.
 
     Idempotency: ``event_id`` is the de-dup key (see taxonomy §4 subscriber
-    contract). AuditLog itself doesn't enforce uniqueness, so a replay
-    that re-dispatches a row will produce a second AuditLog entry. That
-    is acceptable for audit (multiple delivery attempts ARE auditable
-    events), but loyalty / billing subscribers will need stricter dedup.
+    contract). AuditLog has no unique constraint on ``payload->event_id``,
+    so we defend against re-dispatch with an existence check before
+    write_audit — see :meth:`handle` for the scenario. Loyalty / billing
+    subscribers still need stricter dedup (DB-level unique constraints)
+    because their writes carry state changes (balances, ledgers) that a
+    pre-check race would corrupt; the audit row is observational so a
+    pre-check is enough.
     """
 
     def handle(self, envelope: "Envelope") -> None:
+        # Phase 2.2 cleanup (retro review #6): the dispatcher re-claims
+        # any row that didn't reach ``is_dispatched=True`` on the previous
+        # tick. When a multi-subscriber chain has one failing subscriber,
+        # the transaction commits AuditLog rows from successful
+        # subscribers while leaving the event pending → next tick writes
+        # another AuditLog row. Pre-check + skip prevents the duplicate.
+        #
+        # JSON-field lookup cost is bounded by AuditLog volume (admin
+        # writes only), not user traffic. No dedicated index needed at
+        # current scale; add a GIN index on payload->>event_id if dispatch
+        # latency regresses.
+        from apps.audit.models import AuditLog
+
+        if AuditLog.all_tenants.filter(payload__event_id=envelope.event_id).exists():
+            logger.info(
+                "audit.subscriber.skip_duplicate event_id=%s event=%s",
+                envelope.event_id,
+                envelope.event_name,
+            )
+            return
+
         domain = envelope.event_name.split(".", 1)[0]
         target_id_raw = envelope.data.get(f"{domain}_id")
 

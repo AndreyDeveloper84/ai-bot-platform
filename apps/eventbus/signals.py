@@ -23,6 +23,16 @@ Out of scope (still need per-domain PRs):
   - booking.completed / booking.no_show — depend on YClients webhook
     port (Q-ATT-IMPL7)
   - customer.* / master.* — owning modules' lifecycle code
+
+Bulk-insert caveat (Phase 2.2 cleanup, retro review #7):
+  ``post_save`` does NOT fire on ``Model.objects.bulk_create(...)`` —
+  Django's documented behaviour. Any future code path creating
+  BookingRequests via bulk_create (large imports, backfills, fixture
+  seeders) will silently skip both ``booking.created`` and
+  ``booking.attribution.assigned``. No current callers do this, but if
+  one lands, emit explicitly via :mod:`apps.eventbus.services` after the
+  bulk_create completes. Same caveat applies to bulk_update / raw SQL
+  inserts.
 """
 
 from __future__ import annotations

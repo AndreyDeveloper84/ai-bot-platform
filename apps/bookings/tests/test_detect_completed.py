@@ -191,9 +191,15 @@ class TestEmitFailureRollback:
         booking = BookingRequest.all_tenants.get()
         assert booking.completed_at is None  # rolled back
 
+        # Phase 2.2 cleanup #4: failure increments emit_failed and
+        # leaves scanned untouched (scanned == emitted + raced + emit_failed).
+        assert result["emit_failed"] == 1
+        assert result["scanned"] == result["emitted"] + result["raced"] + result["emit_failed"]
+
         # And the next tick (without the patched failure) does emit.
         result = detect_completed_bookings()
         assert result["emitted"] == 1
+        assert result["emit_failed"] == 0
 
 
 class TestGraceTunable:

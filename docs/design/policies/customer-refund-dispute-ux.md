@@ -1,10 +1,14 @@
 # Customer Refund / Charge Dispute Flow — UX Policy
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — customer-initiated refund / charge disputes happen weekly across portfolio
-**Reads:** [`customer-cancellation-reschedule-spec.md`](./customer-cancellation-reschedule-spec.md), [`booking-conflict-resolution-ux.md`](./booking-conflict-resolution-ux.md), [`../handoffs/2026-05-19-master-earnings-handoff.md`](../handoffs/2026-05-19-master-earnings-handoff.md), [`../handoffs/2026-05-19-master-reviews-feedback-handoff.md`](../handoffs/2026-05-19-master-reviews-feedback-handoff.md), [`../handoffs/2026-05-19-master-admin-internal-chat-handoff.md`](../handoffs/2026-05-19-master-admin-internal-chat-handoff.md), [`attribution-policy.md`](./attribution-policy.md), [`single-assistant-identity.md`](./single-assistant-identity.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`event-taxonomy.md`](./event-taxonomy.md), [`contract-offer-acceptance-display-ux.md`](./contract-offer-acceptance-display-ux.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`customer-cancellation-reschedule-spec.md`](./customer-cancellation-reschedule-spec.md), [`booking-conflict-resolution-ux.md`](./booking-conflict-resolution-ux.md), [`../handoffs/2026-05-19-master-earnings-handoff.md`](../handoffs/2026-05-19-master-earnings-handoff.md), [`../handoffs/2026-05-19-master-reviews-feedback-handoff.md`](../handoffs/2026-05-19-master-reviews-feedback-handoff.md), [`../handoffs/2026-05-19-master-admin-internal-chat-handoff.md`](../handoffs/2026-05-19-master-admin-internal-chat-handoff.md), [`attribution-policy.md`](./attribution-policy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`event-taxonomy.md`](./event-taxonomy.md), [`contract-offer-acceptance-display-ux.md`](./contract-offer-acceptance-display-ux.md)
 
 > Customer pays for service. Customer is unhappy. Today customer calls salon, salon owner has a fight, master is confused, refund happens (or doesn't) outside any system. Audit lost, attribution stale, master earnings affected without trail, founder-50 cohort billing breaks. This policy specifies the customer-initiated dispute flow.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: refund dispute flow fires [`ayla-emergency-fallback-policy §3.1`](./ayla-emergency-fallback-policy.md) `payment_dispute` tier. Ayla stays customer-facing voice throughout («передаю команде на проверку, вернусь в течение 48 часов»); admin works in Ayla Pro queue per [`tenant-as-provider-model §5`](./tenant-as-provider-model.md), NOT in customer chat. Removed deprecated `single-assistant-identity.md` + `conversation-ownership-policy.md` references.
 
 ---
 

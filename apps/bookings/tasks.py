@@ -348,7 +348,7 @@ def detect_completed_bookings() -> dict[str, int]:
         ).order_by("visit_at")[:COMPLETED_BATCH_LIMIT]
     )
 
-    counters = {"scanned": 0, "emitted": 0, "raced": 0}
+    counters = {"scanned": 0, "emitted": 0, "raced": 0, "emit_failed": 0}
 
     for booking in candidates:
         duration = booking.duration_min or default_duration_min
@@ -401,13 +401,18 @@ def detect_completed_bookings() -> dict[str, int]:
             )
             # Roll back the completed_at stamp so the next tick retries.
             BookingRequest.all_tenants.filter(pk=booking.pk).update(completed_at=None)
-            counters["scanned"] -= 1
+            # Telemetry: track emit-failure separately. Earlier code
+            # decremented `scanned` on rollback which lied about work
+            # done — ops dashboards now see {scanned, emitted, raced,
+            # emit_failed} where scanned == emitted + raced + emit_failed.
+            counters["emit_failed"] += 1
 
-    if counters["emitted"] or counters["raced"]:
+    if counters["emitted"] or counters["raced"] or counters["emit_failed"]:
         logger.info(
-            "bookings.detect_completed.summary scanned=%d emitted=%d raced=%d",
+            "bookings.detect_completed.summary scanned=%d emitted=%d raced=%d emit_failed=%d",
             counters["scanned"],
             counters["emitted"],
             counters["raced"],
+            counters["emit_failed"],
         )
     return counters

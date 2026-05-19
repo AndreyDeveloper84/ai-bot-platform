@@ -117,14 +117,31 @@ def lint_pii(payload: dict[str, Any]) -> list[str]:
     """§6 PII forbidden-field lint. Walks nested dicts/lists.
 
     Returns list of violations; empty = clean.
+
+    Recursion is bounded by :data:`_PII_MAX_DEPTH` to defend against
+    accidentally-deep or maliciously-shaped payloads. Hand-built dicts
+    with cycles or absurd nesting won't cause ``RecursionError`` →
+    emit() raising → unwinding the caller's transaction. Hitting the
+    limit appends a single «truncated» violation so the issue is
+    surfaced in logs without dropping the rest of the validation.
     """
 
     violations: list[str] = []
-    _walk_pii(payload, path="data", violations=violations)
+    _walk_pii(payload, path="data", violations=violations, depth=0)
     return violations
 
 
-def _walk_pii(node: Any, *, path: str, violations: list[str]) -> None:
+# Phase 2.2 cleanup (retro review #5): cap _walk_pii recursion. JSONField
+# payloads from healthy code paths are ≤4 levels deep; 16 is generous
+# headroom for analytics envelopes with `attribution_metadata` nesting
+# while still cheap to abort on a circular/adversarial dict.
+_PII_MAX_DEPTH = 16
+
+
+def _walk_pii(node: Any, *, path: str, violations: list[str], depth: int) -> None:
+    if depth >= _PII_MAX_DEPTH:
+        violations.append(f"PII §6: walker truncated at depth={_PII_MAX_DEPTH} (path={path!r})")
+        return
     if isinstance(node, dict):
         for k, v in node.items():
             key_lower = str(k).lower()
@@ -132,10 +149,10 @@ def _walk_pii(node: Any, *, path: str, violations: list[str]) -> None:
                 if pat in key_lower:
                     violations.append(f"PII §6: forbidden key {path}.{k!r} (matches {pat!r})")
                     break  # one report per key
-            _walk_pii(v, path=f"{path}.{k}", violations=violations)
+            _walk_pii(v, path=f"{path}.{k}", violations=violations, depth=depth + 1)
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            _walk_pii(v, path=f"{path}[{i}]", violations=violations)
+            _walk_pii(v, path=f"{path}[{i}]", violations=violations, depth=depth + 1)
     elif isinstance(node, str):
         if _PHONE_RE.search(node):
             violations.append(f"PII §6: phone-shaped string at {path!r}")
