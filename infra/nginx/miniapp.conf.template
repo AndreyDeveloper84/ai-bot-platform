@@ -4,6 +4,9 @@
 #   {SUBDOMAIN}      miniapp.gobeauty.site | miniapp-dev.gobeauty.site
 #   {DIST_PATH}      /home/taximeter/ai-bot-platform{,-dev}/apps/miniapp/dist
 #   {GUNICORN_PORT}  8013 (prod) | 8014 (dev) — Django backend on 127.0.0.1
+#   {API_HOST}       api.gobeauty.site | api-dev.gobeauty.site — value
+#                    of the Host header forwarded to gunicorn; must be in
+#                    Django ALLOWED_HOSTS
 #
 # MAX Mini App requires HTTPS public URL.
 
@@ -44,9 +47,12 @@ server {
     # API proxy — same-origin /api/ avoids CORS preflight in MAX webview.
     # Fronts apps/miniapp_api on the Django gunicorn that serves
     # api-{,dev-}gobeauty.site too. Keep ports in sync with that vhost.
+    #
+    # Host header is forced to {API_HOST} so the request passes Django's
+    # ALLOWED_HOSTS without adding the miniapp subdomain to it.
     location /api/ {
         proxy_pass http://127.0.0.1:{GUNICORN_PORT};
-        proxy_set_header Host $host;
+        proxy_set_header Host {API_HOST};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
