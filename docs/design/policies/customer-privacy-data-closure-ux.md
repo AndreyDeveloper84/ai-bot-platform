@@ -1,10 +1,14 @@
 # Customer Privacy / Data Export / Account Closure — UX Policy
 
-**Date:** 2026-05-19 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Production-blocking — GDPR + Russia 152-FZ alignment; customer trust foundation
-**Reads:** [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`customer-notification-controls-ux.md`](./customer-notification-controls-ux.md), [`customer-loyalty-rewards-ux.md`](./customer-loyalty-rewards-ux.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`customer-wellness-dashboard-ux.md`](./customer-wellness-dashboard-ux.md), [`core-wellness-profile.md`](./core-wellness-profile.md), [`wellness-input-modules.md`](./wellness-input-modules.md), [`single-assistant-identity.md`](./single-assistant-identity.md), [`attribution-policy.md`](./attribution-policy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`../handoffs/2026-05-19-master-offboarding-handoff.md`](../handoffs/2026-05-19-master-offboarding-handoff.md), [`event-taxonomy.md`](./event-taxonomy.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-memory-and-personalization.md`](./ayla-memory-and-personalization.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`customer-profile-management-ux.md`](./customer-profile-management-ux.md), [`customer-notification-controls-ux.md`](./customer-notification-controls-ux.md), [`customer-loyalty-rewards-ux.md`](./customer-loyalty-rewards-ux.md), [`customer-refund-dispute-ux.md`](./customer-refund-dispute-ux.md), [`customer-wellness-dashboard-ux.md`](./customer-wellness-dashboard-ux.md), [`core-wellness-profile.md`](./core-wellness-profile.md), [`wellness-input-modules.md`](./wellness-input-modules.md), [`attribution-policy.md`](./attribution-policy.md), [`tenant-suspension-pause-ux.md`](./tenant-suspension-pause-ux.md), [`../handoffs/2026-05-19-master-offboarding-handoff.md`](../handoffs/2026-05-19-master-offboarding-handoff.md), [`event-taxonomy.md`](./event-taxonomy.md)
 
 > Customer has rights: see what we know, fix mistakes, export, take it elsewhere, stop being known. Today no UX exists for any of these — customer would email founder begging. This policy specifies View / Export / Rectify / Soft-Delete / Hard-Delete flows with audit, cooling-off, and cross-tenant boundaries.
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: customer's data scope = **Ayla memory** (cross-tenant per [`ayla-memory-and-personalization §9`](./ayla-memory-and-personalization.md)) + **per-tenant data** (bookings/loyalty/reviews per [`tenant-as-provider-model §6.1`](./tenant-as-provider-model.md)). Hard-delete cascades both; per-tenant close affects only one. Memory transparency surface = «Что Ayla знает обо мне» per Doc #2 §5. Deprecated `single-assistant-identity.md` reference removed.
 
 ---
 
@@ -237,7 +241,7 @@ Per Q-CP13.
 │ ✓ Отзывы (с вашей стороны)                │
 │ ✓ Обращения и жалобы                      │
 │ ✓ Настройки и согласия                    │
-│ ✓ Сообщения с помощником                 │
+│ ✓ Сообщения с Ayla                       │
 │                                        │
 │ Формат:                                   │
 │ ⦿ ZIP с CSV + PDF (понятный человеку)   │
@@ -393,7 +397,7 @@ Customer Mini App → «Приостановить аккаунт»:
 │ Что сохранится:                          │
 │ ✓ Профиль и история                      │
 │ ✓ Баллы и уровень                         │
-│ ✓ Сообщения с помощником                 │
+│ ✓ Сообщения с Ayla                       │
 │                                        │
 │ Восстановить — в любой момент в течение  │
 │ 30 дней. Просто откройте Мини-App.       │
@@ -483,7 +487,7 @@ Customer Mini App → «Удалить аккаунт»:
 │ ✗ История записей (станет анонимной)    │
 │ ✗ Wellness данные (все 7 модулей)       │
 │ ✗ Цели по самочувствию                  │
-│ ✗ AI-память помощника                    │
+│ ✗ AI-память Ayla                         │
 │ ✗ Список любимых мастеров               │
 │ ✗ Личные предпочтения                    │
 │                                        │
