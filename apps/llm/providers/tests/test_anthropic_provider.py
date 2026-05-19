@@ -11,8 +11,6 @@ from apps.llm.protocol import (
     CompletionResult,
     LLMError,
     LLMProvider,
-    LLMQuotaError,
-    LLMTransportError,
     ToolCall,
 )
 from apps.llm.providers.anthropic_provider import (
@@ -292,23 +290,9 @@ _FakeRateLimitError.__name__ = "RateLimitError"
 
 
 class TestErrorMapping:
-    @pytest.mark.asyncio
-    async def test_connection_error_becomes_transport_error(
-        self, patched_provider: tuple[AnthropicProvider, MagicMock]
-    ) -> None:
-        provider, client = patched_provider
-        client.messages.create.side_effect = _FakeAPIConnectionError("boom")
-        with pytest.raises(LLMTransportError):
-            await provider.complete([{"role": "user", "content": "x"}])
-
-    @pytest.mark.asyncio
-    async def test_rate_limit_becomes_quota_error(
-        self, patched_provider: tuple[AnthropicProvider, MagicMock]
-    ) -> None:
-        provider, client = patched_provider
-        client.messages.create.side_effect = _FakeRateLimitError("limit")
-        with pytest.raises(LLMQuotaError):
-            await provider.complete([{"role": "user", "content": "x"}])
+    """Non-retriable exception mapping. Retriable transients are now
+    handled by the PI7 retry layer — see TestRetryAnthropic below.
+    """
 
     @pytest.mark.asyncio
     async def test_unknown_error_becomes_llm_error(
@@ -318,3 +302,184 @@ class TestErrorMapping:
         client.messages.create.side_effect = ValueError("weird")
         with pytest.raises(LLMError):
             await provider.complete([{"role": "user", "content": "x"}])
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / PI9 (DRF-860) — per-tenant cost cap integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+class TestTenantCostCap:
+    """Anthropic provider — the per-tenant cap coexists alongside the
+    pre-existing L7 per-model cap. Tenant cap is checked FIRST so
+    cap-exhausted tenants see TenantQuotaExceeded (graceful fallback)
+    instead of LLMProviderQuotaExceeded (router fallback)."""
+
+    @pytest.fixture
+    def tenant(self):
+        from decimal import Decimal
+
+        from apps.tenancy.models import Tenant
+
+        return Tenant.objects.create(
+            slug="anth-cost",
+            name="Anthropic cost test",
+            daily_token_cap=10_000,
+            daily_cost_cap_usd=Decimal("5.00"),
+        )
+
+    @pytest.fixture(autouse=True)
+    def _cache_clear(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_complete_records_usage(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock], tenant
+    ) -> None:
+        from apps.llm.cost_tracker import get_current_usage
+        from apps.tenancy.context import tenant_scope
+
+        provider, client = patched_provider
+        client.messages.create.return_value = _make_response(
+            input_tokens=200, output_tokens=100, model="claude-haiku-4-5"
+        )
+
+        with tenant_scope(tenant):
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.tokens_used == 300
+
+    @pytest.mark.asyncio
+    async def test_complete_rejected_when_tenant_cap_exhausted(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock], tenant
+    ) -> None:
+        from decimal import Decimal
+
+        from apps.llm.cost_tracker import TenantQuotaExceeded, record_usage
+        from apps.tenancy.context import tenant_scope
+
+        await record_usage(str(tenant.id), tokens=10_000, cost_usd=Decimal("0"))
+
+        provider, client = patched_provider
+        with tenant_scope(tenant), pytest.raises(TenantQuotaExceeded):
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        client.messages.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_tenant_scope_path_still_works(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        provider, client = patched_provider
+        client.messages.create.return_value = _make_response()
+        result = await provider.complete([{"role": "user", "content": "x"}])
+        assert result.text == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 / PI7 (DRF-858) — exponential-backoff retry integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fast_retry_provider() -> tuple[AnthropicProvider, MagicMock]:
+    """Provider configured with a zero-delay retry policy.
+
+    Tests in this section assert retry BEHAVIOUR — they don't simulate
+    wall-clock backoff. The backoff math has its own unit tests in
+    ``apps/llm/tests/test_retry.py``.
+    """
+    from apps.llm.retry import RetryPolicy
+
+    policy = RetryPolicy(max_attempts=3, base_delay_s=0.0, max_delay_s=0.0, jitter=0.0)
+    provider = AnthropicProvider(api_key="ci-fake-key", retry_policy=policy)
+    fake_client = MagicMock()
+    fake_client.messages.create = AsyncMock()
+    provider._client = fake_client  # type: ignore[attr-defined]
+    return provider, fake_client
+
+
+class TestRetryAnthropic:
+    """Verify retry layer wraps the Anthropic SDK call site.
+
+    Symmetric with TestRetryOpenAI — same retry math, anthropic-
+    specific predicate.
+    """
+
+    @pytest.mark.asyncio
+    async def test_retries_on_rate_limit_then_succeeds(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        provider, client = fast_retry_provider
+        client.messages.create.side_effect = [
+            _FakeRateLimitError("rate"),
+            _FakeRateLimitError("still rate"),
+            _make_response(content=[_text_block("finally")]),
+        ]
+        result = await provider.complete([{"role": "user", "content": "hi"}])
+        assert result.text == "finally"
+        assert client.messages.create.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_fails_fast_on_400(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        from apps.llm.protocol import LLMError
+
+        provider, client = fast_retry_provider
+
+        class _BadReq(Exception):
+            pass
+
+        _BadReq.__name__ = "BadRequestError"
+        client.messages.create.side_effect = _BadReq("bad")
+        with pytest.raises(LLMError):
+            await provider.complete([{"role": "user", "content": "x"}])
+        assert client.messages.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_exhausted_raises_retriable_llm_error(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        from apps.llm.retry import RetriableLLMError
+
+        provider, client = fast_retry_provider
+        client.messages.create.side_effect = _FakeRateLimitError("persistent")
+
+        with pytest.raises(RetriableLLMError) as exc_info:
+            await provider.complete([{"role": "user", "content": "x"}])
+
+        assert exc_info.value.attempts == 3
+        assert client.messages.create.await_count == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_audit_row_per_failed_attempt(
+        self, fast_retry_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        from asgiref.sync import sync_to_async
+
+        from apps.audit.models import AuditLog
+        from apps.llm.retry import AUDIT_RETRY_ATTEMPT_FAILED
+
+        provider, client = fast_retry_provider
+        client.messages.create.side_effect = [
+            _FakeRateLimitError("first"),
+            _make_response(content=[_text_block("ok")]),
+        ]
+        await provider.complete([{"role": "user", "content": "hi"}])
+
+        rows = await sync_to_async(
+            lambda: list(AuditLog.all_tenants.filter(action=AUDIT_RETRY_ATTEMPT_FAILED))
+        )()
+        assert len(rows) == 1
+        payload = rows[0].payload
+        assert payload["provider"] == "anthropic"
+        assert payload["op"] == "complete"
+        assert payload["attempt"] == 1

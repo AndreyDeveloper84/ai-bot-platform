@@ -1,0 +1,448 @@
+# Event Taxonomy — canonical event names + payload contract
+
+**Date:** 2026-05-18 r1
+**Status:** Foundational — locks event names + envelope structure across all modules
+**Reads:** [`attribution-policy.md`](./attribution-policy.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`core-wellness-profile.md`](./core-wellness-profile.md)
+
+> Every module emits events. Without a canonical taxonomy, names diverge between parallel implementations, analytics breaks, retention pipelines drift. This doc locks the names, envelope, and rules.
+
+---
+
+## 0. Why this exists
+
+### The problem
+We have multiple modules in flight — booking, scheduling, master management, conversations, loyalty, marketing, attribution. Each writes events to the event bus. Without a single source of truth:
+
+- Analytics dashboard expects `booking.completed`, attribution writes `booking_completed` → silent gap
+- Loyalty listens for `BookingCompleted`, marketing emits `booking.complete` → silent gap
+- Wellness Profile listener subscribes to `customer_state_change`, conversations emits `customer.state_changed` → silent gap
+
+This doc prevents that by **naming every event before it's written**.
+
+### The promise
+Any module reading or writing events:
+- MUST use a name from this catalog
+- MUST follow envelope structure §2
+- MUST respect PII rules §6
+- MUST version per §7
+- Any new event MUST add an entry here before merge
+
+---
+
+## 1. Naming convention
+
+### Pattern
+```
+<domain>.<entity>.<action>[.<modifier>]
+```
+
+- **domain** — top-level module: `booking` / `customer` / `master` / `schedule` / `campaign` / `loyalty` / `wellness` / `conversation` / `billing` / `admin` / `system`
+- **entity** — the noun the action applies to (usually = domain root entity, can be sub-entity like `attribution`)
+- **action** — past-tense verb: `created`, `updated`, `cancelled`, `assigned`, `triggered`, `completed`
+- **modifier** (optional) — qualifies the action when one entity has many lifecycle states: `booking.status.changed.completed` vs `booking.status.changed.cancelled`
+
+### Examples
+- ✅ `booking.created`
+- ✅ `booking.attribution.assigned`
+- ✅ `customer.state.changed`
+- ✅ `master.invite.accepted`
+- ❌ `bookingCreated` (camelCase)
+- ❌ `booking_attribution_assigned` (snake)
+- ❌ `BookingCompleted` (PascalCase)
+- ❌ `book.create` (singular noun, present tense)
+
+### Rules
+- All lowercase, dot-separated
+- Past tense for completed actions (`created`, not `create`)
+- Use full words, not abbreviations (`subscription`, not `sub`)
+- Avoid implementation jargon (`record_inserted` is leaky)
+- Avoid system/protocol prefixes (`db.row.inserted` — not domain event)
+
+---
+
+## 2. Envelope structure (every event)
+
+All events share an outer envelope. Payload (`data` field) is event-specific.
+
+```json
+{
+  "event_id": "evt_01HZX...",            // ULID, unique
+  "event_name": "booking.attribution.assigned",
+  "event_version": "1.0",                // SemVer; bump on breaking payload change
+  "occurred_at": "2026-05-18T14:32:11Z", // ISO 8601 UTC
+  "tenant_id": "tnt_abc123",             // salon scope; null for system events
+  "actor": {
+    "type": "ai" | "human" | "system" | "external",
+    "id": "usr_xyz789" | "ai_persona_v2" | null,
+    "role": "owner" | "admin" | "master" | "customer" | "ai_assistant" | null
+  },
+  "correlation_id": "cor_def456",        // trace through multi-step flow
+  "causation_id": "evt_01HZW...",        // event that caused this event (optional)
+  "data": { /* per-event payload */ },
+  "metadata": { /* arbitrary tags, never PII */ }
+}
+```
+
+### Required fields
+- `event_id` — ULID, must be globally unique
+- `event_name` — from this catalog
+- `event_version` — start at `1.0`
+- `occurred_at` — UTC ISO 8601
+- `actor.type` — even if `system`
+- `data` — even if empty object
+
+### Optional fields
+- `tenant_id` — required for all multi-tenant events; null for cross-tenant system events
+- `actor.id` / `actor.role` — present when known
+- `correlation_id` — for tracing flows
+- `causation_id` — for event chains
+- `metadata` — implementation tags
+
+### Forbidden fields
+- ❌ `user_email`, `phone`, `name` directly in envelope — use `actor.id` reference
+- ❌ Free text from customer in envelope — payload only, with PII rules §6
+- ❌ Raw bot/customer messages — store ID reference, fetch from conversation store
+
+---
+
+## 3. The canonical catalog
+
+10 domains, 50+ events. New events must be added here before code merge.
+
+### 3.1 Booking domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `booking.created` | New BookingRequest row inserted | `booking_id`, `customer_id`, `master_id`, `service_id`, `slot_start`, `slot_end`, `booking_source` | analytics, attribution, master-mobile (notify) |
+| `booking.attribution.assigned` | 4a writes booking_source/billable | `booking_id`, `booking_source`, `ai_assist_score`, `billable`, `billing_reason`, `attribution_metadata` | analytics, loyalty, marketing, billing |
+| `booking.confirmed` | Customer confirms or auto-confirmed | `booking_id`, `confirmed_at`, `confirmation_method` (manual/auto) | conversation, master-mobile |
+| `booking.cancelled` | Customer or admin cancels | `booking_id`, `cancelled_by` (actor), `cancellation_reason`, `cancelled_at` | loyalty (refund cascade), marketing (suppression) |
+| `booking.completed` | Master marks visit done OR scheduled completion | `booking_id`, `completed_at`, `marked_by` | loyalty (points earn), wellness (Layer 4 update), marketing (post-visit campaign trigger), analytics |
+| `booking.no_show` | Visit time passed, no completion | `booking_id`, `detected_at` | retention, marketing (suppress), analytics |
+| `booking.rescheduled` | Slot change after creation | `booking_id`, `old_slot_start`, `new_slot_start`, `rescheduled_by` | master-mobile, conversation |
+| `booking.refunded` | Payment refund processed | `booking_id`, `refund_amount`, `refunded_at`, `refund_reason` | loyalty (revoke points), billing |
+
+### 3.2 Customer domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `customer.created` | First customer record (any tenant) | `customer_id`, `tenant_id`, `acquisition_channel`, `first_touch_source` | analytics, marketing |
+| `customer.state.changed` | core-user-states transition | `customer_id`, `old_state`, `new_state`, `reason`, `triggered_by` | marketing, retention, AI inference |
+| `customer.profile.layer.updated` | Wellness Profile layer write | `customer_id`, `layer_name`, `confidence`, `source` | AI inference, retention |
+| `customer.consent.changed` | Opt-in/out for any policy | `customer_id`, `consent_type`, `granted`, `granted_at`, `granted_via` | all modules (gate sends) |
+| `customer.opted_out` | Customer blocks bot or full opt-out | `customer_id`, `opt_out_scope`, `reason` | marketing (suppress), conversation (lock) |
+| `customer.deleted_request` | Customer requested account deletion (OP6) | `customer_id`, `requested_at` | retention pipeline |
+
+### 3.3 Master domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `master.invited` | Owner sends invite | `master_id`, `invited_by`, `invite_method` (max_handle/email) | master-mobile (deep link), analytics |
+| `master.invite.accepted` | Master clicks deep link + onboards | `master_id`, `accepted_at` | scheduling (default hours apply), booking (becomes bookable) |
+| `master.invite.expired` | 14d without acceptance | `master_id`, `expired_at` | owner UI (re-invite prompt) |
+| `master.invite.cancelled` | Owner cancels before accept | `master_id`, `cancelled_by` | — |
+| `master.archived` | `is_active=False` + `archived_at` set | `master_id`, `archived_by`, `archive_reason` | booking (un-bookable), analytics |
+| `master.unarchived` | Reactivated | `master_id`, `unarchived_by` | booking (re-bookable) |
+| `master.service.added` | New MasterService M2M row | `master_id`, `service_id`, `added_by` | booking (visibility), recommendations |
+| `master.service.removed` | M2M row deleted | `master_id`, `service_id`, `removed_by` | booking (visibility) |
+
+### 3.4 Schedule domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `schedule.working_hours.updated` | Master/owner edits WorkingHours | `master_id`, `day_of_week`, `old`, `new`, `changed_by` | slot resolver, audit |
+| `schedule.exception.added` | New ScheduleException row | `master_id`, `exception_id`, `kind`, `date_range`, `added_by` | slot resolver, customer notification |
+| `schedule.exception.removed` | Exception deleted | `master_id`, `exception_id`, `removed_by` | slot resolver |
+| `schedule.timeblock.added` | New TimeBlock (lunch/cleaning) | `master_id`, `block_id`, `kind`, `time_range` | slot resolver |
+| `schedule.change_request.submitted` | Master proposes schedule change | `change_request_id`, `master_id`, `proposed_change` | owner UI (approval queue) |
+| `schedule.change_request.approved` | Owner approves | `change_request_id`, `approved_by` | applies change |
+| `schedule.change_request.rejected` | Owner rejects | `change_request_id`, `rejected_by`, `reason` | master-mobile notification |
+| `schedule.slot_config.updated` | Buffer/lead/max-advance change | `tenant_id`, `old`, `new`, `changed_by` | slot resolver |
+
+### 3.5 Conversation domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `conversation.started` | First message in new thread | `conversation_id`, `customer_id`, `channel` (max/tg/web), `entry_intent` | analytics, AI |
+| `conversation.message.sent` | Any message (in or out) | `conversation_id`, `message_id`, `direction` (in/out), `actor`, `intent_class`, `content_ref` (NOT raw text) | analytics, AI |
+| `conversation.handoff.to_human` | AI → human transition | `conversation_id`, `tier` (AI_CONTINUITY/HUMAN_SUPERVISED/HUMAN_LOCKED), `reason`, `triggered_by` | dashboard (alert), analytics |
+| `conversation.handoff.to_ai` | Human → AI release | `conversation_id`, `released_by`, `notes_summary_ref` | AI (resume context) |
+| `conversation.escalated` | SLA breach or critical | `conversation_id`, `sla_tier` (15/30/60/120), `breach_minutes` | dashboard, analytics |
+| `conversation.persona.violation` | Voice check failed | `conversation_id`, `message_id`, `violation_type` | persona-editor analytics |
+| `conversation.satisfaction.scored` | Post-conversation CSAT | `conversation_id`, `score`, `feedback_ref` | analytics |
+
+### 3.6 Wellness domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `wellness.input.recorded` | Any module (food/water/body/sleep/mood/avatar/symptom) writes | `customer_id`, `module_name`, `input_type`, `value_ref`, `confidence` | Wellness Profile aggregator, AI inference |
+| `wellness.profile.layer.updated` | Aggregator writes derived field to profile | `customer_id`, `layer_name`, `field`, `old`, `new`, `source` | AI, retention |
+| `wellness.insight.generated` | AI produces new insight | `customer_id`, `insight_id`, `insight_type`, `confidence`, `evidence_refs` | conversation (suggest), retention |
+| `wellness.recommendation.shown` | Recommendation surfaced to customer | `customer_id`, `recommendation_id`, `surface` (home/chat/email), `service_id` (if applicable) | analytics |
+| `wellness.recommendation.acted` | Customer clicked/booked from recommendation | `recommendation_id`, `action_type`, `resulted_booking_id` (optional) | attribution (`ai_assist_score` input), analytics |
+| `wellness.consent.module.granted` | Customer opted into specific input module | `customer_id`, `module_name`, `granted_at` | the module enables itself |
+| `wellness.consent.module.revoked` | Opted out | `customer_id`, `module_name`, `revoked_at` | module stops collecting; soft-delete cascade |
+
+### 3.7 Campaign domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `campaign.dispatched` | Send executed | `campaign_id`, `dispatch_id`, `customer_id`, `template_id`, `dispatched_at` | analytics |
+| `campaign.opened` | Read receipt (where supported) | `dispatch_id`, `opened_at` | analytics |
+| `campaign.clicked` | Inline button or deep-link tap | `dispatch_id`, `button_id`, `clicked_at` | attribution (may write `attribution_metadata.campaign_id` on booking) |
+| `campaign.converted` | Attribution linked back to dispatch | `dispatch_id`, `attributed_booking_id`, `attribution_window_days` | analytics, marketing dashboard |
+| `campaign.suppressed` | Send blocked by frequency/opt-out | `campaign_id`, `customer_id`, `suppression_reason` | dispatch service, analytics |
+
+### 3.8 Loyalty domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `loyalty.points.earned` | Points credited on `booking.completed` | `customer_id`, `points`, `source_booking_id`, `multiplier_applied` | customer profile, conversation (notify) |
+| `loyalty.points.redeemed` | Customer uses points | `customer_id`, `points`, `redemption_target_id` (booking/product), `redeemed_at` | analytics |
+| `loyalty.points.revoked` | Refund or cancel cascade | `customer_id`, `points`, `reason`, `cascade_from_booking_id` | analytics |
+| `loyalty.tier.changed` | Tier up/down | `customer_id`, `old_tier`, `new_tier`, `reason` | conversation (announce), marketing (eligibility) |
+
+### 3.9 Billing domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `billing.invoice.generated` | End-of-month or per-event invoice | `invoice_id`, `tenant_id`, `period`, `total_amount`, `billable_booking_count` | finance, tenant notification |
+| `billing.payment.received` | Payment confirmed | `invoice_id`, `tenant_id`, `amount`, `paid_at`, `method` | dunning (clear), analytics |
+| `billing.payment.failed` | Charge declined | `invoice_id`, `tenant_id`, `failure_reason` | dunning (start), tenant notification |
+| `billing.dunning.escalated` | Past-due moved to next dunning stage | `tenant_id`, `dunning_stage`, `days_past_due` | account ops, tenant suspension trigger |
+| `billing.tenant.suspended` | Hard pause | `tenant_id`, `suspended_at`, `suspension_reason` | all customer-facing surfaces (block), salon notification |
+
+### 3.10 Admin / System domain
+
+| Event name | Trigger | Payload keys | Subscribers |
+|---|---|---|---|
+| `admin.user.login` | Web/Mini App login | `user_id`, `tenant_id`, `role`, `ip_country` | audit, security |
+| `admin.permission.changed` | Role assigned/revoked | `target_user_id`, `tenant_id`, `old_role`, `new_role`, `changed_by` | audit, security |
+| `admin.settings.updated` | Tenant settings change | `tenant_id`, `setting_path`, `old`, `new`, `changed_by` | audit, downstream re-config |
+| `admin.audit.event` | Any audit-worthy action not covered above | `tenant_id`, `actor`, `action`, `target`, `result` | audit log only |
+| `system.module.health.degraded` | Module reports degraded state | `module_name`, `severity`, `metric` | ops alerting |
+| `system.batch.completed` | Scheduled job done | `job_name`, `duration_ms`, `result` | ops, analytics |
+
+---
+
+## 4. Subscribers — who reads what
+
+### Cross-cutting subscribers (read most events)
+- **Analytics dashboard** — most `booking.*`, `customer.*`, `campaign.*`, `loyalty.*`, `conversation.*`
+- **Audit log** — every event with `actor.type=human` or admin domain
+- **AI inference engine** — `customer.*`, `wellness.*`, `conversation.message.sent` for adaptation
+
+### Targeted subscribers
+- **Loyalty processor** — `booking.completed`, `booking.refunded`, `booking.cancelled` (cascade)
+- **Marketing dispatch** — `customer.state.changed`, `booking.completed`, `booking.no_show`, `customer.consent.changed`, `customer.opted_out`
+- **Wellness Profile aggregator** — all `wellness.input.recorded`, `booking.completed`
+- **Slot resolver** — all `schedule.*` events that affect availability
+- **Billing pipeline** — `booking.attribution.assigned` (with billable=true), `billing.*`
+
+### Subscriber contract
+Every subscriber MUST:
+1. Be idempotent — re-receiving same `event_id` is safe
+2. Handle out-of-order delivery within reason
+3. Acknowledge or retry; never silently drop
+4. Reject events with unknown name (don't guess) — log and alert
+
+---
+
+## 5. Replay + dead letter
+
+### Replay
+The event store retains all events ≥ 90 days for replay scenarios:
+- Subscriber bug → fix + replay missed events
+- New analytics view → backfill from historical events
+- Audit investigation → reconstruct timeline
+
+Replay flag in envelope: `metadata.replay=true` so subscribers don't re-trigger side effects (no second email send).
+
+### Dead letter
+If a subscriber rejects an event 3× with error, it lands in dead-letter queue:
+- Engineering alerted
+- Manual triage
+- Either fix subscriber + replay, OR mark event as «known unhandleable» and skip
+
+---
+
+## 6. PII rules
+
+### Forbidden in event payloads
+- Customer phone, email, full name as plain values
+- Raw bot/customer message text
+- Photo bytes or file content
+- Geographic coordinates beyond city level
+- Credit card numbers, full payment details
+- Health symptom details in plain text (Layer 4 Profile sensitive)
+
+### Allowed in event payloads
+- ID references: `customer_id`, `message_id`, `content_ref` (pointer to encrypted store)
+- Enums, codes, status values
+- Numeric metrics (amounts, scores, counts)
+- Timestamps
+- Coarse geography (country, city if not enough to identify)
+- Names of services, masters, tenants (publicly available within tenant)
+
+### When sensitive data is needed downstream
+Subscriber fetches it from the canonical store using the ID, with its own access control. Events are pointers, not payloads, for sensitive data.
+
+### Example
+```json
+// ✅ correct
+{
+  "event_name": "conversation.message.sent",
+  "data": {
+    "conversation_id": "cnv_abc",
+    "message_id": "msg_xyz",
+    "direction": "in",
+    "intent_class": "booking_inquiry",
+    "content_ref": "msg_xyz"
+  }
+}
+
+// ❌ wrong
+{
+  "event_name": "conversation.message.sent",
+  "data": {
+    "raw_text": "Здравствуйте, хочу записаться, мой телефон +7-911-...",
+    "customer_phone": "+7-911-..."
+  }
+}
+```
+
+---
+
+## 7. Versioning
+
+### Rules
+- Start at `event_version: "1.0"`
+- **Patch bump** (`1.0.1`): doc-only change, no payload change. Rare.
+- **Minor bump** (`1.1`): additive payload change — new optional fields. Old subscribers still work.
+- **Major bump** (`2.0`): breaking payload change — renamed/removed fields, changed types. Old subscribers break.
+
+### Breaking change procedure
+1. Add new event name with `2.0`: emit BOTH `1.x` and `2.0` for one quarter
+2. Migrate subscribers to `2.0`
+3. After all subscribers migrated + 30d soak, retire `1.x` emission
+4. Document deprecation in this doc
+
+### Never
+- ❌ Change semantics of an existing version (silent breaking change)
+- ❌ Reuse a deprecated event name with new meaning
+
+---
+
+## 8. Tenancy + cross-tenant events
+
+### Default
+Every event MUST have `tenant_id`. Multi-tenant by design.
+
+### Exceptions (tenant_id = null)
+- `system.*` events (cron, batch jobs)
+- Cross-tenant customer events when customer exists on multiple tenants (rare; per Q-CO5 customer-tenant is separated, so even these get one tenant_id per occurrence)
+- Platform-level admin events (founder/ops actions outside tenant scope)
+
+### Cross-tenant data leakage prevention
+Subscribers MUST filter by `tenant_id` before processing. Reading another tenant's event = security incident.
+
+---
+
+## 9. Schema enforcement
+
+### Where validation lives
+- **At emission time**: producer validates against this doc (envelope + name + required payload keys)
+- **At storage time**: event store accepts any well-formed envelope; logs unknown event names but doesn't reject (so we don't lose events during evolution)
+- **At consumption time**: subscribers validate payload before processing; reject + log if mismatch
+
+### Source of truth
+This doc + a generated JSON schema file `docs/design/policies/event-schemas/*.json` (Phase 2). MVP: doc only.
+
+---
+
+## 10. Adding a new event
+
+Procedure:
+1. Discuss with UX Architect (this role) — does it fit existing domain or need new one?
+2. Add row to §3 catalog with name, trigger, payload, subscribers
+3. Add to producer code + bump emitting module version
+4. Notify subscribers (analytics, etc.) so they expect it
+5. Merge as one PR including doc + code
+
+Forbidden:
+- ❌ Emit event without doc entry
+- ❌ Add new domain without architectural review
+- ❌ Reuse existing event name for new semantics
+
+---
+
+## 11. Anti-patterns
+
+| Anti-pattern | Why bad | Correct |
+|---|---|---|
+| Free-form `metadata` for important fields | Field becomes critical → spreads inconsistently | Promote to typed `data` key |
+| Events for every DB write | Noise; consumers can't filter | Only emit business-meaningful events |
+| Customer text in payload | PII leak, retention nightmare | Use `content_ref` to encrypted store |
+| Future-tense names (`will_book`) | Confusing; intent ≠ event | Past tense always |
+| Synchronous chains | Brittle; event flow becomes RPC | Subscribers must be async-tolerant |
+| Skipping `correlation_id` on chains | Hard to debug | Always propagate when caused by another event |
+
+---
+
+## 12. Open questions
+
+| # | Question | Lean | Owner | Urgency |
+|---|---|---|---|---|
+| Q-EV1 | Event store technology — Kafka, Postgres outbox, EventBridge, custom? | Postgres outbox MVP (low ops); evaluate Kafka at 1M+ events/day | Eng | 🟡 |
+| Q-EV2 | Per-event PII review — automated linter or manual? | Automated lint on payload schema; reject PR if forbidden field in `data` | Eng | 🟡 |
+| Q-EV3 | Retention window beyond 90d? | Replay 90d hot; cold archive 365d compressed | Eng + Legal | 🟢 |
+| Q-EV4 | Subscriber idempotency — enforce via dedup table or rely on subscriber? | Dedup table at infra level (every subscriber gets cheap idempotency) | Eng | 🟡 |
+| Q-EV5 | Cross-tenant event aggregation for platform analytics? | Separate aggregation pipeline; events still tenant-scoped | Eng | 🟢 |
+| Q-EV6 | Customer-facing events (e.g., for export per OP6)? | Customer can request a JSON export of own events; redacted version | Legal + PM | 🟡 |
+| Q-EV7 | AI-emitted events — actor.type=ai, but actor.id? | Use `actor.id = ai_persona_v{N}` where N is persona version | PM | 🟢 |
+| Q-EV8 | Webhook delivery to tenant systems (YClients, etc.) — replay-safe? | Tenant integrations get a curated subset of events via webhook with HMAC + idempotency key | Eng | 🟡 |
+| Q-EV9 | Should `conversation.message.sent` emit on EVERY message (high volume) or batched? | Per-message; volume manageable with proper partitioning | Eng | 🟡 |
+| Q-EV10 | Test/staging events — pollute prod analytics? | `metadata.environment` tag; analytics filters by env | Eng | 🟢 |
+
+---
+
+## 13. Cross-document linkage
+
+- [`attribution-policy.md`](./attribution-policy.md) — booking.attribution.assigned payload contract lives here
+- [`conversation-ownership-policy.md`](./conversation-ownership-policy.md) — conversation.handoff.* events trigger tier transitions
+- [`core-wellness-profile.md`](./core-wellness-profile.md) — wellness.profile.layer.updated payload references layer names
+- [`wellness-input-modules.md`](./wellness-input-modules.md) — each module emits wellness.input.recorded
+- [`core-user-states.md`](./core-user-states.md) — customer.state.changed reflects state machine transitions
+- [`assistant-persona.md`](./assistant-persona.md) — conversation.persona.violation feeds back
+
+---
+
+## 14. What this unblocks
+
+- **4a attribution backend** has canonical event names to emit
+- **Schedule rebuild (PR A)** knows what events to fire on WorkingHours/TimeBlock/etc.
+- **Master extension (PR B)** has master.* event names locked
+- **Analytics dashboard** has subscriber contract
+- **Loyalty / marketing** have firm event names to listen for
+- **New modules** added in future can extend without renaming chaos
+
+## 15. What this does NOT unblock
+
+- ❌ Replace event-bus technology decision (Q-EV1 still open)
+- ❌ Skip PII review on payloads (every PR with new event MUST be reviewed)
+- ❌ Allow ad-hoc event emission outside this catalog
+
+---
+
+## 16. Sign-off
+
+| Role | Approval | Date |
+|---|---|---|
+| UX Architect | ✅ | 2026-05-18 |
+| Backend lead | ☐ | |
+| Analytics lead | ☐ | |
+| Legal (PII rules §6) | ☐ | |
+| Security (cross-tenant §8) | ☐ | |
+
+## Last verified
+2026-05-18 (initial draft, locked event catalog)
