@@ -128,7 +128,7 @@ class Command(BaseCommand):
 
         services_by_ext: dict[int, CatalogService] = {}
         for spec in SERVICES:
-            obj, was_created = CatalogService.all_tenants.update_or_create(
+            svc, svc_created = CatalogService.all_tenants.update_or_create(
                 tenant=tenant,
                 external_id=spec["external_id"],
                 defaults={
@@ -143,12 +143,12 @@ class Command(BaseCommand):
                     "external_updated_at": now,
                 },
             )
-            services_by_ext[spec["external_id"]] = obj
-            self.stdout.write(f"  {'+' if was_created else '='} Service {obj.slug}")
+            services_by_ext[spec["external_id"]] = svc
+            self.stdout.write(f"  {'+' if svc_created else '='} Service {svc.slug}")
 
         masters_by_ext: dict[int, CatalogMaster] = {}
         for spec in MASTERS:
-            obj, was_created = CatalogMaster.all_tenants.update_or_create(
+            mst, mst_created = CatalogMaster.all_tenants.update_or_create(
                 tenant=tenant,
                 external_id=spec["external_id"],
                 defaults={
@@ -162,20 +162,20 @@ class Command(BaseCommand):
                     "external_updated_at": now,
                 },
             )
-            masters_by_ext[spec["external_id"]] = obj
-            self.stdout.write(f"  {'+' if was_created else '='} Master {obj.name}")
+            masters_by_ext[spec["external_id"]] = mst
+            self.stdout.write(f"  {'+' if mst_created else '='} Master {mst.name}")
 
             for svc_ext in spec["service_external_ids"]:
                 MasterService.all_tenants.update_or_create(
                     tenant=tenant,
-                    master=obj,
+                    master=mst,
                     service=services_by_ext[svc_ext],
                 )
 
             for day, is_working, start, end, lunch_start, lunch_end in WORKING_HOURS:
                 WorkingHours.all_tenants.update_or_create(
                     tenant=tenant,
-                    master=obj,
+                    master=mst,
                     day_of_week=day,
                     defaults={
                         "is_working": is_working,
