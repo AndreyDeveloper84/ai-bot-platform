@@ -471,3 +471,150 @@ class TestExecuteReschedule:
         assert result.error == "invalid_payload"
         assert client.cancel_calls == []
         assert client.create_calls == []
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Hotfix D — split-brain recovery between YClients-create and local-write
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestLocalCreateSplitBrainRecovery:
+    """The window between YClients.create_record succeeding and the
+    local BookingRequest.all_tenants.create succeeding is the last
+    split-brain gap. If the local write fails (DB transient, validator
+    surprise), YClients has the new record but our DB doesn't.
+
+    Recovery strategy:
+    - Try to cancel the new YClients record (best-effort).
+    - If compensate succeeded → flip old row to CANCELLED + emit
+      booking.cancelled with shared correlation_id.
+    - If compensate failed → leave old row RESCHEDULED, emit critical
+      system.module.health.degraded alert for ops triage.
+    - Always audit, always return error to caller.
+    """
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "record_id": 555,
+            "new_datetime": _future_iso(72),
+            "master_id": 11,
+            "service_id": 22,
+            "master_name": "Ольга",
+            "service_name": "Массаж",
+            "client_phone": "79991234567",
+            "client_name": "Anna",
+        }
+
+    def test_local_create_fails_compensate_succeeds_recovers_cleanly(
+        self, tenant: Tenant, bot_user: BotUser, monkeypatch
+    ) -> None:
+        from apps.eventbus.models import DomainEvent
+
+        booking = _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
+
+        # Force local BookingRequest.create to raise.
+        from apps.skills.booking import tools as tools_module
+
+        original_create = tools_module.BookingRequest.all_tenants.create
+
+        def _crashing_create(*args, **kwargs):
+            # Only fail the NEW create (suffix in comment marker), let the
+            # _make_booking fixture's own create pass.
+            if "rescheduled_from=555" in kwargs.get("comment", ""):
+                raise RuntimeError("simulated DB transient")
+            return original_create(*args, **kwargs)
+
+        monkeypatch.setattr(tools_module.BookingRequest.all_tenants, "create", _crashing_create)
+
+        with tenant_scope(tenant):
+            result = execute_reschedule(
+                client=client,
+                payload=self._payload(),
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+
+        assert result.error == "booking_reschedule_local_create_failed"
+        # YClients was told to cancel the new record (compensate).
+        assert 888 in client.cancel_calls
+
+        # Old row flipped from RESCHEDULED (set earlier) to CANCELLED.
+        booking.refresh_from_db()
+        assert booking.status == BookingRequest.Status.CANCELLED
+
+        # booking.cancelled envelope emitted with reschedule_local_create_failed reason.
+        cancel_ev = (
+            DomainEvent.objects.filter(event_name="booking.cancelled")
+            .order_by("-occurred_at")
+            .first()
+        )
+        assert cancel_ev is not None
+        assert cancel_ev.data["cancellation_reason"] == "reschedule_local_create_failed"
+
+        # Warning-level health alert (compensate succeeded → not critical).
+        alert = (
+            DomainEvent.objects.filter(event_name="system.module.health.degraded")
+            .order_by("-occurred_at")
+            .first()
+        )
+        assert alert is not None
+        assert alert.data["module_name"] == "booking.execute_reschedule"
+        assert alert.data["severity"] == "warning"
+        assert "split_brain_recovered" in alert.data["metric"]
+
+    def test_local_create_fails_compensate_fails_alerts_critical(
+        self, tenant: Tenant, bot_user: BotUser, monkeypatch
+    ) -> None:
+        from apps.eventbus.models import DomainEvent
+
+        booking = _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.create_response = BookingRecord(record_id=888, record_hash="h", raw={})
+
+        from apps.skills.booking import tools as tools_module
+
+        original_create = tools_module.BookingRequest.all_tenants.create
+
+        def _crashing_create(*args, **kwargs):
+            if "rescheduled_from=555" in kwargs.get("comment", ""):
+                raise RuntimeError("simulated DB transient")
+            return original_create(*args, **kwargs)
+
+        monkeypatch.setattr(tools_module.BookingRequest.all_tenants, "create", _crashing_create)
+
+        # Compensate cancel ALSO fails — true unresolved split-brain.
+        original_cancel = client.cancel_record
+
+        def _failing_cancel(*, record_id: int):
+            if record_id == 888:
+                raise YClientsAPIError("simulated compensate cancel failure")
+            return original_cancel(record_id=record_id)
+
+        client.cancel_record = _failing_cancel  # type: ignore[method-assign]
+
+        with tenant_scope(tenant):
+            result = execute_reschedule(
+                client=client,
+                payload=self._payload(),
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+
+        assert result.error == "booking_reschedule_local_create_failed"
+
+        # Old row STAYS in RESCHEDULED — we couldn't undo, so don't lie.
+        booking.refresh_from_db()
+        assert booking.status == BookingRequest.Status.RESCHEDULED
+
+        # Critical-level health alert (compensate failed → ops paging).
+        alert = (
+            DomainEvent.objects.filter(event_name="system.module.health.degraded")
+            .order_by("-occurred_at")
+            .first()
+        )
+        assert alert is not None
+        assert alert.data["severity"] == "critical"
+        assert "split_brain_unresolved" in alert.data["metric"]
+        assert "yc_id=888" in alert.data["metric"]
