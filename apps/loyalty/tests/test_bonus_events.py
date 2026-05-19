@@ -327,3 +327,200 @@ class TestRevokeFirstVisitClearsReferralClaim:
         # to reverse referral payouts (not in Phase 2.d).
         referral = LoyaltyReferral.all_tenants.get(referee_customer=customer)
         assert referral.status == LoyaltyReferral.Status.COMPLETED
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Retro review hotfix #1 + #2 — revoke-aware bonus checks
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestRevokeAwareBonusChecks:
+    """Code Reviewer retro pass found two interaction bugs with REFUND_REVOKE:
+
+    #1: referral check used raw EARN_VISIT.count(), so a cancelled-then-
+        recompleted first visit looked like «not first» (count=2) and the
+        referee's recompleted visit silently failed to credit the referrer.
+
+    #2: long-return prior-EARN_VISIT lookup ignored REFUND_REVOKE, so a
+        30-day-ago revoked visit blocked the >90d gap detection on the
+        next real visit.
+
+    Both fix together via «effective visit count» semantics (earn − revoke).
+    """
+
+    @pytest.fixture
+    def referrer(self, tenant) -> BotUser:
+        return BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="hotfix-referrer"
+        )
+
+    def test_revoked_first_visit_does_not_double_credit_referrer(
+        self, tenant, customer, service, referrer
+    ):
+        """Regression guard for the COMPLETED filter — NOT a test of the
+        Hotfix A count-math change.
+
+        Scenario: referee's first visit fires referral → that booking
+        is cancelled (REFUND_REVOKE) → another visit later. The referrer
+        was already credited at the first visit (existing design — revoke
+        does not undo the referrer payout, see
+        `test_revoke_does_not_undo_referral_credit`). The second visit
+        must NOT re-credit because the LoyaltyReferral row is already
+        in COMPLETED status.
+
+        This test passes with or without the count-math fix — the
+        PENDING-filter short-circuit catches the second visit before
+        the count is evaluated. Kept as a regression guard.
+        """
+        with tenant_scope(tenant):
+            create_referral(referrer=referrer, referee=customer)
+            account = get_or_create_account(customer)
+
+            booking1 = _booking(tenant, customer, service, "0")
+            credit_points(
+                account,
+                points=12,
+                event_type=LoyaltyEvent.EventType.EARN_VISIT,
+                booking=booking1,
+            )
+            # First visit credited the referrer (existing behavior).
+            referrer_acc = LoyaltyAccount.all_tenants.get(customer=referrer)
+            assert referrer_acc.balance == REFERRAL_BONUS_POINTS
+
+            # That first visit gets cancelled.
+            revoke_visit_points(account, booking=booking1)
+
+            # Customer completes a NEW visit. Without the hotfix, count==2
+            # already — referral check (count==1) would skip. With hotfix,
+            # effective_visits = 2−1 = 1, BUT referral is now COMPLETED so
+            # _maybe_complete_referral short-circuits at the pending filter.
+            booking2 = _booking(tenant, customer, service, "1")
+            credit_points(
+                account,
+                points=12,
+                event_type=LoyaltyEvent.EventType.EARN_VISIT,
+                booking=booking2,
+            )
+
+        # Referrer keeps the 50 — not re-credited (PENDING filter).
+        referrer_acc.refresh_from_db()
+        assert referrer_acc.balance == REFERRAL_BONUS_POINTS
+
+    def test_referral_fires_when_pre_referral_visit_was_revoked(
+        self, tenant, customer, service, referrer
+    ):
+        # Edge case: customer had a visit cancelled BEFORE being referred.
+        # Then referral was created. Then their NEXT visit completes.
+        # Without hotfix, count=2 (raw) → referral skipped. With hotfix,
+        # effective_visits = 2-1 = 1 → referral fires.
+        with tenant_scope(tenant):
+            account = get_or_create_account(customer)
+
+            # Pre-existing cancelled visit (no referrer yet).
+            old_booking = _booking(tenant, customer, service, "0")
+            credit_points(
+                account,
+                points=12,
+                event_type=LoyaltyEvent.EventType.EARN_VISIT,
+                booking=old_booking,
+            )
+            revoke_visit_points(account, booking=old_booking)
+
+            # NOW referral is created.
+            create_referral(referrer=referrer, referee=customer)
+
+            # Customer completes their first post-referral visit.
+            new_booking = _booking(tenant, customer, service, "1")
+            credit_points(
+                account,
+                points=12,
+                event_type=LoyaltyEvent.EventType.EARN_VISIT,
+                booking=new_booking,
+            )
+
+        # Referrer should be credited — this is effectively the «first
+        # visit» after the referral, even though raw EARN_VISIT count = 2.
+        referrer_acc = LoyaltyAccount.all_tenants.get(customer=referrer)
+        assert referrer_acc.balance == REFERRAL_BONUS_POINTS
+        referral = LoyaltyReferral.all_tenants.get(referee_customer=customer)
+        assert referral.status == LoyaltyReferral.Status.COMPLETED
+
+    def test_long_return_fires_when_prior_visit_was_revoked(self, tenant, customer, service):
+        """Fix matters scenario: 100d-ago active visit + 30d-ago revoked
+        visit + new visit today. Without hotfix the lookup returned the
+        30d-ago row and computed gap=30d → no bonus. With hotfix the
+        revoked row is excluded → gap=100d → bonus fires.
+
+        Events seeded via ORM to avoid credit_points' own long-return
+        side effects (which would add a spurious EARN_RETURN at the
+        90d boundary).
+        """
+        with tenant_scope(tenant):
+            account = get_or_create_account(customer)
+
+        # Seed historical state directly — no _apply_visit_bonuses.
+        old_booking = _booking(tenant, customer, service, "0")
+        old_event = LoyaltyEvent.all_tenants.create(
+            tenant=tenant,
+            account=account,
+            event_type=LoyaltyEvent.EventType.EARN_VISIT,
+            points_delta=12,
+            balance_after=12,
+            booking=old_booking,
+            reason="seed 100d-ago active",
+        )
+        _backdate_event(old_event, days_ago=100)
+
+        revoked_booking = _booking(tenant, customer, service, "1")
+        revoked_earn = LoyaltyEvent.all_tenants.create(
+            tenant=tenant,
+            account=account,
+            event_type=LoyaltyEvent.EventType.EARN_VISIT,
+            points_delta=12,
+            balance_after=24,
+            booking=revoked_booking,
+            reason="seed 30d-ago active",
+        )
+        _backdate_event(revoked_earn, days_ago=30)
+
+        revoke_row = LoyaltyEvent.all_tenants.create(
+            tenant=tenant,
+            account=account,
+            event_type=LoyaltyEvent.EventType.REFUND_REVOKE,
+            points_delta=-12,
+            balance_after=12,
+            booking=revoked_booking,
+            reason="seed revoke",
+        )
+        _backdate_event(revoke_row, days_ago=28)
+
+        # Resync balance cache.
+        LoyaltyAccount.all_tenants.filter(pk=account.pk).update(balance=12)
+        account.refresh_from_db()
+        before = LoyaltyEvent.all_tenants.filter(
+            account=account, event_type=LoyaltyEvent.EventType.EARN_RETURN
+        ).count()
+
+        # Today — new visit. With hotfix: 30d-ago revoked excluded,
+        # prior lookup hits 100d-ago active → gap=100d → bonus.
+        with tenant_scope(tenant):
+            credit_points(
+                account,
+                points=12,
+                event_type=LoyaltyEvent.EventType.EARN_VISIT,
+                booking=_booking(tenant, customer, service, "2"),
+            )
+
+        after = LoyaltyEvent.all_tenants.filter(
+            account=account, event_type=LoyaltyEvent.EventType.EARN_RETURN
+        ).count()
+        assert after == before + 1
+        latest_bonus = (
+            LoyaltyEvent.all_tenants.filter(
+                account=account, event_type=LoyaltyEvent.EventType.EARN_RETURN
+            )
+            .order_by("-occurred_at")
+            .first()
+        )
+        assert latest_bonus is not None
+        assert latest_bonus.metadata["gap_days"] >= 90
