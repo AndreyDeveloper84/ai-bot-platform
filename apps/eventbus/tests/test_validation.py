@@ -16,16 +16,25 @@ from apps.eventbus.validation import (
 
 
 def _envelope(**overrides) -> Envelope:
-    defaults = dict(
-        event_id=new_ulid(),
-        event_name=V.BOOKING_CREATED,
-        event_version="1.0",
-        occurred_at=dt.datetime.now(dt.UTC),
-        actor=Actor(type="system"),
-        data={},
+    """Build an Envelope with optional per-test field overrides.
+
+    Uses explicit kwargs (not a dict + splat) so mypy can match each
+    keyword to its typed parameter on :class:`Envelope`.
+    """
+
+    return Envelope(
+        event_id=overrides.pop("event_id", new_ulid()),
+        event_name=overrides.pop("event_name", V.BOOKING_CREATED),
+        event_version=overrides.pop("event_version", "1.0"),
+        occurred_at=overrides.pop("occurred_at", dt.datetime.now(dt.UTC)),
+        actor=overrides.pop("actor", Actor(type="system")),
+        data=overrides.pop("data", {}),
+        tenant_id=overrides.pop("tenant_id", None),
+        correlation_id=overrides.pop("correlation_id", None),
+        causation_id=overrides.pop("causation_id", None),
+        metadata=overrides.pop("metadata", {}),
+        **overrides,
     )
-    defaults.update(overrides)
-    return Envelope(**defaults)
 
 
 class TestValidateEnvelope:
