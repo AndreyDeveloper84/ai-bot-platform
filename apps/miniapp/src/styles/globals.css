@@ -355,3 +355,221 @@ a {
   color: var(--c-accent);
   border-bottom-color: var(--c-accent);
 }
+
+/* Profile (F4). */
+.profile-identity {
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.profile-phone {
+  margin-top: var(--s-1);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.profile-phone--missing {
+  color: var(--c-warning);
+}
+
+.profile-favorites {
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-bottom: var(--s-3);
+  font-size: var(--font-size-200);
+}
+
+.profile-favorites__label {
+  color: var(--c-text-secondary);
+}
+
+.profile-section {
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.profile-section__title {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  margin: 0 0 var(--s-3);
+  color: var(--c-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.profile-section--privacy .profile-section__title {
+  color: var(--c-warning);
+}
+
+.profile-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.profile-toggle:last-child {
+  border-bottom: 0;
+}
+
+.profile-toggle__label {
+  flex: 1;
+  font-size: var(--font-size-300);
+}
+
+.profile-toggle__input {
+  width: 48px;
+  height: 28px;
+  appearance: none;
+  background: var(--c-divider);
+  border-radius: 14px;
+  position: relative;
+  transition: background 0.18s ease;
+  cursor: pointer;
+}
+
+.profile-toggle__input::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 24px;
+  height: 24px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.18s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.profile-toggle__input:checked {
+  background: var(--c-accent);
+}
+
+.profile-toggle__input:checked::before {
+  transform: translateX(20px);
+}
+
+.profile-field {
+  display: block;
+  margin-bottom: var(--s-3);
+}
+
+.profile-field:last-child {
+  margin-bottom: 0;
+}
+
+.profile-field__label {
+  display: block;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  margin-bottom: var(--s-1);
+}
+
+.profile-field__hint {
+  display: block;
+  margin-top: var(--s-1);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.profile-input {
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-300);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+  background: #fff;
+  color: var(--c-text-primary);
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+.profile-input:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.profile-input--multiline {
+  min-height: 80px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.btn-secondary--danger {
+  color: var(--c-warning);
+  border-color: var(--c-warning);
+}
+
+.btn-danger {
+  background: var(--c-warning);
+  color: #fff;
+  border: 0;
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r-sm);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Modal (delete-confirmation in F4). */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s-4);
+  z-index: 1000;
+}
+
+.modal-card {
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  max-width: 480px;
+  width: 100%;
+}
+
+.modal-card__title {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+}
+
+.modal-card__body {
+  margin: 0 0 var(--s-3);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+}
+
+.modal-card__actions {
+  display: flex;
+  gap: var(--s-2);
+  justify-content: flex-end;
+  margin-top: var(--s-4);
+}
+
+/* Hello screen — small nav row to visits + profile. */
+.hello-nav {
+  display: flex;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+  flex-wrap: wrap;
+}

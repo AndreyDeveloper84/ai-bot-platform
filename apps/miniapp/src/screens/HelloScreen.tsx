@@ -64,6 +64,14 @@ export function HelloScreen() {
       cta={<StickyCta onClick={() => navigate("/catalog")}>Записаться</StickyCta>}
     >
       <p>Помогу записаться в студию {tenant.name}.</p>
+      <nav className="hello-nav" aria-label="Разделы">
+        <button type="button" className="btn-secondary" onClick={() => navigate("/visits")}>
+          Мои записи
+        </button>
+        <button type="button" className="btn-secondary" onClick={() => navigate("/me")}>
+          Профиль
+        </button>
+      </nav>
     </ScreenLayout>
   );
 }
