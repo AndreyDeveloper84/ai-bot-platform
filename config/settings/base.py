@@ -101,6 +101,12 @@ LOCAL_APPS = [
     # Subscriber activates by adding apps.loyalty.subscribers.LoyaltySubscriber
     # to DOMAIN_EVENT_SUBSCRIBERS env var.
     "apps.loyalty",
+    # Master-Admin internal chat — PR 6 (production blocker for
+    # earnings disputes, leave requests, review concerns, substitution,
+    # offboarding). See ``docs/design/handoffs/2026-05-19-master-admin-internal-chat-handoff.md``.
+    # Data layer + basic CRUD; SLA beat, PII scan, founder flow,
+    # frontend Mini-App tabs all in follow-up PRs.
+    "apps.internal_chat",
 ]
 
 INSTALLED_APPS = [
