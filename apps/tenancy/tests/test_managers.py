@@ -491,3 +491,217 @@ class TestRetroB3SlugImmutability:
         t.slug = "rebound"
         with pytest.raises(ValueError, match="immutable"):
             t.save()
+
+
+# ---------------------------------------------------------------------------
+# Tenancy retro B2 — write-path enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB2WriteEnforcement:
+    """Pre-fix TenantScopedManager.get_queryset() filtered reads, but
+    write methods (bulk_create, get_or_create, update_or_create,
+    create) bypassed scoping entirely. A caller passing tenant=other
+    to any of these wrote cross-tenant rows with no check.
+
+    Post-fix: tenant kwarg ABSENT → stamp current_tenant(); PRESENT
+    and matches → pass through; PRESENT and mismatches → raise
+    CrossTenantError (even in audit mode, since writes are
+    irreversible state).
+    """
+
+    def test_create_stamps_tenant_when_omitted(self, settings):
+        # A model_a-style write WITHOUT tenant kwarg gets the tenant
+        # stamped from current_tenant(). Use a real model since the
+        # default manager is the production manager.
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t = Tenant.objects.create(slug="b2-stamp", name="Stamp")
+        with tenant_scope(t):
+            row = AuditLog.objects.create(action="test.write_stamps", target="x")
+        assert row.tenant_id == t.id
+
+    def test_create_matching_tenant_passes(self, settings):
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t = Tenant.objects.create(slug="b2-match", name="Match")
+        with tenant_scope(t):
+            row = AuditLog.objects.create(action="test.matching", target="x", tenant=t)
+        assert row.tenant_id == t.id
+
+    def test_create_mismatched_tenant_raises_in_audit_mode(self, settings):
+        # Audit mode raises on writes — silent cross-tenant writes are
+        # irreversible and not acceptable degradation, unlike reads.
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t1 = Tenant.objects.create(slug="b2-mm-a", name="A")
+        t2 = Tenant.objects.create(slug="b2-mm-b", name="B")
+        with tenant_scope(t1), pytest.raises(CrossTenantError):
+            AuditLog.objects.create(action="test.cross_tenant", target="x", tenant=t2)
+
+    def test_create_mismatched_tenant_raises_in_strict_mode(self, settings):
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        t1 = Tenant.objects.create(slug="b2-mm-s-a", name="A")
+        t2 = Tenant.objects.create(slug="b2-mm-s-b", name="B")
+        with tenant_scope(t1), pytest.raises(CrossTenantError):
+            AuditLog.objects.create(action="test.cross_tenant_strict", target="x", tenant=t2)
+
+    def test_create_without_context_raises_in_strict(self, settings):
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        # No tenant_scope entered → strict mode refuses the write.
+        with pytest.raises(CrossTenantError, match="without a tenant context"):
+            AuditLog.objects.create(action="test.no_scope", target="x")
+
+    def test_get_or_create_stamps_tenant(self, settings):
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t = Tenant.objects.create(slug="b2-goc", name="GOC")
+        with tenant_scope(t):
+            row, created = AuditLog.objects.get_or_create(
+                action="b2.get_or_create",
+                target="anchor",
+                defaults={"payload": {"x": 1}},
+            )
+        assert created
+        assert row.tenant_id == t.id
+
+    def test_get_or_create_mismatched_raises(self, settings):
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t1 = Tenant.objects.create(slug="b2-goc-a", name="A")
+        t2 = Tenant.objects.create(slug="b2-goc-b", name="B")
+        with tenant_scope(t1), pytest.raises(CrossTenantError):
+            AuditLog.objects.get_or_create(
+                action="b2.goc_cross",
+                tenant=t2,
+            )
+
+    def test_bulk_create_stamps_tenant_on_each_instance(self, settings):
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t = Tenant.objects.create(slug="b2-bulk", name="Bulk")
+        with tenant_scope(t):
+            instances = [AuditLog(action=f"b2.bulk.{i}", target="x") for i in range(3)]
+            AuditLog.objects.bulk_create(instances)
+        rows = AuditLog.all_tenants.filter(action__startswith="b2.bulk.")
+        assert rows.count() == 3
+        for row in rows:
+            assert row.tenant_id == t.id
+
+    def test_bulk_create_mismatched_instance_raises(self, settings):
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t1 = Tenant.objects.create(slug="b2-bulk-a", name="A")
+        t2 = Tenant.objects.create(slug="b2-bulk-b", name="B")
+        with tenant_scope(t1):
+            instances = [
+                AuditLog(action="b2.bulk_cross.0", target="x"),
+                AuditLog(action="b2.bulk_cross.1", target="x", tenant=t2),
+            ]
+            with pytest.raises(CrossTenantError):
+                AuditLog.objects.bulk_create(instances)
+
+    def test_update_or_create_mismatched_defaults_raises(self, settings):
+        # Reviewer B-2: pre-fix had no test for update_or_create mismatch
+        # via the ``defaults`` dict — the assertion that update_or_create
+        # rejects cross-tenant writes was unverified. This test pins it.
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t1 = Tenant.objects.create(slug="b2-uoc-a", name="A")
+        t2 = Tenant.objects.create(slug="b2-uoc-b", name="B")
+        with tenant_scope(t1), pytest.raises(CrossTenantError):
+            AuditLog.objects.update_or_create(
+                action="b2.uoc_cross",
+                target="x",
+                defaults={"payload": {"x": 1}, "tenant": t2},
+            )
+
+    def test_queryset_update_mismatched_tenant_raises(self, settings):
+        # Reviewer B-1: pre-fix ``.objects.filter(...).update(tenant=other)``
+        # could silently reassign rows cross-tenant. Post-fix the
+        # TenantScopedQuerySet.update() override catches it.
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t1 = Tenant.objects.create(slug="b2-upd-a", name="A")
+        t2 = Tenant.objects.create(slug="b2-upd-b", name="B")
+        with tenant_scope(t1):
+            AuditLog.objects.create(action="b2.update_target", target="x")
+            with pytest.raises(CrossTenantError):
+                AuditLog.objects.filter(action="b2.update_target").update(tenant=t2)
+
+    def test_queryset_update_intra_tenant_passes(self, settings):
+        # Negative regression: an intra-tenant update (no tenant kwarg)
+        # must continue to work — this is the legitimate use case.
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "audit"
+        t = Tenant.objects.create(slug="b2-upd-intra", name="Intra")
+        with tenant_scope(t):
+            AuditLog.objects.create(action="b2.intra_update", target="before")
+            updated = AuditLog.objects.filter(action="b2.intra_update").update(target="after")
+        assert updated == 1
+        row = AuditLog.all_tenants.get(action="b2.intra_update")
+        assert row.target == "after"
+
+    def test_bulk_create_without_scope_in_strict_raises(self, settings):
+        # Reviewer Y-2: closes the previous silent-skip when bulk_create
+        # ran without a tenant_scope under strict mode.
+        from apps.audit.models import AuditLog
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with pytest.raises(CrossTenantError, match="without a tenant context"):
+            AuditLog.objects.bulk_create([AuditLog(action="b2.bulk_no_scope", target="x")])
+
+
+# ---------------------------------------------------------------------------
+# Abstract-base check — system check for tenant FK + manager pair
+# ---------------------------------------------------------------------------
+
+
+class TestSystemCheckTenantManagers:
+    """The Django check walks installed models with a tenant FK and
+    warns when the canonical manager pair is missing.
+    """
+
+    def test_check_returns_warnings_for_known_missing_models(self):
+        from apps.tenancy.system_checks import check_tenant_scoped_managers
+
+        messages = check_tenant_scoped_managers()
+        # Closes reviewer Y-5: the previous ``ids.issubset(...)``
+        # assertion passed vacuously on an empty messages list (which
+        # would mean the check is broken). Require AT LEAST ONE message
+        # AND restrict ids to the documented W-codes so a future check
+        # adding W902 trips this test (forcing the new code to be
+        # tested explicitly).
+        assert len(messages) >= 1, (
+            "expected at least one W900/W901 warning on dev — the check "
+            "should be firing on the known unscoped infrastructure models"
+        )
+        ids = {m.id for m in messages}
+        assert ids <= {"tenancy.W900", "tenancy.W901"}, (
+            f"unexpected check ids: {ids - {'tenancy.W900', 'tenancy.W901'}}"
+        )
+
+    def test_well_scoped_model_does_not_trip_check(self):
+        # AuditLog has both objects = TenantScopedManager() AND
+        # all_tenants = models.Manager() — the canonical shape. The
+        # check must NOT flag it.
+        from apps.audit.models import AuditLog
+        from apps.tenancy.system_checks import check_tenant_scoped_managers
+
+        messages = check_tenant_scoped_managers()
+        offenders = [m for m in messages if getattr(m, "obj", None) is AuditLog]
+        assert offenders == []

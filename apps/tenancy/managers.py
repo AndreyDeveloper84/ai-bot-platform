@@ -107,11 +107,79 @@ def _audit_log(action: str, **extra: Any) -> None:
     logger.warning("tenancy.scope.%s extra=%r", action, extra)
 
 
+class TenantScopedQuerySet(models.QuerySet):
+    """QuerySet returned by :class:`TenantScopedManager`.
+
+    Tenancy retro B2: overrides ``update()`` so a caller doing
+    ``Model.objects.filter(...).update(tenant_id=other)`` cannot
+    silently reassign rows cross-tenant. The Manager-level overrides
+    (``create``, ``get_or_create`` …) close the row-insert paths;
+    this QuerySet override closes the row-rewrite path.
+
+    ``delete()`` is NOT overridden: the rows reachable via this
+    QuerySet are already scoped to current_tenant() by
+    ``get_queryset()``, so deleting them is intra-tenant by
+    construction. Cross-tenant delete attempts via ``.filter(tenant=
+    other)`` are caught by :meth:`TenantScopedManager.filter` upstream.
+    """
+
+    def update(self, **kwargs: Any) -> int:
+        mode = _mode()
+        if mode != "off":
+            tenant = current_tenant()
+            if tenant is not None:
+                # Walk kwargs for any tenant-related field; raise on
+                # mismatch. Reuses the lookup-alias regex so
+                # ``update(tenant_id=other, tenant__id=other)`` etc.
+                # are all caught.
+                for key, value in list(kwargs.items()):
+                    if not _TENANT_LOOKUP_RE.match(key):
+                        continue
+                    raw = getattr(value, "pk", value)
+                    if str(raw) != str(tenant.id):
+                        if mode == "strict":
+                            raise CrossTenantError(
+                                f"{self.model.__name__}.objects.update("
+                                f"{key}={raw!r}) attempted while "
+                                f"current_tenant()={tenant.id!r}. "
+                                "Cross-tenant row reassignment is not "
+                                "allowed via the default manager; use "
+                                "`.all_tenants` if intentional."
+                            )
+                        _audit_log(
+                            "explicit_cross_tenant_update",
+                            model=self.model.__name__,
+                            current=str(tenant.id),
+                            requested=str(raw),
+                            field=key,
+                            mode=mode,
+                        )
+                        # Audit mode: still raise — writes are
+                        # irreversible state; see B2 policy note on
+                        # ``_enforce_write_tenant``.
+                        raise CrossTenantError(
+                            f"{self.model.__name__}.objects.update("
+                            f"{key}={raw!r}) attempted while "
+                            f"current_tenant()={tenant.id!r}. "
+                            "Cross-tenant row reassignment is not "
+                            "silently allowed even in audit mode."
+                        )
+        return super().update(**kwargs)
+
+
 class TenantScopedManager(models.Manager):
     """Default manager: scopes every read to ``current_tenant()``.
 
     See module docstring for behaviour under audit / strict / off.
+
+    Tenancy retro B2: ``_queryset_class`` is set to
+    :class:`TenantScopedQuerySet` so ``.filter(...).update(...)``
+    routes through the cross-tenant-rewrite guard. Without this,
+    a vanilla ``QuerySet.update(tenant=other)`` would silently
+    reassign rows across tenants.
     """
+
+    _queryset_class = TenantScopedQuerySet
 
     def get_queryset(self) -> "QuerySet[Any]":
         mode = _mode()
@@ -188,6 +256,168 @@ class TenantScopedManager(models.Manager):
                 return self.none()
 
         return super().filter(*args, **kwargs)
+
+    # ─── write-path enforcement (Tenancy retro B2) ────────────────────
+    #
+    # Pre-fix `get_queryset()` filtered reads but write methods
+    # (`bulk_create`, `get_or_create`, `update_or_create`,
+    # QuerySet.update / delete) bypassed scoping entirely. A caller
+    # passing `tenant=other` to any of these wrote / mutated cross-
+    # tenant rows with no check.
+    #
+    # Hybrid policy mirrors `filter()`:
+    #   - tenant kwarg ABSENT  → stamp current_tenant() into the call.
+    #   - tenant kwarg PRESENT and matches current → pass through.
+    #   - tenant kwarg PRESENT and mismatches      → raise / audit per
+    #                                                 STRICT_TENANT_SCOPE.
+    # The stamp behaviour preserves backward-compat for the eight
+    # existing call sites that legitimately rely on "the manager knows
+    # the current tenant"; the mismatch raise closes the cross-tenant
+    # write vector.
+
+    def get_or_create(self, defaults: Any = None, **kwargs: Any) -> tuple[Any, bool]:
+        self._enforce_write_tenant("get_or_create", kwargs)
+        if defaults is not None:
+            self._enforce_write_tenant("get_or_create.defaults", defaults)
+        return super().get_or_create(defaults=defaults, **kwargs)
+
+    def update_or_create(
+        self,
+        defaults: Any = None,
+        create_defaults: Any = None,
+        **kwargs: Any,
+    ) -> tuple[Any, bool]:
+        self._enforce_write_tenant("update_or_create", kwargs)
+        if defaults is not None:
+            self._enforce_write_tenant("update_or_create.defaults", defaults)
+        if create_defaults is not None:
+            self._enforce_write_tenant("update_or_create.create_defaults", create_defaults)
+        return super().update_or_create(
+            defaults=defaults,
+            create_defaults=create_defaults,
+            **kwargs,
+        )
+
+    def create(self, **kwargs: Any) -> Any:
+        # ``.objects.create(...)`` is the most common write path; route
+        # it through the same enforcement so a caller passing
+        # ``tenant=other`` can't slip past.
+        self._enforce_write_tenant("create", kwargs)
+        return super().create(**kwargs)
+
+    def bulk_create(self, objs: Any, *args: Any, **kwargs: Any) -> Any:
+        # ``bulk_create`` takes a list of model instances, not a kwargs
+        # dict — enforcement walks each instance's ``tenant_id``.
+        mode = _mode()
+        tenant = current_tenant()
+        if mode != "off" and objs:
+            if tenant is None:
+                # Mirror ``_enforce_write_tenant``: strict mode refuses
+                # writes without scope; audit mode logs and continues
+                # (closes reviewer Y-2 — pre-fix the no-scope branch
+                # was a silent skip, inconsistent with create() policy).
+                if mode == "strict":
+                    raise CrossTenantError(
+                        f"{self.model.__name__}.objects.bulk_create([...]) "
+                        "called without a tenant context. Either enter "
+                        "`tenant_scope(t)` or use `.all_tenants.bulk_create(...)`."
+                    )
+                _audit_log(
+                    "write_without_context",
+                    model=self.model.__name__,
+                    op="bulk_create",
+                )
+            else:
+                for obj in objs:
+                    self._enforce_instance_tenant("bulk_create", obj, tenant)
+        return super().bulk_create(objs, *args, **kwargs)
+
+    def _enforce_write_tenant(self, op: str, kwargs: dict[str, Any]) -> None:
+        """Stamp or assert tenant on a write-method kwarg dict."""
+
+        mode = _mode()
+        if mode == "off":
+            return
+        tenant = current_tenant()
+        if tenant is None:
+            # No scope → defer to the get_queryset() audit/strict path;
+            # don't fabricate a tenant from nowhere on a write.
+            if mode == "strict":
+                raise CrossTenantError(
+                    f"{self.model.__name__}.objects.{op}(...) called "
+                    "without a tenant context. Either enter "
+                    "`tenant_scope(t)` or use `.all_tenants.{op}(...)`."
+                )
+            _audit_log(
+                "write_without_context",
+                model=self.model.__name__,
+                op=op,
+            )
+            return
+        # Walk for any tenant-related kwarg.
+        provided_id: Any = None
+        if "tenant" in kwargs:
+            provided_id = getattr(kwargs["tenant"], "pk", kwargs["tenant"])
+        elif "tenant_id" in kwargs:
+            provided_id = kwargs["tenant_id"]
+        if provided_id is None:
+            # Stamp — caller relied on implicit current_tenant().
+            kwargs.setdefault("tenant", tenant)
+            return
+        if str(provided_id) != str(tenant.id):
+            if mode == "strict":
+                raise CrossTenantError(
+                    f"{self.model.__name__}.objects.{op}(tenant={provided_id!r}) "
+                    f"attempted while current_tenant()={tenant.id!r}. "
+                    "Use `.all_tenants.<op>(...)` for legitimate cross-"
+                    "tenant writes."
+                )
+            _audit_log(
+                "explicit_cross_tenant_write",
+                model=self.model.__name__,
+                op=op,
+                current=str(tenant.id),
+                requested=str(provided_id),
+                mode=mode,
+            )
+            # In audit mode, raise anyway — a silent cross-tenant write
+            # is unrecoverable. Different from reads (where empty is
+            # acceptable degradation), writes commit irreversible state.
+            raise CrossTenantError(
+                f"{self.model.__name__}.objects.{op}(tenant={provided_id!r}) "
+                f"attempted while current_tenant()={tenant.id!r}. "
+                "Cross-tenant writes are not silently allowed even in "
+                "audit mode. Use `.all_tenants` if intentional."
+            )
+
+    def _enforce_instance_tenant(self, op: str, obj: Any, tenant: Any) -> None:
+        """Stamp or assert tenant on a model instance (for bulk_create)."""
+
+        mode = _mode()
+        provided_id = getattr(obj, "tenant_id", None)
+        if provided_id is None:
+            obj.tenant = tenant
+            return
+        if str(provided_id) != str(tenant.id):
+            if mode == "strict":
+                raise CrossTenantError(
+                    f"{self.model.__name__}.objects.{op}([..., "
+                    f"tenant={provided_id!r}, ...]) attempted while "
+                    f"current_tenant()={tenant.id!r}."
+                )
+            _audit_log(
+                "explicit_cross_tenant_write",
+                model=self.model.__name__,
+                op=op,
+                current=str(tenant.id),
+                requested=str(provided_id),
+                mode=mode,
+            )
+            raise CrossTenantError(
+                f"{self.model.__name__}.objects.{op}(...) contained an "
+                f"instance with tenant_id={provided_id!r} while "
+                f"current_tenant()={tenant.id!r}."
+            )
 
 
 def _collect_mismatched_tenant_values(args: tuple, kwargs: dict, current_id: Any) -> list[Any]:
