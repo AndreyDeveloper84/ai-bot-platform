@@ -17,4 +17,5 @@ urlpatterns = [
     path("onboarding/reject", views.onboarding_reject, name="onboarding_reject"),
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
     path("me", views.me, name="me"),
+    path("dashboard", views.dashboard, name="dashboard"),
 ]

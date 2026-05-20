@@ -45,11 +45,13 @@ from typing import Any
 from django.conf import settings
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.utils import timezone as dj_timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.master_api.services.dashboard import build_dashboard
 from apps.events.services import emit
 from apps.events.vocabulary import (
     MASTER_ONBOARDING_ACCEPTED,
@@ -603,3 +605,27 @@ def me(request: HttpRequest) -> HttpResponse:
             },
         }
     )
+
+
+# --- GET /dashboard --------------------------------------------------------
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def dashboard(request: HttpRequest) -> HttpResponse:
+    """M1 master-mobile home aggregator (master-mobile §M1).
+
+    Spec quote (§M1 layout block):
+
+        «Screen M1 — Master mobile dashboard (home) … СЕЙЧАС … СЛЕДУЮЩИЙ
+        КЛИЕНТ … ТРЕБУЮТ ВНИМАНИЯ (2) … СЕГОДНЯ … [🏠] [📅] [💬 2] [👤]»
+
+    Single GET — composes :func:`apps.master_api.services.dashboard.build_dashboard`.
+    Read-only; no audit row. Tenant TZ taken from
+    :attr:`apps.tenancy.models.Tenant.timezone` (default Europe/Moscow,
+    fallback UTC on invalid IANA names).
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    snapshot = build_dashboard(master, dj_timezone.now())
+    return JsonResponse(snapshot.to_dict())
