@@ -107,6 +107,36 @@ MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 #      occurred_at: <iso>}
 MASTER_SERVICES_CHANGED = "master.services_changed"
 
+# --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
+# The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
+# (analytics-bus event names — snake_case dotted notation aligned with
+# event-taxonomy.md §3.12). The SLA-breach + auto-close slugs land
+# alongside the Celery beat that detects them (separate PR); kept out of
+# the canonical set here so an out-of-vocab warning doesn't fire from
+# stub code that does not yet emit them.
+#
+# Payload contracts (consumed by event-taxonomy.md §3.12):
+#   internal_chat.thread_created:
+#     {tenant_id, thread_id, master_id, topic, linked_artifact_type,
+#      linked_artifact_id, actor_id, is_sensitive}
+#   internal_chat.message_sent:
+#     {tenant_id, thread_id, message_id, sender_role, sender_user_id,
+#      has_attachments}     # NOTE: body content NEVER in payload
+#   internal_chat.thread_status_changed:
+#     {tenant_id, thread_id, from_status, to_status, actor_id}
+#   internal_chat.thread_assigned:
+#     {tenant_id, thread_id, assigned_admin_id, actor_id}
+#   internal_chat.escalated_to_founder:
+#     {tenant_id, thread_id, master_id, reason_class}
+#   internal_chat.marked_read:
+#     {tenant_id, thread_id, reader_role, reader_user_id, count}
+INTERNAL_CHAT_THREAD_CREATED = "internal_chat.thread_created"
+INTERNAL_CHAT_MESSAGE_SENT = "internal_chat.message_sent"
+INTERNAL_CHAT_THREAD_STATUS_CHANGED = "internal_chat.thread_status_changed"
+INTERNAL_CHAT_THREAD_ASSIGNED = "internal_chat.thread_assigned"
+INTERNAL_CHAT_ESCALATED_TO_FOUNDER = "internal_chat.escalated_to_founder"
+INTERNAL_CHAT_MARKED_READ = "internal_chat.marked_read"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -138,6 +168,12 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_INVITED,
         MASTER_INVITE_DISPATCHED,
         MASTER_SERVICES_CHANGED,
+        INTERNAL_CHAT_THREAD_CREATED,
+        INTERNAL_CHAT_MESSAGE_SENT,
+        INTERNAL_CHAT_THREAD_STATUS_CHANGED,
+        INTERNAL_CHAT_THREAD_ASSIGNED,
+        INTERNAL_CHAT_ESCALATED_TO_FOUNDER,
+        INTERNAL_CHAT_MARKED_READ,
     }
 )
 

@@ -72,6 +72,15 @@ urlpatterns = [
         "api/v1/admin/",
         include("apps.admin_api.urls", namespace="admin_api"),
     ),
+    # Master ↔ Admin internal chat (PR 6 / handoff 2026-05-19). Production
+    # blocker for earnings disputes / leave requests / review concerns /
+    # substitution / offboarding tracks. Two parallel surfaces:
+    #   /master/... — gated by master init-data decorator.
+    #   /admin/... — gated by admin-role decorator.
+    path(
+        "api/v1/internal-chat/",
+        include("apps.internal_chat.urls", namespace="internal_chat"),
+    ),
     # Phase 5 / KB-SYNC — Shiro-Py salon-knowledge consumer.
     # POST /api/v1/salon-knowledge/webhook/approved/ receives
     # ``knowledge.approved`` events from the colleague's service and
