@@ -71,6 +71,12 @@ STRICT_OPT_OUT_PREFIXES = (
     # Customer Mini App API: tenant resolved from verified initData →
     # BotUser → tenant inside @require_init_data.
     "/api/v1/customer/",
+    # Admin REST API (PR 2 / MM1-MM3): tenant resolved from verified
+    # initData → BotUser → tenant inside @require_admin_role. The
+    # X-Tenant header is never sent. (Master surface /api/v1/master/
+    # follows the same pattern but is opted in to strict mode for
+    # parity with PR 1 — left as-is to keep PR scope tight.)
+    "/api/v1/admin/",
 )
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.

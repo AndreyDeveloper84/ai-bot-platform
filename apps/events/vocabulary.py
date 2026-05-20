@@ -72,6 +72,14 @@ MASTER_ONBOARDING_ACCEPTED = "master.onboarding_accepted"
 MASTER_ONBOARDING_REJECTED = "master.onboarding_rejected"
 MASTER_PROFILE_INITIALIZED = "master.profile_initialized"
 
+# --- Admin master-roster CRUD (master-management MM1-MM3 backend) --------
+# Emitted from apps.admin_api when an owner/admin edits a master record
+# through the Ayla Pro web dashboard or admin Mini App. Payload contract:
+# {master_id, actor_role, fields_changed: [..], previous_values: {..}} for
+# profile updates; {master_id, actor_role, size_bytes, mime} for photo.
+MASTER_PROFILE_UPDATED_BY_ADMIN = "master.profile_updated_by_admin"
+MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -98,6 +106,8 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_ONBOARDING_ACCEPTED,
         MASTER_ONBOARDING_REJECTED,
         MASTER_PROFILE_INITIALIZED,
+        MASTER_PROFILE_UPDATED_BY_ADMIN,
+        MASTER_PHOTO_UPDATED_BY_ADMIN,
     }
 )
 
