@@ -314,20 +314,30 @@ async def record_usage(
         return
 
     # Snapshot the current values BEFORE we increment — we need the
-    # "previous" side of the cross-threshold check.
+    # "previous" side of the cross-threshold check. The new values
+    # come from the post-INCR atomic return so we don't race against
+    # concurrent record_usage calls (LLM retro B3).
     previous_tokens = _read_tokens(tenant_id)
     previous_cost = _read_cost_usd(tenant_id)
 
-    # Increment counters. _incr_with_ttl is idempotent w.r.t. TTL:
-    # sets it once on first write of the day, no-op on subsequent.
-    if tokens > 0:
-        _incr_with_ttl(_tokens_key(tenant_id), tokens)
+    # Increment counters. _incr_with_ttl returns the post-INCR total
+    # (atomic per Redis INCRBY) so two concurrent record_usage calls
+    # see distinct ``new_*`` values that reflect the actual cumulative
+    # state — pre-fix both calls computed ``new = previous + delta``
+    # from the SAME snapshot of ``previous``, missing each other's
+    # increment and either firing the 80% alert twice or skipping it
+    # entirely when neither call individually crossed the threshold.
+    new_tokens_post = (
+        _incr_with_ttl(_tokens_key(tenant_id), tokens) if tokens > 0 else previous_tokens
+    )
     cost_microcents_delta = _usd_to_microcents(cost_usd)
     if cost_microcents_delta > 0:
-        _incr_with_ttl(_cost_key(tenant_id), cost_microcents_delta)
+        new_cost_microcents = _incr_with_ttl(_cost_key(tenant_id), cost_microcents_delta)
+        new_cost = _microcents_to_usd(new_cost_microcents)
+    else:
+        new_cost = previous_cost
 
-    new_tokens = previous_tokens + max(0, tokens)
-    new_cost = previous_cost + cost_usd
+    new_tokens = new_tokens_post
 
     # Read caps + manager_chat_id for the alert path.
     try:
@@ -435,8 +445,13 @@ def _read_cost_usd(tenant_id: str) -> Decimal:
     return _microcents_to_usd(microcents)
 
 
-def _incr_with_ttl(key: str, amount: int) -> None:
+def _incr_with_ttl(key: str, amount: int) -> int:
     """INCR key by amount; set TTL on first write of the day.
+
+    Returns the post-INCR total so callers (notably ``record_usage``)
+    can do threshold-crossing detection from the atomic post-state
+    rather than from a non-atomic ``previous + delta`` snapshot —
+    closes LLM retro B3.
 
     Mirrors the Sprint 7 / L7 pattern. ``cache.add`` only sets the TTL
     when the key was absent — on subsequent writes the TTL set by the
@@ -445,14 +460,25 @@ def _incr_with_ttl(key: str, amount: int) -> None:
     UTC day per tenant.
     """
     if amount <= 0:
-        return
+        # Caller skipped — read current and return so downstream
+        # threshold-crossing logic sees the actual post-state.
+        current = cache.get(key)
+        try:
+            return int(current) if current is not None else 0
+        except (TypeError, ValueError):
+            return 0
 
     incr = getattr(cache, "incr", None)
     if callable(incr):
         try:
-            incr(key, amount)
+            # Redis ``INCRBY`` returns the new total atomically — this is
+            # what makes the post-INCR threshold-crossing race-free.
+            new_total = incr(key, amount)
             cache.add(key, 0, timeout=_TTL_SECONDS)
-            return
+            try:
+                return int(new_total) if new_total is not None else 0
+            except (TypeError, ValueError):
+                return 0
         except ValueError:
             # Some backends raise on INCR of missing keys — fall through
             # to read-modify-write below.
@@ -465,7 +491,9 @@ def _incr_with_ttl(key: str, amount: int) -> None:
         current_int = int(current) if current is not None else 0
     except (TypeError, ValueError):
         current_int = 0
-    cache.set(key, current_int + amount, timeout=_TTL_SECONDS)
+    new_int = current_int + amount
+    cache.set(key, new_int, timeout=_TTL_SECONDS)
+    return new_int
 
 
 def _flag_set(key: str) -> bool:
@@ -525,10 +553,27 @@ def _read_tenant_caps(tenant_id: str) -> tuple[int, Decimal]:
     """
     from apps.tenancy.models import Tenant
 
+    # LLM retro Y3: pre-fix used logger.warning + generous defaults —
+    # the typo'd tenant_id silently ran against a fictitious budget,
+    # «mystery» costs accumulating against a tenant that no longer
+    # existed. The original retro recommended raising; an in-PR
+    # reviewer pointed out that ``enforce_caps`` runs INSIDE
+    # ``provider.complete()`` (not at router lookup), so raising
+    # would 500 the customer until every skill grows an outer
+    # LLM-completion try/except (out of scope for this PR).
+    #
+    # Compromise: keep the soft-fail return-defaults behavior so the
+    # customer flow never breaks, but UPGRADE the log level to ERROR
+    # (Sentry-visible) and stamp the offending id so ops can triage.
+    # Proper typed ``UnknownTenantError(LLMError)`` + skill envelope
+    # is filed as the follow-up.
     try:
         row = Tenant.all_objects.values("daily_token_cap", "daily_cost_cap_usd").get(id=tenant_id)
     except Tenant.DoesNotExist:
-        logger.warning("cost_tracker.tenant_not_found tenant=%s", tenant_id)
+        logger.error(
+            "cost_tracker.tenant_not_found tenant=%s falling_back_to_defaults",
+            tenant_id,
+        )
         return (1_000_000, Decimal("50.00"))
 
     token_cap = int(row.get("daily_token_cap") or 0)
@@ -548,11 +593,17 @@ def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
     """
     from apps.tenancy.models import Tenant
 
+    # See ``_read_tenant_caps`` for the Y3 rationale: loud log,
+    # soft-fail defaults (proper typed exception deferred).
     try:
         row = Tenant.all_objects.values(
             "daily_token_cap", "daily_cost_cap_usd", "manager_chat_id"
         ).get(id=tenant_id)
     except Tenant.DoesNotExist:
+        logger.error(
+            "cost_tracker.alert_context.tenant_not_found tenant=%s falling_back_to_defaults",
+            tenant_id,
+        )
         return (1_000_000, Decimal("50.00"), "")
 
     token_cap = int(row.get("daily_token_cap") or 0)

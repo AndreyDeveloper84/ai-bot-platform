@@ -228,3 +228,48 @@ class TestRoutedConformance:
     def test_routed_provider_implements_protocol(self, tenant: Tenant) -> None:
         provider = LLMRouter().get_provider(tenant)
         assert isinstance(provider, LLMProvider)
+
+
+# ---------------------------------------------------------------------------
+# LLM retro hotfix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB1ProviderInitTypedException:
+    """Pre-fix LLMRouter._load_provider surfaced raw Exception from the
+    provider constructor. Callers had to wrap router lookups in bare
+    try/except Exception (see apps/skills/booking/skill.py hotfix #8).
+    Post-fix re-raises as LLMProviderUnavailable so callers handle
+    uniformly and Sentry pinpoints config errors via chained traceback.
+    """
+
+    def test_constructor_failure_raises_typed_exception(self, tenant: Tenant, monkeypatch) -> None:
+        from apps.llm.protocol import LLMProviderUnavailable
+
+        # Force the OpenAI provider constructor to raise.
+        def _boom(self, *args, **kwargs) -> None:
+            raise RuntimeError("OPENAI_API_KEY not configured")
+
+        monkeypatch.setattr(
+            "apps.llm.providers.openai_provider.OpenAIProvider.__init__",
+            _boom,
+        )
+
+        router = LLMRouter()
+        with pytest.raises(LLMProviderUnavailable, match="openai.*failed to initialise"):
+            router.get_provider(tenant)
+
+
+class TestRetroY7PricingCoverage:
+    """Drift between router-resolved model names and the pricing table
+    silently raises UnknownModelError at first use. The validator
+    catches the drift at CI time.
+    """
+
+    def test_default_models_all_priced(self) -> None:
+        from apps.llm.pricing import validate_pricing_coverage
+
+        missing = validate_pricing_coverage()
+        assert missing == [], (
+            f"models referenced by the router but missing from MODEL_PRICES: {missing}"
+        )
