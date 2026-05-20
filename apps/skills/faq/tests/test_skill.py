@@ -153,6 +153,28 @@ class TestMatches:
         ctx = SkillContext(conversation=conv, bot_user=bu, message_text="привет")
         assert FAQSkill().matches(ctx) is False
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Расскажи про RF-лифтинг",
+            "Опиши процедуру VelaShape",
+            "Подскажи цены на массаж",
+            "Меня интересует обёртывание",
+            "Поведай про лазер",
+            "Что входит в комплекс",
+            "Есть ли у вас прессотерапия",
+            "Можно ли записаться сегодня",
+        ],
+    )
+    def test_imperative_phrasings_match(self, tenant: Tenant, text: str) -> None:
+        """Regression for cutover smoke 2026-05-19: imperatives must hit FAQ."""
+        bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id=f"imp-{hash(text) & 0xFFFF:x}"
+        )
+        conv = Conversation.all_tenants.create(tenant=tenant, bot_user=bu)
+        ctx = SkillContext(conversation=conv, bot_user=bu, message_text=text)
+        assert FAQSkill().matches(ctx) is True
+
 
 # ---------------------------------------------------------------------------
 # handle() — happy path with retrieval

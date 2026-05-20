@@ -350,6 +350,7 @@ def _audit_faq(
 
 
 _QUESTION_SIGNALS: tuple[str, ...] = (
+    # Generic question markers
     "?",
     "сколько",
     "когда",
@@ -360,11 +361,25 @@ _QUESTION_SIGNALS: tuple[str, ...] = (
     "какая",
     "какие",
     "что такое",
+    "что входит",
+    "есть ли",
+    "можно ли",
+    # Imperative info-requests. Cutover smoke 2026-05-19 surfaced
+    # «Расскажи про RF-лифтинг» falling through to echo because no
+    # interrogative signal matched. These are common Russian phrasings
+    # of "give me info about X" and rarely appear in greetings.
+    "расскажи",
+    "опиши",
+    "подскажи",
+    "интересует",
+    "поведай",
+    # English fallbacks
     "what is",
     "how much",
     "when",
     "where",
     "why",
+    "tell me",
 )
 
 
