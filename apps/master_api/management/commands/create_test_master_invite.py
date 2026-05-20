@@ -83,6 +83,22 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args: Any, **options: Any) -> None:
+        # PR 3 / MM2 deprecation: this command fabricates the invite
+        # row directly, bypassing the audit + dispatch side effects of
+        # the real flow. Prefer ``POST /api/v1/admin/masters/invite``
+        # via the admin Mini App / dashboard. The command is kept for
+        # backend tests that don't want HTTP overhead and for the very
+        # earliest "no admin exists yet" bootstrap of a fresh tenant.
+        self.stderr.write(
+            self.style.WARNING(
+                "[DEPRECATED] create_test_master_invite bypasses the proper "
+                "invite flow (no audit row, no MAX DM dispatch, no idempotency). "
+                "For real testing, use POST /api/v1/admin/masters/invite via the "
+                "admin Mini App or dashboard. This command will be removed in a "
+                "later PR — see docs/runbooks/master-bot-onboarding.md."
+            )
+        )
+
         tenant_slug: str = options["tenant"]
         name: str = options["name"].strip()
         if not name:

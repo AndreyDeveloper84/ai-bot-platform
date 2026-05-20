@@ -11,12 +11,20 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.admin_api import views
+from apps.admin_api import views, views_invite
 
 app_name = "admin_api"
 
 urlpatterns = [
     path("masters/", views.masters_list, name="masters_list"),
+    # PR 3 / MM2 — must precede masters/<id>/ so the literal "invite"
+    # segment is not consumed as a master_id. Django's path resolver is
+    # order-sensitive for ``str`` converters (greedy match).
+    path(
+        "masters/invite/",
+        views_invite.master_invite_create,
+        name="master_invite_create",
+    ),
     path(
         "masters/<str:master_id>/",
         views.master_detail,
