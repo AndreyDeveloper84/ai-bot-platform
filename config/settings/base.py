@@ -254,6 +254,18 @@ MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
 MASTER_SESSION_SECRET = os.environ.get("MASTER_SESSION_SECRET", "")
 MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
 
+# Master invite flow (PR 3 / MM2). The admin invite endpoint
+# (`apps/admin_api/views_invite.py`) renders a web fallback URL that
+# embeds the invite token, used by the owner's UI as a "copy invite
+# link" option when the in-bot DM fails. The token is also encoded into
+# a MAX deeplink `max://bot/<MASTER_BOT_USERNAME>?start=master_invite_<token>`.
+# Defaults:
+#   * SITE_DOMAIN — Vite dev default; production overrides via env.
+#   * MASTER_BOT_USERNAME — falls back to `<tenant_slug>_bot` when empty
+#     (the management command does the same fallback).
+SITE_DOMAIN = os.environ.get("SITE_DOMAIN", "http://localhost:5173")
+MASTER_BOT_USERNAME = os.environ.get("MASTER_BOT_USERNAME", "")
+
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
 # than silently 500ing on a misconfigured prod box.

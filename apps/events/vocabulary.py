@@ -80,6 +80,21 @@ MASTER_PROFILE_INITIALIZED = "master.profile_initialized"
 MASTER_PROFILE_UPDATED_BY_ADMIN = "master.profile_updated_by_admin"
 MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 
+# --- Admin master invite flow (master-management MM2 backend / PR 3) -----
+# Emitted from apps.admin_api when an owner/admin issues a fresh
+# CatalogMaster invite. Payload contract:
+#   master.invited:
+#     {master_id, actor_id, actor_role, role: "master", contact_method,
+#      mode, services_count, idempotent: bool}
+#   master.invite_dispatched:
+#     {master_id, channel: "max", delivery: "queued"|"failed"|"skipped",
+#      error?: str}
+# The two events are paired: ``invited`` records the admin's intent +
+# the DB row creation, ``invite_dispatched`` records the side-channel
+# delivery attempt (queued post-commit via ``transaction.on_commit``).
+MASTER_INVITED = "master.invited"
+MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -108,6 +123,8 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_PROFILE_INITIALIZED,
         MASTER_PROFILE_UPDATED_BY_ADMIN,
         MASTER_PHOTO_UPDATED_BY_ADMIN,
+        MASTER_INVITED,
+        MASTER_INVITE_DISPATCHED,
     }
 )
 
