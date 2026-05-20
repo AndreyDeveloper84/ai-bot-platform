@@ -158,6 +158,18 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
 def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Inner pipeline — parse-already-done caller. Side-effects only."""
 
+    # MAX UX indicators: tell the chat we've read the message and we're
+    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
+    # Both are best-effort fire-and-forget — failures are logged inside
+    # send_chat_action and do not propagate. Done first so the user
+    # sees the «прочитано / печатает…» chrome that mysite's MAX SDK
+    # provided automatically (post-cutover regression 2026-05-20).
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="mark_seen")
+        send_chat_action(chat_id=event.chat_id, action="typing_on")
+
     bot_user = resolve_or_create_bot_user(
         channel=event.channel,
         channel_user_id=event.channel_user_id,
