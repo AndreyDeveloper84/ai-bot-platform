@@ -139,6 +139,20 @@ class LLMProviderQuotaExceeded(LLMError):
     """
 
 
+class LLMProviderUnavailable(LLMError):
+    """A provider could not be constructed (missing API key, SDK init
+    failure, malformed settings).
+
+    LLM retro B1: prior to this exception, ``LLMRouter._load_provider``
+    surfaced raw ``Exception`` from the provider constructor. Callers
+    (notably ``apps/skills/booking/skill.py``) had to wrap the lookup
+    in bare ``try/except Exception`` to avoid a 500 — which obscured
+    the actual root cause (config) from observability. Catching this
+    typed error keeps the customer-facing fallback path while letting
+    Sentry pinpoint the misconfigured provider.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------

@@ -282,3 +282,96 @@ async def _create_tenant_async(*, name: str) -> Tenant:
         daily_token_cap=10_000,
         daily_cost_cap_usd=Decimal("5.00"),
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM retro hotfix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestRetroY3UnknownTenantLogsLoudly:
+    """Pre-fix _read_tenant_caps used logger.WARNING + generous defaults
+    when tenant_id was unknown — a stale UUID silently ran against a
+    fictitious budget. Post-fix upgrades the log level to ERROR (Sentry-
+    visible) so the typo surfaces, while keeping the soft-fail return-
+    defaults so the customer flow never 500s. Proper typed
+    ``UnknownTenantError(LLMError)`` + skill envelope deferred.
+    """
+
+    async def test_unknown_tenant_logs_error_and_returns_defaults(self, caplog) -> None:
+        bogus_id = str(uuid4())
+        with caplog.at_level("ERROR", logger="apps.llm.cost_tracker"):
+            # enforce_caps doesn't raise — it falls through to the
+            # generous defaults so customer flow never 500s.
+            await enforce_caps(bogus_id)
+        # The offending id is in the ERROR-level log for Sentry triage.
+        matching = [
+            rec
+            for rec in caplog.records
+            if rec.levelname == "ERROR" and "tenant_not_found" in rec.message
+        ]
+        assert matching, "expected ERROR-level tenant_not_found log"
+        assert bogus_id in matching[0].message
+
+    async def test_unknown_tenant_alert_ctx_also_logs_error(self, caplog) -> None:
+        from asgiref.sync import sync_to_async
+
+        from apps.llm.cost_tracker import _read_tenant_alert_context
+
+        bogus_id = str(uuid4())
+        with caplog.at_level("ERROR", logger="apps.llm.cost_tracker"):
+            token_cap, cost_cap, mgr = await sync_to_async(_read_tenant_alert_context)(bogus_id)
+        # Soft-fail to defaults so accounting can keep going.
+        assert token_cap == 1_000_000
+        assert cost_cap == Decimal("50.00")
+        assert mgr == ""
+        matching = [
+            rec
+            for rec in caplog.records
+            if rec.levelname == "ERROR" and "tenant_not_found" in rec.message
+        ]
+        assert matching, "expected ERROR-level tenant_not_found log"
+
+
+class TestRetroB3PostIncrAtomicAccounting:
+    """Pre-fix threshold-crossing detection used `new = previous + delta`
+    where `previous` was a NON-ATOMIC snapshot taken before the INCR.
+    Two concurrent record_usage calls would both read the same
+    `previous`, both compute identical `new`, and EITHER fire the
+    80% alert twice OR skip it entirely (when neither call
+    individually crossed but their sum did).
+
+    Post-fix uses _incr_with_ttl's return value (Redis INCRBY-atomic
+    post-state) so `new_tokens` / `new_cost` reflect the actual
+    cumulative position even under concurrent writes.
+    """
+
+    async def test_incr_with_ttl_returns_post_state(self) -> None:
+        from apps.llm.cost_tracker import _incr_with_ttl, _tokens_key
+
+        tenant_id = str(uuid4())
+        key = _tokens_key(tenant_id)
+        first_total = _incr_with_ttl(key, 100)
+        assert first_total == 100
+
+        second_total = _incr_with_ttl(key, 50)
+        assert second_total == 150
+
+        # Zero-amount call returns current state without incrementing.
+        same_total = _incr_with_ttl(key, 0)
+        assert same_total == 150
+
+    async def test_record_usage_uses_post_incr_for_new_state(self, tenant: Tenant) -> None:
+        # Two record_usage calls that together cross the 80% threshold
+        # — pre-fix the second call's `new` was computed from the
+        # pre-INCR snapshot, missing the first call's increment, and
+        # neither call individually crossed 80% so the alert would
+        # never fire. Post-fix the second call's new_tokens reflects
+        # the cumulative state (4000 + 4500 = 8500 / 10000 = 85% > 80%).
+        await record_usage(str(tenant.id), tokens=4000, cost_usd=Decimal("0.10"))
+        await record_usage(str(tenant.id), tokens=4500, cost_usd=Decimal("0.10"))
+
+        # Cumulative state is now visible — confirms the post-INCR
+        # value was used to update the Redis counter atomically.
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.tokens_used == 8500

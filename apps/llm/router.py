@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING
 from django.conf import settings
 
 from apps.audit.services import write_audit
-from apps.llm.protocol import LLMProvider
+from apps.llm.protocol import LLMProvider, LLMProviderUnavailable
 
 if TYPE_CHECKING:
     from apps.tenancy.models import Tenant
@@ -186,16 +186,38 @@ class LLMRouter:
         if name in self._providers:
             return self._providers[name]
 
-        if name == "openai":
-            from apps.llm.providers.openai_provider import OpenAIProvider
+        # LLM retro B1: provider constructors may raise on missing API
+        # keys, malformed settings, or SDK init failures. Pre-fix these
+        # bubbled as bare ``Exception`` and forced every caller to wrap
+        # router lookups in ``try/except Exception`` (see
+        # ``apps/skills/booking/skill.py`` hotfix #8). Catching the
+        # constructor and re-raising as a typed
+        # ``LLMProviderUnavailable`` lets:
+        #   - callers handle uniformly (one exception class to catch),
+        #   - Sentry pinpoint the misconfigured provider via the chained
+        #     traceback,
+        #   - the audit row (written by ``get_provider``) carry an
+        #     explicit ``init_failed`` discriminator.
+        try:
+            if name == "openai":
+                from apps.llm.providers.openai_provider import OpenAIProvider
 
-            provider: LLMProvider = OpenAIProvider()
-        elif name == "anthropic":
-            from apps.llm.providers.anthropic_provider import AnthropicProvider
+                provider: LLMProvider = OpenAIProvider()
+            elif name == "anthropic":
+                from apps.llm.providers.anthropic_provider import AnthropicProvider
 
-            provider = AnthropicProvider()
-        else:  # pragma: no cover — guarded above
-            raise ValueError(f"unknown provider name: {name!r}")
+                provider = AnthropicProvider()
+            else:  # pragma: no cover — guarded above
+                raise ValueError(f"unknown provider name: {name!r}")
+        except LLMProviderUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 — typed re-raise below
+            logger.warning(
+                "llm.router.provider_init_failed name=%s err=%s",
+                name,
+                exc,
+            )
+            raise LLMProviderUnavailable(f"provider {name!r} failed to initialise: {exc}") from exc
 
         self._providers[name] = provider
         return provider
