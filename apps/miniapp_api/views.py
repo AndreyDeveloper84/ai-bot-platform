@@ -664,7 +664,11 @@ def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
         "confirmed",
         "reschedule_requested",
     )
-    reschedulable = b.status == "confirmed"
+    # reschedulable requires both an active status AND live FKs to
+    # service+master. If the catalog row was deleted (e.g. dev catalog
+    # re-seed) the booking keeps service_name / master_name strings but
+    # has NULL FKs — the reschedule slot lookup can't run without them.
+    reschedulable = b.status == "confirmed" and b.service_id is not None and b.master_id is not None
     # Phase 4 — post-visit rating exposure. can_rate is computed against
     # the shared `now` so a batch listing is internally consistent.
     moment = now or timezone.now()

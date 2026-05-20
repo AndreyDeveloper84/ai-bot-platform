@@ -43,6 +43,7 @@ function isoDateNDaysAhead(offset: number): string {
 type LoadState =
   | { kind: "loading" }
   | { kind: "ok"; booking: BookingItem; slots: FreeSlot[] }
+  | { kind: "orphan"; booking: BookingItem }
   | { kind: "error"; err: unknown };
 
 export function RescheduleScreen() {
@@ -63,8 +64,14 @@ export function RescheduleScreen() {
     let cancelled = false;
     fetchBooking(bookingId)
       .then(({ booking }) => {
+        // Orphan path: booking's service_id or master_id is null. Happens
+        // when the catalog row was deleted (e.g. dev catalog re-seed)
+        // after the booking was made — FK was set to NULL by on_delete.
+        // We can't fetch slots without those IDs; show a graceful
+        // "запишитесь заново" panel instead of a wall-of-red error.
         if (!booking.service_id || !booking.master_id) {
-          throw new Error("booking missing service/master");
+          if (!cancelled) setState({ kind: "orphan", booking });
+          return null;
         }
         return Promise.all([
           Promise.resolve(booking),
@@ -76,8 +83,9 @@ export function RescheduleScreen() {
           }),
         ]);
       })
-      .then(([booking, { slots }]) => {
-        if (cancelled) return;
+      .then((pair) => {
+        if (cancelled || pair === null) return;
+        const [booking, { slots }] = pair;
         setState({ kind: "ok", booking, slots });
         if (slots.length > 0 && slots[0]) setSelectedDate(slots[0].date);
       })
@@ -159,6 +167,27 @@ export function RescheduleScreen() {
     return (
       <ScreenLayout title="Перенести">
         <StateError err={state.err} onRetry={load} screenId="reschedule" />
+      </ScreenLayout>
+    );
+  }
+
+  if (state.kind === "orphan") {
+    return (
+      <ScreenLayout title="Перенести">
+        <div className="callout">
+          <p style={{ margin: 0 }}>
+            Эту услугу нельзя перенести — она больше не предлагается в текущем
+            каталоге. Запишитесь заново.
+          </p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/catalog")}
+          >
+            Каталог
+          </button>
+        </div>
       </ScreenLayout>
     );
   }
