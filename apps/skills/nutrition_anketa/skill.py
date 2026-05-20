@@ -238,22 +238,38 @@ class NutritionAnketaSkill:
         just the JSON column.
         """
         conversation = context.conversation
+        # Conversations retro B1: route through the atomic helper so
+        # two concurrent skills writing different sub-keys can't
+        # clobber each other. The helper handles the select_for_update
+        # + read-modify-write inside a single transaction.
+        if _is_real_orm_conversation(conversation):
+            from apps.conversations.services import write_skill_state
+
+            write_skill_state(conversation, _STATE_KEY, fsm.serialize())
+            return
+
+        # Mock / synthetic conversations (used by isolated unit tests that
+        # don't spin up the ORM): fall back to in-memory mutation.
         raw = getattr(conversation, "skill_state", None) or {}
         if not isinstance(raw, dict):
             raw = {}
         raw[_STATE_KEY] = fsm.serialize()
         conversation.skill_state = raw
-        # `save` may not be available on a Mock in tests — guard.
         save = getattr(conversation, "save", None)
         if callable(save):
             save(update_fields=["skill_state"])
 
     def _clear_state(self, context: SkillContext) -> None:
         conversation = context.conversation
+        if _is_real_orm_conversation(conversation):
+            from apps.conversations.services import write_skill_state
+
+            write_skill_state(conversation, _STATE_KEY, None)
+            return
+
         raw = getattr(conversation, "skill_state", None) or {}
         if isinstance(raw, dict) and _STATE_KEY in raw:
-            raw = {k: v for k, v in raw.items() if k != _STATE_KEY}
-            conversation.skill_state = raw
+            conversation.skill_state = {k: v for k, v in raw.items() if k != _STATE_KEY}
             save = getattr(conversation, "save", None)
             if callable(save):
                 save(update_fields=["skill_state"])
@@ -296,6 +312,26 @@ class NutritionAnketaSkill:
             "goal": answers["goal"],
             "activity_coefficient": 1.4,
         }
+
+
+# ─── helpers ──────────────────────────────────────────────────────────────
+
+
+def _is_real_orm_conversation(conversation: object) -> bool:
+    """True iff ``conversation`` is a real :class:`apps.conversations.models.Conversation` instance.
+
+    Skills test with synthetic ``_StatefulConversation`` classes that do
+    NOT subclass ``Conversation`` — the atomic
+    :func:`apps.conversations.services.write_skill_state` helper would
+    raise ``ValueError`` on those (no tenant_id, no ORM row). Use
+    ``isinstance`` so a bare ``MagicMock()`` (whose attribute access
+    returns truthy MagicMocks) doesn't get mis-routed into the ORM
+    path — closes reviewer Y-1.
+    """
+
+    from apps.conversations.models import Conversation
+
+    return isinstance(conversation, Conversation)
 
 
 # ─── summary rendering ────────────────────────────────────────────────────

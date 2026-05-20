@@ -191,6 +191,18 @@ class Conversation(models.Model):
                 condition=models.Q(is_active=True, deleted_at__isnull=True, is_shadow=False),
                 name="conversation_one_active_per_bot_user_tenant",
             ),
+            # Conversations retro Y6: ``state`` is a CharField with
+            # TextChoices, which Django does NOT enforce at the DB
+            # layer. A hand-edited row with ``state='zombie'`` would
+            # load silently and the D4 dispatcher's HUMAN_HANDOFF
+            # short-circuit would pass through → bot runs on undefined
+            # state. CHECK constraint keeps the model and DB invariants
+            # aligned. New states must be added here AND to the State
+            # enum (linkage enforced via the migration that adds them).
+            models.CheckConstraint(
+                condition=models.Q(state__in=["idle", "consulting", "escalated", "human_handoff"]),
+                name="conversation_state_known_value",
+            ),
         ]
 
     def __str__(self) -> str:
