@@ -95,6 +95,18 @@ MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 MASTER_INVITED = "master.invited"
 MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 
+# --- Admin services ↔ masters mapping (master-management MM4 / PR 4) -----
+# Emitted from apps.admin_api when an owner/admin toggles the M2M between
+# CatalogMaster and CatalogService. One event PER affected master with a
+# bundled diff (not per change row) to keep the audit feed readable.
+# Payload contract:
+#   master.services_changed:
+#     {master_id, actor_id, actor_role, tenant_id,
+#      services_added: [<service_uuid>...],
+#      services_removed: [<service_uuid>...],
+#      occurred_at: <iso>}
+MASTER_SERVICES_CHANGED = "master.services_changed"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -125,6 +137,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_PHOTO_UPDATED_BY_ADMIN,
         MASTER_INVITED,
         MASTER_INVITE_DISPATCHED,
+        MASTER_SERVICES_CHANGED,
     }
 )
 

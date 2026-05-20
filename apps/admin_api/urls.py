@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.admin_api import views, views_invite
+from apps.admin_api import views, views_invite, views_services_mapping
 
 app_name = "admin_api"
 
@@ -39,5 +39,19 @@ urlpatterns = [
         "masters/<str:master_id>/audit/",
         views.master_audit_feed,
         name="master_audit_feed",
+    ),
+    # PR 4 / MM4 — services ↔ masters matrix editor. The bulk route is
+    # declared BEFORE the bare GET so the literal "bulk" segment can never
+    # be misread as a wildcard slug; Django's order-sensitive path matching
+    # makes the placement explicit even though there is no wildcard here.
+    path(
+        "services-mapping/bulk/",
+        views_services_mapping.services_mapping_bulk,
+        name="services_mapping_bulk",
+    ),
+    path(
+        "services-mapping/",
+        views_services_mapping.services_mapping_get,
+        name="services_mapping_get",
     ),
 ]
