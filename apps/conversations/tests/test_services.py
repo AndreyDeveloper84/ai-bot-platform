@@ -309,6 +309,7 @@ class TestRetroB1SkillStateAtomicWrite:
 
         with tenant_scope(tenant_a):
             conv = resolve_active_conversation(bot_user_a)
+        assert conv is not None  # noqa: S101 — narrow Optional for mypy
         # tenant_a's conversation passed in while tenant_b is in scope.
         with tenant_scope(tenant_b):
             with pytest.raises(CrossTenantError):
