@@ -142,3 +142,67 @@ def send_message(
             response.status_code,
         )
         return {}
+
+
+# MAX bot indicator actions. POST /chats/{chat_id}/actions with
+# `{"action": "<value>"}`. Per dev.max.ru/docs-api/methods/POST/chats/-chatId-/actions
+# + the legacy maxapi SDK's SenderAction enum.
+_CHAT_ACTIONS = {
+    "typing_on": "typing_on",
+    "mark_seen": "mark_seen",
+    "sending_photo": "sending_photo",
+    "sending_video": "sending_video",
+    "sending_audio": "sending_audio",
+    "sending_file": "sending_file",
+}
+
+
+def send_chat_action(*, chat_id: str, action: str, timeout: float = 5.0) -> None:
+    """Fire a MAX chat-indicator action (typing_on / mark_seen / …).
+
+    Best-effort: any non-2xx or network failure logs a warning but does
+    NOT raise — these indicators are UX polish, never the core path. We
+    don't want a typing-indicator hiccup to abort the message reply.
+
+    Args:
+      chat_id: stringified MAX chat id.
+      action: one of :data:`_CHAT_ACTIONS` keys. Unknown values logged + dropped.
+      timeout: request timeout. Short (5s) — indicators are
+               fire-and-forget; a hung indicator must not delay reply.
+    """
+    if action not in _CHAT_ACTIONS:
+        logger.warning("channels.max.outbound.unknown_action action=%r", action)
+        return
+
+    token = _token()
+    if not token:
+        return  # send_message would raise; indicators are silent.
+
+    url = f"{_api_base()}/chats/{chat_id}/actions"
+    headers = {
+        "Authorization": token,
+        "Content-Type": "application/json",
+    }
+    try:
+        response = httpx.post(
+            url,
+            headers=headers,
+            json={"action": _CHAT_ACTIONS[action]},
+            timeout=timeout,
+        )
+    except httpx.RequestError as exc:
+        logger.info(
+            "channels.max.outbound.action_network_error chat_id=%s action=%s exc=%s",
+            chat_id,
+            action,
+            exc,
+        )
+        return
+
+    if response.status_code >= 400:
+        logger.info(
+            "channels.max.outbound.action_http_error chat_id=%s action=%s status=%s",
+            chat_id,
+            action,
+            response.status_code,
+        )
