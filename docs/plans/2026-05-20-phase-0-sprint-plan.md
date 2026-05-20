@@ -134,7 +134,7 @@ Order of work in Bucket 7 (gated by #441):
 3. #432 — ingest endpoint (parallel to publishers).
 4. #442–#446 — consumers (after #432).
 5. #433 — umbrella (closes when #442–#446 close).
-6. #446 — idempotency contract test (after at least one consumer ships).
+6. #447 — idempotency contract test (after at least one consumer ships).
 
 ---
 
@@ -307,7 +307,7 @@ All in milestone `Sprint 1 — Foundation backbone`. Labels: `P0`, `ayla-foundat
 - [#428] [refactor][payment] ai-bot-platform: remove /api/v1/yookassa/webhook + switch YooKassa Personal webhook URL to Ayla
 
 ### Bucket 7 — Event contract Ayla → bot-platform (expanded 2026-05-20 per review)
-- [#441] **PREREQUISITE** [docs][contracts] event-contract.md taxonomy + envelope + versioning rules (blocks #429-#433, #441-#446)
+- [#441] **PREREQUISITE** [docs][contracts] event-contract.md taxonomy + envelope + versioning rules (blocks #429-#433, #442-#447)
 - [#429] [events][contracts] Ayla djangoproject outbox + dispatcher for booking.{created,cancelled,rescheduled,completed}
 - [#430] [events][contracts] Ayla djangoproject outbox + dispatcher for payment.{authorized,captured,failed,refunded}
 - [#431] [events][contracts] Ayla djangoproject outbox + dispatcher for service.updated, master.schedule.updated, review.created, user.profile.updated
