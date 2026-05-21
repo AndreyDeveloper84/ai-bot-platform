@@ -371,14 +371,14 @@ class TestKeyboardPassThrough:
         att = attachments[0]
         assert att["type"] == "inline_keyboard"
         buttons = att["payload"]["buttons"]
-        # 4 rows (default columns=1): 3 link + 1 callback.
-        assert len(buttons) == 4
+        # 7 rows (default columns=1): 3 salon link + 4 wellness/FAQ callback.
+        assert len(buttons) == 7
         # First button is the link to /catalog.
         assert buttons[0][0]["type"] == "link"
         assert buttons[0][0]["url"] == "https://miniapp-dev.example/catalog"
         # Last button is the callback ask prompt.
-        assert buttons[3][0]["type"] == "callback"
-        assert buttons[3][0]["payload"] == "cb:welcome:ask"
+        assert buttons[-1][0]["type"] == "callback"
+        assert buttons[-1][0]["payload"] == "cb:welcome:ask"
 
     def test_callback_tap_runs_welcome_ask_prompt(self, tenant_a, mock_send, fake_redis, settings):
         """User taps «❓ Задать вопрос» — bot replies with the prompt text

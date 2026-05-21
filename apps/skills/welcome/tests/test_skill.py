@@ -11,7 +11,13 @@ from unittest.mock import MagicMock
 
 
 from apps.skills.base import SkillContext
-from apps.skills.welcome.skill import ASK_PROMPT, WELCOME_TEXT, WelcomeSkill
+from apps.skills.welcome.skill import (
+    ASK_PROMPT,
+    FOOD_PROMPT,
+    WATER_PROMPT,
+    WELCOME_TEXT,
+    WelcomeSkill,
+)
 
 
 def _ctx(text: str) -> SkillContext:
@@ -52,44 +58,50 @@ class TestHandleStart:
         assert result.action_type == "welcome_menu"
         assert result.meta["reply_kind"] == "welcome"
 
-    def test_zero_config_only_ships_ask_button(self, settings):
+    def test_zero_config_ships_wellness_and_faq_only(self, settings):
         """When neither MAX_BOT_WEB_APP nor MAX_MINIAPP_URL is set, the
-        keyboard collapses to a single «❓ Задать вопрос» callback —
-        zero-config fallback for tests + early dev."""
+        salon buttons drop out but the wellness + FAQ row remains."""
 
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 1
-        assert buttons[0]["label"].endswith("Задать вопрос")
-        assert buttons[0]["callback"] == "cb:welcome:ask"
+        # No salon buttons; 4 wellness/FAQ buttons (food, water, anketa, ask).
+        assert len(buttons) == 4
+        callbacks = [b["callback"] for b in buttons]
+        assert callbacks == [
+            "cb:welcome:food",
+            "cb:welcome:water",
+            "cb:anketa:start",
+            "cb:welcome:ask",
+        ]
 
     def test_web_app_config_emits_open_app_buttons(self, settings):
         settings.MAX_BOT_WEB_APP = "id583_bot"
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 3 nav buttons + 1 ask = 4 total.
-        assert len(buttons) == 4
+        # 3 salon nav + 4 wellness/FAQ = 7 total.
+        assert len(buttons) == 7
         nav = buttons[:3]
         for btn in nav:
             assert btn["web_app"] == "id583_bot"
             assert "callback" in btn  # repurposed as MAX open_app payload
-        # Ask button stays a plain callback.
-        assert buttons[3]["callback"] == "cb:welcome:ask"
-        assert "web_app" not in buttons[3]
+        # Wellness + FAQ row: never carries web_app.
+        for btn in buttons[3:]:
+            assert "web_app" not in btn
+            assert btn["callback"].startswith("cb:")
 
     def test_miniapp_url_fallback_emits_link_buttons(self, settings):
         """When the bot has no web_app username but a base URL is
-        configured, fall back to link buttons. Routes are appended cleanly
-        regardless of trailing/leading slashes."""
+        configured, fall back to link buttons for the salon nav. Routes
+        are appended cleanly regardless of trailing/leading slashes."""
 
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 4
+        assert len(buttons) == 7
         urls = [b.get("url") for b in buttons[:3]]
         assert urls == [
             "https://miniapp-dev.example/catalog",
@@ -106,6 +118,16 @@ class TestHandleStart:
         assert all("web_app" in b for b in buttons[:3])
         assert not any("url" in b for b in buttons[:3])
 
+    def test_anketa_button_routes_directly_to_anketa_skill(self, settings):
+        """The 📊 Анкета button payload is ``cb:anketa:start`` — that lets
+        the nutrition_anketa skill match it directly and kick off the
+        FSM without an intermediate welcome turn."""
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = ""
+        buttons = WelcomeSkill().handle(_ctx("/start")).action_data["buttons"]
+        anketa = next(b for b in buttons if b["label"].startswith("📊"))
+        assert anketa["callback"] == "cb:anketa:start"
+
     def test_button_columns_one(self, settings):
         settings.MAX_BOT_WEB_APP = "id583_bot"
         result = WelcomeSkill().handle(_ctx("/start"))
@@ -118,6 +140,20 @@ class TestHandleCallback:
         assert result.reply_text == ASK_PROMPT
         assert result.meta["reply_kind"] == "welcome_ask_prompt"
         # No keyboard — the FAQ skill picks up the user's question next turn.
+        assert result.action_data is None
+
+    def test_food_callback_emits_food_prompt(self):
+        result = WelcomeSkill().handle(_ctx("cb:welcome:food"))
+        assert result.reply_text == FOOD_PROMPT
+        assert result.meta["reply_kind"] == "welcome_food_prompt"
+        # No keyboard — user sends a photo next turn → food_scanner.
+        assert result.action_data is None
+
+    def test_water_callback_emits_water_prompt(self):
+        result = WelcomeSkill().handle(_ctx("cb:welcome:water"))
+        assert result.reply_text == WATER_PROMPT
+        assert result.meta["reply_kind"] == "welcome_water_prompt"
+        # No keyboard — user types "стакан" next turn → water skill.
         assert result.action_data is None
 
     def test_unknown_welcome_callback_falls_back_to_menu(self):
