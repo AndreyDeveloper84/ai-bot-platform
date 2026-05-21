@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.admin_api import views, views_invite, views_services_mapping
+from apps.admin_api import (
+    views,
+    views_invite,
+    views_master_deactivation,
+    views_services_mapping,
+)
 
 app_name = "admin_api"
 
@@ -39,6 +44,22 @@ urlpatterns = [
         "masters/<str:master_id>/audit/",
         views.master_audit_feed,
         name="master_audit_feed",
+    ),
+    # PR Tier1.1 / MM5 — deactivation cascade.
+    path(
+        "masters/<str:master_id>/deactivation-preview/",
+        views_master_deactivation.master_deactivation_preview,
+        name="master_deactivation_preview",
+    ),
+    path(
+        "masters/<str:master_id>/deactivate/",
+        views_master_deactivation.master_deactivate,
+        name="master_deactivate",
+    ),
+    path(
+        "masters/<str:master_id>/reactivate/",
+        views_master_deactivation.master_reactivate,
+        name="master_reactivate",
     ),
     # PR 4 / MM4 — services ↔ masters matrix editor. The bulk route is
     # declared BEFORE the bare GET so the literal "bulk" segment can never
