@@ -37,15 +37,22 @@ logger = logging.getLogger(__name__)
 
 
 # Only update types our parser handles. The MAX API offers more
-# (``bot_started`` lifecycle, ``message_edited``, ``chat_title_changed``,
-# etc.) but adding them here without parser support poisons the PEL —
-# the worker raises ParseError, the consumer doesn't ACK, MAX retries
-# forever, the bot goes silent until the entry is drained by hand
-# (dev incident 2026-05-21). When a new parser branch lands, add the
-# matching update_type here in the same PR.
+# (``message_edited``, ``chat_title_changed``, etc.) but adding them
+# here without parser support poisons the PEL — the worker raises
+# ParseError, the consumer doesn't ACK, MAX retries forever, the bot
+# goes silent until the entry is drained by hand (dev incident
+# 2026-05-21). When a new parser branch lands, add the matching
+# update_type here in the same PR.
+#
+# ``bot_started`` is the channel analog of Telegram's /start — fires
+# when a new user first activates the bot. Parser synthesises
+# ``text="/start"`` so welcome skill matches; first contact gets the
+# inline-keyboard greeting without depending on whether the MAX client
+# also auto-sends a /start text message.
 DEFAULT_UPDATE_TYPES: tuple[str, ...] = (
     "message_created",
     "message_callback",
+    "bot_started",
 )
 
 

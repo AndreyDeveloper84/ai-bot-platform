@@ -114,9 +114,11 @@ def parse_max_webhook(payload: dict[str, Any]) -> CanonicalEvent:
         return _parse_message_created(payload)
     if update_type == "message_callback":
         return _parse_message_callback(payload)
+    if update_type == "bot_started":
+        return _parse_bot_started(payload)
     raise ParseError(
         f"Unsupported MAX update_type={update_type!r}. Supported: "
-        "'message_created', 'message_callback'."
+        "'message_created', 'message_callback', 'bot_started'."
     )
 
 
@@ -210,6 +212,55 @@ def _parse_message_callback(payload: dict[str, Any]) -> CanonicalEvent:
         attachments=[],
         timestamp=timestamp,
         raw=raw,
+    )
+
+
+def _parse_bot_started(payload: dict[str, Any]) -> CanonicalEvent:
+    """Translate a ``bot_started`` lifecycle event.
+
+    MAX fires this when a new user activates the bot for the first time
+    (taps «Начать» in the bot card). It is the channel-level analog of
+    Telegram's ``/start`` text. We synthesise ``text="/start"`` on the
+    canonical event so the welcome skill matches via its existing
+    predicate — no special-case branch in the skill layer.
+
+    Shape per dev.max.ru/docs-api::
+
+        {
+          "update_type": "bot_started",
+          "timestamp": 1731320000000,
+          "chat_id": 67890,
+          "user": {"user_id": 12345, "name": "Иван", "lang": "ru"},
+          "payload": "<deeplink param, optional>",
+          "user_locale": "ru"
+        }
+    """
+    user = payload.get("user")
+    if not isinstance(user, dict) or "user_id" not in user:
+        raise ParseError("MAX bot_started payload missing required field: user.user_id")
+
+    chat_id = payload.get("chat_id")
+    if chat_id is None:
+        raise ParseError("MAX bot_started payload missing required field: chat_id")
+
+    timestamp = _parse_ms_ts(payload.get("timestamp"))
+
+    # The deeplink ``payload`` (e.g. ``ref=campaign-name``) may carry an
+    # acquisition signal we want to preserve for attribution. Stash it
+    # in ``raw`` so a downstream skill can read ``event.raw["payload"]``
+    # without us changing the cross-channel DTO shape.
+    return CanonicalEvent(
+        channel="max",
+        channel_user_id=str(user["user_id"]),
+        # Synthetic id — MAX doesn't give us a stable update id for
+        # lifecycle events. Prefix so idempotency keys can't collide
+        # with a real message mid.
+        channel_message_id=f"bot_started:{user['user_id']}:{payload.get('timestamp', '')}",
+        chat_id=str(chat_id),
+        text="/start",
+        attachments=[],
+        timestamp=timestamp,
+        raw=payload,
     )
 
 
