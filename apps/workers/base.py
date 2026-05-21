@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID
+
+from django.conf import settings
 
 from apps.events.services import emit
 from apps.tenancy.context import tenant_scope, trace_id_scope
@@ -72,12 +74,49 @@ def resolve_tenant_by_id_string(tenant_id_raw: str):
         return None
 
 
+class TenantRequiredButMissing(Exception):
+    """Raised by ``TenantAwareTask.__call__`` when a handler declared
+    ``requires_tenant = True`` but the stream entry's
+    ``resolved_tenant_id`` is empty/invalid/unknown.
+
+    Tenancy retro B4: pre-fix workers silently entered ``tenant_scope(None)``
+    for tenant-required handlers; reads returned empty + audit warn but
+    handlers proceeded. This exception lets the consumer DLQ the entry
+    explicitly instead of running on a phantom-tenant context.
+
+    Gated by ``settings.STRICT_TENANT_REFUSE`` (default False during
+    Phase 0 rollout — log-only mode; flip to True after the dev-side
+    soak proves no legitimate handler misses its tenant).
+    """
+
+
 class TenantAwareTask(ABC):
     """Base class for stream-driven worker handlers.
 
     Subclasses MUST override ``handle(payload)``. Base class wraps every
     call in tenant + trace ContextVars and emits start/done/failed events.
+
+    Tenancy retro B4 — tenant-required tag:
+
+      ``requires_tenant: ClassVar[bool] = True``  (default)
+
+    The default is conservative: every handler is presumed to need a
+    tenant in scope. Handlers that legitimately run without one (system
+    tasks: audit sweep, outbox dispatcher, health check, migration
+    runner — none currently subclass TenantAwareTask but the pattern
+    is here for future use) MUST override this to ``False`` with a
+    docstring note explaining why.
+
+    Enforcement is gated by ``settings.STRICT_TENANT_REFUSE``:
+
+      * False (default — Phase 0 rollout): missing-tenant ON a
+        ``requires_tenant=True`` handler logs ERROR but proceeds with
+        ``tenant_scope(None)``. Same as pre-B4 behaviour, but loud.
+      * True (post-soak):  missing-tenant raises
+        :class:`TenantRequiredButMissing` → consumer DLQs the entry.
     """
+
+    requires_tenant: ClassVar[bool] = True
 
     @abstractmethod
     def handle(self, payload: dict[str, Any]) -> None:
@@ -94,6 +133,10 @@ class TenantAwareTask(ABC):
 
         Behaviour:
           - Resolves tenant from ``resolved_tenant_id`` (or None).
+          - Tenancy retro B4: enforces ``requires_tenant`` via the
+            ``STRICT_TENANT_REFUSE`` settings flag — when strict + no
+            tenant + requires_tenant=True, raises
+            :class:`TenantRequiredButMissing` so the consumer DLQs.
           - Enters tenant_scope + trace_id_scope for the handler's
             entire execution.
           - Emits ``worker.handler_started`` then
@@ -106,6 +149,52 @@ class TenantAwareTask(ABC):
         tenant = self._resolve_tenant(raw_entry.get("resolved_tenant_id", ""))
         trace_id = raw_entry.get("trace_id", "")
         payload = self._extract_payload(raw_entry)
+
+        # Tenancy retro B4: enforce or log the requires_tenant tag.
+        if self.requires_tenant and tenant is None:
+            strict = bool(getattr(settings, "STRICT_TENANT_REFUSE", False))
+            if strict:
+                logger.error(
+                    "worker.tenant_required_missing handler=%s trace=%s "
+                    "resolved_tenant_id=%r — refusing dispatch (DLQ)",
+                    type(self).__name__,
+                    trace_id,
+                    raw_entry.get("resolved_tenant_id", ""),
+                )
+                emit(
+                    "worker.tenant_required_missing",
+                    payload={
+                        "handler": type(self).__name__,
+                        "strict_mode": True,
+                    },
+                )
+                raise TenantRequiredButMissing(
+                    f"{type(self).__name__} requires a tenant but "
+                    f"resolved_tenant_id is empty/invalid (trace={trace_id})"
+                )
+            # Log-only rollout mode: loud ERROR but proceed.
+            logger.error(
+                "worker.tenant_required_missing handler=%s trace=%s "
+                "resolved_tenant_id=%r — proceeding in log-only mode "
+                "(STRICT_TENANT_REFUSE=False)",
+                type(self).__name__,
+                trace_id,
+                raw_entry.get("resolved_tenant_id", ""),
+            )
+            emit(
+                "worker.tenant_required_missing",
+                payload={
+                    "handler": type(self).__name__,
+                    "strict_mode": False,
+                },
+            )
+        elif not self.requires_tenant and tenant is None:
+            # Tenant-optional handler running without scope — INFO level.
+            logger.info(
+                "worker.tenantless_handler handler=%s trace=%s",
+                type(self).__name__,
+                trace_id,
+            )
 
         with tenant_scope(tenant), trace_id_scope(trace_id or None):
             emit(

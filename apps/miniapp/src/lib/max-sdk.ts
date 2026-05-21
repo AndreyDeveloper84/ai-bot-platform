@@ -60,9 +60,9 @@ export function getInitData(): string {
 
 /**
  * Deeplink payload passed by MAX when the Mini App is opened via an
- * ``open_app`` inline-keyboard button. Welcome skill emits payloads
- * shaped as ``route=<key>`` (e.g. ``route=catalog``); ``parseStartRoute``
- * maps that to the matching React Router path.
+ * ``open_app`` inline-keyboard button. Welcome skill emits flat-slug
+ * payloads (e.g. ``open_catalog``); ``parseStartRoute`` maps them to
+ * the matching React Router path.
  *
  * MAX delivers the button's ``payload`` field as
  * ``initDataUnsafe.start_param`` (mirroring Telegram WebApp's
@@ -96,10 +96,11 @@ export function getStartPayload(): string {
  *
  * * **Flat slug** (``open_catalog``, ``open_visits``, ``open_profile``)
  *   — current emit path. MAX requires open_app button payload to match
- *   a restricted regex; the flat-slug shape passes.
- * * **Legacy querystring** (``route=catalog``) — initial shape, kept
- *   for backward compat in case the bot rolls back or a stale message
- *   in a user's history has the old payload.
+ *   a restricted regex (no ``=``, no ``&``); the flat-slug shape passes.
+ * * **Legacy querystring inner-value** (``catalog``, ``visits``,
+ *   ``profile``) — accepted via the ``route=<value>`` fallback below,
+ *   kept for cold-start back-compat with stale message bodies in users'
+ *   MAX history during the F2 rollout window.
  */
 const _ROUTE_MAP: Record<string, string> = {
   // Flat slug — current.

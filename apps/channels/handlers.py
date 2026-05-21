@@ -29,6 +29,21 @@ class MaxHandler(TenantAwareTask):
     and `trace_id_scope` from the Redis Stream entry's top-level
     fields by the time `handle()` is called. We just forward the
     decoded payload to the handler implementation.
+
+    Tenancy retro B4: ``requires_tenant=True`` (inherited default).
+    MAX inbound is *expected* to be tenant-routed — the ingress layer
+    at ``apps/ingress/views.py`` resolves the tenant by bot-token
+    before XADD and stamps ``resolved_tenant_id`` on the stream entry.
+    Entries WITHOUT a resolved tenant indicate an ingress mis-binding
+    (unknown bot token, mis-configured webhook URL, ingress
+    regression — see ``apps/ingress/views.py:114-116`` where the
+    ``resolved_tenant_id=""`` branch is explicit). Pre-B4 such entries
+    silently ran with ``tenant_scope(None)``: reads returned empty +
+    audit warn but the handler proceeded on phantom context. Post-B4
+    once ``STRICT_TENANT_REFUSE`` flips, such entries DLQ cleanly so
+    the incident surfaces. Phase 0 default (False) is log-only: ERROR
+    log on missing tenant, handler still runs (parity with pre-B4 for
+    the transition window).
     """
 
     def handle(self, payload: dict[str, Any]) -> None:

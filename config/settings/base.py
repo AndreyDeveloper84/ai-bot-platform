@@ -149,6 +149,31 @@ MIDDLEWARE = [
 #            fully disabled (none today).
 STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 
+# Tenancy retro B4 (2026-05-21) — STRICT_TENANT_REFUSE gates the
+# ``TenantAwareTask`` ``requires_tenant`` enforcement.
+#
+#   False — log-only. Missing tenant on a requires_tenant=True handler
+#           logs ERROR but proceeds with ``tenant_scope(None)``. Same
+#           pre-B4 behaviour, but loud. Default during Phase 0 rollout
+#           soak — same pattern as STRICT_TENANT_SCOPE shadow window.
+#   True  — refuse-dispatch. Missing tenant raises
+#           TenantRequiredButMissing → consumer.py treats it like any
+#           handler exception (no XACK; PEL retains for DLQ retry).
+#
+# Flip to True only after the dev-side soak shows zero
+# ``worker.tenant_required_missing`` events in audit for a clean
+# week (mirrors the Sprint 8 STRICT_TENANT_SCOPE flip cadence).
+STRICT_TENANT_REFUSE = os.environ.get("STRICT_TENANT_REFUSE", "false").lower() == "true"
+
+# Tenancy retro B4 — post-flip monitor (mirrors STRICT_SCOPE_FLIP_AT
+# pattern from Sprint 8 / F2). Operator sets this to the ISO 8601 flip
+# timestamp at the same moment they roll STRICT_TENANT_REFUSE=true in
+# /etc/ai-bot-platform/.env. A future observability task (NOT shipped
+# in this PR) can read this and page on any
+# ``worker.tenant_required_missing`` event in the 24h post-flip
+# window. Runbook: docs/runbooks/strict-tenant-refuse-flip.md (TBD).
+STRICT_TENANT_REFUSE_FLIP_AT = os.environ.get("STRICT_TENANT_REFUSE_FLIP_AT", "")
+
 # Sprint 8 / F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip monitor armed.
 # Operator sets this to the ISO 8601 flip timestamp at the same moment
 # they roll STRICT_TENANT_SCOPE=strict in /etc/ai-bot-platform/.env.
