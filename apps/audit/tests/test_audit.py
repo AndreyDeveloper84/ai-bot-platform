@@ -327,3 +327,204 @@ class TestSoftDelete:
         # Audit row records the fallback mode as "hard".
         row = AuditLog.all_tenants.get(action=AUDIT_CLEANUP_ACTION)
         assert row.payload["mode"] == "hard"
+
+
+# ---------------------------------------------------------------------------
+# Audit retro hotfix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB1UuidCoercion:
+    """Pre-fix ``write_audit(target_id="123456")`` raised ValidationError
+    inside .create() because target_id is UUIDField; the bare
+    ``except Exception`` swallowed it and the audit row was SILENTLY
+    LOST — forensic data corruption masked as a clean write.
+
+    Post-fix non-UUID values flow into ``payload['target_id_raw']`` /
+    ``payload['actor_id_raw']`` so the row still lands AND the
+    contextual id is greppable via admin / SQL search.
+    """
+
+    def test_non_uuid_target_id_lands_in_payload_raw(self):
+        from apps.audit.services import write_audit
+
+        write_audit(
+            action="retro.b1.non_uuid",
+            target="YClientsRecord",
+            target_id="123456",  # integer YClients ID — not a UUID
+        )
+
+        row = AuditLog.all_tenants.filter(action="retro.b1.non_uuid").first()
+        assert row is not None, "audit row was silently lost — B1 contract violated"
+        assert row.target_id is None  # UUID column stayed clean
+        assert row.payload["target_id_raw"] == "123456"
+
+    def test_non_uuid_actor_id_lands_in_payload_raw(self):
+        from apps.audit.services import write_audit
+
+        write_audit(
+            action="retro.b1.non_uuid_actor",
+            actor_id="ai_persona_v2",
+        )
+
+        row = AuditLog.all_tenants.filter(action="retro.b1.non_uuid_actor").first()
+        assert row is not None
+        assert row.actor_id is None
+        assert row.payload["actor_id_raw"] == "ai_persona_v2"
+
+    def test_valid_uuid_target_id_passes_through(self):
+        # Negative regression: a real UUID still lands in the column.
+        import uuid
+
+        from apps.audit.services import write_audit
+
+        u = uuid.uuid4()
+        write_audit(
+            action="retro.b1.valid_uuid",
+            target_id=u,
+        )
+        row = AuditLog.all_tenants.filter(action="retro.b1.valid_uuid").first()
+        assert row is not None
+        assert str(row.target_id) == str(u)
+        assert "target_id_raw" not in (row.payload or {})
+
+    def test_uuid_shaped_string_is_parsed(self):
+        # A UUID-shaped string still parses to the UUID column, not
+        # the raw fallback.
+        import uuid
+
+        from apps.audit.services import write_audit
+
+        u = uuid.uuid4()
+        write_audit(
+            action="retro.b1.uuid_string",
+            target_id=str(u),
+        )
+        row = AuditLog.all_tenants.filter(action="retro.b1.uuid_string").first()
+        assert row is not None
+        assert str(row.target_id) == str(u)
+        assert "target_id_raw" not in (row.payload or {})
+
+
+class TestRetroY1PayloadSizeCap:
+    """Pre-fix a buggy caller passing a 50KB embedded blob (LLM prompt,
+    base64 image) landed a multi-MB row, bloating WAL and slowing
+    every audit read. Post-fix payloads over
+    :data:`AUDIT_PAYLOAD_MAX_BYTES` are replaced with a
+    ``{truncated, size_bytes, cap_bytes, sha256}`` summary so the row
+    still lands but stays small.
+    """
+
+    def test_oversize_payload_replaced_with_summary(self):
+        from apps.audit.services import AUDIT_PAYLOAD_MAX_BYTES, write_audit
+
+        # 16 KB of repeated 'a' guarantees we exceed the 8 KB cap.
+        huge_blob = "a" * (AUDIT_PAYLOAD_MAX_BYTES * 2)
+        write_audit(
+            action="retro.y1.oversize",
+            payload={"embedded": huge_blob},
+        )
+        row = AuditLog.all_tenants.filter(action="retro.y1.oversize").first()
+        assert row is not None
+        assert row.payload.get("truncated") is True
+        assert row.payload.get("size_bytes") > AUDIT_PAYLOAD_MAX_BYTES
+        assert "sha256" in row.payload
+        # Original huge string is NOT in the persisted payload.
+        assert "embedded" not in row.payload
+
+    def test_in_budget_payload_passes_through(self):
+        # Negative regression: a small payload lands intact.
+        from apps.audit.services import write_audit
+
+        write_audit(
+            action="retro.y1.small",
+            payload={"k": "v", "count": 3},
+        )
+        row = AuditLog.all_tenants.filter(action="retro.y1.small").first()
+        assert row is not None
+        assert row.payload.get("k") == "v"
+        assert row.payload.get("count") == 3
+        assert "truncated" not in row.payload
+
+    def test_non_json_serialisable_payload_does_not_raise(self):
+        # Contract: write_audit MUST NEVER RAISE — even when the caller
+        # passes a payload Django's JSONField encoder can't serialise.
+        # The row lands with a degraded summary; the surrounding
+        # request transaction continues. Closes reviewer Y2 — pre-fix
+        # this test only asserted "no exception" which would also have
+        # passed if write_audit silently swallowed everything (the
+        # exact pre-B1 failure class).
+        from apps.audit.services import write_audit
+
+        class _Weird:
+            pass
+
+        try:
+            write_audit(
+                action="retro.y1.weird",
+                payload={"obj": _Weird()},
+            )
+            raised = None
+        except Exception as exc:  # noqa: BLE001
+            raised = exc
+        assert raised is None, (
+            f"write_audit raised {type(raised).__name__}: {raised} — "
+            "contract violation (audit must never break the request)"
+        )
+
+        # The row landed with the un-serialisable value cast to its
+        # str() repr via _cap_payload_size's default=str + round-trip.
+        # Verifies the forensic-breadcrumb contract: even on caller
+        # bugs, write_audit produces a row admins can grep, not silent
+        # data loss (closes reviewer Y2).
+        row = AuditLog.all_tenants.filter(action="retro.y1.weird").first()
+        assert row is not None, (
+            "expected an audit row even on un-serialisable payload — "
+            "possible regression to the silent-swallow failure mode"
+        )
+        # _Weird → '<...test._Weird object at 0x...>' via default=str.
+        obj_repr = (row.payload or {}).get("obj", "")
+        assert "_Weird" in obj_repr, (
+            f"expected str-cast repr of _Weird in payload, got {obj_repr!r}"
+        )
+
+
+class TestRetroY4ChunkedSweep:
+    """Pre-fix the sweep issued a single UPDATE / DELETE over potentially
+    millions of rows — long row locks, replication lag, statement
+    timeout risk. Post-fix processes in chunks of 5000 rows with
+    per-chunk transactions.
+    """
+
+    def test_chunked_soft_archive_processes_all_rows(self, settings):
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "soft"
+        now = timezone.now()
+        # Create 20 old rows (well within a chunk but exercises the loop).
+        for i in range(20):
+            row = AuditLog.all_tenants.create(action=f"chunked.{i}")
+            AuditLog.all_tenants.filter(pk=row.pk).update(created_at=now - timedelta(days=40))
+
+        affected = cleanup_old_audit_logs()
+        assert affected == 20
+
+        archived = AuditLog.all_tenants.filter(
+            action__startswith="chunked.",
+            is_archived=True,
+        )
+        assert archived.count() == 20
+
+    def test_chunked_soft_archive_is_idempotent(self, settings):
+        # Re-running the sweep on already-archived rows is a no-op.
+        settings.AUDIT_LOG_RETENTION_DAYS = 30
+        settings.AUDIT_LOG_RETENTION_MODE = "soft"
+        now = timezone.now()
+        row = AuditLog.all_tenants.create(action="idempotent.soft")
+        AuditLog.all_tenants.filter(pk=row.pk).update(
+            created_at=now - timedelta(days=40),
+            is_archived=True,
+            archived_at=now,
+        )
+
+        affected = cleanup_old_audit_logs()
+        assert affected == 0  # already archived; nothing to do

@@ -29,6 +29,7 @@ from datetime import timedelta
 
 from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -71,17 +72,17 @@ def cleanup_old_audit_logs() -> int:
 
     cutoff = timezone.now() - timedelta(days=days)
 
-    if mode == "soft":
-        # Only flip rows that aren't already archived — re-running the
-        # task must be idempotent.
-        affected = AuditLog.all_tenants.filter(
-            created_at__lt=cutoff,
-            is_archived=False,
-        ).update(is_archived=True, archived_at=timezone.now())
-    else:
-        # hard: original behaviour, full DELETE.
-        deleted, _per_model = AuditLog.all_tenants.filter(created_at__lt=cutoff).delete()
-        affected = deleted
+    # Audit retro Y4: chunked sweep instead of single-statement
+    # UPDATE / DELETE. Pre-fix one UPDATE / DELETE over potentially
+    # millions of rows held long row locks, lagged replication, and
+    # risked statement-timeout. Chunked iteration with short
+    # transactions per chunk lets the sweep coexist with hot
+    # production traffic.
+    affected = (
+        _soft_archive_chunked(AuditLog, cutoff)
+        if mode == "soft"
+        else _hard_delete_chunked(AuditLog, cutoff)
+    )
 
     logger.info(
         "audit.retention.cleanup affected=%d cutoff=%s days=%d mode=%s",
@@ -105,3 +106,67 @@ def cleanup_old_audit_logs() -> int:
         },
     )
     return affected
+
+
+# Audit retro Y4: chunk size matches the loyalty audit-sweep pattern
+# (~5k rows / iteration). Tuned for production tenants — bumps
+# replication caught-up between iterations + keeps row locks
+# short-lived enough that hot writes don't starve.
+_SWEEP_CHUNK_SIZE = 5_000
+
+
+def _soft_archive_chunked(model_cls, cutoff) -> int:  # noqa: ANN001
+    """Chunked UPDATE: flip ``is_archived=True`` on archive-eligible rows.
+
+    Returns the total number of rows affected across all chunks. Each
+    chunk runs inside an explicit ``transaction.atomic()`` so the
+    «short transaction per chunk» contract is load-bearing — a future
+    maintainer adding a second statement inside the loop can't
+    accidentally span chunks (closes reviewer Y3).
+    """
+
+    total = 0
+    while True:
+        pks = list(
+            model_cls.all_tenants.filter(
+                created_at__lt=cutoff,
+                is_archived=False,
+            )
+            .order_by("pk")
+            .values_list("pk", flat=True)[:_SWEEP_CHUNK_SIZE]
+        )
+        if not pks:
+            break
+        with transaction.atomic():
+            affected = model_cls.all_tenants.filter(pk__in=pks).update(
+                is_archived=True,
+                archived_at=timezone.now(),
+            )
+        total += affected
+        if len(pks) < _SWEEP_CHUNK_SIZE:
+            break
+    return total
+
+
+def _hard_delete_chunked(model_cls, cutoff) -> int:  # noqa: ANN001
+    """Chunked DELETE: drop rows past the retention cutoff.
+
+    See :func:`_soft_archive_chunked` for the per-chunk atomic
+    rationale.
+    """
+
+    total = 0
+    while True:
+        pks = list(
+            model_cls.all_tenants.filter(created_at__lt=cutoff)
+            .order_by("pk")
+            .values_list("pk", flat=True)[:_SWEEP_CHUNK_SIZE]
+        )
+        if not pks:
+            break
+        with transaction.atomic():
+            deleted, _per_model = model_cls.all_tenants.filter(pk__in=pks).delete()
+        total += deleted
+        if len(pks) < _SWEEP_CHUNK_SIZE:
+            break
+    return total
