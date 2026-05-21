@@ -32,6 +32,7 @@ import { getMe, type MeResponse } from "./lib/admin-api";
 import { AdminChatsPlaceholderScreen } from "./screens/admin/AdminChatsPlaceholderScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
+import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminServicesPlaceholderScreen } from "./screens/admin/AdminServicesPlaceholderScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
@@ -117,6 +118,10 @@ function AdminRoutes({ me }: { me: MeResponse }) {
       <Route
         path="/admin/team/:masterId/deactivate"
         element={<AdminDeactivationFlowScreen me={me} />}
+      />
+      <Route
+        path="/admin/team/:masterId"
+        element={<AdminMasterDetailScreen me={me} />}
       />
       <Route
         path="/admin/services"

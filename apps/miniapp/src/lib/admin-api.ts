@@ -360,3 +360,167 @@ export const getCatalogServicesForAdmin = async (): Promise<
     duration_min: s.duration_min,
   }));
 };
+
+// --- MM3 master detail / patch / photo / audit -----------------------------
+
+/**
+ * Full master detail returned by ``GET /api/v1/admin/masters/<id>/``.
+ *
+ * Mirrors :func:`apps.admin_api.views._detail_payload`. Keep field
+ * names in sync with the backend serializer — silent rename here will
+ * just produce ``undefined`` in the UI rather than a typecheck error,
+ * so the contract is owned in both repos.
+ */
+export interface LinkedBotUser {
+  id: string;
+  display_name: string;
+  phone_masked: string;
+  last_seen_at: string | null;
+}
+
+export interface MasterDetailService {
+  id: string;
+  name: string;
+}
+
+export interface MasterDetail {
+  id: string;
+  name: string;
+  specialization: string;
+  bio: string;
+  experience: string;
+  rating: string | null;
+  is_active: boolean;
+  invite_status: string;
+  mode: string;
+  photo_url: string;
+  max_handle: string;
+  yclients_staff_id: string | null;
+  invited_at: string | null;
+  archived_at: string | null;
+  linked_bot_user: LinkedBotUser | null;
+  services: MasterDetailService[];
+  working_hours_summary: string;
+}
+
+interface MasterDetailEnvelope {
+  master: MasterDetail;
+}
+
+export const getMasterDetail = (
+  masterId: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<MasterDetail> =>
+  request<MasterDetailEnvelope>(`/api/v1/admin/masters/${masterId}/`, {
+    method: "GET",
+    signal: init.signal,
+  }).then((env) => env.master);
+
+/**
+ * PATCH body for ``/api/v1/admin/masters/<id>/``. Only fields the
+ * backend whitelists in ``PATCH_EDITABLE_FIELDS`` belong here. The
+ * MM3 inline-edit flow sends a single field at a time, but the type
+ * stays a ``Partial`` so future bulk-save lands cleanly.
+ *
+ * Constraints (server-enforced — UI mirrors them for fast feedback):
+ *   - ``name``           — non-blank, ≤ 200 chars
+ *   - ``specialization`` — ≤ 255 chars (blank OK)
+ *   - ``bio``            — ≤ 1000 chars server-side; UI caps at 280 per
+ *     §MM3 line 531 «280 символов max»
+ *   - ``experience``     — ≤ 255 chars
+ *   - ``is_active``      — boolean; setting ``False`` requires Owner
+ */
+export interface MasterPatchPayload {
+  name: string;
+  specialization: string;
+  bio: string;
+  experience: string;
+  is_active: boolean;
+}
+
+export const patchMaster = (
+  masterId: string,
+  patch: Partial<MasterPatchPayload>,
+): Promise<MasterDetail> =>
+  request<MasterDetailEnvelope>(`/api/v1/admin/masters/${masterId}/`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  }).then((env) => env.master);
+
+/**
+ * Multipart photo upload — JPEG / PNG / WebP, ≤ 10 MB. Mirrors
+ * :func:`apps.admin_api.views.master_photo_upload`. The browser sets
+ * the multipart Content-Type boundary automatically when ``body`` is
+ * a ``FormData`` instance, so we must NOT pre-set Content-Type in the
+ * shared ``request`` helper. We hit the lower-level ``fetch`` here
+ * because ``request`` defaults to ``application/json`` when ``body``
+ * is present.
+ */
+export interface MasterPhotoUploadResponse {
+  photo_url: string;
+}
+
+export const uploadMasterPhoto = async (
+  masterId: string,
+  file: File,
+): Promise<MasterPhotoUploadResponse> => {
+  const formData = new FormData();
+  formData.append("photo", file);
+  const initData = getInitData();
+  const headers = new Headers();
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+  // No Content-Type — let fetch set the multipart boundary.
+  const res = await fetch(`/api/v1/admin/masters/${masterId}/photo/`, {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+  if (!res.ok) {
+    let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
+    try {
+      parsed = (await res.json()) as ErrorBody;
+    } catch {
+      /* non-JSON 5xx */
+    }
+    throw new ApiError(res.status, parsed.error, parsed.detail);
+  }
+  return (await res.json()) as MasterPhotoUploadResponse;
+};
+
+/**
+ * Audit feed row — mirrors the backend builder in
+ * :func:`apps.admin_api.views.master_audit_feed`.
+ *
+ * ``action`` is the registered slug from
+ * :mod:`apps.events.vocabulary` (e.g. ``master.profile_updated_by_admin``).
+ * ``payload`` carries event-specific extras; the MM3 UI reads
+ * ``fields_changed`` for the profile-update row.
+ */
+export interface AuditEvent {
+  id: string;
+  action: string;
+  actor_id: string | null;
+  actor_role: string | null;
+  occurred_at: string;
+  payload: Record<string, unknown>;
+}
+
+export interface AuditFeedResponse {
+  items: AuditEvent[];
+  next_cursor: string | null;
+}
+
+export const getMasterAudit = (
+  masterId: string,
+  cursor?: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<AuditFeedResponse> => {
+  const q = new URLSearchParams();
+  if (cursor) q.set("cursor", cursor);
+  q.set("limit", "10");
+  return request<AuditFeedResponse>(
+    `/api/v1/admin/masters/${masterId}/audit/?${q.toString()}`,
+    { method: "GET", signal: init.signal },
+  );
+};
