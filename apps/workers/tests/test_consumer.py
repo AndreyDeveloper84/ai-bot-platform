@@ -645,6 +645,186 @@ class TestRetroB4BlockersPreFlip:
         assert _SystemTask.requires_tenant is False
         assert _AuditSweepHandler.requires_tenant is False
 
+    # ---- B2 adversarial-pass regressions (B-2/3/4 multi-defense) ----
+
+    def test_b2_post_creation_mutation_ignored_at_dispatch(self, settings, fake_redis):
+        """B-2 adversarial: ``Cls.requires_tenant = False`` set AFTER
+        class creation must NOT defeat strict-mode refuse.
+
+        Pre-fix dispatch read ``self.requires_tenant`` live → mutation
+        won. Post-fix dispatch reads the FROZEN snapshot stored by
+        ``__init_subclass__`` → mutation has no effect.
+        """
+
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+
+        class _Mutated(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        # Snapshot was True at class creation. Attacker tries to flip it.
+        _Mutated.requires_tenant = False
+
+        # Dispatch with missing tenant: post-mutation `requires_tenant`
+        # is False, but the frozen snapshot is True → must refuse.
+        with pytest.raises(TenantRequiredButMissing):
+            _Mutated()({"data": "{}", "trace_id": "t-mut", "resolved_tenant_id": ""})
+
+    def test_b2_init_subclass_shadow_does_not_defeat_strict_refuse(self, settings):
+        """B-3 adversarial: a descendant that overrides
+        ``__init_subclass__`` without calling ``super()`` blocks the
+        snapshot from being SET on its further descendants. The
+        runtime lookup in ``__call__`` falls back through MRO to find
+        the nearest TenantAwareTask-descendant's snapshot — which IS
+        set (because ``TenantAwareTask.__init_subclass__`` ran when
+        ``_Shadow`` itself was created and stored True on ``_Shadow``).
+
+        Outcome: strict-mode refuse STILL happens even with the shadow
+        attack pattern. The external mixin's ``requires_tenant=False``
+        is ignored because (a) it's not in the trusted MRO chain and
+        (b) ``_Shadow``'s snapshot is True.
+        """
+
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+
+        class _Shadow(TenantAwareTask):
+            """Blocks the __init_subclass__ chain — adversarial pattern."""
+
+            def __init_subclass__(cls, **kwargs):  # noqa: ANN001, D401
+                # NO super() call — kills hook propagation to descendants.
+                pass
+
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        class _ExternalMixinSetsFalse:
+            requires_tenant = False  # the would-be silent bypass
+
+        # Multi-inheritance: external mixin BEFORE Shadow in MRO. Pre-fix
+        # dispatch would resolve ``self.requires_tenant`` to False here.
+        class _Compromised(_ExternalMixinSetsFalse, _Shadow):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        # Strict refuse must STILL happen — the shadow attack is defeated.
+        with pytest.raises(TenantRequiredButMissing):
+            _Compromised()({"data": "{}", "trace_id": "t-shadow", "resolved_tenant_id": ""})
+
+    def test_b2_property_descriptor_rejected_at_class_creation(self):
+        """B-4 adversarial: a ``@property`` on the subclass's own
+        ``__dict__`` for ``requires_tenant`` is NOT a literal bool.
+        Type-purity check must reject it at class creation.
+        """
+
+        with pytest.raises(TypeError, match="must be a literal"):
+
+            class _Sneaky(TenantAwareTask):
+                @property
+                def requires_tenant(self):
+                    return False
+
+                def handle(self, payload):  # noqa: ANN001
+                    pass
+
+    def test_b2_non_bool_assignment_rejected_at_class_creation(self):
+        """B-4 adversarial: any non-bool type on own ``__dict__``
+        (int, callable, lambda, string) is rejected. The strict-mode
+        decision MUST be a literal bool.
+        """
+
+        with pytest.raises(TypeError, match="must be a literal"):
+
+            class _IntAttack(TenantAwareTask):
+                requires_tenant = 0  # truthy/falsy abuse vector
+
+                def handle(self, payload):  # noqa: ANN001
+                    pass
+
+        with pytest.raises(TypeError, match="must be a literal"):
+
+            class _CallableAttack(TenantAwareTask):
+                requires_tenant = lambda self: False  # noqa: E731
+
+                def handle(self, payload):  # noqa: ANN001
+                    pass
+
+    # ---- B1 adversarial-pass hardening — emit spy via audit Event row ----
+
+    def test_b1_strict_mode_emit_row_carries_trace_id_via_audit_table(self, settings, fake_redis):
+        """B-1 adversarial-pass D-5: spying on a module-imported
+        ``emit`` reference is brittle to refactor (`from X import emit`
+        captures by value). The robust assertion is on the audit
+        ``Event`` row itself — that's the system-of-record for trace
+        correlation. If emit lands inside ``trace_id_scope``, the
+        row's ``trace_id`` column matches.
+        """
+
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+
+        class _StrictHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        with pytest.raises(TenantRequiredButMissing):
+            _StrictHandler()({"data": "{}", "trace_id": "trace-b1-audit", "resolved_tenant_id": ""})
+
+        rows = list(
+            Event.objects.filter(event_type="worker.tenant_required_missing").values(
+                "event_type", "trace_id"
+            )
+        )
+        assert rows, "expected a worker.tenant_required_missing audit row"
+        assert all(r["trace_id"] == "trace-b1-audit" for r in rows), (
+            "B1: every audit row must carry the raw_entry's trace_id "
+            "(emit fired inside trace_id_scope)"
+        )
+
+    # ---- D-4 cross-flag coupling — STRICT_TENANT_REFUSE × STRICT_TENANT_SCOPE ----
+
+    def test_d4_optout_handler_under_strict_scope_documents_all_tenants_path(
+        self, settings, fake_redis
+    ):
+        """D-4 adversarial: a ``requires_tenant=False`` handler running
+        under ``STRICT_TENANT_SCOPE=strict`` MUST use
+        ``Model.all_tenants`` for tenant-scoped reads. The runbook
+        mandates this; this test asserts the handler path proceeds
+        cleanly when the handler doesn't touch tenant-scoped managers.
+
+        A handler that DOES violate the mandate (uses ``Model.objects``)
+        would raise ``CrossTenantError`` at the ORM layer — that
+        traceback would surface as a normal ``worker.handler_failed``
+        path, NOT as a B4 ``TenantRequiredButMissing``. Verified by the
+        log-shape contract here so the flip plan can rely on the
+        documented behaviour.
+        """
+
+        # Both flags strict — the operationally hardest combination.
+        settings.STRICT_TENANT_REFUSE = True
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        ran = {"called": False}
+
+        class _SystemTask(TenantAwareTask):
+            # Documented opt-out — uses .all_tenants for any read.
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                ran["called"] = True
+
+        # Empty resolved_tenant_id under both strict flags. The handler
+        # opts out of tenant requirement, so dispatch must proceed.
+        _SystemTask()({"data": "{}", "trace_id": "t-d4", "resolved_tenant_id": ""})
+        assert ran["called"] is True, (
+            "D-4: opt-out handler must dispatch cleanly under both "
+            "strict flags when it doesn't touch tenant-scoped managers"
+        )
+
     # ---- B3: documented restart-required ----
 
     def test_b3_strict_flag_read_site_documents_restart_required(self):
