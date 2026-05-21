@@ -5,8 +5,9 @@
  * master-management-handoff §MM1, this is a simplified version:
  * roster, search, active/archive filter, tap → action sheet.
  *
- * MM3 master-detail editing is OUT of scope this PR; the action
- * sheet's «Открыть подробно» surfaces a placeholder toast.
+ * MM3 master-detail editing lives on its own screen at
+ * /admin/team/:masterId; the action sheet's «Открыть подробно»
+ * navigates there (Bundle 2/3 of TL admin chrome closure).
  *
  * Owner-only actions («Деактивировать» / «Восстановить») are
  * disabled with a tooltip for Admin / Receptionist callers — the
@@ -193,10 +194,14 @@ export function AdminTeamScreen({ me }: Props) {
     }
   }, [reactivateMasterItem, reactivateNotify, manualReload]);
 
-  const handleOpenDetail = useCallback(() => {
-    setSheetMaster(null);
-    setToast("Карточка мастера — скоро");
-  }, []);
+  const handleOpenDetail = useCallback(
+    (master: MasterListItem) => {
+      setSheetMaster(null);
+      // MM3 detail screen is now wired — Bundle 2/3 of TL admin chrome.
+      navigate(`/admin/team/${master.id}`);
+    },
+    [navigate],
+  );
 
   if (err) {
     return (
@@ -376,7 +381,7 @@ export function AdminTeamScreen({ me }: Props) {
             <button
               type="button"
               className="admin-sheet__action"
-              onClick={handleOpenDetail}
+              onClick={() => handleOpenDetail(sheetMaster)}
             >
               Открыть подробно
             </button>
