@@ -1,6 +1,6 @@
 # ADR-0011: UserPersonalContext Privacy & Retention Policy (152-ФЗ engineering boundaries)
 
-**Status:** Proposed — 2026-05-21 (amendments in flight per PR #495 adversarial review)
+**Status:** Proposed — 2026-05-21 (round-3 amendments per PR #495 adversarial N=4 — addresses 4 new attack surfaces introduced by round-2 abstractions + 6 nice-to-haves)
 **Companion ADRs:** [ADR-0009](./ADR-0009-ayla-split-domain-architecture.md) §Memory model · [ADR-0006](./ADR-0006-field-level-encryption.md)
 **Companion policy:** [`docs/design/policies/ayla-memory-and-personalization.md`](../design/policies/ayla-memory-and-personalization.md) — foundation Doc #2 (the customer-facing UX framing)
 **Blocks:** #228 (UserPersonalContext model) · #229 (MemoryEntry model) · #230 (RedZoneAccessLog model)
@@ -65,6 +65,7 @@ The following five fields MUST appear in the initial migration for the memory mo
 | `source` | enum (`explicit` / `inferred` / `signal`) | How the fact entered memory. `explicit` = user stated it directly. `inferred` = Ayla derived it from conversation/behaviour. `signal` = derived from booking/payment events. Indexed for filter queries. |
 | `last_inferred_at` | timestamptz, nullable | When inference last updated this entry. **MUST be NULL when `source = 'explicit'`** and **MUST be NOT NULL when `source IN ('inferred', 'signal')`** (DB CHECK constraint enforced). Updated on every re-inference pass; the value answers «how stale is this guess?» |
 | `delete_requested_at` | timestamptz, nullable | Set when the user requests deletion of this specific entry (DELETE `/api/v1/users/me/memory/{entry_id}` — #232). `soft_deleted_at` (already in #229) is set by the soft-delete job that processes the request; `delete_requested_at` records the user's intent moment for audit. |
+| `deletion_reason` | enum (`user_delete` / `withdrawal` / `forget_all` / `ttl_purge` / `minor_protection`), nullable | **Set in the same UPDATE that sets `delete_requested_at`.** Distinguishes WHY a row is being deleted — critical for regulator audit «show me Q3 consent withdrawals» (filter `deletion_reason='withdrawal'`) vs «show me Q3 deletions» (filter `deletion_reason='user_delete'`). NULL only on live (non-deleted) rows. (Round-3 Blocker A1.) |
 | `consent_at` | timestamptz, nullable | Set when the user explicitly consented to storing this entry. **MUST be NOT NULL for `sensitivity_zone IN ('yellow', 'red')`** before the entry is read or used by Ayla (DB CHECK constraint enforced at write). Green-zone entries do NOT require explicit consent (the 152-ФЗ basis for green is implied by the service contract — see §11). |
 
 ### 3.2 On `UserPersonalContext` (1 field — user-level)
@@ -111,6 +112,20 @@ Both constraints fire at INSERT and UPDATE. App-level validation is a courtesy; 
 **Constraint 2 semantics:** yellow/red entries require either an active consent timestamp OR a soft-delete marker. The `soft_deleted_at` exemption is critical for the withdrawal flow (§11.y): a withdrawn entry transitions to soft-deleted in the same UPDATE that flags its `delete_requested_at` — the constraint stays satisfied because the row is in tombstone state.
 
 **Withdrawal is NOT modeled as «set `consent_at = NULL` on a live row»** — that would violate Constraint 2. Withdrawal sets `delete_requested_at = now()` + `soft_deleted_at = now()` in one transaction; the entry becomes immediately unreadable per the app-layer read gate (§11.y). Physical purge happens async via the TTL sweep.
+
+**Constraint 3 (round-3 Blocker A1) — `deletion_reason` nullness:**
+
+```sql
+-- A row is "deleted" (has any deletion timestamp) IFF deletion_reason is set
+ALTER TABLE memory_entry
+  ADD CONSTRAINT memory_entry_deletion_reason_nullness CHECK (
+    (delete_requested_at IS NULL AND soft_deleted_at IS NULL AND deletion_reason IS NULL)
+    OR (deletion_reason IS NOT NULL
+        AND (delete_requested_at IS NOT NULL OR soft_deleted_at IS NOT NULL))
+  );
+```
+
+Live (non-deleted) rows MUST have `deletion_reason IS NULL`. Any row in soft-delete state MUST have a non-null `deletion_reason`. Prevents the «orphaned soft-delete with no reason» case where regulator audit asks «why was this user's entry deleted?» and the DB shrugs.
 
 **Migration discipline.** The CHECK constraints are added with the `NOT VALID` + `VALIDATE CONSTRAINT` pattern (Blocker #10) — see §14.
 
@@ -219,30 +234,66 @@ The «every red read writes a log row» rule (§7 bullet 1) is **NOT a docstring
 
 1. **Mandatory accessor function.** All red-zone reads MUST go through `apps/identity/services/red_zone_reader.py::RedZoneReader.read(entry_id, accessor_role, request_id)`. The accessor opens a DB transaction, writes the `RedZoneAccessLog` row first, then SELECTs the entry, then COMMITs. If either step fails, the transaction rolls back — the read does not happen.
 
-   Pseudo-code:
+   Pseudo-code (round-3 Blocker A2: signature gains `purpose`, `try/finally` GUC reset is mandatory):
 
    ```python
    class RedZoneReader:
        @classmethod
-       def read(cls, entry_id, accessor_role, request_id):
+       def read(cls, entry_id, accessor_role, request_id, purpose):
+           # request_id MUST be a real audit reference: Celery task id, HTTP
+           # request id, or ops ticket id. Validated at call site.
+           # purpose is a short human-readable string ("contraindication_check",
+           # "subject_access_request", "incident_debug", ...) — stored in
+           # RedZoneAccessLog.purpose for after-the-fact auditability (round-3 A5).
            with transaction.atomic():
-               RedZoneAccessLog.objects.create(
-                   memory_entry_id=entry_id,
-                   user_id=...,
-                   accessor_role=accessor_role,
-                   access_type='read',
-                   request_id=request_id,
-               )
-               entry = MemoryEntry.objects.select_for_update().get(
-                   id=entry_id,
-                   sensitivity_zone='red',
-                   soft_deleted_at__isnull=True,
-                   delete_requested_at__isnull=True,
-               )
-               return entry.content  # decryption happens here
+               # CRITICAL: set the session GUC inside the transaction, then
+               # reset in finally. Django connection pooling reuses sessions
+               # across requests — without the reset, the next request in the
+               # same pooled connection bypasses the BEFORE SELECT trigger
+               # silently. This is the «pool-leaked auth» bypass (A2).
+               with connection.cursor() as cur:
+                   cur.execute(
+                       "SELECT set_config('ayla.red_zone_access_context', %s, true)",
+                       [str(request_id)],  # MUST be a UUID — trigger regex-checks
+                   )
+               try:
+                   RedZoneAccessLog.objects.create(
+                       memory_entry_id=entry_id,
+                       user_id=...,
+                       accessor_role=accessor_role,
+                       access_type='read',
+                       request_id=request_id,
+                       purpose=purpose,
+                   )
+                   entry = MemoryEntry.objects.select_for_update().get(
+                       id=entry_id,
+                       sensitivity_zone='red',
+                       soft_deleted_at__isnull=True,
+                       delete_requested_at__isnull=True,
+                   )
+                   return entry.content  # decryption happens here
+               finally:
+                   # Reset GUC even on exception — pool safety.
+                   # (PostgreSQL's third arg to set_config = is_local; we use
+                   #  is_local=true so the value clears at tx end anyway, but
+                   #  the explicit reset is defence-in-depth against connection
+                   #  reuse outside an explicit transaction context.)
+                   with connection.cursor() as cur:
+                       cur.execute("SELECT set_config('ayla.red_zone_access_context', '', false)")
    ```
 
-2. **Import guard.** A pre-commit + CI lint rule bans direct `MemoryEntry.objects.filter(sensitivity_zone='red')` queries anywhere outside `apps/identity/services/red_zone_reader.py`. Rule lives in `pyproject.toml` (`[tool.ruff.lint.flake8-tidy-imports]`) + a custom forbidden-pattern check. `tests/test_red_zone_guard.py` greps production code paths and fails CI if any direct red access bypasses `RedZoneReader`. The rule MUST land in the same PR that creates `RedZoneAccessLog` (#230).
+2. **Import guard — AST-based (round-3 Blocker A2).** Regex-based lint (the round-2 spec) misses six known bypass patterns:
+
+   - **Variable-resolved literals:** `filter(sensitivity_zone=zone_var)` where `zone_var = 'red'` is set elsewhere.
+   - **`.all()` then Python-side filter:** `for entry in MemoryEntry.objects.all(): if entry.sensitivity_zone == 'red': ...`
+   - **Raw SQL:** `MemoryEntry.objects.raw("SELECT * FROM memory_entry WHERE sensitivity_zone = 'red'")`.
+   - **Bulk operations:** `MemoryEntry.objects.filter(...).update(...)` and `MemoryEntry.objects.bulk_update(...)` — these bypass `post_save` signals AND the `RedZoneReader` accessor. **FORBIDDEN on rows where `sensitivity_zone='red'`. Period.** If a code path needs to update many red rows (e.g. TTL sweep), it MUST iterate via `RedZoneReader` one-at-a-time, accepting the throughput cost.
+   - **Django shell + `dumpdata` / `dbshell`:** developer console session reading prod red rows. Mitigated by §7.2 DB role separation (`ayla_app` cannot SELECT red without GUC) but the shell pathway needs explicit policy: developers MUST use the `break-glass` role and follow the 4-eyes protocol (§7.2 bullet 3).
+   - **Signal handlers:** `@receiver(post_save, sender=MemoryEntry)` handlers receive a decrypted instance bypass the accessor. Mitigated by signal handlers that touch red rows being themselves audited — but the AST lint flags any `post_save`/`pre_save` handler on `MemoryEntry` that doesn't import from `red_zone_reader`.
+
+   The lint rule is therefore **AST-based** (using `libcst` or `ast.NodeVisitor`), NOT regex. It lives in `tools/lint/red_zone_guard.py`, runs in pre-commit + CI, and explicitly traces variable assignments to detect literal `'red'` flowing into any `MemoryEntry.objects.*` call site outside the accessor module. `tests/test_red_zone_guard.py` exercises each of the 6 patterns above as a positive test (the lint MUST fail on each).
+
+   The rule MUST land in the same PR that creates `RedZoneAccessLog` (#230).
 
 3. **Future hardening (Phase 2+):** Postgres Row-Level Security (RLS) policy gating red rows behind a session-level role check. Deferred per §16.4 — the import guard + DB role separation (§7.2) is sufficient defence for MVP given the small team size and the §7.2 BEFORE SELECT trigger.
 
@@ -252,7 +303,20 @@ The accessor + import guard protect application-layer reads. They do NOT protect
 
 **Production database has two routine roles + one break-glass role:**
 
-- **`ayla_app`** — application service role. Read+write on all tables EXCEPT no direct read on `memory_entry.content` column when `sensitivity_zone='red'` (column-level GRANT). App reads red via `RedZoneReader` → row-level read via privileged service role behind it. A `BEFORE SELECT` trigger on `memory_entry` raises an exception on a red-zone SELECT unless the session has set `ayla.red_zone_access_context` to a non-null `request_id` (which `RedZoneReader.read()` does). This makes direct `psql` SELECT of red rows by the app role **also** fail without a logged context.
+- **`ayla_app`** — application service role. Read+write on all tables EXCEPT no direct read on `memory_entry.content` column when `sensitivity_zone='red'` (column-level GRANT). App reads red via `RedZoneReader` → row-level read via privileged service role behind it. A `BEFORE SELECT` trigger on `memory_entry` raises an exception on a red-zone SELECT unless the session has `ayla.red_zone_access_context` set to a non-empty value matching a UUID regex (round-3 A8 — guards against empty-string GUC and against non-UUID garbage):
+
+  ```sql
+  -- Trigger body (round-3 A8 — empty-string-safe, UUID-validated)
+  IF coalesce(current_setting('ayla.red_zone_access_context', true), '') !~
+     '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  THEN
+    RAISE EXCEPTION 'Red-zone access requires UUID context (got %)',
+      coalesce(current_setting('ayla.red_zone_access_context', true), '<unset>')
+      USING ERRCODE = 'check_violation';
+  END IF;
+  ```
+
+  This makes direct `psql` SELECT of red rows by the app role **also** fail without a logged UUID-valid context.
 - **`ayla_ops`** — read-only ops role for routine debugging / dashboards. SELECT on `memory_entry` BUT through a view (`memory_entry_safe`) that omits red rows entirely (`WHERE sensitivity_zone != 'red'`). Ops sees green/yellow only. A bare `SELECT * FROM memory_entry WHERE sensitivity_zone='red'` under this role returns zero rows.
 
 **Break-glass procedure for ops needing red-zone read** (incident response, legal subpoena, etc):
@@ -263,7 +327,12 @@ The accessor + import guard protect application-layer reads. They do NOT protect
 - The session also writes to `RedZoneAccessLog` with `accessor_role='ops_admin'` AND to the OS-level SSH session audit.
 - §11 legal-basis claim (152-ФЗ Chapter 3) holds because audit trail exists at OS layer when DB layer is bypassed via app-role escalation.
 
-**Provisioning step in #230 acceptance:** the migration creates the two routine roles + the `memory_entry_safe` view + the `BEFORE SELECT` trigger. The break-glass role + the 4-eyes provisioning live in the secret-manager runbook (not in code). Without these, the audit claim is unenforceable.
+**Migration role (round-3 Blocker A3 — `ayla_migrator`).** Django migrations need DDL privileges. `ayla_app` deliberately LACKS DDL — a compromised app must not be able to `DROP TRIGGER memory_entry_red_select_guard ON memory_entry` and proceed unaudited. So a separate role exists for migrations only:
+
+- **`ayla_migrator`** — DDL only (CREATE / ALTER / DROP table, column, constraint, trigger, view, role). NO DML on `memory_entry.content`. Used exclusively to run `python manage.py migrate` in deploy pipelines. The CI/CD agent assumes this role for the migration step only; application boot reverts to `ayla_app`.
+- **`ayla_backup`** — physical backup role for `pg_basebackup`. Has REPLICATION privilege. **Accepted residual risk per §11.1:** physical backups bypass logical roles by design — they snapshot raw page contents including encrypted `memory_entry.content`. The encryption-key + red-zone pepper layered defence (§6) is the mitigation; the role itself cannot be more restricted without breaking DR capability.
+
+**Provisioning step in #230 acceptance:** the migration creates `ayla_app`, `ayla_ops`, `ayla_migrator`, `ayla_backup` + the `memory_entry_safe` view + the `BEFORE SELECT` trigger. The break-glass role + the 4-eyes provisioning live in the secret-manager runbook (not in code). Without these, the audit claim is unenforceable.
 
 ---
 
@@ -306,7 +375,15 @@ The boundary established in ADR-0009 §Memory model is restated here as engineer
 
 **Post-flip:** `tenant_required_missing` → DLQ (via #499 PEL reaper) → no read performed. Architectural invariant holds in production.
 
-Sprint 1 Track A #228-#230 models can land before flip; they inherit log-only enforcement until 2026-05-28, then hard enforcement after. If the soak surfaces blockers that delay the flip past 2026-05-28, this ADR's §9 enforcement claim is degraded to «log-only + code review» until the flip lands. Tech lead updates §9.1 with the new timeline if it slips.
+Sprint 1 Track A #228-#230 models can land before flip; they inherit log-only enforcement until 2026-05-28, then hard enforcement after. If the soak surfaces blockers that delay the flip past 2026-05-28, this ADR's §9 enforcement claim for **green and yellow zones** is degraded to «log-only + code review» until the flip lands. Tech lead updates §9.1 with the new timeline if it slips.
+
+**Red-zone carve-out (round-3 Blocker A4 — IMPORTANT):**
+
+> The «log-only during soak» concession applies to **green and yellow zones only**. Red-zone cross-tenant reads hard-fail (raise `TenantScopeViolation`) **from the moment #230's migration ships**, independent of the `STRICT_TENANT_REFUSE` flag. A cross-tenant leak during the soak window is a 152-ФЗ §10 special-category violation that no amount of «log-only + code review» can retroactively undo — and red-zone facts are infrequent enough that the «production observability soak» rationale for the soft mode doesn't apply.
+
+Concretely: `apps/identity/services/red_zone_reader.py::RedZoneReader.read()` MUST validate the caller's `tenant_id` claim against the target entry's `source_tenant_id` (or `personal_context.user_id` ↔ `Request.user` linkage) **before** the DB SELECT. Mismatch raises immediately. The §7.2 `BEFORE SELECT` trigger is the second-layer defence; the app-layer check is the first.
+
+This carve-out ships in `#230`'s scope per §13.9.
 
 ---
 
@@ -345,7 +422,7 @@ Memory writer MUST check `users.date_of_birth` via Ayla REST before writing yell
 
 - Reject write with `MinorProtectionLookupFailed` exception.
 - Caller retries with exponential backoff.
-- Cap retries at 3; on final failure, write is dropped + audit event `memory.write_rejected_dob_lookup_failed` emitted.
+- Cap retries at 3; on final failure, write is dropped + audit event `memory.write_rejected_dob_lookup_failed` emitted to `apps/observability` AND a `RedZoneAccessLog` row written with `access_type='write_rejected_dob_lookup'` (round-3 Blocker A6 — the table designed for red-zone events should also log red-zone write rejections, not only successful operations).
 - Customer-facing impact: AI's next turn may not have updated context. **Acceptable degradation vs 152-ФЗ §10 violation.**
 
 **Fail-open for green-explicit only:**
@@ -404,6 +481,8 @@ The 30+90 day window between erasure-from-live and erasure-from-backup is a 152-
 
 **Lawyer-friendly summary:** erasure is «no longer used», not «physically unrecoverable». This is the industry standard 152-ФЗ interpretation.
 
+**Backup-restore safety net (round-3 Blocker A7).** On a DR restore from any backup older than the most recent erasure, the app-layer read gate (§11.3) is applied **unconditionally**: any row whose `delete_requested_at` or `soft_deleted_at` is set (in either the restored data OR in the live audit table) remains unreadable. This means a backup restore in month 2 cannot resurrect data the user erased in month 1, even though the encrypted bytes are present on disk. The `RedZoneAccessLog` table (with 7-year retention) is the source of truth for which rows are deleted across all snapshots; the read gate consults the log on a startup reconciliation pass after any restore.
+
 ### 11.2 Zone promotion (green → yellow or green → red) — Blocker #8 fix
 
 If a fact's sensitivity is upgraded (e.g. AI later infers yellow-level context from a green-zone fact), promotion MUST be triggered by NEW explicit user consent dialog. **Auto-promotion is FORBIDDEN.**
@@ -429,6 +508,8 @@ The DB CHECK §3.4 catches the «yellow/red without `consent_at`» case but cann
 Withdrawal does **NOT** clear `consent_at` on a live row — that would violate Constraint #2 (§3.4). Withdrawal sets `delete_requested_at = now()` + `soft_deleted_at = now()` in one transaction. The app-layer read gate (`apps/identity/services/memory_reader.py`) filters `soft_deleted_at__isnull=True AND delete_requested_at__isnull=True`, so withdrawn entries are immediately invisible at the read path even before physical purge.
 
 **Red withdrawal additionally writes** to `RedZoneAccessLog` with `access_type='withdrawal'` in the same transaction. (§13.7 amends the enum to include `'withdrawal'` — ships inline with #230's PR.)
+
+**The withdrawal UPDATE sets `deletion_reason = 'withdrawal'`** (round-3 A1) — this distinguishes withdrawals from outright deletions in subsequent audit queries («show me Q3 consent withdrawals» = `WHERE deletion_reason='withdrawal' AND delete_requested_at >= ...`). Forget-all sets `deletion_reason = 'forget_all'`; per-entry delete sets `'user_delete'`; TTL purge sets `'ttl_purge'`; minor-protection purge sets `'minor_protection'`.
 
 ---
 
@@ -464,13 +545,24 @@ Most of these do not block this ADR's acceptance. **§13.4 is an exception — i
 - **§13.1 — PATCH endpoint for memory entry rectification** (152-ФЗ right to rectify). Needed Sprint 2. Owner: bot-platform backend.
 - **§13.2 — Yellow-zone TTL sweep job.** Parallels existing red-zone TTL sweep (#234). MUST use the `GREATEST(last_used_at, consent_at)` semantic from §5 (NOT `last_used_at` alone). Default 365-day window.
 - **§13.3 — Processing-objection toggle** in Bonuses → Memory UI. Sets `forget_all_requested_at` + disables future writes. Distinct from forget-all (which erases past) — this stops future without erasing.
-- **§13.4 — Minor-age reconciliation job (BLOCKING #229).** Hits Ayla REST for DOB on daily cadence; primarily clears the minor flag on freshly-18 users. Hygiene job; NOT the primary control (the writer is — see §10). **MUST be filed and accepted before #229 lands.**
+- **§13.4 — Minor-age reconciliation job (BLOCKING #229).** Hits Ayla REST for DOB on daily cadence. Two roles:
+  1. **Primary:** clears the minor flag on freshly-18 users (their birthday rolled over since last sweep).
+  2. **Detect-minor-post-fact (round-3 A9):** when DOB populated later reveals an existing user as a minor (e.g. a user who registered without DOB and only filled it in months later, or whose DOB was corrected), the reconciliation job MUST:
+     - Set UPC `minor_lock = true`.
+     - Emit `memory.minor_detected_postfact` event with `user_id` and the timestamp of detection.
+     - Queue **all yellow and red `MemoryEntry` rows for that user** for soft-delete with `deletion_reason='minor_protection'`. Async sweep purges them.
+     - Create an Ayla Pro queue ticket for human review — the founder / privacy steward verifies the detection and confirms no further action needed (or escalates to lawyer if the time-window of incorrect storage is significant).
+
+  Hygiene job; NOT the primary write-time control (the writer is — see §10.2). **MUST be filed and accepted before #229 lands.**
 - **§13.5 — ADR-0006 amendment for `DJANGO_RED_ZONE_PEPPER`** secret. Specifies the secret + rotation procedure + secret-manager runbook entry. Until this lands, the memory writer fails closed on red writes if the secret is unset (§6).
 - **§13.6 — Voice modulator yellow-zone non-disclosure test.** Regression test ensuring yellow facts are filtered out of provider-addressed strings (covers `apps/llm/persona/` #280 acceptance).
 - **§13.7 — `RedZoneAccessLog.access_type` enum amendment** to include `'withdrawal'` value (see §11.3). Ships inline with #230's PR.
 - **§13.8 — `RedZoneReader` accessor + import guard** (§7.1). Production code outside `apps/identity/services/red_zone_reader.py` may NOT query red rows directly. CI lint rule + grep test. Ships inline with #229/#230's PR.
 - **§13.9 — DB role separation migration** (§7.2). Creates `ayla_app` (with `BEFORE SELECT` trigger on red rows checking session context), `ayla_ops` (with `memory_entry_safe` view filtering red), break-glass procedure docs. Ships inline with #230's migration.
 - **§13.10 — Backup retention rotation policy docs** (§11.1). Confirms WAL = 24h, basebackup = 30d, offsite cold = 90d rotation windows. Lives in `docs/runbooks/`. Owner: infra.
+- **§13.11 — Backup-restore reconciliation runbook** (round-3 A7). Documents the startup reconciliation pass that applies the read gate to restored data via the `RedZoneAccessLog` table. Lives in `docs/runbooks/`. Owner: infra.
+- **§13.12 — `RedZoneAccessLog.access_type` enum** also gains `'write_rejected_dob_lookup'` (round-3 A6) in addition to `'withdrawal'` from §13.7. Combined enum amendment ships inline with #230.
+- **§13.13 — AST-based lint `tools/lint/red_zone_guard.py`** (round-3 A2). 6 bypass-pattern regression tests live in `tests/test_red_zone_guard.py`. Ships inline with #229/#230.
 
 ---
 
@@ -511,6 +603,17 @@ For a greenfield table (no pre-existing rows in #229's initial migration), the `
 - [ ] Test: direct `psql -U ayla_app -c "SELECT content FROM memory_entry WHERE sensitivity_zone='red'"` without setting `ayla.red_zone_access_context` → trigger raises.
 - [ ] Test: zone promotion `green → yellow` without `consent_token` → memory writer raises `ZonePromotionRequiresConsent`.
 - [ ] Test: minor-age reconciliation job (§13.4) sweeps freshly-18 users + clears their minor flag.
+- [ ] Test (round-3 A1): insert with `delete_requested_at IS NOT NULL AND deletion_reason IS NULL` → DB raises.
+- [ ] Test (round-3 A1): insert live row with `deletion_reason IS NOT NULL` → DB raises.
+- [ ] Test (round-3 A2): six AST-lint regression cases (variable-resolved literal, `.all()` then Python filter, `.raw()`, `.update()`/`.bulk_update()`, signal handlers, shell pathway) — each MUST fail lint when introduced outside `red_zone_reader.py`.
+- [ ] Test (round-3 A2): RedZoneReader.read() raises on missing `purpose` argument; raises on invalid `request_id` shape (non-UUID).
+- [ ] Test (round-3 A2 / pool-leaked auth): two sequential reads in the same pooled connection where the second SHOULD have no red access — second read MUST be denied (GUC cleared in finally).
+- [ ] Test (round-3 A3): `ayla_app` cannot `CREATE TABLE`/`ALTER TABLE`/`DROP TRIGGER`; `ayla_migrator` can. `ayla_migrator` cannot `SELECT memory_entry.content` for red rows even with GUC set.
+- [ ] Test (round-3 A4): cross-tenant red SELECT raises `TenantScopeViolation` at app layer BEFORE the DB query is issued, regardless of `STRICT_TENANT_REFUSE` flag value.
+- [ ] Test (round-3 A6): writer fail-closed path writes one row to `RedZoneAccessLog` with `access_type='write_rejected_dob_lookup'`.
+- [ ] Test (round-3 A7): simulated backup restore — entries with `delete_requested_at IS NOT NULL` in the live log remain unreadable after restore even though encrypted bytes are recovered.
+- [ ] Test (round-3 A8): GUC set to empty string OR random non-UUID string → trigger raises; GUC set to a UUID → trigger allows.
+- [ ] Test (round-3 A9): mock DOB-populated-later → reconciliation job emits `memory.minor_detected_postfact` + queues all yellow/red entries for soft-delete with `deletion_reason='minor_protection'` + creates an Ayla Pro queue ticket.
 
 ---
 
@@ -549,6 +652,18 @@ Deferred to Phase 2+. Operational overhead today (separate DB cluster, backup st
 ### 16.4 «Use Postgres RLS for zone access control»
 
 Considered. Row-Level Security gives us another defence layer but adds operational complexity (every connection needs a role context, including replay/audit jobs). Defer; revisit if a regulatory audit demands it explicitly.
+
+**Phase 2+ migration plan (round-3 A10).** When RLS lands, it REPLACES the §7.2 `BEFORE SELECT` trigger — the two should not coexist long-term because RLS's standard pattern uses `current_setting('app.current_user')` + `SET LOCAL` per transaction, and mixing with a trigger that does its own GUC check is tooling-hostile (different connection-pool semantics for `SET LOCAL` vs `set_config(..., is_local=true)`; double-evaluation of the same access policy at two layers).
+
+Phase 2 migration steps:
+
+1. Add RLS policy `red_zone_access_policy` to `memory_entry` using `USING (sensitivity_zone != 'red' OR current_setting('ayla.red_zone_access_context', true) ~ '^[0-9a-f-]{36}$')`.
+2. Enable RLS on `memory_entry`.
+3. Verify all red-zone access paths still work (RedZoneReader sets the GUC via `SET LOCAL` inside its transaction).
+4. Drop the §7.2 `BEFORE SELECT` trigger.
+5. Migrate `ayla_app` to `BYPASSRLS=false`; `ayla_ops` already bypasses via the `memory_entry_safe` view, no change.
+
+The trigger is therefore an **MVP-only construct** — call this out to the implementer of #230's migration so they don't optimize trigger internals knowing they'll be removed in Phase 2.
 
 ---
 
