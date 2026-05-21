@@ -85,3 +85,89 @@ class TestCreateTestMasterInvite:
     def test_blank_name_raises(self, tenant: Tenant) -> None:
         with pytest.raises(CommandError, match="must not be blank"):
             _run(tenant=tenant.slug, name="   ")
+
+    def test_bootstrap_bot_user_creates_placeholder_and_prints_env(self, tenant: Tenant) -> None:
+        """``--bootstrap-bot-user`` pre-creates a BotUser and prints .env snippet."""
+        from apps.identity.models import BotUser
+
+        out = _run(
+            tenant=tenant.slug,
+            name="Анна Петрова",
+            bootstrap_bot_user=True,
+        )
+        master = CatalogMaster.all_tenants.get(tenant=tenant, name="Анна Петрова")
+        bot_user = BotUser.all_tenants.get(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=f"dev-bypass-{master.id}",
+        )
+        # Snippet rendered with placeholder bot_user.id.
+        assert "VITE_DEV_BYPASS_USER_ID=" in out
+        assert str(bot_user.id) in out
+        assert f"VITE_DEV_BYPASS_TENANT_SLUG={tenant.slug}" in out
+        # Follow-up hint for after M0 acceptance.
+        assert "print_master_dev_env" in out
+
+
+class TestPrintMasterDevEnv:
+    """Cover the print_master_dev_env command's happy path + error cases."""
+
+    def test_happy_path_prints_env_snippet(self, tenant: Tenant) -> None:
+        from datetime import datetime, timezone as dt_tz
+
+        from apps.identity.models import BotUser
+
+        now = datetime.now(tz=dt_tz.utc)
+        bu = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="m-99001",
+            display_name="Master",
+            chat_id="m-99001",
+        )
+        master = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=12345,
+            external_updated_at=now,
+            name="Linked Master",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            linked_bot_user=bu,
+        )
+        out = StringIO()
+        call_command("print_master_dev_env", str(master.id), stdout=out)
+        text = out.getvalue()
+        assert f"VITE_DEV_BYPASS_USER_ID={bu.id}" in text
+        assert f"VITE_DEV_BYPASS_TENANT_SLUG={tenant.slug}" in text
+        assert "DEBUG=True" in text
+
+    def test_master_not_linked_raises(self, tenant: Tenant) -> None:
+        from datetime import datetime, timezone as dt_tz
+        import uuid
+
+        now = datetime.now(tz=dt_tz.utc)
+        master = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=12346,
+            external_updated_at=now,
+            name="Unlinked Master",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            invite_token=uuid.uuid4(),
+            invited_at=now,
+        )
+        out = StringIO()
+        with pytest.raises(CommandError, match="no linked_bot_user"):
+            call_command("print_master_dev_env", str(master.id), stdout=out)
+
+    def test_invalid_uuid_raises(self, db) -> None:
+        out = StringIO()
+        with pytest.raises(CommandError, match="not a valid UUID"):
+            call_command("print_master_dev_env", "not-a-uuid", stdout=out)
+
+    def test_missing_master_raises(self, db) -> None:
+        import uuid
+
+        out = StringIO()
+        with pytest.raises(CommandError, match="not found"):
+            call_command("print_master_dev_env", str(uuid.uuid4()), stdout=out)

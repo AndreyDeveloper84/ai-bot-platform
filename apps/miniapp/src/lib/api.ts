@@ -1,4 +1,5 @@
 import { getInitData } from "./max-sdk";
+import { applyDevBypassHeaders } from "./dev-bypass";
 
 const API_BASE = "/api/v1/customer";
 
@@ -18,6 +19,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const initData = getInitData();
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
 
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
