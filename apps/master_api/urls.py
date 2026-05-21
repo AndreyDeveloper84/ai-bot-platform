@@ -18,4 +18,12 @@ urlpatterns = [
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
     path("me", views.me, name="me"),
     path("dashboard", views.dashboard, name="dashboard"),
+    # M3 schedule self-service (master-mobile §M3, PR Tier1.2)
+    path("schedule", views.schedule, name="schedule"),
+    path("availability", views.availability_request, name="availability_request"),
+    path(
+        "availability/pending",
+        views.availability_pending,
+        name="availability_pending",
+    ),
 ]

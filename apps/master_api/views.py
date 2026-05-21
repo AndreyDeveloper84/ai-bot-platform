@@ -38,7 +38,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +52,17 @@ from django.views.decorators.http import require_http_methods
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.master_api.services.dashboard import build_dashboard
+from apps.master_api.services.schedule import (
+    AvailabilityRequestError,
+    DEFAULT_RANGE_DAYS,
+    MAX_RANGE_DAYS,
+    build_schedule,
+    list_pending_requests,
+    request_availability_change,
+)
 from apps.events.services import emit
 from apps.events.vocabulary import (
+    MASTER_AVAILABILITY_CHANGE_REQUESTED,
     MASTER_ONBOARDING_ACCEPTED,
     MASTER_ONBOARDING_REJECTED,
     MASTER_ONBOARDING_STARTED,
@@ -629,3 +638,281 @@ def dashboard(request: HttpRequest) -> HttpResponse:
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     snapshot = build_dashboard(master, dj_timezone.now())
     return JsonResponse(snapshot.to_dict())
+
+
+# --- M3 schedule + availability (PR Tier1.2) -------------------------------
+
+
+def _parse_iso_date(raw: str):  # type: ignore[no-untyped-def]
+    """Parse YYYY-MM-DD. Returns ``datetime.date | None`` (lazy import)."""
+
+    from datetime import date
+
+    try:
+        return date.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_iso_datetime(raw: str) -> datetime | None:
+    """Parse ISO datetime. Accepts trailing 'Z' (UTC). Returns None on bad input."""
+
+    if not isinstance(raw, str) or not raw:
+        return None
+    s = raw.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        # Naive — treat as UTC. Production clients always include TZ
+        # via Mini App's locale-aware Date.toISOString().
+        dt = dt.replace(tzinfo=dt_timezone.utc)
+    return dt
+
+
+def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uuid.UUID) -> None:
+    """Dispatch the «Анна просит выходной» DM to the salon manager.
+
+    Per master-mobile §M3 line 458: «server marks slot blocked → owner
+    notified (audit + bot DM)». No-op when ``manager_chat_id`` is
+    empty — degraded mode aligned with the reminder-escalation pattern
+    (apps/bookings/tasks::escalate_stale_reminders).
+
+    Imports are local because the function is wired via
+    ``transaction.on_commit`` and the channels module isn't needed by
+    every master endpoint.
+    """
+
+    chat_id = (tenant.manager_chat_id or "").strip()
+    if not chat_id:
+        logger.info(
+            "master_api.availability.no_manager_chat_id tenant=%s master=%s",
+            tenant.id,
+            master.id,
+        )
+        return
+
+    from apps.channels.max.outbound import MaxAPIError, send_message
+
+    # Admin Mini App deeplink — settings-overridable so staging can point
+    # at the staging admin URL. The default value mirrors the customer-
+    # side ADMIN_MINI_APP_URL convention from PR #450.
+    admin_url = getattr(
+        settings,
+        "ADMIN_MINI_APP_URL",
+        "https://admin.formulatela.ru/availability",
+    )
+    text = (
+        f"{master.name} просит изменить расписание. "
+        f"[Открыть запрос]({admin_url}?request_id={request_id})"
+    )
+    try:
+        send_message(chat_id=chat_id, text=text)
+    except MaxAPIError:
+        # Best-effort: the audit + DB row are the source of truth. DM
+        # failures are logged for ops but don't propagate.
+        logger.warning(
+            "master_api.availability.manager_dm_failed tenant=%s request=%s",
+            tenant.id,
+            request_id,
+            exc_info=True,
+        )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def schedule(request: HttpRequest) -> HttpResponse:
+    """M3 schedule read — own bookings + free windows + conflicts over a range.
+
+    Spec quote (master-mobile §M3 line 474):
+
+        «`GET /api/master/schedule?from=...&to=...` — returns bookings
+        + free/blocked slots + work hours for master»
+
+    Spec quote (§M3 line 466):
+
+        «Conflict (admin double-booked you): «⚠ Конфликт расписания —
+        посмотрите» + tap → conversation with admin / banner with
+        «уточнить у админа» button»
+
+    Query params:
+      from: YYYY-MM-DD (tenant-local). Defaults to today.
+      to:   YYYY-MM-DD inclusive. Defaults to from + 7 days.
+
+    Max range 31 days; wider → 400. ``from > to`` → 400.
+
+    Cross-master + cross-tenant isolation enforced via
+    :func:`require_master_init_data` + the service helper's explicit
+    master_id + tenant_id filters.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    tenant = request.tenant  # type: ignore[attr-defined]
+
+    # Resolve defaults in tenant-local TZ so «today» means today for
+    # the master, not for UTC.
+    from apps.master_api.services.schedule import get_tenant_tz
+
+    tz = get_tenant_tz(tenant)
+    today_local = dj_timezone.now().astimezone(tz).date()
+
+    raw_from = request.GET.get("from", "").strip()
+    raw_to = request.GET.get("to", "").strip()
+
+    if raw_from:
+        from_date = _parse_iso_date(raw_from)
+        if from_date is None:
+            return _error("bad_request", "'from' must be YYYY-MM-DD", 400)
+    else:
+        from_date = today_local
+
+    if raw_to:
+        to_date = _parse_iso_date(raw_to)
+        if to_date is None:
+            return _error("bad_request", "'to' must be YYYY-MM-DD", 400)
+    else:
+        to_date = from_date + timedelta(days=DEFAULT_RANGE_DAYS - 1)
+
+    if from_date > to_date:
+        return _error("bad_request", "'from' must be <= 'to'", 400)
+    if (to_date - from_date).days >= MAX_RANGE_DAYS:
+        return _error(
+            "bad_request",
+            f"range exceeds {MAX_RANGE_DAYS} days",
+            400,
+        )
+
+    payload = build_schedule(
+        master,
+        from_date=from_date,
+        to_date=to_date,
+        now=dj_timezone.now(),
+    )
+    return JsonResponse(payload.to_dict())
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def availability_request(request: HttpRequest) -> HttpResponse:
+    """M3 «Помечу как недоступно» — master proposes an off-time window.
+
+    Spec quote (master-mobile §M3 line 458):
+
+        «Mark unavailable / off-day: master taps empty slot → sheet
+        `Помечу как недоступно` → confirmation → server marks slot
+        blocked → owner notified (audit + bot DM)»
+
+    Body:
+      {
+        "start": "<iso datetime>",
+        "end":   "<iso datetime>",
+        "reason_class": "vacation"|"sick"|"personal"|"other",
+        "reason_text": ""  // optional, ≤200 chars
+      }
+
+    Returns 201 on success with the created request_id. Conflict
+    against an existing approved exception → 400 «overlap». Invalid
+    body → 400.
+
+    Side effects:
+      * Audit row: ``master.availability_change_requested``.
+      * Event emit (same slug) for analytics fanout.
+      * MAX DM to ``tenant.manager_chat_id`` post-commit. No-op when
+        empty (degraded mode, matches reminder-escalation pattern).
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    tenant = request.tenant  # type: ignore[attr-defined]
+
+    body = _parse_json_body(request)
+    if isinstance(body, JsonResponse):
+        return body
+
+    start = _parse_iso_datetime(body.get("start") or "")
+    end = _parse_iso_datetime(body.get("end") or "")
+    if start is None or end is None:
+        return _error("bad_request", "start + end must be ISO datetimes", 400)
+
+    reason_class = (body.get("reason_class") or "").strip()
+    reason_text = (body.get("reason_text") or "").strip()
+
+    try:
+        with transaction.atomic():
+            req = request_availability_change(
+                master,
+                start=start,
+                end=end,
+                reason_class=reason_class,
+                reason_text=reason_text,
+                actor=bot_user,
+            )
+            payload = {
+                "tenant_id": str(master.tenant_id),
+                "master_id": str(master.id),
+                "request_id": str(req.id),
+                "bot_user_id": str(bot_user.id),
+                "requested_start": (
+                    req.requested_start.isoformat() if req.requested_start else None
+                ),
+                "requested_end": (req.requested_end.isoformat() if req.requested_end else None),
+                "reason_class": req.reason_class,
+            }
+            write_audit(
+                MASTER_AVAILABILITY_CHANGE_REQUESTED,
+                target="scheduling.ScheduleChangeRequest",
+                target_id=req.id,
+                payload=payload,
+                actor_id=bot_user.id,
+            )
+            emit(
+                MASTER_AVAILABILITY_CHANGE_REQUESTED,
+                properties=payload,
+            )
+
+            request_id = req.id
+            transaction.on_commit(
+                lambda: _maybe_send_manager_dm(
+                    tenant=tenant,
+                    master=master,
+                    request_id=request_id,
+                )
+            )
+    except AvailabilityRequestError as exc:
+        return _error(exc.slug, exc.detail, 400)
+
+    return JsonResponse(
+        {
+            "request_id": str(req.id),
+            "status": req.status,
+            "requested_start": (req.requested_start.isoformat() if req.requested_start else None),
+            "requested_end": (req.requested_end.isoformat() if req.requested_end else None),
+            "reason_class": req.reason_class,
+            "created_at": req.created_at.isoformat(),
+        },
+        status=201,
+    )
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def availability_pending(request: HttpRequest) -> HttpResponse:
+    """M3 list of master's own pending + recently-decided requests.
+
+    Spec quote (master-mobile §M3 line 476):
+
+        «`GET /api/master/availability/pending` — list of pending
+        availability changes»
+
+    Filter: pending OR (decided within last 14 days). Ordered
+    created_at desc. Read-only — no audit, no event emit.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    items = list_pending_requests(master, now=dj_timezone.now())
+    return JsonResponse({"items": items})

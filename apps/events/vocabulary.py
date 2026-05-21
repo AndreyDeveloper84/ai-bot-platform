@@ -130,6 +130,17 @@ MASTER_BOOKINGS_CANCELLED = "master.bookings_cancelled"
 MASTER_DEACTIVATED = "master.deactivated"
 MASTER_REACTIVATED = "master.reactivated"
 
+# --- Master schedule self-service (master-mobile §M3, PR Tier1.2) ---------
+# Master taps «Помечу как недоступно» / requests an off-time window via the
+# M3 schedule screen. Payload contract:
+#   master.availability_change_requested:
+#     {tenant_id, master_id, request_id, bot_user_id,
+#      requested_start: <iso>, requested_end: <iso>,
+#      reason_class: vacation|sick|personal|other}
+# Note: NO PII in payload — the master's free-form reason_text is in the
+# DB row only, never on the analytics bus.
+MASTER_AVAILABILITY_CHANGE_REQUESTED = "master.availability_change_requested"
+
 # --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
 # The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
 # (analytics-bus event names — snake_case dotted notation aligned with
@@ -202,6 +213,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_BOOKINGS_CANCELLED,
         MASTER_DEACTIVATED,
         MASTER_REACTIVATED,
+        MASTER_AVAILABILITY_CHANGE_REQUESTED,
     }
 )
 
