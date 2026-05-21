@@ -14,11 +14,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from django.test import Client
-
-
-pytestmark = pytest.mark.django_db
 
 
 def test_ingest_post_returns_501_with_pending_message() -> None:
@@ -40,6 +36,25 @@ def test_ingest_post_returns_501_with_pending_message() -> None:
     body = json.loads(response.content)
     assert body["status"] == "not_implemented"
     assert "441" in body["reason"]
+
+
+def test_ingest_post_sets_long_retry_after() -> None:
+    """501 response carries Retry-After to deter aggressive retry loops.
+
+    Many HTTP retry middlewares (urllib3 Retry, httpx transport
+    retries, cloud ingress) treat 5xx as transiently retryable by
+    default. A long Retry-After (24h) tells a naive publisher to
+    hold the event until #441 lands rather than DOS this endpoint
+    while the contract is unfinalised.
+    """
+    client = Client()
+    response = client.post(
+        "/api/v1/internal/events/ingest/",
+        data="{}",
+        content_type="application/json",
+    )
+    assert response.status_code == 501
+    assert response["Retry-After"] == "86400"
 
 
 def test_ingest_get_returns_405() -> None:

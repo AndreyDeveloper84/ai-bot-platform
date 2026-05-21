@@ -16,7 +16,6 @@ fans events to consumers (#442-#446) follows the contract doc.
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
 
 from django.http import HttpRequest, JsonResponse
 from django.utils.decorators import method_decorator
@@ -43,14 +42,14 @@ class InternalEventsIngestView(View):
     the class.
     """
 
-    http_method_names: ClassVar[list[str]] = ["post"]
+    http_method_names = ["post"]
 
     def post(self, request: HttpRequest) -> JsonResponse:
         logger.info(
             "eventbus.ingest.stub_hit content_length=%s",
             request.META.get("CONTENT_LENGTH") or "0",
         )
-        return JsonResponse(
+        response = JsonResponse(
             {
                 "status": "not_implemented",
                 "reason": (
@@ -60,3 +59,10 @@ class InternalEventsIngestView(View):
             },
             status=501,
         )
+        # 501 is in the 5xx family and many retry middlewares (urllib3
+        # Retry, httpx transport retries, cloud ingress) treat 5xx as
+        # retryable by default. Long Retry-After tells well-behaved
+        # publishers to hold the event until #441 lands rather than
+        # hammering this endpoint while the contract is unfinalised.
+        response["Retry-After"] = "86400"
+        return response
