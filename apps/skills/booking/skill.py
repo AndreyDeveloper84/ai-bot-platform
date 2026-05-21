@@ -53,14 +53,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from apps.audit.services import write_audit
 from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
 from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
-from apps.llm.protocol import ToolCall
+from apps.llm.protocol import CompletionResult, ToolCall
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
@@ -111,21 +110,6 @@ _FALLBACK_HANDOFF_TEXT = "Не получилось оформить запис�
 # because MAX inline_keyboard wraps below the message body and the
 # user reads the buttons, not the prose.
 _MASTER_PICK_PROMPT = "Выберите мастера:"
-
-
-@dataclass(frozen=True)
-class _SynthLLMResult:
-    """Stand-in for :class:`LLMCompletion` used by the callback short-circuit.
-
-    The master-pick callback path skips Phase 1 (LLM tool selection) and
-    constructs the equivalent ``tool_calls`` list deterministically. The
-    rest of the handle() body reads ``first.tool_calls`` + ``first.text``,
-    so we mirror the relevant duck-typed shape without dragging in the
-    full provider response dataclass.
-    """
-
-    tool_calls: list[ToolCall]
-    text: str
 
 
 # Audit / event slugs.
@@ -261,7 +245,10 @@ class BookingSkill:
                     tool_calls_made=[],
                     confidence=None,
                 )
-            first = _SynthLLMResult(
+            # Synthesise the Phase-1 LLM response so the rest of handle()
+            # reads tool_calls + text exactly as on a real completion.
+            first = CompletionResult(
+                text="",
                 tool_calls=[
                     ToolCall(
                         id=f"synth:pick_master:{master_id}",
@@ -269,7 +256,8 @@ class BookingSkill:
                         arguments={"master_id": master_id},
                     )
                 ],
-                text="",
+                provider="synth",
+                finish_reason="tool_calls",
             )
         else:
             # ── Phase 1: first LLM call (decide on tool use) ───────
