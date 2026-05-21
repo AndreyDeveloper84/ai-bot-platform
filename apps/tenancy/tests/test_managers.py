@@ -680,20 +680,65 @@ class TestSystemCheckTenantManagers:
         from apps.tenancy.system_checks import check_tenant_scoped_managers
 
         messages = check_tenant_scoped_managers()
-        # Closes reviewer Y-5: the previous ``ids.issubset(...)``
-        # assertion passed vacuously on an empty messages list (which
-        # would mean the check is broken). Require AT LEAST ONE message
-        # AND restrict ids to the documented W-codes so a future check
-        # adding W902 trips this test (forcing the new code to be
-        # tested explicitly).
-        assert len(messages) >= 1, (
-            "expected at least one W900/W901 warning on dev — the check "
-            "should be firing on the known unscoped infrastructure models"
-        )
+        # Updated after PR #466 closed all 5 known unscoped models with
+        # documented opt-outs. Now the dev surface SHOULD be silent —
+        # any warning here means either:
+        #   (a) a new tenant-FK-bearing model landed without the
+        #       canonical manager pair, OR
+        #   (b) an existing opt-out was accidentally removed.
+        # Either way the operator must triage. The ID-restriction
+        # (closes reviewer Y-5 from PR #454) catches future check
+        # codes (W902+) that need explicit test coverage.
         ids = {m.id for m in messages}
         assert ids <= {"tenancy.W900", "tenancy.W901"}, (
-            f"unexpected check ids: {ids - {'tenancy.W900', 'tenancy.W901'}}"
+            f"unexpected check ids: {ids - {'tenancy.W900', 'tenancy.W901'}} — "
+            "either a new W-code landed (add to the test) or the assertion "
+            "needs widening"
         )
+
+    def test_check_fires_on_synthetic_violator(self):
+        # The check itself MUST still fire for a model that lacks the
+        # canonical manager pair AND the opt-out sentinel. Build a
+        # synthetic class without going through the migration pipeline
+        # and ensure the walker flags it. Catches the failure shape
+        # «check function is silently broken because ``apps.get_models``
+        # returns an unexpected iterable» — pre-fix that was a vacuous
+        # pass; post-fix the synthetic violator forces the walker to
+        # exercise the failure path.
+        from unittest.mock import MagicMock
+
+        from django.db.models import Manager
+
+        from apps.tenancy.system_checks import check_tenant_scoped_managers
+
+        # A model that LOOKS like it has a ``tenant`` FK pointing at
+        # tenancy.Tenant but uses a plain Manager.
+        fake_field = MagicMock()
+        fake_field.name = "tenant"
+        fake_field.related_model = Tenant
+        fake_model = MagicMock()
+        fake_model.__name__ = "FakeUnscopedModel"
+        fake_model._meta.abstract = False
+        fake_model._meta.proxy = False
+        fake_model._meta.label = "synthetic.FakeUnscopedModel"
+        fake_model._meta.get_fields.return_value = [fake_field]
+        fake_model._default_manager = Manager()  # NOT a TenantScopedManager
+        # No ``all_tenants`` attribute either.
+        if hasattr(fake_model, "all_tenants"):
+            del fake_model.all_tenants
+        # No opt-out sentinel.
+        if hasattr(fake_model, "_IGNORE_TENANT_MANAGER_CHECK"):
+            del fake_model._IGNORE_TENANT_MANAGER_CHECK
+
+        with patch(
+            "apps.tenancy.system_checks.django_apps.get_models",
+            return_value=[fake_model],
+        ):
+            messages = check_tenant_scoped_managers()
+        ids = {m.id for m in messages}
+        # Both W900 (manager) and W901 (escape hatch) should fire.
+        assert "tenancy.W900" in ids
+        assert "tenancy.W901" in ids
 
     def test_well_scoped_model_does_not_trip_check(self):
         # AuditLog has both objects = TenantScopedManager() AND

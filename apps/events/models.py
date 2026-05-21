@@ -122,6 +122,21 @@ class Event(models.Model):
     # No TenantScopedManager — emit() needs to write events from system
     # contexts too (worker boot, breaker rotation). Caller scopes reads
     # explicitly when querying.
+    #
+    # Tenancy system-check opt-out (tenancy.W900 / W901). Load-bearing
+    # reason: Event rows can be written with ``tenant=None`` (system-
+    # tier telemetry — worker boot, breaker rotation, infra emit from
+    # outside any tenant_scope). A ``TenantScopedManager`` would
+    # silently filter those rows out of every read in audit mode and
+    # raise in strict mode — neither is correct for system-tier
+    # telemetry that the operator NEEDS to see during incidents.
+    # Cross-tenant analytics dashboards are a SECONDARY argument
+    # (those could legitimately use ``all_tenants``); the
+    # ``tenant=None`` invariant is what disqualifies the canonical
+    # pair. Explicit-tenant-arg pattern in ``emit()`` is the lookup
+    # contract callers rely on.
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
     objects = models.Manager()
 
     class Meta:

@@ -102,11 +102,13 @@ def check_tenant_scoped_managers(
                     "TenantScopedManager. Reads will not be scoped "
                     "to current_tenant().",
                     hint=(
-                        "Declare `objects = TenantScopedManager()` "
-                        "on the model, OR set "
+                        "Declare `objects = TenantScopedManager()` + "
+                        "`all_tenants = models.Manager()` on the model "
+                        "(canonical pair — see apps/audit/models.py for "
+                        "the reference shape), OR set "
                         "`_IGNORE_TENANT_MANAGER_CHECK = True` with a "
-                        "documented justification (see "
-                        "apps/tenancy/system_checks.py)."
+                        "documented justification (worked examples in "
+                        "apps/eventbus/models.py and apps/tools/models.py)."
                     ),
                     obj=model,
                     id="tenancy.W900",
@@ -123,7 +125,8 @@ def check_tenant_scoped_managers(
                         "Declare `all_tenants = models.Manager()` "
                         "alongside `objects = TenantScopedManager()` "
                         "so admin / replay code can read across "
-                        "tenants explicitly."
+                        "tenants explicitly (see apps/audit/models.py "
+                        "for the canonical shape)."
                     ),
                     obj=model,
                     id="tenancy.W901",
