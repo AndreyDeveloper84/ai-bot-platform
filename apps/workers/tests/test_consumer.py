@@ -33,6 +33,8 @@ class _FakeStreamRedis:
         # group_offset[(stream, group)] = next index to read
         self.group_offset: dict[tuple[str, str], int] = {}
         self._counter = 0
+        # Reaper cursor persistence (B3 adversarial-pass).
+        self._kv: dict[str, str] = {}
 
     def xgroup_create(self, name: str, groupname: str, id: str, mkstream: bool):  # noqa: A002
         import redis
@@ -44,7 +46,9 @@ class _FakeStreamRedis:
         self.streams.setdefault(name, [])
         self.group_offset[(name, groupname)] = 0
 
-    def xadd(self, stream: str, fields: dict[str, str]) -> str:
+    def xadd(self, stream: str, fields: dict[str, str], **_kwargs) -> str:
+        # ``**_kwargs`` accepts the reaper's ``maxlen=`` + ``approximate=``
+        # without modelling trimming (the stub is not memory-bounded).
         self._counter += 1
         entry_id = f"1700000000-{self._counter}"
         self.streams.setdefault(stream, []).append((entry_id, dict(fields)))
@@ -81,6 +85,43 @@ class _FakeStreamRedis:
 
     def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
         return list(self.streams.get(stream, []))
+
+    def xautoclaim(
+        self,
+        name: str,
+        groupname: str,
+        consumername: str,
+        min_idle_time: int,
+        start_id: str = "0",
+        count: int | None = None,
+    ):
+        """Stub XAUTOCLAIM for the PEL reaper test (#499).
+
+        Real Redis returns ``[next_cursor, [(entry_id, fields), …], [deleted_ids]]``.
+        For the stub, the «idle threshold» concept doesn't exist (entries
+        have no real timestamp), so every PEL entry past ``start_id`` is
+        returned up to ``count``. Tests that need «idle skip» behaviour
+        should pre-fill the PEL via xreadgroup + selectively not-xack.
+        """
+
+        pel = self.pel.get((name, groupname), {})
+        entries = sorted(pel.items(), key=lambda kv: int(kv[0].rsplit("-", 1)[-1]))
+        if start_id != "0":
+            entries = [(eid, fields) for eid, fields in entries if eid > start_id]
+        if count is not None:
+            entries = entries[:count]
+        claimed = [(eid, dict(fields)) for eid, fields in entries]
+        return ("0", claimed, [])
+
+    # ---- Cursor persistence for the PEL reaper (B3 adversarial-pass) ----
+
+    def get(self, key: str):
+        return self._kv.get(key)
+
+    def set(self, key: str, value: str, *, ex: int | None = None):
+        # `ex` (TTL) ignored — the stub doesn't expire keys; tests that
+        # need to assert expiry can call `.set` directly with mock time.
+        self._kv[key] = value
 
 
 @pytest.fixture
