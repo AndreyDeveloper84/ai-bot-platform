@@ -227,6 +227,18 @@ class TestMatches:
         )
         assert BookingSkill().matches(ctx) is False
 
+    def test_master_pick_callback_matches_before_intent(self, context: SkillContext) -> None:
+        """Callback prefix takes precedence — intent classifier might mis-route
+        a bare numeric string in the callback payload otherwise."""
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_master:42",
+            intent=IntentDecision(intent="faq", skill="faq", confidence=0.9, risk_level="low"),
+        )
+        # Even with intent=faq, the callback prefix wins.
+        assert BookingSkill().matches(ctx) is True
+
 
 # ---------------------------------------------------------------------------
 # Happy paths
@@ -239,17 +251,107 @@ class TestShowMastersFlow:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11, "Ольга"), _staff(12, "Иван")]
         tc = ToolCall(id="c1", name="show_masters", arguments={"service_name": "массаж"})
-        completions = [
-            _completion(tool_calls=[tc]),
-            _completion(text="Вот наши мастера: Ольга, Иван."),
-        ]
+        # Master-cards short-circuit (2026-05-21): Phase 3 LLM is skipped
+        # when show_masters returns candidates. Only one completion is
+        # consumed (Phase 1, the tool selection).
+        completions = [_completion(tool_calls=[tc])]
         with _patch_yclients(client), _patch_provider_complete(completions):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(context)
         assert isinstance(result, SkillResult)
         assert result.should_handoff is False
-        assert "Ольга" in result.reply_text or "мастер" in result.reply_text.lower()
+        # Deterministic prompt, not LLM-generated text.
+        assert result.reply_text == "Выберите мастера:"
         assert result.tool_calls_made == [tc]
+
+    def test_emits_master_pick_keyboard(self, context: SkillContext, tenant: Tenant) -> None:
+        """Each candidate master becomes one inline-keyboard button with
+        callback ``cb:book:pick_master:<staff_id>``. The handler tap
+        dispatches show_slots(master_id=<id>) — no LLM round-trip."""
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11, "Ольга"), _staff(12, "Иван")]
+        tc = ToolCall(id="c1", name="show_masters", arguments={"service_name": "массаж"})
+        with _patch_yclients(client), _patch_provider_complete([_completion(tool_calls=[tc])]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        # Platform-canonical envelope shape — matches what
+        # ``apps.channels.max.handler._build_attachments`` consumes.
+        assert result.action_data is not None
+        atts = result.action_data["attachments"]
+        assert len(atts) == 1
+        assert atts[0]["type"] == "inline_keyboard"
+        buttons = atts[0]["payload"]["buttons"]
+        assert len(buttons) == 2
+        labels = [b["label"] for b in buttons]
+        # Names appear in labels (emoji prefix tolerated).
+        assert any("Ольга" in lbl for lbl in labels)
+        assert any("Иван" in lbl for lbl in labels)
+        # Callback payloads carry staff ids verbatim.
+        callbacks = [b["callback"] for b in buttons]
+        assert "cb:book:pick_master:11" in callbacks
+        assert "cb:book:pick_master:12" in callbacks
+
+
+class TestMasterPickCallback:
+    """User taps a master card from the show_masters keyboard.
+
+    2026-05-21: skip Phase 1 LLM, dispatch show_slots(master_id=<id>)
+    deterministically, render slots via Phase 3 LLM as usual.
+    """
+
+    def test_matches_callback_prefix(self, context: SkillContext) -> None:
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_master:11",
+        )
+        assert BookingSkill().matches(ctx) is True
+
+    def test_callback_dispatches_show_slots_no_phase1_llm(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The fake provider is given ONLY the Phase 3 completion. If the
+        short-circuit accidentally calls Phase 1 first, the test runs out
+        of mock completions and errors — that's the regression guard."""
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = ["2026-05-20"]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-05-20T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_master:11",
+        )
+        # Only ONE completion mocked — the Phase 3 reply renderer.
+        completions = [_completion(text="Свободно в 14:00 — забронировать?")]
+        with _patch_yclients(client), _patch_provider_complete(completions):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert result.should_handoff is False
+        assert "14:00" in result.reply_text
+        # Synthetic tool_call recorded for audit / replay.
+        assert len(result.tool_calls_made) == 1
+        assert result.tool_calls_made[0].name == "show_slots"
+        assert result.tool_calls_made[0].arguments == {"master_id": 11}
+
+    def test_malformed_callback_id_handoffs_softly(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_master:NOT_AN_INT",
+        )
+        # No completion should be consumed — early-return before any LLM call.
+        with _patch_yclients(FakeYClients()), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert "имя" in result.reply_text.lower() or "ещё раз" in result.reply_text.lower()
+        assert result.tool_calls_made == []
 
 
 class TestShowSlotsFlow:
