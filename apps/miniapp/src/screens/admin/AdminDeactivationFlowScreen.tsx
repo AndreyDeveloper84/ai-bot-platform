@@ -38,7 +38,14 @@
  *   - HapticFeedback.notificationOccurred('success') on Step 4
  */
 
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { Snackbar } from "../../components/Snackbar";
@@ -78,6 +85,12 @@ interface BookingDecision {
 interface FlowState {
   step: Step;
   preview: DeactivationPreview | null;
+  /**
+   * Polish item (c) from PR #498 review — epoch-ms timestamp of when
+   * the current ``preview`` was loaded. Used to fire the 60s stale
+   * callout on Step 1. Null until first preview/ok.
+   */
+  previewLoadedAt: number | null;
   decisions: Record<string, BookingDecision>;
   notifyReassignedMasters: boolean;
   customTemplate: string;
@@ -93,6 +106,7 @@ interface FlowState {
 const initialState: FlowState = {
   step: 1,
   preview: null,
+  previewLoadedAt: null,
   decisions: {},
   notifyReassignedMasters: true,
   customTemplate: "",
@@ -104,6 +118,14 @@ const initialState: FlowState = {
   result: null,
   toast: "",
 };
+
+/**
+ * Polish item (c) from PR #498 review — Step 1 callout fires after the
+ * preview has been visible for 60s without a refresh, so the owner has
+ * a manual «Обновить» button instead of being surprised by a 409 at
+ * Step 3. Auto-refresh is explicitly avoided.
+ */
+const STALE_PREVIEW_MS = 60_000;
 
 type Action =
   | { type: "preview/start" }
@@ -118,7 +140,12 @@ type Action =
   | { type: "submit/ok"; result: DeactivationResult }
   | { type: "submit/err"; err: unknown }
   | { type: "toast"; value: string }
-  | { type: "reset/race"; preview: DeactivationPreview };
+  | {
+      type: "reset/race";
+      preview: DeactivationPreview;
+      preservedDecisions: Record<string, BookingDecision>;
+      newBookingsCount: number;
+    };
 
 function reducer(state: FlowState, action: Action): FlowState {
   switch (action.type) {
@@ -129,6 +156,7 @@ function reducer(state: FlowState, action: Action): FlowState {
         ...state,
         loadingPreview: false,
         preview: action.preview,
+        previewLoadedAt: Date.now(),
         previewErr: null,
       };
     case "preview/err":
@@ -163,16 +191,30 @@ function reducer(state: FlowState, action: Action): FlowState {
       return { ...state, submitting: false, submitErr: action.err };
     case "toast":
       return { ...state, toast: action.value };
-    case "reset/race":
+    case "reset/race": {
+      // Polish item (b) from PR #498 review — preserve decisions for
+      // bookings that still exist in the refreshed preview. Only new
+      // bookings start unassigned; removed bookings' decisions are
+      // discarded silently. Singular/plural toast is computed by the
+      // caller (it has the count from the diff).
+      const plural = action.newBookingsCount === 1 ? "ё" : "ы";
+      const verb = action.newBookingsCount === 1 ? "появилась" : "появились";
+      const toast =
+        action.newBookingsCount > 0
+          ? `${action.newBookingsCount === 1 ? "Появилась" : `Появил${plural}сь`} нов${action.newBookingsCount === 1 ? "ая" : "ые"} запис${action.newBookingsCount === 1 ? "ь" : "и"} — ${action.newBookingsCount === 1 ? "её" : "их"} нужно решить`
+          : "Список записей обновлён";
+      void verb;
       return {
         ...state,
         preview: action.preview,
-        decisions: {},
+        previewLoadedAt: Date.now(),
+        decisions: action.preservedDecisions,
         step: 1,
-        toast: "Появилась новая запись — список обновлён",
+        toast,
         submitting: false,
         submitErr: null,
       };
+    }
     default:
       return state;
   }
@@ -201,7 +243,26 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [showTemplateEdit, setShowTemplateEdit] = useState<boolean>(false);
 
+  // Polish item (c) from PR #498 review — Step 1 stale-preview callout.
+  // We rely on a ticker that bumps `now` once per 15s so the callout
+  // appears within ~15s of crossing the 60s threshold. No auto-refresh
+  // — the owner taps «Обновить» manually to avoid surprise.
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (state.step !== 1) return undefined;
+    const id = setInterval(() => setNowTick(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, [state.step]);
+  const previewIsStale =
+    state.step === 1 &&
+    state.previewLoadedAt !== null &&
+    nowTick - state.previewLoadedAt > STALE_PREVIEW_MS;
+
   const ownerOnlyDisabledLabel = "Только владелец может деактивировать мастера";
+
+  // Latest decisions ref for the race-refresh path (avoids stale-closure
+  // when the 409 handler computes the diff).
+  const decisionsRef = useRef<Record<string, BookingDecision>>({});
 
   // Initial preview fetch.
   const fetchPreview = useCallback(
@@ -210,7 +271,26 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
       try {
         const preview = await previewDeactivation(masterId);
         if (asRaceRefresh) {
-          dispatch({ type: "reset/race", preview });
+          // Polish (b) — intersect existing decisions with the new
+          // booking list. Bookings still present keep their decision;
+          // new ones land in the «undecided» pile; removed ones drop.
+          const oldDecisions = decisionsRef.current;
+          const newIds = new Set(
+            preview.future_bookings.map((b) => b.booking_id),
+          );
+          const preserved: Record<string, BookingDecision> = {};
+          for (const [id, decision] of Object.entries(oldDecisions)) {
+            if (newIds.has(id) && decision) preserved[id] = decision;
+          }
+          const newBookingsCount = preview.future_bookings.filter(
+            (b) => !(b.booking_id in oldDecisions),
+          ).length;
+          dispatch({
+            type: "reset/race",
+            preview,
+            preservedDecisions: preserved,
+            newBookingsCount,
+          });
         } else {
           dispatch({ type: "preview/ok", preview });
         }
@@ -226,7 +306,43 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
     void fetchPreview();
   }, [fetchPreview, masterId]);
 
-  // Bridge — BackButton on Steps 2 + 3; closing confirmation while dirty.
+  // Keep decisionsRef in sync — read by the race-refresh diff.
+  useEffect(() => {
+    decisionsRef.current = state.decisions;
+  }, [state.decisions]);
+
+  // Polish item (d) from PR #498 review — BackButton handler reads the
+  // latest step via a ref so the empty-deps effect's closure never
+  // goes stale. Previously the effect re-attached on every step change;
+  // on slow Android devices the bridge sometimes delivers the
+  // BackButton tap a few hundred ms after the detach, hitting a stale
+  // handler. With the ref pattern the handler always reads the most
+  // recent step.
+  const stepRef = useRef<Step>(state.step);
+  useEffect(() => {
+    stepRef.current = state.step;
+  }, [state.step]);
+
+  useEffect(() => {
+    const off = onBackButton(() => {
+      hapticSelection();
+      const current = stepRef.current;
+      if (current === 2) {
+        dispatch({ type: "step/set", step: 1 });
+      } else if (current === 3) {
+        dispatch({ type: "step/set", step: 2 });
+      }
+      // Step 1 / 4 — BackButton is hidden anyway (see show/hide effect);
+      // if it fires defensively, do nothing.
+    });
+    return () => {
+      off();
+    };
+  }, []);
+
+  // Show/hide BackButton + closing confirmation when step / decisions
+  // change. Separated from the handler-attach effect so the handler
+  // mounts exactly once.
   useEffect(() => {
     const shouldShowBack = state.step === 2 || state.step === 3;
     setBackButton(shouldShowBack);
@@ -235,17 +351,6 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
       state.step === 3 ||
       Object.keys(state.decisions).length > 0;
     setClosingConfirmation(hasDirtyState && state.step !== 4);
-    if (!shouldShowBack) return undefined;
-    const off = onBackButton(() => {
-      hapticSelection();
-      dispatch({
-        type: "step/set",
-        step: (state.step === 3 ? 2 : 1) as Step,
-      });
-    });
-    return () => {
-      off();
-    };
   }, [state.step, state.decisions]);
 
   // Cleanup on unmount — drop closing confirmation + BackButton.
@@ -482,6 +587,32 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
         <p>
           Все данные сохранятся. Можно вернуть в любой момент одним кликом.
         </p>
+
+        {previewIsStale && (
+          <div
+            className="callout"
+            role="status"
+            aria-live="polite"
+            style={{
+              marginTop: "var(--s-3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "var(--s-2)",
+            }}
+          >
+            <span style={{ color: "var(--c-text-secondary)" }}>
+              Данные могут быть неактуальны.
+            </span>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void fetchPreview()}
+            >
+              Обновить
+            </button>
+          </div>
+        )}
 
         <div
           className="callout"

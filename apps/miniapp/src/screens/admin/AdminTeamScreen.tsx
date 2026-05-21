@@ -77,26 +77,55 @@ export function AdminTeamScreen({ me }: Props) {
     setBackButton(false);
   }, []);
 
-  const reload = useCallback(async () => {
-    setLoading(true);
-    setErr(null);
-    try {
-      const res = await listMasters({
-        is_active: filter === "active",
-        search: search.trim() || undefined,
-        limit: 50,
-      });
-      setItems(res.items);
-      setTotalCount(res.total_count);
-    } catch (e) {
-      setErr(e);
-      setItems(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [filter, search]);
+  // Polish item (a) from PR #498 review — 300ms debounce on search +
+  // AbortController to cancel in-flight requests when input changes.
+  // Without this, fast typing fires N HTTP requests and the last to
+  // resolve (not necessarily the latest input) wins the state race.
+  const reload = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const res = await listMasters(
+          {
+            is_active: filter === "active",
+            search: search.trim() || undefined,
+            limit: 50,
+          },
+          { signal },
+        );
+        if (signal?.aborted) return;
+        setItems(res.items);
+        setTotalCount(res.total_count);
+      } catch (e) {
+        // Abort throws DOMException with name === 'AbortError'; swallow
+        // it because the next reload is already on the way.
+        if ((e as DOMException | undefined)?.name === "AbortError") return;
+        setErr(e);
+        setItems(null);
+      } finally {
+        if (!signal?.aborted) setLoading(false);
+      }
+    },
+    [filter, search],
+  );
 
+  // Debounced fetch when search/filter changes. Filter changes still
+  // pay the 300ms cost, but the UI feels snappy because the active-tab
+  // chip flips immediately; the spinner gates the list.
   useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void reload(controller.signal);
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [reload]);
+
+  // Manual retry path doesn't need debounce.
+  const manualReload = useCallback(() => {
     void reload();
   }, [reload]);
 
@@ -152,7 +181,7 @@ export function AdminTeamScreen({ me }: Props) {
       setReactivateMasterItem(null);
       setToast(`${masterName} восстановлена`);
       // Refresh — the archived row should disappear from the archive tab.
-      void reload();
+      manualReload();
     } catch (e) {
       const msg =
         e instanceof ApiError
@@ -162,7 +191,7 @@ export function AdminTeamScreen({ me }: Props) {
     } finally {
       setReactivating(false);
     }
-  }, [reactivateMasterItem, reactivateNotify, reload]);
+  }, [reactivateMasterItem, reactivateNotify, manualReload]);
 
   const handleOpenDetail = useCallback(() => {
     setSheetMaster(null);
@@ -173,7 +202,7 @@ export function AdminTeamScreen({ me }: Props) {
     return (
       <div className="screen">
         <h1 className="screen__title">Команда</h1>
-        <StateError err={err} onRetry={() => void reload()} />
+        <StateError err={err} onRetry={manualReload} />
         <AdminTabBar />
       </div>
     );
@@ -181,8 +210,25 @@ export function AdminTeamScreen({ me }: Props) {
 
   return (
     <div className="screen">
-      <header className="screen__header" style={{ marginBottom: "var(--s-3)" }}>
-        <h1 className="screen__title" style={{ display: "flex", alignItems: "center", gap: "var(--s-2)" }}>
+      <header
+        className="screen__header"
+        style={{
+          marginBottom: "var(--s-3)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "var(--s-2)",
+        }}
+      >
+        <h1
+          className="screen__title"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--s-2)",
+            margin: 0,
+          }}
+        >
           Команда
           <span
             className="admin-count-chip"
@@ -191,6 +237,19 @@ export function AdminTeamScreen({ me }: Props) {
             {totalCount}
           </span>
         </h1>
+        {(me.is_owner || me.is_admin) && (
+          <button
+            type="button"
+            className="cta-bar__button"
+            style={{ padding: "var(--s-2) var(--s-3)" }}
+            onClick={() => {
+              hapticSelection();
+              navigate("/admin/team/invite");
+            }}
+          >
+            + Добавить мастера
+          </button>
+        )}
       </header>
 
       <div
