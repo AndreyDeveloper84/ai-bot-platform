@@ -1,5 +1,17 @@
 # Phase 0 — Stream Beta startup prompt
 
+> **⚠️ SUPERSEDED 2026-05-21 — DO NOT BOOT AGAINST THIS PROMPT.**
+> Beta stream was distributed across existing windows on 2026-05-21:
+> - **Beta-docs** (#412/#413/#414 ADR-0009 copies, #418 README rebrand, #437 ADR-0011 privacy, **#441 event-contract.md — Week 1 BLOCKER**) → owned by **W4** (Sprint 1 coordinator window).
+> - **Beta-infra** (#417 DNS env URL flip, #419 .mcp.json secrets) → owned by **W2** (Channel SRE window).
+> - **Beta-frontend deferred** (#415 frontAyla namespace, #416 Bundle IDs, #436 ADR-0010 LLM) → no owner yet, picked up Week 2-3.
+> See `2026-05-20-phase-0-agent-prompts-index.md §6-stream layout` for the authoritative ownership table.
+> This file is kept ONLY for historical context (what the consolidated Beta scope would have been). Do not paste it into a new window.
+
+---
+
+# Original Beta scope (historical, do not boot)
+
 > **Purpose:** Copy this entire file into a new Claude Code (or Codex) window to start the Beta agent.
 > **Stream:** Beta — Cross-repo docs + rebrand + frontAyla + DNS.
 > **Repo working dir:** varies — Beta touches three repos (ai-bot-platform, Ayla, ayla-ai-core), but never their app code.

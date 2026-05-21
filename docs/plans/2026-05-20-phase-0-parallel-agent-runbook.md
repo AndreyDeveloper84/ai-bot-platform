@@ -1,10 +1,30 @@
 # Phase 0 — Parallel Agent Runbook
 
-> **Status:** Active 2026-05-20
-> **Purpose:** Distribute Phase 0 work across **3 parallel Claude/Codex agents** running in adjacent windows. The plan guarantees agents do not collide on file ownership, define explicit sync points, and give the supervising tech lead (Claude in main session) a way to watch progress.
+> **Status:** Active 2026-05-20, **REORG 2026-05-21** — see [§Ownership reorg](#ownership-reorg-2026-05-21) below.
+> **Purpose:** Distribute Phase 0 work across parallel Claude/Codex agents running in adjacent windows. The plan guarantees agents do not collide on file ownership, define explicit sync points, and give the supervising tech lead (Claude in main session) a way to watch progress.
 > **Companion docs:** ADR-0009 (architecture), `2026-05-20-phase-0-sprint-plan.md` (full plan), `2026-05-20-ayla-consolidated-architecture.md` (rationale), [`2026-05-21-developer-agent-workflow.md`](2026-05-21-developer-agent-workflow.md) (universal 10-phase ticket workflow — MANDATORY for every agent).
-> **Agent startup prompts:** see [`2026-05-20-phase-0-agent-prompts-index.md`](2026-05-20-phase-0-agent-prompts-index.md) — copy-paste-ready prompts for Alpha/Beta/Gamma windows.
+> **Agent startup prompts:** see [`2026-05-20-phase-0-agent-prompts-index.md`](2026-05-20-phase-0-agent-prompts-index.md) — authoritative 6-stream ownership table.
 > **Phase 0 backlog:** 35 issues (#412–#447) + 4 edits applied 2026-05-20.
+
+## Ownership reorg (2026-05-21)
+
+After reading 4 active-agent retros, ownership was reallocated from the original 3-stream Alpha/Beta/Gamma to a **6-stream layout**:
+
+- **Phase 0 Alpha** → NEW agent 5 (Ayla djangoproject backend). Unchanged from original.
+- **Phase 0 Beta DISTRIBUTED** (no dedicated agent):
+  - Wherever this doc says "Beta writes/owns X" with X ∈ {#412, #413, #414, #418, #437, #441, jwt-contract.md} → read as **W4 (Sprint 1 coordinator window)**.
+  - Wherever this doc says "Beta writes/owns X" with X ∈ {#417 DNS, #419 secrets} → read as **W2 (Channel SRE window)**.
+  - Wherever this doc says "Beta writes/owns X" with X ∈ {#415 frontAyla, #416 Bundle IDs, #436 ADR-0010} → **deferred, no owner yet (Week 2-3 pickup)**.
+- **Phase 0 Gamma** → NEW agent 6. Unchanged from original.
+- **Track A streams** (continuing windows, not Phase 0):
+  - Stream Delta (Master mini-app) → W1.
+  - Stream Epsilon (Channel + ops) → W2 (also takes Beta-infra above).
+  - Stream Zeta (Security backstop) → W3 (also second-pass Code Reviewer on NEW Gamma's high-risk PRs).
+  - Sprint 1 coordinator → W4 (also takes Beta-docs above).
+
+When this doc references "Beta announces", "Beta drafts", "Beta DNS scope" etc., substitute W4 (docs) or W2 (infra) per the above mapping. The Alpha and Gamma references in this doc remain accurate for NEW agents 5 and 6.
+
+**Authoritative source of truth for ownership:** `2026-05-20-phase-0-agent-prompts-index.md §6-stream layout`. If this runbook conflicts with the index, the index wins.
 
 ## Hard rules
 
