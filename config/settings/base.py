@@ -158,11 +158,22 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 #           soak — same pattern as STRICT_TENANT_SCOPE shadow window.
 #   True  — refuse-dispatch. Missing tenant raises
 #           TenantRequiredButMissing → consumer.py treats it like any
-#           handler exception (no XACK; PEL retains for DLQ retry).
+#           handler exception (no XACK; entry stays in the PEL for
+#           manual escalation). **No automatic DLQ retry is wired**
+#           — XAUTOCLAIM reaper is a follow-up; PEL retention is the
+#           current contract.
 #
 # Flip to True only after the dev-side soak shows zero
 # ``worker.tenant_required_missing`` events in audit for a clean
 # week (mirrors the Sprint 8 STRICT_TENANT_SCOPE flip cadence).
+#
+# **WORKER RESTART REQUIRED ON FLIP.** This value is read from
+# ``os.environ`` exactly once, here, at module import time. After
+# that, ``settings.STRICT_TENANT_REFUSE`` is a static attribute on
+# the settings module. The runtime read in ``apps.workers.base``
+# returns the import-frozen value, NOT the live env var. Operator
+# flip sequence is documented in
+# ``docs/runbooks/strict-tenant-refuse-flip.md``.
 STRICT_TENANT_REFUSE = os.environ.get("STRICT_TENANT_REFUSE", "false").lower() == "true"
 
 # Tenancy retro B4 — post-flip monitor (mirrors STRICT_SCOPE_FLIP_AT

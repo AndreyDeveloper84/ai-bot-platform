@@ -150,8 +150,14 @@ def consume_once(
                     handler_failed = True
 
             if handler_failed:
-                # Do NOT XACK on failure. Entry stays in PEL for retry
-                # / manual claim. Consumer moves on to the next entry.
+                # Do NOT XACK on failure. Entry stays in PEL for
+                # operator escalation (manual XCLAIM / XAUTOCLAIM).
+                # **No automatic DLQ retry is wired** as of 2026-05-21
+                # — XREADGROUP ">" returns only NEW entries, so the
+                # same entry will not redeliver until XCLAIM moves it.
+                # Strict-mode TenantRequiredButMissing follows the
+                # same path. See follow-up XAUTOCLAIM reaper issue.
+                # Consumer moves on to the next entry.
                 continue
 
             client.xack(stream_name, group, entry_id)
