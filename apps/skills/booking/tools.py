@@ -325,15 +325,16 @@ CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
 BUY_CERTIFICATE_TOOL_SPEC: dict[str, Any] = {
     "name": "buy_certificate",
     "description": (
-        "Issue a YooKassa hosted-checkout URL for a gift certificate "
-        "purchase. Call when the client asks to buy a сертификат / "
-        "подарочный сертификат. amount_rub MUST be a positive number in "
-        "[500, 100000] roubles — out-of-range values trigger a polite "
-        "clarification. recipient_name is the person the certificate is "
-        "for (free-text, optional — blank means 'for me'). buyer_email "
-        "is optional; supply it ONLY if the client volunteers an email "
-        "for the receipt. The tool returns a checkout URL — render it "
-        "with an inline '💳 Оплатить' button so the client can pay."
+        "Request a hosted-checkout URL for a gift certificate purchase "
+        "from the Ayla payments service. Call when the client asks to "
+        "buy a сертификат / подарочный сертификат. amount_rub MUST be "
+        "a positive number in [500, 100000] roubles — out-of-range "
+        "values trigger a polite clarification. recipient_name is the "
+        "person the certificate is for (free-text, optional — blank "
+        "means 'for me'). buyer_email is optional; supply it ONLY if "
+        "the client volunteers an email for the receipt. The tool "
+        "returns a checkout URL — render it with an inline "
+        "'💳 Оплатить' button so the client can pay."
     ),
     "parameters": {
         "type": "object",
@@ -530,13 +531,17 @@ class BuyCertificateResult:
     Fields:
 
     * ``ok``           — True on a successful checkout-URL issuance.
-    * ``order_id``     — UUID of the created
-                         :class:`apps.orders.models.Order`. Empty on
+    * ``order_id``     — Ayla payment id (#427 carve-out: the DTO
+                         field name is unchanged for downstream
+                         render-layer compatibility, but the value is
+                         now Ayla djangoproject's canonical payment_id
+                         since bot-platform no longer owns an Order
+                         row per ADR-0009 §Hard rule #1). Empty on
                          failure paths.
     * ``amount_rub``   — Echoed for downstream rendering. ``Decimal("0")``
                          on failures.
-    * ``checkout_url`` — YooKassa-hosted checkout URL the bot hands the
-                         client (stub URL in test mode). Empty on
+    * ``checkout_url`` — YooKassa-hosted checkout URL Ayla obtained on
+                         our behalf (stub URL in test mode). Empty on
                          failures.
     * ``error``        — Slug used by the skill to map onto a handoff
                          reason. Empty on success.
@@ -2377,13 +2382,22 @@ def buy_certificate(
     bot_user: Any,
     arguments: dict[str, Any],
 ) -> BookingToolResult:
-    """Issue a YooKassa hosted-checkout URL for a gift certificate.
+    """Request a checkout URL from Ayla for a gift certificate.
+
+    Phase 0 / #427 + ADR-0009 §Hard rule #5: bot-platform no longer
+    talks to YooKassa directly. The skill calls Ayla djangoproject's
+    ``POST /api/v1/payments/create`` — Ayla persists the canonical
+    Payment row, drives the YooKassa lifecycle, and owns the webhook.
+    bot-platform's role shrinks to: parse the user's intent, ask
+    Ayla, render the returned checkout URL via an inline button.
 
     Args:
-      tenant: current :class:`apps.tenancy.models.Tenant`. Scopes the
-              created :class:`apps.orders.models.Order` row.
+      tenant: current :class:`apps.tenancy.models.Tenant`. Used for
+              audit only — bot-platform no longer writes a payment
+              row scoped to the tenant (canonical state lives in
+              Ayla, which is multi-tenant-aware on its own side).
       bot_user: current :class:`apps.identity.models.BotUser` — the
-              buyer.
+              buyer. Still recorded in the audit row.
       arguments: LLM-supplied ``{amount_rub, recipient_name?, buyer_email?}``.
 
     Returns a :class:`BookingToolResult` with ``certificate`` populated.
@@ -2392,29 +2406,34 @@ def buy_certificate(
 
     Error contract:
 
-    * ``amount_out_of_range`` — clarification, no Order created.
-    * ``certificate_provider_failure`` — YooKassa raised; Order row
-      saved with status=FAILED so the operator can see the attempt.
+    * ``amount_out_of_range`` — clarification, no Ayla call.
+    * ``certificate_provider_failure`` — Ayla payments endpoint
+      raised (5xx / 4xx / unreachable). Audit row written so the
+      operator can see the attempt.
 
-    Validation order (matters for tests):
+    Validation order:
 
-    1. Parse + range-check the amount BEFORE creating the Order. An
-       out-of-range value MUST NOT leave an orphan Order row.
-    2. Create the Order in ``pending``.
-    3. Generate idempotence_key, call YooKassa.
-    4. On success: stamp the payment_id + URL onto the Order, flip to
-       ``awaiting_payment``. Build the keyboard.
-    5. On failure: flip Order to ``failed`` so admin sees the attempt.
+    1. Parse + range-check the amount BEFORE calling Ayla. An
+       out-of-range value MUST NOT trigger any HTTP call.
+    2. Generate idempotence_key, call Ayla.
+    3. On success: build the keyboard from the returned URL.
+    4. On failure: audit + return handoff slug.
+
+    Compared to the prior YooKassa-direct shape, the Order row write
+    is GONE — per ADR-0009 §Hard rule #1 (no duplicate canonical
+    state), Ayla owns the Payment row. The legacy YooKassa webhook
+    + ``apps/orders/tasks.py`` survive until #428 to drain any
+    in-flight YooKassa payments during the safety window; new
+    payments after this PR lands flow exclusively through Ayla.
     """
-    # Local imports — avoid the top-level Django-import cycle that
-    # would otherwise force apps.orders to import at module load.
-    from apps.integrations.yookassa import (
-        YooKassaAPIError,
-        YooKassaUnavailableError,
-        get_yookassa_client,
-    )
+    # Local imports — keeps Django-app-load cycles narrow and lets
+    # tests substitute the singleton via reset_ayla_payments_client().
     from apps.bookings.keyboards import url_button
-    from apps.orders.models import Order
+    from apps.integrations.ayla_payments import (
+        AylaPaymentsAPIError,
+        AylaPaymentsUnavailableError,
+        get_ayla_payments_client,
+    )
 
     tenant_id = str(getattr(tenant, "id", ""))
 
@@ -2451,83 +2470,63 @@ def buy_certificate(
 
     recipient_name = str(arguments.get("recipient_name") or "").strip()
     buyer_email = str(arguments.get("buyer_email") or "").strip()
-
-    # ── 2. Persist the Order in pending ──────────────────────────────
     description = f"Сертификат на {amount:.0f} ₽" + (
         f" для {recipient_name}" if recipient_name else ""
     )
-    order = Order.all_tenants.create(
-        tenant=tenant,
-        bot_user=bot_user,
-        kind=Order.Kind.CERTIFICATE,
-        amount_rub=amount,
-        recipient_name=recipient_name,
-        buyer_email=buyer_email,
-        description=description[:255],
-        status=Order.Status.PENDING,
-    )
 
-    # ── 3. YooKassa call ─────────────────────────────────────────────
+    # ── 2. Ayla payments call ────────────────────────────────────────
     from uuid import uuid4
 
     idempotence_key = uuid4()
-    client = get_yookassa_client()
+    client = get_ayla_payments_client()
     try:
         result = client.create_payment(
             amount_rub=amount,
             description=description[:128],
-            order_id=order.id,
             idempotence_key=idempotence_key,
+            recipient_name=recipient_name,
+            buyer_email=buyer_email,
+            kind="certificate",
         )
-    except (YooKassaUnavailableError, YooKassaAPIError) as exc:
+    except (AylaPaymentsUnavailableError, AylaPaymentsAPIError) as exc:
         logger.warning(
-            "buy_certificate.provider_failure order_id=%s err=%s",
-            order.id,
+            "buy_certificate.provider_failure idem=%s err=%s",
+            idempotence_key,
             type(exc).__name__,
         )
-        Order.all_tenants.filter(pk=order.pk).update(status=Order.Status.FAILED)
         _audit_tool(
             tenant_id=tenant_id,
             tool="buy_certificate",
             outcome="provider_failure",
             extra={
-                "order_id": str(order.id),
+                "idempotence_key": str(idempotence_key),
                 "exception_type": type(exc).__name__,
             },
         )
         write_audit(
             EVENT_CERTIFICATE_CHECKOUT_FAILED,
             target="BookingSkill",
-            target_id=order.id,
             payload={
                 "tenant_id": tenant_id,
-                "order_id": str(order.id),
+                "idempotence_key": str(idempotence_key),
                 "exception_type": type(exc).__name__,
             },
         )
         return BookingToolResult(
             certificate=BuyCertificateResult(
                 ok=False,
-                order_id=str(order.id),
                 amount_rub=amount,
                 error="certificate_provider_failure",
             ),
             error="certificate_provider_failure",
         )
 
-    # ── 4. Stamp the payment id + URL onto the Order ────────────────
-    Order.all_tenants.filter(pk=order.pk).update(
-        external_payment_id=result.payment_id,
-        checkout_url=result.checkout_url,
-        status=Order.Status.AWAITING_PAYMENT,
-    )
-
     _audit_tool(
         tenant_id=tenant_id,
         tool="buy_certificate",
         outcome="ok",
         extra={
-            "order_id": str(order.id),
+            "payment_id": result.payment_id,
             "amount": str(amount),
             "test_mode": result.test,
         },
@@ -2535,13 +2534,12 @@ def buy_certificate(
     write_audit(
         EVENT_CERTIFICATE_CHECKOUT_REQUESTED,
         target="BookingSkill",
-        target_id=order.id,
         payload={
             "tenant_id": tenant_id,
-            "order_id": str(order.id),
-            # Audit payload MUST NOT include the secret key. Shop id +
-            # payment id are safe (they're public-facing identifiers).
-            "external_payment_id": result.payment_id,
+            # Audit payload MUST NOT include the bearer token. The Ayla
+            # payment_id is a public-facing identifier (mirrors the
+            # YooKassa-era external_payment_id field).
+            "payment_id": result.payment_id,
             "amount_rub": str(amount),
             "test_mode": result.test,
         },
@@ -2557,7 +2555,11 @@ def buy_certificate(
         text=text,
         certificate=BuyCertificateResult(
             ok=True,
-            order_id=str(order.id),
+            # ``order_id`` is the public DTO field name — kept for
+            # backwards compatibility with the channel adapter +
+            # rendering layer. Populated from Ayla's ``payment_id``
+            # now that bot-platform no longer owns an Order row.
+            order_id=result.payment_id,
             amount_rub=amount,
             checkout_url=result.checkout_url,
         ),
