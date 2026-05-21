@@ -1836,3 +1836,239 @@ a {
 .m6-skeleton__compose {
   margin-top: var(--s-4);
 }
+
+/* ===========================================================================
+   Admin Mini App — MM1 roster + MM5 deactivation flow
+   (master-management-handoff §MM1 + §MM5).
+   =========================================================================== */
+
+.admin-count-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: var(--font-size-100);
+  font-weight: 500;
+  min-width: 22px;
+}
+
+.admin-chip {
+  display: inline-flex;
+  align-items: center;
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: var(--font-size-100);
+}
+
+.admin-chip--warn {
+  background: color-mix(in srgb, var(--c-warning) 14%, var(--c-surface-2));
+  color: var(--c-warning);
+}
+
+.admin-filter-tabs {
+  display: inline-flex;
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  padding: 2px;
+  gap: 2px;
+}
+
+.admin-filter-tabs__tab {
+  background: transparent;
+  color: var(--c-text-secondary);
+  border: 0;
+  padding: var(--s-2) var(--s-3);
+  border-radius: calc(var(--r-md) - 2px);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.admin-filter-tabs__tab--active {
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+}
+
+.admin-search-input {
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  min-height: 44px;
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+}
+
+.admin-search-input:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+
+.admin-master-list {
+  margin: 0;
+  padding: 0 0 calc(72px + var(--safe-bottom, 0px));
+  list-style: none;
+}
+
+.admin-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 200;
+}
+
+.admin-sheet {
+  width: 100%;
+  max-width: 480px;
+  background: var(--c-surface-1);
+  border-top-left-radius: var(--r-lg, 16px);
+  border-top-right-radius: var(--r-lg, 16px);
+  padding: var(--s-4);
+  padding-bottom: calc(var(--s-4) + var(--safe-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.admin-sheet__title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: var(--s-2);
+}
+
+.admin-sheet__action {
+  display: block;
+  width: 100%;
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+  border: 0;
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-top: var(--s-2);
+  font: inherit;
+  font-weight: 500;
+  min-height: 48px;
+  cursor: pointer;
+}
+
+.admin-sheet__action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.admin-sheet__action--danger {
+  color: var(--c-danger);
+}
+
+.admin-sheet__action--cancel {
+  background: transparent;
+  color: var(--c-text-secondary);
+}
+
+.admin-flow-screen {
+  padding-bottom: calc(var(--s-6) + var(--safe-bottom, 0px));
+}
+
+.admin-flow-back {
+  background: transparent;
+  border: 0;
+  padding: var(--s-2) 0;
+  color: var(--c-accent);
+  font: inherit;
+  cursor: pointer;
+  margin-bottom: var(--s-2);
+}
+
+.admin-bookings-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: var(--s-3) 0;
+}
+
+.admin-booking-card {
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+}
+
+.admin-booking-card__head {
+  font-weight: 500;
+  margin-bottom: var(--s-2);
+}
+
+.admin-booking-card__choices {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+.admin-select {
+  display: block;
+  width: 100%;
+  padding: var(--s-2);
+  margin-top: var(--s-1);
+  min-height: 40px;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font: inherit;
+}
+
+.admin-select:disabled {
+  opacity: 0.5;
+}
+
+.admin-textarea {
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  resize: vertical;
+  min-height: 80px;
+}
+
+.admin-textarea:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+
+.admin-flow-summary {
+  margin-top: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.admin-template-preview {
+  margin-top: var(--s-2);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
