@@ -182,8 +182,12 @@ class AnthropicProvider:
         # by the orchestrator → graceful fallback) instead of the
         # router-fallback LLMProviderQuotaExceeded. Both caps coexist:
         # tenant cap protects per-customer billing, model cap protects
-        # the org-wide Anthropic spend.
-        await _enforce_tenant_caps()
+        # the org-wide Anthropic spend. LLM retro B2: reservation
+        # threaded back to record_usage to refund the over-estimate.
+        reservation = await _enforce_tenant_caps(
+            model=chosen_model,
+            max_completion_tokens=max_tokens,
+        )
 
         # L7 — pre-call quota gate. Read the current counter; if at
         # or above cap, refuse the call rather than burning more
@@ -237,12 +241,15 @@ class AnthropicProvider:
         _record_token_usage(prompt_tokens + completion_tokens)
 
         # Phase 1 / PI9 (DRF-860) — per-tenant accounting. Cost
-        # computed against the vendor-resolved model id.
+        # computed against the vendor-resolved model id. LLM retro B2
+        # reservation threaded through for reserve-then-record
+        # reconciliation.
         actual_model = getattr(response, "model", chosen_model) or chosen_model
         await _record_tenant_usage(
             model=actual_model,
             input_tokens=prompt_tokens,
             output_tokens=completion_tokens,
+            reservation=reservation,
         )
 
         return CompletionResult(
@@ -483,18 +490,52 @@ def _record_token_usage(tokens: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _enforce_tenant_caps() -> None:
+# LLM retro B2: imported from the cost_tracker module so the worst-
+# case output-token budget is single-sourced across providers (closes
+# reviewer Y3 — pre-fix each provider carried its own 4096 constant
+# with a "kept synced" comment, which is exactly the drift hazard).
+
+
+async def _enforce_tenant_caps(
+    *,
+    model: str | None = None,
+    max_completion_tokens: int | None = None,
+):
     """Forward to :func:`apps.llm.cost_tracker.enforce_caps` when a
     tenant is in scope.
 
     No-op outside a tenant context (matches the OpenAI provider).
+
+    LLM retro B2: when ``model`` is provided, computes a worst-case
+    ``estimated_cost_usd`` and forwards it to ``enforce_caps`` so the
+    cost-cap check uses the reserve-then-record path. Returns the
+    :class:`CostReservation` to thread back into ``record_usage``.
     """
     tenant = current_tenant()
     if tenant is None:
-        return
-    from apps.llm.cost_tracker import enforce_caps
+        return None
+    from decimal import Decimal
 
-    await enforce_caps(str(tenant.id))
+    from apps.llm.cost_tracker import enforce_caps
+    from apps.llm.pricing import UnknownModelError, compute_cost
+
+    estimated_cost_usd: Decimal | None = None
+    if model:
+        from apps.llm.cost_tracker import RESERVATION_DEFAULT_MAX_TOKENS
+
+        try:
+            estimated_cost_usd = compute_cost(
+                model,
+                input_tokens=0,
+                output_tokens=max_completion_tokens or RESERVATION_DEFAULT_MAX_TOKENS,
+            )
+        except UnknownModelError:
+            estimated_cost_usd = None
+
+    return await enforce_caps(
+        str(tenant.id),
+        estimated_cost_usd=estimated_cost_usd,
+    )
 
 
 async def _record_tenant_usage(
@@ -502,6 +543,7 @@ async def _record_tenant_usage(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    reservation=None,
 ) -> None:
     """Compute cost and forward to :func:`apps.llm.cost_tracker.record_usage`.
 
@@ -510,6 +552,10 @@ async def _record_tenant_usage(
     intentionally parallel modules (per L2/L4 docstrings) and a shared
     helper would re-introduce the import-cycle the cost_tracker module
     itself was designed to break.
+
+    ``reservation`` is the :class:`CostReservation` returned by the
+    matching ``_enforce_tenant_caps`` call (LLM retro B2 reserve-then-
+    record reconciliation).
     """
     tenant = current_tenant()
     if tenant is None:
@@ -536,6 +582,7 @@ async def _record_tenant_usage(
         str(tenant.id),
         tokens=max(0, int(input_tokens or 0)) + max(0, int(output_tokens or 0)),
         cost_usd=cost_usd,
+        reservation=reservation,
     )
 
 
