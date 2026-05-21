@@ -206,6 +206,21 @@ def reap_pel_once(
 
         decision = _classify_pel_entry(stream, entry_id, fields)
 
+        # Phase H first-pass follow-up: split XADD/XACK/emit into separate
+        # try blocks. Each side-effect's failure mode is distinct:
+        #
+        # 1. XADD-to-DLQ fails → entry stays in PEL (no XACK) → next tick
+        #    re-claims it. Safe — at worst a per-tick log-spam until Redis
+        #    recovers.
+        # 2. XACK fails after XADD succeeds → entry is in DLQ AND PEL →
+        #    next tick re-reaps → duplicate DLQ row. We log and skip the
+        #    emit on this entry so the duplicate isn't ALSO audited
+        #    twice; the duplicate-DLQ-row is a known degenerate state
+        #    documented in the runbook (operator dedup by
+        #    ``_reaped_entry_id`` field if it surfaces).
+        # 3. emit() fails after XADD+XACK succeed → forensic gap (no
+        #    audit row) but no other state corruption. Log and continue
+        #    to the next entry instead of breaking the batch.
         try:
             if decision.decision == "terminal":
                 # Copy to DLQ stream with a forensic header so operators
@@ -231,26 +246,50 @@ def reap_pel_once(
                     decision.decision,
                 )
                 continue
-
-            client.xack(stream, group, entry_id)
-        except Exception:  # noqa: BLE001 — log + continue; don't lose the batch
+        except Exception:  # noqa: BLE001
             logger.exception(
-                "workers.reaper.handle_failed stream=%s entry_id=%s",
+                "workers.reaper.xadd_failed stream=%s entry_id=%s "
+                "decision=%s — leaving entry in PEL for next tick",
                 stream,
                 entry_id,
+                decision.decision,
             )
             continue
 
-        emit(
-            PEL_REAPED_EVENT_TYPE,
-            payload={
-                "stream": stream,
-                "entry_id": entry_id,
-                "classification": decision.classification,
-                "decision": decision.decision,
-                "dlq_stream": dlq_stream if decision.decision == "terminal" else None,
-            },
-        )
+        try:
+            client.xack(stream, group, entry_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "workers.reaper.xack_failed stream=%s entry_id=%s — "
+                "entry now in DLQ AND PEL (will re-reap on next tick; "
+                "operator may see duplicate _reaped_entry_id rows)",
+                stream,
+                entry_id,
+            )
+            # Skip the emit too — next tick's audit row will cover it.
+            continue
+
+        try:
+            emit(
+                PEL_REAPED_EVENT_TYPE,
+                payload={
+                    "stream": stream,
+                    "entry_id": entry_id,
+                    "classification": decision.classification,
+                    "decision": decision.decision,
+                    "dlq_stream": dlq_stream
+                    if decision.decision == "terminal"
+                    else None,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "workers.reaper.audit_emit_failed stream=%s entry_id=%s — "
+                "entry already moved to DLQ + XACK'd; forensic gap on this "
+                "row only, batch continues",
+                stream,
+                entry_id,
+            )
         reaped += 1
 
     if reaped:

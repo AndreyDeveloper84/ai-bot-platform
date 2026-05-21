@@ -96,11 +96,9 @@ class TestReaperTerminalPath:
             "resolved_tenant_id": "",
         }
 
-        reaped = reap_pel.run() if callable(getattr(reap_pel, "run", None)) else reap_pel()
-        # apps.workers.tasks.reap_pel is a shared_task; calling it
-        # directly invokes the underlying function.
-        # Reap result depends on flow above; either way one entry should
-        # have moved.
+        # ``@shared_task`` always exposes ``.run`` — call the underlying
+        # function directly (Celery wrapper is the production entry point).
+        reaped = reap_pel.run()
         assert reaped >= 1
 
         # Source PEL: empty (entry XACK'd by reaper).
@@ -230,6 +228,152 @@ class TestReaperMultiStream:
 # ---------------------------------------------------------------------------
 # Empty / no-stream edge cases
 # ---------------------------------------------------------------------------
+
+
+class TestReaperFailureModes:
+    """Per first-pass Code Reviewer follow-up: each side-effect's failure
+    mode is distinct and tested separately so a future refactor can't
+    accidentally merge them back into one try/except.
+    """
+
+    def test_xadd_to_dlq_failure_leaves_entry_in_pel(
+        self, fake_redis, settings, monkeypatch
+    ):
+        """Failure mode 1: XADD to DLQ raises (Redis down, OOM, etc).
+        Entry MUST stay in source PEL — no XACK fired — so the next
+        tick can retry. Loop must continue to the next entry."""
+
+        settings.PEL_REAPER_ENABLED = True
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        entry_id = fake_redis.xadd(
+            "ingress:max",
+            {"data": "{}", "trace_id": "t-xadd-fail", "resolved_tenant_id": ""},
+        )
+        fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[entry_id] = {
+            "data": "{}",
+            "trace_id": "t-xadd-fail",
+            "resolved_tenant_id": "",
+        }
+
+        # Patch xadd to raise on the DLQ stream only.
+        real_xadd = fake_redis.xadd
+
+        def xadd_raises_on_dlq(stream, fields):
+            if stream.endswith(":dlq"):
+                raise RuntimeError("simulated redis-down on DLQ stream")
+            return real_xadd(stream, fields)
+
+        monkeypatch.setattr(fake_redis, "xadd", xadd_raises_on_dlq)
+
+        reaped = reaper.reap_pel_streams()
+
+        # reaper.reap_pel_once continues past the failing entry.
+        assert reaped == 0
+        # Entry MUST still be in PEL (XACK never fired).
+        assert entry_id in fake_redis.pel[("ingress:max", "consumers")]
+        # No audit row — XADD never succeeded, emit not reached.
+        assert not Event.objects.filter(event_type="worker.pel_reaped").exists()
+
+    def test_xack_failure_after_xadd_leaves_entry_for_re_reap(
+        self, fake_redis, settings, monkeypatch
+    ):
+        """Failure mode 2: XADD succeeds, XACK raises. Entry is now in
+        BOTH DLQ AND source PEL. Next tick will re-claim and produce a
+        duplicate DLQ row — known degenerate state. Audit emit MUST be
+        skipped on this entry so the next tick's audit row isn't a
+        duplicate-of-a-duplicate."""
+
+        settings.PEL_REAPER_ENABLED = True
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        entry_id = fake_redis.xadd(
+            "ingress:max",
+            {"data": "{}", "trace_id": "t-xack-fail", "resolved_tenant_id": ""},
+        )
+        fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[entry_id] = {
+            "data": "{}",
+            "trace_id": "t-xack-fail",
+            "resolved_tenant_id": "",
+        }
+
+        def xack_raises(*args, **kwargs):
+            raise RuntimeError("simulated XACK failure")
+
+        monkeypatch.setattr(fake_redis, "xack", xack_raises)
+
+        reaper.reap_pel_streams()
+
+        # DLQ has the entry (XADD succeeded).
+        assert len(fake_redis.xrange("ingress:max:dlq")) == 1
+        # Source PEL still has the entry (XACK failed).
+        assert entry_id in fake_redis.pel[("ingress:max", "consumers")]
+        # No audit row — skipped because XACK failed.
+        assert not Event.objects.filter(event_type="worker.pel_reaped").exists()
+
+    def test_emit_failure_after_xadd_and_xack_continues_batch(
+        self, fake_redis, settings, monkeypatch
+    ):
+        """Failure mode 3: XADD + XACK both succeed, audit emit raises.
+        Entry is fully moved (DLQ + XACK'd source); only the audit row
+        is missing — forensic gap. The batch MUST continue, not break,
+        so the rest of the entries aren't held hostage by an audit-DB
+        hiccup."""
+
+        settings.PEL_REAPER_ENABLED = True
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        good_id = fake_redis.xadd("ingress:max", {"data": "{}", "trace_id": "t-good"})
+        bad_id = fake_redis.xadd("ingress:max", {"data": "{}", "trace_id": "t-bad"})
+        for eid in (bad_id, good_id):
+            fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[eid] = {
+                "data": "{}",
+                "trace_id": "t",
+            }
+
+        # Patch emit to raise on the first call only — exercise the
+        # «batch continues» invariant.
+        from apps.workers import reaper as reaper_mod
+
+        call_count = {"n": 0}
+        real_emit = reaper_mod.emit
+
+        def emit_raises_first(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated audit DB hiccup")
+            return real_emit(*args, **kwargs)
+
+        monkeypatch.setattr(reaper_mod, "emit", emit_raises_first)
+
+        reaped = reaper.reap_pel_streams()
+
+        # Both entries reaped (XADD + XACK both succeeded for each).
+        assert reaped == 2
+        assert fake_redis.pel.get(("ingress:max", "consumers"), {}) == {}
+        assert len(fake_redis.xrange("ingress:max:dlq")) == 2
+        # Audit emit fired for both; first raised, second succeeded.
+        # The second emission's audit row is in the DB.
+        rows = Event.objects.filter(event_type="worker.pel_reaped").count()
+        assert rows == 1, (
+            "expected 1 audit row from the successful emit; "
+            "the raising emit must not block the batch"
+        )
 
 
 class TestReaperEdgeCases:
