@@ -51,6 +51,12 @@ from django.views.decorators.http import require_http_methods
 
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.master_api.services.conversations import (
+    ConversationsListError,
+    DEFAULT_LIMIT as CONVERSATIONS_DEFAULT_LIMIT,
+    MAX_LIMIT as CONVERSATIONS_MAX_LIMIT,
+    list_master_conversations,
+)
 from apps.master_api.services.dashboard import build_dashboard
 from apps.master_api.services.schedule import (
     AvailabilityRequestError,
@@ -897,6 +903,75 @@ def availability_request(request: HttpRequest) -> HttpResponse:
         },
         status=201,
     )
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def conversations_list(request: HttpRequest) -> HttpResponse:
+    """M5 master conversations list (master-mobile §M5, PR Tier1.3).
+
+    Spec quote (§M5 line 552):
+
+        «Screen M5 — Master conversation list (their conversations only)»
+
+    Spec quote (§M5 lines 608-614):
+
+        «Master's card is **stripped down** vs admin's: ❌ No LTV /
+        financial signal … ✅ Customer first name only … ✅ Last name
+        as 1-letter initial»
+
+    Query params (all optional):
+      filter: "active" (default) | "all" | "resolved"
+      search: substring on customer first name (case-insensitive)
+      cursor: opaque base64-JSON signed token
+      limit:  default 25, max 50
+
+    Returns 200 with::
+
+        {
+          "items": [...],
+          "section_counts": {...},
+          "next_cursor": null | "<token>"
+        }
+
+    Read-only. No audit row, no event emit. Cross-master + cross-tenant
+    isolation enforced by :func:`require_master_init_data` plus the
+    explicit ``master_id`` + ``tenant_id`` filters in the service layer.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+
+    raw_filter = (request.GET.get("filter") or "active").strip().lower()
+    raw_search = (request.GET.get("search") or "").strip()
+    raw_cursor = (request.GET.get("cursor") or "").strip() or None
+    raw_limit = (request.GET.get("limit") or "").strip()
+    if raw_limit:
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return _error("bad_request", "'limit' must be an integer", 400)
+    else:
+        limit = CONVERSATIONS_DEFAULT_LIMIT
+    if limit < 1 or limit > CONVERSATIONS_MAX_LIMIT:
+        return _error(
+            "bad_request",
+            f"'limit' must be in 1..{CONVERSATIONS_MAX_LIMIT}",
+            400,
+        )
+
+    try:
+        response = list_master_conversations(
+            master,
+            filter=raw_filter,  # type: ignore[arg-type]
+            search=raw_search,
+            cursor=raw_cursor,
+            limit=limit,
+            now=dj_timezone.now(),
+        )
+    except ConversationsListError as exc:
+        return _error(exc.slug, exc.detail, 400)
+
+    return JsonResponse(response.to_dict())
 
 
 @require_http_methods(["GET"])

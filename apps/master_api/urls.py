@@ -26,4 +26,6 @@ urlpatterns = [
         views.availability_pending,
         name="availability_pending",
     ),
+    # M5 conversations list (master-mobile §M5, PR Tier1.3)
+    path("conversations", views.conversations_list, name="conversations_list"),
 ]
