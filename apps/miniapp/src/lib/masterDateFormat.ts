@@ -228,6 +228,49 @@ export function localHmFromIso(iso: string): string {
   return formatTimeHM(iso);
 }
 
+// --- M6 conversation detail helpers --------------------------------------
+
+/**
+ * Day-group key in local time (YYYY-MM-DD). Used to bucket messages into
+ * date separators per spec §M6 lines 647-657 («Вчера, 18:42» / «Сегодня,
+ * 14:32»). Returns the raw iso on parse failure (degrades to one bucket
+ * per malformed value rather than crashing the screen).
+ */
+export function localDayKey(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return formatYmdLocal(d);
+}
+
+/**
+ * «Сегодня, 14:32» / «Вчера, 18:42» / «4 мая 2026, 11:05» — date-separator
+ * label for M6 message groups. Spec §M6 lines 647-657 shows the relative
+ * forms first; older messages fall back to full date.
+ *
+ * The label embeds the *first* message's time so the user sees an
+ * anchor — full per-message time chips live on the bubbles themselves.
+ */
+export function formatDaySeparator(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const time = formatTimeHM(iso);
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const dDay = new Date(d);
+  dDay.setHours(0, 0, 0, 0);
+  const diffDays = Math.round(
+    (today.getTime() - dDay.getTime()) / (24 * 60 * 60 * 1000),
+  );
+  if (diffDays === 0) return `Сегодня, ${time}`;
+  if (diffDays === 1) return `Вчера, ${time}`;
+  const month = MONTHS_GEN[d.getMonth()] ?? "";
+  // Older — include year only when not the current year.
+  if (d.getFullYear() !== now.getFullYear()) {
+    return `${d.getDate()} ${month} ${d.getFullYear()}, ${time}`;
+  }
+  return `${d.getDate()} ${month}, ${time}`;
+}
+
 /** Add minutes to an HH:MM string. Returns HH:MM (24h). */
 export function addMinutesHm(hm: string, minutes: number): string {
   const [h, m] = hm.split(":").map((s) => Number(s));

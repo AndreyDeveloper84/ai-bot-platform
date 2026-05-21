@@ -417,3 +417,116 @@ export function findForbiddenPiiKeys(
 ): string[] {
   return FORBIDDEN_PII_KEYS.filter((k) => k in item);
 }
+
+// --- M6 conversation detail types ----------------------------------------
+// Mirrors apps/master_api/services/conversation_detail.py
+// (ConversationDetailResponse / MessageItem / MessageResponse).
+// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M6.
+
+export type ConversationTier =
+  | "ai_continuity"
+  | "human_supervised"
+  | "human_locked";
+
+/** «Передать админу» reason classes — mirrors backend `VALID_REASON_CLASSES`. */
+export type PromoteReasonClass =
+  | "complaint"
+  | "financial"
+  | "medical"
+  | "other";
+
+export interface ConversationMessage {
+  message_id: string;
+  /** "user" | "assistant" | "system" — backend uses lowercase Message.Role. */
+  role: string;
+  content: string;
+  /** ISO datetime — empty string if the server couldn't render it. */
+  sent_at: string;
+  composed_by_master: boolean;
+  composed_by_master_id: string | null;
+}
+
+export interface ConversationAiDraft {
+  draft_id: string | null;
+  content: string | null;
+  created_at: string | null;
+}
+
+export interface ConversationPermissions {
+  can_compose: boolean;
+  can_promote_to_human_locked: boolean;
+}
+
+export interface ConversationDetailResponse {
+  conversation_id: string;
+  tier: ConversationTier | string;
+  /** complaint/financial/medical/other when HUMAN_LOCKED, null otherwise. */
+  tier_reason: string | null;
+  is_active: boolean;
+  tier_locked_by_admin_name: string | null;
+  tier_locked_since: string | null;
+  client_first_name: string;
+  client_last_initial: string;
+  is_returning_customer: boolean;
+  visit_count: number;
+  messages: ConversationMessage[];
+  ai_draft: ConversationAiDraft;
+  permissions: ConversationPermissions;
+}
+
+export interface SendMessageResponse {
+  message_id: string;
+  content: string;
+  sent_at: string;
+  composed_by_master: boolean;
+}
+
+export interface MarkReadResponse {
+  marked_count: number;
+}
+
+export interface PromoteResponse {
+  conversation_id: string;
+  tier: ConversationTier | string;
+  tier_locked_at: string;
+}
+
+/** Mirrors backend MAX_COMPOSE_LENGTH (apps/master_api/services/conversation_detail.py). */
+export const MASTER_COMPOSE_MAX_LENGTH = 2000;
+/** Threshold at which the live counter starts being visible. */
+export const MASTER_COMPOSE_COUNTER_THRESHOLD = 1500;
+
+export const getConversationDetail = (
+  conversationId: string,
+): Promise<ConversationDetailResponse> =>
+  request(`/conversations/${conversationId}`, { method: "GET" });
+
+export const sendMasterMessage = (
+  conversationId: string,
+  content: string,
+): Promise<SendMessageResponse> =>
+  request(`/conversations/${conversationId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+
+export const markConversationRead = (
+  conversationId: string,
+): Promise<MarkReadResponse> =>
+  request(`/conversations/${conversationId}/mark-read`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
+export const promoteConversationToHumanLocked = (
+  conversationId: string,
+  reasonClass: PromoteReasonClass,
+  reasonText?: string,
+): Promise<PromoteResponse> =>
+  request(`/conversations/${conversationId}/promote`, {
+    method: "POST",
+    body: JSON.stringify({
+      reason_class: reasonClass,
+      reason_text: reasonText ?? "",
+    }),
+  });

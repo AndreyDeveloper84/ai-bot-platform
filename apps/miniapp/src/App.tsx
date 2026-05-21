@@ -5,6 +5,7 @@ import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { HelloScreen } from "./screens/HelloScreen";
+import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
@@ -43,6 +44,10 @@ export function App() {
       <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
       <Route path="/master/conversations" element={<MasterConversationsScreen />} />
+      <Route
+        path="/master/conversations/:id"
+        element={<MasterConversationDetailScreen />}
+      />
       <Route path="/master/profile" element={<MasterProfilePlaceholderScreen />} />
       <Route path="*" element={<HelloScreen />} />
     </Routes>

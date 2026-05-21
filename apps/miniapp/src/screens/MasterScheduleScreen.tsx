@@ -28,11 +28,11 @@
  *   - HapticFeedback.selectionChanged() on date step
  *   - HapticFeedback.impactOccurred('heavy') on availability-request confirm
  *
- * Conversation deeplink: M6 (conversation detail) is not built yet. Tapping
- * a booking card routes to /master/conversations (the list) — pragmatic
- * fallback documented in the PR body. The conversations list is the next
- * best navigation target since the master normally reaches a specific
- * conversation from there anyway.
+ * Conversation deeplink: ScheduleBooking does not carry a conversation_id
+ * (M3 payload is booking-keyed). Tapping a booking card therefore routes
+ * to /master/conversations (the list) where the master picks the thread
+ * by client name. The conversations list itself routes into M6
+ * (/master/conversations/:id) per its own card-tap handler.
  */
 
 import {
@@ -268,14 +268,18 @@ export function MasterScheduleScreen() {
     setView(v);
   }, []);
 
-  // --- Booking → conversation list (M6 not built; document fallback) ---
+  // --- Booking → conversation list (intentional indirection) ---------
 
   const onBookingTap = useCallback(
     (_booking: ScheduleBooking) => {
       hapticSelection();
-      // M6 (conversation detail) is not built yet — fall back to the
-      // master conversations list rather than 404. The master can find
-      // the client there if they really need to message them.
+      // M6 (conversation detail) is wired, but ScheduleBooking does NOT
+      // carry a `conversation_id` — the M3 backend returns booking rows
+      // only. Adding the join here would mean a second round-trip per
+      // tap. Cheapest correct UX: route to the conversations list, where
+      // the master can pick the right thread by client name. A future
+      // PR can extend the schedule payload with conversation_id if the
+      // tap flow proves heavy enough to justify it.
       navigate("/master/conversations");
     },
     [navigate],
