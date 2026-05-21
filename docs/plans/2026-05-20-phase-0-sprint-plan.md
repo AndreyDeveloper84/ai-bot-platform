@@ -1,12 +1,26 @@
 # Phase 0 Sprint Plan — Ayla Architecture Stabilization
 
-> **Status:** Active — 2026-05-20
+> **Status:** Active — 2026-05-20, **DNS scope reduced 2026-05-21**
 > **Owner:** Andrey Tikhonov + parallel Claude/Codex agents
 > **Duration:** 3–4 недели (target end ~2026-06-10)
 > **Foundation milestone:** GH `Sprint 1 — Foundation backbone` (milestone #1) — already 51 open + 17 closed pre-deploy locks
 > **Two tracks run in parallel:** A) Sprint 1 product foundation (5 EPICs Ayla-first pivot), B) Phase 0 infra/rebrand/contracts (new issues, ~28 to create)
 > **References:** ADR-0009 (architecture decision), `2026-05-20-ayla-consolidated-architecture.md` (analysis), memory `freeze-mvp-until-boundaries-locked`
 > **GH issues created:** #412 — #439 (28 issues in `Sprint 1 — Foundation backbone` milestone, 2026-05-20). Tech-lead review 2026-05-20 added 7 more issues (#441 — #446 — event-contract doc + 5 split consumers + idempotency contract test). See §GH issue mapping at end.
+
+## 🔄 Scope reduction 2026-05-21 — DNS rebrand deferred
+
+**ayla.app domain unavailable** (owned by third party). DNS-related work deferred to Phase 1+:
+
+- **#417 (Env URL flip dev.gobeauty.site → dev.ayla.app)** → **CLOSED, no longer applicable.** Backend stays on gobeauty.site indefinitely until product domain decided (acquire ayla.app via outreach OR pick alternative aylaapp.com/heyayla.com/ayla.life/etc OR stay on gobeauty.site permanently).
+- **#434 (Nginx API Gateway routing api.ayla.app/*)** → **DEFERRED** until product domain chosen. Path-based routing architecture preserved in ADR-0009 but on whatever host eventually ships.
+- **Sync 1 (env URL flip)** → REMOVED from week 3 schedule.
+- **Sync 5 (API Gateway routes)** → REMOVED from week 3 schedule.
+- **Phase 0 close criteria** reduced from 9 to 8 (criterion #2 «env URL rebrand» dropped + criterion #8 «API Gateway» dropped).
+- **W2 Beta-infra scope** reduced: keeps #419 .mcp.json secrets, releases #417 DNS work.
+- **W2's PR #488** (DNS flip runbook) — closed as historical artifact for future migration.
+
+Mobile builds continue using current 2-host structure (api-dev.gobeauty.site for bot-platform + dev.gobeauty.site/api/v1 for Ayla djangoproject equivalent). Net effect on user-facing product: zero (end users see App Store / bot voice / Mini App — none expose backend DNS).
 
 ## Tech-lead review corrections applied (2026-05-20)
 
@@ -62,7 +76,7 @@ These are NOT in Sprint 1 milestone yet. They become new GH issues with labels `
 *Scope per user: package namespace, Bundle IDs, env URLs, README/CLAUDE.md/backend service names, API doc title. NOT in scope: visual redesign, App Store marketing assets, full brand book.*
 - [rebrand][frontAyla] `@beautygo/*` → `@ayla/*` yarn workspaces rename + build smoke
 - [rebrand][frontAyla] Bundle IDs `ru.beautygo.client/pro` → `ru.ayla.client/pro` (Expo `app.config.ts` + provisioning profiles + Android signing). Note: Apple provisioning review may take 3-7 days — DOES NOT block other Phase 0 work
-- [rebrand][infra] Env URL: `dev.gobeauty.site` → `dev.ayla.app` (DNS, LE certs, reverse proxy, 30-day 301 redirect from old domain)
+- ~~[rebrand][infra] Env URL: `dev.gobeauty.site` → `dev.ayla.app` (DNS, LE certs, reverse proxy, 30-day 301 redirect from old domain)~~ **DEFERRED 2026-05-21** — ayla.app unavailable. See top-of-doc scope reduction notice.
 - [rebrand][docs] README + CLAUDE.md + backend service names + API doc titles BeautyGo → Ayla across all three repos
 
 #### Bucket 3 — Secrets hygiene (2 issues)
@@ -109,8 +123,8 @@ These are NOT in Sprint 1 milestone yet. They become new GH issues with labels `
 **Idempotency contract test (1 issue):**
 - **#447** [test][contracts] Idempotency contract test: send same event 3 times → assert exactly one side-effect per consumer (RemoteBookingProxy upsert, cache invalidation, etc.)
 
-#### Bucket 8 — API Gateway (1 issue)
-- [gateway][infra] Nginx routing at `api.ayla.app`. Path-based: `/auth/*`, `/users/me/*`, `/specialists/*`, `/services/*`, `/categories/*`, `/appointments/*`, `/payments/*`, `/reviews/*`, `/schedule/*`, `/search` → Ayla djangoproject. `/ai/*`, `/customer/chat/*`, `/customer/memory/*`, `/customer/conversations/*`, `/customer/auth/verify`, `/customer/slots`, `/internal/events/ingest` → ai-bot-platform. Health probes per backend. Tested with curl matrix in `docs/qa/phase-0-gateway-routing.md`
+#### Bucket 8 — API Gateway (DEFERRED 2026-05-21)
+- ~~[gateway][infra] Nginx routing at `api.ayla.app`. Path-based: `/auth/*`, `/users/me/*`, ... → Ayla djangoproject; `/ai/*`, `/customer/chat/*`, ... → ai-bot-platform.~~ **DEFERRED** — ayla.app unavailable; routing architecture preserved in ADR-0009 but no implementation until product domain chosen Phase 1+. Mobile builds use 2-host structure on gobeauty.site for now.
 
 #### Bucket 9 — Unified JWT contract (1 issue)
 - [jwt][contracts] Unified JWT: Ayla djangoproject auth issues JWT with `tenant_id` claim per ADR-0009. ai-bot-platform middleware verifies with same signing key (or shared issuer). Aligns with #246 (User.tenant_id removal → TenantUserRelationship). Anonymous-to-user merge via #258 works through gateway. Phase A.7 DRF-242.8 work serves as starting point on bot-platform side
@@ -218,13 +232,13 @@ If a ticket can't tell which side it falls on, default to "not Phase 0".
 ## Definition of Phase 0 close (Andrey signs off when all 9 are true)
 
 1. ADR-0009 merged across all three repos (`docs/adr/` in bot-platform, `docs/architecture/` in Ayla djangoproject, `docs/` in ayla-ai-core). Linked from `CLAUDE.md` in bot-platform.
-2. Technical rebrand done: `@beautygo/*` → `@ayla/*`, Bundle IDs flipped (Apple may still be in review — backend rebrand still counts), env URLs migrated, README/CLAUDE.md/backend service names updated.
+2. Technical rebrand done: `@beautygo/*` → `@ayla/*`, Bundle IDs flipped (Apple may still be in review — backend rebrand still counts), README/CLAUDE.md/backend service names updated. **Env URL rebrand DROPPED 2026-05-21** — ayla.app unavailable, gobeauty.site stays.
 3. Secrets hygiene: `git ls-files | xargs grep -l 'sk-' 2>/dev/null` returns nothing. `db.sqlite3` not in HEAD. Pre-commit `detect-secrets` active in all three repos.
 4. Ayla djangoproject `manage.py runserver` boots against Postgres. `select_for_update()` in `appointments/infrastructure/availability/` actually locks rows (verified by concurrency test). Outbox worker consumes events.
 5. `Payment` lives in `payments/`. `appointments/models.py:318` no longer contains Payment.
 6. bot-platform: `grep -r 'YooKassa\|yookassa' apps/` returns only display-only Order paths.
 7. Event contract: round-trip test passes (mobile booking → bot memory update). Both automated and manual portions documented in `docs/qa/`.
-8. `curl api.ayla.app/auth/health` → Ayla. `curl api.ayla.app/ai/health` → bot-platform. Gateway routing complete.
+8. ~~`curl api.ayla.app/auth/health` → Ayla. `curl api.ayla.app/ai/health` → bot-platform. Gateway routing complete.~~ **DROPPED 2026-05-21** — Gateway concept preserved in ADR-0009 but implementation deferred Phase 1+ pending product domain decision. 8 close criteria total (was 9).
 9. JWT issued by Ayla, verified by both backends with `tenant_id` claim. Anonymous-to-user merge round-trip works.
 
 When all 9 green: Andrey opens a PR titled "Phase 0 close — unblock Phase 1 MVP work" that updates `feedback_freeze_mvp_until_boundaries_locked` memory to "RESOLVED — Phase 0 closed YYYY-MM-DD" and lifts the Sprint 2/3/4 freeze.
@@ -284,7 +298,7 @@ All in milestone `Sprint 1 — Foundation backbone`. Labels: `P0`, `ayla-foundat
 ### Bucket 2 — Technical rebrand
 - [#415] [rebrand] frontAyla: @beautygo/* → @ayla/* yarn workspaces rename + build smoke
 - [#416] [rebrand] frontAyla: Bundle IDs ru.beautygo.* → ru.ayla.* (Expo app.config + provisioning)
-- [#417] [rebrand] Env URL dev.gobeauty.site → dev.ayla.app (DNS + certs + reverse proxy + 30-day 301)
+- ~~[#417] Env URL dev.gobeauty.site → dev.ayla.app~~ — **CLOSED 2026-05-21** (ayla.app unavailable, deferred Phase 1+)
 - [#418] [rebrand] README + CLAUDE.md + backend service names + API doc titles: BeautyGo → Ayla across 3 repos
 - (#226 already exists for brand asset folder + design tokens — NOT recreated)
 
@@ -320,8 +334,8 @@ All in milestone `Sprint 1 — Foundation backbone`. Labels: `P0`, `ayla-foundat
 - [#446] [events][contracts] Consumer: user.profile.updated
 - [#447] [test][contracts] Idempotency contract test (same event 3x → exactly one side-effect per consumer)
 
-### Bucket 8 — API Gateway
-- [#434] [gateway][infra] Nginx API Gateway: api.ayla.app/* routing to Ayla + bot-platform per ADR-0009
+### Bucket 8 — API Gateway (DEFERRED)
+- ~~[#434] Nginx API Gateway: api.ayla.app/* routing~~ — **DEFERRED 2026-05-21** (ayla.app unavailable, Phase 1+)
 
 ### Bucket 9 — Unified JWT contract
 - [#435] [jwt][contracts] Unified JWT with tenant_id claim — Ayla issues, both backends verify
