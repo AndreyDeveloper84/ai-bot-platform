@@ -60,9 +60,9 @@ export function getInitData(): string {
 
 /**
  * Deeplink payload passed by MAX when the Mini App is opened via an
- * ``open_app`` inline-keyboard button. Welcome skill emits payloads
- * shaped as ``route=<key>`` (e.g. ``route=catalog``); ``parseStartRoute``
- * maps that to the matching React Router path.
+ * ``open_app`` inline-keyboard button. Welcome skill emits flat-slug
+ * payloads (e.g. ``open_catalog``); ``parseStartRoute`` maps them to
+ * the matching React Router path.
  *
  * MAX delivers the button's ``payload`` field as
  * ``initDataUnsafe.start_param`` (mirroring Telegram WebApp's
@@ -91,34 +91,51 @@ export function getStartPayload(): string {
  * emitted by ``apps/skills/welcome/skill.py::_welcome_buttons``. Adding
  * a new route here requires adding the matching button there in the
  * same PR, or the welcome menu will ship a dead deeplink.
+ *
+ * Two key formats accepted:
+ *
+ * * **Flat slug** (``open_catalog``, ``open_visits``, ``open_profile``)
+ *   — current emit path. MAX requires open_app button payload to match
+ *   a restricted regex (no ``=``, no ``&``); the flat-slug shape passes.
+ * * **Legacy querystring inner-value** (``catalog``, ``visits``,
+ *   ``profile``) — accepted via the ``route=<value>`` fallback below,
+ *   kept for cold-start back-compat with stale message bodies in users'
+ *   MAX history during the F2 rollout window.
  */
 const _ROUTE_MAP: Record<string, string> = {
+  // Flat slug — current.
+  open_catalog: "/catalog",
+  open_visits: "/my-visits",
+  open_profile: "/me",
+  // Legacy querystring inner-values — kept for cold-start back-compat.
   catalog: "/catalog",
   visits: "/my-visits",
   profile: "/me",
 };
 
 /**
- * Parse a MAX start_param payload of shape ``key=value[&key=value...]``
- * and return the in-app path for ``route=<known>``, or ``null`` for
- * empty / unknown / malformed input. Permissive: ignores unknown keys
- * so future welcome additions (``ref=campaign-x``) don't accidentally
- * break navigation.
+ * Parse a MAX start_param payload and return the in-app path, or ``null``
+ * for empty / unknown / malformed input.
  *
  * Examples:
- *   parseStartRoute("route=catalog")        → "/catalog"
- *   parseStartRoute("route=visits&ref=ig")  → "/my-visits"
- *   parseStartRoute("route=unknown")        → null
+ *   parseStartRoute("open_catalog")         → "/catalog"
+ *   parseStartRoute("route=visits&ref=ig")  → "/my-visits"  (legacy form)
+ *   parseStartRoute("open_unknown")         → null
  *   parseStartRoute("")                     → null
  *   parseStartRoute("garbage")              → null
  */
 export function parseStartRoute(payload: string): string | null {
   if (!payload) return null;
-  // URLSearchParams accepts both "a=b&c=d" and "a=b" cleanly.
-  const params = new URLSearchParams(payload);
-  const route = params.get("route");
-  if (!route) return null;
-  return _ROUTE_MAP[route] ?? null;
+  // Try flat-slug direct lookup first (current emit format).
+  const direct = _ROUTE_MAP[payload];
+  if (direct) return direct;
+  // Fall back to legacy querystring shape (``route=<value>``).
+  if (payload.includes("=")) {
+    const params = new URLSearchParams(payload);
+    const route = params.get("route");
+    if (route && _ROUTE_MAP[route]) return _ROUTE_MAP[route];
+  }
+  return null;
 }
 
 export function signalReady(): void {

@@ -140,11 +140,17 @@ def _welcome_buttons() -> list[dict[str, str]]:
     salon_buttons: list[dict[str, str]] = []
     if web_app:
         # In-MAX Mini App — native UX. ``callback`` carries the route
-        # payload that the Mini App reads from initData.
+        # payload that the Mini App reads from initData.start_param.
+        #
+        # MAX requires open_app button payload to match a restricted
+        # regex (no `=`, `&`, etc — likely ``[A-Za-z0-9_:-]+``). Initial
+        # ``route=catalog`` shape was rejected with HTTP 400
+        # ``proto.payload``. Use a flat slug instead and let the Mini
+        # App's parseStartRoute() resolve it via direct lookup.
         salon_buttons = [
-            {"label": "📅 Записаться", "callback": "route=catalog", "web_app": web_app},
-            {"label": "📋 Мои визиты", "callback": "route=visits", "web_app": web_app},
-            {"label": "👤 Профиль", "callback": "route=profile", "web_app": web_app},
+            {"label": "📅 Записаться", "callback": "open_catalog", "web_app": web_app},
+            {"label": "📋 Мои визиты", "callback": "open_visits", "web_app": web_app},
+            {"label": "👤 Профиль", "callback": "open_profile", "web_app": web_app},
         ]
     elif miniapp_url:
         # External link fallback — opens in the user's browser.

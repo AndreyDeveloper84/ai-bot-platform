@@ -84,9 +84,13 @@ class TestHandleStart:
         # 3 salon nav + 4 wellness/FAQ = 7 total.
         assert len(buttons) == 7
         nav = buttons[:3]
-        for btn in nav:
+        # Flat slug payloads — MAX rejects open_app payloads with `=`
+        # (HTTP 400 proto.payload). Mini App's parseStartRoute resolves
+        # these by direct lookup.
+        expected_payloads = ["open_catalog", "open_visits", "open_profile"]
+        for btn, expected in zip(nav, expected_payloads):
             assert btn["web_app"] == "id583_bot"
-            assert "callback" in btn  # repurposed as MAX open_app payload
+            assert btn["callback"] == expected
         # Wellness + FAQ row: never carries web_app.
         for btn in buttons[3:]:
             assert "web_app" not in btn
