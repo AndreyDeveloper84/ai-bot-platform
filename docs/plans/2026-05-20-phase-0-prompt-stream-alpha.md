@@ -74,8 +74,20 @@ contract tickets (#429-#431) until Beta announces #441 has landed.
   `apps/tenancy/`, `apps/persona/`, etc. — those are EPICs #219–#223,
   not your concern.
 
-If a Week 1 ticket forces you to cross any of these — STOP and post a
-question in this window for the tech lead.
+# Anti-touch exceptions (you MAY edit these even though they live near
+# Beta territory)
+- `Ayla/djangoproject/.env.example` — infra config, part of your stack
+  setup (docker-compose, Postgres URL, Celery broker, Redis URL). Edit
+  this freely as part of #421/#422/#423/#424.
+- `Ayla/djangoproject/docker-compose.yml`, `Makefile`, `manage.py` —
+  infra config, yours.
+- `Ayla/djangoproject/requirements*.txt`, `pyproject.toml` —
+  dependency declarations, yours.
+- New Django app skeletons you need to add (e.g. moving `Payment` to
+  `payments/` per #426) — your refactor.
+
+If a Week 1 ticket forces you to cross any boundary not listed above —
+STOP and post a question in this window for the tech lead.
 
 # Hard rules (non-negotiable)
 - **Phase 0 freeze:** no Sprint 2/3/4 features, no AI-avatar, no voice

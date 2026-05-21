@@ -45,7 +45,7 @@ ADR-0002 named only three repos. The Ayla repo is the implicit fourth and was ne
 | Tenancy, multi-tenant context, STRICT_TENANT_SCOPE | ai-bot-platform | `apps/tenancy` |
 | Audit, events bus, eventbus (Postgres outbox), replay | ai-bot-platform | `apps/audit`, `apps/events`, `apps/eventbus`, `apps/replay` |
 | Observability, shadow-mode, OpenTelemetry | ai-bot-platform | `apps/observability` |
-| **Core user memory (`UserPersonalContext`)** | **ai-bot-platform** | `apps/identity` — cross-channel, cross-tenant, follows the user |
+| **Core user memory (`UserPersonalContext`)** | **ai-bot-platform** | `apps/identity` — cross-channel, **user-owned (not cross-tenant)**, reusable across providers only within consent boundary. See §Memory model for the reuse rule. |
 | **Canonical User identity + PII** (auth: OTP + JWT + Anonymous JWT + social, profile, avatar, name, basic settings) | **Ayla djangoproject** | `users/` — source of user truth. Bot-platform NEVER stores canonical PII. |
 | **Channel identity** (per-channel BotUser linked to canonical User via FK, RFM/LTV projection) | **ai-bot-platform** | `apps/identity/BotUser`, `ClientProfile` — channel-scoped wrapper around canonical User |
 | **Booking domain (Appointment DDD, state machine, snapshot, idempotency)** | **Ayla djangoproject** | `appointments/` — keeps existing engine |
