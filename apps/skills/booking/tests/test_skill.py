@@ -311,9 +311,11 @@ class TestMasterPickCallback:
     def test_callback_dispatches_show_slots_no_phase1_llm(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
-        """The fake provider is given ONLY the Phase 3 completion. If the
-        short-circuit accidentally calls Phase 1 first, the test runs out
-        of mock completions and errors — that's the regression guard."""
+        """Master pick → show_slots → slot-cards short-circuit (no Phase 1
+        LLM, no Phase 3 LLM). Zero completions consumed — both short-circuits
+        bypass the model. Regression guard: if any short-circuit path
+        accidentally calls the LLM, the test runs out of mock completions
+        and errors."""
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
@@ -326,13 +328,17 @@ class TestMasterPickCallback:
             bot_user=context.bot_user,
             message_text="cb:book:pick_master:11",
         )
-        # Only ONE completion mocked — the Phase 3 reply renderer.
-        completions = [_completion(text="Свободно в 14:00 — забронировать?")]
-        with _patch_yclients(client), _patch_provider_complete(completions):
+        # Zero completions mocked — both Phase 1 (callback short-circuit)
+        # and Phase 3 (slot-cards short-circuit) skip the model entirely.
+        with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert result.should_handoff is False
-        assert "14:00" in result.reply_text
+        # Slot-cards keyboard rendered deterministically.
+        assert result.reply_text == "Выберите время:"
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert any("cb:book:pick_slot:" in b["callback"] for b in buttons)
         # Synthetic tool_call recorded for audit / replay.
         assert len(result.tool_calls_made) == 1
         assert result.tool_calls_made[0].name == "show_slots"
@@ -355,7 +361,11 @@ class TestMasterPickCallback:
 
 
 class TestShowSlotsFlow:
-    def test_lists_slots(self, context: SkillContext, tenant: Tenant) -> None:
+    def test_lists_slots_as_buttons(self, context: SkillContext, tenant: Tenant) -> None:
+        """Slot-cards short-circuit (2026-05-21): show_slots result is
+        rendered as deterministic text + inline-keyboard, one button per
+        slot. Phase 3 LLM is skipped — only the Phase 1 (tool selection)
+        completion is consumed."""
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
@@ -364,15 +374,85 @@ class TestShowSlotsFlow:
             AvailableTime(time="14:00", datetime="2026-05-20T14:00:00", seance_length_s=3600)
         ]
         tc = ToolCall(id="c1", name="show_slots", arguments={"master_id": 11})
-        completions = [
-            _completion(tool_calls=[tc]),
-            _completion(text="Свободно в 14:00."),
-        ]
+        # Only ONE completion mocked — short-circuit skips Phase 3 LLM.
+        completions = [_completion(tool_calls=[tc])]
         with _patch_yclients(client), _patch_provider_complete(completions):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(context)
         assert result.should_handoff is False
-        assert "14:00" in result.reply_text or "Свободно" in result.reply_text
+        assert result.reply_text == "Выберите время:"
+        # Keyboard envelope with cb:book:pick_slot:<datetime> callback.
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert len(buttons) == 1
+        assert buttons[0]["callback"] == "cb:book:pick_slot:2026-05-20T14:00:00"
+        # Human-readable label includes the time.
+        assert "14:00" in buttons[0]["label"]
+
+
+class TestSlotPickCallback:
+    """User taps a slot button from the show_slots keyboard.
+
+    Unlike master-pick (deterministic show_slots dispatch), slot-pick
+    needs the LLM to emit confirm_booking with master_id + service_id
+    drawn from short-term conversation history. The skill overrides
+    the prompt query with a synthesised "запиши меня на <datetime>"
+    user text and lets Phase 1 LLM do the inference.
+    """
+
+    def test_matches_callback_prefix(self, context: SkillContext) -> None:
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:2026-05-22T14:00:00",
+        )
+        assert BookingSkill().matches(ctx) is True
+
+    def test_callback_synthesises_user_query_for_llm(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The Phase 1 LLM prompt's ``query`` is overridden with the
+        synthesised user-text. Regression guard: the mocked completion
+        receives the synthesised query, not the raw callback payload."""
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:2026-05-22T14:00:00",
+        )
+        # LLM returns plain text "ok, на 14:00" — no tool call needed
+        # for this test (we just want to verify the prompt path).
+        completions = [_completion(text="Ок, проверю слот.")]
+        with _patch_yclients(client), _patch_provider_complete(completions) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        # No tool calls → small-talk path → returns LLM text verbatim.
+        assert result.reply_text == "Ок, проверю слот."
+        # Inspect the prompt that was actually sent: it should contain
+        # the synthesised "запиши меня на <datetime>" string, not the
+        # raw cb: callback payload.
+        sent_messages = mock_complete.call_args.args[0]
+        user_msg = next(m for m in sent_messages if m["role"] == "user")
+        assert "Запиши меня на" in user_msg["content"]
+        assert "2026-05-22T14:00:00" in user_msg["content"]
+        # Raw callback payload must NOT leak into the LLM context.
+        assert "cb:book:pick_slot:" not in user_msg["content"]
+
+    def test_empty_callback_payload_handoffs_softly(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:",
+        )
+        with _patch_yclients(FakeYClients()), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert "время" in result.reply_text.lower() or "ещё раз" in result.reply_text.lower()
+        assert result.tool_calls_made == []
 
 
 class TestConfirmBookingFlow:

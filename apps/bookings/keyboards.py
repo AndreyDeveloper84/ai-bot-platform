@@ -52,6 +52,16 @@ CALLBACK_BOOK_CANCEL_PREFIX = "cb:book:cancel:"
 # pending-action rows, this is a stateless deterministic id).
 CALLBACK_BOOK_PICK_MASTER_PREFIX = "cb:book:pick_master:"
 
+# Booking slot-pick callback (2026-05-21). When the user taps a slot
+# card after a show_slots result, the button payload carries the slot's
+# ISO datetime verbatim. Booking skill matches this prefix and
+# synthesises a user-text query ("запиши меня на <datetime>") so the
+# normal Phase-1 LLM call emits confirm_booking with master_id +
+# service_id pulled from short-term conversation memory. Suffix is
+# the raw ISO string YClients returned in show_slots — kept verbatim
+# so the LLM's confirm_booking arguments match the prior tool output.
+CALLBACK_BOOK_PICK_SLOT_PREFIX = "cb:book:pick_slot:"
+
 
 # Button labels — Russian per the salon brand voice (see
 # ``apps.skills.booking.prompts`` for tone alignment).
