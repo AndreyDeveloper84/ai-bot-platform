@@ -184,6 +184,14 @@ class TenantAwareTask(ABC):
 
     requires_tenant: ClassVar[bool] = True
 
+    # Frozen snapshot of the trusted ``requires_tenant`` resolution,
+    # written by ``__init_subclass__`` at subclass-creation time.
+    # Declared here at class level so mypy sees the attribute at the
+    # ``cls._RESOLVED_REQUIRES_TENANT`` read sites below (PR #497
+    # introduced the assignment but no declaration → broke `attr-defined`
+    # mypy gate on dev).
+    _RESOLVED_REQUIRES_TENANT: ClassVar[bool] = True
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """B2 (Tenancy retro B4 follow-up) — MRO bypass defence.
 

@@ -93,15 +93,20 @@ When the pre-flip checklist below is satisfied:
 
 ## Pre-flip checklist (must pass before 2026-05-28)
 
-- [ ] PR `phase0/zeta/476-blockers-pre-flip` merged.
+- [x] PR `phase0/zeta/476-blockers-pre-flip` (#487, `dc065a8c47`) merged.
+- [x] PR `phase0/zeta/487-adversarial-followup` (#496, `5975c08`) merged.
 - [ ] At least 7 consecutive days of `worker.tenant_required_missing`
       events triaged — zero legitimate handlers in the list.
 - [ ] All registered `TenantAwareTask` subclasses audited for their
-      effective `requires_tenant` value (B2 boot-audit logging is a
-      planned follow-up; until it lands, audit via
-      `grep -rn 'class.*TenantAwareTask' apps/` + manual review).
-- [ ] XAUTOCLAIM reaper issue filed (or operator-side manual-claim
-      runbook accepted as the post-flip PEL drain path).
+      effective `requires_tenant` value. Boot-audit logging tracked
+      in **issue #502** (B2 nice-to-have); until it lands, audit via
+      `grep -rn 'class.*TenantAwareTask' apps/` + manual review.
+- [ ] **Issue #499** (XAUTOCLAIM reaper) merged OR operator accepts
+      manual-XCLAIM as the post-flip PEL drain path with a documented
+      runbook.
+- [ ] **Issue #500** (D-2 operator-side ceilings: PEL length alert,
+      per-handler rate budget, audit-table baseline + growth alert,
+      alert dedup) — all 4 items checked off.
 - [ ] Dev-team comms about the **worker-restart-required** flip
       semantics so nobody thinks the env-var flip is hot.
 
