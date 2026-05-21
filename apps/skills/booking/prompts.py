@@ -151,6 +151,33 @@ def _render_system_prompt(
         "сначала вызови show_my_bookings."
     )
 
+    # Live-data rendering rule. The skill's two-call loop already
+    # invoked a tool and is splicing the result into the prompt below
+    # (КАНДИДАТЫ-МАСТЕРА / СЛОТЫ / ВАШИ ЗАПИСИ / ...). Without an
+    # explicit instruction, gpt-4o-mini treats those blocks as future
+    # tool context and replies with placeholder filler — observed live
+    # 2026-05-21 ("Один момент!" after `хочу записаться на массаж`,
+    # despite КАНДИДАТЫ-МАСТЕРА list being present in the prompt).
+    has_live_data = any(
+        x is not None
+        for x in (
+            candidate_masters,
+            available_slots,
+            confirmation,
+            pending,
+            user_bookings,
+            price,
+            certificate,
+        )
+    )
+    if has_live_data:
+        sections.append(
+            "ВАЖНО: ниже указаны данные, которые УЖЕ получены инструментами. "
+            "Сразу представь их пользователю в этом же ответе — НЕ пиши "
+            "«один момент», «сейчас покажу», «позволь мне». Данные у тебя — "
+            "перечисли их естественным языком и задай следующий вопрос."
+        )
+
     if candidate_masters:
         sections.append(_format_masters_block(candidate_masters))
     if available_slots:

@@ -40,6 +40,53 @@ class TestShape:
             assert tool in body
 
 
+class TestLiveDataRenderingRule:
+    """The "render NOW, don't say 'wait'" instruction (fix 2026-05-21).
+
+    When any tool result is spliced into the prompt (candidate_masters,
+    slots, bookings, etc.), the system text MUST include the explicit
+    instruction so gpt-4o-mini doesn't reply with placeholder filler
+    ("Один момент!"). Without a tool result present, the instruction is
+    absent — first-call prompts stay short.
+    """
+
+    def test_rule_present_when_masters_spliced(self) -> None:
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="запиши",
+            candidate_masters=[{"id": 1, "name": "Аня", "specialization": "Массаж"}],
+        )
+        body = messages[0]["content"]
+        assert "ВАЖНО" in body
+        assert "НЕ пиши" in body
+        assert "«один момент»" in body or "один момент" in body
+
+    def test_rule_present_when_slots_spliced(self) -> None:
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="запиши",
+            available_slots=[{"datetime": "2026-05-22T10:00", "duration_minutes": 60}],
+        )
+        body = messages[0]["content"]
+        assert "ВАЖНО" in body
+
+    def test_rule_present_when_bookings_spliced(self) -> None:
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="мои записи",
+            user_bookings=[],  # empty list is still "data was fetched"
+        )
+        body = messages[0]["content"]
+        assert "ВАЖНО" in body
+
+    def test_rule_absent_on_first_call_no_data(self) -> None:
+        """First LLM call (no tool result yet) — instruction must NOT appear.
+        Adding it before the model has data would confuse the tool-use loop."""
+        messages = build_booking_prompt(brand_voice=_voice(), query="запиши")
+        body = messages[0]["content"]
+        assert "ВАЖНО" not in body
+
+
 class TestGroundingBlocks:
     def test_candidate_masters_spliced_in(self) -> None:
         masters = [
