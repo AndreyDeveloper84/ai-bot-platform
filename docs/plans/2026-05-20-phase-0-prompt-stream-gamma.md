@@ -25,7 +25,10 @@ the apps/orders refactor, the API gateway, and JWT verification.
   - `apps/tenancy/middleware.py` or `apps/identity/middleware.py`
     (whichever is JWT verification entry point)
   - `tests/contracts/` (new directory you create)
-  - infra/Nginx config for API gateway
+  - API Gateway Nginx routing config (`infra/nginx/api-ayla-app.conf`
+    or wherever #434 lands) — the path-fan-out map between Ayla and
+    bot-platform. Beta sets up DNS + TLS + 30-day 301 redirect for the
+    host; you own the route map inside the conf.
 - You do NOT own: Ayla repo, ayla-ai-core repo, frontAyla, any docs/
   outside inline code-block usage.
 

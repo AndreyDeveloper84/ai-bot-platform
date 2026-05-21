@@ -137,7 +137,9 @@ Sync points are moments where two streams must hand off or align. Tech lead in m
 - **Steps:**
   1. Alpha implements `POST /api/v1/payments/webhook/` in Ayla djangoproject (signature verification, idempotent).
   2. Alpha announces: "Ayla payment webhook ready at staging URL X".
-  3. Gamma adds feature flag `YOOKASSA_WEBHOOK_OWNER = "ayla"` in bot-platform. The old endpoint during the safety window MUST NOT silently 200-OK and drop the event (silent drops → lost payments). Instead, the old endpoint either: (a) **logs + alerts on every hit + responds 410 Gone**, OR (b) **forwards the payload to Ayla's receiver + logs the forward**. Pick one explicitly in the PR; default to (a) with an on-call alert tied to the dashboard flip.
+  3. Gamma adds feature flag `YOOKASSA_WEBHOOK_OWNER = "ayla"` in bot-platform. The old endpoint during the safety window **MUST NOT** silently 200-OK and drop the event (silent drops → lost payments). Pick ONE behavior explicitly in the PR:
+     - **(a) default:** log + alert on every hit + respond `410 Gone`. On-call alert ties into the YooKassa dashboard flip so a missed flip pages someone.
+     - **(b) alternative:** forward the payload to Ayla's receiver + log the forward. Use only if dashboard flip cannot be scheduled tightly.
   4. Human flips YooKassa Personal Cabinet webhook URL to Ayla.
   5. Both teams watch logs for 24h to confirm Ayla receives, bot-platform receives nothing.
   6. Gamma removes `/api/v1/yookassa/webhook` URL + handler code.
