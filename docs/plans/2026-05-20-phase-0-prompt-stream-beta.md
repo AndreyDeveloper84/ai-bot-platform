@@ -72,9 +72,17 @@ If time permits Week 1: start drafting `docs/architecture/jwt-contract.md`
 - Any `apps/*/models.py`, `views.py`, etc. in Ayla djangoproject —
   Alpha owns.
 - `Ayla/djangoproject/` Python source — Alpha owns.
+- `Ayla/djangoproject/.env.example`, `docker-compose.yml`, `Makefile`,
+  `requirements*.txt`, `pyproject.toml` — Alpha owns (infra).
 - Sprint 1 Track A files (EPICs #219-#223): `apps/identity/`,
   `apps/tenancy/`, `apps/persona/`, `apps/handoff/Emergency*`,
   `apps/channels/max/` oauth — NOT your concern.
+- **API Gateway Nginx routing config** (`infra/nginx/api-ayla-app.conf`
+  or wherever #434 lands) — **Gamma owns**. Your DNS scope (#417):
+  A/CNAME records, LE certs for `dev.ayla.app` + `api.ayla.app`, the
+  30-day 301 redirect from the old domain. You do NOT write the
+  path-fan-out rules (`/auth/* → Ayla`, `/ai/* → bot-platform`); that's
+  Gamma's gateway map.
 
 You may write inline code-block examples in your docs (JSON schemas in
 event-contract.md, etc.) — that's documentation, not code.

@@ -60,9 +60,9 @@
 - `Ayla\frontAyla\` — primary (mobile monorepo)
 - `*/docs/` directories in all 3 repos
 - `*/README.md`, `*/CLAUDE.md` in all 3 repos
-- DNS configuration (Cloudflare/registrar — outside repos)
-- Nginx reverse proxy config (likely `infra/` or in deploy scripts)
+- DNS configuration (Cloudflare/registrar — outside repos): A/CNAME records, LE certs, 30-day 301 redirect from old domain
 - `.mcp.json` cleanup
+- **NOT in scope for Beta:** API Gateway Nginx routing config. That's Gamma (#434). Beta does DNS + TLS + redirects; Gamma writes the route map that fans `api.ayla.app/*` to two backends.
 
 **Tickets (10):**
 | # | Title (short) | Notes |
@@ -85,13 +85,14 @@
 - Any `apps/*/models.py`, `views.py`, `serializers.py`, `urls.py`, `tasks.py` — those are Alpha or Gamma.
 - `Ayla/djangoproject/` Python source — Alpha owns.
 - `ai-bot-platform/apps/` — Gamma owns.
+- API Gateway Nginx routing config (e.g. `infra/nginx/api-ayla-app.conf` or whatever path #434 lands at) — **Gamma owns**. Beta touches DNS, TLS certs, and 301 redirects only.
 
 ### Stream Gamma — ai-bot-platform contracts + refactors
 
 **Goal:** Own bot-platform's side of split-domain — contracts, events ingest+consumers, orders refactor, gateway, JWT verify.
 
 **Repo + roots owned:**
-- `C:\Users\user\PycharmProjects\ai-bot-platform\` — primary, ALL `apps/eventbus/`, `apps/orders/`, `apps/eventbus/consumers/`, `tests/contracts/`, `config/urls.py`.
+- `C:\Users\user\PycharmProjects\ai-bot-platform\` — primary, ALL `apps/eventbus/`, `apps/orders/`, `apps/eventbus/consumers/`, `tests/contracts/`, `config/urls.py`, `apps/tenancy/middleware.py` (JWT verify), and **the API Gateway Nginx routing config** (e.g. `infra/nginx/api-ayla-app.conf` or wherever #434 lands). Beta sets up DNS + TLS + redirect for the host; Gamma writes the route map fanning paths to backends.
 
 **Tickets (11):**
 | # | Title (short) | Notes |
@@ -136,7 +137,7 @@ Sync points are moments where two streams must hand off or align. Tech lead in m
 - **Steps:**
   1. Alpha implements `POST /api/v1/payments/webhook/` in Ayla djangoproject (signature verification, idempotent).
   2. Alpha announces: "Ayla payment webhook ready at staging URL X".
-  3. Gamma adds feature flag `YOOKASSA_WEBHOOK_OWNER = "ayla"` in bot-platform and keeps old endpoint accepting (no-op) for safety window.
+  3. Gamma adds feature flag `YOOKASSA_WEBHOOK_OWNER = "ayla"` in bot-platform. The old endpoint during the safety window MUST NOT silently 200-OK and drop the event (silent drops → lost payments). Instead, the old endpoint either: (a) **logs + alerts on every hit + responds 410 Gone**, OR (b) **forwards the payload to Ayla's receiver + logs the forward**. Pick one explicitly in the PR; default to (a) with an on-call alert tied to the dashboard flip.
   4. Human flips YooKassa Personal Cabinet webhook URL to Ayla.
   5. Both teams watch logs for 24h to confirm Ayla receives, bot-platform receives nothing.
   6. Gamma removes `/api/v1/yookassa/webhook` URL + handler code.
