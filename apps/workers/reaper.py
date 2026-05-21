@@ -323,9 +323,12 @@ def reap_pel_once(
         # No cursor write — leaves any persisted cursor unchanged.
         return 0
 
-    # redis-py returns a tuple; some versions return a list. Normalise.
-    if len(result) >= 2:
-        next_cursor, claimed = result[0], result[1]
+    # redis-py types xautoclaim as Awaitable|Any (it's a sync client; the
+    # type hint hedges for async variant). Cast to list for mypy and
+    # for the tuple/list normalisation across redis-py minor versions.
+    result_list = list(result)  # type: ignore[arg-type]
+    if len(result_list) >= 2:
+        next_cursor, claimed = result_list[0], result_list[1]
     else:  # defensive — shape changed upstream
         return 0
 
@@ -387,7 +390,7 @@ def reap_pel_once(
                 # trim and acceptable for operator triage.
                 client.xadd(
                     dlq_stream,
-                    dlq_fields,
+                    dlq_fields,  # type: ignore[arg-type]  # redis-py field-value union
                     maxlen=DLQ_STREAM_MAXLEN,
                     approximate=True,
                 )
