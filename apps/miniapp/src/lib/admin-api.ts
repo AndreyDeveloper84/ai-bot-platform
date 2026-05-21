@@ -524,3 +524,167 @@ export const getMasterAudit = (
     { method: "GET", signal: init.signal },
   );
 };
+
+// --- MM4 services ↔ masters matrix --------------------------------------
+
+/**
+ * Service row inside the services-mapping payload. Mirrors
+ * :func:`apps.admin_api.views_services_mapping.services_mapping_get` ’s
+ * service serializer. ``price_from`` is a Decimal string on the wire
+ * (``"1500.00"``) — keep as string so we don't lose precision; the UI
+ * formats with ``Intl.NumberFormat`` when rendering.
+ */
+export interface ServicesMappingService {
+  id: string;
+  name: string;
+  duration_min: number;
+  price_from: string | null;
+  is_active: boolean;
+}
+
+/**
+ * Master row inside the services-mapping payload. Mirrors
+ * :func:`services_mapping_get` ’s master serializer.
+ */
+export interface ServicesMappingMaster {
+  id: string;
+  name: string;
+  is_active: boolean;
+  invite_status: string;
+}
+
+export interface ServicesMappingPair {
+  master_id: string;
+  service_id: string;
+}
+
+export interface ServicesMappingOrphans {
+  services_without_masters: string[];
+  masters_without_services: string[];
+}
+
+/**
+ * GET /api/v1/admin/services-mapping/ — full matrix snapshot.
+ *
+ * Spec: docs/design/handoffs/2026-05-18-master-management-handoff.md §MM4
+ * backend contract (lines 656-672). Backend impl: PR #411.
+ *
+ * ``snapshot_token`` is opaque HMAC-Option-A token (see backend
+ * docstring); resend with POST /bulk/ to enable conflict detection.
+ */
+export interface ServicesMappingPayload {
+  services: ServicesMappingService[];
+  masters: ServicesMappingMaster[];
+  mapping: ServicesMappingPair[];
+  orphans: ServicesMappingOrphans;
+  snapshot_token: string;
+}
+
+/**
+ * POST /api/v1/admin/services-mapping/bulk/ — diff apply payload.
+ *
+ * ``changes`` carries enable/disable per cell; backend dedupes no-ops
+ * (asking to enable an already-enabled pair is silently dropped from
+ * ``applied`` count). ``snapshot_token`` is optional but recommended —
+ * omit only for first save when GET hasn't completed yet (we won't hit
+ * this path in the UI).
+ */
+export interface ServicesMappingChange {
+  service_id: string;
+  master_id: string;
+  enabled: boolean;
+}
+
+export interface ServicesMappingBulkBody {
+  changes: ServicesMappingChange[];
+  snapshot_token?: string;
+}
+
+export interface ServicesMappingConflictEntry {
+  service_id: string;
+  master_id: string;
+  current_value: boolean;
+  your_value: boolean;
+  changed_by: string | null;
+  changed_at: string | null;
+}
+
+/**
+ * POST /api/v1/admin/services-mapping/bulk/ — 200 OK response.
+ *
+ * ``applied`` is the count of (master, service) pairs whose stored
+ * state actually changed. ``new_snapshot_token`` is the post-write
+ * token; pass it on the next /bulk/ call to chain edits without a
+ * re-fetch.
+ */
+export interface ServicesMappingBulkResult {
+  applied: number;
+  conflicts: [];
+  new_snapshot_token: string;
+}
+
+/**
+ * POST /api/v1/admin/services-mapping/bulk/ — 409 Conflict response.
+ *
+ * Wrapped in ApiError by the shared ``request`` helper (status >= 400
+ * throws), but the body carries the conflict array. Callers MUST parse
+ * the ApiError's response separately — the helper below uses
+ * ``fetch`` directly to surface both the parsed body and the 409.
+ */
+export interface ServicesMappingConflictResponse {
+  applied: 0;
+  conflicts: ServicesMappingConflictEntry[];
+}
+
+export const getServicesMapping = (
+  init: { signal?: AbortSignal } = {},
+): Promise<ServicesMappingPayload> =>
+  request<ServicesMappingPayload>("/api/v1/admin/services-mapping/", {
+    method: "GET",
+    signal: init.signal,
+  });
+
+/**
+ * POST /bulk/. Returns the parsed success body OR a tagged conflict
+ * envelope (status 409). Any other non-2xx becomes an ApiError throw.
+ *
+ * Why bypass ``request``: the shared helper throws on any non-2xx, so
+ * 409's structured body (with the conflict array) would be flattened
+ * into ApiError's ``detail`` string. Conflict resolution needs the
+ * full conflict[] array — preserve it via direct ``fetch``.
+ */
+export interface ServicesMappingConflictEnvelope
+  extends ServicesMappingConflictResponse {
+  __conflict: true;
+}
+
+export const patchServicesMapping = async (
+  body: ServicesMappingBulkBody,
+): Promise<ServicesMappingBulkResult | ServicesMappingConflictEnvelope> => {
+  const initData = getInitData();
+  const headers = new Headers();
+  headers.set("Content-Type", "application/json");
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  const res = await fetch("/api/v1/admin/services-mapping/bulk/", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (res.status === 409) {
+    const data = (await res.json()) as ServicesMappingConflictResponse;
+    return { ...data, __conflict: true };
+  }
+  if (!res.ok) {
+    let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
+    try {
+      parsed = (await res.json()) as ErrorBody;
+    } catch {
+      /* non-JSON 5xx */
+    }
+    throw new ApiError(res.status, parsed.error, parsed.detail);
+  }
+  return (await res.json()) as ServicesMappingBulkResult;
+};

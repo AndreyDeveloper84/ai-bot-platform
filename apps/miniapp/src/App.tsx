@@ -33,7 +33,7 @@ import { AdminChatsPlaceholderScreen } from "./screens/admin/AdminChatsPlacehold
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
-import { AdminServicesPlaceholderScreen } from "./screens/admin/AdminServicesPlaceholderScreen";
+import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
@@ -125,7 +125,7 @@ function AdminRoutes({ me }: { me: MeResponse }) {
       />
       <Route
         path="/admin/services"
-        element={<AdminServicesPlaceholderScreen />}
+        element={<AdminServicesMatrixScreen me={me} />}
       />
       <Route path="/admin/chats" element={<AdminChatsPlaceholderScreen />} />
       <Route
