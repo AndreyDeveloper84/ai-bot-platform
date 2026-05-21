@@ -11,7 +11,7 @@ import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify, type AuthVerifyResponse } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
-import { signalReady } from "../lib/max-sdk";
+import { getStartPayload, parseStartRoute, signalReady } from "../lib/max-sdk";
 
 type State =
   | { kind: "loading" }
@@ -118,6 +118,23 @@ export function HelloScreen() {
     const cancel = verify(true);
     return cancel;
   }, [verify]);
+
+  // Deeplink redirect (F3): when MAX opens the Mini App via a welcome
+  // ``open_app`` button, the button's ``payload`` (e.g. ``route=catalog``)
+  // arrives as initData's ``start_param``. After auth succeeds, jump
+  // straight to the matching screen so the user doesn't see Hello at
+  // all — the menu tap "lands" exactly where they expected.
+  //
+  // Runs only on auth success (we don't want to redirect mid-error or
+  // mid-loading) and only ONCE per session (the dep array tracks the
+  // state transition, not the start_param itself).
+  useEffect(() => {
+    if (state.kind !== "ok") return;
+    const target = parseStartRoute(getStartPayload());
+    if (target) {
+      navigate(target, { replace: true });
+    }
+  }, [state.kind, navigate]);
 
   if (state.kind === "loading") {
     return (
