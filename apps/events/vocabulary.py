@@ -107,6 +107,29 @@ MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 #      occurred_at: <iso>}
 MASTER_SERVICES_CHANGED = "master.services_changed"
 
+# --- Admin master deactivation cascade (master-management MM5 / PR Tier1.1) --
+# Emitted from apps.admin_api.services.master_deactivation. Payload contracts:
+#   master.deactivation_started (low-volume; preview endpoint):
+#     {master_id, actor_id, actor_role, tenant_id,
+#      future_bookings_count}
+#   master.bookings_reassigned (per booking):
+#     {master_id, actor_id, actor_role, tenant_id, booking_id,
+#      from_master_id, to_master_id, visit_at,
+#      customer_notification_message_hash}
+#   master.bookings_cancelled (per booking):
+#     {master_id, actor_id, actor_role, tenant_id, booking_id, visit_at,
+#      customer_notification_message_hash}
+#   master.deactivated (terminal):
+#     {master_id, actor_id, actor_role, tenant_id, reason,
+#      reassigned_count, cancelled_count}
+#   master.reactivated (terminal):
+#     {master_id, actor_id, actor_role, tenant_id, notified_master}
+MASTER_DEACTIVATION_STARTED = "master.deactivation_started"
+MASTER_BOOKINGS_REASSIGNED = "master.bookings_reassigned"
+MASTER_BOOKINGS_CANCELLED = "master.bookings_cancelled"
+MASTER_DEACTIVATED = "master.deactivated"
+MASTER_REACTIVATED = "master.reactivated"
+
 # --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
 # The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
 # (analytics-bus event names — snake_case dotted notation aligned with
@@ -174,6 +197,11 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         INTERNAL_CHAT_THREAD_ASSIGNED,
         INTERNAL_CHAT_ESCALATED_TO_FOUNDER,
         INTERNAL_CHAT_MARKED_READ,
+        MASTER_DEACTIVATION_STARTED,
+        MASTER_BOOKINGS_REASSIGNED,
+        MASTER_BOOKINGS_CANCELLED,
+        MASTER_DEACTIVATED,
+        MASTER_REACTIVATED,
     }
 )
 

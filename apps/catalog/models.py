@@ -186,6 +186,16 @@ class CatalogMaster(_MirrorBase):
     )
     photo_url = models.URLField(max_length=500, blank=True, default="")
     archived_at = models.DateTimeField(null=True, blank=True)
+    archive_reason = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Owner-provided rationale for the most recent deactivation "
+            "(MM5 Step 3, «Причина»). Persisted as a forensic note next "
+            "to the AuditLog row; cleared on reactivate so the next "
+            "deactivation starts fresh."
+        ),
+    )
     invited_at = models.DateTimeField(null=True, blank=True)
     max_handle = models.CharField(max_length=64, blank=True, default="")
 
