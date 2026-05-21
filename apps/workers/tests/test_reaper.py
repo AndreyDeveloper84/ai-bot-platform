@@ -108,9 +108,10 @@ class TestReaperTerminalPath:
         dlq_entries = fake_redis.xrange("ingress:max:dlq")
         assert len(dlq_entries) == 1
         _dlq_id, dlq_fields = dlq_entries[0]
-        assert dlq_fields["_reaped_from"] == "ingress:max"
-        assert dlq_fields["_reaped_entry_id"] == entry_id
-        assert dlq_fields["_reaped_classification"] == "tenant_required_missing"
+        # B2 adversarial-pass: forensic headers use __reaper namespace.
+        assert dlq_fields["__reaper.from"] == "ingress:max"
+        assert dlq_fields["__reaper.entry_id"] == entry_id
+        assert dlq_fields["__reaper.classification"] == "tenant_required_missing"
         # Original fields preserved.
         assert dlq_fields["trace_id"] == "trace-A"
         assert dlq_fields["resolved_tenant_id"] == ""
@@ -236,9 +237,7 @@ class TestReaperFailureModes:
     accidentally merge them back into one try/except.
     """
 
-    def test_xadd_to_dlq_failure_leaves_entry_in_pel(
-        self, fake_redis, settings, monkeypatch
-    ):
+    def test_xadd_to_dlq_failure_leaves_entry_in_pel(self, fake_redis, settings, monkeypatch):
         """Failure mode 1: XADD to DLQ raises (Redis down, OOM, etc).
         Entry MUST stay in source PEL — no XACK fired — so the next
         tick can retry. Loop must continue to the next entry."""
@@ -374,6 +373,199 @@ class TestReaperFailureModes:
             "expected 1 audit row from the successful emit; "
             "the raising emit must not block the batch"
         )
+
+
+class TestReaperAdversarialPassRegressions:
+    """Regression tests for blockers + design issues from adversarial-pass
+    Code Reviewer on PR #508. Each maps to a specific catch — see commit
+    message + memory `h3-waiver-pattern`.
+    """
+
+    def test_b1_invalid_batch_size_clamps_to_default(self, fake_redis, settings, caplog):
+        """B1: misconfigured ``PEL_REAPER_BATCH_SIZE`` (non-int) must
+        NOT crash Celery beat. Clamp logs ERROR + uses safe default."""
+
+        settings.PEL_REAPER_ENABLED = True
+        settings.PEL_REAPER_BATCH_SIZE = "not-a-number"
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        with caplog.at_level("ERROR", logger="apps.workers.reaper"):
+            reaped = reaper.reap_pel_streams()
+
+        assert reaped == 0
+        assert any(
+            "invalid_setting" in rec.message and "PEL_REAPER_BATCH_SIZE" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_b1_zero_batch_size_clamps_to_one(self, fake_redis, settings, caplog):
+        """B1: batch_size=0 clamps to min=1 so forward progress is
+        guaranteed even with a typo'd config."""
+
+        settings.PEL_REAPER_ENABLED = True
+        settings.PEL_REAPER_BATCH_SIZE = 0
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        entry_id = fake_redis.xadd("ingress:max", {"data": "{}", "resolved_tenant_id": ""})
+        fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[entry_id] = {
+            "data": "{}",
+            "resolved_tenant_id": "",
+        }
+
+        with caplog.at_level("ERROR", logger="apps.workers.reaper"):
+            reaped = reaper.reap_pel_streams()
+
+        assert reaped == 1
+        assert any("below_min_setting" in rec.message for rec in caplog.records)
+
+    def test_b2_forensic_namespace_resists_field_spoofing(self, fake_redis, settings):
+        """B2: ingress can't spoof reaper's forensic fields. Reaper's
+        authoritative values win on canonical keys; original spoofed
+        values preserved under ``__reaper.shadowed.<key>``."""
+
+        settings.PEL_REAPER_ENABLED = True
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        entry_id = fake_redis.xadd(
+            "ingress:max",
+            {
+                "data": "{}",
+                "resolved_tenant_id": "",
+                "__reaper.from": "ingress:vk",
+                "__reaper.classification": "handler_failure",
+            },
+        )
+        fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[entry_id] = {
+            "data": "{}",
+            "resolved_tenant_id": "",
+            "__reaper.from": "ingress:vk",
+            "__reaper.classification": "handler_failure",
+        }
+
+        reaper.reap_pel_streams()
+
+        _id, dlq_fields = fake_redis.xrange("ingress:max:dlq")[0]
+        assert dlq_fields["__reaper.from"] == "ingress:max"
+        assert dlq_fields["__reaper.classification"] == "tenant_required_missing"
+        # Spoofed originals preserved for triage visibility.
+        assert dlq_fields["__reaper.shadowed.__reaper.from"] == "ingress:vk"
+        assert dlq_fields["__reaper.shadowed.__reaper.classification"] == "handler_failure"
+
+    def test_b3_cursor_persists_across_ticks(self, fake_redis, settings):
+        """B3: cursor written to Redis after each tick so next tick
+        can resume from where this one left off (tail-starvation fix)."""
+
+        settings.PEL_REAPER_ENABLED = True
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        entry_id = fake_redis.xadd("ingress:max", {"data": "{}"})
+        fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[entry_id] = {
+            "data": "{}",
+        }
+
+        reaper.reap_pel_streams()
+        assert "pel_reaper:cursor:ingress:max" in fake_redis._kv
+
+    def test_b3_read_cursor_returns_zero_when_unset(self, fake_redis):
+        """B3: first invocation (no persisted cursor) returns ``"0"``
+        so XAUTOCLAIM starts from the beginning."""
+
+        from apps.workers.reaper import _read_cursor
+
+        assert _read_cursor(fake_redis, "pel_reaper:cursor:unset") == "0"
+
+    def test_d1_consumer_name_includes_hostname(self):
+        """D-1: ``REAPER_CONSUMER_NAME`` includes hostname so two beat
+        processes on different pods don't share consumer identity."""
+
+        import socket
+
+        from apps.workers.reaper import REAPER_CONSUMER_NAME
+
+        assert REAPER_CONSUMER_NAME == f"reaper@{socket.gethostname()}"
+
+    def test_d3_dlq_xadd_uses_maxlen(self, fake_redis, settings, monkeypatch):
+        """D-3: DLQ XADD passes ``maxlen=`` + ``approximate=True`` so
+        unbounded ingress misbehaviour can't grow DLQ forever."""
+
+        settings.PEL_REAPER_ENABLED = True
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        entry_id = fake_redis.xadd("ingress:max", {"data": "{}", "resolved_tenant_id": ""})
+        fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[entry_id] = {
+            "data": "{}",
+            "resolved_tenant_id": "",
+        }
+
+        recorded_xadd_kwargs = []
+        real_xadd = fake_redis.xadd
+
+        def xadd_spy(stream, fields, **kwargs):
+            recorded_xadd_kwargs.append((stream, kwargs))
+            return real_xadd(stream, fields, **kwargs)
+
+        monkeypatch.setattr(fake_redis, "xadd", xadd_spy)
+
+        reaper.reap_pel_streams()
+
+        dlq_calls = [kwargs for (stream, kwargs) in recorded_xadd_kwargs if stream.endswith(":dlq")]
+        assert len(dlq_calls) == 1
+        assert dlq_calls[0].get("maxlen") == reaper.DLQ_STREAM_MAXLEN
+        assert dlq_calls[0].get("approximate") is True
+
+    def test_d5_non_utf8_bytes_do_not_crash_batch(self, fake_redis, settings):
+        """D-5: non-UTF8 bytes in a field value MUST NOT crash the
+        batch. ``errors="replace"`` lets the garbled row survive +
+        the rest of the batch proceeds."""
+
+        settings.PEL_REAPER_ENABLED = True
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        fake_redis.xgroup_create("ingress:max", "consumers", "$", True)
+        bad_id = fake_redis.xadd("ingress:max", {"data": "OK"})
+        good_id = fake_redis.xadd("ingress:max", {"data": "good"})
+        fake_redis.pel.setdefault(("ingress:max", "consumers"), {})[bad_id] = {
+            "data": b"\x80\x81\x82",
+            b"resolved_tenant_id": b"",
+        }
+        fake_redis.pel[("ingress:max", "consumers")][good_id] = {
+            "data": "good",
+            "resolved_tenant_id": "",
+        }
+
+        # Must NOT raise UnicodeDecodeError.
+        reaped = reaper.reap_pel_streams()
+
+        assert reaped == 2
+        assert len(fake_redis.xrange("ingress:max:dlq")) == 2
 
 
 class TestReaperEdgeCases:

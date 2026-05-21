@@ -57,6 +57,7 @@ the same ``consumers`` group; no extra consumer-group setup required.
 from __future__ import annotations
 
 import logging
+import socket
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,9 +70,40 @@ from apps.workers.registry import registered_streams
 
 logger = logging.getLogger(__name__)
 
-REAPER_CONSUMER_NAME = "reaper"
 DLQ_SUFFIX = ":dlq"
 PEL_REAPED_EVENT_TYPE = "worker.pel_reaped"
+
+# D-1 (adversarial-pass): hostname-suffixed consumer name so two beat
+# processes (deploy race, ops mistake) don't share the same XAUTOCLAIM
+# consumer identity and race on partial overlapping batches.
+REAPER_CONSUMER_NAME = f"reaper@{socket.gethostname()}"
+
+# B2 (adversarial-pass): namespaced forensic-header keys to prevent
+# field collision with attacker-controlled ingress payloads. Double-
+# underscore + dot makes accidental collision unlikely + visually
+# distinct in DLQ triage. If an original payload field happens to use
+# one of these keys (e.g. unlucky ingress chose ``__reaper.from``),
+# the original value is preserved under ``__reaper.shadowed.<key>``.
+_FORENSIC_NAMESPACE = "__reaper"
+_FORENSIC_FROM = f"{_FORENSIC_NAMESPACE}.from"
+_FORENSIC_ENTRY_ID = f"{_FORENSIC_NAMESPACE}.entry_id"
+_FORENSIC_CLASSIFICATION = f"{_FORENSIC_NAMESPACE}.classification"
+_FORENSIC_SHADOWED_PREFIX = f"{_FORENSIC_NAMESPACE}.shadowed."
+
+# D-3 (adversarial-pass): MAXLEN cap on DLQ stream XADD so a misbehaving
+# ingress can't produce unbounded `<stream>:dlq` growth (Redis memory).
+# Approximate trimming (~) is much cheaper than exact trimming and the
+# tail-trim by a few entries is operationally fine.
+DLQ_STREAM_MAXLEN = 100_000
+
+# B3 (adversarial-pass): per-stream cursor key for resumable XAUTOCLAIM
+# pagination so a permanently-failing low-id entry doesn't starve the
+# tail. Cursor persists in Redis across beat ticks.
+_CURSOR_KEY_PREFIX = "pel_reaper:cursor:"
+# Cursor TTL: 24h so a misconfiguration / long pause doesn't leave a
+# stale cursor blocking the reaper indefinitely. The reaper resets to
+# "0" on drain-complete anyway; this is belt-and-suspenders.
+_CURSOR_TTL_SECONDS = 86400
 
 
 @dataclass(frozen=True)
@@ -88,6 +120,105 @@ class PelEntryDecision:
 
     classification: str
     decision: str
+
+
+def _coerce_setting(raw: Any, *, default: int, min_value: int, name: str) -> tuple[int, bool]:
+    """Coerce a settings value to a clamped int with diagnostics.
+
+    Returns ``(value, was_clamped)``. ``was_clamped`` is True when the
+    raw value was unparseable OR below ``min_value`` (in either case we
+    log + return the safe default / clamped value). B1 (adversarial-pass).
+    """
+
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        logger.error(
+            "workers.reaper.invalid_setting name=%s raw=%r — defaulting to %d",
+            name,
+            raw,
+            default,
+        )
+        return default, True
+    if parsed < min_value:
+        logger.error(
+            "workers.reaper.below_min_setting name=%s raw=%r min=%d — clamping to %d",
+            name,
+            raw,
+            min_value,
+            min_value,
+        )
+        return min_value, True
+    return parsed, False
+
+
+def _read_cursor(client: Any, cursor_key: str) -> str:
+    """Read the persisted XAUTOCLAIM cursor for a stream.
+
+    Returns ``"0"`` (start-from-beginning) if the cursor has never been
+    written, expired, or is unreadable. The reaper proceeds with that
+    default — at worst it re-scans entries that real Redis would skip
+    via the IDLE filter anyway. B3 (adversarial-pass).
+    """
+
+    try:
+        raw = client.get(cursor_key)
+    except Exception:  # noqa: BLE001 — defensive against Redis API surface
+        return "0"
+    if raw is None:
+        return "0"
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    return str(raw) or "0"
+
+
+def _write_cursor(client: Any, cursor_key: str, cursor: str) -> None:
+    """Persist the next-XAUTOCLAIM cursor with a 24h TTL.
+
+    Failure here is non-fatal — the next reap tick will fall back to
+    ``"0"`` and re-scan from the beginning, which is the same behaviour
+    as pre-B3. We log but don't raise. B3 (adversarial-pass).
+    """
+
+    try:
+        client.set(cursor_key, cursor, ex=_CURSOR_TTL_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "workers.reaper.cursor_write_failed cursor_key=%s cursor=%s",
+            cursor_key,
+            cursor,
+        )
+
+
+def _build_dlq_fields(
+    fields: dict[str, Any],
+    stream: str,
+    entry_id: str,
+    classification: str,
+) -> dict[str, Any]:
+    """Build DLQ XADD fields with the ``__reaper`` forensic namespace,
+    preserving any colliding original-payload values under a shadowed
+    key prefix so operator triage doesn't lose information.
+
+    B2 (adversarial-pass): a malicious / accidentally-overlapping
+    ingress payload field ``__reaper.from = "ingress:vk"`` would have
+    been silently overwritten by the naïve ``{**fields, "_reaped_from": stream}``
+    dict-spread. Now we explicitly preserve any colliding original
+    value under ``__reaper.shadowed.__reaper.from`` so the spoof is
+    visible at triage time.
+    """
+
+    out: dict[str, Any] = {}
+    reserved = {_FORENSIC_FROM, _FORENSIC_ENTRY_ID, _FORENSIC_CLASSIFICATION}
+    for key, value in fields.items():
+        if key in reserved:
+            out[f"{_FORENSIC_SHADOWED_PREFIX}{key}"] = value
+        else:
+            out[key] = value
+    out[_FORENSIC_FROM] = stream
+    out[_FORENSIC_ENTRY_ID] = entry_id
+    out[_FORENSIC_CLASSIFICATION] = classification
+    return out
 
 
 def _dlq_stream_for(stream: str) -> str:
@@ -168,6 +299,15 @@ def reap_pel_once(
 
     client = ingress_streams._client()
 
+    # B3 (adversarial-pass): resumable cursor. ``start_id="0"`` every
+    # call would scan from the lowest PEL id, so a permanently-failing
+    # low-id entry (XACK-fail loop) would starve everything past
+    # ``batch_size``. Persisting the cursor in Redis lets us continue
+    # from where the previous tick left off, returning to "0" only when
+    # the previous tick drained the eligible set.
+    cursor_key = f"{_CURSOR_KEY_PREFIX}{stream}"
+    start_id = _read_cursor(client, cursor_key)
+
     # XAUTOCLAIM returns [next_cursor, [(entry_id, fields), ...], [deleted_ids]].
     # The fake-redis stub and real redis-py both honour this shape.
     result = client.xautoclaim(
@@ -175,18 +315,26 @@ def reap_pel_once(
         groupname=group,
         consumername=REAPER_CONSUMER_NAME,
         min_idle_time=idle_ms,
-        start_id="0",
+        start_id=start_id,
         count=batch_size,
     )
 
     if not result:
+        # No cursor write — leaves any persisted cursor unchanged.
         return 0
 
     # redis-py returns a tuple; some versions return a list. Normalise.
     if len(result) >= 2:
-        _next_cursor, claimed = result[0], result[1]
+        next_cursor, claimed = result[0], result[1]
     else:  # defensive — shape changed upstream
         return 0
+
+    # Normalise cursor (bytes → str). "0" means «drained — start over
+    # next tick»; anything else is the resume point.
+    if isinstance(next_cursor, bytes):
+        next_cursor = next_cursor.decode("utf-8")
+    next_cursor = str(next_cursor) if next_cursor is not None else "0"
+    _write_cursor(client, cursor_key, next_cursor)
 
     if not claimed:
         return 0
@@ -197,9 +345,13 @@ def reap_pel_once(
     for entry_id, raw_fields in claimed:
         if isinstance(entry_id, bytes):
             entry_id = entry_id.decode("utf-8")
+        # D-5 (adversarial-pass): non-UTF8 bytes in field values would
+        # crash the entire batch with UnicodeDecodeError. Use
+        # ``errors="replace"`` so a malicious / corrupt payload only
+        # garbles its own DLQ row, not the surrounding batch.
         fields = {
-            (k.decode("utf-8") if isinstance(k, bytes) else k): (
-                v.decode("utf-8") if isinstance(v, bytes) else v
+            (k.decode("utf-8", errors="replace") if isinstance(k, bytes) else k): (
+                v.decode("utf-8", errors="replace") if isinstance(v, bytes) else v
             )
             for k, v in raw_fields.items()
         }
@@ -223,15 +375,22 @@ def reap_pel_once(
         #    to the next entry instead of breaking the batch.
         try:
             if decision.decision == "terminal":
-                # Copy to DLQ stream with a forensic header so operators
-                # can trace provenance back to the source-stream entry.
-                dlq_fields = {
-                    **fields,
-                    "_reaped_from": stream,
-                    "_reaped_entry_id": entry_id,
-                    "_reaped_classification": decision.classification,
-                }
-                client.xadd(dlq_stream, dlq_fields)
+                # B2 (adversarial-pass): build DLQ fields with the
+                # forensic namespace, preserving any original payload
+                # value that collides with a reserved key under a
+                # ``__reaper.shadowed.<key>`` shadow. Triage tooling
+                # can trust the ``__reaper.*`` values are reaper-set.
+                dlq_fields = _build_dlq_fields(fields, stream, entry_id, decision.classification)
+                # D-3 (adversarial-pass): MAXLEN cap on DLQ XADD so a
+                # misbehaving ingress can't produce unbounded growth.
+                # ``approximate=True`` (~) is much cheaper than exact
+                # trim and acceptable for operator triage.
+                client.xadd(
+                    dlq_stream,
+                    dlq_fields,
+                    maxlen=DLQ_STREAM_MAXLEN,
+                    approximate=True,
+                )
             elif decision.decision == "replay":
                 # Future classifier hook — re-XADD with corrected metadata.
                 # Caller decides what «corrected» means; today's classifier
@@ -277,9 +436,7 @@ def reap_pel_once(
                     "entry_id": entry_id,
                     "classification": decision.classification,
                     "decision": decision.decision,
-                    "dlq_stream": dlq_stream
-                    if decision.decision == "terminal"
-                    else None,
+                    "dlq_stream": dlq_stream if decision.decision == "terminal" else None,
                 },
             )
         except Exception:  # noqa: BLE001
@@ -321,8 +478,28 @@ def reap_pel_streams() -> int:
         logger.debug("workers.reaper.disabled — PEL_REAPER_ENABLED=False")
         return 0
 
-    idle_seconds = int(getattr(settings, "PEL_REAPER_IDLE_SECONDS", 3600))
-    batch_size = int(getattr(settings, "PEL_REAPER_BATCH_SIZE", 100))
+    # B1 (adversarial-pass): clamp at read site so a misconfigured
+    # env var (typo `=0`, accidental `=-1`, or empty string) can't
+    # silently disable the reaper or crash the Celery beat. Log if
+    # we had to coerce so ops can spot the misconfiguration.
+    idle_seconds, idle_was_clamped = _coerce_setting(
+        getattr(settings, "PEL_REAPER_IDLE_SECONDS", 3600),
+        default=3600,
+        min_value=0,
+        name="PEL_REAPER_IDLE_SECONDS",
+    )
+    batch_size, batch_was_clamped = _coerce_setting(
+        getattr(settings, "PEL_REAPER_BATCH_SIZE", 100),
+        default=100,
+        min_value=1,
+        name="PEL_REAPER_BATCH_SIZE",
+    )
+    if idle_was_clamped or batch_was_clamped:
+        logger.warning(
+            "workers.reaper.settings_clamped effective_idle=%d effective_batch=%d",
+            idle_seconds,
+            batch_size,
+        )
     idle_ms = idle_seconds * 1000
 
     streams = registered_streams()
