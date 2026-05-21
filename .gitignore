@@ -45,6 +45,14 @@ local_settings.py
 .env.*.local
 !.env.example
 
+# Claude Code MCP server config — must never be committed. Contains
+# Figma / Notion / similar third-party API tokens (per issue #419).
+# Operators copy `.mcp.json.example` → `.mcp.json` and source actual
+# tokens from 1Password Connect (see docs/setup/secrets-vault.md).
+.mcp.json
+.mcp.local.json
+!.mcp.json.example
+
 # Testing / tooling
 .pytest_cache/
 .mypy_cache/

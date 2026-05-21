@@ -47,3 +47,20 @@ repos:
             legacy_formulatela_mcp/.*|
             legacy_notifications/.*
           )$
+
+  - repo: local
+    hooks:
+      # Belt-and-suspenders for issue #419. `.gitignore` is the primary
+      # defense — `.mcp.json` is listed there and shouldn't reach staging.
+      # If an engineer force-adds it (`git add -f`) or removes the gitignore
+      # entry by accident, this hook refuses the commit. detect-secrets'
+      # default entropy plugins don't reliably catch Figma/Notion token
+      # shapes, so explicit pattern refusal is the cheaper guarantee.
+      - id: forbid-mcp-json
+        name: Refuse to commit .mcp.json (use .mcp.json.example instead)
+        entry: scripts/forbid_mcp_json.sh
+        language: script
+        files: ^\.mcp\.json$
+        # `files` regex scopes the hook: it only runs when the matching
+        # file is actually staged. Unrelated commits → no invocation,
+        # no failure.
