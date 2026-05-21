@@ -170,8 +170,10 @@ For each event below: trigger condition, `data` schema, JSON example with realis
 |------------------|-------------------|----------------------------------------------------------|
 | `appointment_id` | string (UUID)     | Canonical `Appointment.id`.                              |
 | `cancelled_by`   | enum string       | One of: `user`, `admin`, `master`, `system`.             |
-| `reason`         | string \| null    | Free-text reason if provided (max 500 chars). PII rules in §7 apply: no full names, no contact info. |
+| `reason_code`    | enum string \| null | One of: `user_changed_plans`, `user_no_show`, `master_unavailable`, `tenant_closed_slot`, `payment_hold_expired`, `policy_violation`, `other`. `null` only when `cancelled_by=system` and the code is auto-derived elsewhere. |
 | `cancelled_at`   | string (ISO8601)  | When cancellation was committed.                         |
+
+> **No free-text `reason` field.** Earlier draft allowed a 500-char free-text fallback with server-side PII stripping; review (PR #468) flagged this as a leak vector — regex strippers miss «Аня» and non-canonical phone formats. If Ayla Pro needs the master's free-text cancellation note for ops, it fetches via `GET /api/v1/appointments/{appointment_id}/cancellation` keyed on the appointment.
 
 **Example:**
 
@@ -189,7 +191,7 @@ For each event below: trigger condition, `data` schema, JSON example with realis
   "data": {
     "appointment_id": "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8",
     "cancelled_by": "user",
-    "reason": "не успеваю",
+    "reason_code": "user_changed_plans",
     "cancelled_at": "2026-05-21T16:08:45.119Z"
   }
 }
@@ -512,10 +514,12 @@ Note `causation_id` chains this event to the `booking.created` that triggered th
 | Field              | Type              | Description                                              |
 |--------------------|-------------------|----------------------------------------------------------|
 | `service_id`       | string (UUID)     | Canonical Ayla `Service.id`.                             |
-| `changed_fields`   | array of strings  | Names of fields that changed. Allowed values: `name`, `price`, `duration`, `description`, `is_active`, `category_id`, `requires_consultation`. |
-| `previous_values`  | object            | Per-field previous value. Same keys as `changed_fields`. Stringified (numbers as decimal strings, booleans as `true`/`false`). |
+| `changed_fields`   | array of strings  | Names of fields that changed. Allowed values: `name`, `price`, `duration`, `is_active`, `category_id`, `requires_consultation`. (NOTE: `description` is intentionally OMITTED — see exclusion note below.) |
+| `previous_values`  | object            | Per-field previous value. Same keys as `changed_fields`. Encoding: numbers as decimal strings (`"1800.00"`), booleans as JSON booleans (`true` / `false`, not `"true"`), UUIDs as bare strings. Always JSON-typed, never stringified bare. |
 
 **Note:** New values are NOT in the envelope. Consumers fetch the current service via `GET /api/v1/services/{service_id}`. This keeps the event light and avoids the consumer trusting potentially-stale event data.
+
+**`description` exclusion:** the `description` field is free-text and may legitimately contain wellness-adjacent phrasing that triggers PII concerns under §7. We do NOT publish previous_value for `description`. Consumers fetch the current description from REST when needed (rare — the catalog cache invalidation per consumer #444 doesn't need text content, just the version-bump signal).
 
 **Example:**
 
@@ -558,9 +562,10 @@ Note `user_id` here is the admin who made the change (since the change isn't on 
 
 | Field             | Type              | Description                                              |
 |-------------------|-------------------|----------------------------------------------------------|
-| `master_id`       | string (UUID)     | The affected master.                                     |
-| `change_type`     | enum string       | One of: `recurring_block`, `exception_added`, `exception_removed`, `vacation_set`, `vacation_cleared`. |
-| `affected_dates`  | array of strings (ISO date) | Dates whose computed availability is now stale. Up to 365 dates; if change affects >365 days, send the special value `["*"]` meaning "invalidate everything for this master". |
+| `master_id`            | string (UUID)     | The affected master.                                     |
+| `change_type`          | enum string       | One of: `recurring_block`, `exception_added`, `exception_removed`, `vacation_set`, `vacation_cleared`. |
+| `affected_all_dates`   | boolean           | `true` if the change invalidates every future date for this master (e.g. recurring rule edit). When `true`, `affected_dates` MUST be empty. |
+| `affected_dates`       | array of strings (ISO date) | Specific dates whose computed availability is now stale. Capped at 365 entries. When `affected_all_dates=true`, MUST be `[]`. Either field carries the signal; never both. |
 
 **Example:**
 
@@ -578,6 +583,7 @@ Note `user_id` here is the admin who made the change (since the change isn't on 
   "data": {
     "master_id": "8d4e5f6a-7b8c-4d9e-0f1a-2b3c4d5e6f7a",
     "change_type": "vacation_set",
+    "affected_all_dates": false,
     "affected_dates": ["2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19"]
   }
 }
@@ -586,7 +592,7 @@ Note `user_id` here is the admin who made the change (since the change isn't on 
 Note `actor: master` — masters can edit their own schedules in Ayla Pro. `user_id` here echoes the master themselves (since the affected user IS the master).
 
 **Consumer contract (`master.schedule + review.created` consumer, #445):**
-1. Invalidate slot cache for `data.master_id` for all dates in `data.affected_dates` (or all dates if `["*"]`).
+1. If `data.affected_all_dates=true`, invalidate the entire slot cache for `data.master_id`. Otherwise invalidate slot cache for each date in `data.affected_dates`.
 2. Do NOT cancel existing bookings — Ayla emits `booking.cancelled` separately for any bookings the schedule change invalidated.
 
 ---
@@ -680,11 +686,19 @@ Every consumer MUST be idempotent with respect to `event_id`. The contract is:
 
 ### 5.1 Concrete implementation pattern
 
-Consumers maintain a dedupe table indexed by `event_id` with the timestamp of first processing. On receipt:
+Consumers maintain a dedupe table indexed by `event_id`. **Order matters:** process-then-record, in a single DB transaction. INSERT-then-process leaks data on consumer crash between INSERT and side-effect.
 
-1. Attempt INSERT into dedupe table with `(event_id, processed_at=now())`.
-2. If INSERT succeeds: process the event normally.
-3. If INSERT fails with unique-constraint violation: skip processing (already handled).
+On receipt:
+
+1. BEGIN DB transaction.
+2. SELECT `event_id` from dedupe table. If row exists: ROLLBACK + return success to ingest (already handled).
+3. Process the event (write the side-effect rows in the SAME transaction).
+4. INSERT into dedupe table with `(event_id, processed_at=now())`.
+5. COMMIT.
+
+If the consumer crashes between step 3 and step 5, the whole transaction rolls back — side-effect AND dedupe row both gone — and Ayla's retry re-delivers the event, which re-processes cleanly. No silent data loss.
+
+For consumers whose side-effect spans multiple datastores (e.g. DB write + cache invalidate), the dedupe table MUST live in the same store as the durable side-effect (DB), with the non-durable side-effect (cache) issued as a `transaction.on_commit` callback. Cache duplication on retry is harmless because cache writes are idempotent by key.
 
 ### 5.2 What "observable side-effect" means
 
@@ -694,7 +708,11 @@ Consumers maintain a dedupe table indexed by `event_id` with the timestamp of fi
 
 ### 5.3 Dedupe table retention
 
-Dedupe rows kept for at least 30 days (matches the deprecation window). After 30 days, an event_id retry that hits an empty dedupe table will re-process. This is acceptable because the outbox retry budget is 5 attempts with max ~1h backoff total — events older than 30 days are dead-letter, never retried live.
+Dedupe rows kept for **120 days**. Retention MUST be `≥ max(DLQ retention, deprecation window) + 30-day safety margin`. With current DLQ retention 90 days (§6.4) and deprecation window 30 days (§4.3), 120 days satisfies the inequality.
+
+**Why this matters:** operators may manually re-publish DLQ entries up to 90 days after dead-lettering (§6.4) and roll back a consumer mid-deprecation. A shorter dedupe window risks re-processing an event that was already partially processed before going to DLQ. Re-processing an idempotent side-effect is normally harmless, but `loyalty.bonus.eligible` emission (consumer #443 step 2) is NOT a single DB write — it crosses a bus boundary, and the downstream loyalty consumer may have a different dedupe horizon. The safety margin protects against that.
+
+Operators who must replay a DLQ entry older than 120 days MUST set `X-Ayla-Force-Process: true` on the replay request — the ingest endpoint logs a P1 alert when this header appears.
 
 ### 5.4 Contract test discipline
 
@@ -717,6 +735,7 @@ Dedupe rows kept for at least 30 days (matches the deprecation window). After 30
 - **Signature header:** `X-Ayla-Event-Signature: sha256=<hex>` where `<hex>` is `hmac_sha256(secret, raw_request_body)`.
 - **Verification:** ingest endpoint (#432) computes the HMAC over the raw request body and rejects with 401 if mismatch.
 - **Timestamp header:** `X-Ayla-Event-Timestamp: <unix_ms>` — server rejects with 401 if `|now - timestamp| > 300s` to prevent replay of intercepted requests.
+- **Clock discipline:** Both Ayla and bot-platform hosts MUST run NTP with max tolerable skew of 60 seconds. This leaves 240 seconds of the 300s replay window for actual transit + dispatcher lag. Without NTP, §8.3 alerts will fire on clock drift, not on attacks.
 
 ### 6.3 Retry policy
 
@@ -731,17 +750,27 @@ Dedupe rows kept for at least 30 days (matches the deprecation window). After 30
 - Dead-lettered events are NOT automatically retried. On-call investigates, manually re-publishes if root cause is fixed.
 - Dead-letter retention: 90 days (matches red-zone retention for symmetry).
 
-### 6.5 Lag SLA
+### 6.5 Lag SLA + monitoring
 
-- **Target:** P95 of `(event.processed_at - event.occurred_at)` < 5 minutes.
-- **Alert:** P95 over a rolling 15-min window > 5 min → alert. Sustained > 15 min → page.
+- **Lag target:** P95 of `(event.processed_at - event.occurred_at)` < 5 minutes.
+- **Lag alert:** P95 over a rolling 15-min window > 5 min → alert. Sustained > 15 min → page.
 - **Why 5 min:** AI conversational memory must reflect recent state changes within one conversational turn. 5 min is the practical upper bound where users perceive "AI knows my latest action".
+
+Lag alone doesn't catch all failure modes. Ayla MUST also monitor outbox depth:
+
+- **Outbox pending depth:** `outbox.pending_count` (rows where `processed_at IS NULL AND dead IS FALSE`).
+- **Pending-depth alert:** sustained > 1000 pending rows for >5 min → alert. This catches the case where the dispatcher is alive (lag stays low because it processes a few) but a network partition between dispatcher and bot-platform leaks queue depth. Without this signal, lag SLA alone is silent until the queue overflows.
 
 ### 6.6 Ordering guarantees
 
-- **Within a `correlation_id`:** consumer receives events in publish order (outbox dispatches FIFO per correlation key).
+- **Within a `correlation_id`:** outbox dispatches FIFO per correlation key. The dispatcher partitions worker threads by `correlation_id` hash — events with the same correlation never run on parallel workers.
 - **Across correlation IDs:** NO ordering guarantee. Consumers MUST NOT rely on cross-flow ordering.
-- **Consequence:** if a consumer needs to react to a cross-flow ordering (e.g. "this `payment.captured` must come after a specific unrelated `booking.created`"), it queries Ayla REST for current state instead of relying on event order.
+
+**Retries break FIFO.** A retried event A can land at the consumer AFTER a sibling event B published later in the same correlation (B succeeded on first try, A failed and is on its 3rd retry 30s later). Consumers MUST therefore tolerate out-of-order arrival within a correlation:
+
+- For `causation_id` walk-backs (e.g. `payment.captured` looking up its parent `booking.created` via `causation_id`): if the parent isn't in the consumer's local state yet, ENQUEUE the event for re-processing once (after 5s delay) before treating it as a hard failure. Most parent arrivals catch up within seconds.
+- For state-machine reconciliation (e.g. `booking.cancelled` arriving before `booking.created`): consumer MUST be tolerant — upsert pattern in §3 contracts means the cancelled-state writer will set status correctly, and the later-arriving `booking.created` either creates the row in cancelled state OR is a no-op on the already-cancelled row. Idempotency holds.
+- For strict-order requirements (rare): query Ayla REST for current state instead of relying on event order. This is the escape hatch — use it sparingly.
 
 ---
 
@@ -845,11 +874,30 @@ Returns HTTP 400 + logs the malformed body. NOT retryable. Counted in `events_ma
 
 Expected and handled by consumer dedupe (§5). Consumer's dedupe-table check skips processing; the ingest endpoint still returns HTTP 200 so Ayla's dispatcher marks the outbox row processed. This must NOT produce an alert; duplicates are the normal cost of at-least-once delivery.
 
-### 8.8 Consumer hung (no response within timeout)
+### 8.8 Orphan outbox row from rolled-back transaction
+
+The transactional outbox pattern (§6.1) requires that the outbox INSERT happens in the **same DB transaction** as the domain state change. If implemented via `transaction.on_commit` callbacks (Django) or a separate session, a partial rollback can leave a domain change committed without the corresponding outbox row OR vice versa.
+
+Defense:
+
+- Publisher implementations (#429, #430, #431) MUST use `INSERT INTO outbox` inline in the same `BEGIN ... COMMIT` block as the domain change. Code review at the publisher PR enforces this.
+- Daily reconciliation job compares `count(domain_changes since T)` vs `count(outbox rows since T)` per event_name. Drift > 0.1% triggers an alert.
+
+### 8.9 Dispatcher partitioned from Ayla DB
+
+The Ayla dispatcher reads outbox rows from the Ayla DB. If the dispatcher is alive but its DB connection is partitioned (network split, replica lag), it cannot drain the queue. Lag SLA (§6.5) won't fire because no events are processed — there's no lag to measure on events not yet picked up.
+
+Defense: pending-depth alert (§6.5) catches this independent of lag. Operator restarts the dispatcher and verifies DB connectivity.
+
+### 8.10 Consumer hung (no response within timeout)
 
 Ingest endpoint's per-handler timeout is 8 seconds (giving Ayla's 10-second outer timeout 2 seconds of headroom). On timeout, the handler invocation is interrupted, treated as failure (§8.1), and Ayla retries.
 
 Long-running consumer work (e.g. catalog cache rebuild) MUST be moved off the synchronous handler path — handler enqueues a job and returns 202.
+
+### 8.11 Consumer crash between processing and dedupe write
+
+Pattern enforced by §5.1 (process-then-INSERT in one transaction) prevents this: a crash inside the transaction rolls back BOTH the side-effect and the dedupe row, leaving the system in the pre-event state. Ayla's retry then re-delivers and re-processes cleanly. No silent loss.
 
 ---
 
