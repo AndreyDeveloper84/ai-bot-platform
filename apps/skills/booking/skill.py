@@ -56,7 +56,10 @@ import logging
 from typing import Any, ClassVar
 
 from apps.audit.services import write_audit
-from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
+from apps.bookings.keyboards import (
+    CALLBACK_BOOK_PICK_MASTER_PREFIX,
+    CALLBACK_BOOK_PICK_SLOT_PREFIX,
+)
 from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
 from apps.llm.protocol import CompletionResult, ToolCall
@@ -111,6 +114,9 @@ _FALLBACK_HANDOFF_TEXT = "Не получилось оформить запис�
 # user reads the buttons, not the prose.
 _MASTER_PICK_PROMPT = "Выберите мастера:"
 
+# Same pattern for slot picking after show_slots returns candidates.
+_SLOT_PICK_PROMPT = "Выберите время:"
+
 
 # Audit / event slugs.
 EVENT_BOOKING_HANDLED = "booking.handled"
@@ -164,13 +170,17 @@ class BookingSkill:
     name: ClassVar[str] = "booking"
 
     def matches(self, context: SkillContext) -> bool:
-        # Master-pick button tap (2026-05-21 UX). User saw a master-cards
-        # keyboard from a prior show_masters reply; the tapped button's
-        # payload is ``cb:book:pick_master:<staff_id>``. Take it before
-        # the intent classifier — the prefix is unambiguous and the
-        # classifier might mis-route a bare numeric string.
+        # Booking-flow callback taps (2026-05-21 UX). User tapped a
+        # button from a prior booking reply; the tapped button's payload
+        # carries the deterministic prefix. Take these before the intent
+        # classifier — the prefixes are unambiguous and the classifier
+        # might mis-route a bare numeric string / ISO datetime.
+        #   * cb:book:pick_master:<staff_id>   — master cards (#505)
+        #   * cb:book:pick_slot:<iso_datetime> — slot cards (this PR)
         text = (context.message_text or "").strip()
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
+            return True
+        if text.startswith(CALLBACK_BOOK_PICK_SLOT_PREFIX):
             return True
 
         intent = context.intent
@@ -260,10 +270,29 @@ class BookingSkill:
                 finish_reason="tool_calls",
             )
         else:
+            # Slot-pick callback (cb:book:pick_slot:<iso_datetime>). Unlike
+            # master-pick — which deterministically dispatches show_slots —
+            # the slot tap needs the LLM to synthesise confirm_booking
+            # with master_id + service_id pulled from short-term history.
+            # We override the query with a synthesised user-text so the
+            # standard Phase-1 prompt + tool-use loop fires naturally.
+            if text.startswith(CALLBACK_BOOK_PICK_SLOT_PREFIX):
+                raw_dt = text[len(CALLBACK_BOOK_PICK_SLOT_PREFIX) :].strip()
+                if not raw_dt:
+                    logger.warning("booking.pick_slot.empty_payload")
+                    return _build_skill_result(
+                        text="Не удалось распознать время. Напишите ещё раз?",
+                        tool_calls_made=[],
+                        confidence=None,
+                    )
+                query_text = f"Запиши меня на {raw_dt}"
+            else:
+                query_text = context.message_text
+
             # ── Phase 1: first LLM call (decide on tool use) ───────
             first_messages = build_booking_prompt(
                 brand_voice=_DEFAULT_BRAND_VOICE,
-                query=context.message_text,
+                query=query_text,
             )
             first = asyncio.run(
                 provider.complete(
@@ -325,6 +354,20 @@ class BookingSkill:
                 tool_calls_made=tool_calls_made,
                 confidence=_CONFIDENCE_OK,
                 action_data=_action_data_for_master_pick(tool_result.masters),
+            )
+
+        # Slot-cards short-circuit (symmetric to master cards). When
+        # show_slots returned candidate times, render them as a
+        # deterministic text + keyboard (one button per slot,
+        # cb:book:pick_slot:<iso_datetime>). Skip Phase 3 LLM —
+        # identical UX rationale as master cards.
+        if tool_name == SHOW_SLOTS_TOOL_SPEC["name"] and tool_result.slots:
+            _audit_handled(tenant_id=tenant_id, tool=tool_name)
+            return _build_skill_result(
+                text=_SLOT_PICK_PROMPT,
+                tool_calls_made=tool_calls_made,
+                confidence=_CONFIDENCE_OK,
+                action_data=_action_data_for_slot_pick(tool_result.slots),
             )
 
         # Health-check gate — only relevant for confirm_booking.
@@ -611,6 +654,73 @@ def _master_button_label(master) -> str:
     if spec and spec.lower() != "мастер массажа":
         return f"👤 {name} — {spec}"
     return f"👤 {name}"
+
+
+def _action_data_for_slot_pick(slots: list) -> dict[str, Any]:
+    """Build the slot-cards keyboard from a show_slots result.
+
+    Mirror of :func:`_action_data_for_master_pick`. One button per slot,
+    callback payload ``cb:book:pick_slot:<iso_datetime>`` carrying the
+    YClients-returned ISO datetime verbatim. The skill's slot-callback
+    branch synthesises a "запиши меня на <datetime>" user-text so the
+    Phase-1 LLM can emit confirm_booking with master_id + service_id
+    drawn from short-term conversation memory.
+    """
+    buttons = [
+        {
+            "label": _slot_button_label(s),
+            "callback": f"{CALLBACK_BOOK_PICK_SLOT_PREFIX}{s.datetime}",
+        }
+        for s in slots
+    ]
+    return {
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {"buttons": buttons},
+            }
+        ],
+        "kind": "slot_pick",
+    }
+
+
+# Russian weekday abbreviations for slot button labels.
+_RU_WEEKDAYS_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+_RU_MONTHS_SHORT = (
+    "янв",
+    "фев",
+    "мар",
+    "апр",
+    "мая",
+    "июн",
+    "июл",
+    "авг",
+    "сен",
+    "окт",
+    "ноя",
+    "дек",
+)
+
+
+def _slot_button_label(slot) -> str:
+    """One-line readable label for the slot-pick button.
+
+    Format: ``🕐 22 мая (Ср) 14:00``. ISO datetime is parsed defensively;
+    if parsing fails the raw datetime string is rendered — UX is still
+    workable, just less pretty.
+    """
+    raw = slot.datetime or ""
+    try:
+        from datetime import datetime as _dt
+
+        # YClients returns ``YYYY-MM-DDTHH:MM:SS`` — fromisoformat handles it.
+        ts = _dt.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return f"🕐 {raw}"
+    day = ts.day
+    month = _RU_MONTHS_SHORT[ts.month - 1] if 1 <= ts.month <= 12 else ""
+    wd = _RU_WEEKDAYS_SHORT[ts.weekday()] if 0 <= ts.weekday() <= 6 else ""
+    return f"🕐 {day} {month} ({wd}) {ts.strftime('%H:%M')}".strip()
 
 
 def _slots_payload(result: BookingToolResult) -> list[dict[str, Any]] | None:
