@@ -4,7 +4,7 @@ Translates the raw MAX webhook JSON into a channel-agnostic
 :class:`CanonicalEvent` that downstream handlers (D3) consume without
 knowing or caring about MAX-specific field names.
 
-### Expected MAX webhook shape
+### Expected MAX webhook shapes
 
 Per dev.max.ru docs and the legacy `mysite/maxbot/handlers/ai_assistant.py`
 field reads, a `message_created` update looks like::
@@ -19,9 +19,31 @@ field reads, a `message_created` update looks like::
       }
     }
 
-Sprint 2 only handles `update_type=message_created`. Callback buttons
-(`message_callback`) and other update types map to ParseError until
-Sprint 3 adds the AI Concierge with full intent dispatch.
+A `message_callback` update (user tapped an inline-keyboard button) looks like::
+
+    {
+      "update_type": "message_callback",
+      "timestamp": 1731320000000,
+      "callback": {
+        "timestamp": 1731320000000,
+        "callback_id": "cb-uuid",
+        "payload": "cb:welcome:book",
+        "user": {"user_id": 12345, "name": "Иван", "lang": "ru"}
+      },
+      "message": {
+        "recipient": {"chat_id": 67890, "chat_type": "dialog"},
+        "body": {"mid": "msg-uuid", ...}
+      },
+      "user_locale": "ru"
+    }
+
+The callback payload becomes ``CanonicalEvent.text`` (channel-agnostic
+convention: skills match on ``text.startswith("cb:")`` exactly the way
+they do for Telegram callbacks; see ``apps.channels.telegram.parser``).
+``callback_id`` is stashed in ``raw["callback_id"]`` so the handler can
+use it for the idempotency key + a future ``/answers`` ack call.
+
+Every other update type maps to ParseError.
 
 ### Why a CanonicalEvent DTO instead of using the raw payload directly
 
@@ -72,7 +94,7 @@ class ParseError(Exception):
 
 
 def parse_max_webhook(payload: dict[str, Any]) -> CanonicalEvent:
-    """Translate a `message_created` MAX webhook into a CanonicalEvent.
+    """Translate a MAX webhook update into a CanonicalEvent.
 
     Args:
       payload: parsed JSON body of the POST to `/api/v1/ingress/max/`.
@@ -81,21 +103,25 @@ def parse_max_webhook(payload: dict[str, Any]) -> CanonicalEvent:
       A frozen :class:`CanonicalEvent` with the canonical fields filled.
 
     Raises:
-      ParseError: ``update_type`` is missing or not ``message_created``,
-                  OR any of the required nested fields are missing
-                  (``message.sender.user_id``, ``message.recipient.chat_id``).
-                  All other shape oddities (missing text, empty
-                  attachments) are tolerated — empty defaults.
+      ParseError: ``update_type`` is missing or not one of the supported
+                  values, OR required nested fields are missing.
+                  Tolerated shape oddities (missing text, empty
+                  attachments) fall back to empty defaults.
     """
 
     update_type = payload.get("update_type")
-    if update_type != "message_created":
-        raise ParseError(
-            f"Unsupported MAX update_type={update_type!r}. Sprint 2 "
-            "only handles 'message_created' — callback buttons and "
-            "other event types land in Sprint 3."
-        )
+    if update_type == "message_created":
+        return _parse_message_created(payload)
+    if update_type == "message_callback":
+        return _parse_message_callback(payload)
+    raise ParseError(
+        f"Unsupported MAX update_type={update_type!r}. Supported: "
+        "'message_created', 'message_callback'."
+    )
 
+
+def _parse_message_created(payload: dict[str, Any]) -> CanonicalEvent:
+    """Translate a `message_created` update."""
     message = payload.get("message")
     if not isinstance(message, dict):
         raise ParseError("MAX payload missing required field: message")
@@ -116,11 +142,7 @@ def parse_max_webhook(payload: dict[str, Any]) -> CanonicalEvent:
         attachments = []
 
     channel_message_id = str(body.get("mid") or body.get("seq") or "")
-    timestamp_ms = payload.get("timestamp")
-    timestamp: datetime | None = None
-    if isinstance(timestamp_ms, (int, float)):
-        # MAX sends epoch milliseconds; normalise to UTC datetime.
-        timestamp = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+    timestamp = _parse_ms_ts(payload.get("timestamp"))
 
     return CanonicalEvent(
         channel="max",
@@ -132,3 +154,67 @@ def parse_max_webhook(payload: dict[str, Any]) -> CanonicalEvent:
         timestamp=timestamp,
         raw=payload,
     )
+
+
+def _parse_message_callback(payload: dict[str, Any]) -> CanonicalEvent:
+    """Translate a `message_callback` update.
+
+    The callback ``payload`` is folded into ``text`` so skill ``matches()``
+    predicates that look at ``text.startswith("cb:")`` light up the same
+    way they do for the Telegram channel. The ``callback_id`` is stashed
+    in ``raw["callback_id"]`` for handler-level use (idempotency, the
+    optional ``/answers`` ack).
+    """
+    callback = payload.get("callback")
+    if not isinstance(callback, dict):
+        raise ParseError("MAX callback payload missing required field: callback")
+
+    user = callback.get("user")
+    if not isinstance(user, dict) or "user_id" not in user:
+        raise ParseError("MAX callback payload missing required field: callback.user.user_id")
+
+    # `chat_id` lives on the ORIGINAL message the button was attached to —
+    # this is the bot's reply that carried the inline keyboard. MAX always
+    # includes it for callback events fired by inline_keyboard buttons.
+    message = payload.get("message") or {}
+    recipient = message.get("recipient") or {}
+    chat_id = recipient.get("chat_id")
+    if chat_id is None:
+        raise ParseError("MAX callback payload missing required field: message.recipient.chat_id")
+
+    callback_id = str(callback.get("callback_id") or "")
+    if not callback_id:
+        raise ParseError("MAX callback payload missing required field: callback.callback_id")
+
+    # `payload` may legitimately be None — defensive empty string.
+    cb_payload = callback.get("payload") or ""
+
+    # Surface callback_id via a raw copy so the handler can pull it without
+    # mutating the original dict (consumer Stream entry must not be touched).
+    raw = dict(payload)
+    raw["callback_id"] = callback_id
+
+    # Per-callback timestamp wins over the envelope timestamp; both are
+    # epoch ms in the MAX schema.
+    timestamp = _parse_ms_ts(callback.get("timestamp") or payload.get("timestamp"))
+
+    body = message.get("body") or {}
+    channel_message_id = str(body.get("mid") or body.get("seq") or "")
+
+    return CanonicalEvent(
+        channel="max",
+        channel_user_id=str(user["user_id"]),
+        channel_message_id=channel_message_id,
+        chat_id=str(chat_id),
+        text=str(cb_payload),
+        attachments=[],
+        timestamp=timestamp,
+        raw=raw,
+    )
+
+
+def _parse_ms_ts(value: Any) -> datetime | None:
+    """Convert MAX's epoch-milliseconds timestamp to a UTC datetime."""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+    return None

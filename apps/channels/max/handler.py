@@ -63,8 +63,12 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
-from apps.channels.max.outbound import send_message
+from apps.channels.max.outbound import (
+    make_inline_keyboard_attachment_rows,
+    send_message,
+)
 from apps.channels.max.parser import CanonicalEvent, parse_max_webhook
 from apps.conversations.models import Conversation
 from apps.conversations.services import record_message, resolve_active_conversation
@@ -89,6 +93,67 @@ _WELCOME_TEXT = (
 
 _FALLBACK_NO_ECHO = "(нечем эхом) 🙂"
 _FALLBACK_EMPTY = "?"
+
+
+def _build_attachments(action_data: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """Pull the channel-agnostic keyboard from ``SkillResult.action_data``.
+
+    Two shapes are accepted, in priority order:
+
+    1. **Platform-canonical envelope** —
+       ``action_data["attachments"] = [{"type": "inline_keyboard",
+                                        "payload": {"buttons": [...]}}]``.
+       The booking skill (B7 / reminder callbacks) emits this shape
+       because Telegram's ``_extract_keyboard`` reads it directly (see
+       :func:`apps.channels.telegram.handler._extract_keyboard`); we
+       must match that contract or booking keyboards silently vanish
+       on MAX. ``buttons`` is the channel-agnostic ``[{label, callback}]``
+       list which we run through :func:`make_inline_keyboard_attachment_rows`
+       (or ``…_attachment`` for the flat-list variant) to get the MAX
+       wire shape.
+
+    2. **Flat short-form** — ``action_data["buttons"]`` (or
+       ``["button_rows"]``) at the top level. Used by the welcome skill
+       and food_scanner where the producer doesn't need to be channel-aware.
+
+    Returns None when neither key is present so the outbound body stays
+    exactly as before — guarantees zero regression for skills that don't
+    opt in to keyboards.
+    """
+    if not action_data:
+        return None
+
+    # (1) Platform-canonical envelope — booking + reminders.
+    envelope_attachments = action_data.get("attachments")
+    if isinstance(envelope_attachments, list):
+        for att in envelope_attachments:
+            if not isinstance(att, dict) or att.get("type") != "inline_keyboard":
+                continue
+            payload = att.get("payload") or {}
+            buttons = payload.get("buttons")
+            if not isinstance(buttons, list) or not buttons:
+                continue
+            # ``buttons`` may be a flat list of {label, callback} dicts OR a
+            # pre-shaped 2-D matrix. booking emits the flat form (the
+            # `result.pending.keyboard` is a single row); telegram's adapter
+            # accepts both, so we mirror.
+            if buttons and isinstance(buttons[0], list):
+                return [make_inline_keyboard_attachment_rows(buttons)]
+            from apps.channels.max.outbound import make_inline_keyboard_attachment
+
+            return [make_inline_keyboard_attachment(buttons, columns=1)]
+
+    # (2) Flat short-form — welcome + food_scanner.
+    rows = action_data.get("button_rows")
+    if isinstance(rows, list) and rows:
+        return [make_inline_keyboard_attachment_rows(rows)]
+    buttons = action_data.get("buttons")
+    if isinstance(buttons, list) and buttons:
+        from apps.channels.max.outbound import make_inline_keyboard_attachment
+
+        columns = action_data.get("button_columns") or 1
+        return [make_inline_keyboard_attachment(buttons, columns=int(columns))]
+    return None
 
 
 def _echo_text(event: CanonicalEvent) -> str:
@@ -136,7 +201,16 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
         len(event.attachments),
     )
 
-    idempotency_key = f"webhook:max:{event.channel_message_id or event.channel_user_id}"
+    # Callback events carry their own unique id (callback_id) — distinct
+    # from any message id. Key off that so a button-tap retry collapses
+    # cleanly with the original tap, and a button-tap doesn't collide
+    # with the bot's preceding message (which shares the message_id the
+    # button was attached to).
+    callback_id = (event.raw or {}).get("callback_id", "") if isinstance(event.raw, dict) else ""
+    if callback_id:
+        idempotency_key = f"webhook:max:callback:{callback_id}"
+    else:
+        idempotency_key = f"webhook:max:{event.channel_message_id or event.channel_user_id}"
     try:
         with with_idempotency(idempotency_key, ttl_seconds=86_400):
             _handle_max_event_inner(event, trace_id)
@@ -272,8 +346,15 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             len(reply_text),
         )
 
+    # Extract optional inline keyboard from the skill result. The
+    # platform's keyboard contract (see apps/orchestrator/ui/keyboards.py)
+    # stores the channel-agnostic ``[{label, callback}]`` list in
+    # ``action_data["buttons"]``; the channel adapter converts it to the
+    # native wire format. Mirrors apps/channels/telegram/handler._extract_keyboard.
+    attachments = _build_attachments(action_data)
+
     # Outbound — MaxAPIError propagates up (handler does not swallow).
-    send_message(chat_id=event.chat_id, text=reply_text)
+    send_message(chat_id=event.chat_id, text=reply_text, attachments=attachments)
 
     emit(
         "channels.max.outbound.sent",
@@ -289,6 +370,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
                 if event.attachments
                 else "empty_prompt"
             ),
+            "has_keyboard": bool(attachments),
         },
     )
     logger.info(

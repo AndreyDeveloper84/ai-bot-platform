@@ -67,4 +67,13 @@ class SkillsConfig(AppConfig):
         # ordering only.
         from apps.skills.booking import skill as _booking  # noqa: F401
 
+        # 2026-05-20 — welcome skill ports the /start greeting into a
+        # dedicated handler that emits an inline keyboard with Mini App
+        # quick-actions (📅 Записаться / 📋 Мои визиты / 👤 Профиль / ❓ Задать
+        # вопрос). Registered BEFORE echo so /start lands here; the
+        # cb:welcome:* callbacks route the «❓ Задать вопрос» tap to a
+        # helpful prompt rather than verbatim echo. Restores the inline-
+        # keyboard UX that mysite's MAX SDK shipped pre-platform-cutover.
+        from apps.skills.welcome import skill as _welcome  # noqa: F401
+
         from apps.skills.echo import skill as _echo  # noqa: F401

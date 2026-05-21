@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from apps.channels.max.outbound import MaxAPIError, send_message
+from apps.channels.max.outbound import (
+    MaxAPIError,
+    make_inline_keyboard_attachment,
+    make_inline_keyboard_attachment_rows,
+    send_message,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -102,3 +107,87 @@ class TestSendMessageErrors:
         assert "MAX_BOT_TOKEN" in exc_info.value.body
         # No HTTP call should have been attempted.
         assert httpx_mock.get_requests() == []
+
+
+class TestInlineKeyboardAttachment:
+    """make_inline_keyboard_attachment builds the MAX wire shape from
+    the channel-agnostic ``[{label, callback}]`` list. The output must
+    match the dev.max.ru spec exactly: top-level ``type``+``payload``,
+    nested ``buttons`` as a 2-D matrix, each button with ``type`` discriminator.
+    """
+
+    def test_callback_button_wire_shape(self):
+        att = make_inline_keyboard_attachment(
+            [{"label": "📅 Записаться", "callback": "cb:welcome:book"}],
+        )
+        assert att["type"] == "inline_keyboard"
+        assert att["payload"]["buttons"] == [
+            [{"type": "callback", "text": "📅 Записаться", "payload": "cb:welcome:book"}],
+        ]
+
+    def test_link_button_wire_shape(self):
+        att = make_inline_keyboard_attachment(
+            [{"label": "Сайт", "url": "https://example.com"}],
+        )
+        assert att["payload"]["buttons"] == [
+            [{"type": "link", "text": "Сайт", "url": "https://example.com"}],
+        ]
+
+    def test_open_app_button_wire_shape(self):
+        att = make_inline_keyboard_attachment(
+            [
+                {
+                    "label": "📅 Записаться",
+                    "callback": "route=catalog",
+                    "web_app": "id583_bot",
+                },
+            ],
+        )
+        btn = att["payload"]["buttons"][0][0]
+        assert btn["type"] == "open_app"
+        assert btn["text"] == "📅 Записаться"
+        assert btn["web_app"] == "id583_bot"
+        # Channel-agnostic ``callback`` reused as MAX ``payload`` for open_app.
+        assert btn["payload"] == "route=catalog"
+
+    def test_columns_layout_pairs_buttons(self):
+        att = make_inline_keyboard_attachment(
+            [
+                {"label": "A", "callback": "cb:a"},
+                {"label": "B", "callback": "cb:b"},
+                {"label": "C", "callback": "cb:c"},
+            ],
+            columns=2,
+        )
+        rows = att["payload"]["buttons"]
+        assert len(rows) == 2
+        assert [b["text"] for b in rows[0]] == ["A", "B"]
+        assert [b["text"] for b in rows[1]] == ["C"]
+
+    def test_columns_default_is_one_per_row(self):
+        att = make_inline_keyboard_attachment(
+            [{"label": x, "callback": f"cb:{x}"} for x in ("A", "B", "C")],
+        )
+        assert [len(row) for row in att["payload"]["buttons"]] == [1, 1, 1]
+
+    def test_invalid_columns_raises(self):
+        with pytest.raises(ValueError, match="columns must be >= 1"):
+            make_inline_keyboard_attachment(
+                [{"label": "A", "callback": "cb:a"}],
+                columns=0,
+            )
+
+    def test_rows_form_preserves_grouping(self):
+        att = make_inline_keyboard_attachment_rows(
+            [
+                [{"label": "Да", "callback": "cb:yes"}, {"label": "Нет", "callback": "cb:no"}],
+                [{"label": "Назад", "callback": "cb:back"}],
+            ],
+        )
+        rows = att["payload"]["buttons"]
+        assert [b["text"] for b in rows[0]] == ["Да", "Нет"]
+        assert [b["text"] for b in rows[1]] == ["Назад"]
+
+    def test_empty_buttons_emits_empty_grid(self):
+        att = make_inline_keyboard_attachment([])
+        assert att == {"type": "inline_keyboard", "payload": {"buttons": []}}
