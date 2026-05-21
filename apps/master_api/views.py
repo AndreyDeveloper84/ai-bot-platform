@@ -57,6 +57,13 @@ from apps.master_api.services.conversations import (
     MAX_LIMIT as CONVERSATIONS_MAX_LIMIT,
     list_master_conversations,
 )
+from apps.master_api.services.conversation_detail import (
+    ConversationDetailError,
+    get_conversation_detail,
+    mark_conversation_read,
+    promote_to_human_locked,
+    send_master_message,
+)
 from apps.master_api.services.dashboard import build_dashboard
 from apps.master_api.services.schedule import (
     AvailabilityRequestError,
@@ -971,6 +978,118 @@ def conversations_list(request: HttpRequest) -> HttpResponse:
     except ConversationsListError as exc:
         return _error(exc.slug, exc.detail, 400)
 
+    return JsonResponse(response.to_dict())
+
+
+# --- M6 conversation detail (PR M6.1) -------------------------------------
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def conversation_detail(request: HttpRequest, conversation_id: str) -> HttpResponse:
+    """M6 master conversation detail (master-mobile §M6).
+
+    Spec quote (§M6 lines 706-712):
+
+        «When master taps «Отправить от себя» on a draft, the message
+        renders to the customer as «Помощник: …». Same single assistant
+        identity. Master's authorship is recorded in attribution
+        metadata (``actor_type=master``, ``composed_by=master_id``)»
+
+    Cross-master + cross-tenant isolation enforced by
+    :func:`apps.master_api.services.conversation_detail._verify_master_involved`.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    try:
+        response = get_conversation_detail(master, conversation_id)
+    except ConversationDetailError as exc:
+        return _error(exc.slug, exc.detail, exc.status)
+    return JsonResponse(response.to_dict())
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def conversation_send_message(request: HttpRequest, conversation_id: str) -> HttpResponse:
+    """M6 master compose endpoint (§M6 lines 668, 674).
+
+    Stamps the message with attribution metadata
+    ``{"actor_type": "master", "composed_by": <master_id>}`` so audit /
+    admin views can distinguish bot-authored from master-authored text.
+
+    Rejects HUMAN_LOCKED with 403 ``tier_locked``.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    body = _parse_json_body(request)
+    if isinstance(body, JsonResponse):
+        return body
+
+    content = body.get("content") or ""
+    try:
+        response = send_master_message(
+            master,
+            conversation_id,
+            content=content,
+            actor_bot_user=bot_user,
+        )
+    except ConversationDetailError as exc:
+        return _error(exc.slug, exc.detail, exc.status)
+    return JsonResponse(response.to_dict(), status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def conversation_mark_read(request: HttpRequest, conversation_id: str) -> HttpResponse:
+    """M6 mark-read endpoint — debounced (one audit row per call)."""
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        marked = mark_conversation_read(
+            master,
+            conversation_id,
+            actor_bot_user=bot_user,
+        )
+    except ConversationDetailError as exc:
+        return _error(exc.slug, exc.detail, exc.status)
+    return JsonResponse({"marked_count": marked})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def conversation_promote(request: HttpRequest, conversation_id: str) -> HttpResponse:
+    """M6 safety promote — escalate to HUMAN_LOCKED (§M6 line 765).
+
+    Returns 409 ``already_locked`` if the conversation is already
+    locked; 400 on missing/invalid reason_class.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    body = _parse_json_body(request)
+    if isinstance(body, JsonResponse):
+        return body
+
+    reason_class = body.get("reason_class") or ""
+    reason_text = body.get("reason_text") or ""
+    try:
+        response = promote_to_human_locked(
+            master,
+            conversation_id,
+            reason_class=reason_class,
+            reason_text=reason_text,
+            actor_bot_user=bot_user,
+        )
+    except ConversationDetailError as exc:
+        return _error(exc.slug, exc.detail, exc.status)
     return JsonResponse(response.to_dict())
 
 

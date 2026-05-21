@@ -141,6 +141,20 @@ MASTER_REACTIVATED = "master.reactivated"
 # DB row only, never on the analytics bus.
 MASTER_AVAILABILITY_CHANGE_REQUESTED = "master.availability_change_requested"
 
+# --- Master conversation detail (master-mobile §M6, PR M6.1) ---------------
+# Master reads/sends/promotes in their own conversation. Payload contracts:
+#   conversation.master_replied:
+#     {tenant_id, conversation_id, master_id, message_id}
+#   conversation.marked_read_by_master:
+#     {tenant_id, conversation_id, master_id, marked_count}
+#   conversation.tier_promoted_to_human_locked:
+#     {tenant_id, conversation_id, master_id, reason_class, reason_text}
+# Reason_text is free-form forensic context; never PII per master's
+# own PII gating (the master themselves never sees customer phone/LTV).
+CONVERSATION_MASTER_REPLIED = "conversation.master_replied"
+CONVERSATION_MARKED_READ_BY_MASTER = "conversation.marked_read_by_master"
+CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED = "conversation.tier_promoted_to_human_locked"
+
 # --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
 # The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
 # (analytics-bus event names — snake_case dotted notation aligned with
@@ -214,6 +228,9 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_DEACTIVATED,
         MASTER_REACTIVATED,
         MASTER_AVAILABILITY_CHANGE_REQUESTED,
+        CONVERSATION_MASTER_REPLIED,
+        CONVERSATION_MARKED_READ_BY_MASTER,
+        CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED,
     }
 )
 

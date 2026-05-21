@@ -28,4 +28,25 @@ urlpatterns = [
     ),
     # M5 conversations list (master-mobile §M5, PR Tier1.3)
     path("conversations", views.conversations_list, name="conversations_list"),
+    # M6 conversation detail backend (master-mobile §M6, PR M6.1)
+    path(
+        "conversations/<uuid:conversation_id>",
+        views.conversation_detail,
+        name="conversation_detail",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/messages",
+        views.conversation_send_message,
+        name="conversation_send_message",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/mark-read",
+        views.conversation_mark_read,
+        name="conversation_mark_read",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/promote",
+        views.conversation_promote,
+        name="conversation_promote",
+    ),
 ]
