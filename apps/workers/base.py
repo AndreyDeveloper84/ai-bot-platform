@@ -165,6 +165,15 @@ class TenantAwareTask(ABC):
             return
 
         for ancestor in mro[1:ta_idx]:
+            # Skip ancestors that are themselves TenantAwareTask
+            # descendants — they're legitimate opt-out subclasses (e.g.
+            # ``SystemTask(TenantAwareTask)`` setting requires_tenant=False
+            # with docstring justification, then ``AuditSweepHandler``
+            # extending ``SystemTask``). The guard targets external
+            # mixins that shadow the attribute, not the documented
+            # inheritance chain.
+            if issubclass(ancestor, TenantAwareTask):
+                continue
             if "requires_tenant" in ancestor.__dict__:
                 raise TypeError(
                     f"{cls.__name__}: ancestor {ancestor.__name__} "

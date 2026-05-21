@@ -284,7 +284,8 @@ class TestRetroB4RequiresTenantTag:
     handler when ``resolved_tenant_id`` was empty/invalid. Reads
     returned empty + warn but handlers proceeded on phantom-tenant
     context. Post-fix the ``requires_tenant`` ClassVar + ``STRICT_TENANT_REFUSE``
-    settings flag let strict-tenant handlers DLQ entries cleanly OR
+    settings flag let strict-tenant handlers refuse entries cleanly
+    (PEL retention; no auto-DLQ — see follow-up XAUTOCLAIM issue) OR
     log-only during the rollout soak.
     """
 
@@ -358,11 +359,15 @@ class TestRetroB4RequiresTenantTag:
 
             # Handler MUST NOT have been invoked.
             assert ran["handle_called"] is False
-            # DLQ-side log is present.
+            # Strict-mode refusal log is present. NOTE: pre-PR-#487 this
+            # asserted on the substring «DLQ» which was misleading — there
+            # is no automatic DLQ retry wired (no XAUTOCLAIM); the entry
+            # stays in the PEL. The accurate assertion matches the new
+            # log line "refusing dispatch".
             assert any(
-                "tenant_required_missing" in rec.message and "DLQ" in rec.message
+                "tenant_required_missing" in rec.message and "refusing dispatch" in rec.message
                 for rec in caplog.records
-            ), "expected DLQ ERROR log"
+            ), "expected strict-mode refusal ERROR log"
             # And the exception class name shows up on the
             # worker.handler_failed event payload.
             assert TenantRequiredButMissing.__name__
@@ -609,6 +614,36 @@ class TestRetroB4BlockersPreFlip:
                 pass
 
         assert _OK.requires_tenant is True
+
+    def test_b2_subclass_of_optout_subclass_inherits_optout_cleanly(self):
+        """B2: legitimate intermediate-class opt-out chain
+        (``SystemTask(TenantAwareTask, requires_tenant=False)`` →
+        ``AuditSweepHandler(SystemTask)``) must work. The MRO guard
+        targets external mixins that shadow the attribute, NOT the
+        documented inheritance chain of opt-out subclasses.
+
+        Caught by first-pass Code Reviewer 2026-05-21 — without the
+        ``issubclass(ancestor, TenantAwareTask)`` skip, ANY further
+        subclass of an opt-out ``TenantAwareTask`` descendant would
+        fail at class creation, breaking the very pattern the docstring
+        on ``__init_subclass__`` says is allowed.
+        """
+
+        class _SystemTask(TenantAwareTask):
+            # requires_tenant=False: documented opt-out for system-tier
+            # handlers (audit sweep, outbox dispatcher).
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        class _AuditSweepHandler(_SystemTask):
+            # Concrete system-tier subclass — inherits the opt-out.
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        assert _SystemTask.requires_tenant is False
+        assert _AuditSweepHandler.requires_tenant is False
 
     # ---- B3: documented restart-required ----
 
