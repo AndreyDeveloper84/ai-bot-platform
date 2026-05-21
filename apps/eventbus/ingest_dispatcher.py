@@ -1,0 +1,250 @@
+"""Cross-service event dispatcher — `docs/architecture/event-contract.md` §3 + §5.
+
+Owns the handler registry keyed by ``(event_name, event_version)`` and
+the dedupe-aware dispatch entry point used by the ingest view. The
+registry is process-local and populated at module import time by
+consumer modules (#442–#446) calling :func:`register`.
+
+### Why a registry instead of explicit ``if event_name == "...":``
+
+§4.2 says consumers register handlers per exact ``(event_name,
+event_version)`` pair so two versions of the same event can run side-
+by-side during a deprecation window. A registry — `dict[tuple, Handler]`
+— is the trivial data structure that supports that. An if/elif tree
+would lock the dispatcher to one version per name and force a
+redeploy on every consumer change.
+
+### Why dispatch lives here, not in the view
+
+The view (:mod:`apps.eventbus.views`) is the HTTP-shaped layer: it
+parses, verifies signatures, and maps outcomes to status codes. Pure
+business logic (look up the handler, run inside a DB transaction,
+write the dedupe row) belongs in this module so tests can exercise
+it without spinning up Django's request cycle.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
+from typing import Final
+
+from django.db import IntegrityError, transaction
+from django.utils import timezone
+
+from apps.eventbus.ingest_envelope import IngestEnvelope
+from apps.eventbus.models import IngestDedupe, IngestDLQ
+
+
+logger = logging.getLogger(__name__)
+
+
+# Type alias for a registered handler. The handler receives the
+# validated envelope and runs its side-effect within the dedupe
+# transaction. Returning a value is allowed but ignored — observable
+# behaviour is via DB writes / further bus emissions per §5.2.
+EventHandler = Callable[[IngestEnvelope], None]
+
+
+class DispatchOutcome(str, Enum):
+    """Possible outcomes of a single dispatch attempt.
+
+    The view layer maps each outcome to an HTTP status per
+    `event-contract.md` §8. Keeping the enum here keeps the
+    HTTP/business boundary clean: the dispatcher knows nothing about
+    HTTP codes, the view knows nothing about how dedupe works.
+    """
+
+    OK = "ok"  # Handler ran; dedupe row written. 200.
+    DUPLICATE = "duplicate"  # Dedupe hit; handler did NOT run. 200 (§8.7).
+    UNKNOWN_EVENT_NAME = "unknown_event_name"  # §8.5 — 422 + DLQ.
+    UNKNOWN_EVENT_VERSION = "unknown_event_version"  # §8.4 — 422 + DLQ.
+    HANDLER_EXCEPTION = "handler_exception"  # §8.1 — 500, NO dedupe.
+
+
+@dataclass(frozen=True)
+class DispatchResult:
+    """Outcome of :func:`dispatch_envelope`.
+
+    The ``exception`` field is populated only on ``HANDLER_EXCEPTION``;
+    the view layer logs its type (NOT its ``str()``) per §6.4 PII
+    rules and increments the Prometheus failure counter.
+    """
+
+    outcome: DispatchOutcome
+    exception: BaseException | None = None
+
+
+# Module-level registry. Populated by consumer modules at import time
+# via :func:`register`. Production code MUST NOT mutate at request
+# time — the registry is read-mostly and concurrent mutation racing
+# the dispatcher is undefined behaviour.
+_REGISTRY: dict[tuple[str, int], EventHandler] = {}
+
+
+def register(event_name: str, event_version: int, handler: EventHandler) -> None:
+    """Register a handler for ``(event_name, event_version)``.
+
+    Re-registering the same pair is a programmer error — raise loudly
+    rather than silently shadow. Consumer modules import-time call
+    this from their `apps.py.ready()` (or a module-level call) so
+    every Django start-up has a deterministic registry shape.
+    """
+    key = (event_name, event_version)
+    if key in _REGISTRY:
+        raise ValueError(
+            f"Handler already registered for {event_name}@v{event_version}; "
+            "re-registration is a programmer error."
+        )
+    _REGISTRY[key] = handler
+    logger.info(
+        "eventbus.ingest.handler_registered name=%s version=%d",
+        event_name,
+        event_version,
+    )
+
+
+def unregister(event_name: str, event_version: int) -> None:
+    """Remove a registered handler. Used by tests to keep the
+    registry hygienic between modules; production code rarely
+    unregisters."""
+    _REGISTRY.pop((event_name, event_version), None)
+
+
+def registered_handlers() -> dict[tuple[str, int], EventHandler]:
+    """Return a copy of the registry — for tests and introspection."""
+    return dict(_REGISTRY)
+
+
+# `event-contract.md` §3 — the 12 closed-set event names. Used to
+# distinguish UNKNOWN_EVENT_NAME (422) from UNKNOWN_EVENT_VERSION
+# (also 422 but for a different operator response).
+_KNOWN_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "booking.created",
+        "booking.cancelled",
+        "booking.rescheduled",
+        "booking.completed",
+        "payment.authorized",
+        "payment.captured",
+        "payment.failed",
+        "payment.refunded",
+        "review.created",
+        "service.updated",
+        "master.schedule.updated",
+        "user.profile.updated",
+    }
+)
+
+
+def dispatch_envelope(envelope: IngestEnvelope) -> DispatchResult:
+    """Run the registered handler for ``envelope`` with dedupe + DLQ.
+
+    Steps (`event-contract.md` §5.1 + §8.4/§8.5):
+
+    1. If ``event_name`` not in the closed §3 set → write DLQ row
+       (reason ``unknown_event_name``) → return ``UNKNOWN_EVENT_NAME``.
+    2. If no handler registered for ``(name, version)`` → write DLQ
+       (reason ``unknown_event_version``) → return ``UNKNOWN_EVENT_VERSION``.
+    3. Open a DB transaction.
+    4. Try inserting a dedupe row (PK collision means duplicate
+       delivery — short-circuit with ``DUPLICATE``).
+    5. Run the handler.
+    6. Mark ``processed_at = now()`` on the dedupe row.
+    7. Commit. Both side-effect AND dedupe row land together; a crash
+       between handler and commit rolls back BOTH (§5.1).
+
+    On handler exception: rollback (no dedupe row), return
+    ``HANDLER_EXCEPTION`` so the view can return 500 and Ayla can
+    retry per §6.3.
+    """
+    if envelope.event_name not in _KNOWN_NAMES:
+        _write_dlq(envelope, reason="unknown_event_name")
+        return DispatchResult(outcome=DispatchOutcome.UNKNOWN_EVENT_NAME)
+
+    key = (envelope.event_name, envelope.event_version)
+    handler = _REGISTRY.get(key)
+    if handler is None:
+        _write_dlq(envelope, reason="unknown_event_version")
+        return DispatchResult(outcome=DispatchOutcome.UNKNOWN_EVENT_VERSION)
+
+    try:
+        with transaction.atomic():
+            # Try inserting dedupe row first — PK collision means
+            # duplicate delivery. The standard §5.1 pattern is
+            # process-then-record, but the dedupe table's PK uniqueness
+            # is the cheaper primitive for short-circuiting duplicates
+            # BEFORE running the handler. Writing the row + handler in
+            # the same transaction still satisfies the §5.1 atomicity
+            # invariant: on handler exception the dedupe insert rolls
+            # back too.
+            try:
+                dedupe_row = IngestDedupe.objects.create(
+                    event_id=envelope.event_id,
+                    event_name=envelope.event_name,
+                    event_version=envelope.event_version,
+                    processed_at=timezone.now(),
+                )
+            except IntegrityError:
+                # Duplicate delivery — already processed end-to-end
+                # OR processing in flight on another worker. Either way,
+                # we MUST NOT re-run the handler.
+                return DispatchResult(outcome=DispatchOutcome.DUPLICATE)
+
+            handler(envelope)
+            # Update processed_at to AFTER-handler timestamp so the
+            # row reflects the moment the side-effect committed.
+            dedupe_row.processed_at = timezone.now()
+            dedupe_row.save(update_fields=["processed_at"])
+
+    except Exception as exc:  # noqa: BLE001 — we deliberately catch all
+        logger.exception(
+            "eventbus.ingest.handler_exception event_id=%s name=%s version=%d",
+            envelope.event_id,
+            envelope.event_name,
+            envelope.event_version,
+        )
+        return DispatchResult(outcome=DispatchOutcome.HANDLER_EXCEPTION, exception=exc)
+
+    return DispatchResult(outcome=DispatchOutcome.OK)
+
+
+def _write_dlq(envelope: IngestEnvelope, *, reason: str) -> None:
+    """Persist a DLQ row for an event that cannot be processed.
+
+    Separate function so the view layer can call it for cases where
+    the envelope failed earlier validation but the operator still
+    benefits from a persistent record (e.g. retry-budget exhaustion
+    when implemented in the dispatcher layer later).
+
+    Stores the envelope's fields as a flat dict (event-contract.md
+    §6.4 calls for the "full envelope payload"); the raw HTTP body
+    is logged by the view layer separately if needed.
+    """
+    try:
+        IngestDLQ.objects.create(
+            event_id=envelope.event_id,
+            event_name=envelope.event_name,
+            event_version=envelope.event_version,
+            reason=reason,
+            raw_body={
+                "event_id": envelope.event_id,
+                "event_name": envelope.event_name,
+                "event_version": envelope.event_version,
+                "occurred_at": envelope.occurred_at.isoformat(),
+                "tenant_id": envelope.tenant_id,
+                "user_id": envelope.user_id,
+                "actor": envelope.actor,
+                "correlation_id": envelope.correlation_id,
+                "causation_id": envelope.causation_id,
+                "data": envelope.data,
+            },
+        )
+    except Exception:  # noqa: BLE001 — DLQ write MUST NEVER block the response
+        logger.exception(
+            "eventbus.ingest.dlq_write_failed event_id=%s reason=%s",
+            envelope.event_id,
+            reason,
+        )
