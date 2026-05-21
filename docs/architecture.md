@@ -22,13 +22,24 @@ Reference: [PHASE0_DESIGN.md §0](../../mysite/docs/arch/PHASE0_DESIGN.md#0-exec
 
 ## 2. Repo layout
 
-Three-repo split (ADR-0002):
+Three-repo split — originally ADR-0002, refined by **[ADR-0009](adr/ADR-0009-ayla-split-domain-architecture.md)** (Ayla split-domain architecture, Variant A — locked 2026-05-20). Under ADR-0009 the three repos take on sharper roles:
 
-| Repo | Role |
+| Repo | Role under ADR-0009 |
 |---|---|
 | `mysite/` (formula_tela) | Static site, SEO landing pages, AI marketing agents, YooKassa, payments, FROZEN `maxbot/` carry-over source. Stays alive forever. |
-| `ayla-ai-core/` | Shared AI library — clients, voice config, anti-hallucination helpers, replay primitives. Imported via `git+`. v0.6.0 is the Phase 0 baseline. |
-| `ai-bot-platform/` | This repo. Tenanted bot runtime. Drains `mysite/maxbot/` sprint-by-sprint. |
+| `Ayla djangoproject` | **Canonical SoR** for booking lifecycle (Appointment DDD + state machine), master schedule, services catalog, reviews, user profile, **payments (YooKassa hold→capture→refund)**. Publishes domain events to `ai-bot-platform` per [`docs/architecture/event-contract.md`](architecture/event-contract.md). |
+| `ai-bot-platform/` | This repo. AI / observability / multi-tenant runtime. **Consumes** Ayla domain events (memory, reminders, RFM, catalog cache). Booking + payment are read-only here; mutations route through Ayla REST. |
+| `ayla-ai-core/` | Shared AI library — LLM clients, voice config, anti-hallucination helpers, replay primitives. **v0.8.1 → v1.0 freeze** per ADR-0009; pinned via `git+ssh@vX.Y.Z` in both consumers. Unchanged. |
+
+**Architectural constraints from ADR-0009 (non-negotiable, see §Hard rules in the ADR):**
+
+1. No duplicate canonical state — if Ayla owns it, bot-platform may cache or mirror, never own. Reverse also true.
+2. No direct cross-repo DB access — both backends talk REST + events only. No shared tables, no cross-repo `psycopg2`.
+3. No new MVP features merge until Phase 0 close criteria are met. Allowed during freeze: bug fixes, infra migration, rebrand, event contract code, ADR/sprint docs, Sprint 1 EPICs (Track A).
+4. bot-platform does NOT grow new transactional domains. Any new transactional state goes to Ayla.
+5. Transactional tools in bot-platform skills are REST wrappers — bot-platform never DB-writes booking / payment / catalog.
+6. JWT `tenant_id` claim = `active_tenant_id`; verify via `TenantUserRelationship`. For global AI memory requests (memory layer queries), `tenant_id` MAY be null — means «global user scope, not tenant-scoped».
+7. Every cross-service event has `event_version`; consumers idempotent. See [`docs/architecture/event-contract.md`](architecture/event-contract.md).
 
 Inside `ai-bot-platform/`:
 
