@@ -216,3 +216,204 @@ export const getDashboard = (): Promise<DashboardResponse> =>
   request("/dashboard", { method: "GET" });
 
 export const MASTER_SESSION_STORAGE_KEY = "master_token";
+
+// --- M3 schedule types ----------------------------------------------------
+// Mirrors apps/master_api/services/schedule.py::ScheduleResponse.to_dict().
+// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M3.
+
+export interface ScheduleFreeWindow {
+  start: string; // HH:MM (tenant-local)
+  end: string; // HH:MM
+  duration_min: number;
+}
+
+export type ScheduleConflictType =
+  | "double_booking"
+  | "outside_hours"
+  | "overlapping_exception";
+
+export interface ScheduleConflict {
+  type: ScheduleConflictType | string;
+  booking_id: string;
+  description: string;
+}
+
+export interface ScheduleBooking {
+  booking_id: string;
+  visit_at: string; // ISO UTC
+  duration_min: number;
+  service_name: string;
+  client_first_name: string;
+  client_last_initial: string;
+  is_in_progress: boolean;
+  is_returning_customer: boolean;
+}
+
+export interface ScheduleBlock {
+  exception_id: string;
+  start: string; // ISO UTC
+  end: string;
+  reason: string; // lunch|vacation|sick|personal|other
+  approved: boolean;
+}
+
+export interface ScheduleDay {
+  date: string; // YYYY-MM-DD (tenant-local)
+  is_off_day: boolean;
+  working_hours: { start: string; end: string } | null;
+  bookings: ScheduleBooking[];
+  blocks: ScheduleBlock[];
+  free_windows: ScheduleFreeWindow[];
+  conflicts: ScheduleConflict[];
+}
+
+export interface MasterScheduleResponse {
+  tenant_tz: string;
+  from: string; // YYYY-MM-DD
+  to: string; // YYYY-MM-DD
+  days: ScheduleDay[];
+}
+
+export type AvailabilityReasonClass =
+  | "vacation"
+  | "sick"
+  | "personal"
+  | "other";
+
+export interface AvailabilityRequestBody {
+  start: string; // ISO datetime
+  end: string; // ISO datetime
+  reason_class: AvailabilityReasonClass;
+  reason_text?: string;
+}
+
+export interface AvailabilityRequestResponse {
+  request_id: string;
+  status: string;
+  requested_start: string | null;
+  requested_end: string | null;
+  reason_class: string;
+  created_at: string;
+}
+
+export interface PendingAvailabilityItem {
+  request_id: string;
+  requested_start: string | null;
+  requested_end: string | null;
+  reason_class: string;
+  reason_text: string;
+  status: string;
+  decided_at: string | null;
+  decided_by_name: string | null;
+  rejection_reason: string | null;
+}
+
+export interface PendingAvailabilityResponse {
+  items: PendingAvailabilityItem[];
+}
+
+export const getMasterSchedule = (
+  params: { from?: string; to?: string } = {},
+): Promise<MasterScheduleResponse> => {
+  const search = new URLSearchParams();
+  if (params.from) search.set("from", params.from);
+  if (params.to) search.set("to", params.to);
+  const qs = search.toString();
+  return request(`/schedule${qs ? `?${qs}` : ""}`, { method: "GET" });
+};
+
+export const requestAvailability = (
+  body: AvailabilityRequestBody,
+): Promise<AvailabilityRequestResponse> =>
+  request("/availability", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const getPendingAvailability =
+  (): Promise<PendingAvailabilityResponse> =>
+    request("/availability/pending", { method: "GET" });
+
+// --- M5 conversations types -----------------------------------------------
+// Mirrors apps/master_api/services/conversations.py::ConversationsListResponse.
+
+export type ConversationSection =
+  | "awaiting_master"
+  | "ai_drafted"
+  | "ai_handling"
+  | "resolved"
+  | "other";
+
+export type ConversationFilter = "active" | "all" | "resolved";
+
+export interface MasterConversationItem {
+  conversation_id: string;
+  client_first_name: string;
+  client_last_initial: string;
+  is_returning_customer: boolean;
+  section: ConversationSection | string;
+  last_message_excerpt: string;
+  last_message_at: string | null;
+  sla_tier: SlaTier;
+  ai_drafted_reply_available: boolean;
+  reason_chip: string | null;
+  resolved_outcome: string | null;
+}
+
+export interface ConversationSectionCounts {
+  awaiting_master: number;
+  ai_drafted: number;
+  ai_handling: number;
+  resolved_today: number;
+}
+
+export interface MasterConversationsResponse {
+  items: MasterConversationItem[];
+  section_counts: ConversationSectionCounts;
+  next_cursor: string | null;
+}
+
+export const getMasterConversations = (
+  params: {
+    filter?: ConversationFilter;
+    search?: string;
+    cursor?: string;
+    limit?: number;
+  } = {},
+): Promise<MasterConversationsResponse> => {
+  const search = new URLSearchParams();
+  if (params.filter) search.set("filter", params.filter);
+  if (params.search) search.set("search", params.search);
+  if (params.cursor) search.set("cursor", params.cursor);
+  if (params.limit !== undefined) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  return request(`/conversations${qs ? `?${qs}` : ""}`, { method: "GET" });
+};
+
+/**
+ * Defensive PII gate — verify a master conversations response NEVER carries
+ * fields stripped by the backend. Spec §M5 lines 608-615:
+ *
+ *     «❌ No LTV / financial signal · ❌ No reveal-phone hint · …
+ *      ✅ Customer first name only»
+ *
+ * Returns the list of forbidden keys observed (empty when clean). The screen
+ * `console.warn`s if non-empty and continues rendering — defence-in-depth,
+ * not a hard failure (backend is the authority).
+ */
+export const FORBIDDEN_PII_KEYS = [
+  "phone",
+  "phone_number",
+  "phone_masked",
+  "ltv",
+  "ltv_rub",
+  "email",
+  "client_last_name",
+  "client_full_name",
+] as const;
+
+export function findForbiddenPiiKeys(
+  item: Record<string, unknown>,
+): string[] {
+  return FORBIDDEN_PII_KEYS.filter((k) => k in item);
+}

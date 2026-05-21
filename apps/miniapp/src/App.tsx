@@ -5,12 +5,12 @@ import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { HelloScreen } from "./screens/HelloScreen";
-import { MasterConversationsPlaceholderScreen } from "./screens/MasterConversationsPlaceholderScreen";
+import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterProfilePlaceholderScreen } from "./screens/MasterProfilePlaceholderScreen";
-import { MasterSchedulePlaceholderScreen } from "./screens/MasterSchedulePlaceholderScreen";
+import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
 import { MyVisitsScreen } from "./screens/MyVisitsScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
@@ -35,13 +35,14 @@ export function App() {
       <Route path="/me" element={<ProfileScreen />} />
       {/* Phase 4 — post-visit rating (F5). */}
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
-      {/* Master surface — M0 onboarding (PR #212) + M1 dashboard (PR #8)
-          + placeholder routes for M3/M5/M4 (separate PRs).
+      {/* Master surface — M0 onboarding (PR #212) + M1 dashboard (PR #455)
+          + M3 schedule + M5 conversations (this PR).
+          M4 profile remains a placeholder pending separate PR.
           Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md. */}
       <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />
       <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
-      <Route path="/master/schedule" element={<MasterSchedulePlaceholderScreen />} />
-      <Route path="/master/conversations" element={<MasterConversationsPlaceholderScreen />} />
+      <Route path="/master/schedule" element={<MasterScheduleScreen />} />
+      <Route path="/master/conversations" element={<MasterConversationsScreen />} />
       <Route path="/master/profile" element={<MasterProfilePlaceholderScreen />} />
       <Route path="*" element={<HelloScreen />} />
     </Routes>

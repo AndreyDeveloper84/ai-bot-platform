@@ -119,3 +119,122 @@ export function joinClientName(
   if (!first) return last;
   return `${first} ${last}`;
 }
+
+// --- Schedule helpers (M3) ------------------------------------------------
+
+const WEEKDAYS_SHORT_RU = [
+  "Вс",
+  "Пн",
+  "Вт",
+  "Ср",
+  "Чт",
+  "Пт",
+  "Сб",
+];
+
+const WEEKDAY_NAMES_FULL_UPPER = [
+  "ВОСКРЕСЕНЬЕ",
+  "ПОНЕДЕЛЬНИК",
+  "ВТОРНИК",
+  "СРЕДА",
+  "ЧЕТВЕРГ",
+  "ПЯТНИЦА",
+  "СУББОТА",
+];
+
+/** «Пн» / «Вт» / … for week-view column headers. */
+export function weekdayShortRu(date: Date): string {
+  return WEEKDAYS_SHORT_RU[date.getDay()] ?? "";
+}
+
+/** «СРЕДА, 21 МАЯ» — week-view section header (uppercase verbatim per spec). */
+export function formatWeekHeaderRu(date: Date): string {
+  const weekday = WEEKDAY_NAMES_FULL_UPPER[date.getDay()] ?? "";
+  const month = (MONTHS_GEN[date.getMonth()] ?? "").toUpperCase();
+  return `${weekday}, ${date.getDate()} ${month}`;
+}
+
+/**
+ * Parse a YYYY-MM-DD string as a local-date (no TZ shift).
+ *
+ * `new Date("2026-05-21")` would land at UTC midnight which can flip to the
+ * previous day in negative-offset locales. We split + construct to keep the
+ * calendar date stable regardless of the user's TZ.
+ */
+export function parseLocalYmd(ymd: string): Date {
+  const parts = ymd.split("-").map((s) => Number(s));
+  const y = parts[0];
+  const m = parts[1];
+  const d = parts[2];
+  if (
+    y === undefined ||
+    m === undefined ||
+    d === undefined ||
+    !Number.isFinite(y) ||
+    !Number.isFinite(m) ||
+    !Number.isFinite(d)
+  ) {
+    return new Date(NaN);
+  }
+  return new Date(y, m - 1, d);
+}
+
+/** Format a local Date as YYYY-MM-DD (no TZ shift). */
+export function formatYmdLocal(date: Date): string {
+  const y = date.getFullYear();
+  const m = date.getMonth() + 1;
+  const d = date.getDate();
+  return `${y}-${pad2(m)}-${pad2(d)}`;
+}
+
+/** Add days to a Date (returns a new instance, local-cal preserving). */
+export function addDays(date: Date, n: number): Date {
+  const out = new Date(date);
+  out.setDate(out.getDate() + n);
+  return out;
+}
+
+/** Start-of-week (Monday) for the given date, in local time. */
+export function startOfWeekMonday(date: Date): Date {
+  const out = new Date(date);
+  const day = out.getDay(); // 0=Sun..6=Sat
+  const back = day === 0 ? 6 : day - 1;
+  out.setDate(out.getDate() - back);
+  out.setHours(0, 0, 0, 0);
+  return out;
+}
+
+/** «19—25 мая» — week range header for the week view. */
+export function formatWeekRangeRu(start: Date, end: Date): string {
+  const startDay = start.getDate();
+  const endDay = end.getDate();
+  const startMonth = MONTHS_GEN[start.getMonth()] ?? "";
+  const endMonth = MONTHS_GEN[end.getMonth()] ?? "";
+  if (start.getMonth() === end.getMonth()) {
+    return `${startDay}—${endDay} ${endMonth}`;
+  }
+  return `${startDay} ${startMonth} — ${endDay} ${endMonth}`;
+}
+
+/** «Май 2026» — month-view header. */
+export function formatMonthHeaderRu(date: Date): string {
+  const m = MONTHS_GEN[date.getMonth()] ?? "";
+  const capitalised = m.charAt(0).toUpperCase() + m.slice(1);
+  return `${capitalised} ${date.getFullYear()}`;
+}
+
+/** Pull HH:MM from an ISO UTC datetime, converted to local. */
+export function localHmFromIso(iso: string): string {
+  return formatTimeHM(iso);
+}
+
+/** Add minutes to an HH:MM string. Returns HH:MM (24h). */
+export function addMinutesHm(hm: string, minutes: number): string {
+  const [h, m] = hm.split(":").map((s) => Number(s));
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return hm;
+  let total = (h as number) * 60 + (m as number) + minutes;
+  total = Math.max(0, Math.min(total, 24 * 60 - 1));
+  const hh = Math.floor(total / 60);
+  const mm = total % 60;
+  return `${pad2(hh)}:${pad2(mm)}`;
+}
