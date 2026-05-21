@@ -272,3 +272,206 @@ class TestEmptyRegistry:
     def test_no_streams_returns_zero(self, fake_redis):
         processed = consumer.consume_once()
         assert processed == 0
+
+
+# ---------------------------------------------------------------------------
+# Tenancy retro B4 — requires_tenant tag + STRICT_TENANT_REFUSE flag
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB4RequiresTenantTag:
+    """Pre-fix workers silently entered ``tenant_scope(None)`` for every
+    handler when ``resolved_tenant_id`` was empty/invalid. Reads
+    returned empty + warn but handlers proceeded on phantom-tenant
+    context. Post-fix the ``requires_tenant`` ClassVar + ``STRICT_TENANT_REFUSE``
+    settings flag let strict-tenant handlers DLQ entries cleanly OR
+    log-only during the rollout soak.
+    """
+
+    def test_default_requires_tenant_is_true(self):
+        # The default conservative tag — every handler is presumed to
+        # need a tenant unless it explicitly opts out.
+        class _DefaultHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        assert _DefaultHandler.requires_tenant is True
+
+    def test_log_only_mode_proceeds_with_none_tenant(self, fake_redis, settings, caplog):
+        # STRICT_TENANT_REFUSE=False (default) → handler runs against
+        # tenant_scope(None), ERROR log captures the violation.
+        settings.STRICT_TENANT_REFUSE = False
+        captured: dict[str, Any] = {}
+
+        @register("ingress:b4-log-only")
+        class _StrictHandler(TenantAwareTask):
+            # requires_tenant inherited as True.
+            def handle(self, payload):  # noqa: ANN001
+                captured["tenant"] = current_tenant()
+                captured["ran"] = True
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-log-only",
+                {"data": json.dumps({}), "trace_id": "t-b4-log"},
+            )
+            with caplog.at_level("ERROR", logger="apps.workers.base"):
+                processed = consumer.consume_once(streams=["ingress:b4-log-only"])
+
+            assert processed == 1
+            assert captured.get("ran") is True
+            assert captured.get("tenant") is None
+            assert any(
+                "tenant_required_missing" in rec.message and "log-only mode" in rec.message
+                for rec in caplog.records
+            ), "expected ERROR log in log-only mode"
+        finally:
+            clear_registry()
+
+    def test_strict_mode_dlqs_handler_with_required_tenant_missing(
+        self, fake_redis, settings, caplog
+    ):
+        # STRICT_TENANT_REFUSE=True → handler refuses to dispatch,
+        # raises TenantRequiredButMissing. The consumer treats this
+        # like any other handler exception (no XACK; PEL retains for
+        # DLQ retry policy).
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+        ran = {"handle_called": False}
+
+        @register("ingress:b4-strict")
+        class _StrictHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                ran["handle_called"] = True
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-strict",
+                {"data": json.dumps({}), "trace_id": "t-b4-strict"},
+            )
+            with caplog.at_level("ERROR", logger="apps.workers.base"):
+                # consumer.consume_once swallows handler exceptions
+                # (no XACK; entry stays in PEL). The raise is
+                # contained — test verifies handle was NOT called.
+                consumer.consume_once(streams=["ingress:b4-strict"])
+
+            # Handler MUST NOT have been invoked.
+            assert ran["handle_called"] is False
+            # DLQ-side log is present.
+            assert any(
+                "tenant_required_missing" in rec.message and "DLQ" in rec.message
+                for rec in caplog.records
+            ), "expected DLQ ERROR log"
+            # And the exception class name shows up on the
+            # worker.handler_failed event payload.
+            assert TenantRequiredButMissing.__name__
+        finally:
+            clear_registry()
+
+    def test_tenant_optional_handler_logs_info(self, fake_redis, settings, caplog):
+        # requires_tenant=False handler runs with tenant_scope(None)
+        # cleanly — INFO log, no ERROR.
+        settings.STRICT_TENANT_REFUSE = True  # even strict mode allows opt-out
+        ran = {"ran": False}
+
+        @register("ingress:b4-optional")
+        class _SystemHandler(TenantAwareTask):
+            # System-tier handler: declares itself tenant-optional.
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                ran["ran"] = True
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-optional",
+                {"data": json.dumps({}), "trace_id": "t-b4-opt"},
+            )
+            with caplog.at_level("INFO", logger="apps.workers.base"):
+                processed = consumer.consume_once(streams=["ingress:b4-optional"])
+
+            assert processed == 1
+            assert ran["ran"] is True
+            assert any("tenantless_handler" in rec.message for rec in caplog.records), (
+                "expected INFO-level tenantless_handler log"
+            )
+            # No ERROR-level tenant_required logs.
+            assert not any(
+                rec.levelname == "ERROR" and "tenant_required" in rec.message
+                for rec in caplog.records
+            )
+        finally:
+            clear_registry()
+
+    def test_strict_mode_with_tenant_present_proceeds_normally(self, fake_redis, settings, db):
+        # Negative regression: strict mode must NOT affect handlers
+        # whose entry carries a valid tenant.
+        settings.STRICT_TENANT_REFUSE = True
+        captured: dict[str, Any] = {}
+
+        tenant = Tenant.objects.create(slug="b4-ok", name="B4-OK")
+
+        @register("ingress:b4-strict-ok")
+        class _StrictHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                captured["tenant_id"] = current_tenant().id if current_tenant() else None
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-strict-ok",
+                {
+                    "data": json.dumps({}),
+                    "trace_id": "t-b4-ok",
+                    "resolved_tenant_id": str(tenant.id),
+                },
+            )
+            processed = consumer.consume_once(streams=["ingress:b4-strict-ok"])
+
+            assert processed == 1
+            assert captured.get("tenant_id") == tenant.id
+        finally:
+            clear_registry()
+
+    def test_tenant_optional_handler_with_tenant_present_proceeds_normally(
+        self, fake_redis, settings, db, caplog
+    ):
+        # Completes the 2x2 enforcement matrix (closes reviewer Y3
+        # missing test cell): requires_tenant=False handler that
+        # happens to receive a tenant-tagged entry must silently
+        # proceed — no INFO «tenantless» log, no ERROR. Handler sees
+        # the real tenant via current_tenant() and dispatches normally.
+        settings.STRICT_TENANT_REFUSE = True  # irrelevant when tenant present
+        captured: dict[str, Any] = {}
+
+        tenant = Tenant.objects.create(slug="b4-opt-ok", name="B4-Opt-OK")
+
+        @register("ingress:b4-opt-ok")
+        class _SystemHandler(TenantAwareTask):
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                captured["tenant_id"] = current_tenant().id if current_tenant() else None
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-opt-ok",
+                {
+                    "data": json.dumps({}),
+                    "trace_id": "t-b4-opt-ok",
+                    "resolved_tenant_id": str(tenant.id),
+                },
+            )
+            with caplog.at_level("INFO", logger="apps.workers.base"):
+                processed = consumer.consume_once(streams=["ingress:b4-opt-ok"])
+
+            assert processed == 1
+            assert captured.get("tenant_id") == tenant.id
+            # No tenantless / tenant_required logs — handler dispatched
+            # cleanly with real tenant in scope.
+            assert not any(
+                "tenantless_handler" in rec.message or "tenant_required_missing" in rec.message
+                for rec in caplog.records
+            ), "expected no tenant-status logs when tenant is present"
+        finally:
+            clear_registry()
