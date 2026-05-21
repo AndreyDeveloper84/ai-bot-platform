@@ -990,8 +990,9 @@ export function AdminMasterDetailScreen({ me }: Props) {
         <button
           type="button"
           className="btn-secondary"
-          disabled
-          title="Скоро — Bundle 3 (MM4)"
+          onClick={() =>
+            navigate(`/admin/services?master_id=${encodeURIComponent(master.id)}`)
+          }
         >
           {`Редактировать (${master.services.length}) →`}
         </button>
