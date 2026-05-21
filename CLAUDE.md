@@ -21,10 +21,10 @@ The two backends communicate via:
 
 1. **No duplicate canonical state.** If Ayla owns it, bot-platform may cache or mirror — never own. Reverse also true.
 2. **No direct cross-repo DB access.** Both backends only talk REST + events. No shared tables, no cross-repo `psycopg2`.
-3. **No new MVP features during Phase 0.** Only refactor and decoupling work merges. The Phase 0 sprint plan is at `docs/plans/2026-05-20-phase-0-sprint-plan.md`.
+3. **No new MVP features merge until Phase 0 close criteria are met.** Allowed during freeze: bug fixes, infra migration, rebrand, event contract code, ADR/sprint docs, Sprint 1 EPICs (Track A). The Phase 0 sprint plan is at `docs/plans/2026-05-20-phase-0-sprint-plan.md`. If your work doesn't fit one of those allow-list categories, stop and confirm with tech lead before merging.
 4. **bot-platform does NOT grow new transactional domains.** Any new transactional state belongs to Ayla.
 5. **Transactional tools in bot-platform skills are REST wrappers.** bot-platform never DB-writes booking, payment, or catalog. If you're tempted to add such a write, you're about to violate the architecture — stop and confirm with tech lead.
-6. **JWT `tenant_id` claim = `active_tenant_id`.** Verify the claimed relationship via `TenantUserRelationship`.
+6. **JWT `tenant_id` claim = `active_tenant_id`.** Verify the claimed relationship via `TenantUserRelationship`. For global AI memory requests (memory layer queries), `tenant_id` MAY be null — means «global user scope, not tenant-scoped».
 7. **Every cross-service event has `event_version`. Consumers MUST be idempotent.** See `docs/architecture/event-contract.md` §4 + §5.
 
 ### Where to put new code
@@ -62,7 +62,7 @@ Phase 0 is running with parallel agent streams (Alpha/Beta/Gamma) per `docs/plan
 4. `docs/plans/2026-05-20-phase-0-sprint-plan.md` — current sprint plan with bucket-by-bucket scope.
 5. `docs/plans/2026-05-20-phase-0-parallel-agent-runbook.md` — your stream's anti-touch list + sync handshakes.
 6. `docs/plans/2026-05-21-developer-agent-workflow.md` — the universal 10-phase regimen.
-7. `docs/architecture.md` — the older Phase 0 design doc (still authoritative for in-repo architecture; reads §2 in light of ADR-0009 refinement).
+7. `docs/architecture.md` — the older Phase 0 design doc (still authoritative for in-repo architecture; read §2 in light of ADR-0009 refinement).
 
 ---
 

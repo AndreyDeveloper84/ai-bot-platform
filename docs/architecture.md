@@ -35,10 +35,10 @@ Three-repo split — originally ADR-0002, refined by **[ADR-0009](adr/ADR-0009-a
 
 1. No duplicate canonical state — if Ayla owns it, bot-platform may cache or mirror, never own. Reverse also true.
 2. No direct cross-repo DB access — both backends talk REST + events only. No shared tables, no cross-repo `psycopg2`.
-3. Phase 0 freeze on new MVP features — only refactor and decoupling work merges.
+3. No new MVP features merge until Phase 0 close criteria are met. Allowed during freeze: bug fixes, infra migration, rebrand, event contract code, ADR/sprint docs, Sprint 1 EPICs (Track A).
 4. bot-platform does NOT grow new transactional domains. Any new transactional state goes to Ayla.
 5. Transactional tools in bot-platform skills are REST wrappers — bot-platform never DB-writes booking / payment / catalog.
-6. JWT `tenant_id` claim = `active_tenant_id`; verify via `TenantUserRelationship`.
+6. JWT `tenant_id` claim = `active_tenant_id`; verify via `TenantUserRelationship`. For global AI memory requests (memory layer queries), `tenant_id` MAY be null — means «global user scope, not tenant-scoped».
 7. Every cross-service event has `event_version`; consumers idempotent. See [`docs/architecture/event-contract.md`](architecture/event-contract.md).
 
 Inside `ai-bot-platform/`:
