@@ -238,3 +238,56 @@ class TestParseMaxWebhookCallback:
         payload["message"].pop("recipient")
         with pytest.raises(ParseError, match="recipient.chat_id"):
             parse_max_webhook(payload)
+
+
+def _bot_started_payload(**overrides) -> dict:
+    """Build a minimal MAX `bot_started` lifecycle payload."""
+    base = {
+        "update_type": "bot_started",
+        "timestamp": 1731320000000,
+        "chat_id": 67890,
+        "user": {"user_id": 12345, "name": "Иван", "lang": "ru"},
+        "user_locale": "ru",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestParseMaxWebhookBotStarted:
+    """``bot_started`` — first contact lifecycle event. Synthesised as
+    ``text="/start"`` so welcome skill matches via its existing predicate.
+    New-client onboarding works whether the MAX client also auto-sends
+    a /start text or not (the welcome skill is idempotent on /start).
+    """
+
+    def test_synthesises_slash_start_text(self):
+        ev = parse_max_webhook(_bot_started_payload())
+        assert ev.text == "/start"
+        assert ev.channel == "max"
+        assert ev.channel_user_id == "12345"
+        assert ev.chat_id == "67890"
+
+    def test_synthetic_message_id_prefixed(self):
+        """Synthetic channel_message_id must not collide with a real
+        message mid — prefix with 'bot_started:' to keep the idempotency
+        namespace clean."""
+
+        ev = parse_max_webhook(_bot_started_payload())
+        assert ev.channel_message_id.startswith("bot_started:12345:")
+
+    def test_deeplink_payload_preserved_in_raw(self):
+        """``payload`` carries an acquisition signal (e.g. ``ref=campaign``).
+        Stash on ``raw`` so a downstream attribution skill can read it."""
+
+        ev = parse_max_webhook(_bot_started_payload(payload="ref=ig-aug-2026"))
+        assert ev.raw["payload"] == "ref=ig-aug-2026"
+
+    def test_missing_user_raises(self):
+        with pytest.raises(ParseError, match="user.user_id"):
+            parse_max_webhook(_bot_started_payload(user={}))
+
+    def test_missing_chat_id_raises(self):
+        payload = _bot_started_payload()
+        payload.pop("chat_id")
+        with pytest.raises(ParseError, match="chat_id"):
+            parse_max_webhook(payload)

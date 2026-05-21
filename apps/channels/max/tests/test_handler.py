@@ -371,14 +371,14 @@ class TestKeyboardPassThrough:
         att = attachments[0]
         assert att["type"] == "inline_keyboard"
         buttons = att["payload"]["buttons"]
-        # 4 rows (default columns=1): 3 link + 1 callback.
-        assert len(buttons) == 4
+        # 7 rows (default columns=1): 3 salon link + 4 wellness/FAQ callback.
+        assert len(buttons) == 7
         # First button is the link to /catalog.
         assert buttons[0][0]["type"] == "link"
         assert buttons[0][0]["url"] == "https://miniapp-dev.example/catalog"
         # Last button is the callback ask prompt.
-        assert buttons[3][0]["type"] == "callback"
-        assert buttons[3][0]["payload"] == "cb:welcome:ask"
+        assert buttons[-1][0]["type"] == "callback"
+        assert buttons[-1][0]["payload"] == "cb:welcome:ask"
 
     def test_callback_tap_runs_welcome_ask_prompt(self, tenant_a, mock_send, fake_redis, settings):
         """User taps «❓ Задать вопрос» — bot replies with the prompt text
@@ -407,6 +407,34 @@ class TestKeyboardPassThrough:
 
         # Second call short-circuits on AlreadyClaimed.
         assert len(mock_send) == 1
+
+
+class TestUnsupportedUpdateTypeSkipped:
+    """ParseError from unknown update types must NOT poison the PEL.
+    Handler logs + emits a skip event + returns cleanly so the consumer
+    ACKs. Regression guard for dev incident 2026-05-21 where bot_started
+    blocked all subsequent inbound until manual PEL drain.
+    """
+
+    def test_bot_started_does_not_raise(self, tenant_a, mock_send, fake_redis, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            # Must not raise — handler returns cleanly.
+            max_handler.handle_max_event({"update_type": "bot_started"})
+
+        # No outbound, no rows — handler short-circuited.
+        assert len(mock_send) == 0
+
+    def test_unknown_update_type_emits_skip_event(self, tenant_a, mock_send, fake_redis, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event({"update_type": "message_edited", "message": {}})
+
+        ev = Event.objects.filter(event_type="channels.max.handler.skipped").first()
+        assert ev is not None
+        assert ev.payload["update_type"] == "message_edited"
 
 
 class TestOutboundFailure:

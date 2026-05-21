@@ -69,7 +69,7 @@ from apps.channels.max.outbound import (
     make_inline_keyboard_attachment_rows,
     send_message,
 )
-from apps.channels.max.parser import CanonicalEvent, parse_max_webhook
+from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
 from apps.conversations.models import Conversation
 from apps.conversations.services import record_message, resolve_active_conversation
 from apps.events.services import emit
@@ -193,7 +193,31 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
       propagates (retry policy on MAX API side, not ours).
     """
 
-    event = parse_max_webhook(payload)
+    # Tolerate-and-skip for unsupported update types: parser raises
+    # ParseError, we log + emit an event + return cleanly. This prevents
+    # PEL retry-storms when MAX delivers a lifecycle update we don't
+    # parse yet (e.g. bot_started, message_edited). Dev incident
+    # 2026-05-21: bot_started poisoned the PEL because handler raised
+    # and consumer didn't ACK — bot went silent for the user.
+    try:
+        event = parse_max_webhook(payload)
+    except ParseError as exc:
+        logger.info(
+            "channels.max.handler.skipped_unsupported update_type=%r reason=%s",
+            (payload or {}).get("update_type") if isinstance(payload, dict) else None,
+            exc,
+        )
+        emit(
+            "channels.max.handler.skipped",
+            payload={
+                "update_type": (payload or {}).get("update_type")
+                if isinstance(payload, dict)
+                else None,
+                "reason": str(exc)[:200],
+            },
+        )
+        return
+
     logger.info(
         "channels.max.handler.received channel_user_id=%s text_len=%d attachments=%d",
         event.channel_user_id,
