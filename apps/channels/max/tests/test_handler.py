@@ -122,7 +122,17 @@ class TestWelcomeBranch:
 
 
 class TestAttachmentOnly:
-    def test_attachment_only_replies_with_no_echo_fallback(
+    """Sprint 9 / P1 (DRF-818) — food_scanner skill now owns attachment-only
+    turns and runs the Ayla recognition path. The Sprint 2 ``_FALLBACK_NO_ECHO``
+    string survives only as the registry-empty defensive fallback in
+    ``_echo_text`` — it does not fire in the normal pipeline.
+
+    Verify food_scanner claims the turn and emits its photo-bytes prompt
+    (no real Ayla call — channel adapter hasn't stashed bytes on the
+    conversation, so food_scanner returns ``PHOTO_NO_BYTES``).
+    """
+
+    def test_attachment_only_routes_to_food_scanner(
         self, tenant_a, mock_send, fake_redis, settings
     ):
         settings.STRICT_TENANT_SCOPE = "strict"
@@ -133,7 +143,13 @@ class TestAttachmentOnly:
                     attachments=[{"type": "image", "payload": {"url": "x"}}],
                 )
             )
-        assert mock_send[0]["text"] == "(нечем эхом) 🙂"
+        # Photo-bytes path: channel adapter didn't stash bytes (web
+        # adapter convention not yet wired for MAX), so food_scanner
+        # returns the graceful "не получилось скачать" prompt rather
+        # than crashing on a None scan.
+        from apps.skills.food_scanner.skill import PHOTO_NO_BYTES
+
+        assert mock_send[0]["text"] == PHOTO_NO_BYTES
 
 
 class TestEmptyMessage:
