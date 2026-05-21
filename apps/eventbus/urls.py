@@ -1,9 +1,10 @@
-"""URL routes for the internal event ingest channel (Phase 0 / #432).
+"""URL routes for the cross-service event ingest channel.
 
 Mounted at ``/api/v1/internal/events/`` from :mod:`config.urls`. One
-route today — the ingest stub at ``ingest/``. The per-event-name
-dispatch handler that fans events to registered consumers lands with
-Beta #441 (``event-contract.md``) + Gamma #442-#446.
+route — the ingest endpoint. Per-event-name dispatch happens inside
+:class:`apps.eventbus.views.InternalEventsIngestView` against the
+:mod:`apps.eventbus.ingest_dispatcher` registry; consumer modules
+(#442-#446) register their handlers at app-ready time.
 """
 
 from __future__ import annotations
@@ -16,5 +17,9 @@ from apps.eventbus.views import InternalEventsIngestView
 app_name = "eventbus_internal"
 
 urlpatterns = [
-    path("ingest/", InternalEventsIngestView.as_view(), name="ingest"),
+    # Trailing slash deliberately OMITTED — matches
+    # `docs/architecture/event-contract.md` §6.1 exactly. A 301
+    # ``APPEND_SLASH`` redirect would drop the body on POST, breaking
+    # HMAC verification (signature is computed over the body).
+    path("ingest", InternalEventsIngestView.as_view(), name="ingest"),
 ]

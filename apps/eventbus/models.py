@@ -163,3 +163,109 @@ class DomainEvent(models.Model):
 
     def __str__(self) -> str:
         return f"DomainEvent[{self.event_name} {self.event_id}]"
+
+
+# ---------------------------------------------------------------------------
+# Cross-service ingest models — `docs/architecture/event-contract.md`
+# §5 (idempotency dedupe table) + §6.4 (dead-letter table).
+#
+# DISTINCT from :class:`DomainEvent` above which models the IN-PROCESS
+# bus. These two models persist state for the inbound cross-service
+# channel from Ayla djangoproject.
+# ---------------------------------------------------------------------------
+
+
+class IngestDedupe(models.Model):
+    """Idempotency ledger for cross-service inbound events.
+
+    `event-contract.md` §5.1 — consumers dedupe on ``event_id``. A row
+    here means an event has been processed end-to-end (the consumer's
+    side-effect + this row are written in the SAME DB transaction per
+    §5.1, so a crash before COMMIT rolls both back and a retry
+    re-processes cleanly).
+
+    Retention: §5.3 says ≥120 days (max of DLQ retention 90d + dedupe
+    safety margin 30d). Cleanup is a Celery beat (out of scope for
+    #432 itself; filed as a follow-up).
+    """
+
+    # Same opt-out as DomainEvent above — system reads cross-tenant.
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    event_id = models.CharField(
+        max_length=26,
+        primary_key=True,
+        help_text="ULID from the cross-service envelope §2.event_id. "
+        "PK so concurrent inserts hit a uniqueness constraint "
+        "rather than racing in application code.",
+    )
+    event_name = models.CharField(max_length=120)
+    event_version = models.IntegerField()
+    received_at = models.DateTimeField(auto_now_add=True)
+    processed_at = models.DateTimeField(
+        help_text="Set to ``now()`` in the same transaction as the consumer's side-effect."
+    )
+
+    class Meta:
+        verbose_name = "Ingest dedupe row"
+        verbose_name_plural = "Ingest dedupe ledger"
+        indexes = [
+            models.Index(fields=["received_at"], name="evbus_ingest_dedupe_recv_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"IngestDedupe[{self.event_id}]"
+
+
+class IngestDLQ(models.Model):
+    """Dead-letter table for cross-service inbound events.
+
+    `event-contract.md` §6.4 + §8.4/§8.5 — events that fail processing
+    after retries OR carry an unknown ``event_name`` / unknown
+    ``event_version`` are persisted here for operator investigation.
+
+    Retention: §6.4 says 90 days. Cleanup is a Celery beat (follow-up).
+    Manual replay tooling: §5.3 mentions an ``X-Ayla-Force-Process``
+    header; that's a follow-up ticket — the table shape is fixed now
+    so replay tooling can land separately without a migration.
+    """
+
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    id = models.BigAutoField(primary_key=True)
+    event_id = models.CharField(
+        max_length=26,
+        db_index=True,
+        help_text="ULID from envelope §2.event_id. Indexed for replay lookups.",
+    )
+    event_name = models.CharField(max_length=120, db_index=True)
+    event_version = models.IntegerField()
+    reason = models.CharField(
+        max_length=64,
+        help_text="Slug from `event-contract.md` §8 (e.g. ``unknown_event_name``, "
+        "``unknown_event_version``, ``handler_exception``, ``retry_budget_exhausted``).",
+    )
+    raw_body = models.JSONField(
+        help_text="Full envelope payload at receipt. PII rules §7 already "
+        "limit what may appear here, but operators MUST treat this table "
+        "as 152-ФЗ-sensitive nonetheless."
+    )
+    dead_lettered_at = models.DateTimeField(auto_now_add=True)
+    replayed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Set when an operator manually re-publishes the entry. "
+        "Distinct from received-during-replay; the latter goes through "
+        "the normal dedupe ledger above.",
+    )
+
+    class Meta:
+        verbose_name = "Ingest DLQ entry"
+        verbose_name_plural = "Ingest DLQ entries"
+        indexes = [
+            models.Index(fields=["-dead_lettered_at"], name="evbus_dlq_recent_idx"),
+            models.Index(fields=["reason"], name="evbus_dlq_reason_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"IngestDLQ[{self.event_name} {self.event_id} {self.reason}]"
