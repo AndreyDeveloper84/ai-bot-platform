@@ -58,6 +58,69 @@ export function getInitData(): string {
   return fromEnv;
 }
 
+/**
+ * Deeplink payload passed by MAX when the Mini App is opened via an
+ * ``open_app`` inline-keyboard button. Welcome skill emits payloads
+ * shaped as ``route=<key>`` (e.g. ``route=catalog``); ``parseStartRoute``
+ * maps that to the matching React Router path.
+ *
+ * MAX delivers the button's ``payload`` field as
+ * ``initDataUnsafe.start_param`` (mirroring Telegram WebApp's
+ * convention). Returns empty string when:
+ * - the Mini App wasn't opened via an open_app button (no payload),
+ * - the WebApp bridge is unavailable (dev browser without
+ *   ``VITE_DEV_INIT_DATA``),
+ * - ``start_param`` is missing / not a string.
+ *
+ * Dev override: ``VITE_DEV_START_PARAM`` env var simulates a payload
+ * when running ``npm run dev`` outside MAX.
+ */
+export function getStartPayload(): string {
+  const fromBridge = maxBridge()?.initDataUnsafe;
+  if (fromBridge && typeof fromBridge["start_param"] === "string") {
+    return fromBridge["start_param"];
+  }
+  const fromEnv = (import.meta.env.VITE_DEV_START_PARAM as string | undefined) ?? "";
+  return fromEnv;
+}
+
+/**
+ * Welcome-skill deeplink → in-app path. Returns null for unknown / empty.
+ *
+ * CONTRACT MIRROR: this map is the consumer side of the payload values
+ * emitted by ``apps/skills/welcome/skill.py::_welcome_buttons``. Adding
+ * a new route here requires adding the matching button there in the
+ * same PR, or the welcome menu will ship a dead deeplink.
+ */
+const _ROUTE_MAP: Record<string, string> = {
+  catalog: "/catalog",
+  visits: "/my-visits",
+  profile: "/me",
+};
+
+/**
+ * Parse a MAX start_param payload of shape ``key=value[&key=value...]``
+ * and return the in-app path for ``route=<known>``, or ``null`` for
+ * empty / unknown / malformed input. Permissive: ignores unknown keys
+ * so future welcome additions (``ref=campaign-x``) don't accidentally
+ * break navigation.
+ *
+ * Examples:
+ *   parseStartRoute("route=catalog")        → "/catalog"
+ *   parseStartRoute("route=visits&ref=ig")  → "/my-visits"
+ *   parseStartRoute("route=unknown")        → null
+ *   parseStartRoute("")                     → null
+ *   parseStartRoute("garbage")              → null
+ */
+export function parseStartRoute(payload: string): string | null {
+  if (!payload) return null;
+  // URLSearchParams accepts both "a=b&c=d" and "a=b" cleanly.
+  const params = new URLSearchParams(payload);
+  const route = params.get("route");
+  if (!route) return null;
+  return _ROUTE_MAP[route] ?? null;
+}
+
 export function signalReady(): void {
   maxBridge()?.ready?.();
 }
