@@ -409,6 +409,34 @@ class TestKeyboardPassThrough:
         assert len(mock_send) == 1
 
 
+class TestUnsupportedUpdateTypeSkipped:
+    """ParseError from unknown update types must NOT poison the PEL.
+    Handler logs + emits a skip event + returns cleanly so the consumer
+    ACKs. Regression guard for dev incident 2026-05-21 where bot_started
+    blocked all subsequent inbound until manual PEL drain.
+    """
+
+    def test_bot_started_does_not_raise(self, tenant_a, mock_send, fake_redis, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            # Must not raise — handler returns cleanly.
+            max_handler.handle_max_event({"update_type": "bot_started"})
+
+        # No outbound, no rows — handler short-circuited.
+        assert len(mock_send) == 0
+
+    def test_unknown_update_type_emits_skip_event(self, tenant_a, mock_send, fake_redis, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event({"update_type": "message_edited", "message": {}})
+
+        ev = Event.objects.filter(event_type="channels.max.handler.skipped").first()
+        assert ev is not None
+        assert ev.payload["update_type"] == "message_edited"
+
+
 class TestOutboundFailure:
     def test_max_api_error_propagates_after_persisting_assistant_message(
         self, tenant_a, fake_redis, settings, monkeypatch
