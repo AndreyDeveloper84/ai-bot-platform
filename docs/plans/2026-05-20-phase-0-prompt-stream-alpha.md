@@ -31,8 +31,12 @@ separate windows. Strict file-ownership rules below — do NOT cross them.
 4. C:\Users\user\PycharmProjects\ai-bot-platform\docs\plans\2026-05-21-developer-agent-workflow.md
    **(Universal 10-phase developer workflow. MANDATORY for every
    ticket: Understand → Design → Setup → TDD → Self-review → Commit →
-   Push+PR → Code Reviewer → Pre-merge → Merge+cleanup. Plus anti-
-   patterns and special-case protocols.)**
+   Push+PR → Code Reviewer → Pre-merge → Merge+cleanup. Pay special
+   attention to: two-step schema migration pattern for #420/#424/#426
+   (additive first, drop later — never big-bang); pre-commit hook
+   recovery (NEW commit, never --amend); concurrency-test discipline
+   for outbox worker (#425) since SQLite hides race conditions that
+   Postgres surfaces. Plus anti-patterns and special-case protocols.)**
 
 If any of those paths fails, the merge of PR #449 may not have propagated
 locally — `cd ai-bot-platform && git fetch origin dev && git checkout dev

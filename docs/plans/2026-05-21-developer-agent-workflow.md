@@ -24,7 +24,7 @@
    - Test scenarios per acceptance checkbox.
    - Migration strategy (if DB touched) — **two-step where possible** (additive first, drop later).
    - Failure modes considered (what breaks if this PR is bad).
-2. **B.2** For high-risk tickets (schema migrations, payment flow, security boundaries, event contracts), additionally invoke the **Plan** sub-agent (`Agent` tool with `subagent_type=Plan`) for an architectural-grade second pass on the plan. Output goes to the PR body as the "Plan" section.
+2. **B.2** For high-risk tickets (schema migrations, payment flow, security boundaries, event contracts), additionally dispatch a **Plan** sub-agent via the Task/Agent tool for an architectural-grade second pass on the plan. (Subagent type names vary by harness — check the available agent list via `Skill` or `ToolSearch` first; common names: `Plan`, `Software Architect`, or `general-purpose` with planning instructions.) Output goes to the PR body as the "Plan" section.
 3. **B.3** Save the plan inline in your scratchpad OR as `docs/plans/phase-0/<stream>/<ticket>-plan.md` if the tech lead asks for traceability. Default: inline.
 4. **B.4** Re-read ADR-0009 hard rules #1–#7. Confirm your plan does not violate any:
    - No duplicate canonical state.
@@ -97,7 +97,7 @@
 
 ## Phase H — Code Reviewer (MANDATORY)
 
-1. **H.1** Immediately after opening PR, dispatch the **Code Reviewer** sub-agent (`Agent` tool with `subagent_type=Code Reviewer`). Memory `feedback_pr_workflow_code_reviewer` — non-negotiable on every PR diff.
+1. **H.1** Immediately after opening PR, dispatch a **Code Reviewer** sub-agent via the Task/Agent tool. (Subagent name is `Code Reviewer` in the current harness; if absent, use `general-purpose` with reviewer instructions.) Memory `feedback_pr_workflow_code_reviewer` — non-negotiable on every PR diff.
 2. **H.2** Prompt template:
    ```
    Review PR #<NNN> in AndreyDeveloper84/ai-bot-platform (branch
