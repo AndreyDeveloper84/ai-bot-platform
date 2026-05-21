@@ -74,6 +74,60 @@ def resolve_tenant_by_id_string(tenant_id_raw: str):
         return None
 
 
+def _resolve_requires_tenant_trusted(cls: type) -> bool:
+    """Walk MRO and return the trusted ``requires_tenant`` value for ``cls``.
+
+    «Trusted» means: external mixin ancestors (anything that does NOT
+    descend from ``TenantAwareTask``) are SKIPPED. The first
+    ``TenantAwareTask`` descendant in MRO order (subclass-first) with
+    ``requires_tenant`` in its own ``__dict__`` wins. If none declare,
+    the conservative default ``True`` is returned.
+
+    Non-bool values raise ``TypeError`` (catches @property descriptors
+    and other non-literal attacks — adversarial-pass B-4).
+
+    Used by ``TenantAwareTask.__init_subclass__`` to freeze a snapshot
+    at class creation, and as a runtime fallback in ``__call__`` when
+    the snapshot is missing (e.g. an ``__init_subclass__`` shadow
+    attack — adversarial-pass B-3).
+    """
+
+    for klass in cls.__mro__:
+        # Skip the ABC base of TenantAwareTask itself (object, ABC).
+        if klass is object:
+            continue
+        # Skip external mixins — they do not contribute trust.
+        if not (klass is TenantAwareTask or _is_tenant_aware_task_subclass(klass)):
+            continue
+        if "requires_tenant" in klass.__dict__:
+            val = klass.__dict__["requires_tenant"]
+            if type(val) is not bool:
+                raise TypeError(
+                    f"{cls.__name__}.requires_tenant resolved to a "
+                    f"non-bool value on {klass.__name__} "
+                    f"(got {type(val).__name__}) — properties, "
+                    "descriptors, and runtime non-bool mutations are "
+                    "rejected (B4 adversarial-pass type purity)."
+                )
+            return val
+    return True
+
+
+def _is_tenant_aware_task_subclass(klass: type) -> bool:
+    """Returns True if ``klass`` is a subclass of ``TenantAwareTask``.
+
+    Wrapper around ``issubclass`` that handles the bootstrap case:
+    ``TenantAwareTask`` itself is not yet bound when its own class
+    body is being evaluated. The check is only meaningful AFTER
+    ``TenantAwareTask`` is in module scope.
+    """
+
+    try:
+        return issubclass(klass, TenantAwareTask)
+    except NameError:
+        return False
+
+
 class TenantRequiredButMissing(Exception):
     """Raised by ``TenantAwareTask.__call__`` when a handler declared
     ``requires_tenant = True`` but the stream entry's
@@ -130,12 +184,21 @@ class TenantAwareTask(ABC):
 
     requires_tenant: ClassVar[bool] = True
 
+    # Frozen snapshot of the trusted ``requires_tenant`` resolution,
+    # written by ``__init_subclass__`` at subclass-creation time.
+    # Declared here at class level so mypy sees the attribute at the
+    # ``cls._RESOLVED_REQUIRES_TENANT`` read sites below (PR #497
+    # introduced the assignment but no declaration → broke `attr-defined`
+    # mypy gate on dev).
+    _RESOLVED_REQUIRES_TENANT: ClassVar[bool] = True
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """B2 (Tenancy retro B4 follow-up) — MRO bypass defence.
 
-        A mixin sibling of ``TenantAwareTask`` that declares
-        ``requires_tenant = False`` would silently shadow this base
-        class's ``True`` default via MRO resolution::
+        Three checks at class creation, plus a frozen snapshot for the
+        runtime defence in ``__call__``. Threat model below.
+
+        **Threat 1 — external mixin shadows the attribute:**
 
             class _SystemMixin:
                 requires_tenant = False  # silent bypass
@@ -144,16 +207,31 @@ class TenantAwareTask(ABC):
                 def handle(self, payload): ...
 
         ``MyHandler.requires_tenant`` resolves to ``False`` even though
-        nobody wrote that on ``MyHandler`` itself. Strict-mode flips
-        would then NOT refuse a missing-tenant entry for ``MyHandler``,
-        defeating the whole defence.
+        nobody wrote that on ``MyHandler`` itself → strict-mode flip
+        would silently skip the refuse path. Defence: scan ancestors
+        between ``cls`` and ``TenantAwareTask`` for ``requires_tenant``
+        in their own ``__dict__``. Skip ancestors that themselves
+        descend from ``TenantAwareTask`` (those are legitimate opt-out
+        subclasses — e.g. ``SystemTask(TenantAwareTask)`` setting
+        ``requires_tenant=False`` then ``AuditSweepHandler(SystemTask)``).
 
-        This guard refuses any class creation where a non-
-        ``TenantAwareTask`` ancestor between the subclass and
-        ``TenantAwareTask`` defines ``requires_tenant``. Explicit
-        opt-out on the subclass itself (with a docstring justification)
-        remains allowed — that lives in the subclass's own ``__dict__``
-        and is therefore visible at review time.
+        **Threat 2 — @property / descriptor on own ``__dict__``:**
+
+            class _Sneaky(TenantAwareTask):
+                @property
+                def requires_tenant(self): return False
+
+        Passes the simple ``in __dict__`` check. Defence: type-purity —
+        own-``__dict__`` ``requires_tenant`` MUST be a literal ``bool``.
+        Properties, descriptors, callables: rejected.
+
+        **Threat 3 — ``__init_subclass__`` shadow + post-creation mutation:**
+
+        Addressed by the FROZEN SNAPSHOT stored on ``cls`` here and
+        consumed in ``__call__``. See ``_RESOLVED_REQUIRES_TENANT``
+        below. Runtime mutation of ``cls.requires_tenant = False``
+        has no effect on dispatch decisions because ``__call__`` reads
+        from the snapshot, not from ``self.requires_tenant``.
         """
 
         super().__init_subclass__(**kwargs)
@@ -164,14 +242,8 @@ class TenantAwareTask(ABC):
         except ValueError:
             return
 
+        # Threat 1: external mixin shadow.
         for ancestor in mro[1:ta_idx]:
-            # Skip ancestors that are themselves TenantAwareTask
-            # descendants — they're legitimate opt-out subclasses (e.g.
-            # ``SystemTask(TenantAwareTask)`` setting requires_tenant=False
-            # with docstring justification, then ``AuditSweepHandler``
-            # extending ``SystemTask``). The guard targets external
-            # mixins that shadow the attribute, not the documented
-            # inheritance chain.
             if issubclass(ancestor, TenantAwareTask):
                 continue
             if "requires_tenant" in ancestor.__dict__:
@@ -183,6 +255,21 @@ class TenantAwareTask(ABC):
                     f"directly on {cls.__name__} with a docstring "
                     f"justification, or remove it from {ancestor.__name__}."
                 )
+
+        # Threat 2: own-__dict__ type purity.
+        if "requires_tenant" in cls.__dict__:
+            own = cls.__dict__["requires_tenant"]
+            if type(own) is not bool:
+                raise TypeError(
+                    f"{cls.__name__}.requires_tenant must be a literal "
+                    f"`bool`, got {type(own).__name__} — properties, "
+                    "descriptors, and non-bool values are rejected "
+                    "(B4 / adversarial-pass type-purity check)."
+                )
+
+        # Threat 3: freeze the authoritative value at class creation so
+        # runtime mutation cannot bypass the check.
+        cls._RESOLVED_REQUIRES_TENANT = _resolve_requires_tenant_trusted(cls)
 
     @abstractmethod
     def handle(self, payload: dict[str, Any]) -> None:
@@ -224,12 +311,43 @@ class TenantAwareTask(ABC):
         trace_id = raw_entry.get("trace_id", "")
         payload = self._extract_payload(raw_entry)
 
+        # B2 follow-up (adversarial pass): read ``requires_tenant``
+        # from the frozen snapshot stored by ``__init_subclass__``,
+        # not from ``self.requires_tenant``. This neutralises
+        # post-creation mutation attacks (``Cls.requires_tenant = False``
+        # after import-boot) and @property abuse.
+        #
+        # If the snapshot is missing — e.g. an ``__init_subclass__``
+        # shadow attack on a descendant class blocked our hook from
+        # running — fall back to a runtime trusted-MRO walk and log
+        # a warning so the bypass is observable.
+        cls = type(self)
+        frozen = cls.__dict__.get("_RESOLVED_REQUIRES_TENANT")
+        if frozen is None:
+            # Snapshot missing on THIS class. Check the inheritance chain
+            # for a TenantAwareTask ancestor that has the snapshot
+            # (legitimate subclass-of-snapshot case). If still missing,
+            # bypass attack suspected — log + recompute live.
+            for ancestor in cls.__mro__[1:]:
+                if "_RESOLVED_REQUIRES_TENANT" in ancestor.__dict__:
+                    frozen = ancestor.__dict__["_RESOLVED_REQUIRES_TENANT"]
+                    break
+            if frozen is None:
+                logger.warning(
+                    "worker.requires_tenant_snapshot_missing handler=%s "
+                    "— __init_subclass__ shadow or bootstrap edge case; "
+                    "computing trusted value live",
+                    cls.__name__,
+                )
+                frozen = _resolve_requires_tenant_trusted(cls)
+        requires_tenant_value = bool(frozen)
+
         # B1: enter trace_id_scope BEFORE any emit so trace correlation
         # holds even when __call__ is invoked outside consumer.py's
         # outer scope (direct unit tests, replay rerun, future refactor).
         with trace_id_scope(trace_id or None):
             # Tenancy retro B4: enforce or log the requires_tenant tag.
-            if self.requires_tenant and tenant is None:
+            if requires_tenant_value and tenant is None:
                 # B3: STRICT_TENANT_REFUSE is read from `settings` each
                 # call — but `settings.STRICT_TENANT_REFUSE` itself is
                 # populated from os.environ ONCE at import time
@@ -274,7 +392,7 @@ class TenantAwareTask(ABC):
                         "strict_mode": False,
                     },
                 )
-            elif not self.requires_tenant and tenant is None:
+            elif not requires_tenant_value and tenant is None:
                 # Tenant-optional handler running without scope — INFO level.
                 logger.info(
                     "worker.tenantless_handler handler=%s trace=%s",

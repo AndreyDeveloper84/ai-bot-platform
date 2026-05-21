@@ -67,8 +67,21 @@ When the pre-flip checklist below is satisfied:
    STRICT_TENANT_REFUSE=true
    STRICT_TENANT_REFUSE_FLIP_AT=<ISO 8601 UTC, exactly now>
    ```
-2. **Restart every worker process** running `python -m apps.workers.consumer --forever`.
-   Standard pattern: `systemctl restart ai-bot-workers@*`.
+2. **Stop ALL workers BEFORE starting any.** Not a rolling restart.
+   ```
+   systemctl stop ai-bot-workers@*
+   # wait for XPENDING to drain to zero (or accept the cutover blast
+   #   radius): redis-cli XPENDING ingress:max consumers
+   systemctl start ai-bot-workers@*
+   ```
+   **Why stop-all-then-start-all (adversarial-pass D-1):** during a
+   rolling restart, half the pool runs with the old flag value and
+   half with the new. Same stream group, same PEL. An entry with
+   empty `resolved_tenant_id` assigned to an old-mode worker → logs
+   and ACKs. Identical entry on a new-mode worker → raises and stays
+   in PEL. Different treatment per entry purely by which worker
+   happened to claim it. Auditors then see inconsistent
+   `worker.tenant_required_missing` patterns for identical inputs.
 3. Verify with `journalctl -u ai-bot-workers@* | grep STRICT_TENANT_REFUSE`
    that workers picked up the new value (or via a `worker.consumed`
    event audit query after the restart timestamp).
@@ -80,17 +93,43 @@ When the pre-flip checklist below is satisfied:
 
 ## Pre-flip checklist (must pass before 2026-05-28)
 
-- [ ] PR `phase0/zeta/476-blockers-pre-flip` merged.
+- [x] PR `phase0/zeta/476-blockers-pre-flip` (#487, `dc065a8c47`) merged.
+- [x] PR `phase0/zeta/487-adversarial-followup` (#496, `5975c08`) merged.
 - [ ] At least 7 consecutive days of `worker.tenant_required_missing`
       events triaged — zero legitimate handlers in the list.
 - [ ] All registered `TenantAwareTask` subclasses audited for their
-      effective `requires_tenant` value (B2 boot-audit logging is a
-      planned follow-up; until it lands, audit via
-      `grep -rn 'class.*TenantAwareTask' apps/` + manual review).
-- [ ] XAUTOCLAIM reaper issue filed (or operator-side manual-claim
-      runbook accepted as the post-flip PEL drain path).
+      effective `requires_tenant` value. Boot-audit logging tracked
+      in **issue #502** (B2 nice-to-have); until it lands, audit via
+      `grep -rn 'class.*TenantAwareTask' apps/` + manual review.
+- [ ] **Issue #499** (XAUTOCLAIM reaper) merged OR operator accepts
+      manual-XCLAIM as the post-flip PEL drain path with a documented
+      runbook.
+- [ ] **Issue #500** (D-2 operator-side ceilings: PEL length alert,
+      per-handler rate budget, audit-table baseline + growth alert,
+      alert dedup) — all 4 items checked off.
 - [ ] Dev-team comms about the **worker-restart-required** flip
       semantics so nobody thinks the env-var flip is hot.
+
+### Adversarial-pass D-2 — operational ceilings (must be wired)
+
+Without these, strict mode + a misbehaving ingress = unbounded
+PEL growth + unbounded audit-table growth + alert flood.
+
+- [ ] **PEL length alert at N=1000.** `redis-cli XPENDING ingress:max
+      consumers IDLE 0` returns count; wire to monitoring with a 1000
+      threshold (warning) and 5000 (page). Drain via XCLAIM /
+      manual-claim runbook (or XAUTOCLAIM reaper once it ships).
+- [ ] **`worker.tenant_required_missing` per-handler rate budget.**
+      Audit dedup OR rate-limit at the emit site. Single-handler
+      runaway must cap at ~100 events/minute to bound the audit
+      table growth. Stub today; track as follow-up.
+- [ ] **Audit-table size baseline.** Snapshot `apps_audit_event`
+      table size + index size pre-flip. Set an alert at 2× baseline
+      growth rate in the 24h post-flip window — that ratio surfaces
+      a runaway before the table doubles.
+- [ ] **Alert suppression / dedup wired.** Any `worker.tenant_required_missing`
+      alert MUST dedup on `(handler, hour)` so a single bad ingress
+      doesn't flood the on-call page.
 
 ## STRICT_TENANT_REFUSE × STRICT_TENANT_SCOPE coupling
 

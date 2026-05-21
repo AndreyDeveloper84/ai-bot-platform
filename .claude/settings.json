@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__linear__linear_getIssueById",
+      "mcp__linear__linear_searchIssues",
+      "mcp__claude_ai_Linear__list_issues",
+      "mcp__claude_ai_Linear__get_issue",
+      "mcp__linear__linear_getWorkflowStates",
+      "mcp__notion__API-post-search",
+      "mcp__notion__API-get-block-children",
+      "mcp__claude_ai_Notion__notion-fetch",
+      "mcp__linear__linear_getProjectIssues",
+      "mcp__linear__linear_getIssues",
+      "mcp__linear__linear_getProjects",
+      "mcp__linear__linear_search_issues_by_identifier",
+      "mcp__linear__linear_getTeams",
+      "mcp__linear__linear_getLabels",
+      "mcp__claude_ai_Linear__list_issue_statuses",
+      "mcp__claude_ai_Notion__notion-search",
+      "mcp__claude_ai_Linear__list_teams",
+      "mcp__claude_ai_Linear__list_projects",
+      "mcp__linear__linear_getViewer",
+      "mcp__linear__linear_getCycles"
+    ]
+  }
+}
