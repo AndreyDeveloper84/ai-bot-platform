@@ -375,3 +375,162 @@ class TestRetroB3PostIncrAtomicAccounting:
         # value was used to update the Redis counter atomically.
         usage = await get_current_usage(str(tenant.id))
         assert usage.tokens_used == 8500
+
+
+# ---------------------------------------------------------------------------
+# LLM retro B2 — reserve-then-record cap enforcement (TOCTOU fix)
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB2ReserveThenRecord:
+    """Pre-fix enforce_caps read current_cost, compared against cap, then
+    returned. Two concurrent callers both read `current < cap`, both
+    proceeded, both charged — overshoot O(concurrency × max_call_cost).
+
+    Post-fix enforce_caps INCRBYs a worst-case `estimated_cost_usd`
+    before the cap check. If the post-INCR total exceeds the cap,
+    DECRBYs the reservation and raises. Each caller sees their own
+    post-INCR value (Redis INCRBY is atomic), so only the callers
+    that genuinely fit under the cap proceed. record_usage refunds
+    the delta between reservation and actual.
+    """
+
+    async def test_reservation_is_returned(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import enforce_caps
+
+        # Plenty of headroom — reservation should be created.
+        reservation = await enforce_caps(
+            str(tenant.id),
+            estimated_cost_usd=Decimal("0.05"),
+        )
+        assert reservation is not None
+        assert reservation.microcents > 0
+
+    async def test_reservation_is_refunded_on_cap_exceed(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import (
+            TenantQuotaExceeded,
+            enforce_caps,
+            get_current_usage,
+        )
+
+        # Pre-fill close to the cap so an estimate that would push over
+        # 100% is rejected.
+        await record_usage(str(tenant.id), tokens=0, cost_usd=Decimal("4.80"))
+
+        with pytest.raises(TenantQuotaExceeded) as exc_info:
+            await enforce_caps(
+                str(tenant.id),
+                estimated_cost_usd=Decimal("0.50"),  # 4.80 + 0.50 = 5.30 > 5.00
+            )
+        assert exc_info.value.which_cap == "cost"
+
+        # The reservation MUST have been refunded — the cost key is
+        # back to 4.80, not stuck at 5.30.
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.cost_used_usd == Decimal("4.80")
+
+    async def test_record_usage_refunds_over_estimate(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import enforce_caps, get_current_usage
+
+        # Reserve $0.10 worst-case, actually use $0.02.
+        reservation = await enforce_caps(
+            str(tenant.id),
+            estimated_cost_usd=Decimal("0.10"),
+        )
+        # After enforce_caps the cost key reflects the reservation.
+        usage_after_reserve = await get_current_usage(str(tenant.id))
+        assert usage_after_reserve.cost_used_usd == Decimal("0.10")
+
+        # record_usage with the reservation refunds the over-estimate.
+        await record_usage(
+            str(tenant.id),
+            tokens=50,
+            cost_usd=Decimal("0.02"),
+            reservation=reservation,
+        )
+        usage_after_record = await get_current_usage(str(tenant.id))
+        # Net effect: 0.10 reserved − 0.08 refund = 0.02 actual.
+        assert usage_after_record.cost_used_usd == Decimal("0.02")
+
+    async def test_record_usage_tops_up_under_estimate(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import enforce_caps, get_current_usage
+
+        # Reserve $0.05 worst-case, actually use $0.08 (over-spend).
+        reservation = await enforce_caps(
+            str(tenant.id),
+            estimated_cost_usd=Decimal("0.05"),
+        )
+        await record_usage(
+            str(tenant.id),
+            tokens=50,
+            cost_usd=Decimal("0.08"),
+            reservation=reservation,
+        )
+        usage = await get_current_usage(str(tenant.id))
+        # Reservation 0.05 + top-up 0.03 = 0.08 actual.
+        assert usage.cost_used_usd == Decimal("0.08")
+
+    async def test_concurrent_reservations_prevent_overshoot(self, tenant: Tenant) -> None:
+        import asyncio
+
+        from apps.llm.cost_tracker import TenantQuotaExceeded, enforce_caps
+
+        # Pre-fill so only ~$0.50 of headroom remains; spawn 5 concurrent
+        # reservations of $0.20 each. Pre-fix: all 5 would pass (cost
+        # read 4.50 < 5.00, all proceed). Post-fix: exactly 2 pass
+        # (4.50 + 0.20 × 2 = 4.90 ≤ 5.00; the 3rd would push to 5.10 >
+        # 5.00 and refund), the other 3 raise TenantQuotaExceeded with
+        # the reservation already refunded.
+        #
+        # Atomicity note (closes reviewer Y2): on locmem (single-process
+        # pytest backend) ``cache.incr`` is atomic via threading.RLock,
+        # and ``asyncio.gather`` runs coroutines cooperatively on one
+        # thread — so this test exercises the deterministic side of the
+        # gate logic. It does NOT prove Redis INCRBY atomicity in
+        # production; that property is contractually relied upon (Redis
+        # single-threaded model). Real-Redis integration coverage lives
+        # in the staging soak.
+        await record_usage(str(tenant.id), tokens=0, cost_usd=Decimal("4.50"))
+
+        async def _try_reserve():
+            try:
+                return await enforce_caps(
+                    str(tenant.id),
+                    estimated_cost_usd=Decimal("0.20"),
+                )
+            except TenantQuotaExceeded:
+                return None
+
+        results = await asyncio.gather(*[_try_reserve() for _ in range(5)])
+        accepted = [r for r in results if r is not None]
+        rejected = [r for r in results if r is None]
+
+        # Tight bounds (closes reviewer Y1 inverse-bug guard): exactly 2
+        # reservations fit. ``<= 2`` alone would pass even on a broken
+        # gate that rejects everyone; ``== 2`` catches over-rejection.
+        assert len(accepted) == 2
+        assert len(rejected) == 3
+        # And the net cost reflects only the accepted reservations.
+        usage = await get_current_usage(str(tenant.id))
+        expected_max = Decimal("4.50") + Decimal("0.20") * len(accepted)
+        assert usage.cost_used_usd == expected_max
+
+    async def test_legacy_callers_without_estimate_still_work(self, tenant: Tenant) -> None:
+        # Backward-compat: callers that don't pass estimated_cost_usd
+        # get the legacy soft-check path. enforce_caps returns a
+        # zero-microcent reservation; record_usage falls back to the
+        # plain INCR path.
+        from apps.llm.cost_tracker import enforce_caps, get_current_usage
+
+        reservation = await enforce_caps(str(tenant.id))
+        assert reservation.microcents == 0
+
+        await record_usage(
+            str(tenant.id),
+            tokens=100,
+            cost_usd=Decimal("0.03"),
+            reservation=reservation,
+        )
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.cost_used_usd == Decimal("0.03")
+        assert usage.tokens_used == 100

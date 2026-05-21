@@ -131,11 +131,29 @@ _ALERT_100_TEMPLATE = (
 # ---------------------------------------------------------------------------
 
 
+# LLM retro B2: shared worst-case output-token assumption for the cap
+# reservation when the caller doesn't pass ``max_tokens``. Conservative
+# ceiling for both OpenAI's gpt-4o family and Anthropic's Claude
+# variants used today. Extracted from duplicate per-provider constants
+# so a future model with a bigger context window only needs a one-place
+# bump (closes reviewer Y3).
+RESERVATION_DEFAULT_MAX_TOKENS = 4096
+
+
 @dataclass(frozen=True)
 class CurrentUsage:
     """Snapshot of one tenant's day-so-far LLM consumption.
 
     Returned by :func:`get_current_usage` for admin / dashboard reads.
+
+    Note (LLM retro B2): ``cost_used_usd`` may briefly include
+    in-flight reservations during the window between
+    :func:`enforce_caps` (INCRBY) and the matching :func:`record_usage`
+    (DECRBY refund of over-estimate). Concurrent dashboard reads can
+    see a value that temporarily exceeds the actual spent amount.
+    Worst case: a dashboard briefly shows tenant at 100% before the
+    refund reconciles. Downstream code that branches on this value
+    must tolerate the transient.
     """
 
     tokens_used: int
@@ -212,20 +230,67 @@ async def get_current_usage(tenant_id: str) -> CurrentUsage:
     )
 
 
+@dataclass(frozen=True)
+class CostReservation:
+    """Pre-call cost reservation handle returned by :func:`enforce_caps`.
+
+    LLM retro B2: pre-fix ``enforce_caps`` read the current cost,
+    compared against the cap, then returned — with no atomic primitive
+    between the read and the eventual ``record_usage`` INCR. Two
+    concurrent calls would both read ``current < cap``, both proceed,
+    both charge — overshoot is ``O(concurrency × max_call_cost)``
+    (one gpt-4o turn can be $0.50).
+
+    Post-fix the gate INCRBYs a worst-case ``estimated_cost_usd`` into
+    the cost key, reads the post-INCR total, and compares THAT against
+    the cap. If over → DECRBY the reservation back + raise. If under
+    → caller proceeds; :func:`record_usage` refunds the delta
+    (reservation − actual) so the final cost key reflects the real
+    spend.
+
+    Callers that don't supply ``estimated_cost_usd`` get the legacy
+    soft-check behavior (backward-compat for callers without a
+    pre-call cost estimate).
+
+    Deferred (LLM retro Y5 follow-up): the TOKEN cap still does the
+    legacy read-then-check pattern. Same TOCTOU class as the cost cap
+    was — concurrent callers can both read ``current + projected <=
+    cap`` and both proceed, overshooting by O(concurrency × projected).
+    The blast radius is smaller (per-call token cost is bounded by
+    ``max_tokens``, knowable; cost overshoot was unbounded by model
+    variance). Track as a separate follow-up; the reserve-then-record
+    plumbing here is the foundation that token-cap reservation would
+    build on.
+    """
+
+    microcents: int  # Worst-case cost reserved (0 = legacy soft-check).
+
+
 async def enforce_caps(
     tenant_id: str,
     *,
     projected_tokens: int = 0,
-) -> None:
+    estimated_cost_usd: Decimal | None = None,
+) -> CostReservation:
     """Pre-call gate. Raises when either cap is at or above 100%.
 
     Args:
       tenant_id: stringified tenant UUID.
       projected_tokens: optional pre-emptive overshoot guard. When >0
         we check ``(current + projected) >= cap`` for the token cap
-        only (cost projection would require knowing the model up-front,
-        which the caller doesn't always have). Helps reject a known-
-        large prompt before burning the call.
+        only.
+      estimated_cost_usd: caller-supplied worst-case cost estimate for
+        the impending call. When > 0 enables the LLM retro B2 reserve-
+        then-record flow: this amount is INCRBY'd to the cost key
+        BEFORE the cap check, so two concurrent callers can't both
+        read ``under cap`` and both proceed. Caller MUST pass the
+        returned :class:`CostReservation` into the matching
+        :func:`record_usage` so the delta is reconciled. When None /
+        0 the legacy read-then-check path runs (backward-compat).
+
+    Returns:
+      :class:`CostReservation` with the reserved microcents.
+      ``microcents=0`` means no reservation was made (legacy path).
 
     Raises:
       :class:`TenantQuotaExceeded` with ``which_cap`` set to ``"token"``
@@ -239,7 +304,6 @@ async def enforce_caps(
     )
 
     tokens_used = _read_tokens(tenant_id)
-    cost_used = _read_cost_usd(tenant_id)
 
     # Token cap — including the projected pre-emptive guard. We use
     # `>=` for the projection (would-cross-or-equal-cap) and the cap
@@ -261,19 +325,77 @@ async def enforce_caps(
             current_value=tokens_used,
         )
 
-    if cost_used >= cost_cap_usd:
+    # Cost cap path — branch by whether the caller passed an estimate.
+    if estimated_cost_usd is None or estimated_cost_usd <= Decimal(0):
+        # Legacy soft-check path. TOCTOU race remains for callers that
+        # don't supply an estimate; logged in the docstring above.
+        cost_used = _read_cost_usd(tenant_id)
+        if cost_used >= cost_cap_usd:
+            await sync_to_async(_write_quota_telemetry, thread_sensitive=False)(
+                tenant_id=tenant_id,
+                which_cap="cost",
+                cap_value=cost_cap_usd,
+                current_value=cost_used,
+            )
+            raise TenantQuotaExceeded(
+                tenant_id=tenant_id,
+                which_cap="cost",
+                cap_value=cost_cap_usd,
+                current_value=cost_used,
+            )
+        return CostReservation(microcents=0)
+
+    # LLM retro B2 reserve-then-record. INCRBY first; check post-INCR.
+    reservation_microcents = _usd_to_microcents(estimated_cost_usd)
+    if reservation_microcents <= 0:
+        return CostReservation(microcents=0)
+
+    new_cost_microcents = _incr_with_ttl(_cost_key(tenant_id), reservation_microcents)
+    new_cost_usd = _microcents_to_usd(new_cost_microcents)
+    if new_cost_usd > cost_cap_usd:
+        # Refund the reservation atomically — caller never proceeds.
+        _decr_cost_microcents(tenant_id, reservation_microcents)
         await sync_to_async(_write_quota_telemetry, thread_sensitive=False)(
             tenant_id=tenant_id,
             which_cap="cost",
             cap_value=cost_cap_usd,
-            current_value=cost_used,
+            current_value=new_cost_usd,
         )
         raise TenantQuotaExceeded(
             tenant_id=tenant_id,
             which_cap="cost",
             cap_value=cost_cap_usd,
-            current_value=cost_used,
+            current_value=new_cost_usd,
         )
+    return CostReservation(microcents=reservation_microcents)
+
+
+def _decr_cost_microcents(tenant_id: str, amount: int) -> None:
+    """Best-effort DECRBY on the cost key. Refunds an over-reservation.
+
+    Used both by :func:`enforce_caps` (when post-INCR exceeds the cap)
+    and by :func:`record_usage` (when the actual cost is less than the
+    reserved amount). Falls back to read-modify-write on backends that
+    don't support DECR (locmem in tests).
+    """
+
+    if amount <= 0:
+        return
+    decr = getattr(cache, "decr", None)
+    key = _cost_key(tenant_id)
+    if callable(decr):
+        try:
+            decr(key, amount)
+            return
+        except ValueError:
+            pass
+    current = cache.get(key)
+    try:
+        current_int = int(current) if current is not None else 0
+    except (TypeError, ValueError):
+        current_int = 0
+    new_int = max(0, current_int - amount)
+    cache.set(key, new_int, timeout=_TTL_SECONDS)
 
 
 async def record_usage(
@@ -281,6 +403,7 @@ async def record_usage(
     *,
     tokens: int,
     cost_usd: Decimal,
+    reservation: CostReservation | None = None,
 ) -> None:
     """Post-call accumulator. INCRs both counters and fires threshold
     alerts on cross-boundary moves (80%, 100%).
@@ -289,6 +412,14 @@ async def record_usage(
       tenant_id: stringified tenant UUID.
       tokens: total tokens consumed by this call (input + output).
       cost_usd: USD cost from :func:`apps.llm.pricing.compute_cost`.
+      reservation: optional :class:`CostReservation` returned by the
+        matching :func:`enforce_caps` call. When provided AND non-zero,
+        the cost INCR is skipped (already done at reserve time) and a
+        DECRBY of ``(reservation - actual)`` refunds the over-estimate.
+        If the actual exceeds the reservation, an additional INCRBY
+        tops up the difference. When ``None`` or zero-reservation the
+        legacy INCR path runs (backward-compat). See :class:`CostReservation`
+        for the LLM retro B2 reserve-then-record rationale.
 
     Behaviour:
       - Increments ``tokens`` and ``cost_microcents`` keys; sets TTL on
@@ -330,12 +461,32 @@ async def record_usage(
     new_tokens_post = (
         _incr_with_ttl(_tokens_key(tenant_id), tokens) if tokens > 0 else previous_tokens
     )
-    cost_microcents_delta = _usd_to_microcents(cost_usd)
-    if cost_microcents_delta > 0:
-        new_cost_microcents = _incr_with_ttl(_cost_key(tenant_id), cost_microcents_delta)
-        new_cost = _microcents_to_usd(new_cost_microcents)
+    actual_microcents = _usd_to_microcents(cost_usd)
+
+    if reservation is not None and reservation.microcents > 0:
+        # LLM retro B2 reserve-then-record reconciliation: the
+        # reservation was already INCRBY'd at enforce_caps time. Refund
+        # the over-estimate (or top up the under-estimate).
+        delta = reservation.microcents - actual_microcents
+        if delta > 0:
+            _decr_cost_microcents(tenant_id, delta)
+            # Recompute new_cost from the actual key state — the DECRBY
+            # is not atomic-with-read in the locmem fallback, but
+            # _read_cost_usd is the source of truth for the threshold
+            # check below.
+            new_cost = _read_cost_usd(tenant_id)
+        elif delta < 0:
+            new_cost_microcents = _incr_with_ttl(_cost_key(tenant_id), -delta)
+            new_cost = _microcents_to_usd(new_cost_microcents)
+        else:
+            new_cost = _read_cost_usd(tenant_id)
     else:
-        new_cost = previous_cost
+        # Legacy path: no reservation, INCR the actual cost.
+        if actual_microcents > 0:
+            new_cost_microcents = _incr_with_ttl(_cost_key(tenant_id), actual_microcents)
+            new_cost = _microcents_to_usd(new_cost_microcents)
+        else:
+            new_cost = previous_cost
 
     new_tokens = new_tokens_post
 
