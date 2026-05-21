@@ -88,18 +88,30 @@ The runbook's `§What to do if an agent goes off-script` section is canonical. S
 
 GH issue #451 captures 11 polish findings from the Code Reviewer pass on PR #449. These can land in a single follow-up PR during Phase 0 Week 4 buffer.
 
+## Explicit ticket ownership (clarifies under-named tickets)
+
+Round-5 review caught tickets not explicitly named in the stream rows above. Resolved:
+
+- **#420** (db.sqlite3 cleanup + CI guard) — NEW Alpha, Week 1 first ticket.
+- **#427** (apps/orders → display-only) — NEW Gamma, Week 1 independent (no Sync 4 dependency).
+- **#433** (consumers umbrella) — NEW Gamma; closes when #442-#446 close.
+- **#438** (E2E test mobile→event→memory→Telegram) — **co-owned NEW Alpha + NEW Gamma + W3 review**. Automated portion in CI; manual smoke in `docs/qa/`. Run after first consumer ships.
+- **Sprint 1 Track A EPICs #219, #220, #221, #223** (Ayla persona, memory framework, emergency tiers, anonymous OAuth) — NOT abandoned. They sit in W4's coordinator backlog awaiting pickup by Delta (W1 currently focused on #222) or new agents in Week 2-3. Listed in `project_ayla_active_streams.md` for traceability.
+
 ## Cognitive overhead warning (6 streams)
 
-6 parallel agents is **above the previously documented "5 sustainable" porog**. Tech lead in main window must:
+6 parallel agents is **above the previously documented 5-sustainable threshold**. Tech lead in main window must:
 
-- Branch watch every 30 min: `git fetch --all && git branch -r | grep -E 'phase0/|phase0-track-a/'` across all 3 repos.
+- Branch watch every **60 min** (not 30 — unrealistic for one human across 6 windows): `git fetch --all && git branch -r | grep -E 'phase0/|phase0-track-a/'` across all 3 repos. Hourly cadence matches the existing runbook.
 - Code Reviewer dispatch on EVERY PR (no exceptions per `pr-workflow-code-reviewer` memory).
 - W3 doubles as second-pass reviewer on NEW Gamma's high-risk PRs — reduces tech lead load.
 - Sync handshake propagation (manually re-post announcements to dependent windows when sync completes).
 - Halt protocol if any agent edits files outside its stream's anti-touch list.
 
-**Escape valves:**
-- If overhead breaks: pause NEW Gamma (slowest critical path due to Sync 4 dependency) and absorb its work into W3. Reduces to 5 streams.
-- If Sync 4 (#441) slips: pause NEW Gamma entirely until W4 lands the doc. NEW Alpha continues on infra (#420-#426) independent of Sync 4.
+**Escape valves (ordered by likelihood):**
+
+1. **If W4 cannot land #441 by EOW1** (highest schedule risk — W4 has Sprint 1 coordinator load + 6 Beta-docs tickets + Sync 3 + Sync 4 writing): halt all 6 streams and **reassign #441 to W3** (security backstop has writing capacity during retro pauses; they already cite ADR-0009 §Mandatory event contract correctly per their retro report).
+2. **If Sync 4 (#441) slips beyond Week 1:** pause NEW Gamma entirely until #441 lands. NEW Alpha continues on infra (#420-#426) independent of Sync 4 — they unblock themselves without the contract doc.
+3. **If general cognitive overhead breaks:** pause NEW Gamma (slowest critical path due to Sync 4 dependency) and absorb its work into W3. Reduces to 5 streams.
 
 See `2026-05-20-phase-0-parallel-agent-runbook.md` §Tech lead's watch protocol for full procedure.
