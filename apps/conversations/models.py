@@ -55,6 +55,18 @@ from apps.tenancy.managers import TenantScopedManager
 class Conversation(models.Model):
     """A single thread between a BotUser and the platform."""
 
+    class Tier(models.TextChoices):
+        # Per docs/design/policies/conversation-ownership-policy.md §4.
+        # AI_CONTINUITY: bot replies autonomously; master can read +
+        # send (audited).
+        # HUMAN_SUPERVISED: bot drafts only; master/admin reviews
+        # before send (out of scope for this PR — placeholder).
+        # HUMAN_LOCKED: bot is silent; only admin/owner can speak.
+        # Master surface goes read-only (see M6 §M6 layout block).
+        AI_CONTINUITY = "ai_continuity", "AI Continuity"
+        HUMAN_SUPERVISED = "human_supervised", "Human Supervised"
+        HUMAN_LOCKED = "human_locked", "Human Locked"
+
     class State(models.TextChoices):
         # Per ADR-0007: minimal-first. Add new values alongside the
         # writer code that emits them, not pre-emptively.
@@ -158,6 +170,54 @@ class Conversation(models.Model):
         db_index=True,
         help_text="Set by record_message() on every insert. Drives the "
         "by-recency admin list and inactivity-cleanup queries.",
+    )
+    # Master M6 / PR M6.1 — conversation ownership tier per
+    # docs/design/policies/conversation-ownership-policy.md §4.
+    tier = models.CharField(
+        max_length=24,
+        choices=Tier.choices,
+        default=Tier.AI_CONTINUITY,
+        db_index=True,
+        help_text=(
+            "Ownership tier. HUMAN_LOCKED disables master compose + AI "
+            "auto-reply; only admin/owner downgrades."
+        ),
+    )
+    tier_reason_class = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text=(
+            "Classification when tier is locked: "
+            "complaint|financial|medical|other. Empty otherwise."
+        ),
+    )
+    tier_locked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the conversation entered HUMAN_LOCKED.",
+    )
+    tier_locked_by_master = models.ForeignKey(
+        "catalog.CatalogMaster",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="conversations_locked",
+        help_text="Master who promoted the conversation to HUMAN_LOCKED.",
+    )
+    tier_locked_reason_text = models.CharField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Free-form forensic context. Never surfaced as PII.",
+    )
+    last_read_by_master_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Last time the assigned master tapped mark-read on this "
+            "conversation. Used to compute the per-master unread count."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
