@@ -39,6 +39,13 @@ the apps/orders refactor, the API gateway, and JWT verification.
    (Stream Gamma section + Sync points 2, 3, 4, 5.)
 3. C:\Users\user\PycharmProjects\ai-bot-platform\docs\plans\2026-05-20-phase-0-sprint-plan.md
    (Buckets 6, 7, 8, 9. Bucket 7 has 12 issues — most of your work.)
+4. C:\Users\user\PycharmProjects\ai-bot-platform\docs\plans\2026-05-21-developer-agent-workflow.md
+   **(Universal 10-phase developer workflow. MANDATORY for every
+   ticket: Understand → Design → Setup → TDD → Self-review → Commit →
+   Push+PR → Code Reviewer → Pre-merge → Merge+cleanup. Pay special
+   attention to: TDD discipline for consumers (#442-#446) and
+   idempotency test (#447); two-step migration pattern for any schema
+   work; codex second opinion for security/payment/JWT diffs.)**
 
 # Your tickets (12 total — see runbook §Stream Gamma)
 

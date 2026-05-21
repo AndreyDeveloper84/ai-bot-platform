@@ -2,7 +2,7 @@
 
 > **Status:** Active 2026-05-20
 > **Purpose:** Distribute Phase 0 work across **3 parallel Claude/Codex agents** running in adjacent windows. The plan guarantees agents do not collide on file ownership, define explicit sync points, and give the supervising tech lead (Claude in main session) a way to watch progress.
-> **Companion docs:** ADR-0009 (architecture), `2026-05-20-phase-0-sprint-plan.md` (full plan), `2026-05-20-ayla-consolidated-architecture.md` (rationale).
+> **Companion docs:** ADR-0009 (architecture), `2026-05-20-phase-0-sprint-plan.md` (full plan), `2026-05-20-ayla-consolidated-architecture.md` (rationale), [`2026-05-21-developer-agent-workflow.md`](2026-05-21-developer-agent-workflow.md) (universal 10-phase ticket workflow — MANDATORY for every agent).
 > **Agent startup prompts:** see [`2026-05-20-phase-0-agent-prompts-index.md`](2026-05-20-phase-0-agent-prompts-index.md) — copy-paste-ready prompts for Alpha/Beta/Gamma windows.
 > **Phase 0 backlog:** 35 issues (#412–#447) + 4 edits applied 2026-05-20.
 

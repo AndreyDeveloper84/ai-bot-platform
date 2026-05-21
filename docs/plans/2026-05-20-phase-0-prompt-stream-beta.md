@@ -29,6 +29,13 @@ of Week 1 or Phase 0 timeline slips for everyone.**
    (Stream Beta section + Sync points 1, 3, 4, 5.)
 3. C:\Users\user\PycharmProjects\ai-bot-platform\docs\plans\2026-05-20-phase-0-sprint-plan.md
    (Buckets 1, 2, 3, 10. Bucket 7 §#441 prerequisite.)
+4. C:\Users\user\PycharmProjects\ai-bot-platform\docs\plans\2026-05-21-developer-agent-workflow.md
+   **(Universal 10-phase developer workflow. MANDATORY for every
+   ticket: Understand → Design → Setup → TDD → Self-review → Commit →
+   Push+PR → Code Reviewer → Pre-merge → Merge+cleanup. Plus anti-
+   patterns and special-case protocols. Doc-heavy work — Phases B/D/E
+   adapt: "implementation" = writing the doc, "TDD" = drafting full
+   examples + validation tests, "self-review" = grep for ambiguity.)**
 
 # Your tickets (11 total — see runbook §Stream Beta)
 
