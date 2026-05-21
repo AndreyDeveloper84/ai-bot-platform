@@ -7,7 +7,7 @@
 ADR-0002 (2026-05-07) established a three-repo split (`mysite/`, `ayla-ai-core/`, `ai-bot-platform/`) for the Formula tela salon and the early multi-tenant bot platform. Since then:
 
 1. **Ayla-first strategic pivot (2026-05-19, memory `project_ayla_first_strategic_pivot`)** repositioned Ayla as one product for the user (Ayla + Ayla Pro mobile), with salon as provider, not customer. AI belongs to the user, not the salon.
-2. A separate `Ayla` repository emerged (PyCharm/Ayla) containing `frontAyla/` (Expo monorepo: `apps/client`, `apps/pro`, `packages/shared`) and `djangoproject/` (Django 5.2 + DRF backend with 12 apps including a DDD booking engine, YooKassa, multi-tenant `tenants` app, and Expo-facing REST API at `api.ayla.app`).
+2. A separate `Ayla` repository emerged (PyCharm/Ayla) containing `frontAyla/` (Expo monorepo: `apps/client`, `apps/pro`, `packages/shared`) and `djangoproject/` (Django 5.2 + DRF backend with 12 apps including a DDD booking engine, YooKassa, multi-tenant `tenants` app, and Expo-facing REST API — initially planned at `api.ayla.app` but DNS rebrand deferred 2026-05-21 due to domain unavailability; currently on `gobeauty.site` infrastructure).
 3. A May 20 audit of all three repos surfaced significant duplication: booking domain (Ayla djangoproject `appointments/` + bot-platform `apps/booking/`), payments (Ayla `payments/` + bot-platform `apps/orders/` + `apps/integrations/yookassa/`), and catalog (Ayla `services/` + bot-platform `apps/catalog/`). Both Ayla djangoproject and bot-platform separately mirror YClients.
 4. The Notion architecture v2.0 (31.03) describes Ayla as a single Django backend serving two mobile apps via a single REST API with `X-App-Type` header. Reality: bot-platform has matured into a far more capable backend (26 apps, multi-tenant, ChromaDB RAG, two-bus events, MAX Mini App, observability), while Ayla djangoproject holds the booking engine and YooKassa integration.
 
@@ -63,7 +63,9 @@ ADR-0002 named only three repos. The Ayla repo is the implicit fourth and was ne
 
 ### Mobile API split (gateway-routed)
 
-Expo apps talk to two backends via a single API gateway (`api.ayla.app` → Nginx routing):
+> **⚠️ DOMAIN UPDATE 2026-05-21:** This ADR originally specified `api.ayla.app` as the production endpoint. The domain `ayla.app` turned out to be unavailable (owned by third party). DNS rebrand has been **deferred** to Phase 1+ when product domain is finalized. Backend continues on `gobeauty.site` indefinitely. The architectural pattern below (path-based routing via gateway) is preserved — only the host name is TBD. Examples below use `api.ayla.app` placeholder for clarity; substitute current backend host (`api-dev.gobeauty.site` and equivalents) until domain decision.
+
+Expo apps talk to two backends via a single API gateway (host TBD — currently `gobeauty.site` infrastructure; will migrate to product domain in Phase 1+):
 
 - **Direct user actions** → Ayla djangoproject:
   - Auth (OTP, social, anonymous → merge, refresh, logout)
@@ -167,7 +169,7 @@ bot-platform consumers update memory, conversation context, reminders, audit, an
 - **Catalog has one source of truth** (Ayla djangoproject), accessed via REST and mirrored read-only in bot-platform.
 
 ### Acceptable
-- **Mobile talks to two backends.** Mitigated by API Gateway with path-based routing; mobile sees one `api.ayla.app` host.
+- **Mobile talks to two backends.** Mitigated by API Gateway with path-based routing; mobile sees one host (product domain TBD per 2026-05-21 domain update; until then mobile uses current 2-host structure on gobeauty.site).
 - **Two Django services to operate.** Each repo already has its own CI, deploy, Sentry project.
 - **Event contract becomes critical infrastructure.** If events fail, AI memory becomes stale. Mitigated by Postgres outbox pattern (already proven in bot-platform), retry budget, idempotent consumers, observability alerts on lag.
 
