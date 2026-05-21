@@ -15,6 +15,7 @@
 
 import { getInitData } from "./max-sdk";
 import { ApiError } from "./api";
+import { applyDevBypassHeaders } from "./dev-bypass";
 
 const MASTER_API_BASE = "/api/v1/master";
 
@@ -27,6 +28,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const initData = getInitData();
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
   // Don't auto-set Content-Type for FormData (the browser writes the
   // boundary string). JSON callers explicitly set it.
   const body = init.body;

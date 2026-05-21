@@ -33,6 +33,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
+from apps.identity.models import BotUser
 from apps.master_api.auth import generate_invite_token
 from apps.tenancy.models import Tenant
 
@@ -79,6 +80,15 @@ class Command(BaseCommand):
             action="store_true",
             help="If a PENDING master with this (tenant, name) already exists, "
             "rotate the invite_token and extend expiry by 7 days.",
+        )
+        parser.add_argument(
+            "--bootstrap-bot-user",
+            action="store_true",
+            help="Also create a placeholder BotUser row in this tenant and "
+            "print a .env.local snippet — lets you complete M0 onboarding "
+            "in a plain Chrome tab via the DEBUG-only init-data bypass "
+            "(see docs/runbooks/master-bot-onboarding.md). Idempotent: "
+            "reuses an existing BotUser with channel_user_id='dev-bypass-<master>'.",
         )
 
     @transaction.atomic
@@ -184,3 +194,43 @@ class Command(BaseCommand):
         self.stdout.write(f"  expires_at:    {master.invite_expires_at.isoformat()}")
         self.stdout.write(f"  deeplink:      {deeplink}")
         self.stdout.write(f"  web URL:       {web_url}")
+
+        if options["bootstrap_bot_user"]:
+            # Catch-22 resolution: the M0 /onboarding/claim endpoint
+            # requires a BotUser to exist (the master must have DM'd the
+            # bot first). For browser-only dev where no real MAX session
+            # exists, we pre-create a placeholder BotUser tied to this
+            # invite so the dev-bypass headers can resolve a user from
+            # the very first request.
+            channel_user_id = f"dev-bypass-{master.id}"
+            bot_user, bu_created = BotUser.all_tenants.get_or_create(
+                tenant=tenant,
+                channel="max",
+                channel_user_id=channel_user_id,
+                defaults={
+                    "display_name": f"[dev] {name}",
+                    "chat_id": channel_user_id,
+                    "timezone": tenant.timezone,
+                },
+            )
+            self.stdout.write("")
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"\N{CHECK MARK} {'Created' if bu_created else 'Reusing'} "
+                    "placeholder BotUser for dev-bypass"
+                )
+            )
+            self.stdout.write(f"  bot_user_id:   {bot_user.id}")
+            self.stdout.write("")
+            self.stdout.write("  # Paste into apps/miniapp/.env.local:")
+            self.stdout.write(f"  VITE_DEV_BYPASS_USER_ID={bot_user.id}")
+            self.stdout.write(f"  VITE_DEV_BYPASS_TENANT_SLUG={tenant.slug}")
+            self.stdout.write("")
+            self.stdout.write("  Restart `npm run dev`, then open the web URL above in Chrome.")
+
+        self.stdout.write("")
+        self.stdout.write("  # After the master accepts the invite (M0 complete), run:")
+        self.stdout.write(f"  python manage.py print_master_dev_env {master.id}")
+        self.stdout.write(
+            "  # to get the dashboard-ready .env.local snippet (uses the real linked BotUser)."
+        )

@@ -55,6 +55,7 @@ from apps.miniapp_api.auth import (
     extract_init_data,
     verify_init_data,
 )
+from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.tenancy.context import tenant_scope
 
 logger = logging.getLogger(__name__)
@@ -303,28 +304,36 @@ def require_master_init_data(
 
     @wraps(view_func)
     def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
-        header = request.headers.get("Authorization", "")
-        try:
-            raw = extract_init_data(header)
-            verified = verify_init_data(raw)
-        except InitDataNotConfigured:
-            logger.error("master_api.auth.not_configured")
-            return _error("server_misconfigured", "MAX bot token not configured", 500)
-        except InitDataBadSignature:
-            return _error("bad_signature", "initData signature mismatch", 401)
-        except InitDataStale:
-            return _error("stale", "initData expired — reopen the Mini App", 401)
-        except InitDataMalformed as exc:
-            return _error("malformed", str(exc), 400)
-        except InitDataError as exc:
-            return _error("unauthorized", str(exc), 401)
+        # Dev-bypass (DEBUG-only, header-opt-in) — see apps/miniapp_api/dev_bypass.py.
+        # Prod-safe: try_dev_bypass returns None unconditionally when DEBUG=False.
+        bypass = try_dev_bypass(request)
+        verified = None
+        bot_user: BotUser | None
+        if bypass is not None:
+            bot_user, _bypass_tenant = bypass
+        else:
+            header = request.headers.get("Authorization", "")
+            try:
+                raw = extract_init_data(header)
+                verified = verify_init_data(raw)
+            except InitDataNotConfigured:
+                logger.error("master_api.auth.not_configured")
+                return _error("server_misconfigured", "MAX bot token not configured", 500)
+            except InitDataBadSignature:
+                return _error("bad_signature", "initData signature mismatch", 401)
+            except InitDataStale:
+                return _error("stale", "initData expired — reopen the Mini App", 401)
+            except InitDataMalformed as exc:
+                return _error("malformed", str(exc), 400)
+            except InitDataError as exc:
+                return _error("unauthorized", str(exc), 401)
 
-        bot_user = (
-            BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
-            .select_related("tenant")
-            .order_by("-last_seen")
-            .first()
-        )
+            bot_user = (
+                BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
+                .select_related("tenant")
+                .order_by("-last_seen")
+                .first()
+            )
         if bot_user is None:
             return _error(
                 "user_not_registered",
@@ -380,28 +389,36 @@ def require_init_data_only(
 
     @wraps(view_func)
     def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
-        header = request.headers.get("Authorization", "")
-        try:
-            raw = extract_init_data(header)
-            verified = verify_init_data(raw)
-        except InitDataNotConfigured:
-            logger.error("master_api.auth.not_configured")
-            return _error("server_misconfigured", "MAX bot token not configured", 500)
-        except InitDataBadSignature:
-            return _error("bad_signature", "initData signature mismatch", 401)
-        except InitDataStale:
-            return _error("stale", "initData expired — reopen the Mini App", 401)
-        except InitDataMalformed as exc:
-            return _error("malformed", str(exc), 400)
-        except InitDataError as exc:
-            return _error("unauthorized", str(exc), 401)
+        # Dev-bypass (DEBUG-only, header-opt-in). Critical for the M0
+        # /onboarding/claim bootstrap when no real MAX session exists.
+        bypass = try_dev_bypass(request)
+        verified = None
+        bot_user: BotUser | None
+        if bypass is not None:
+            bot_user, _bypass_tenant = bypass
+        else:
+            header = request.headers.get("Authorization", "")
+            try:
+                raw = extract_init_data(header)
+                verified = verify_init_data(raw)
+            except InitDataNotConfigured:
+                logger.error("master_api.auth.not_configured")
+                return _error("server_misconfigured", "MAX bot token not configured", 500)
+            except InitDataBadSignature:
+                return _error("bad_signature", "initData signature mismatch", 401)
+            except InitDataStale:
+                return _error("stale", "initData expired — reopen the Mini App", 401)
+            except InitDataMalformed as exc:
+                return _error("malformed", str(exc), 400)
+            except InitDataError as exc:
+                return _error("unauthorized", str(exc), 401)
 
-        bot_user = (
-            BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
-            .select_related("tenant")
-            .order_by("-last_seen")
-            .first()
-        )
+            bot_user = (
+                BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
+                .select_related("tenant")
+                .order_by("-last_seen")
+                .first()
+            )
         if bot_user is None:
             return _error(
                 "user_not_registered",

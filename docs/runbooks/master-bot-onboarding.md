@@ -4,10 +4,127 @@ Status: living document (PR 1 / M0). Update as later master PRs land.
 
 ## What this covers
 
+- How to open the master/customer Mini App in a plain Chrome tab using the
+  **DEBUG-only init-data bypass** (new — replaces the prior "no bypass"
+  policy).
 - How to manually exercise the master M0 onboarding flow against a real
   dev environment.
 - How to recover a stuck invite (expired / lost link).
-- Why there is **no dev-mode init-data bypass** in this PR.
+
+## ⚠️ Local browser dev (dev-bypass) — SECURITY-CRITICAL
+
+> **Bypass работает только в DEBUG=True. Никогда не используется в prod.
+> Не коммитьте `.env.local`.**
+>
+> The dev-bypass is a **DEBUG-only, header-opt-in, loudly-logged** path that
+> lets developers open `/onboarding/master?token=...`,
+> `/master/dashboard`, and customer screens in a regular Chrome tab. In
+> production (`DEBUG=False`) the bypass code path is **dead code** —
+> `apps/miniapp_api/dev_bypass.py::try_dev_bypass` exits before reading any
+> header. Every successful bypass writes a `WARNING` log line; rejected
+> bypass attempts also log. There is no `ALLOW_DEV_BYPASS` setting — DEBUG
+> is the canonical gate.
+
+### Step-by-step
+
+1. **Start the backend with DEBUG=True**:
+   ```
+   DJANGO_DEBUG=True uv run python manage.py runserver
+   ```
+
+2. **Create a PENDING invite + placeholder BotUser** in one shot. The
+   `--bootstrap-bot-user` flag resolves the chicken-and-egg problem
+   below (M0 `/claim` needs a BotUser to exist):
+   ```
+   python manage.py create_test_master_invite \
+       --tenant formula-tela \
+       --name "Анна Петрова" \
+       --max-handle anna_styl \
+       --bootstrap-bot-user
+   ```
+
+   Output includes a ready-to-paste `.env.local` snippet:
+   ```
+   VITE_DEV_BYPASS_USER_ID=<placeholder_bot_user_uuid>
+   VITE_DEV_BYPASS_TENANT_SLUG=formula-tela
+   ```
+
+3. **Paste the snippet into `apps/miniapp/.env.local`**
+   (copy `apps/miniapp/.env.local.example` for the header comments).
+   `.env.local` is `.gitignore`d — do not commit.
+
+4. **Start the Vite dev server**:
+   ```
+   cd apps/miniapp && npm run dev
+   ```
+
+5. **Open the web URL** from step 2 in Chrome:
+   `http://localhost:5173/onboarding/master?token=<token>`
+
+   The frontend (`apps/miniapp/src/lib/dev-bypass.ts`) detects:
+   - `import.meta.env.DEV === true` (Vite dev mode)
+   - No real MAX initData in `window.WebApp` (plain Chrome tab)
+   - Both `VITE_DEV_BYPASS_*` env vars present
+
+   Then injects three headers on every API request:
+   - `X-Dev-Bypass: 1`
+   - `X-Dev-User-Id: <bot_user_uuid>`
+   - `X-Dev-Tenant-Slug: <tenant_slug>`
+
+   The backend resolves the BotUser + Tenant from these headers and skips
+   HMAC verification. Each request emits a `WARNING [DEV-BYPASS] init-data
+   validation skipped: ...` log line so the bypass can never be quietly
+   running.
+
+6. **Complete M0 onboarding** (steps 1/2/3) → the master row's
+   `linked_bot_user` is now the placeholder BotUser from step 2.
+
+7. **Refresh `.env.local` to use the linked BotUser** (optional —
+   placeholder works too, but this snaps the dev environment to the
+   real linked identity):
+   ```
+   python manage.py print_master_dev_env <master_id>
+   ```
+   Paste the printed snippet into `apps/miniapp/.env.local`, restart
+   `npm run dev`. Subsequent requests use the linked BotUser id.
+
+### Catch-22 nuance (M0 bootstrap)
+
+The `/api/v1/master/onboarding/claim` endpoint runs through
+`require_init_data_only`, which still needs to resolve a BotUser from the
+init-data — or, with the bypass, from the dev headers. Before M0,
+the master has no `linked_bot_user`, and typically no BotUser row exists
+at all for a fresh dev environment.
+
+Two resolutions documented above:
+
+- `create_test_master_invite --bootstrap-bot-user` (recommended for fresh
+  dev tenants) — pre-creates a placeholder BotUser
+  (`channel_user_id="dev-bypass-<master_id>"`) so the dev-bypass headers
+  resolve immediately.
+- `print_master_dev_env <master_id>` (post-M0) — emits the snippet using
+  the actual `linked_bot_user`, useful after the master has accepted.
+
+### Header precedence (real init-data vs dev headers)
+
+When both a valid `Authorization: MaxInitData` header AND
+`X-Dev-Bypass: 1` are present (rare — happens if you open the dev URL
+inside MAX), **the dev-bypass wins**. Rationale: the caller explicitly
+opted into dev mode by sending the bypass header. The opposite policy
+would mean "init-data silently overrides the bypass", which breaks the
+"headers always work in dev" invariant. Pinned by
+`apps/miniapp_api/tests/test_dev_bypass.py::test_real_init_data_plus_dev_headers_bypass_wins`.
+
+### Admin endpoints
+
+The bypass is wired into `require_init_data` (customer surface) and
+`require_master_init_data` / `require_init_data_only` (master surface).
+**Admin endpoints (`apps/admin_api/auth.py`) are NOT bypassed** —
+strict HMAC even in DEBUG, so accidentally testing owner/admin flows
+without proper MAX session is impossible. If you need to dev the admin
+Mini App, use the `VITE_DEV_INIT_DATA` workaround in
+`apps/miniapp/src/lib/max-sdk.ts::getInitData` with a hand-signed
+init-data string.
 
 ## Real admin invite flow (preferred — PR 3 / MM2)
 
@@ -142,42 +259,6 @@ Steps:
   recovery path is via the Django admin (`InviteStatus = PENDING`
   + fresh token) or by deleting the row and re-running this command
   with a different `--name` if name conflict.
-
-## Why no dev-mode init-data bypass in this PR
-
-Considered: a `X-Dev-Init-Data` header bypass gated behind
-`DEBUG=True` so the master Mini App could be exercised in a plain
-browser without a MAX wrapper.
-
-**Decision: deferred.**
-
-Cost-benefit:
-- The bypass touches `apps/miniapp_api/auth.extract_init_data` (the
-  customer surface) AND adds a parallel branch through
-  `require_init_data_only` + `require_master_init_data`. That's two
-  more test surfaces with security-sensitive invariants (DEBUG-gating,
-  loud logging, never-in-prod).
-- The same dev-flow is already achievable with **a real MAX dev bot**
-  in the test tenant — `seed_dev_formula_tela --max-user-id <your_id>`
-  + the deeplink from `create_test_master_invite` gives a working
-  end-to-end flow in ~30 seconds.
-- Risk: any dev-mode bypass eventually leaks into a misconfigured prod
-  env. The cost of a single bypass-test-leak is higher than the
-  convenience savings.
-
-Workaround for browser-only dev (when MAX is unreachable):
-1. Set `VITE_DEV_INIT_DATA` in `apps/miniapp/.env.local` to a
-   pre-signed initData string. The customer flow already supports this
-   (`apps/miniapp/src/lib/max-sdk.ts::getInitData`). Generate one via
-   `apps/master_api/tests/conftest.py::_sign` (copy the helper to a
-   throwaway script, sign with your local `MAX_BOT_TOKEN`).
-2. Open `http://localhost:5173/onboarding/master?token=<token>` from
-   `create_test_master_invite`.
-
-If we discover this workaround is too painful in practice (e.g. the
-test runner needs to refresh init-data hourly), revisit the dev-shim
-decision in a follow-up PR with explicit DEBUG-gating + a permission
-guard.
 
 ## Audit trail
 

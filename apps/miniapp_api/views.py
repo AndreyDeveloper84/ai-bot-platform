@@ -54,6 +54,7 @@ from apps.miniapp_api.auth import (
     extract_init_data,
     verify_init_data,
 )
+from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.scheduling.services.resolver import (
     collect_time_block_intervals,
     compute_free_slots,
@@ -126,6 +127,19 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
 
     @wraps(view_func)
     def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        # Dev-bypass (DEBUG-gated, header-opt-in, loudly logged) — see
+        # apps/miniapp_api/dev_bypass.py. In prod, the first line of
+        # try_dev_bypass is `if not settings.DEBUG: return None`, so this
+        # branch is dead code in production regardless of header presence.
+        bypass = try_dev_bypass(request)
+        if bypass is not None:
+            bot_user_b, _bypass_tenant = bypass
+            request.verified_init_data = None  # type: ignore[attr-defined]
+            request.bot_user = bot_user_b  # type: ignore[attr-defined]
+            request.tenant = bot_user_b.tenant  # type: ignore[attr-defined]
+            with tenant_scope(bot_user_b.tenant):
+                return view_func(request, *args, **kwargs)
+
         header = request.headers.get("Authorization", "")
         try:
             raw = extract_init_data(header)
