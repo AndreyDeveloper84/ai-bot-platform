@@ -110,8 +110,10 @@ class TestParseMaxWebhookHappyPath:
 
 class TestParseMaxWebhookErrors:
     def test_unsupported_update_type_raises(self):
-        with pytest.raises(ParseError, match="message_created"):
-            parse_max_webhook({"update_type": "message_callback", "message": {}})
+        # `message_chat_created` is a real MAX update type we don't handle
+        # (group-chat lifecycle event). Stays the canonical "unsupported".
+        with pytest.raises(ParseError, match="message_chat_created"):
+            parse_max_webhook({"update_type": "message_chat_created", "message": {}})
 
     def test_missing_message_raises(self):
         with pytest.raises(ParseError, match="message"):
@@ -144,3 +146,95 @@ class TestParseMaxWebhookErrors:
     def test_non_dict_message_raises(self):
         with pytest.raises(ParseError):
             parse_max_webhook({"update_type": "message_created", "message": "not a dict"})
+
+
+def _message_callback_payload(**overrides) -> dict:
+    """Build a minimal MAX `message_callback` payload that the parser accepts."""
+
+    base = {
+        "update_type": "message_callback",
+        "timestamp": 1731320000000,
+        "callback": {
+            "timestamp": 1731320000500,
+            "callback_id": "cb-uuid-1",
+            "payload": "cb:welcome:book",
+            "user": {"user_id": 12345, "name": "Иван", "lang": "ru"},
+        },
+        "message": {
+            "recipient": {"chat_id": 67890, "chat_type": "dialog"},
+            "body": {"mid": "msg-uuid-1", "seq": 1, "text": "Выберите раздел", "attachments": []},
+        },
+        "user_locale": "ru",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestParseMaxWebhookCallback:
+    """``message_callback`` decoder. The callback payload becomes ``text``
+    so skill ``matches()`` predicates that look at ``text.startswith("cb:")``
+    light up the same way they do for Telegram callbacks. ``callback_id``
+    is stashed in ``raw`` for handler-level idempotency keying.
+    """
+
+    def test_callback_payload_becomes_text(self):
+        ev = parse_max_webhook(_message_callback_payload())
+        assert ev.text == "cb:welcome:book"
+        assert ev.channel == "max"
+        assert ev.channel_user_id == "12345"
+        assert ev.chat_id == "67890"
+
+    def test_callback_id_stashed_in_raw(self):
+        ev = parse_max_webhook(_message_callback_payload())
+        assert ev.raw["callback_id"] == "cb-uuid-1"
+
+    def test_callback_timestamp_overrides_envelope(self):
+        ev = parse_max_webhook(_message_callback_payload())
+        # ``callback.timestamp`` (1731320000500ms) wins over the
+        # envelope ``timestamp`` (1731320000000ms).
+        assert ev.timestamp == datetime.fromtimestamp(1731320000.5, tz=timezone.utc)
+
+    def test_envelope_timestamp_fallback_when_callback_missing_ts(self):
+        payload = _message_callback_payload()
+        payload["callback"].pop("timestamp")
+        ev = parse_max_webhook(payload)
+        assert ev.timestamp == datetime.fromtimestamp(1731320000.0, tz=timezone.utc)
+
+    def test_empty_callback_payload_tolerated(self):
+        """MAX permits a None ``callback.payload``. We coerce to empty
+        string so downstream ``text.startswith("cb:")`` short-circuits
+        cleanly without an AttributeError."""
+
+        payload = _message_callback_payload()
+        payload["callback"]["payload"] = None
+        ev = parse_max_webhook(payload)
+        assert ev.text == ""
+        # No attachments on callback events.
+        assert ev.attachments == []
+
+    def test_missing_callback_raises(self):
+        with pytest.raises(ParseError, match="callback"):
+            parse_max_webhook({"update_type": "message_callback", "message": {}})
+
+    def test_missing_callback_user_raises(self):
+        payload = _message_callback_payload()
+        payload["callback"].pop("user")
+        with pytest.raises(ParseError, match="callback.user.user_id"):
+            parse_max_webhook(payload)
+
+    def test_missing_callback_id_raises(self):
+        """callback_id is the idempotency key — refuse a payload that
+        can't be deduped on retry."""
+
+        payload = _message_callback_payload()
+        payload["callback"].pop("callback_id")
+        with pytest.raises(ParseError, match="callback.callback_id"):
+            parse_max_webhook(payload)
+
+    def test_missing_chat_id_raises(self):
+        """No chat_id means we can't address a reply back — refuse."""
+
+        payload = _message_callback_payload()
+        payload["message"].pop("recipient")
+        with pytest.raises(ParseError, match="recipient.chat_id"):
+            parse_max_webhook(payload)

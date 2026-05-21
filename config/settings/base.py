@@ -244,6 +244,14 @@ MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 # CHANNEL_TOKEN_TO_TENANT_SLUG map already wired for /api/v1/ingress/max/.
 MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
 
+# Welcome-skill keyboard config (apps/skills/welcome). When the bot's
+# Mini App username is set, the welcome buttons use MAX's native
+# ``open_app`` button type so the Mini App opens INSIDE the MAX client.
+# When unset, the fallback ``link`` button opens MAX_MINIAPP_URL in the
+# user's external browser — degraded UX but always works.
+MAX_BOT_WEB_APP = os.environ.get("MAX_BOT_WEB_APP", "")
+MAX_MINIAPP_URL = os.environ.get("MAX_MINIAPP_URL", "")
+
 # Master Mini App session token (PR 1 / M0 onboarding).
 #
 # Issued by POST /api/v1/master/onboarding/accept. The Mini App stores it

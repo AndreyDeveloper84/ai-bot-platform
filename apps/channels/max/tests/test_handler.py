@@ -214,6 +214,201 @@ class TestIdempotencyDedup:
         assert dedup_events.exists()
 
 
+def _callback_payload(
+    *, callback_id="cb-1", payload="cb:welcome:ask", user_id=12345, chat_id=67890
+):
+    """MAX `message_callback` shape — matches the parser DTO contract."""
+    return {
+        "update_type": "message_callback",
+        "timestamp": 1731320000000,
+        "callback": {
+            "timestamp": 1731320000500,
+            "callback_id": callback_id,
+            "payload": payload,
+            "user": {"user_id": user_id, "name": "Иван", "lang": "ru"},
+        },
+        "message": {
+            "recipient": {"chat_id": chat_id, "chat_type": "dialog"},
+            "body": {"mid": "m-orig", "seq": 1, "text": "Выберите раздел"},
+        },
+        "user_locale": "ru",
+    }
+
+
+class TestBookingEnvelopeKeyboard:
+    """The booking skill emits action_data in the *platform-canonical*
+    envelope shape (see apps/skills/booking/skill.py:_action_data_for_pending):
+
+        {"attachments": [{"type": "inline_keyboard",
+                          "payload": {"buttons": [{"label": ..., "callback": ...}]}}]}
+
+    Telegram reads this directly. MAX must too — otherwise booking
+    confirm/cancel/reschedule keyboards silently vanish on MAX.
+    Regression guard for Code Reviewer finding #1 (2026-05-21).
+    """
+
+    def test_envelope_flat_buttons_pass_through(
+        self, tenant_a, mock_send, fake_redis, settings, monkeypatch
+    ):
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        # Inject a fake skill that emits the booking envelope shape, so we
+        # don't have to spin up the whole booking tool harness.
+        from apps.skills import registry as skill_registry
+        from apps.skills.base import SkillResult
+
+        class _FakeBookingSkill:
+            name = "fake-booking"
+
+            def matches(self, ctx):
+                return ctx.message_text == "/booking"
+
+            def handle(self, ctx):
+                return SkillResult(
+                    reply_text="Подтвердить запись?",
+                    action_type="booking_pending",
+                    action_data={
+                        "attachments": [
+                            {
+                                "type": "inline_keyboard",
+                                "payload": {
+                                    "buttons": [
+                                        {"label": "✅ Да", "callback": "cb:book:confirm:tok-1"},
+                                        {"label": "❌ Нет", "callback": "cb:book:cancel:tok-1"},
+                                    ],
+                                },
+                            }
+                        ],
+                        "pending_action": {"kind": "confirm", "token": "tok-1"},
+                    },
+                )
+
+        monkeypatch.setattr(
+            skill_registry, "_skills", [_FakeBookingSkill()] + skill_registry._skills
+        )
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event(_payload(text="/booking"))
+
+        attachments = mock_send[0]["attachments"]
+        assert attachments is not None and len(attachments) == 1
+        att = attachments[0]
+        assert att["type"] == "inline_keyboard"
+        # Two callback buttons, MAX wire format, in order.
+        buttons = att["payload"]["buttons"]
+        texts = [row[0]["text"] for row in buttons]
+        assert texts == ["✅ Да", "❌ Нет"]
+        payloads = [row[0]["payload"] for row in buttons]
+        assert payloads == ["cb:book:confirm:tok-1", "cb:book:cancel:tok-1"]
+
+    def test_envelope_pre_shaped_rows_pass_through(
+        self, tenant_a, mock_send, fake_redis, settings, monkeypatch
+    ):
+        """Same envelope but buttons is already a 2-D matrix (rare —
+        reminder tasks emit one row per CTA). Pass through unchanged."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        from apps.skills import registry as skill_registry
+        from apps.skills.base import SkillResult
+
+        class _FakeReminderSkill:
+            name = "fake-reminder"
+
+            def matches(self, ctx):
+                return ctx.message_text == "/reminder"
+
+            def handle(self, ctx):
+                return SkillResult(
+                    reply_text="Напомнить?",
+                    action_data={
+                        "attachments": [
+                            {
+                                "type": "inline_keyboard",
+                                "payload": {
+                                    "buttons": [
+                                        [{"label": "Да", "callback": "cb:rem:yes"}],
+                                        [{"label": "Нет", "callback": "cb:rem:no"}],
+                                    ],
+                                },
+                            }
+                        ],
+                    },
+                )
+
+        monkeypatch.setattr(
+            skill_registry, "_skills", [_FakeReminderSkill()] + skill_registry._skills
+        )
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event(_payload(text="/reminder"))
+
+        rows = mock_send[0]["attachments"][0]["payload"]["buttons"]
+        # 2 rows × 1 button preserved.
+        assert [b[0]["text"] for b in rows] == ["Да", "Нет"]
+
+
+class TestKeyboardPassThrough:
+    """Inline-keyboard restoration (2026-05-20). When a skill emits
+    ``action_data["buttons"]``, the MAX adapter must convert that to the
+    native ``inline_keyboard`` attachment and pass it to ``send_message``.
+    Regression guard for the post-cutover «пропали кнопки» bug.
+    """
+
+    def test_welcome_keyboard_attached_to_outbound(self, tenant_a, mock_send, fake_redis, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        # Force the link-button branch — predictable + asserts the URL layout.
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event(_payload(text="/start"))
+
+        sent = mock_send[0]
+        attachments = sent["attachments"]
+        assert attachments is not None
+        # Exactly one attachment, of type inline_keyboard.
+        assert len(attachments) == 1
+        att = attachments[0]
+        assert att["type"] == "inline_keyboard"
+        buttons = att["payload"]["buttons"]
+        # 4 rows (default columns=1): 3 link + 1 callback.
+        assert len(buttons) == 4
+        # First button is the link to /catalog.
+        assert buttons[0][0]["type"] == "link"
+        assert buttons[0][0]["url"] == "https://miniapp-dev.example/catalog"
+        # Last button is the callback ask prompt.
+        assert buttons[3][0]["type"] == "callback"
+        assert buttons[3][0]["payload"] == "cb:welcome:ask"
+
+    def test_callback_tap_runs_welcome_ask_prompt(self, tenant_a, mock_send, fake_redis, settings):
+        """User taps «❓ Задать вопрос» — bot replies with the prompt text
+        and no keyboard (the FAQ skill takes the next turn)."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event(_callback_payload(payload="cb:welcome:ask"))
+
+        sent = mock_send[0]
+        # The ASK_PROMPT text is on the reply.
+        assert "Спросите" in sent["text"]
+        # No keyboard on this turn.
+        assert sent["attachments"] is None
+
+    def test_callback_idempotency_keys_off_callback_id(
+        self, tenant_a, mock_send, fake_redis, settings
+    ):
+        """Two webhook deliveries for the same callback_id collapse to
+        one outbound — even if PEL retries push the same payload twice."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            max_handler.handle_max_event(_callback_payload(callback_id="same-cb-1"))
+            max_handler.handle_max_event(_callback_payload(callback_id="same-cb-1"))
+
+        # Second call short-circuits on AlreadyClaimed.
+        assert len(mock_send) == 1
+
+
 class TestOutboundFailure:
     def test_max_api_error_propagates_after_persisting_assistant_message(
         self, tenant_a, fake_redis, settings, monkeypatch

@@ -206,3 +206,94 @@ def send_chat_action(*, chat_id: str, action: str, timeout: float = 5.0) -> None
             action,
             response.status_code,
         )
+
+
+# ─── inline keyboard wire-format ──────────────────────────────────────────
+
+
+def make_inline_keyboard_attachment(
+    buttons: list[dict[str, str]],
+    *,
+    columns: int = 1,
+) -> dict[str, Any]:
+    """Build a MAX ``inline_keyboard`` attachment from the channel-agnostic list.
+
+    The platform's keyboard contract (see
+    :mod:`apps.orchestrator.ui.keyboards`) emits ``[{"label": ..., "callback": ...}]``
+    — channel-blind. MAX's wire shape nests the buttons in a 2-D matrix
+    inside an attachment::
+
+        {
+          "type": "inline_keyboard",
+          "payload": {
+            "buttons": [
+              [{"type": "callback", "text": "📅 Записаться", "payload": "cb:welcome:book"}],
+              [{"type": "callback", "text": "ℹ️ Услуги",   "payload": "cb:welcome:services"}]
+            ]
+          }
+        }
+
+    ``columns`` flows the flat list into a grid. ``columns=1`` (default)
+    stacks vertically; ``columns=2`` pairs them. Callers that need a
+    hand-rolled layout use :func:`make_inline_keyboard_attachment_rows`.
+    """
+    if columns < 1:
+        raise ValueError(f"columns must be >= 1, got {columns}")
+    rows: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for btn in buttons:
+        current.append(_button_to_max(btn))
+        if len(current) >= columns:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append(current)
+    return {"type": "inline_keyboard", "payload": {"buttons": rows}}
+
+
+def make_inline_keyboard_attachment_rows(
+    rows: list[list[dict[str, str]]],
+) -> dict[str, Any]:
+    """Like :func:`make_inline_keyboard_attachment` but takes pre-shaped rows.
+
+    Use when the caller has already decided which buttons share a row
+    (e.g. paired Confirm/Cancel pair followed by a wider Back button).
+    """
+    return {
+        "type": "inline_keyboard",
+        "payload": {"buttons": [[_button_to_max(b) for b in row] for row in rows]},
+    }
+
+
+def _button_to_max(btn: dict[str, Any]) -> dict[str, Any]:
+    """Convert one channel-agnostic button dict to MAX's wire format.
+
+    Channel-agnostic shape is ``{"label": "📅 Записаться", "callback": "cb:welcome:book"}``.
+    MAX wire shape distinguishes by ``type``:
+
+      * ``"callback"`` (default) — bot receives a ``message_callback``
+        update with the ``payload`` echoed back.
+      * ``"link"`` — opens the URL in the user's external browser.
+      * ``"open_app"`` — launches a MAX Mini App; requires either
+        ``web_app`` (bot username) or ``contact_id``.
+
+    The channel-agnostic dict accommodates the variants via optional
+    keys: ``url`` selects link, ``web_app``/``contact_id`` selects open_app.
+    Defaults to callback when none are present.
+    """
+    text = btn.get("label") or ""
+    if btn.get("url"):
+        return {"type": "link", "text": text, "url": btn["url"]}
+    if btn.get("web_app") or btn.get("contact_id"):
+        out: dict[str, Any] = {"type": "open_app", "text": text}
+        if btn.get("web_app"):
+            out["web_app"] = btn["web_app"]
+        if btn.get("contact_id"):
+            out["contact_id"] = btn["contact_id"]
+        if btn.get("callback"):
+            # MAX `open_app` button supports a `payload` carried into
+            # the Mini App's initData. Reuse the `callback` field so
+            # producers don't have to learn two key names.
+            out["payload"] = btn["callback"]
+        return out
+    return {"type": "callback", "text": text, "payload": btn.get("callback") or ""}
