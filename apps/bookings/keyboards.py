@@ -62,6 +62,14 @@ CALLBACK_BOOK_PICK_MASTER_PREFIX = "cb:book:pick_master:"
 # so the LLM's confirm_booking arguments match the prior tool output.
 CALLBACK_BOOK_PICK_SLOT_PREFIX = "cb:book:pick_slot:"
 
+# Booking date-pick callback (2026-05-21). Date-picker sits between
+# master pick and slot pick — without it show_slots auto-selects the
+# nearest available date and the user never gets to pick when. Payload
+# carries the master_id + date so the slot-listing call can pin the
+# date without re-fetching the master's date list. Format:
+# ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>``.
+CALLBACK_BOOK_PICK_DATE_PREFIX = "cb:book:pick_date:"
+
 
 # Button labels — Russian per the salon brand voice (see
 # ``apps.skills.booking.prompts`` for tone alignment).
