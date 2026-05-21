@@ -53,9 +53,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from apps.audit.services import write_audit
+from apps.bookings.keyboards import CALLBACK_BOOK_PICK_MASTER_PREFIX
 from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
 from apps.llm.protocol import ToolCall
@@ -103,6 +105,27 @@ _DEFAULT_BRAND_VOICE = BrandVoiceConfig(
 
 
 _FALLBACK_HANDOFF_TEXT = "Не получилось оформить запись — переключаю на менеджера, он подскажет."
+
+# Deterministic prompt shown when the master-cards keyboard is sent.
+# Buttons carry the data — text only frames the choice. Kept short
+# because MAX inline_keyboard wraps below the message body and the
+# user reads the buttons, not the prose.
+_MASTER_PICK_PROMPT = "Выберите мастера:"
+
+
+@dataclass(frozen=True)
+class _SynthLLMResult:
+    """Stand-in for :class:`LLMCompletion` used by the callback short-circuit.
+
+    The master-pick callback path skips Phase 1 (LLM tool selection) and
+    constructs the equivalent ``tool_calls`` list deterministically. The
+    rest of the handle() body reads ``first.tool_calls`` + ``first.text``,
+    so we mirror the relevant duck-typed shape without dragging in the
+    full provider response dataclass.
+    """
+
+    tool_calls: list[ToolCall]
+    text: str
 
 
 # Audit / event slugs.
@@ -157,6 +180,15 @@ class BookingSkill:
     name: ClassVar[str] = "booking"
 
     def matches(self, context: SkillContext) -> bool:
+        # Master-pick button tap (2026-05-21 UX). User saw a master-cards
+        # keyboard from a prior show_masters reply; the tapped button's
+        # payload is ``cb:book:pick_master:<staff_id>``. Take it before
+        # the intent classifier — the prefix is unambiguous and the
+        # classifier might mis-route a bare numeric string.
+        text = (context.message_text or "").strip()
+        if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
+            return True
+
         intent = context.intent
         if intent is not None:
             return intent.intent == "booking"
@@ -210,18 +242,48 @@ class BookingSkill:
         allowed_service_ids = {int(s.id) for s in services}
         service_lookup = build_service_lookup(services)
 
-        # ── Phase 1: first LLM call (decide on tool use) ───────────
-        first_messages = build_booking_prompt(
-            brand_voice=_DEFAULT_BRAND_VOICE,
-            query=context.message_text,
-        )
-        first = asyncio.run(
-            provider.complete(
-                first_messages,
-                model=model,
-                tools=BOOKING_TOOL_SPECS,
+        # ── Master-pick callback short-circuit ──────────────────────
+        # User tapped a master-card button (cb:book:pick_master:<id>).
+        # Skip Phase 1 LLM entirely — we already know the user's intent
+        # is "show slots for this master". Synthesise the tool call
+        # deterministically and fall through to Phase 2 + Phase 3.
+        text = (context.message_text or "").strip()
+        if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
+            raw_id = text[len(CALLBACK_BOOK_PICK_MASTER_PREFIX) :].strip()
+            try:
+                master_id = int(raw_id)
+            except (TypeError, ValueError):
+                # Malformed payload — UX is "I didn't catch that, pick again".
+                # Rare path: only fires if MAX delivers a corrupt button payload.
+                logger.warning("booking.pick_master.bad_id raw=%r", raw_id)
+                return _build_skill_result(
+                    text="Не удалось распознать выбор мастера. Напишите имя ещё раз?",
+                    tool_calls_made=[],
+                    confidence=None,
+                )
+            first = _SynthLLMResult(
+                tool_calls=[
+                    ToolCall(
+                        id=f"synth:pick_master:{master_id}",
+                        name=SHOW_SLOTS_TOOL_SPEC["name"],
+                        arguments={"master_id": master_id},
+                    )
+                ],
+                text="",
             )
-        )
+        else:
+            # ── Phase 1: first LLM call (decide on tool use) ───────
+            first_messages = build_booking_prompt(
+                brand_voice=_DEFAULT_BRAND_VOICE,
+                query=context.message_text,
+            )
+            first = asyncio.run(
+                provider.complete(
+                    first_messages,
+                    model=model,
+                    tools=BOOKING_TOOL_SPECS,
+                )
+            )
 
         if not first.tool_calls:
             # Small talk / direct reply — no tool needed.
@@ -261,6 +323,20 @@ class BookingSkill:
                 reason=handoff_reason,
                 text=_FALLBACK_HANDOFF_TEXT,
                 tenant_id=tenant_id,
+            )
+
+        # Master-cards short-circuit: when show_masters returned candidates,
+        # render them as a deterministic text + inline-keyboard (one button
+        # per master, cb:book:pick_master:<id> payload). Skip Phase 3 LLM
+        # to avoid the round-trip + remove the failure mode where the
+        # model writes filler text instead of presenting the cards.
+        if tool_name == SHOW_MASTERS_TOOL_SPEC["name"] and tool_result.masters:
+            _audit_handled(tenant_id=tenant_id, tool=tool_name)
+            return _build_skill_result(
+                text=_MASTER_PICK_PROMPT,
+                tool_calls_made=tool_calls_made,
+                confidence=_CONFIDENCE_OK,
+                action_data=_action_data_for_master_pick(tool_result.masters),
             )
 
         # Health-check gate — only relevant for confirm_booking.
@@ -503,6 +579,50 @@ def _masters_payload(result: BookingToolResult) -> list[dict[str, Any]] | None:
         }
         for m in result.masters
     ]
+
+
+def _action_data_for_master_pick(masters: list) -> dict[str, Any]:
+    """Build the master-cards keyboard from a show_masters result.
+
+    Channel adapters consume the platform-canonical envelope shape (same
+    as preview-gated confirms in :func:`_action_data_for_pending`). The
+    handler ``_build_attachments`` converts the channel-agnostic
+    ``[{label, callback}]`` list to the MAX wire format.
+
+    One button per master, callback payload
+    ``cb:book:pick_master:<staff_id>``. The skill's matches() picks the
+    prefix up on the tap and the handle() short-circuit dispatches
+    show_slots(master_id=<id>) without a Phase 1 LLM round-trip.
+
+    Label shape: ``<emoji> <name>`` with a specialisation hint when
+    distinct from the canonical "Мастер массажа" boilerplate — keeps the
+    button readable in MAX's tight inline-keyboard layout.
+    """
+    buttons = [
+        {
+            "label": _master_button_label(m),
+            "callback": f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}{m.id}",
+        }
+        for m in masters
+    ]
+    return {
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {"buttons": buttons},
+            }
+        ],
+        "kind": "master_pick",
+    }
+
+
+def _master_button_label(master) -> str:
+    """One-line readable label for the master-pick button."""
+    name = (master.name or "").strip() or "Мастер"
+    spec = (master.specialization or "").strip()
+    if spec and spec.lower() != "мастер массажа":
+        return f"👤 {name} — {spec}"
+    return f"👤 {name}"
 
 
 def _slots_payload(result: BookingToolResult) -> list[dict[str, Any]] | None:

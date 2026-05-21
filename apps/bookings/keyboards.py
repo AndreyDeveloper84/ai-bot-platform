@@ -43,6 +43,15 @@ CALLBACK_CANCEL_PREFIX = "cb:rem:cancel:"
 CALLBACK_BOOK_CONFIRM_PREFIX = "cb:book:confirm:"
 CALLBACK_BOOK_CANCEL_PREFIX = "cb:book:cancel:"
 
+# Booking master-pick callback (2026-05-21). When the user taps a master
+# card after a show_masters result, the button payload carries the YClients
+# staff id verbatim. Booking skill matches this prefix and dispatches
+# show_slots(master_id=<id>) directly — no LLM round-trip needed for the
+# selection itself. Suffix is the raw integer YClients staff id (NOT a
+# UUID like the confirm/cancel preview tokens — those are platform-side
+# pending-action rows, this is a stateless deterministic id).
+CALLBACK_BOOK_PICK_MASTER_PREFIX = "cb:book:pick_master:"
+
 
 # Button labels — Russian per the salon brand voice (see
 # ``apps.skills.booking.prompts`` for tone alignment).
