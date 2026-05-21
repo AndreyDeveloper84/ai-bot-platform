@@ -30,6 +30,15 @@ from django.db import models
 class DomainEvent(models.Model):
     """One row per emitted domain event. Outbox row → dispatcher → subscribers."""
 
+    # Tenancy system-check opt-out (tenancy.W900 / W901). DomainEvent is
+    # an outbox table — the dispatcher reads cross-tenant via
+    # ``select_for_update(skip_locked=True)`` (see apps/eventbus/
+    # dispatcher.py) because it's a system process, not a tenant-scoped
+    # request. Adding TenantScopedManager would scope dispatch reads to
+    # the (None) current_tenant and silently drop pending rows.
+    # Documented intentional deviation.
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
     # event-taxonomy.md §2 envelope -----------------------------------
     event_id = models.CharField(
         max_length=26,

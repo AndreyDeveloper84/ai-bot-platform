@@ -65,6 +65,18 @@ class ShadowDeltaSnapshot(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Tenancy system-check opt-out (tenancy.W900 / W901).
+    # ShadowDeltaSnapshot is an operator observability artefact — the
+    # admin dashboard at apps/observability/views.py reads cross-tenant
+    # via ``.filter(snapshot_date__gte=cutoff)`` (no tenant filter,
+    # intentional), and the S4 Celery beat iterates tenants explicitly
+    # in ``compute_daily_delta(date, tenant)``. Auto-scoping by
+    # current_tenant() would break the dashboard (which has no tenant
+    # in scope) and silently return empty. Documented intentional
+    # deviation; explicit-tenant pattern in the beat task is the
+    # load-bearing contract.
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
     class Meta:
         verbose_name = "Shadow delta snapshot"
         verbose_name_plural = "Shadow delta snapshots"
