@@ -94,6 +94,86 @@ export interface ProfilePatchResponse {
   master: Pick<MasterProfile, "id" | "name" | "bio" | "photo_url">;
 }
 
+// --- Dashboard (M1) types -------------------------------------------------
+// Mirrors apps/master_api/services/dashboard.py:DashboardSnapshot.to_dict().
+// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M1.
+
+export interface DashboardMaster {
+  id: string;
+  name: string;
+  specialization: string;
+  photo_url: string;
+}
+
+export interface DashboardSalon {
+  id: string;
+  name: string;
+}
+
+export interface DashboardActiveVisit {
+  booking_id: string;
+  client_first_name: string;
+  client_last_initial: string;
+  service_name: string;
+  started_at: string; // ISO
+  duration_min: number;
+  minutes_remaining: number;
+  is_in_progress: boolean;
+  note: string;
+}
+
+export interface DashboardNextVisit {
+  booking_id: string;
+  client_first_name: string;
+  client_last_initial: string;
+  visit_at: string; // ISO
+  service_name: string;
+  duration_min: number;
+  is_returning_customer: boolean;
+  customer_intent_hint: string;
+}
+
+export type SlaTier = "red" | "yellow" | "white";
+
+export interface DashboardInboxItem {
+  conversation_id: string;
+  client_first_name: string;
+  client_last_initial: string;
+  last_message_excerpt: string;
+  last_message_at: string; // ISO
+  sla_tier: SlaTier;
+  ai_drafted_reply_available: boolean;
+}
+
+export interface DashboardTodaySummary {
+  total_clients_today: number;
+  completed_count: number;
+  next_free_window: { start: string; end: string } | null;
+}
+
+export interface DashboardTabBadges {
+  conversations_unread: number;
+  schedule_has_pending_change: boolean;
+  profile_has_owner_pending_change: boolean;
+}
+
+export interface DashboardStatesFlags {
+  is_day_done: boolean;
+  is_offline_safe_response: boolean;
+}
+
+export interface DashboardResponse {
+  master: DashboardMaster;
+  salon: DashboardSalon;
+  now_iso: string;
+  active_visit: DashboardActiveVisit | null;
+  next_visit: DashboardNextVisit | null;
+  inbox_preview: DashboardInboxItem[];
+  today_summary: DashboardTodaySummary;
+  tab_badges: DashboardTabBadges;
+  states: DashboardStatesFlags;
+}
+
 // --- endpoints -------------------------------------------------------------
 
 export const claimInvite = (token: string): Promise<ClaimResponse> =>
@@ -131,5 +211,8 @@ export const patchOnboardingProfile = (input: {
     body: JSON.stringify({ bio: input.bio ?? "" }),
   });
 };
+
+export const getDashboard = (): Promise<DashboardResponse> =>
+  request("/dashboard", { method: "GET" });
 
 export const MASTER_SESSION_STORAGE_KEY = "master_token";
