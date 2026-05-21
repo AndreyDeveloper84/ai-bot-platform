@@ -24,10 +24,10 @@
  *   - HapticFeedback.selectionChanged() on tab switch
  *   - Pull-to-refresh → HapticFeedback.impactOccurred('soft' approximated 'light')
  *
- * M6 conversation detail is not built yet. Tapping a card currently routes
- * to the same list with a toast («Откроется в M6»). Permission cliff per
- * spec line 623: deep-linked non-own conversation → redirect to list with
- * toast «Этот диалог не для вас».
+ * Tapping a card routes to M6 (`/master/conversations/:id`). Permission
+ * cliff per spec line 623: a deep-linked non-own conversation surfaces
+ * as 404 on M6 → M6 navigates back here with `state.permissionCliff =
+ * true`, triggering the toast «Этот диалог не для вас».
  */
 
 import {
@@ -91,7 +91,6 @@ const COPY = {
   loadMore: "Показать ещё",
   noResults: (q: string) => `Ничего не найдено по запросу «${q}»`,
   toastPermissionCliff: "Этот диалог не для вас",
-  toastM6Pending: "Откроется в подробном виде позже",
   searchAria: "Поиск по имени клиента",
 };
 
@@ -242,17 +241,14 @@ export function MasterConversationsScreen() {
     [load],
   );
 
-  // --- Card tap → M6 fallback ----------------------------------------
+  // --- Card tap → M6 conversation detail ------------------------------
 
   const onCardTap = useCallback(
-    (_item: MasterConversationItem) => {
+    (item: MasterConversationItem) => {
       hapticSelection();
-      // M6 (conversation detail) is not built yet. We show a toast so the
-      // user gets feedback and the tap isn't a black hole. Once M6 ships,
-      // this becomes navigate(`/master/conversations/${item.conversation_id}`).
-      setToast({ visible: true, message: COPY.toastM6Pending });
+      navigate(`/master/conversations/${item.conversation_id}`);
     },
-    [],
+    [navigate],
   );
 
   // --- Tab change -----------------------------------------------------
