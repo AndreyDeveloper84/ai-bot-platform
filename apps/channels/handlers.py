@@ -40,10 +40,13 @@ class MaxHandler(TenantAwareTask):
     ``resolved_tenant_id=""`` branch is explicit). Pre-B4 such entries
     silently ran with ``tenant_scope(None)``: reads returned empty +
     audit warn but the handler proceeded on phantom context. Post-B4
-    once ``STRICT_TENANT_REFUSE`` flips, such entries DLQ cleanly so
-    the incident surfaces. Phase 0 default (False) is log-only: ERROR
-    log on missing tenant, handler still runs (parity with pre-B4 for
-    the transition window).
+    once ``STRICT_TENANT_REFUSE`` flips, the dispatcher refuses such
+    entries (raise ``TenantRequiredButMissing``). The consumer does
+    NOT XACK on raise — **the entry stays in the PEL** until operator
+    XCLAIM / XAUTOCLAIM intervention. No automatic DLQ retry is wired
+    yet — see ``docs/runbooks/strict-tenant-refuse-flip.md``. Phase 0
+    default (False) is log-only: ERROR log on missing tenant, handler
+    still runs (parity with pre-B4 for the transition window).
     """
 
     def handle(self, payload: dict[str, Any]) -> None:
