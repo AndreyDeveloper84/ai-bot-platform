@@ -1,12 +1,15 @@
 # Customer Mini App static SPA — nginx vhost (TEMPLATE).
 #
 # Placeholders:
-#   {SUBDOMAIN}      miniapp.gobeauty.site | miniapp-dev.gobeauty.site
+#   {SUBDOMAIN}      miniapp.gobeauty.site (prod) | miniapp-dev.ayla.app (dev)
 #   {DIST_PATH}      /home/taximeter/ai-bot-platform{,-dev}/apps/miniapp/dist
 #   {GUNICORN_PORT}  8013 (prod) | 8014 (dev) — Django backend on 127.0.0.1
-#   {API_HOST}       api.gobeauty.site | api-dev.gobeauty.site — value
-#                    of the Host header forwarded to gunicorn; must be in
-#                    Django ALLOWED_HOSTS
+#   {API_HOST}       api.gobeauty.site (prod) | api-dev.ayla.app (dev) —
+#                    value of the Host header forwarded to gunicorn; must
+#                    be in Django ALLOWED_HOSTS
+#
+# Note: dev migrated from gobeauty.site → ayla.app per #417 on 2026-05-21.
+# Prod remains on gobeauty.site until Phase 1.
 #
 # MAX Mini App requires HTTPS public URL.
 

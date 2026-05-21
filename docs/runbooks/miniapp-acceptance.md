@@ -25,8 +25,8 @@ HUMAN_LOCKED handoff visibility in the admin UI.
   willing to trigger lazy-create on first Mini App tap.
 - Access: admin console (or `manage.py shell`) on the target env to
   inspect AdminTask + BookingRequest rows.
-- Pre-check: `curl https://miniapp-dev.gobeauty.site/ -I` returns 200.
-- Pre-check: `curl https://api-dev.gobeauty.site/healthz/` returns
+- Pre-check: `curl https://miniapp-dev.ayla.app/ -I` returns 200.
+- Pre-check: `curl https://api-dev.ayla.app/healthz/` returns
   `{"status":"ok"}`.
 - Communication: announce in #ops before running the **rating=2** step
   — it creates a real `TaskType.COMPLAINT` AdminTask the operators will see.

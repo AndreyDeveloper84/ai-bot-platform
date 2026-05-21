@@ -34,9 +34,9 @@
 
 /etc/nginx/sites-enabled/
 ├── api.gobeauty.site                 → 127.0.0.1:8013
-├── api-dev.gobeauty.site             → 127.0.0.1:8014
+├── api-dev.ayla.app             → 127.0.0.1:8014
 ├── miniapp.gobeauty.site             → static dist/
-└── miniapp-dev.gobeauty.site         → static dist/
+└── miniapp-dev.ayla.app         → static dist/
 ```
 
 ---
@@ -47,11 +47,11 @@
 
 Create A records pointing at `app.penza.taxi` IP:
 - `api.gobeauty.site`
-- `api-dev.gobeauty.site`
+- `api-dev.ayla.app`
 - `miniapp.gobeauty.site`
-- `miniapp-dev.gobeauty.site`
+- `miniapp-dev.ayla.app`
 
-Wait for propagation (`dig +short api-dev.gobeauty.site`).
+Wait for propagation (`dig +short api-dev.ayla.app`).
 
 ### 2.2 Postgres roles + databases
 
@@ -160,7 +160,7 @@ curl -fsS http://127.0.0.1:8014/readyz/  # → 200
 ### 2.8 Nginx vhosts
 
 ```bash
-SUB=api-dev.gobeauty.site
+SUB=api-dev.ayla.app
 DEPLOY_PATH=/home/taximeter/ai-bot-platform-dev
 sudo sed -e "s|{SUBDOMAIN}|${SUB}|g" \
          -e "s|{GUNICORN_PORT}|8014|g" \
@@ -173,7 +173,7 @@ sudo ln -sf /etc/nginx/sites-available/${SUB} /etc/nginx/sites-enabled/
 sudo certbot --nginx -d ${SUB} --non-interactive --agree-tos -m admin@gobeauty.site
 
 # Same for Mini App
-SUB=miniapp-dev.gobeauty.site
+SUB=miniapp-dev.ayla.app
 DIST=/home/taximeter/ai-bot-platform-dev/apps/miniapp/dist
 sudo sed -e "s|{SUBDOMAIN}|${SUB}|g" -e "s|{DIST_PATH}|${DIST}|g" \
          infra/nginx/miniapp.conf.template \
@@ -184,8 +184,8 @@ sudo certbot --nginx -d ${SUB} --non-interactive --agree-tos -m admin@gobeauty.s
 sudo nginx -t && sudo systemctl reload nginx
 
 # Final smoke
-curl -fsS https://api-dev.gobeauty.site/readyz/  # → 200
-curl -fsS https://miniapp-dev.gobeauty.site/     # → HTML page
+curl -fsS https://api-dev.ayla.app/readyz/  # → 200
+curl -fsS https://miniapp-dev.ayla.app/     # → HTML page
 ```
 
 ---
@@ -244,9 +244,9 @@ backup. Backup procedure: `docs/runbooks/disaster-recovery.md`.
 
 ## 6. Smoke checklist post-deploy
 
-- [ ] `curl https://api-dev.gobeauty.site/readyz/` → 200
-- [ ] `curl https://api-dev.gobeauty.site/api/v1/customer/auth/verify` (with valid initData header) → 200 or 404 user_not_registered
-- [ ] `https://miniapp-dev.gobeauty.site/` returns HTML with `<title>` matching app
+- [ ] `curl https://api-dev.ayla.app/readyz/` → 200
+- [ ] `curl https://api-dev.ayla.app/api/v1/customer/auth/verify` (with valid initData header) → 200 or 404 user_not_registered
+- [ ] `https://miniapp-dev.ayla.app/` returns HTML with `<title>` matching app
 - [ ] `journalctl -u ai-bot-platform-dev -n 50` — no traceback in last 5 min
 - [ ] `sudo systemctl is-active ai-bot-platform-dev{,-worker,-beat}` — all `active`
 - [ ] PostgreSQL: `sudo -u postgres psql ai_bot_platform_dev -c '\dt'` shows migrated tables

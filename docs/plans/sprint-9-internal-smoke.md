@@ -6,7 +6,7 @@
 
 Walk every skill's happy path + the most-important failure path through
 a real Telegram dev-bot session against Ayla staging
-(`dev.gobeauty.site`). Catch integration-layer issues that unit tests
+(`dev.ayla.app`). Catch integration-layer issues that unit tests
 miss — wire-up between skill / I1 client / channel adapter / Ayla
 backend.
 
@@ -14,7 +14,7 @@ backend.
 
 * **Dev tenant** — `tenant=sprint-9-smoke` in local Django shell, with
   Telegram bot token in `MAX_BOT_TOKEN`, `MAX_BOT_MODE=polling`.
-* **Ayla** — staging via `AYLA_BASE_URL=https://dev.gobeauty.site` +
+* **Ayla** — staging via `AYLA_BASE_URL=https://dev.ayla.app` +
   `AYLA_SERVICE_TOKEN` from 1Password.
 * **Local run** — `make run` + `make worker` + `make bot-polling`
   (the last command launches the dev-bot in long-polling mode against

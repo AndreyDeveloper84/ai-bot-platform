@@ -15,7 +15,7 @@ subscription for the URL first, then re-POSTs — MAX has no PUT.
 ### Usage
 
     python manage.py max_subscribe_webhook \
-        --url https://api-dev.gobeauty.site/api/v1/ingress/max/ \
+        --url https://api-dev.ayla.app/api/v1/ingress/max/ \
         --update-type message_created --update-type message_callback
 
 The ``--url`` is required (no sensible default — dev and prod differ).

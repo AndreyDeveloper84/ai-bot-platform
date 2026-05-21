@@ -1,16 +1,20 @@
 # ai-bot-platform — Django API nginx vhost (TEMPLATE).
 #
 # Placeholders:
-#   {SUBDOMAIN}        api.gobeauty.site (prod) | api-dev.gobeauty.site (dev)
+#   {SUBDOMAIN}        api.gobeauty.site (prod) | api-dev.ayla.app (dev)
 #   {GUNICORN_PORT}    8013 (prod) | 8014 (dev)
 #   {CERT_PATH}        /etc/letsencrypt/live/{SUBDOMAIN}/...
 #
-# Install:
-#   sudo cp ai-bot-platform-api.conf.template /etc/nginx/sites-available/{SUBDOMAIN}
-#   sudo sed -i 's/{SUBDOMAIN}/api-dev.gobeauty.site/g; s/{GUNICORN_PORT}/8014/g' \
-#       /etc/nginx/sites-available/{SUBDOMAIN}
-#   sudo certbot --nginx -d {SUBDOMAIN}
-#   sudo ln -s /etc/nginx/sites-available/{SUBDOMAIN} /etc/nginx/sites-enabled/
+# Note: dev migrated from gobeauty.site → ayla.app per #417 on 2026-05-21.
+# Prod remains on gobeauty.site until Phase 1 (Notion API Spec v2.0 target:
+# api.ayla.app).
+#
+# Install (dev example):
+#   sudo cp ai-bot-platform-api.conf.template /etc/nginx/sites-available/api-dev.ayla.app
+#   sudo sed -i 's/{SUBDOMAIN}/api-dev.ayla.app/g; s/{GUNICORN_PORT}/8014/g' \
+#       /etc/nginx/sites-available/api-dev.ayla.app
+#   sudo certbot --nginx -d api-dev.ayla.app
+#   sudo ln -s /etc/nginx/sites-available/api-dev.ayla.app /etc/nginx/sites-enabled/
 #   sudo nginx -t && sudo systemctl reload nginx
 
 server {

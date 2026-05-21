@@ -2,13 +2,13 @@
 
 Sprint 9 / Q3 (DRF-830). Activated when:
 
-* ``AYLA_BASE_URL`` is set (typically ``https://dev.gobeauty.site``)
+* ``AYLA_BASE_URL`` is set (typically ``https://dev.ayla.app``)
 * ``AYLA_SERVICE_TOKEN`` is set (load from 1Password before run)
 
 Without those env vars the whole module is skipped — CI default. Run
 locally with::
 
-    AYLA_BASE_URL=https://dev.gobeauty.site \\
+    AYLA_BASE_URL=https://dev.ayla.app \\
     AYLA_SERVICE_TOKEN=<from 1password> \\
     uv run pytest tests/e2e/test_ayla_integration.py -v
 

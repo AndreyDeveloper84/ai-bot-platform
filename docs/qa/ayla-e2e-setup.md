@@ -1,7 +1,7 @@
 # Ayla E2E setup (Sprint 9 / Q3)
 
 How to run the live E2E suite at `tests/e2e/test_ayla_integration.py`
-against `dev.gobeauty.site`.
+against `dev.ayla.app`.
 
 ## Default behaviour: skipped
 
@@ -13,7 +13,7 @@ default `pytest` invocation deterministic and offline.
 
 ```bash
 # Token is in 1Password — "Ayla / staging / AYLA_SERVICE_TOKEN"
-export AYLA_BASE_URL=https://dev.gobeauty.site
+export AYLA_BASE_URL=https://dev.ayla.app
 export AYLA_SERVICE_TOKEN=<token>
 uv run pytest tests/e2e/test_ayla_integration.py -v
 ```

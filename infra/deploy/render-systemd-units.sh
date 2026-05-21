@@ -23,13 +23,18 @@ if [[ "$ENV" == "dev" ]]; then
     ENV_FILE="/etc/ai-bot-platform/dev.env"
     PORT=8014
     WORKERS=2
-    API_SUB="api-dev.gobeauty.site"
-    MINIAPP_SUB="miniapp-dev.gobeauty.site"
+    # #417 (2026-05-21): dev migrated from *.gobeauty.site to *.ayla.app.
+    # Production URLs remain on gobeauty.site until Phase 1 (Notion API
+    # Spec v2.0 target: api.ayla.app, ready Phase 1).
+    API_SUB="api-dev.ayla.app"
+    MINIAPP_SUB="miniapp-dev.ayla.app"
 else
     DEPLOY_PATH="/home/taximeter/ai-bot-platform"
     ENV_FILE="/etc/ai-bot-platform/prod.env"
     PORT=8013
     WORKERS=3
+    # Phase 1 flip target: api.ayla.app / miniapp.ayla.app per Notion
+    # API Spec v2.0. Until then prod stays on gobeauty.site.
     API_SUB="api.gobeauty.site"
     MINIAPP_SUB="miniapp.gobeauty.site"
 fi
