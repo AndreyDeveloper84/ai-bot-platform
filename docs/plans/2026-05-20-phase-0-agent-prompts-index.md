@@ -29,6 +29,7 @@ Before launching agents, re-read:
 1. `docs/adr/ADR-0009-ayla-split-domain-architecture.md` — the architecture decision.
 2. `docs/plans/2026-05-20-phase-0-sprint-plan.md` — the 35-issue execution plan with 9 close criteria.
 3. `docs/plans/2026-05-20-phase-0-parallel-agent-runbook.md` — stream boundaries, sync points, week-by-week, tech-lead watch protocol.
+4. `docs/plans/2026-05-21-developer-agent-workflow.md` — universal 10-phase developer workflow regulation that every agent (Alpha/Beta/Gamma + future) follows on every ticket.
 
 For background:
 
