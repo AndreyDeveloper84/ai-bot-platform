@@ -82,6 +82,33 @@ class _FakeStreamRedis:
     def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
         return list(self.streams.get(stream, []))
 
+    def xautoclaim(
+        self,
+        name: str,
+        groupname: str,
+        consumername: str,
+        min_idle_time: int,
+        start_id: str = "0",
+        count: int | None = None,
+    ):
+        """Stub XAUTOCLAIM for the PEL reaper test (#499).
+
+        Real Redis returns ``[next_cursor, [(entry_id, fields), …], [deleted_ids]]``.
+        For the stub, the «idle threshold» concept doesn't exist (entries
+        have no real timestamp), so every PEL entry past ``start_id`` is
+        returned up to ``count``. Tests that need «idle skip» behaviour
+        should pre-fill the PEL via xreadgroup + selectively not-xack.
+        """
+
+        pel = self.pel.get((name, groupname), {})
+        entries = sorted(pel.items(), key=lambda kv: int(kv[0].rsplit("-", 1)[-1]))
+        if start_id != "0":
+            entries = [(eid, fields) for eid, fields in entries if eid > start_id]
+        if count is not None:
+            entries = entries[:count]
+        claimed = [(eid, dict(fields)) for eid, fields in entries]
+        return ("0", claimed, [])
+
 
 @pytest.fixture
 def fake_redis(monkeypatch):
