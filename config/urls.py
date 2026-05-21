@@ -33,6 +33,14 @@ urlpatterns = [
         "api/v1/yookassa/",
         include("apps.integrations.yookassa.urls", namespace="yookassa"),
     ),
+    # Phase 0 / #432 (ADR-0009 §Mandatory event contract) — internal
+    # events ingest channel from Ayla djangoproject. Stub today
+    # (501 Not Implemented); full per-event dispatch arrives with
+    # Beta #441 (event-contract.md) + Gamma #442-#446 consumers.
+    path(
+        "api/v1/internal/events/",
+        include("apps.eventbus.urls", namespace="eventbus_internal"),
+    ),
     # Phase 1 / CH1 (DRF-848) — Telegram channel adapter webhook.
     # Tenant resolution happens from the URL slug, not the X-Tenant
     # header (Telegram has no equivalent). The view authenticates with
