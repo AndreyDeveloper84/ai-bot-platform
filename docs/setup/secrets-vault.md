@@ -21,7 +21,14 @@ Both files are git-ignored. The `*.example` siblings are committed and carry onl
 # macOS
 brew install 1password-cli
 
-# Linux (per https://developer.1password.com/docs/cli/get-started)
+# Linux (Debian/Ubuntu — see https://developer.1password.com/docs/cli/get-started
+# for other distros)
+curl -sS https://downloads.1password.com/linux/keys/1password.asc \
+  | sudo gpg --dearmor --output /usr/share/keyrings/1password-archive-keyring.gpg
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/amd64 stable main' \
+  | sudo tee /etc/apt/sources.list.d/1password.list
+sudo apt update && sudo apt install -y 1password-cli
+
 op --version  # verify
 ```
 
@@ -87,7 +94,7 @@ The dev/prod runtime env files live in `/etc/ai-bot-platform/{dev,prod}.env` on 
 5. Verify with a smoke (e.g., for MAX_BOT_TOKEN: ingress a `/start` and confirm bot replies).
 6. Revoke the old value at the source service.
 
-> 1Password Connect server-side sync is on the Phase 1 roadmap (issue TBD). Until then, rotation is a manual sequence — the value goes through a human, not an API.
+> 1Password Connect server-side sync is on the Phase 1 roadmap (issue [#479](https://github.com/AndreyDeveloper84/ai-bot-platform/issues/479)). Until then, rotation is a manual sequence — the value goes through a human, not an API. Rotation cadence policy is also tracked there; current default is "rotate on incident, no calendar schedule".
 
 ## What's gitignored
 
