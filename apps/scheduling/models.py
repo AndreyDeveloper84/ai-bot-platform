@@ -438,6 +438,29 @@ class ScheduleChangeRequest(models.Model):
     ``requested_change`` is intentionally a free-form JSONField — the
     diff shape varies by request type (e.g. recurring weekday change vs
     one-off date custom hours). Writers populate per their domain.
+
+    ### M3 typed availability-request fields (PR Tier1.2)
+
+    Master-mobile §M3 line 475 specifies a typed `POST
+    /api/master/availability` endpoint shape — start/end datetimes +
+    a closed-set reason_class (vacation/sick/personal/other) + free-form
+    reason_text. Rather than smuggle the typed payload through the
+    free-form ``requested_change`` JSON blob (which the admin approve/
+    reject endpoint would then need to parse defensively), we add
+    first-class columns:
+
+    * ``requested_start`` / ``requested_end`` — UTC instants describing
+      the off-time window. Nullable so legacy ``requested_change``-only
+      rows (the pre-M3 path) keep working.
+    * ``reason_class`` — closed set vacation/sick/personal/other.
+      Optional/blank for legacy rows.
+    * ``reason_text`` — short user-supplied note. The free-form
+      ``reason`` field above stays as a long-form fallback to preserve
+      back-compat.
+
+    Admin approve/reject endpoint (separate PR) reads
+    ``requested_start`` / ``requested_end`` + ``reason_class`` directly;
+    no JSON parsing.
     """
 
     class Status(models.TextChoices):
@@ -446,6 +469,12 @@ class ScheduleChangeRequest(models.Model):
         REJECTED = "rejected", "Rejected"
         CANCELLED = "cancelled", "Cancelled by master"
         AUTO_ESCALATED = "auto_escalated", "Auto-escalated (72h timeout)"
+
+    class ReasonClass(models.TextChoices):
+        VACATION = "vacation", "Отпуск"
+        SICK = "sick", "Больничный"
+        PERSONAL = "personal", "Личные дела"
+        OTHER = "other", "Другое"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(
@@ -464,6 +493,38 @@ class ScheduleChangeRequest(models.Model):
         help_text="Diff structure — writer-defined shape. Common keys: "
         "type (working_hours_change / exception_add), day_of_week, "
         "new_start, new_end, date, exception_type, reason.",
+    )
+    # M3 typed columns (PR Tier1.2 / master-mobile §M3 line 475). Nullable
+    # so legacy ``requested_change``-only rows still validate.
+    requested_start = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Start of the proposed off-time window (UTC). Set by "
+        "M3 POST /api/master/availability; null for legacy "
+        "requested_change-only rows.",
+    )
+    requested_end = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="End of the proposed off-time window (UTC). Set by "
+        "M3 POST /api/master/availability; null for legacy rows. Always "
+        "> requested_start when both are set.",
+    )
+    reason_class = models.CharField(
+        max_length=16,
+        choices=ReasonClass.choices,
+        blank=True,
+        default="",
+        help_text="Closed-set classification of the master's reason. "
+        "Empty for legacy rows that pre-date the M3 typed endpoint.",
+    )
+    reason_text = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Short free-form note from the master (≤200 chars). "
+        "The longer ``reason`` text field stays as the legacy free-form "
+        "fallback for callers that pre-date the M3 endpoint.",
     )
     reason = models.TextField(
         blank=True,
@@ -489,6 +550,20 @@ class ScheduleChangeRequest(models.Model):
         related_name="+",
     )
     resolved_at = models.DateTimeField(null=True, blank=True)
+    # Snapshot of the BotUser who submitted the request. Distinct from
+    # ``master`` (the CatalogMaster row) and from ``resolved_by`` (the
+    # Django User who approved/rejected). Lets the admin endpoint render
+    # «requested by Анна» without re-joining through CatalogMaster →
+    # linked_bot_user (which may have been swapped on re-onboarding).
+    requested_by = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="BotUser who submitted via the M3 endpoint. NULL for "
+        "system-generated or legacy rows.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = TenantScopedManager()
@@ -501,6 +576,19 @@ class ScheduleChangeRequest(models.Model):
         indexes = [
             models.Index(fields=["tenant", "status", "-created_at"]),
             models.Index(fields=["tenant", "master", "-created_at"]),
+        ]
+        constraints = [
+            # When both window endpoints are set, end must be after start.
+            # Nullable allowed so legacy ``requested_change``-only rows
+            # don't break the constraint.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(requested_start__isnull=True)
+                    | models.Q(requested_end__isnull=True)
+                    | models.Q(requested_end__gt=models.F("requested_start"))
+                ),
+                name="schedule_change_request_end_after_start",
+            ),
         ]
 
     def __str__(self) -> str:
