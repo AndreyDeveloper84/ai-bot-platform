@@ -540,6 +540,23 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.workers.tasks.reap_pel",
         "schedule": crontab(minute="*/5"),
     },
+    # PR #507 adversarial A8 — bound the cross-service event-ingest
+    # tables' retention. DLQ persists envelope.data per §6.4 (PII
+    # surface per ADR-0011 §3.4 + 152-ФЗ); dedupe per §5.3.
+    "eventbus.cleanup_ingest_dlq": {
+        "task": "apps.eventbus.cleanup_ingest_dlq",
+        # Daily 04:45 UTC — slotted after the 04:30 payment-events
+        # cleanup and before the 05:00 shadow-delta sweep, so no two
+        # large-table sweeps fire simultaneously.
+        "schedule": crontab(hour="4", minute="45"),
+    },
+    "eventbus.cleanup_ingest_dedupe": {
+        "task": "apps.eventbus.cleanup_ingest_dedupe",
+        # Daily 04:50 UTC — 5 min after the DLQ sweep, separate
+        # transaction so a long dedupe sweep doesn't block the
+        # DLQ task.
+        "schedule": crontab(hour="4", minute="50"),
+    },
 }
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
