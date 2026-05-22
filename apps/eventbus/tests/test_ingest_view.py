@@ -168,6 +168,36 @@ class TestHandlerException:
         # §5.1 — dedupe row rolled back on handler exception so retry re-processes.
         assert IngestDedupe.objects.filter(event_id=VALID_BODY["event_id"]).count() == 0
 
+    def test_handler_exception_audit_row_persists(self, client: Client) -> None:
+        """PR #507 adversarial A5 — audit row survives handler exception.
+
+        The dedupe rolls back (§5.1 — Ayla retry needs to re-process),
+        but the audit row MUST persist for ops triage. View-layer
+        write_audit() runs AFTER dispatch_envelope returns + outside
+        the inner atomic block, so the audit row commits independently
+        of the inner rollback.
+        """
+        from apps.audit.models import AuditLog
+
+        def _boom(env: IngestEnvelope) -> None:
+            raise RuntimeError("downstream timeout")
+
+        register("booking.created", 1, _boom)
+
+        body = json.dumps(VALID_BODY).encode()
+        response = _post(client, body)
+
+        assert response.status_code == 500
+        # Audit row exists despite dedupe rollback.
+        audit_rows = AuditLog.all_tenants.filter(
+            action="eventbus.ingest.handler_exception",
+        )
+        assert audit_rows.count() == 1
+        # PII rule §7 — exception TYPE only, not message.
+        payload = audit_rows.first().payload
+        assert payload.get("exception_type") == "RuntimeError"
+        assert "downstream timeout" not in str(payload)
+
 
 class TestVerbPolicy:
     def test_get_returns_405(self, client: Client) -> None:
