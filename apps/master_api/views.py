@@ -57,6 +57,11 @@ from apps.master_api.services.conversations import (
     MAX_LIMIT as CONVERSATIONS_MAX_LIMIT,
     list_master_conversations,
 )
+from apps.master_api.services.ai_drafts import (
+    generate_draft_for_conversation,
+    release_draft_to_ai,
+    send_draft_as_master,
+)
 from apps.master_api.services.conversation_detail import (
     ConversationDetailError,
     get_conversation_detail,
@@ -1097,6 +1102,132 @@ def conversation_promote(request: HttpRequest, conversation_id: str) -> HttpResp
     except ConversationDetailError as exc:
         return _error(exc.slug, exc.detail, exc.status)
     return JsonResponse(response.to_dict())
+
+
+# --- M6 AI drafts (Bundle B / item 4 backend) -----------------------------
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> HttpResponse:
+    """Generate a fresh AI draft for the master on this conversation.
+
+    Spec quote (master-mobile §M6 lines 662-671):
+
+        «✨ Предложенный ответ ... [Отправить от себя] [Отредактировать]
+        [Пусть помощник ответит]»
+
+    Body: empty (any JSON dict ignored — keeps the endpoint a pure
+    «generate now» trigger).
+
+    Status codes:
+      200  — fresh draft (or idempotent re-serve within 60s window)
+      400  — ``conversation_locked``: HUMAN_LOCKED tier
+      404  — master not involved / conversation not found
+      503  — ``llm_unavailable``: provider raised; refer to logs
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        response = generate_draft_for_conversation(
+            conversation_id=conversation_id,
+            master=master,
+            actor_bot_user=bot_user,
+        )
+    except ConversationDetailError as exc:
+        return _error(exc.slug, exc.detail, exc.status)
+    return JsonResponse(response.to_dict())
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def conversation_draft_send_as_me(
+    request: HttpRequest, conversation_id: str, draft_id: str
+) -> HttpResponse:
+    """Send the draft text (or override) as a master-attributed message.
+
+    Spec quote (master-mobile §M6 lines 706-712):
+
+        «When master taps «Отправить от себя» on a draft, the message
+        renders to the customer as «Помощник: …». Same single assistant
+        identity. Master's authorship is recorded in attribution metadata
+        (``actor_type=master``, ``composed_by=master_id``)»
+
+    Body (optional):
+      ``{"override_content": "edited text"}`` — the «Отредактировать»
+      path. When present, replaces the draft's LLM text with the
+      master's edited version. ≤ 2000 chars.
+
+    Status codes:
+      201  — message created; draft marked SENT_AS_MASTER
+      400  — ``draft_already_acted`` (non-ACTIVE) / ``bad_request``
+             (override too long or empty)
+      403  — ``tier_locked``: HUMAN_LOCKED
+      404  — master not involved / draft not found
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    body = _parse_json_body(request)
+    if isinstance(body, JsonResponse):
+        return body
+
+    override_content = body.get("override_content")
+    if override_content is not None and not isinstance(override_content, str):
+        return _error("bad_request", "override_content must be a string", 400)
+
+    try:
+        response = send_draft_as_master(
+            conversation_id=conversation_id,
+            draft_id=draft_id,
+            master=master,
+            actor_bot_user=bot_user,
+            override_content=override_content,
+        )
+    except ConversationDetailError as exc:
+        return _error(exc.slug, exc.detail, exc.status)
+    return JsonResponse(response.to_dict(), status=201)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def conversation_draft_release_to_ai(
+    request: HttpRequest, conversation_id: str, draft_id: str
+) -> HttpResponse:
+    """Let the AI auto-send the draft (no master attribution).
+
+    Spec quote (master-mobile §M6 line 670):
+
+        «[Пусть помощник ответит]  Releases to AI auto-send»
+
+    Body: empty.
+
+    Status codes:
+      201  — message created; draft marked RELEASED_TO_AI
+      400  — ``draft_already_acted``
+      403  — ``tier_locked``
+      404  — master not involved / draft not found
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        response = release_draft_to_ai(
+            conversation_id=conversation_id,
+            draft_id=draft_id,
+            master=master,
+            actor_bot_user=bot_user,
+        )
+    except ConversationDetailError as exc:
+        return _error(exc.slug, exc.detail, exc.status)
+    return JsonResponse(response.to_dict(), status=201)
 
 
 @require_http_methods(["GET"])

@@ -54,6 +54,22 @@ urlpatterns = [
         views.conversation_promote,
         name="conversation_promote",
     ),
+    # M6 AI drafts (master-mobile §M6, Bundle B / item 4 backend)
+    path(
+        "conversations/<uuid:conversation_id>/drafts/generate",
+        views.conversation_draft_generate,
+        name="conversation_draft_generate",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/send-as-me",
+        views.conversation_draft_send_as_me,
+        name="conversation_draft_send_as_me",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/release-to-ai",
+        views.conversation_draft_release_to_ai,
+        name="conversation_draft_release_to_ai",
+    ),
     # M7 notification preferences (master-mobile §M7, Bundle B / item 3)
     path(
         "notification-prefs/",
