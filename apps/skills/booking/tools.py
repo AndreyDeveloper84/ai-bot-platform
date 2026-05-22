@@ -1641,6 +1641,26 @@ def execute_reschedule(
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="invalid_record_id")
         return BookingToolResult(error="invalid_record_id")
 
+    # Tech-lead double-pass S1: enforce CONFIRMED-only at the LLM tool
+    # layer, mirroring ``apps.booking.services.reschedule.py:74``.
+    # Without this, a customer who tapped Cancel (status →
+    # CANCEL_REQUESTED during the 5s undo window) then tapped Reschedule
+    # via the LLM would have the LLM tool happily reschedule a cancel-
+    # pending row. Service-layer rejects; LLM path used to silently
+    # accept. Same business invariant now enforced in BOTH places.
+    if booking.status != BookingRequest.Status.CONFIRMED:
+        logger.info(
+            "booking.reschedule.exec.not_reschedulable record_id=%s status=%s",
+            record_id,
+            booking.status,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="not_reschedulable_status",
+        )
+        return BookingToolResult(error="not_reschedulable")
+
     # Skills retro hotfix #4: re-check slot availability at execute time.
     # The preview-time check (reschedule_booking) is up to 10 min stale
     # (pending-action expiry window). Between preview ✓ and ✅ tap,
@@ -1799,6 +1819,16 @@ def execute_reschedule(
                 "new_datetime": new_datetime,
                 "master_id": master_id,
                 "service_id": service_id,
+                # Q12-α (founder ACK 2026-05-22 decision #4): a
+                # partial-failure reschedule is a chain TERMINATOR —
+                # the old row is cancelled, the new row never written,
+                # so any future booking the customer makes is a fresh
+                # billable sale (a new chain via execute_confirm).
+                # Surface this on the audit row so admin/ops dashboards
+                # can filter for «manual rebook required» tickets
+                # without having to cross-reference the event_type.
+                "q12a_chain_terminator": True,
+                "q12a_chain_terminator_reason": "partial_failure",
             },
         )
         return BookingToolResult(error="booking_reschedule_partial_failure")
@@ -1820,141 +1850,181 @@ def execute_reschedule(
         comment__startswith=_new_idem_prefix,
     ).first()
     if existing_new is None:
-        # Phase 4a-IMPL1 closure: reschedule produces a NEW BookingRequest
-        # row with ai_direct attribution. Per Q12-α the locked rule today
-        # marks any ai_direct + CONFIRMED as billable; the «reschedule is
-        # not billable» refinement lives in policy but is not yet enforced
-        # in compute_billable (canonical create_customer_booking has the
-        # same behavior). attribution_metadata.created_by carries the
-        # discriminator so future billing logic can opt out cleanly.
-        billable, billing_reason = compute_billable(
-            booking_source="ai_direct",
-            status=BookingRequest.Status.CONFIRMED,
-        )
-        reschedule_metadata = build_customer_attribution_metadata(
-            booking_created_at=dj_timezone.now().isoformat(),
-            test_mode=False,
-        )
-        reschedule_metadata["created_by"] = "execute_reschedule"
-        reschedule_metadata["rescheduled_from_record_id"] = record_id
+        # Tech-lead double-pass S3: wrap the chain compute + new-row
+        # write in a single ``transaction.atomic()`` with
+        # ``select_for_update`` on the OLD booking. Without this, two
+        # concurrent reschedule calls on different chain links could
+        # both walk to the same root, both pass continuation check, and
+        # both write new continuation rows pointing at the root — a
+        # chain fork. The atomic + lock mirrors
+        # ``apps.booking.services.reschedule.py:63`` so both reschedule
+        # paths now enforce the same concurrency contract.
+        from django.db import transaction as _db_transaction
 
-        # Hotfix D (retro review #2): the window between YClients-create
-        # success and local-write success is the last split-brain gap
-        # the Q-ATT-IMPL1 closure didn't seal. The early _parse_iso_datetime
-        # guard rejected unparseable slots before any YClients call, but
-        # the local create can still fail on DB transients, JSONField
-        # validation surprises, or any future model-level validator
-        # additions. If we land here without recovery, YClients has the
-        # customer's new appointment but our DB and reminders + Loyalty
-        # don't know about it.
-        try:
-            BookingRequest.all_tenants.create(
-                tenant=tenant,
-                bot_user=bot_user,
-                category_name="",
-                service_name=service_name or booking.service_name or "—",
-                master_name=master_name or booking.master_name or "—",
-                client_name=client_name,
-                client_phone=phone,
-                comment=(f"Bot booking | {new_yc_marker} | rescheduled_from={record_id}"),
-                source="bot",
-                is_processed=False,
-                status=BookingRequest.Status.CONFIRMED,
-                visit_at=visit_at_dt,
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        with _db_transaction.atomic():
+            booking = (
+                BookingRequest.all_tenants.select_for_update()
+                .select_related("service")
+                .get(pk=booking.pk)
+            )
+
+            # Q12-α continuation decision (issue #478, founder ACK
+            # 2026-05-22). The LLM reschedule tool always keeps the
+            # same service + master (the LLM prompt enforces it); a
+            # service swap is structurally not a normal LLM flow today.
+            # We pass ``booking.service_id`` as ``new_service_id`` so
+            # the helper's strict-equality check is tautologically
+            # satisfied — the 90-day chain-root threshold is the
+            # meaningful gate at this layer. If the LLM ever starts
+            # allowing service swaps from this path, this call site
+            # MUST be updated.
+            is_continuation, chain_break_reason, chain_root_id = compute_reschedule_continuation(
+                old=booking,
+                new_service_id=str(booking.service_id) if booking.service_id else "",
+                new_visit_at=visit_at_dt,
+            )
+            billable, billing_reason = compute_billable(
                 booking_source="ai_direct",
-                ai_assist_score=compute_assist_score(booking_source="ai_direct"),
-                billable=billable,
-                billing_reason=billing_reason,
-                attribution_metadata=reschedule_metadata,
+                status=BookingRequest.Status.CONFIRMED,
+                created_by="execute_reschedule",
+                is_reschedule_continuation=is_continuation,
+                chain_break_reason=chain_break_reason,
             )
-        except Exception as exc:  # noqa: BLE001 — recover, do not propagate
-            # Split-brain recovery: try to cancel the new YClients record
-            # so the customer isn't double-booked on their side. Then
-            # treat this as a reschedule_partial_failure for analytics.
-            logger.exception(
-                "booking.reschedule.local_create_failed yc_id=%s err=%s",
-                new_yc_id,
-                exc,
+            reschedule_metadata = build_customer_attribution_metadata(
+                booking_created_at=dj_timezone.now().isoformat(),
+                test_mode=False,
             )
-            compensate_ok = False
-            try:
-                client.cancel_record(record_id=int(new_yc_id))
-                compensate_ok = True
-            except Exception:  # noqa: BLE001 — compensate is best-effort
-                logger.exception(
-                    "booking.reschedule.compensate_cancel_failed yc_id=%s",
-                    new_yc_id,
-                )
+            reschedule_metadata["created_by"] = "execute_reschedule"
+            reschedule_metadata["rescheduled_from_record_id"] = record_id
+            reschedule_metadata["q12a_is_continuation"] = is_continuation
+            if chain_break_reason:
+                reschedule_metadata["q12a_chain_break_reason"] = chain_break_reason
 
-            # If compensate succeeded, the rescheduled-from-old is now a
-            # plain cancel (no new visit anywhere). Flip the old row from
-            # RESCHEDULED to CANCELLED to keep analytics honest and emit
-            # booking.cancelled with the SHARED correlation_id so
-            # subscribers (Loyalty, analytics) see the composite outcome.
-            #
-            # When compensate FAILS (else branch below — we don't take any
-            # action there), we intentionally LEAVE the old row in
-            # RESCHEDULED. Customer still has a visit on YClients side
-            # that we can't link to locally; marking the old row CANCELLED
-            # would tell Loyalty «no visit happens» when in fact one might.
-            # The critical-severity health alert below is the ops hook to
-            # reconcile manually.
-            if compensate_ok:
-                BookingRequest.all_tenants.filter(pk=booking.pk).update(
-                    status=BookingRequest.Status.CANCELLED,
+            # Hotfix D (retro review #2): the window between YClients-
+            # create success and local-write success is the last split-
+            # brain gap the Q-ATT-IMPL1 closure didn't seal. The early
+            # _parse_iso_datetime guard rejected unparseable slots
+            # before any YClients call, but the local create can still
+            # fail on DB transients, JSONField validation surprises, or
+            # any future model-level validator additions. If we land
+            # here without recovery, YClients has the customer's new
+            # appointment but our DB and reminders + Loyalty don't know
+            # about it.
+            try:
+                BookingRequest.all_tenants.create(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    category_name="",
+                    service_name=service_name or booking.service_name or "—",
+                    master_name=master_name or booking.master_name or "—",
+                    client_name=client_name,
+                    client_phone=phone,
+                    comment=(f"Bot booking | {new_yc_marker} | rescheduled_from={record_id}"),
+                    source="bot",
+                    is_processed=False,
+                    status=BookingRequest.Status.CONFIRMED,
+                    visit_at=visit_at_dt,
+                    booking_source="ai_direct",
+                    ai_assist_score=compute_assist_score(booking_source="ai_direct"),
+                    billable=billable,
+                    billing_reason=billing_reason,
+                    attribution_metadata=reschedule_metadata,
+                    original_booking_event_id=chain_root_id,
+                )
+            except Exception as exc:  # noqa: BLE001 — recover, do not propagate
+                # Split-brain recovery: try to cancel the new YClients record
+                # so the customer isn't double-booked on their side. Then
+                # treat this as a reschedule_partial_failure for analytics.
+                logger.exception(
+                    "booking.reschedule.local_create_failed yc_id=%s err=%s",
+                    new_yc_id,
+                    exc,
+                )
+                compensate_ok = False
+                try:
+                    client.cancel_record(record_id=int(new_yc_id))
+                    compensate_ok = True
+                except Exception:  # noqa: BLE001 — compensate is best-effort
+                    logger.exception(
+                        "booking.reschedule.compensate_cancel_failed yc_id=%s",
+                        new_yc_id,
+                    )
+
+                # If compensate succeeded, the rescheduled-from-old is now a
+                # plain cancel (no new visit anywhere). Flip the old row from
+                # RESCHEDULED to CANCELLED to keep analytics honest and emit
+                # booking.cancelled with the SHARED correlation_id so
+                # subscribers (Loyalty, analytics) see the composite outcome.
+                #
+                # When compensate FAILS (else branch below — we don't take any
+                # action there), we intentionally LEAVE the old row in
+                # RESCHEDULED. Customer still has a visit on YClients side
+                # that we can't link to locally; marking the old row CANCELLED
+                # would tell Loyalty «no visit happens» when in fact one might.
+                # The critical-severity health alert below is the ops hook to
+                # reconcile manually.
+                if compensate_ok:
+                    BookingRequest.all_tenants.filter(pk=booking.pk).update(
+                        status=BookingRequest.Status.CANCELLED,
+                    )
+                    try:
+                        eventbus_services.emit_booking_cancelled(
+                            booking_id=str(booking.pk),
+                            cancelled_by="system",
+                            cancellation_reason="reschedule_local_create_failed",
+                            cancelled_at=dj_timezone.now().isoformat(),
+                            actor_type="system",
+                            correlation_id=_reschedule_correlation_id,
+                            tenant=tenant,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "booking.reschedule.recovery_cancel_emit_failed booking=%s",
+                            booking.pk,
+                        )
+
+                # Always audit + alert — ops needs visibility regardless of
+                # whether compensate succeeded.
+                write_audit(
+                    "bookings.reschedule.local_create_failed",
+                    target="BookingSkill",
+                    payload={
+                        "tenant_id": tenant_id,
+                        "old_record_id": record_id,
+                        "new_yc_record_id": new_yc_id,
+                        "compensate_succeeded": compensate_ok,
+                        "error": str(exc)[:200],
+                    },
                 )
                 try:
-                    eventbus_services.emit_booking_cancelled(
-                        booking_id=str(booking.pk),
-                        cancelled_by="system",
-                        cancellation_reason="reschedule_local_create_failed",
-                        cancelled_at=dj_timezone.now().isoformat(),
+                    eventbus_services.emit(
+                        "system.module.health.degraded",
+                        {
+                            "module_name": "booking.execute_reschedule",
+                            "severity": "critical" if not compensate_ok else "warning",
+                            "metric": (
+                                f"split_brain_unresolved_yc_id={new_yc_id}"
+                                if not compensate_ok
+                                else f"split_brain_recovered_yc_id={new_yc_id}"
+                            ),
+                        },
                         actor_type="system",
-                        correlation_id=_reschedule_correlation_id,
                         tenant=tenant,
                     )
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "booking.reschedule.recovery_cancel_emit_failed booking=%s",
-                        booking.pk,
-                    )
-
-            # Always audit + alert — ops needs visibility regardless of
-            # whether compensate succeeded.
-            write_audit(
-                "bookings.reschedule.local_create_failed",
-                target="BookingSkill",
-                payload={
-                    "tenant_id": tenant_id,
-                    "old_record_id": record_id,
-                    "new_yc_record_id": new_yc_id,
-                    "compensate_succeeded": compensate_ok,
-                    "error": str(exc)[:200],
-                },
-            )
-            try:
-                eventbus_services.emit(
-                    "system.module.health.degraded",
-                    {
-                        "module_name": "booking.execute_reschedule",
-                        "severity": "critical" if not compensate_ok else "warning",
-                        "metric": (
-                            f"split_brain_unresolved_yc_id={new_yc_id}"
-                            if not compensate_ok
-                            else f"split_brain_recovered_yc_id={new_yc_id}"
-                        ),
-                    },
-                    actor_type="system",
-                    tenant=tenant,
+                except Exception:  # noqa: BLE001 — alert never breaks the tool
+                    logger.exception("booking.reschedule.alert_emit_failed")
+                _audit_tool(
+                    tenant_id=tenant_id,
+                    tool="execute_reschedule",
+                    outcome=(
+                        "split_brain_recovered" if compensate_ok else "split_brain_unresolved"
+                    ),
                 )
-            except Exception:  # noqa: BLE001 — alert never breaks the tool
-                logger.exception("booking.reschedule.alert_emit_failed")
-            _audit_tool(
-                tenant_id=tenant_id,
-                tool="execute_reschedule",
-                outcome=("split_brain_recovered" if compensate_ok else "split_brain_unresolved"),
-            )
-            return BookingToolResult(error="booking_reschedule_local_create_failed")
+                return BookingToolResult(error="booking_reschedule_local_create_failed")
 
         _schedule_reminders(
             tenant=tenant,
