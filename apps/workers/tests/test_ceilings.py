@@ -76,20 +76,23 @@ class TestHappyPath:
         assert should_emit_tenant_missing("MaxHandler") is True  # 3 — at boundary
         assert should_emit_tenant_missing("MaxHandler") is False  # 4 — over
 
-    def test_sets_window_ttl_on_first_call(self, settings, fake_redis):
-        """First INCR in a window sets the hour-window TTL so the key
-        auto-rotates. Subsequent INCRs in same window must NOT reset TTL
-        (it would slide the dedup window past the hour boundary)."""
+    def test_ttl_always_reset_idempotent(self, settings, fake_redis):
+        """TTL is reset on EVERY INCR — idempotent and survives a process
+        crash mid-INCR-EXPIRE (counter without TTL would permastick a
+        handler's budget at 0). Code Reviewer adversarial pass on #528.
+        Trade-off: one extra Redis RTT per emit at the ceiling rate (100/hr)
+        vs. unrecoverable permabudgeted state on crash. RTT loss is in
+        the noise at this rate."""
         settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
         should_emit_tenant_missing("MaxHandler")
         first_key = next(iter(fake_redis.expires))
         assert fake_redis.expires[first_key] == 3600
 
-        # Second call: TTL NOT re-set (fake_redis would store the new
-        # value but our code only sets TTL when count == 1).
-        fake_redis.expires.clear()  # reset to see if expire is called again
+        # Second call: TTL re-set (also 3600 — sliding by tens of ms is
+        # fine, and "always reset" is the recoverable behaviour).
+        fake_redis.expires.clear()
         should_emit_tenant_missing("MaxHandler")
-        assert fake_redis.expires == {}
+        assert fake_redis.expires == {first_key: 3600}
 
     def test_per_handler_budgets_are_independent(self, settings, fake_redis):
         """MaxHandler and TelegramHandler get their own buckets — one

@@ -113,11 +113,16 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
         # redis.asyncio.Redis), so the runtime return is int. Cast to keep
         # mypy quiet without hiding real type errors elsewhere.
         count: int = int(redis.incr(key))  # type: ignore[arg-type]
-        if count == 1:
-            # First hit this window — set TTL so the key auto-rotates
-            # at the hour boundary. Don't bother with PEXPIRE precision;
-            # 1-second drift on a 1-hour window is meaningless.
-            redis.expire(key, _WINDOW_TTL_SECONDS)
+        # Always reset TTL — idempotent, costs one extra RTT per emit.
+        # Why not "set TTL only on first INCR": if the process crashes
+        # between INCR (count=1) and EXPIRE, the key has no TTL and
+        # accumulates forever — the handler's budget permastucks at 0
+        # until an operator manually deletes the key. Probability is
+        # low (single statement gap, no I/O in between) but the failure
+        # mode is silent and unrecoverable. At 100 emits/hour the extra
+        # RTT is in the noise vs. an unrecoverable permabudgeted state.
+        # Caught by Code Reviewer adversarial pass on PR #528 / #500.
+        redis.expire(key, _WINDOW_TTL_SECONDS)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "workers.ceilings.incr_failed handler=%s err=%s — emit allowed (fail-open)",
