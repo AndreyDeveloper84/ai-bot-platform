@@ -54,4 +54,10 @@ urlpatterns = [
         views.conversation_promote,
         name="conversation_promote",
     ),
+    # M7 notification preferences (master-mobile §M7, Bundle B / item 3)
+    path(
+        "notification-prefs/",
+        views.notification_prefs,
+        name="notification_prefs",
+    ),
 ]
