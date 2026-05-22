@@ -1,6 +1,6 @@
 # JWT Contract — Ayla djangoproject (issuer) → ai-bot-platform (verifier)
 
-> **Status:** v1 — draft 2026-05-21
+> **Status:** v1.1 — round-2 amendments 2026-05-22 (addresses 11 adversarial blockers S1–S14 from PR #516 review)
 > **Owner:** Phase 0 Stream Beta (W4)
 > **Authority:** ADR-0009 §Hard rule #6 — this doc is the wire spec for the «`tenant_id` claim = `active_tenant_id`» rule the ADR establishes.
 > **Sibling spec:** [`docs/architecture/event-contract.md`](./event-contract.md) — same pattern (issuer is Ayla, consumer is bot-platform), different transport (HTTP request header instead of HMAC-signed POST).
@@ -24,6 +24,21 @@ Without a locked JWT contract:
 This doc locks the wire format, claim semantics, signing, verification flow, and failure modes so the two backends produce a coherent auth experience.
 
 **The contract is asymmetric:** Ayla issues + signs; bot-platform verifies + looks up tenant relationship. bot-platform never issues tokens; if it needs a service-to-service call to Ayla, it uses an internal-service JWT (§5.4) signed by a separate key.
+
+### 1.1 Token presentation channel (S11 fix)
+
+**Tokens MUST travel in the `Authorization: Bearer <jwt>` HTTP header. ONLY.**
+
+Verifiers (Ayla djangoproject + bot-platform + the API Gateway):
+
+- MUST extract the token from `Authorization: Bearer ...` only.
+- MUST reject (HTTP 400 `invalid_token_location`) tokens presented in:
+  - URL query string (`?access_token=...`, `?token=...`, `?jwt=...`) — gets logged by NGINX, mobile crash reporters, browser history.
+  - POST body parameters — same logging risk + leaks to error trackers.
+  - Custom non-standard headers (`X-Token`, `X-Auth-JWT`, etc.) — bypass standard middleware sanitization.
+  - Cookies (no cookie auth in this contract).
+
+Anonymous JWTs are 30 days lived; leakage via URL is a long-lived credential exposure. The header-only rule applies uniformly across all four token types (§2).
 
 ---
 
@@ -52,7 +67,7 @@ Every token MUST conform to the envelope below. Claim names match `python-jose` 
 |---|---|---|---|
 | `iss` | string | yes | Issuer: `"https://api.ayla.app"` (or whatever the canonical Ayla auth host is — currently `api-dev.gobeauty.site` per DNS deferral, see ADR-0009 §Mobile API split). Frozen across token rotation. |
 | `sub` | string (UUID) | yes | Subject: canonical Ayla `User.id`. For `anonymous` tokens, sub = `AnonymousSession.id` (different UUID space — see §6). |
-| `aud` | string array | yes | Audience: `["ayla-djangoproject", "ai-bot-platform"]` for user tokens, OR a single-element array for service-to-service. Verifiers MUST reject tokens whose `aud` doesn't include their service name. |
+| `aud` | string array | yes | Audience. **One element per token issuance — NOT a multi-target dual-audience array.** (S1 fix.) For an access token usable at bot-platform: `aud: ["ai-bot-platform"]`. For an access token usable at Ayla's own endpoints: `aud: ["ayla-djangoproject"]`. Mobile holds BOTH tokens (one per backend) and presents the right one per request based on routing. The API Gateway MAY strip+reissue tokens at the routing layer if a unified-mobile-storage model is required — design tradeoff for the gateway implementer. Verifiers reject tokens whose `aud[0]` ≠ their service name. |
 | `exp` | integer (unix timestamp) | yes | Expiration. Hard cap per token type (§2). |
 | `iat` | integer (unix timestamp) | yes | Issued-at. |
 | `nbf` | integer (unix timestamp) | yes | Not-before. Equal to `iat` in practice. |
@@ -70,7 +85,8 @@ All Ayla-specific data sits under the `ayla` claim as a nested object, so future
 | `ayla.scope` | array of strings | yes | Authorization scope strings, e.g. `["user:profile:read", "memory:write", "booking:create"]`. Verifier checks scope against endpoint requirements. |
 | `ayla.user_role` | enum string | yes | One of: `customer`, `master`, `tenant_owner`, `admin`. Drives RBAC at the verifier. |
 | `ayla.anon_session_id` | string (UUID) \| null | conditional | Present only when `token_type='anonymous'`. References `AnonymousSession.id` per Epic #223 #255. |
-| `ayla.device_id` | string \| null | optional | Mobile device identifier, used for device-binding signals (rate limiting, suspicious-session detection). Not security-load-bearing — informational. |
+| `ayla.device_id` | string \| null | optional | Mobile device identifier, used for device-binding signals (rate limiting, suspicious-session detection). **Informational only — never use for authorization decisions** (S10 fix: prior draft said «not security-load-bearing» but ALSO «used for suspicious-session detection» — self-contradictory; this revision picks: informational, never security-load-bearing). |
+| `ayla.contract_version` | string | **yes (S13 fix)** | The JWT contract version this token was issued under. Frozen on v1 for MVP: `"1"`. Verifier MUST reject tokens with unknown contract_version (prevents rollback-drift attacks where Ayla downgrades issuance + verifier silently enforces older policy without noticing missing claims). |
 
 ### 3.3 Full envelope example — `access` token
 
@@ -78,7 +94,7 @@ All Ayla-specific data sits under the `ayla` claim as a nested object, so future
 {
   "iss": "https://api.ayla.app",
   "sub": "f1a2b3c4-d5e6-4789-9abc-def012345678",
-  "aud": ["ayla-djangoproject", "ai-bot-platform"],
+  "aud": ["ai-bot-platform"],
   "exp": 1747930200,
   "iat": 1747929300,
   "nbf": 1747929300,
@@ -101,7 +117,8 @@ All Ayla-specific data sits under the `ayla` claim as a nested object, so future
     "scope": ["user:profile:read", "memory:read", "memory:write", "booking:create", "booking:read"],
     "user_role": "customer",
     "anon_session_id": null,
-    "device_id": "ios-9c3a7e1b-4d52"
+    "device_id": "ios-9c3a7e1b-4d52",
+    "contract_version": "1"
   }
 }
 ```
@@ -112,7 +129,7 @@ All Ayla-specific data sits under the `ayla` claim as a nested object, so future
 {
   "iss": "https://api.ayla.app",
   "sub": "01HEXAMPLE0000000000000ULD",
-  "aud": ["ayla-djangoproject", "ai-bot-platform"],
+  "aud": ["ai-bot-platform"],
   "exp": 1750521300,
   "iat": 1747929300,
   "nbf": 1747929300,
@@ -124,7 +141,8 @@ All Ayla-specific data sits under the `ayla` claim as a nested object, so future
     "scope": ["provider:directory:read", "memory:write:green_zone_only"],
     "user_role": "customer",
     "anon_session_id": "01HEXAMPLE0000000000000ULD",
-    "device_id": "ios-9c3a7e1b-4d52"
+    "device_id": "ios-9c3a7e1b-4d52",
+    "contract_version": "1"
   }
 }
 ```
@@ -135,15 +153,26 @@ Note: `sub` and `ayla.anon_session_id` reference the same `AnonymousSession` row
 
 ## 4. Signing + key management
 
-### 4.1 Algorithm
+### 4.1 Algorithm — RS256 EVERYWHERE (S2 fix)
 
-**RS256.** Public-key signatures only. HS256 (HMAC) is **forbidden** for user-facing tokens because:
+**RS256. Public-key signatures only — for ALL four token types, including service_to_service.**
+
+HS256 (HMAC) is **forbidden** across the board:
 
 - HS256 secret rotation requires synchronized key roll across both backends — operationally fragile.
-- HS256 verification requires bot-platform to hold the signing secret, which means bot-platform can also FORGE tokens. RS256 lets bot-platform verify with the public key only.
+- HS256 verification requires the verifier to hold the signing secret, which means the verifier can also FORGE tokens. With RS256, each side verifies with the other's public key only.
 - The «algorithm confusion» attack (a token with `alg: HS256` signed using the public key as a shared secret) is mitigated only if verifiers HARDCODE `alg: RS256` and reject HS256 entirely. This contract mandates hardcoding.
 
-For service-to-service (§5.4), HS256 with a shared secret IS allowed because the trust boundary is symmetric (both sides issue and verify).
+**Why HS256 for service_to_service was rejected (was a v1 draft option):** in the draft, bot-platform held Ayla's HS256 secret to forge s2s tokens. Combined with bot-platform's broader ingress surface (MAX, Telegram, future channels), a single bot-platform compromise gave an attacker the ability to mint s2s tokens with arbitrary `user_on_behalf_of` and exfiltrate red-zone PII from Ayla. **This was THE security-boundary failure of ADR-0009 split-domain architecture.** RS256 each-side-own-keypair is the only audit-defensible answer.
+
+**New layout under S2 fix:**
+
+- Ayla djangoproject has keypair A (signing key A-private + public A in Ayla's JWKS).
+- ai-bot-platform has keypair B (signing key B-private + public B in bot-platform's JWKS).
+- Ayla issues user tokens signed with A-private. Bot-platform verifies with public A.
+- Bot-platform issues s2s tokens (when calling Ayla) signed with B-private. Ayla verifies with public B.
+- Ayla issues s2s tokens (when calling bot-platform) signed with A-private. Bot-platform verifies with public A.
+- Q-JWT1 (was deferred Phase 2+) is now **resolved 🟢** in this contract.
 
 ### 4.2 Key distribution — JWKS
 
@@ -173,9 +202,15 @@ Bot-platform fetches and caches this endpoint. Cache TTL = 5 minutes (matches ac
 - **Emergency rotation** (compromise suspected): immediate new `kid`, old `kid` removed from JWKS within 60 seconds. Bot-platform caches expire within 5 min, so worst-case access tokens forged with the leaked key are valid for 5 minutes. Refresh tokens signed by the leaked key MUST be force-revoked via the blacklist (§7) — same incident triggers a mass blacklist of all refresh `jti` issued before the compromise window.
 - **Key storage:** private signing key in Ayla djangoproject's secret manager (Vault / equivalent). NEVER in source control. Bot-platform NEVER sees the private key.
 
-### 4.4 Service-to-service shared secret
+### 4.4 Service-to-service signing (RS256 + own JWKS)
 
-For internal REST calls (bot-platform → Ayla, Ayla → bot-platform), a separate `service_to_service` token type uses HS256 with a shared secret. The secret lives in both repos' deploy configs. Rotation is coordinated (both sides updated in lockstep). Token lifetime is 5 minutes — long enough for one request, short enough to limit leak damage.
+Per S2 fix in §4.1: each side has its own RSA keypair and publishes its own JWKS.
+
+- ai-bot-platform exposes `GET /.well-known/jwks.json` (same RFC 7517 format as Ayla's). Ayla fetches and caches with the same 5-minute TTL + emergency rotation handling as bot-platform's view of Ayla's JWKS.
+- Rotation is INDEPENDENT per side — bot-platform can rotate keypair B without coordinating with Ayla (and vice versa). Each side just re-fetches the other's JWKS on cache miss.
+- Token lifetime stays 5 minutes (§2 — short to limit leak damage; new token per request acceptable cost).
+
+**Bot-platform compromise impact analysis under this layout:** if bot-platform's private key B leaks, attacker can mint s2s tokens claiming `iss: ai-bot-platform`. Ayla MUST further gate s2s requests on `user_on_behalf_of` consent binding (§5.4 below) — without that, the attacker can call any Ayla endpoint claiming any user. The chain is broken at the consent-binding layer, not the key layer.
 
 ---
 
@@ -194,9 +229,18 @@ Mobile selects the active tenant via the provider switcher (Epic #222 #252). On 
 `ayla.relationships` in the token is a **snapshot at issuance time**. It may be stale (relationship revoked after the token was issued — but before it expired). bot-platform MUST re-verify against its own `TenantUserRelationship` mirror table on every tenant-scoped request:
 
 ```python
-# Bot-platform middleware (simplified)
+# Bot-platform middleware (simplified — S5 fix: User.is_active also checked
+# for null-tenant tokens, otherwise a disabled user could nuke their memory
+# in the 15-minute access-token window after their disable)
 tenant_id = jwt['ayla']['tenant_id']
 user_id = jwt['sub']
+
+# Layer 1: User.is_active live check — runs FOR ALL TOKEN TYPES, including
+# null-tenant. Caches against a kill-list refreshed from Ayla every 30s.
+if not is_user_active(user_id):  # consults local kill-list mirror
+    raise UserDisabled("user account disabled")
+
+# Layer 2: tenant-scoped relationship check, only when tenant_id is non-null
 if tenant_id is not None:
     rel = TenantUserRelationship.objects.filter(
         user_id=user_id,
@@ -206,6 +250,8 @@ if tenant_id is not None:
     if rel is None:
         raise TenantScopeViolation("active relationship not found")
 ```
+
+**`is_user_active(user_id)`** consults a kill-list mirror table maintained from Ayla's `user.profile.updated` events (the deactivation event includes a flag). The mirror is refreshed every 30 seconds; worst-case lag is the residual exposure for a freshly-disabled user (much smaller than the 15-minute access-token natural expiry).
 
 If the in-token `relationships` array CLAIMS a relationship but the DB doesn't have it → 401, and a `worker.tenant_required_missing` audit event fires (the soak telemetry per `project_strict_tenant_refuse_soak`).
 
@@ -223,9 +269,28 @@ For any tenant-scoped endpoint (chat with a specific provider's salon, booking a
 
 The token type for these global-scope endpoints is still `access` (not a special type). The distinction is purely the `tenant_id` claim value.
 
-### 5.4 service_to_service tokens
+**S4 fix — endpoint-scoping mechanism named explicitly:**
 
-For cross-repo REST calls (e.g. bot-platform calls Ayla `GET /api/v1/users/{user_id}/dob` for the minor-protection lookup per ADR-0011 §10.2), a `service_to_service` token is used:
+«Tenant-scoped» is determined at the DRF view layer by the **explicit `@global_scope` decorator opt-in**. The middleware default is FAIL-CLOSED:
+
+- Every endpoint is treated as tenant-scoped UNLESS its view (class or method) carries `@global_scope` from `apps.identity.decorators`.
+- The decorator signals to the JWT verifier middleware «null-tenant tokens are acceptable here»; without it, null-tenant → 403 immediately.
+- The middleware iterates the URL resolver's resolved view + checks for the decorator presence at request time.
+- Adding a new endpoint without thinking about scope defaults to «tenant required» — the safer of the two errors (false 403 is recoverable; false access grant is not).
+
+**Allowlist of global-scope endpoints (kept in `apps.identity.global_scope_registry`):**
+
+- `GET /api/v1/users/me/memory` — cross-tenant memory read
+- `DELETE /api/v1/users/me/memory/{entry_id}` — cross-tenant delete
+- `POST /api/v1/users/me/memory/forget-all` — cross-tenant nuke
+- `GET /api/v1/users/me/providers` — relationship listing
+- `GET /api/v1/users/me/profile` (read of user-global PII) — cross-tenant by definition
+
+This list is updated explicitly per PR via the registry; CI test asserts that any view carrying `@global_scope` is also listed in the registry (and vice versa), preventing «forgot to flag this endpoint» drift.
+
+### 5.4 service_to_service tokens — with consent binding (S3 fix)
+
+For cross-repo REST calls (e.g. bot-platform calls Ayla `GET /api/v1/users/{user_id}/dob` for the minor-protection lookup per ADR-0011 §10.2), a `service_to_service` token is used. **The token MUST embed the original user's access JWT as a nested claim** — Ayla re-verifies it on receipt, proving the user actually has a live session at the moment the s2s call is made.
 
 ```json
 {
@@ -234,18 +299,34 @@ For cross-repo REST calls (e.g. bot-platform calls Ayla `GET /api/v1/users/{user
   "aud": ["ayla-djangoproject"],
   "exp": 1747929600,
   "iat": 1747929300,
-  "jti": "...",
+  "jti": "00000000-0000-4000-8000-00000000s2s1",
   "ayla": {
     "token_type": "service_to_service",
     "tenant_id": null,
     "scope": ["user:dob:read"],
     "user_role": "service",
-    "user_on_behalf_of": "f1a2b3c4-d5e6-4789-9abc-def012345678"
+    "user_on_behalf_of": "f1a2b3c4-d5e6-4789-9abc-def012345678",
+    "user_token": "<the original user's access JWT, signed by Ayla — verbatim string>",
+    "contract_version": "1"
   }
 }
 ```
 
-Note `iss` is the calling service identity, NOT a user. `sub` is the service-account name. `user_on_behalf_of` (new claim only on service-to-service tokens) records which user the call is for — audit logs use this to attribute the action.
+**S3 chain-break mechanism (verifier side, Ayla):**
+
+1. Validate the outer s2s token signature (RS256 with bot-platform's public key — §4.4).
+2. Extract `ayla.user_token` and validate it as a normal user access token (signature with Ayla's own public key, `exp` check, `iss` check).
+3. Cross-check: outer `ayla.user_on_behalf_of` MUST equal inner user-token's `sub`. Mismatch → 401 `s2s_consent_binding_violation`.
+4. Cross-check: outer `ayla.scope` MUST be a SUBSET of inner user-token's `ayla.scope`. The user cannot delegate more privilege than they have. Wider scope → 401 same error.
+5. Cross-check: inner user-token's `exp` MUST be in the future. A user-token expiring before the s2s call lands → reject. (Attacker cannot replay an old user-token to amplify a session window.)
+6. For sensitive reads (DOB, red-zone memory, payment history): Ayla additionally consults the **consent record** — a row in `users_consents` table — that records the user explicitly granted bot-platform the right to read this specific data category. Without a matching consent record, 403 `consent_required`.
+
+**Compromise impact under S3 fix:** if bot-platform's private key B leaks, attacker can mint s2s tokens with valid outer signature. BUT the attacker also needs:
+- A live user-token signed by Ayla (15-minute window after a real user actually logged in) — short-lived credential cap.
+- The user-token's `sub` matches `user_on_behalf_of` — attacker cannot inject arbitrary user IDs.
+- A consent record exists for that user × data category — attacker cannot exfiltrate categories the user hasn't consented to.
+
+The chain breaks at the consent-binding layer. Bot-platform compromise no longer = full PII exfiltration.
 
 ---
 
@@ -307,11 +388,13 @@ Ayla maintains a `RefreshTokenBlacklist` table indexed by `jti`. Rows:
 - Inserted on rotation (old `jti` blacklisted as new pair is issued).
 - Inserted on explicit logout (`POST /api/v1/auth/logout` adds the current refresh `jti`).
 - Inserted on incident response (mass-blacklist during key compromise per §4.3).
-- Pruned 30 days after `jti.exp` — at which point the token would be expired anyway, so blacklist redundancy is harmless.
+- Pruned **90 days** after `jti.exp` (S8 fix — was 30d in draft; typical security-incident detection lag is ~200d, so 30d-post-exp pruning closes a real forensic window. 90d retains long enough for most breach-detection cycles to catch a pre-pruning revocation).
 
 bot-platform does NOT have a blacklist mirror (it only verifies access tokens, which are short-lived enough that blacklisting would be operational overhead). If a refresh is blacklisted, the next access token won't be issued, and the 15-minute window of remaining access-token validity is acceptable risk.
 
 ### 7.3 Logout
+
+**S9 — `/api/v1/auth/refresh` rate limit:** Ayla's refresh endpoint MUST be rate-limited per-`jti` (max 1 refresh per minute per token) AND per-user (max 30 refreshes per hour). The per-`jti` cap blocks reuse-amplification; the per-user cap blocks brute-force enumeration of stolen `jti`s.
 
 `POST /api/v1/auth/logout` (Ayla djangoproject):
 
@@ -336,10 +419,14 @@ Bot-platform middleware verifies every incoming JWT. The verifier MUST:
 ### 8.2 Ayla-claim validation
 
 6. Validate `ayla.token_type` IN (`access`, `anonymous`, `service_to_service`). Reject `refresh` — refresh tokens are used only on Ayla; they MUST NOT reach bot-platform endpoints.
+
+   **S14 fix — fail-closed timing:** JWT verification fails CLOSED (reject 401) from day-1 of bot-platform's JWT middleware (#435), INDEPENDENT of the `STRICT_TENANT_REFUSE` flag. The STRICT_TENANT_REFUSE soak (per `project_strict_tenant_refuse_soak` and ADR-0011 §9.1) governs WORKER-side tenant scoping, not auth-layer JWT validation. Confusing these two is a known attractor — call out the distinction:
+   - `STRICT_TENANT_REFUSE=False` (log-only soak): WORKER finds a request missing a tenant context → log event, don't refuse.
+   - JWT auth-layer validation: always fail-closed. A malformed/missing/invalid JWT is rejected at HTTP 401 from day-1; never log-only.
 7. Validate `ayla.tenant_id`:
    - If endpoint is tenant-scoped AND `tenant_id IS NULL` → reject with HTTP 403 `tenant_required`.
    - If `tenant_id IS NOT NULL` → look up `TenantUserRelationship(user_id=sub, tenant_id=ayla.tenant_id, is_active=True)`. If absent → 401, fire `worker.tenant_required_missing` audit event.
-8. Validate `ayla.scope` against endpoint requirements. If scope insufficient → 403 `insufficient_scope`.
+8. Validate `ayla.scope` against endpoint requirements. **S12 fix:** the `ayla.scope` claim is the UNION of the user's scopes across all relationships at issuance time. The verifier MUST FILTER this union to scopes applicable to the active `ayla.tenant_id` BEFORE the endpoint scope-check. Specifically: take the user's role+scope at `ayla.tenant_id` from the verified relationships array, and check the endpoint requirement against that filtered set. Without filtering, a user who is a `customer` at tenant A and a `master` at tenant B presents an active-tenant=A token carrying `master:*` scopes and gets master endpoints at A — cross-tenant privilege escalation. (Q-JWT3 was originally deferred Phase 2+; promoted to 🟢 resolved here.) If scope insufficient post-filter → 403 `insufficient_scope`.
 9. For anonymous tokens (`ayla.token_type='anonymous'`): the endpoint MUST be on the anonymous-allowed allow-list. Reject anonymous on registered-only endpoints with 403.
 
 ### 8.3 Cache hierarchy
@@ -380,15 +467,28 @@ If a caller sends a JWT with `alg: HS256` (or `none`), the verifier rejects with
 
 The bot-platform `TenantUserRelationship` mirror is fed by Ayla events (per event-contract.md §3 + Epic #222). If a relationship was created in Ayla 200ms ago and the event hasn't reached bot-platform yet, a fresh JWT with the new `tenant_id` will fail bot-platform's lookup → 401.
 
-**Mitigation:** the verifier MAY (not MUST) treat the in-token `ayla.relationships` array as authoritative for the SPECIFIC tenant claimed in `ayla.tenant_id`, IF the relationship's `granted_at` is within the last 60 seconds AND the in-token relationship matches a TUR row that exists in bot-platform with `is_active=False` (transient lag, will catch up). If both conditions hold, the request proceeds + a `worker.tenant_relationship_lag` event fires for telemetry.
+**Mitigation (S6-tightened):** the verifier MAY (not MUST) treat the in-token `ayla.relationships` array as authoritative for the SPECIFIC tenant claimed in `ayla.tenant_id`, IF ALL of:
 
-If the relationship is older than 60 seconds and bot-platform doesn't have it, that's a real out-of-sync incident — reject + alert.
+1. The relationship's `granted_at` in the token is within the last 60 seconds (per server clock — NOT trusting client clock).
+2. The in-token relationship matches a TUR row that exists in bot-platform with `is_active=False` (transient lag, will catch up).
+3. The TUR row's `granted_at` (on bot-platform's mirror, fed by `provider.relationship_formed` events) is within ±5 seconds of the in-token `granted_at`. **S6 fix:** without this delta-match, a post-key-compromise attacker could re-issue tokens claiming any old relationship's `granted_at` within the 60s «grace» window, bypassing revocation. The delta-match anchors token-claimed timestamp to a real event the consumer also saw.
+
+If all 3 hold, request proceeds + `worker.tenant_relationship_lag` event fires for telemetry.
+
+If the in-token `granted_at` is older than 60 seconds OR bot-platform doesn't have the TUR row OR the timestamps diverge by >5s → reject + alert.
 
 ### 10.5 JWKS endpoint unreachable
 
 bot-platform cannot fetch Ayla's JWKS to verify a new `kid`. Cache miss + fetch failure = HTTP 503 from bot-platform with `error="auth_unavailable"`. Mobile retries with exponential backoff.
 
-Mitigation: bot-platform retains the LAST-KNOWN-GOOD JWKS as a stale cache valid for 1 hour after Ayla becomes unreachable. New `kid`s are unverifiable but pre-rotation tokens still validate. After 1 hour, all token verification fails — Ayla MUST be up for auth.
+Mitigation (S7-reconciled with §4.3): bot-platform retains the LAST-KNOWN-GOOD JWKS as a stale cache. **The stale-cache validity window is 5 MINUTES, matching §4.3's «emergency rotation worst-case 5 min» bound**. (Earlier draft said 1 hour — direct contradiction. 1 hour creates a forgery window during BGP/DNS poisoning. 5 min is the floor: if Ayla is unreachable longer than 5 min, all token verification fails — Ayla MUST be up for auth, no exceptions.)
+
+Concretely:
+
+- 0–5 min Ayla unreachable: stale cache valid; pre-rotation tokens still validate; new `kid`s unverifiable (their tokens fail).
+- >5 min Ayla unreachable: bot-platform returns HTTP 503 `auth_unavailable` for all token-protected endpoints. Mobile retries with exponential backoff.
+
+This is a real availability trade — bot-platform's auth is hard-coupled to Ayla's uptime. The trade was accepted in ADR-0009 (Ayla owns canonical identity; bot-platform is stateless on auth). Document the SLO requirement: Ayla auth must hit 99.95% availability or the platform degrades to read-only / cached responses.
 
 ### 10.6 Refresh-token reuse (potential compromise)
 
@@ -401,6 +501,20 @@ HTTP 403 `error="anonymous_not_allowed"` with hint header `X-Ayla-Auth-Required:
 ### 10.8 Service-to-service token used as user token
 
 If a `service_to_service` token reaches an endpoint expecting a user token (or vice versa), the verifier rejects with 401 `error="invalid_token"`, `error_description="wrong token type"`. This is a misconfiguration, not an attack — fix the calling code.
+
+### 10.9 Token presented in query string / body (S11 enforcement)
+
+HTTP 400 `error="invalid_token_location"`. Mobile + service callers MUST present JWTs in `Authorization: Bearer` header only. If a token arrives via URL or body, the verifier rejects without inspecting the token contents (prevents the token from being logged at any tier that processes query strings or bodies — NGINX, mobile crash reporters, browser history). Counter `jwt_verify_failed_total{reason="bad_location"}`. Threshold alert: non-trivial rate suggests a buggy client or active probing.
+
+### 10.10 s2s token consent-binding violation (S3 chain-break)
+
+HTTP 401 `error="s2s_consent_binding_violation"` with sub-reasons:
+- `outer_sub_mismatch_inner_sub` — `user_on_behalf_of` ≠ inner user-token `sub`.
+- `outer_scope_exceeds_inner` — outer scope is wider than the user actually has.
+- `inner_user_token_expired` — replay of an old user-token.
+- `consent_record_missing` — Ayla `users_consents` row absent for this user × data category.
+
+Counter `jwt_verify_failed_total{reason="s2s_consent_<sub>"}`. Threshold alert at ANY non-zero rate — these are either a misconfiguration or an active attempt to escalate via compromised bot-platform key.
 
 ---
 
@@ -423,9 +537,9 @@ If a `service_to_service` token reaches an endpoint expecting a user token (or v
 
 | # | Question | Owner | Status |
 |---|---|---|---|
-| **Q-JWT1** | Should service-to-service tokens use RS256 (asymmetric, no shared secret) instead of HS256, for consistency? | infra + security | 🟡 HS256 MVP, RS256 if multi-region |
+| **Q-JWT1** | Should service-to-service tokens use RS256 (asymmetric, no shared secret) instead of HS256, for consistency? | infra + security | 🟢 **RESOLVED v1.1** — RS256 each side own keypair (S2 fix) |
 | **Q-JWT2** | Where does the JWKS endpoint live during DNS deferral (gobeauty.site era)? Currently spec says `https://api.ayla.app/.well-known/jwks.json` placeholder — pre-domain-decision Phase 1+ | infra | 🟡 substitute `api-dev.gobeauty.site` until domain finalized |
-| **Q-JWT3** | Per-relationship scopes — should `ayla.scope` differ across the user's tenant relationships? E.g. customer at tenant A, master at tenant B — what scope is in the active-tenant=A token? | Eng + PM | 🟡 Phase 2+; MVP uses union of user scopes |
+| **Q-JWT3** | Per-relationship scopes — should `ayla.scope` differ across the user's tenant relationships? E.g. customer at tenant A, master at tenant B — what scope is in the active-tenant=A token? | Eng + PM | 🟢 **RESOLVED v1.1** — scope is the union at issuance time; verifier MUST filter to active tenant's relationship before endpoint scope-check (S12 fix in §8.2.8) |
 | **Q-JWT4** | Anonymous token revocation — currently «expires in 30d, blacklisted on merge». Should there be an explicit «void this anonymous session» endpoint for cleanup of stale device tokens? | Eng | 🟡 Phase 2+ if data shows accumulation |
 | **Q-JWT5** | Cross-device merge with conflicting anonymous state — handled by Q-AN9 (resolved 2026-05-20: medical-routing + register-encouragement). Verify JWT contract is consistent with that resolution. | Privacy + Eng | 🟢 consistent — anonymous tokens don't carry red/yellow scope |
 
@@ -435,4 +549,6 @@ These are tracked but DO NOT block this doc — they refine v2+ of the contract.
 
 ## Last verified
 
-2026-05-21 — initial draft. v1 of the cross-service JWT contract; ships ahead of #258/#257/#259 implementation as the spec they build against.
+2026-05-22 — v1.1 round-2 amendments addressing 11 adversarial blockers + 3 nice-to-haves from PR #516 review. Critical security boundary fixes (S1+S2+S3 chain — bot-platform compromise → forge identity → exfiltrate red-zone PII via Ayla REST): aud segregation, RS256 each-side-own-keypair, s2s token MUST embed nested user-token + consent-record check. Other fixes: token-location (Bearer header only), tenant-scope endpoint allowlist mechanism, User.is_active for null-tenant, lag-grace 5s delta-match, JWKS stale window reconciled to 5min, scope filtered to active tenant, contract_version claim, fail-closed day-1 independent of STRICT_TENANT_REFUSE flag, refresh blacklist 90d, refresh rate-limiting, device_id informational-only.
+
+2026-05-21 — initial draft. v1 of the cross-service JWT contract; landed on dev via PR #508 PEL reaper bundling (W3 work picked up W4 doc as collateral). v1.1 fixes the security-boundary issues that the bundled draft did not address.
