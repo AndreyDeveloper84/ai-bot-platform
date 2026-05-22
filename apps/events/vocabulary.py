@@ -141,6 +141,23 @@ MASTER_REACTIVATED = "master.reactivated"
 # DB row only, never on the analytics bus.
 MASTER_AVAILABILITY_CHANGE_REQUESTED = "master.availability_change_requested"
 
+# --- Admin availability-request decision (M3-admin / Bundle B backend) -----
+# Emitted from apps.admin_api.services.availability when an owner/admin
+# resolves a master's PENDING availability request. Payload contracts:
+#   admin.availability_approved:
+#     {tenant_id, master_id, request_id, actor_id, actor_role,
+#      requested_start: <iso>, requested_end: <iso>, reason_class,
+#      materialised_dates: ["YYYY-MM-DD", ...]}
+#   admin.availability_rejected:
+#     {tenant_id, master_id, request_id, actor_id, actor_role,
+#      requested_start: <iso>, requested_end: <iso>, reason_class,
+#      rejection_reason: <str ≤500>}
+# rejection_reason is free-form admin context, NOT customer PII; we keep
+# it on the audit bus so forensic review can rebuild why a request was
+# declined without re-joining through the DB row.
+ADMIN_AVAILABILITY_APPROVED = "admin.availability_approved"
+ADMIN_AVAILABILITY_REJECTED = "admin.availability_rejected"
+
 # --- Master conversation detail (master-mobile §M6, PR M6.1) ---------------
 # Master reads/sends/promotes in their own conversation. Payload contracts:
 #   conversation.master_replied:
@@ -228,6 +245,8 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_DEACTIVATED,
         MASTER_REACTIVATED,
         MASTER_AVAILABILITY_CHANGE_REQUESTED,
+        ADMIN_AVAILABILITY_APPROVED,
+        ADMIN_AVAILABILITY_REJECTED,
         CONVERSATION_MASTER_REPLIED,
         CONVERSATION_MARKED_READ_BY_MASTER,
         CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED,

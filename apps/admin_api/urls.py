@@ -13,6 +13,7 @@ from django.urls import path
 
 from apps.admin_api import (
     views,
+    views_availability,
     views_invite,
     views_master_deactivation,
     views_services_mapping,
@@ -74,5 +75,25 @@ urlpatterns = [
         "services-mapping/",
         views_services_mapping.services_mapping_get,
         name="services_mapping_get",
+    ),
+    # Bundle B / M3-admin — approve/reject master availability requests.
+    # Action paths declared BEFORE the bare list so Django's order-sensitive
+    # path resolver can never misread a UUID for a literal action segment
+    # (belt + braces; the list path has no <uuid> parameter so collision is
+    # theoretical, but the convention matches services-mapping above).
+    path(
+        "availability-requests/<str:request_id>/approve/",
+        views_availability.availability_request_approve,
+        name="availability_request_approve",
+    ),
+    path(
+        "availability-requests/<str:request_id>/reject/",
+        views_availability.availability_request_reject,
+        name="availability_request_reject",
+    ),
+    path(
+        "availability-requests/",
+        views_availability.availability_requests_list,
+        name="availability_requests_list",
     ),
 ]
