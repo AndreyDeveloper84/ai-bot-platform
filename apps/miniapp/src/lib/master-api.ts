@@ -215,6 +215,110 @@ export const patchOnboardingProfile = (input: {
 export const getDashboard = (): Promise<DashboardResponse> =>
   request("/dashboard", { method: "GET" });
 
+// --- M4 master profile (read-by-self + edit own bio/photo) --------------
+// Mirrors apps/master_api/views.py::me() + onboarding_profile() (PATCH).
+// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M4
+// (lines 480-553). The PATCH endpoint is reused via the /profile URL
+// alias added in apps/master_api/urls.py (Option B per PR body) — same
+// view function as /onboarding/profile, idempotent + last-write-wins.
+
+export interface MasterMeServiceItem {
+  id: string;
+  name: string;
+  duration_min: number | null;
+}
+
+export interface MasterMeMaster {
+  id: string;
+  name: string;
+  specialization: string;
+  bio: string;
+  photo_url: string;
+  services: MasterMeServiceItem[];
+}
+
+export interface MasterMeSalon {
+  tenant_id: string;
+  name: string;
+}
+
+export interface MasterMePermissions {
+  can_edit_schedule: boolean;
+  can_edit_services: boolean;
+  can_message_customers: boolean;
+}
+
+export interface MasterMeResponse {
+  master: MasterMeMaster;
+  salon: MasterMeSalon;
+  permissions: MasterMePermissions;
+}
+
+export const getMasterMe = (): Promise<MasterMeResponse> =>
+  request("/me", { method: "GET" });
+
+/**
+ * PATCH master profile — bio only (JSON path).
+ *
+ * Routes to ``/api/v1/master/profile`` (the M4 alias to the existing
+ * onboarding profile view). Same view function — idempotent + last
+ * write wins. The audit event is still ``MASTER_PROFILE_INITIALIZED``
+ * until the backend cleanup ticket adds a dedicated
+ * ``MASTER_PROFILE_UPDATED`` slug (tracked separately).
+ */
+export const patchMasterProfile = (patch: {
+  bio?: string;
+}): Promise<ProfilePatchResponse> =>
+  request("/profile", {
+    method: "PATCH",
+    body: JSON.stringify({ bio: patch.bio ?? "" }),
+  });
+
+/**
+ * Upload a new profile photo (multipart). Bypasses the shared
+ * ``request()`` helper so the browser sets the multipart boundary
+ * correctly (MM3/MM4 lesson: ``request()`` injects
+ * ``application/json`` when a body is present, which clobbers the
+ * boundary string and the backend MultiPartParser rejects with 400).
+ */
+export const uploadMasterProfilePhoto = async (
+  file: File,
+): Promise<ProfilePatchResponse> => {
+  const fd = new FormData();
+  fd.set("photo", file);
+  const initData = getInitData();
+  const headers = new Headers();
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+  // No Content-Type — let fetch set the multipart boundary.
+  const res = await fetch(`${MASTER_API_BASE}/profile`, {
+    method: "PATCH",
+    headers,
+    body: fd,
+  });
+  if (!res.ok) {
+    let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
+    try {
+      parsed = (await res.json()) as ErrorBody;
+    } catch {
+      /* non-JSON 5xx */
+    }
+    throw new ApiError(res.status, parsed.error, parsed.detail);
+  }
+  return (await res.json()) as ProfilePatchResponse;
+};
+
+/** §M4 line 527 — bio UI cap (server-side MAX_BIO_LENGTH = 280). */
+export const MASTER_PROFILE_BIO_MAX = 280;
+/** §M4 line 550 — photo upload cap. Mirrors backend PHOTO_MAX_BYTES. */
+export const MASTER_PROFILE_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+/** §M4 line 550 — accepted MIME types. */
+export const MASTER_PROFILE_PHOTO_MIME_ALLOWLIST = new Set<string>([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+
 export const MASTER_SESSION_STORAGE_KEY = "master_token";
 
 // --- M3 schedule types ----------------------------------------------------

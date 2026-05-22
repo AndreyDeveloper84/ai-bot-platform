@@ -16,6 +16,11 @@ urlpatterns = [
     path("onboarding/accept", views.onboarding_accept, name="onboarding_accept"),
     path("onboarding/reject", views.onboarding_reject, name="onboarding_reject"),
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
+    # M4 alias — same view, post-onboarding edit URL. Idempotent +
+    # last-write-wins; audit event slug still reads MASTER_PROFILE_INITIALIZED
+    # until the dedicated MASTER_PROFILE_UPDATED slug ships in a follow-up
+    # backend cleanup ticket (Option B per the M4 frontend PR body).
+    path("profile", views.onboarding_profile, name="profile"),
     path("me", views.me, name="me"),
     path("dashboard", views.dashboard, name="dashboard"),
     # M3 schedule self-service (master-mobile §M3, PR Tier1.2)
