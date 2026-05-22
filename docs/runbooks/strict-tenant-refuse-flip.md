@@ -122,9 +122,23 @@ When the pre-flip checklist below is satisfied:
 - [ ] At least 7 consecutive days of `worker.tenant_required_missing`
       events triaged — zero legitimate handlers in the list.
 - [ ] All registered `TenantAwareTask` subclasses audited for their
-      effective `requires_tenant` value. Boot-audit logging tracked
-      in **issue #502** (B2 nice-to-have); until it lands, audit via
-      `grep -rn 'class.*TenantAwareTask' apps/` + manual review.
+      effective `requires_tenant` value. **Issue #502 shipped 2026-05-22**
+      — query the latest `worker.subscriber_audit` event for the live
+      inventory instead of `grep`:
+
+      ```python
+      from apps.events.models import Event
+      latest = Event.objects.filter(
+          event_type="worker.subscriber_audit"
+      ).latest("created_at")
+      for h in latest.payload["handlers"]:
+          print(h["stream"], h["handler_class"], h["requires_tenant"])
+      ```
+
+      Verify (a) MaxHandler is present with `requires_tenant=True`,
+      (b) no unexpected handlers with `requires_tenant=False` outside
+      the documented opt-out list, (c) MRO chain on each handler
+      doesn't show external-mixin shadowing.
 - [x] **Issue #499 (XAUTOCLAIM reaper) merged** — see §«Automatic DLQ»
       above. Opt-in via `PEL_REAPER_ENABLED`; flip alongside
       `STRICT_TENANT_REFUSE` so DLQ drain is active from the first
