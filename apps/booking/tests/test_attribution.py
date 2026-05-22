@@ -373,3 +373,241 @@ class TestComputeRescheduleContinuation:
             new_visit_at=chain_root.visit_at + timedelta(days=1),
         )
         assert root_id == chain_root.id
+
+
+# ---------------------------------------------------------------------------
+# Q12-α — adversarial-pass regression tests (4 blockers + design issues)
+# ---------------------------------------------------------------------------
+
+
+class TestQ12aAdversarialPassRegressions:
+    """Regression tests for the 4 blockers + design issues surfaced by
+    the adversarial Code Reviewer on PR #526.
+
+    Each maps to a specific catch — see commit message + memory
+    `h3-waiver-pattern`.
+    """
+
+    @pytest.fixture
+    def tenant(self, db) -> Tenant:
+        return Tenant.objects.create(slug="q12a-adv", name="Q12-α adversarial")
+
+    def _make_row(
+        self,
+        tenant: Tenant,
+        *,
+        visit_at,
+        service_id=None,
+        original_booking_event=None,
+        status="confirmed",
+    ) -> BookingRequest:
+        with tenant_scope(tenant):
+            return BookingRequest.objects.create(
+                tenant=tenant,
+                service_name="Manicure",
+                client_name="Test",
+                client_phone="+79991234567",
+                visit_at=visit_at,
+                duration_min=60,
+                status=status,
+                booking_source="ai_direct",
+                billable=True,
+                billing_reason="ai_direct + confirmed",
+                attribution_metadata={
+                    "actor_type": "customer",
+                    "created_by": "execute_confirm",
+                },
+                service_id=service_id,
+                original_booking_event=original_booking_event,
+            )
+
+    # ---- B1: LLM tool path — service_id=None on both sides → no swap ----
+
+    def test_b1_llm_path_both_sides_no_service_fk_is_not_swap(self, tenant: Tenant) -> None:
+        """Adversarial-pass B1: LLM-created rows have ``service_id=None``
+        (no service FK set at write time). Pre-fix the helper compared
+        ``str(None)='None'`` vs `""` → 100% of LLM reschedules silently
+        registered as service_swap, breaking the entire feature on the
+        dominant production path. Fix: ``_normalise_service_id`` coerces
+        None → "", so «both sides None» passes the equality check.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._make_row(tenant, visit_at=timezone.now() + timedelta(days=7), service_id=None)
+        is_cont, break_reason, root_id = compute_reschedule_continuation(
+            old=old,
+            new_service_id="",  # LLM tool passes "" when booking.service_id is None
+            new_visit_at=old.visit_at + timedelta(days=10),
+        )
+        assert is_cont is True, (
+            "LLM tool path: both sides no service FK must pass swap check; "
+            f"got break_reason={break_reason!r}"
+        )
+        assert break_reason is None
+        assert root_id == old.id
+
+    def test_b1_asymmetric_service_id_is_swap(self, tenant: Tenant) -> None:
+        """Safety: when one side has a service identifier and the other
+        does not, that IS still a swap. Defensive — better to over-charge
+        once than to silently extend a chain across mismatched services.
+
+        Mirror scenario: row has no FK (LLM path) + caller supplies a
+        new non-empty service id (e.g. catalog migration brought a
+        service in). Helper detects mismatch.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._make_row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            service_id=None,
+        )
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id="some-different-service-id",
+            new_visit_at=old.visit_at + timedelta(days=10),
+        )
+        assert is_cont is False
+        assert break_reason == "service_swap"
+
+    # ---- B2: chain root cancelled breaks the chain ----
+
+    def test_b2_cancelled_root_breaks_chain_even_when_old_is_confirmed(
+        self, tenant: Tenant
+    ) -> None:
+        """Adversarial-pass B2: founder rule #1 («cancel breaks chain»)
+        applies to the ROOT, not just to ``old``. The structural
+        CONFIRMED-only check on ``old`` doesn't catch the case where
+        the chain root was cancelled (admin data fix, GDPR erasure,
+        audit job) while ``old`` is still CONFIRMED. Without this fix,
+        a cancelled chain root silently extends non-billable chain
+        forever via subsequent reschedules of intermediate links.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        root_visit = timezone.now() + timedelta(days=7)
+        root = self._make_row(
+            tenant,
+            visit_at=root_visit,
+            service_id=None,
+            status="cancelled",  # Cancelled root.
+        )
+        link2 = self._make_row(
+            tenant,
+            visit_at=root_visit + timedelta(days=5),
+            service_id=None,
+            original_booking_event=root,
+            status="confirmed",
+        )
+
+        is_cont, break_reason, root_id = compute_reschedule_continuation(
+            old=link2,
+            new_service_id=None,
+            new_visit_at=root_visit + timedelta(days=10),
+        )
+        assert is_cont is False
+        assert break_reason == "chain_root_cancelled"
+        assert root_id is None
+
+    # ---- B4: timezone-naive new_visit_at must not crash the batch ----
+
+    def test_b4_naive_new_visit_at_coerced_via_root_tzinfo(self, tenant: Tenant) -> None:
+        """Adversarial-pass B4: pre-fix a naive ``new_visit_at`` against
+        a TZ-aware ``root.visit_at`` raised ``TypeError`` mid-helper,
+        propagating into the reschedule transaction → rollback → in
+        the LLM tool path the old row stays CONFIRMED while YClients-
+        side is already cancelled → split-brain. Fix: helper adopts
+        root's tzinfo defensively.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._make_row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            service_id=None,
+        )
+        # Naive datetime — strip tzinfo.
+        naive = (old.visit_at + timedelta(days=10)).replace(tzinfo=None)
+
+        # MUST NOT raise TypeError.
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=naive,
+        )
+        # The helper coerced naive → tz-aware via root.tzinfo; same-
+        # day plus 10 is well within 90d → continuation.
+        assert is_cont is True
+        assert break_reason is None
+
+    # ---- D1: chain-root invariant enforcement ----
+
+    def test_d1_chain_root_invariant_violation_treated_as_broken(self, tenant: Tenant) -> None:
+        """Adversarial-pass D1: writers MUST set
+        ``original_booking_event_id`` to the ROOT (a row whose own
+        ``original_booking_event_id`` is None). If a buggy writer or
+        DB tampering leaves a non-root in the FK, the 90d window would
+        be measured from the wrong anchor. Defence: helper detects the
+        invariant violation and returns chain_broken instead of trusting
+        the inconsistent pointer.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        root_visit = timezone.now() + timedelta(days=7)
+        true_root = self._make_row(
+            tenant,
+            visit_at=root_visit,
+            service_id=None,
+        )
+        # link2 INCORRECTLY points at... another link2-like row that
+        # itself has original_booking_event_id set. Simulate the bug.
+        fake_root = self._make_row(
+            tenant,
+            visit_at=root_visit + timedelta(days=2),
+            service_id=None,
+            original_booking_event=true_root,
+        )
+        compromised = self._make_row(
+            tenant,
+            visit_at=root_visit + timedelta(days=5),
+            service_id=None,
+            original_booking_event=fake_root,  # NOT a root!
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=compromised,
+            new_service_id=None,
+            new_visit_at=root_visit + timedelta(days=10),
+        )
+        assert is_cont is False
+        assert break_reason == "chain_root_invariant_violated"
+
+    # ---- D2: contradiction guard on compute_billable ----
+
+    def test_d2_contradictory_kwargs_raise(self) -> None:
+        """Adversarial-pass D2: contradictory kwargs should not silently
+        produce wrong audit — raise loud."""
+
+        with pytest.raises(ValueError, match="incompatible"):
+            compute_billable(
+                booking_source="ai_direct",
+                status="confirmed",
+                created_by="execute_reschedule",
+                is_reschedule_continuation=True,
+                chain_break_reason="over_90d",
+            )

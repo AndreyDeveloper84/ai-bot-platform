@@ -43,6 +43,25 @@ if TYPE_CHECKING:  # avoid circular import at runtime
 RESCHEDULE_CONTINUATION_THRESHOLD_DAYS = 90
 
 
+def _normalise_service_id(service_id_value: object) -> str:
+    """Coerce a service identifier (UUID / str / int / None) to a
+    comparable string. ``None`` → ``""`` so chains where neither old
+    nor new has a service FK can pass through.
+
+    Q12-α adversarial-pass B1: the LLM tool path (`apps/skills/booking/
+    tools.py::execute_reschedule`) creates rows WITHOUT setting the
+    ``service`` FK — so ``booking.service_id`` is None. Pre-fix the
+    helper compared ``str(None)`` (= "None") vs ``""``, falsely flagging
+    every LLM reschedule as a service_swap → 100 % of LLM reschedules
+    silently overbilled. This helper normalises both sides so an
+    «old None, new None/""» pair passes the swap check.
+    """
+
+    if service_id_value is None:
+        return ""
+    return str(service_id_value)
+
+
 def compute_billable(
     *,
     booking_source: str,
@@ -68,6 +87,17 @@ def compute_billable(
     row — :attr:`BookingRequest.billable` is set at write time and
     frozen.
     """
+
+    # Adversarial-pass D2: refuse contradictory kwargs at function entry
+    # — `is_reschedule_continuation=True` AND `chain_break_reason="..."`
+    # would silently produce wrong audit. Better to raise loud than to
+    # let the True branch win + leave an inconsistent finance row.
+    if is_reschedule_continuation and chain_break_reason:
+        raise ValueError(
+            "compute_billable: is_reschedule_continuation=True is "
+            "incompatible with a non-None chain_break_reason "
+            f"({chain_break_reason!r}). Caller bug."
+        )
 
     if booking_source != "ai_direct":
         return (False, f"NOT billable: booking_source={booking_source}")
@@ -145,31 +175,53 @@ def compute_reschedule_continuation(
     # always points at the ROOT, not at the immediate predecessor —
     # that's what the writers in services/reschedule.py and
     # skills/booking/tools.py enforce. Single-hop chain walk.
+    from apps.booking.models import BookingRequest
+
     if old.original_booking_event_id is not None:
         # ``old`` is itself a continuation — its FK column already points
         # at the chain ROOT (not the immediate predecessor — that's the
         # invariant the writers enforce). Use ``all_tenants`` so a
         # tenant-active flag rotation can't blind the lookup; the
         # caller already holds ``tenant_scope(tenant)``.
-        from apps.booking.models import BookingRequest
-
         try:
             root = BookingRequest.all_tenants.get(id=old.original_booking_event_id)
         except BookingRequest.DoesNotExist:
             # Root deleted (shouldn't happen under PROTECT — defence
             # in depth). Treat as chain broken.
             return (False, "chain_root_missing", None)
+
+        # Adversarial-pass D1: defence-in-depth — `original_booking_event_id`
+        # MUST point at a ROOT (i.e. a row whose own
+        # ``original_booking_event_id`` is None). If a DB-tampering /
+        # buggy writer left a non-root in the FK, the 90d window would
+        # be measured from the wrong anchor. Treat as chain broken
+        # rather than trust the inconsistent pointer.
+        if root.original_booking_event_id is not None:
+            return (False, "chain_root_invariant_violated", None)
     else:
         root = old
 
-    # 1. Strict service equality.
-    if str(old.service_id) != str(new_service_id):
+    # Adversarial-pass B2: «cancel breaks chain» applies to the ROOT, not
+    # just to ``old``. The structural CONFIRMED check on ``old`` doesn't
+    # catch the case where the root has been cancelled (manual data fix,
+    # GDPR erasure stub, audit job, etc.) while ``old`` (a non-root
+    # link) is still CONFIRMED. Founder rule #1 is explicit — a
+    # cancelled chain anywhere terminates the continuation.
+    if root.status == BookingRequest.Status.CANCELLED:
+        return (False, "chain_root_cancelled", None)
+
+    # 1. Strict service equality. Normalise both sides via
+    # ``_normalise_service_id`` so the LLM tool path (where rows lack
+    # the ``service`` FK — see B1 adversarial-pass note) doesn't
+    # falsely register a swap from ``str(None) != ""``. Both sides
+    # ``""`` (no FK on either) → no swap, trust the caller's higher-
+    # layer enforcement.
+    new_svc = _normalise_service_id(new_service_id)
+    if _normalise_service_id(old.service_id) != new_svc:
         # ``old.service_id`` is the most-recent link's service; if THAT
         # differs from the proposed new service, the chain breaks here.
-        # (We also check ``root.service_id`` below as defence-in-depth
-        # against an inconsistent intermediate chain link.)
         return (False, "service_swap", None)
-    if str(root.service_id) != str(new_service_id):
+    if _normalise_service_id(root.service_id) != new_svc:
         # Defence-in-depth: the chain root's service must match too.
         return (False, "service_swap", None)
 
@@ -178,6 +230,15 @@ def compute_reschedule_continuation(
         # Legacy row without visit_at can't anchor a chain. Treat as
         # missing root → chain broken (fresh sale).
         return (False, "chain_root_no_visit_at", None)
+    # Adversarial-pass B4: defensive guard against TZ-naive new_visit_at.
+    # ``root.visit_at`` is TZ-aware (Django USE_TZ=True). A naive
+    # ``new_visit_at`` would raise `TypeError: can't compare offset-
+    # naive and offset-aware datetimes` mid-transaction → rollback +
+    # split-brain in the LLM tool path (YClients already cancelled).
+    # Convert defensively by adopting root's tzinfo if naive; this is
+    # safe because the caller's intent is «same wall-clock instant».
+    if new_visit_at.tzinfo is None:
+        new_visit_at = new_visit_at.replace(tzinfo=root.visit_at.tzinfo)
     # Founder phrasing: «больше чем на 90 дней» = strictly greater.
     # Exactly 90d is continuation; 90d + 1 microsecond breaks.
     if new_visit_at > root.visit_at + timedelta(days=threshold_days):
