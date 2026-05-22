@@ -16,6 +16,11 @@ urlpatterns = [
     path("onboarding/accept", views.onboarding_accept, name="onboarding_accept"),
     path("onboarding/reject", views.onboarding_reject, name="onboarding_reject"),
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
+    # M4 alias — same view, post-onboarding edit URL. Idempotent +
+    # last-write-wins; audit event slug still reads MASTER_PROFILE_INITIALIZED
+    # until the dedicated MASTER_PROFILE_UPDATED slug ships in a follow-up
+    # backend cleanup ticket (Option B per the M4 frontend PR body).
+    path("profile", views.onboarding_profile, name="profile"),
     path("me", views.me, name="me"),
     path("dashboard", views.dashboard, name="dashboard"),
     # M3 schedule self-service (master-mobile §M3, PR Tier1.2)
@@ -48,5 +53,27 @@ urlpatterns = [
         "conversations/<uuid:conversation_id>/promote",
         views.conversation_promote,
         name="conversation_promote",
+    ),
+    # M6 AI drafts (master-mobile §M6, Bundle B / item 4 backend)
+    path(
+        "conversations/<uuid:conversation_id>/drafts/generate",
+        views.conversation_draft_generate,
+        name="conversation_draft_generate",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/send-as-me",
+        views.conversation_draft_send_as_me,
+        name="conversation_draft_send_as_me",
+    ),
+    path(
+        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/release-to-ai",
+        views.conversation_draft_release_to_ai,
+        name="conversation_draft_release_to_ai",
+    ),
+    # M7 notification preferences (master-mobile §M7, Bundle B / item 3)
+    path(
+        "notification-prefs/",
+        views.notification_prefs,
+        name="notification_prefs",
     ),
 ]

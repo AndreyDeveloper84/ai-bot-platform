@@ -172,6 +172,35 @@ CONVERSATION_MASTER_REPLIED = "conversation.master_replied"
 CONVERSATION_MARKED_READ_BY_MASTER = "conversation.marked_read_by_master"
 CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED = "conversation.tier_promoted_to_human_locked"
 
+# --- Master notification preferences (master-mobile §M7, Bundle B / 3) -----
+# Emitted from apps.master_api.services.notification_prefs.update_prefs
+# whenever a master toggles any setting on the M7 screen. Payload contract:
+#   master.notification_prefs_updated:
+#     {tenant_id, master_id, bot_user_id,
+#      changes: {<field>: {before: <val>, after: <val>}, ...}}
+# No customer PII in payload — the diff carries only boolean toggles + the
+# master's own quiet-hours times (HH:MM strings).
+MASTER_NOTIFICATION_PREFS_UPDATED = "master.notification_prefs_updated"
+
+# --- Master AI drafts (master-mobile §M6, Bundle B / item 4 backend) -------
+# Master generates / sends / releases an LLM draft on a customer conversation.
+# Payload contracts (analytics bus + audit log):
+#   master.ai_draft_generated:
+#     {tenant_id, conversation_id, master_id, draft_id,
+#      llm_provider, llm_model, llm_cost_usd: "0.000123",
+#      content_length: int, trigger_message_id?: <uuid>}
+#   master.draft_sent_as_self:
+#     {tenant_id, conversation_id, master_id, draft_id,
+#      message_id, was_edited: bool}
+#   master.draft_released_to_ai:
+#     {tenant_id, conversation_id, master_id, draft_id, message_id}
+# Cost rendered as a stringified Decimal so the analytics bus keeps the
+# exact precision the cost-tracker uses; no PII (message content stays
+# in the AiDraft row, never on the bus).
+MASTER_AI_DRAFT_GENERATED = "master.ai_draft_generated"
+MASTER_DRAFT_SENT_AS_SELF = "master.draft_sent_as_self"
+MASTER_DRAFT_RELEASED_TO_AI = "master.draft_released_to_ai"
+
 # --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
 # The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
 # (analytics-bus event names — snake_case dotted notation aligned with
@@ -250,6 +279,10 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         CONVERSATION_MASTER_REPLIED,
         CONVERSATION_MARKED_READ_BY_MASTER,
         CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED,
+        MASTER_NOTIFICATION_PREFS_UPDATED,
+        MASTER_AI_DRAFT_GENERATED,
+        MASTER_DRAFT_SENT_AS_SELF,
+        MASTER_DRAFT_RELEASED_TO_AI,
     }
 )
 

@@ -129,19 +129,28 @@ When the pre-flip checklist below is satisfied:
       above. Opt-in via `PEL_REAPER_ENABLED`; flip alongside
       `STRICT_TENANT_REFUSE` so DLQ drain is active from the first
       strict-mode refusal.
-- [ ] **Issue #500** (D-2 operator-side ceilings: PEL length alert,
-      per-handler rate budget, audit-table baseline + growth alert,
-      alert dedup) — all 4 items checked off.
+- [ ] **Issue #500** (D-2 operator-side ceilings) — HARD GATE.
+      Tech-lead directive 2026-05-22: do NOT flip until all 4
+      ceilings below are wired (see «HARD GATE» section).
+      Specific thresholds: PEL alert warn N=1000 / page N=5000;
+      handler rate budget ≤100/min; audit table 2× baseline alert;
+      alert dedup on `(handler, hour)`.
 - [ ] At flip time: `PEL_REAPER_ENABLED=true` set in
       `/etc/ai-bot-platform/.env` alongside `STRICT_TENANT_REFUSE=true`
       (same worker restart picks both up).
 - [ ] Dev-team comms about the **worker-restart-required** flip
       semantics so nobody thinks the env-var flip is hot.
 
-### Adversarial-pass D-2 — operational ceilings (must be wired)
+### ⚠ HARD GATE — D-2 operational ceilings (issue #500)
 
-Without these, strict mode + a misbehaving ingress = unbounded
-PEL growth + unbounded audit-table growth + alert flood.
+Tech-lead directive 2026-05-22: **`STRICT_TENANT_REFUSE=true` MUST NOT
+be flipped until ALL 4 ceilings below are wired and verified.** This
+is not advisory — it's a pre-flip blocker. XAUTOCLAIM reaper (#499 —
+merged) and observability dashboard are separate, do NOT satisfy this
+gate.
+
+Without these, strict mode + a misbehaving ingress = unbounded PEL
+growth + unbounded audit-table growth + alert flood.
 
 - [x] **PEL length alert at N=1000.** Shipped: `python manage.py
       monitor_pel --warning 1000 --page 5000` (exit 0/1/2). Wire to
