@@ -544,6 +544,19 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.workers.tasks.reap_pel",
         "schedule": crontab(minute="*/5"),
     },
+    # PR #535 follow-up Blocker #5 Layer 2 — AI draft retention sweep.
+    # Hard-deletes terminal AiDraft rows (SENT_AS_MASTER / RELEASED_TO_AI
+    # / REPLACED / DISMISSED) older than 30 days. Layer 1 (immediate
+    # content clear on status flip) lives in
+    # apps/master_api/services/ai_drafts.py — that closes the at-rest
+    # PII window. Layer 2 sweeps the metadata stubs after the finance
+    # reconciliation window closes. Daily 03:15 UTC — slotted between
+    # the 03:00 audit cleanup and the 03:30 profile recompute to keep
+    # worker pool spikes staggered.
+    "purge_old_ai_drafts": {
+        "task": "apps.conversations.tasks.purge_old_ai_drafts",
+        "schedule": crontab(hour="3", minute="15"),
+    },
 }
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter

@@ -57,6 +57,7 @@ from apps.master_api.services.conversations import (
     MAX_LIMIT as CONVERSATIONS_MAX_LIMIT,
     list_master_conversations,
 )
+from apps.master_api.services.ai_draft_limits import check_and_consume_rate_limit
 from apps.master_api.services.ai_drafts import (
     generate_draft_for_conversation,
     release_draft_to_ai,
@@ -1125,11 +1126,23 @@ def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> H
       200  — fresh draft (or idempotent re-serve within 60s window)
       400  — ``conversation_locked``: HUMAN_LOCKED tier
       404  — master not involved / conversation not found
+      429  — ``rate_limit_exceeded`` (per-master 10/min, 100/day) /
+             ``cost_cap_exceeded`` (per-master $X/day cumulative). Both
+             include a ``Retry-After`` header.
       503  — ``llm_unavailable``: provider raised; refer to logs
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # Blocker #2: per-master rate limit at the view layer — fail fast
+    # BEFORE any service work so a rogue loop can't burn budget.
+    rate = check_and_consume_rate_limit(master.id)
+    if not rate.allowed:
+        resp = _error(rate.slug, rate.detail, 429)
+        if rate.retry_after_seconds > 0:
+            resp["Retry-After"] = str(rate.retry_after_seconds)
+        return resp
 
     try:
         response = generate_draft_for_conversation(
@@ -1138,7 +1151,11 @@ def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> H
             actor_bot_user=bot_user,
         )
     except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
+        resp = _error(exc.slug, exc.detail, exc.status)
+        if exc.slug == "cost_cap_exceeded":
+            # Service layer raises 429 with a 1h retry-after suggestion.
+            resp["Retry-After"] = "3600"
+        return resp
     return JsonResponse(response.to_dict())
 
 
