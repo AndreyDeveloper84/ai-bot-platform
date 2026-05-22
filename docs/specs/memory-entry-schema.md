@@ -3,7 +3,7 @@
 > **Status:** v1 — extracted from ADR-0011 round-3 amendments, 2026-05-22
 > **Companion doc:** [`docs/adr/ADR-0011-user-personal-context-privacy.md`](../adr/ADR-0011-user-personal-context-privacy.md) — the «why» prose. This document is the «what» — pure data tables.
 > **Authority:** ADR-0009 §Memory model + §Hard rule #6.
-> **Refactor rationale:** 3 amendment rounds on ADR-0011 prose produced 7+4+12 = 23 cumulative adversarial blockers, escalating not converging. Tabular extraction breaks the recursive-blocker pattern — data tables are inherently less ambiguous than dense privacy prose. Implementers read this doc; ADR holds the rationale for «why».
+> **Refactor rationale:** 3 amendment rounds on ADR-0011 prose produced 7+4+12 = 23 cumulative adversarial blockers, escalating not converging. Tabular extraction breaks the recursive-blocker pattern — data tables enumerate fields explicitly where dense privacy prose hides interpretation gaps. Implementers read this doc; ADR holds the rationale for «why».
 > **Blocks:** #228 (UserPersonalContext model) · #229 (MemoryEntry model) · #230 (RedZoneAccessLog model). Same hard gate as ADR-0011.
 
 ---
@@ -64,11 +64,18 @@ Append-only audit. INSERT-only DB role. 7-year retention. No FK CASCADE (audit h
 | `id` | UUID, PK | no | `uuid_generate_v4()` |
 | `memory_entry_id` | UUID, FK → MemoryEntry (NO CASCADE) | no | The entry being accessed. **FK with `ON DELETE NO ACTION`** so log rows persist after entry purge. |
 | `user_id` | UUID, FK → User (NO CASCADE) | no | Subject the entry belongs to. |
-| `accessor_role` | enum `ayla_llm`/`system_job`/`ops_admin` | no | Who performed the access. |
+| `accessor_role` | enum `ayla_llm`/`system_job`/`ops_admin` | no | Coarse category. Round-2 AS2 fix: this alone is INSUFFICIENT for 152-ФЗ Chapter 3 «who accessed» auditor query — a `ops_admin` row doesn't say WHICH admin. The next column closes that gap. |
+| `accessor_principal` | text | no | **Round-2 AS2 fix — concrete identity of the accessor.** Per `accessor_role`: <ul><li>`ayla_llm` → Celery worker hostname + queue name (e.g. `"ayla-celery-worker-3@ai-bot-platform-prod / queue:llm_inference"`)</li><li>`system_job` → cron job name + worker hostname (e.g. `"red_zone_ttl_sweep@ayla-celery-worker-1"`)</li><li>`ops_admin` → staff `User.id` as UUID string (the actual human; for 4-eyes break-glass, the row records the PRIMARY operator; the SECONDARY operator who co-authorized appears as a `companion_operator_id` field in the operator-audit-trail referenced by `request_id`)</li><li>`service_to_service` (future, when s2s reads land) → caller service-account name (e.g. `"service-account/memory-writer@ai-bot-platform"`)</li></ul> Max 256 chars. Indexed for «show me every access by staff X» queries. |
 | `access_type` | enum `read`/`write`/`purge`/`withdrawal`/`write_rejected_dob_lookup` | no | What kind of access. Two new values (round-3 A6 + §11.3 ADR-0011): `withdrawal` for explicit consent withdrawal, `write_rejected_dob_lookup` for §10.2 fail-closed events. |
 | `ts` | timestamptz, indexed | no | Access time. |
 | `request_id` | text | no | UUID (validated by trigger §9 + accessor §10). FK semantic into operator audit (Celery task id / HTTP request id / ops ticket id). Validated at write time. |
 | `purpose` | text | no | Human-readable purpose for the access (round-3 A5): `"contraindication_check"`, `"subject_access_request"`, `"incident_debug"`, `"ttl_sweep"`, ... |
+
+**Indices on `RedZoneAccessLog` (round-2 AS2 supporting):**
+
+- `idx_red_zone_log_user_ts` on `(user_id, ts)` — primary auditor query «every access to user X's red-zone data in date range».
+- `idx_red_zone_log_principal_ts` on `(accessor_principal, ts)` — secondary auditor query «every access by staff X in date range» (round-2 AS2 enables this query — was impossible with `accessor_role` enum alone).
+- `idx_red_zone_log_access_type_ts` on `(access_type, ts)` — operational «show me all withdrawals in Q3» / «show me all DOB-lookup failures last week».
 
 ## 4. CHECK constraints
 
@@ -163,18 +170,37 @@ Sole entry point for red-zone reads from `ayla_app`. Lives at `apps/identity/ser
 
 | Attribute | Value |
 |---|---|
-| Signature | `read(entry_id: UUID, accessor_role: str, request_id: UUID, purpose: str) -> bytes` (decrypted content) |
+| Signature | `read(entry_id: UUID, user_id: UUID, accessor_role: str, request_id: UUID, purpose: str) -> bytes` (decrypted content). **`user_id` MUST be passed by caller — round-2 AS1 fix.** Caller already has it from JWT verifier middleware (the verifier already looked up `user_id` from `jwt['sub']` per jwt-contract.md §8.2). Reading it FROM the entry would require a SELECT-first ordering that defeats the audit-before-read invariant. |
 | Transaction | Opens an `atomic()`; sets GUC; writes log row FIRST; reads entry SECOND; commits |
 | GUC management | `SET LOCAL ayla.red_zone_access_context = <request_id>` inside the transaction; cleared by `SET LOCAL` semantics on commit/rollback. Explicit `try/finally` reset retained as defence-in-depth (S3) |
 
 ```python
 class RedZoneReader:
     @classmethod
-    def read(cls, entry_id: UUID, accessor_role: str, request_id: UUID, purpose: str) -> bytes:
-        # request_id MUST be a real audit reference: Celery task id, HTTP request id, or ops ticket id.
-        # purpose MUST be a short human-readable string. Logged in RedZoneAccessLog.
+    def read(
+        cls,
+        entry_id: UUID,
+        user_id: UUID,          # Round-2 AS1 fix — caller-supplied (from JWT verifier)
+        accessor_role: str,
+        request_id: UUID,
+        purpose: str,
+        accessor_principal: str,  # Round-2 AS2 fix — see §3 RedZoneAccessLog
+    ) -> bytes:
+        # Round-2 AS1 — Audit-before-read invariant + no orphan-log:
+        # The transaction either commits BOTH the audit row AND the read result,
+        # or rolls back BOTH. Two failure modes covered:
+        #   (a) SELECT fails (entry missing / soft-deleted) → DoesNotExist raised
+        #       INSIDE the atomic block → audit row is rolled back automatically.
+        #       No orphan «successful read» log for a read that did not happen.
+        #   (b) Audit INSERT fails (DB role missing, constraint violation) →
+        #       SELECT never executes → no plaintext exposure.
+        #
+        # `user_id` is REQUIRED in signature (was literal ellipsis in v1 spec —
+        # AS1 fix). Caller obtains it from JWT verifier middleware (jwt-contract.md
+        # §8.2). Reading user_id FROM the entry would require SELECT-first ordering
+        # that defeats audit-before-read.
         with transaction.atomic():
-            # SET LOCAL — bound to this transaction, auto-cleared on commit/rollback.
+            # SET LOCAL — bound to this transaction; auto-cleared on commit/rollback.
             # Works correctly under pgbouncer transaction-pooling AND session-pooling.
             with connection.cursor() as cur:
                 cur.execute(
@@ -182,28 +208,45 @@ class RedZoneReader:
                     [str(request_id)],  # MUST be UUID — trigger regex-checks
                 )
             try:
+                # Step 1: write audit row FIRST. If this fails (DB role missing,
+                # FK violation, etc.) the SELECT below never runs.
                 RedZoneAccessLog.objects.create(
                     memory_entry_id=entry_id,
-                    user_id=...,
+                    user_id=user_id,          # AS1 — caller-supplied, not ellipsis
                     accessor_role=accessor_role,
+                    accessor_principal=accessor_principal,  # AS2 — concrete identity
                     access_type='read',
                     request_id=request_id,
                     purpose=purpose,
                 )
+                # Step 2: SELECT. If it fails (DoesNotExist), the atomic block
+                # rolls back EVERYTHING including the audit row. The
+                # «no-orphan-log» invariant.
                 entry = MemoryEntry.objects.select_for_update().get(
                     id=entry_id,
+                    user_id=user_id,          # AS1 — assert ownership at query time
                     sensitivity_zone='red',
                     soft_deleted_at__isnull=True,
                     delete_requested_at__isnull=True,
                 )
                 return entry.content  # decryption via EncryptedJSONField
             finally:
-                # Defence-in-depth GUC reset (S3 retain). SET LOCAL alone is correct under
-                # transactional pooling; explicit reset adds belt-and-braces if a future
-                # refactor accidentally moves code outside `transaction.atomic()`.
+                # Defence-in-depth GUC reset (round-3 S3 retain). SET LOCAL alone is
+                # correct under transactional pooling; explicit reset adds belt-and-
+                # braces if a future refactor accidentally moves code outside
+                # `transaction.atomic()`.
                 with connection.cursor() as cur:
                     cur.execute("SELECT set_config('ayla.red_zone_access_context', '', false)")
 ```
+
+**Trade-off named explicitly (round-2 AS1):**
+
+Two implementation choices were considered:
+1. **Audit-FIRST then SELECT** (chosen, above): audit row commits + SELECT inside same atomic. If SELECT fails, audit row rolls back. Pro: no orphan logs. Con: requires `user_id` in signature.
+2. **SELECT-FIRST then audit** (rejected): read entry, then write audit row. Pro: simpler signature. Con: window between SELECT and audit-INSERT where decrypted plaintext exists in process memory without a log row yet. If process crashes between steps, plaintext was exposed to memory without audit — auditor cannot account for it.
+
+Choice 1 wins because the «caller has user_id from JWT» path is cheap (one extra argument), and the no-orphan-log invariant is structurally stronger than «we promise to always reach the audit-write step».
+
 
 ## 11. Lint rule — ALLOWLIST (S4 inversion)
 
@@ -263,7 +306,7 @@ For the greenfield initial migration in #229, steps 1–3 collapse into a single
 | 14.12 | Test: insert yellow row `(consent_at NULL, soft_deleted_at NOT NULL)` → CHECK 2 allows | #229 | Same as 14.1 |
 | 14.13 | Test: live row with `(deletion_reason NOT NULL)` → CHECK 3 raises | #229 | Same as 14.1 |
 | 14.14 | Test: soft-deleted row with `(deletion_reason NULL)` → CHECK 3 raises | #229 | Same as 14.1 |
-| 14.15 | Test: pre-existing soft-deleted row backfilled with `deletion_reason='unknown_legacy'` before VALIDATE — VALIDATE succeeds | #229 (migration script) | `apps/identity/migrations/0XXX_memory_entry_initial.py` self-test |
+| 14.15 | Test: pre-existing soft-deleted row backfilled with `deletion_reason='unknown_legacy'` before VALIDATE — VALIDATE succeeds | #229 (migration script) | `apps/identity/migrations/0NNN_memory_entry_initial.py` self-test |
 | 14.16 | Test: red read without `RedZoneReader` accessor → writer raises before DB | #229 | `apps/identity/tests/test_red_zone_reader.py::test_direct_access_denied` |
 | 14.17 | Test: direct `psql -U ayla_app SELECT WHERE sensitivity_zone='red'` without GUC → trigger raises | #230 | `apps/identity/tests/test_db_trigger.py` |
 | 14.18 | Test: GUC with empty string OR non-UUID → trigger raises; UUID → trigger allows | #230 | Same as 14.17 |
@@ -273,6 +316,11 @@ For the greenfield initial migration in #229, steps 1–3 collapse into a single
 | 14.22 | Test: cross-tenant red SELECT raises `TenantScopeViolation` at app layer BEFORE DB query, INDEPENDENT of `STRICT_TENANT_REFUSE` flag (ADR-0011 §9.1) | #229 | `apps/identity/tests/test_tenant_scope.py::test_red_zone_carve_out` |
 | 14.23 | Test: writer fail-closed path writes one RedZoneAccessLog row with `access_type='write_rejected_dob_lookup'` | #229 | `apps/identity/tests/test_memory_writer.py::test_dob_lookup_failed_audit` |
 | 14.24 | Test: backup-restore — entries with `delete_requested_at NOT NULL` in live log stay unreadable after restore (per ADR-0011 §11.1) | #230 + restore runbook (§13.11) | `apps/identity/tests/test_backup_restore.py` |
+| 14.27 (AS1) | Test: `RedZoneReader.read()` with non-existent `entry_id` raises `DoesNotExist` AND **no `RedZoneAccessLog` row is committed** (atomic rollback). Verifies no-orphan-log invariant. | #229 | `apps/identity/tests/test_red_zone_reader.py::test_no_orphan_log_on_select_fail` |
+| 14.28 (AS1) | Test: `RedZoneReader.read()` signature rejects calls missing `user_id` argument (TypeError at call site). | #229 | Same |
+| 14.29 (AS1) | Test: `RedZoneReader.read()` with `entry.user_id ≠ caller-supplied user_id` raises `DoesNotExist` (ownership-check at query time). | #229 | Same |
+| 14.30 (AS2) | Test: `RedZoneAccessLog.accessor_principal` is non-null + matches the expected concrete identity per `accessor_role` (Celery hostname / cron name / staff UUID / service-account name). | #230 | `apps/identity/tests/test_audit_log.py::test_accessor_principal_concrete` |
+| 14.31 (AS2) | Test: query «show me every access by staff X in date range» runs against `idx_red_zone_log_principal_ts` index (EXPLAIN ANALYZE shows index scan). | #230 | Same |
 | 14.25 | Test: `db-sensitive` label CI gate — PR without label cannot apply migrations to `memory_entry` (round-3 S6 fix) | #229 | `.github/workflows/migrations.yml` + lint test |
 | 14.26 | Test: minor `memory.minor_detected_postfact` event has hashed user_id + tenant_id=null + only internal subscribers (§15) (round-3 S14 fix) | Reconciliation ticket | `apps/identity/tests/test_minor_event_schema.py` |
 
@@ -330,5 +378,7 @@ Per ADR-0011 §13.4 + round-3 A9. Emitted by the reconciliation job when it post
 ---
 
 ## Last verified
+
+2026-05-22 — round-2 amendments addressing 2 visible AS blockers from refactor's first adversarial pass (memory `feedback_h3_waiver_pattern` N=15). AS1 — `RedZoneReader.read()` signature gains `user_id` argument (was literal ellipsis); atomic re-ordered to audit-first-then-SELECT with explicit no-orphan-log invariant + named trade-off in §10. AS2 — `RedZoneAccessLog` gains `accessor_principal` text column (concrete identity per `accessor_role`); 3 new supporting indexes; verification checklist gains 5 new tests (14.27–14.31). Pattern observation: tabular refactor (this doc) caught both findings as **table-completeness gaps** (placeholder ellipsis + missing column) — NOT prose-density gaps like the ADR rounds. Codified in N=15 rule: «tabular refactor halves count + changes character».
 
 2026-05-22 — v1 extracted from ADR-0011 round-3 amendments per tech lead's «refactor not round-4» recommendation (memory `feedback_h3_waiver_pattern` N=6 + pattern observation that prose density was wrong tool). Addresses round-3 blockers S1 (deletion_reason backfill `unknown_legacy`), S2 (portability export excludes soft-deleted + never exposes `deletion_reason`), S3 (`SET LOCAL` + `try/finally` GUC reset + pgbouncer caveat), S4 (lint inverted to allowlist), S6 (`ayla_migrator` + `db-sensitive` label CI gate), S7 (`pg_dump` role table + accepted-residual note), S8 (no FK CASCADE — §3 RedZoneAccessLog FK with `ON DELETE NO ACTION`; ADR-0011 §11.1 «cascade» wording removed in same refactor PR), S11 (verification checklist gains owner ticket column + test location), S14 (`memory.minor_detected_postfact` event uses hashed user_id + tenant_id=null + explicit internal subscriber allowlist).
