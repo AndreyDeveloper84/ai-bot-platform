@@ -120,7 +120,7 @@ def compute_billable(
 def compute_reschedule_continuation(
     *,
     old: "BookingRequest",
-    new_service_id: str | UUID | int,
+    new_service_id: str | UUID | int | None,
     new_visit_at: datetime,
     threshold_days: int = RESCHEDULE_CONTINUATION_THRESHOLD_DAYS,
 ) -> tuple[bool, str | None, UUID | None]:

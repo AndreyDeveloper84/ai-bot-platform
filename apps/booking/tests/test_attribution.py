@@ -258,7 +258,7 @@ class TestComputeRescheduleContinuation:
         is_cont, break_reason, root_id = compute_reschedule_continuation(
             old=chain_root,
             new_service_id=chain_root.service_id,
-            new_visit_at=chain_root.visit_at + timedelta(days=10),
+            new_visit_at=chain_root.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
         )
         assert is_cont is True
         assert break_reason is None
@@ -274,7 +274,7 @@ class TestComputeRescheduleContinuation:
         is_cont, break_reason, root_id = compute_reschedule_continuation(
             old=chain_root,
             new_service_id=chain_root.service_id,
-            new_visit_at=chain_root.visit_at + timedelta(days=91),
+            new_visit_at=chain_root.visit_at + timedelta(days=91),  # type: ignore[operator,union-attr,arg-type]
         )
         assert is_cont is False
         assert break_reason == "over_90d"
@@ -291,7 +291,7 @@ class TestComputeRescheduleContinuation:
         is_cont, break_reason, _ = compute_reschedule_continuation(
             old=chain_root,
             new_service_id=chain_root.service_id,
-            new_visit_at=chain_root.visit_at + timedelta(days=90),
+            new_visit_at=chain_root.visit_at + timedelta(days=90),  # type: ignore[operator,union-attr,arg-type]
         )
         assert is_cont is True
         assert break_reason is None
@@ -307,7 +307,7 @@ class TestComputeRescheduleContinuation:
         is_cont, break_reason, root_id = compute_reschedule_continuation(
             old=chain_root,
             new_service_id="00000000-0000-4000-8000-000000000099",
-            new_visit_at=chain_root.visit_at + timedelta(days=10),
+            new_visit_at=chain_root.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
         )
         assert is_cont is False
         assert break_reason == "service_swap"
@@ -333,7 +333,7 @@ class TestComputeRescheduleContinuation:
                 service_name="Manicure",
                 client_name="Test",
                 client_phone="+79991234567",
-                visit_at=chain_root.visit_at + timedelta(days=10),
+                visit_at=chain_root.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
                 duration_min=60,
                 booking_source="ai_direct",
                 billable=False,
@@ -370,7 +370,7 @@ class TestComputeRescheduleContinuation:
         _, _, root_id = compute_reschedule_continuation(
             old=chain_root,
             new_service_id=chain_root.service_id,
-            new_visit_at=chain_root.visit_at + timedelta(days=1),
+            new_visit_at=chain_root.visit_at + timedelta(days=1),  # type: ignore[operator,union-attr,arg-type]
         )
         assert root_id == chain_root.id
 
@@ -440,7 +440,7 @@ class TestQ12aAdversarialPassRegressions:
         is_cont, break_reason, root_id = compute_reschedule_continuation(
             old=old,
             new_service_id="",  # LLM tool passes "" when booking.service_id is None
-            new_visit_at=old.visit_at + timedelta(days=10),
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
         )
         assert is_cont is True, (
             "LLM tool path: both sides no service FK must pass swap check; "
@@ -471,7 +471,7 @@ class TestQ12aAdversarialPassRegressions:
         is_cont, break_reason, _ = compute_reschedule_continuation(
             old=old,
             new_service_id="some-different-service-id",
-            new_visit_at=old.visit_at + timedelta(days=10),
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
         )
         assert is_cont is False
         assert break_reason == "service_swap"
@@ -539,7 +539,7 @@ class TestQ12aAdversarialPassRegressions:
             service_id=None,
         )
         # Naive datetime — strip tzinfo.
-        naive = (old.visit_at + timedelta(days=10)).replace(tzinfo=None)
+        naive = (old.visit_at + timedelta(days=10)).replace(tzinfo=None)  # type: ignore[operator,union-attr,arg-type]
 
         # MUST NOT raise TypeError.
         is_cont, break_reason, _ = compute_reschedule_continuation(
@@ -632,7 +632,7 @@ class TestQ12aAdversarialPassRegressions:
         root = self._make_row(tenant, visit_at=timezone.now() + timedelta(days=7), service_id=None)
         old = self._make_row(
             tenant,
-            visit_at=root.visit_at + timedelta(days=5),
+            visit_at=root.visit_at + timedelta(days=5),  # type: ignore[operator,union-attr,arg-type]
             service_id=None,
             original_booking_event=root,
         )
@@ -649,7 +649,7 @@ class TestQ12aAdversarialPassRegressions:
             is_cont, break_reason, _ = compute_reschedule_continuation(
                 old=old,
                 new_service_id=None,
-                new_visit_at=old.visit_at + timedelta(days=5),
+                new_visit_at=old.visit_at + timedelta(days=5),  # type: ignore[operator,union-attr,arg-type]
             )
 
         assert is_cont is False
