@@ -47,16 +47,68 @@ stored on :attr:`AiDraft.llm_cost_usd`. Unknown models silently fall
 back to 0 (audit row carries the model so an unknown-model gap shows
 up in observability).
 
-### Idempotency window
+### Idempotency window + double-paid LLM guard (PR #535 follow-up)
 
 A second ``generate_draft_for_conversation`` call within 60 seconds
 returns the existing ACTIVE draft when:
   * the most recent customer message hasn't changed since generation
   * AND the existing row is still :attr:`AiDraft.Status.ACTIVE`
 
-Otherwise the prior ACTIVE row is marked :attr:`AiDraft.Status.REPLACED`
-and a fresh LLM call runs. This guards against double-tap of the
-«Generate» button burning two LLM bills.
+**Concurrency hardening (Blocker #1):** the idempotency check, the
+per-master cost guard, AND the LLM call all run INSIDE a
+``select_for_update`` lock on the :class:`Conversation` row. Without
+the lock two concurrent generate requests (rapid double-tap, network
+retry) both saw «no ACTIVE» outside the lock, both called the LLM,
+and the partial unique constraint caught at INSERT — second 500'd as
+IntegrityError. Holding the lock during the LLM call (1-3s typical)
+is fine: concurrent generates per master per conversation are rare,
+and serialising them is exactly what prevents the double-bill.
+
+### Cost cap order (Blocker #3)
+
+The per-master cumulative cost guard
+(:func:`apps.master_api.services.ai_draft_limits.check_cost_cap`) fires
+BEFORE the LLM call (inside the conversation lock). Pre-fix the only
+cost accounting happened AFTER the call — useless for blocking. The
+tenant-level cap in :mod:`apps.llm.cost_tracker` still runs INSIDE the
+provider, but per-master adds a finer-grained guard on top.
+
+### Staleness check at send time (Blocker #4)
+
+When the master taps «Отправить от себя» or «Пусть помощник ответит»,
+we recompute the latest customer message id and compare against
+:attr:`AiDraft.trigger_message_id`. If they differ → 409
+``draft_stale``. Spec rationale: customer wrote «можно записаться?» →
+master generated a booking answer → while master was reading, customer
+wrote «отмените запись» → master must NOT ship the stale booking
+answer in response to a cancellation. Frontend force-regenerates.
+
+We chose Option A (send-time comparison) over Option B (signal-based
+REPLACED transition on new USER messages): Option B couples the
+conversations app to a signal-bus across the master_api boundary and
+forces every USER message write to also write to AiDraft. Option A
+is one extra SELECT inside the existing lock — cleaner separation,
+no cross-app signal contract.
+
+### PII retention (Blocker #5 — Layer 1)
+
+When the draft transitions to ANY terminal status (SENT_AS_MASTER,
+RELEASED_TO_AI, REPLACED, DISMISSED), the :attr:`AiDraft.content`
+column is cleared to the empty string in the SAME transaction as the
+status flip. Drafts quote customer PII («Анна, ваша запись на 14:00
+…») and must not accumulate at-rest beyond the moment of action.
+The tokens / cost / model metadata STAYS for finance reconciliation;
+Layer 2 (the daily Celery Beat sweep) eventually deletes the row
+including the metadata at 30 days.
+
+### IntegrityError defence-in-depth (Blocker #6)
+
+With Blocker #1's lock the partial unique constraint
+(``ai_draft_one_active_per_conversation``) is unreachable on the
+happy path. Defence-in-depth: the INSERT is still wrapped in
+try/except :class:`django.db.IntegrityError` so a future lock-bypass
+bug doesn't cascade to a 500 — instead we SELECT the current ACTIVE
+and return it.
 
 ### Out of scope (per Bundle B brief)
 
@@ -78,7 +130,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
@@ -98,6 +150,7 @@ from apps.llm.protocol import (
     LLMProviderUnavailable,
 )
 from apps.llm.router import get_router
+from apps.master_api.services.ai_draft_limits import check_cost_cap
 from apps.master_api.services.conversation_detail import (
     ConversationDetailError,
     _verify_master_involved,
@@ -140,6 +193,17 @@ Operators can set ``settings.SKILL_LLM_PROVIDER['master_draft'] = 'anthropic'``
 to canary master drafts onto a cheaper model without flipping the
 org-wide default.
 """
+
+# Statuses that count as «terminal» for the Blocker #5 content-clear path.
+# ACTIVE is the only non-terminal state per the AiDraft.Status lifecycle.
+_TERMINAL_STATUSES = frozenset(
+    {
+        AiDraft.Status.SENT_AS_MASTER,
+        AiDraft.Status.RELEASED_TO_AI,
+        AiDraft.Status.REPLACED,
+        AiDraft.Status.DISMISSED,
+    }
+)
 
 
 # --- error class ----------------------------------------------------------
@@ -249,6 +313,18 @@ def _latest_customer_message(conversation: Conversation) -> Message | None:
     )
 
 
+def _latest_customer_message_id(conversation: Conversation) -> uuid.UUID | None:
+    """Same as :func:`_latest_customer_message` but returns only the id.
+
+    Used by the Blocker #4 staleness check at send/release time — we
+    only need the id to compare against ``draft.trigger_message_id``,
+    not the full row.
+    """
+
+    msg = _latest_customer_message(conversation)
+    return msg.id if msg is not None else None
+
+
 def _recent_history(conversation: Conversation, limit: int = MAX_HISTORY_MESSAGES) -> list[Message]:
     """Last ``limit`` messages in chronological order.
 
@@ -335,6 +411,34 @@ def _safe_compute_cost(model: str, result: CompletionResult) -> Decimal:
         return Decimal(0)
 
 
+def _clear_draft_content_inplace(draft_pk: Any, *, new_status: str, now: Any) -> None:
+    """Blocker #5 Layer 1 — clear content + flip status atomically.
+
+    Single UPDATE that nulls the customer-PII-quoting content AND
+    sets the terminal status in one SQL statement. Called from inside
+    the per-draft lock in the three terminal paths (send / release /
+    regenerate-replaces).
+
+    ``content`` is ``nullable=False, default=""`` on the model — we set
+    it to the empty string, not NULL, so downstream serialisation
+    queries don't need NULL-handling branches.
+
+    Note: tokens / cost / model metadata stay intact. The 30-day Celery
+    Beat sweep eventually deletes the whole row for finance windows
+    that have closed.
+
+    Note (Blocker #5 design): NO separate audit row for «content
+    cleared» — the status flip already produced one upstream and another
+    would be noise.
+    """
+
+    AiDraft.all_tenants.filter(pk=draft_pk).update(
+        status=new_status,
+        content="",
+        updated_at=now,
+    )
+
+
 # --- main entrypoints -----------------------------------------------------
 
 
@@ -346,23 +450,30 @@ def generate_draft_for_conversation(
 ) -> DraftResponse:
     """Generate a fresh AI draft for the master.
 
-    Flow:
+    Flow (Blocker #1 + #3 + #5 + #6 hardened):
       1. Verify master is involved in the conversation (else 404 —
          mirrors :func:`_verify_master_involved`).
       2. Refuse on HUMAN_LOCKED (the master can't send anyway).
-      3. Idempotency check: if an ACTIVE draft exists, was created
-         within :data:`IDEMPOTENCY_WINDOW`, and its
+      3. Open a transaction + ``select_for_update`` on the Conversation
+         row. Everything else happens inside this lock.
+      4. Idempotency check (inside lock) — if an ACTIVE draft exists,
+         was created within :data:`IDEMPOTENCY_WINDOW`, and its
          :attr:`AiDraft.trigger_message` matches the latest customer
          message, return that draft (no LLM call, no audit row).
-      4. Call the LLM via the router → provider.complete().
-      5. Persist a new AiDraft inside a transaction with the prior
-         ACTIVE row select_for_update()-locked + marked REPLACED.
-      6. Audit + emit ``master.ai_draft_generated``.
+      5. Per-master cumulative cost cap (inside lock, BEFORE LLM call).
+         Raises ``cost_cap_exceeded`` 429 on trip — Blocker #3.
+      6. Mark any prior ACTIVE row as REPLACED + clear its content
+         (Blocker #5 Layer 1).
+      7. Call the LLM (inside lock — Blocker #1 prevents double-bill).
+      8. INSERT the new ACTIVE draft. Wrap in try/except IntegrityError
+         and on catch SELECT the current ACTIVE → return it (Blocker #6).
+      9. Audit + emit ``master.ai_draft_generated``.
 
     Raises:
       :class:`DraftActionError`:
         * ``not_found`` (404) — master not involved
         * ``conversation_locked`` (400) — HUMAN_LOCKED tier
+        * ``cost_cap_exceeded`` (429) — per-master daily $ cap trip
         * ``llm_unavailable`` (503) — provider raised any LLMError /
           LLMProviderUnavailable, OR an unexpected exception bubbled
           from the upstream SDK
@@ -377,140 +488,205 @@ def generate_draft_for_conversation(
             status=400,
         )
 
-    latest_customer_msg = _latest_customer_message(conv)
-    now = dj_timezone.now()
-
-    # Idempotency: serve the existing ACTIVE row when nothing material
-    # has changed since the previous generate. Read OUTSIDE the
-    # transaction — if the window check passes, no DB write is needed.
-    existing_active = (
-        AiDraft.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            conversation_id=conv.id,
-            master_id=master.id,
-            status=AiDraft.Status.ACTIVE,
-        )
-        .order_by("-created_at")
-        .first()
-    )
-    if existing_active is not None and existing_active.created_at is not None:
-        same_trigger = existing_active.trigger_message_id == (
-            latest_customer_msg.id if latest_customer_msg is not None else None
-        )
-        within_window = now - existing_active.created_at <= IDEMPOTENCY_WINDOW
-        if same_trigger and within_window:
-            logger.info(
-                "ai_drafts.generate.idempotent draft_id=%s conv=%s master=%s",
-                existing_active.id,
-                conv.id,
-                master.id,
-            )
-            return DraftResponse(
-                draft_id=str(existing_active.id),
-                content=existing_active.content,
-                created_at=existing_active.created_at.isoformat(),
-                llm_provider=existing_active.llm_provider,
-                llm_model=existing_active.llm_model,
-            )
-
-    # LLM call — happens BEFORE the transaction so an upstream timeout
-    # doesn't hold a row-level lock for the full retry window.
-    history = _recent_history(conv)
-    prompt_messages = _build_prompt_messages(master=master, history=history)
-    try:
-        provider = get_router().get_provider(conv.tenant, skill=SKILL_NAME, op="complete")
-        model = getattr(provider, "default_completion_model", "") or ""
-        result: CompletionResult = asyncio.run(provider.complete(prompt_messages, model=model))
-    except LLMProviderUnavailable as exc:
-        logger.warning(
-            "ai_drafts.generate.provider_unavailable conv=%s master=%s err=%s",
-            conv.id,
-            master.id,
-            exc,
-        )
-        raise DraftActionError(
-            "llm_unavailable",
-            "LLM provider is currently unavailable",
-            status=503,
-        ) from exc
-    except LLMError as exc:
-        logger.warning(
-            "ai_drafts.generate.llm_error conv=%s master=%s err=%s",
-            conv.id,
-            master.id,
-            exc,
-        )
-        raise DraftActionError(
-            "llm_unavailable",
-            "LLM call failed; please try again",
-            status=503,
-        ) from exc
-    except Exception as exc:  # noqa: BLE001 — provider SDKs leak many exception classes
-        logger.exception(
-            "ai_drafts.generate.unexpected conv=%s master=%s",
-            conv.id,
-            master.id,
-        )
-        raise DraftActionError(
-            "llm_unavailable",
-            "LLM call failed unexpectedly; please try again",
-            status=503,
-        ) from exc
-
-    draft_text = (result.text or "").strip()
-    if not draft_text:
-        # Provider returned tool-calls-only or empty completion — treat
-        # as failure rather than persisting an empty draft.
-        logger.warning(
-            "ai_drafts.generate.empty_completion conv=%s master=%s provider=%s model=%s",
-            conv.id,
-            master.id,
-            result.provider,
-            result.model or model,
-        )
-        raise DraftActionError(
-            "llm_unavailable",
-            "LLM returned empty draft; please try again",
-            status=503,
-        )
-
-    resolved_model = result.model or model or ""
-    cost_usd = _safe_compute_cost(resolved_model, result)
-
-    # Persist atomically — lock prior ACTIVE row, mark REPLACED, insert
-    # the new ACTIVE row, write audit + emit event. The select_for_update
-    # serialises concurrent generate calls so the partial unique
-    # constraint (one ACTIVE per conversation) holds without a race.
+    # Blocker #1: idempotency + cost guard + LLM call all run INSIDE a
+    # transaction with select_for_update on the Conversation row. The
+    # lock serialises concurrent generate calls per conversation so
+    # rapid-double-tap can't trigger two paid LLM calls.
     with transaction.atomic():
-        prior = list(
-            AiDraft.all_tenants.select_for_update().filter(
+        # Lock the conversation row. Re-fetch via all_tenants so the
+        # row matches what _verify_master_involved returned (which used
+        # the tenant-scoped manager) — locks travel by id, not by
+        # manager.
+        locked_conv = (
+            Conversation.all_tenants.select_for_update()
+            .filter(id=conv.id, tenant_id=master.tenant_id)
+            .first()
+        )
+        if locked_conv is None:
+            # Conversation was deleted between the involvement check
+            # and the lock — extremely unlikely under normal flow, but
+            # treat as not-found rather than racing to a partial create.
+            raise DraftActionError("not_found", "conversation not found", status=404)
+
+        latest_customer_msg = _latest_customer_message(locked_conv)
+        latest_customer_msg_id = latest_customer_msg.id if latest_customer_msg is not None else None
+        now = dj_timezone.now()
+
+        # Blocker #1 idempotency check (re-do inside lock) — if a
+        # concurrent caller landed a fresh ACTIVE draft moments ago for
+        # the same trigger message, we return that draft instead of
+        # paying for a second LLM call.
+        existing_active = (
+            AiDraft.all_tenants.filter(
                 tenant_id=master.tenant_id,
-                conversation_id=conv.id,
+                conversation_id=locked_conv.id,
                 master_id=master.id,
                 status=AiDraft.Status.ACTIVE,
             )
+            .order_by("-created_at")
+            .first()
         )
-        for old in prior:
-            AiDraft.all_tenants.filter(pk=old.pk).update(
-                status=AiDraft.Status.REPLACED,
-                updated_at=now,
+        if existing_active is not None and existing_active.created_at is not None:
+            same_trigger = existing_active.trigger_message_id == latest_customer_msg_id
+            within_window = now - existing_active.created_at <= IDEMPOTENCY_WINDOW
+            if same_trigger and within_window:
+                logger.info(
+                    "ai_drafts.generate.idempotent draft_id=%s conv=%s master=%s",
+                    existing_active.id,
+                    locked_conv.id,
+                    master.id,
+                )
+                return DraftResponse(
+                    draft_id=str(existing_active.id),
+                    content=existing_active.content,
+                    created_at=existing_active.created_at.isoformat(),
+                    llm_provider=existing_active.llm_provider,
+                    llm_model=existing_active.llm_model,
+                )
+
+        # Blocker #3: per-master cumulative cost cap BEFORE the LLM
+        # call. Inside the lock so concurrent callers serialise their
+        # cap checks correctly.
+        cost_check = check_cost_cap(master_id=master.id, tenant_id=master.tenant_id)
+        if not cost_check.allowed:
+            raise DraftActionError(
+                cost_check.slug,
+                cost_check.detail,
+                status=429,
             )
 
-        draft = AiDraft.all_tenants.create(
-            tenant=master.tenant,
-            conversation=conv,
-            master=master,
-            content=draft_text,
-            status=AiDraft.Status.ACTIVE,
-            trigger_message=latest_customer_msg,
-            llm_provider=result.provider or "",
-            llm_model=resolved_model,
-            llm_cost_usd=cost_usd,
-        )
+        # Mark prior ACTIVE as REPLACED + clear its content
+        # (Blocker #5 Layer 1).
+        if existing_active is not None:
+            _clear_draft_content_inplace(
+                existing_active.pk,
+                new_status=AiDraft.Status.REPLACED,
+                now=now,
+            )
+
+        # Build the prompt + call the LLM — inside the lock per
+        # Blocker #1.  Cost of holding the lock during the 1-3s call
+        # is acceptable: concurrent generate-for-same-conversation is
+        # rare and we WANT to serialise.
+        history = _recent_history(locked_conv)
+        prompt_messages = _build_prompt_messages(master=master, history=history)
+        try:
+            provider = get_router().get_provider(
+                locked_conv.tenant, skill=SKILL_NAME, op="complete"
+            )
+            model = getattr(provider, "default_completion_model", "") or ""
+            result: CompletionResult = asyncio.run(provider.complete(prompt_messages, model=model))
+        except LLMProviderUnavailable as exc:
+            logger.warning(
+                "ai_drafts.generate.provider_unavailable conv=%s master=%s err=%s",
+                locked_conv.id,
+                master.id,
+                exc,
+            )
+            raise DraftActionError(
+                "llm_unavailable",
+                "LLM provider is currently unavailable",
+                status=503,
+            ) from exc
+        except LLMError as exc:
+            logger.warning(
+                "ai_drafts.generate.llm_error conv=%s master=%s err=%s",
+                locked_conv.id,
+                master.id,
+                exc,
+            )
+            raise DraftActionError(
+                "llm_unavailable",
+                "LLM call failed; please try again",
+                status=503,
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 — provider SDKs leak many exception classes
+            logger.exception(
+                "ai_drafts.generate.unexpected conv=%s master=%s",
+                locked_conv.id,
+                master.id,
+            )
+            raise DraftActionError(
+                "llm_unavailable",
+                "LLM call failed unexpectedly; please try again",
+                status=503,
+            ) from exc
+
+        draft_text = (result.text or "").strip()
+        if not draft_text:
+            # Provider returned tool-calls-only or empty completion —
+            # treat as failure rather than persisting an empty draft.
+            logger.warning(
+                "ai_drafts.generate.empty_completion conv=%s master=%s provider=%s model=%s",
+                locked_conv.id,
+                master.id,
+                result.provider,
+                result.model or model,
+            )
+            raise DraftActionError(
+                "llm_unavailable",
+                "LLM returned empty draft; please try again",
+                status=503,
+            )
+
+        resolved_model = result.model or model or ""
+        cost_usd = _safe_compute_cost(resolved_model, result)
+
+        # Blocker #6: defensive INSERT. With Blocker #1's lock in place
+        # the partial unique constraint is unreachable on the happy
+        # path. If a future code path bypasses the lock and races us,
+        # catch IntegrityError + SELECT the winning ACTIVE row + return
+        # it — no 500.
+        try:
+            draft = AiDraft.all_tenants.create(
+                tenant=master.tenant,
+                conversation=locked_conv,
+                master=master,
+                content=draft_text,
+                status=AiDraft.Status.ACTIVE,
+                trigger_message=latest_customer_msg,
+                llm_provider=result.provider or "",
+                llm_model=resolved_model,
+                llm_cost_usd=cost_usd,
+            )
+        except IntegrityError:
+            logger.warning(
+                "ai_drafts.generate.integrity_race conv=%s master=%s — "
+                "falling back to existing ACTIVE",
+                locked_conv.id,
+                master.id,
+            )
+            winning = (
+                AiDraft.all_tenants.filter(
+                    tenant_id=master.tenant_id,
+                    conversation_id=locked_conv.id,
+                    master_id=master.id,
+                    status=AiDraft.Status.ACTIVE,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            if winning is None:
+                # Pathological: integrity error but no ACTIVE exists.
+                # Surface as 503 — we can't meaningfully recover.
+                raise DraftActionError(
+                    "llm_unavailable",
+                    "draft persistence race; please try again",
+                    status=503,
+                ) from None
+            return DraftResponse(
+                draft_id=str(winning.id),
+                content=winning.content,
+                created_at=winning.created_at.isoformat()
+                if winning.created_at
+                else now.isoformat(),
+                llm_provider=winning.llm_provider,
+                llm_model=winning.llm_model,
+            )
 
         payload = {
             "tenant_id": str(master.tenant_id),
-            "conversation_id": str(conv.id),
+            "conversation_id": str(locked_conv.id),
             "master_id": str(master.id),
             "draft_id": str(draft.id),
             "llm_provider": draft.llm_provider,
@@ -518,7 +694,7 @@ def generate_draft_for_conversation(
             "llm_cost_usd": str(cost_usd),
             "content_length": len(draft_text),
             "trigger_message_id": (
-                str(latest_customer_msg.id) if latest_customer_msg is not None else ""
+                str(latest_customer_msg_id) if latest_customer_msg_id is not None else ""
             ),
         }
         write_audit(
@@ -566,6 +742,33 @@ def _validate_draft_actionable(draft: AiDraft) -> None:
         )
 
 
+def _validate_draft_fresh(draft: AiDraft, conv: Conversation) -> None:
+    """Blocker #4 — refuse to ship a draft after a newer customer message.
+
+    Compares the draft's ``trigger_message_id`` to the conversation's
+    latest USER message. Mismatch → 409 ``draft_stale``. Surfaces the
+    latest message id so the frontend can force-regenerate.
+
+    Spec rationale (PR #535 follow-up Blocker #4):
+      Customer: «можно записаться?»
+      Master taps generate → draft about booking
+      While master reads, customer: «отмените запись»
+      Master taps «Отправить от себя» → MUST NOT ship the booking
+      answer in response to a cancellation message.
+    """
+
+    latest_id = _latest_customer_message_id(conv)
+    if draft.trigger_message_id != latest_id:
+        raise DraftActionError(
+            "draft_stale",
+            (
+                "a newer customer message has arrived since this draft "
+                "was generated; please regenerate"
+            ),
+            status=409,
+        )
+
+
 def send_draft_as_master(
     *,
     conversation_id: uuid.UUID | str,
@@ -582,11 +785,12 @@ def send_draft_as_master(
          conversation_detail.py).
       3. Resolve draft → 404 if cross-master / cross-tenant.
       4. Validate draft.status == ACTIVE → else 400 ``draft_already_acted``.
-      5. Validate override_content length (≤ :data:`MAX_OVERRIDE_LENGTH`).
-      6. Atomically:
+      5. Validate freshness (Blocker #4) → else 409 ``draft_stale``.
+      6. Validate override_content length (≤ :data:`MAX_OVERRIDE_LENGTH`).
+      7. Atomically:
          * create assistant Message with attribution metadata
            ``{actor_type: master, composed_by: <master_id>}``
-         * mark draft SENT_AS_MASTER
+         * mark draft SENT_AS_MASTER + clear content (Blocker #5 Layer 1)
          * audit + emit ``master.draft_sent_as_self``
     """
 
@@ -601,6 +805,7 @@ def send_draft_as_master(
 
     draft = _resolve_draft(master, conv, draft_id)
     _validate_draft_actionable(draft)
+    _validate_draft_fresh(draft, conv)
 
     # Resolve the body — override path uses the master's edited text,
     # otherwise the LLM-generated draft content.
@@ -628,6 +833,9 @@ def send_draft_as_master(
         # the status update.
         locked = AiDraft.all_tenants.select_for_update().get(pk=draft.pk)
         _validate_draft_actionable(locked)
+        # Re-check staleness inside the lock — a customer message could
+        # have arrived between the outer check and the lock acquisition.
+        _validate_draft_fresh(locked, conv)
 
         msg = record_message(
             conv,
@@ -643,9 +851,11 @@ def send_draft_as_master(
             },
         )
 
-        AiDraft.all_tenants.filter(pk=locked.pk).update(
-            status=AiDraft.Status.SENT_AS_MASTER,
-            updated_at=dj_timezone.now(),
+        # Blocker #5 Layer 1: clear content + flip status atomically.
+        _clear_draft_content_inplace(
+            locked.pk,
+            new_status=AiDraft.Status.SENT_AS_MASTER,
+            now=dj_timezone.now(),
         )
 
         payload = {
@@ -693,10 +903,11 @@ def release_draft_to_ai(
       2. Refuse on HUMAN_LOCKED.
       3. Resolve draft → 404 if cross-master / cross-tenant.
       4. Validate ACTIVE → else 400 ``draft_already_acted``.
-      5. Atomically:
+      5. Validate freshness (Blocker #4) → else 409 ``draft_stale``.
+      6. Atomically:
          * create plain assistant Message (action_type='ai_draft_released',
            no master attribution metadata)
-         * mark draft RELEASED_TO_AI
+         * mark draft RELEASED_TO_AI + clear content (Blocker #5 Layer 1)
          * audit + emit
     """
 
@@ -711,12 +922,14 @@ def release_draft_to_ai(
 
     draft = _resolve_draft(master, conv, draft_id)
     _validate_draft_actionable(draft)
+    _validate_draft_fresh(draft, conv)
 
     body = draft.content
 
     with transaction.atomic():
         locked = AiDraft.all_tenants.select_for_update().get(pk=draft.pk)
         _validate_draft_actionable(locked)
+        _validate_draft_fresh(locked, conv)
 
         msg = record_message(
             conv,
@@ -733,9 +946,11 @@ def release_draft_to_ai(
             },
         )
 
-        AiDraft.all_tenants.filter(pk=locked.pk).update(
-            status=AiDraft.Status.RELEASED_TO_AI,
-            updated_at=dj_timezone.now(),
+        # Blocker #5 Layer 1: clear content + flip status atomically.
+        _clear_draft_content_inplace(
+            locked.pk,
+            new_status=AiDraft.Status.RELEASED_TO_AI,
+            now=dj_timezone.now(),
         )
 
         payload = {
