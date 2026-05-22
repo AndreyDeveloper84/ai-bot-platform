@@ -11,7 +11,10 @@ class EventBusConfig(AppConfig):
         from apps.eventbus import signals  # noqa: F401  — register post_save handlers
         from apps.eventbus.dispatcher import reset_registry_cache
         from apps.eventbus.ingest_ip import warn_if_proxy_trust_unconfigured
-        from apps.eventbus.startup_checks import warn_if_atomic_requests_true
+        from apps.eventbus.startup_checks import (
+            warn_if_atomic_requests_true,
+            warn_if_tenant_verify_fail_open,
+        )
 
         # PR #507 adversarial pass A5: log a startup WARNING (NOT
         # ImproperlyConfigured — too disruptive for shared-config
@@ -23,6 +26,11 @@ class EventBusConfig(AppConfig):
         # proxy-trust configuration risks XFF spoofing or single-bucket
         # collapse behind a proxy. See apps/eventbus/ingest_ip.py.
         warn_if_proxy_trust_unconfigured()
+
+        # Round-3 NEW-5: log a startup WARNING if the tenant-verify
+        # fail-open flag is set. Surfaces the pre-#246 exposure
+        # window in the ops dashboard at first deploy.
+        warn_if_tenant_verify_fail_open()
 
         # Hotfix C (retro review #3): the subscriber registry is cached
         # after first resolution per :func:`_subscribers`. Wire the

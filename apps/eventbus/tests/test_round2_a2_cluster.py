@@ -166,7 +166,13 @@ class TestAS3AuditSampling:
             "10 over-limit requests; expected ≤2 (sampled to 1/min/IP)"
         )
 
-    @override_settings(EVENT_INGEST_RATE_LIMIT="1/m")
+    @override_settings(
+        EVENT_INGEST_RATE_LIMIT="1/m",
+        # Round-3 NEW-1 — X-Real-IP only honored when proxy trust is
+        # declared. This test exercises the «trusted edge sets
+        # X-Real-IP» production path, so the ack is set explicitly.
+        EVENT_INGEST_EDGE_CONFIGURED_ACK=True,
+    )
     def test_distinct_ips_each_get_one_audit(self, client: Client) -> None:
         """Sampling is per-IP — distinct attackers each get their
         first audit row through. Linear in attack diversity, not

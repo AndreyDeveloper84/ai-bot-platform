@@ -167,11 +167,33 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             "pre-#246 consumer development."
         )
 
-    # Opt-in fall-through. Log every invocation so ops sees the
-    # exposure window in the audit trail.
+    # Opt-in fall-through. Round-3 NEW-5 — log + audit row (sampled)
+    # per fall-through. The startup warning catches the deploy-time
+    # misconfig; this catches every runtime exposure event.
     logger.warning(
         "eventbus.ingest.tenant_verify_fail_open event_name=%s user_id=%s tenant_id=%s",
         event_name,
         user_id,
         tenant_id,
     )
+    try:
+        from apps.audit.services import write_audit
+        from apps.eventbus.ingest_rate_audit_sampler import (
+            should_audit_tenant_fail_open,
+        )
+
+        # Sampled by user_id (the affected user) so a flood from a
+        # single attacker's events bound the audit volume — same
+        # AS3-amplifier rationale.
+        if should_audit_tenant_fail_open(user_id):
+            write_audit(
+                action="eventbus.ingest.tenant_verify_fail_open",
+                target="eventbus.ingest",
+                payload={
+                    "event_name": event_name,
+                    "user_id": user_id,
+                    "tenant_id": tenant_id,
+                },
+            )
+    except Exception:  # noqa: BLE001 — audit MUST NEVER block the handler
+        logger.exception("eventbus.ingest.tenant_verify_fail_open.audit_failed")

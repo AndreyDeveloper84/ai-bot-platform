@@ -291,16 +291,16 @@ class InternalEventsIngestView(View):
 
         if outcome is DispatchOutcome.SATURATED:
             # Round-2 AS5/AS6 — in-flight executor exhausted. Return
-            # 503 + Retry-After so Ayla's outbox backs off per §6.3
-            # instead of amplifying the slow-Ayla cascade. Audit
-            # sampled-via-cache to avoid amplifier (same rationale as
-            # AS3 audit sampling on 429).
+            # 503 + Retry-After so Ayla's outbox backs off per §6.3.
+            # Round-3 NEW-3 — distinct sampler slug from rate-limit
+            # path so SATURATED + 429 audits don't suppress each
+            # other for the same IP.
             from apps.eventbus.ingest_rate_audit_sampler import (
-                should_audit_rate_limited as _should_audit_saturated,
+                should_audit_saturated,
             )
 
             remote_ip = get_remote_ip(request) or "_unknown_"
-            if _should_audit_saturated(remote_ip):
+            if should_audit_saturated(remote_ip):
                 write_audit(
                     action=AUDIT_SATURATED,
                     target="eventbus.ingest",

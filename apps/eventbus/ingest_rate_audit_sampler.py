@@ -1,35 +1,39 @@
-"""Audit sampling for the rate-limited 429 path — Round-2 AS3.
+"""Audit sampling for the rate-limited 429 + saturation 503 paths.
 
-Without sampling, every over-limit request writes an AuditLog row.
-A scanner without HMAC at line speed = unbounded AuditLog growth =
-unauthenticated DoS amplifier on the audit table.
+Round-2 AS3 + Round-3 NEW-2 + NEW-3. Without sampling, every
+over-limit request writes an AuditLog row → unauthenticated DoS
+amplifier on the audit table.
 
-Bound the amplification at the source-IP level: **1 audit row per
-IP per minute**. The rate-limit signal itself remains accurate (the
-ratelimit decorator counts every over-limit request); only the
-*audit emission* is sampled.
+Round-3 amendments:
 
-### Cache backing
+* **NEW-2** — sampler fail-CLOSED on cache outage (Redis down). The
+  Round-2 fail-OPEN behaviour revived the AS3 amplifier during a
+  Redis incident. New layered fallback: Django cache → per-process
+  locmem dict → fail-CLOSED.
+* **NEW-3** — distinct cache key per audit slug. SATURATED + 429
+  audits previously shared ``rate_audit:{ip}`` → one suppressed the
+  other for the same IP. Now: ``rate_audit_429:{ip}`` vs
+  ``rate_audit_saturated:{ip}``.
 
-Uses Django's default cache (Redis in prod, locmem in tests). Key
-shape: ``eventbus:ingest:rate_audit:<ip>``. TTL 60s. First over-
-limit hit per IP per 60s window sets the key + writes audit; cache
-hit during the window short-circuits the audit.
+### Two-layer fallback rationale
 
-### Counter recovery
+Django cache (Redis in prod) provides cross-process per-IP
+sampling — the desired behaviour. If Redis is unavailable, locmem
+(per-process Python dict with timestamp-keyed eviction) bounds
+amplification at 1 audit / minute / process / IP. With N gunicorn
+workers, that's N audits / minute / IP — still bounded, several
+orders of magnitude better than line-speed.
 
-We do NOT track suppressed count in the cache because:
-
-* The ratelimit decorator + Prometheus counters (when added) carry
-  the real volume signal;
-* A single audit row per minute is enough for forensic triage —
-  operators read the rate-limit Grafana panel for volume, the audit
-  row for the «who/what/when» of the first hit.
+If BOTH fail (unlikely — locmem is pure Python), fail-CLOSED.
+Losing forensics is the right tradeoff against keeping AS3
+amplification alive.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Final
 
 from django.core.cache import cache
@@ -38,42 +42,84 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 
-# AS3 — 60s window per source IP. Worst-case audit volume from a
-# botnet of N distinct IPs hitting at line speed: N rows/min instead
-# of N × (line-speed × 60) rows/min. The audit table grows linearly
-# with attack diversity, not attack volume.
+# Round-2 AS3 — 60s window per source IP per slug.
 _SAMPLE_WINDOW_S: Final[int] = 60
-_KEY_PREFIX: Final[str] = "eventbus:ingest:rate_audit:"
+
+# Round-3 NEW-3 — distinct prefix per audit slug. The slug parameter
+# names which audit family is being sampled (429 vs saturation).
+_KEY_PREFIX_FMT: Final[str] = "eventbus:ingest:rate_audit:{slug}:"
+
+# Round-3 NEW-2 — per-process locmem fallback. Keyed by
+# (slug, remote_ip); value is the unix epoch second when that key
+# was last admitted. Locked because gunicorn-style multi-worker
+# deploys with thread pool inside also exercise this from multiple
+# threads.
+_locmem_lock = threading.Lock()
+_locmem_seen: dict[tuple[str, str], float] = {}
+
+
+def _locmem_admit(slug: str, remote_ip: str, now: float) -> bool:
+    """Per-process fallback when the Django cache backend errors.
+
+    Returns True iff this is the first admission for ``(slug, ip)``
+    within the window — bounds 1 / process / window / IP / slug.
+    """
+    key = (slug, remote_ip)
+    with _locmem_lock:
+        last = _locmem_seen.get(key, 0.0)
+        if now - last < _SAMPLE_WINDOW_S:
+            return False
+        _locmem_seen[key] = now
+        # Opportunistic GC — drop stale entries once we cross 10000.
+        if len(_locmem_seen) > 10000:
+            cutoff = now - _SAMPLE_WINDOW_S
+            stale = [k for k, ts in _locmem_seen.items() if ts < cutoff]
+            for k in stale:
+                _locmem_seen.pop(k, None)
+        return True
+
+
+def _should_audit(slug: str, remote_ip: str) -> bool:
+    """Shared sampler — slug-distinct cache keys + locmem fallback.
+
+    Returns True iff the audit row should be written.
+    """
+    cache_key = _KEY_PREFIX_FMT.format(slug=slug) + (remote_ip or "_unknown_")
+    try:
+        admitted = cache.add(cache_key, "1", timeout=_SAMPLE_WINDOW_S)
+    except Exception:  # noqa: BLE001 — cache backend failure
+        # Round-3 NEW-2: locmem fallback. Fail-CLOSED on the cache
+        # exception alone would lose ALL audit forensics during a
+        # Redis incident; per-process locmem keeps a bounded trace.
+        logger.warning(
+            "eventbus.ingest.rate_audit_sampler.cache_failed slug=%s falling_back_to_locmem",
+            slug,
+        )
+        return _locmem_admit(slug, remote_ip or "_unknown_", time.time())
+    return bool(admitted)
 
 
 def should_audit_rate_limited(remote_ip: str) -> bool:
-    """Return True iff the rate-limit audit row should be written.
+    """Return True iff the 429-rate-limited audit row should be written.
 
-    First call per ``remote_ip`` per ``_SAMPLE_WINDOW_S`` returns True;
-    subsequent calls within the window return False.
-
-    Args:
-      remote_ip: The (proxy-aware-resolved) client IP. Empty string
-                 ``""`` is treated as a distinct «no source» bucket —
-                 still bounded to 1 audit/min for unknown-source
-                 traffic.
-
-    Returns:
-      bool — True if audit should be written.
-
-    Note: this is a best-effort sampler. Under cache backend failure
-    (Redis down) the cache call may raise — caller should fall back
-    to writing audit (fail-open on observability per AS3 — losing
-    rate-limit forensics is worse than gaining a few audit rows).
+    Round-3 NEW-3 — distinct cache prefix from SATURATED.
     """
-    key = _KEY_PREFIX + (remote_ip or "_unknown_")
-    try:
-        # add() is atomic: returns True if key was absent (we win the
-        # race + write audit); False if key existed (sampled out).
-        added = cache.add(key, "1", timeout=_SAMPLE_WINDOW_S)
-    except Exception:  # noqa: BLE001 — cache backend failure
-        logger.exception("eventbus.ingest.rate_audit_sampler_failed")
-        # Fail-open on observability — write the audit so we don't
-        # silently lose attack forensics during a cache outage.
-        return True
-    return bool(added)
+    return _should_audit("429", remote_ip)
+
+
+def should_audit_saturated(remote_ip: str) -> bool:
+    """Return True iff the SATURATED audit row should be written.
+
+    Round-3 NEW-3 — distinct cache prefix from 429.
+    """
+    return _should_audit("saturated", remote_ip)
+
+
+def should_audit_tenant_fail_open(remote_ip: str) -> bool:
+    """Return True iff the tenant-verify-fail-open audit row should be written.
+
+    Round-3 NEW-5 — every fall-through into the documented
+    pre-#246 opt-in path emits an audit row (sampled). Distinct
+    slug so it doesn't share cache state with rate / saturation.
+    """
+    return _should_audit("tenant_fail_open", remote_ip)

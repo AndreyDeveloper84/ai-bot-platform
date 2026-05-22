@@ -67,12 +67,20 @@ def get_remote_ip(request: Any) -> str:
       and audit-as-unknown.
     """
     meta = getattr(request, "META", {}) or {}
+    depth = int(getattr(settings, "EVENT_INGEST_TRUSTED_PROXY_DEPTH", 0) or 0)
+    edge_ack = bool(getattr(settings, "EVENT_INGEST_EDGE_CONFIGURED_ACK", False))
 
+    # Round-3 NEW-1 — gate X-Real-IP behind the same proxy-trust
+    # requirement as X-Forwarded-For. Without this gate, the AS1
+    # fix's XFF tightening leaves the OTHER header wide open: an
+    # attacker rotates X-Real-IP per request → isolated buckets.
+    # X-Real-IP is only meaningful when (a) a trusted edge proxy
+    # canonicalises it (signalled by edge_ack=True) OR (b) we have
+    # an explicit depth>0 declaring "trust the headers you set".
     real_ip = str(meta.get(_REAL_IP_HEADER_META) or "").strip()
-    if real_ip:
+    if real_ip and (depth > 0 or edge_ack):
         return real_ip
 
-    depth = int(getattr(settings, "EVENT_INGEST_TRUSTED_PROXY_DEPTH", 0) or 0)
     xff = str(meta.get(_FORWARDED_FOR_HEADER_META) or "").strip()
     if xff and depth > 0:
         # XFF format: "client, proxy1, proxy2, ...". The trusted-proxy

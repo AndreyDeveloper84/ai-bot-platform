@@ -50,3 +50,25 @@ def warn_if_atomic_requests_true() -> None:
             "outer transaction will roll back the audit row. See "
             "PR #507 adversarial-pass A5."
         )
+
+
+def warn_if_tenant_verify_fail_open() -> None:
+    """Round-3 NEW-5 — surface the tenant-verify fail-open exposure window.
+
+    When ops sets ``EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN=True``
+    (the documented pre-#246 bridge), the helper falls through
+    silently per-request. Without a startup signal, an
+    accidentally-True production deploy ships invisibly. Log a
+    high-severity WARNING at app ready time so the misconfig hits
+    the ops dashboard at first deploy.
+    """
+    fail_open = bool(getattr(settings, "EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN", False))
+    if fail_open:
+        logger.warning(
+            "eventbus.ingest.tenant_verify_fail_open_enabled "
+            "EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN=True. Tenant "
+            "verification stub will FALL THROUGH for tenant_id-set "
+            "envelopes when the canonical TenantUserRelationship "
+            "(Sprint 1 #246) is unavailable. Flip this OFF once "
+            "#246 ships in your environment. See PR #524 round-3 NEW-5."
+        )
