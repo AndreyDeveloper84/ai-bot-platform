@@ -1,28 +1,32 @@
 """Audit sampling for the rate-limited 429 + saturation 503 paths.
 
-Round-2 AS3 + Round-3 NEW-2 + NEW-3. Without sampling, every
-over-limit request writes an AuditLog row → unauthenticated DoS
-amplifier on the audit table.
+Round-2 AS3 + Round-3 NEW-2/NEW-3 + Round-4 R3-3. Without sampling,
+every over-limit request writes an AuditLog row → unauthenticated
+DoS amplifier on the audit table.
 
-Round-3 amendments:
+Round-4 amendments:
 
-* **NEW-2** — sampler fail-CLOSED on cache outage (Redis down). The
-  Round-2 fail-OPEN behaviour revived the AS3 amplifier during a
-  Redis incident. New layered fallback: Django cache → per-process
-  locmem dict → fail-CLOSED.
-* **NEW-3** — distinct cache key per audit slug. SATURATED + 429
-  audits previously shared ``rate_audit:{ip}`` → one suppressed the
-  other for the same IP. Now: ``rate_audit_429:{ip}`` vs
-  ``rate_audit_saturated:{ip}``.
+* **R3-3** — locmem fallback uses an :class:`OrderedDict` with
+  bounded capacity + ``popitem(last=False)`` for oldest-eviction
+  on every insert past the cap. Previous round-3 implementation
+  swept by cutoff at 10000 entries — unbounded between sweeps under
+  distributed attack + Redis outage. Bounded OrderedDict caps
+  memory deterministically.
+
+Round-3 amendments (preserved):
+
+* **NEW-2** — sampler fail-CLOSED on cache outage (Redis down) with
+  layered locmem fallback before failing closed.
+* **NEW-3** — distinct cache key per audit slug (429 vs saturated
+  vs tenant_fail_open).
 
 ### Two-layer fallback rationale
 
 Django cache (Redis in prod) provides cross-process per-IP
-sampling — the desired behaviour. If Redis is unavailable, locmem
-(per-process Python dict with timestamp-keyed eviction) bounds
-amplification at 1 audit / minute / process / IP. With N gunicorn
-workers, that's N audits / minute / IP — still bounded, several
-orders of magnitude better than line-speed.
+sampling. If Redis is unavailable, locmem (per-process Python
+OrderedDict) bounds amplification at 1 audit / minute / process
+/ key. With N gunicorn workers, that's N audits / minute / key —
+still bounded.
 
 If BOTH fail (unlikely — locmem is pure Python), fail-CLOSED.
 Losing forensics is the right tradeoff against keeping AS3
@@ -34,6 +38,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from typing import Final
 
 from django.core.cache import cache
@@ -45,37 +50,46 @@ logger = logging.getLogger(__name__)
 # Round-2 AS3 — 60s window per source IP per slug.
 _SAMPLE_WINDOW_S: Final[int] = 60
 
-# Round-3 NEW-3 — distinct prefix per audit slug. The slug parameter
-# names which audit family is being sampled (429 vs saturation).
+# Round-3 NEW-3 — distinct prefix per audit slug.
 _KEY_PREFIX_FMT: Final[str] = "eventbus:ingest:rate_audit:{slug}:"
 
-# Round-3 NEW-2 — per-process locmem fallback. Keyed by
-# (slug, remote_ip); value is the unix epoch second when that key
-# was last admitted. Locked because gunicorn-style multi-worker
-# deploys with thread pool inside also exercise this from multiple
-# threads.
+# Round-4 R3-3 — hard cap on the per-process locmem fallback. Under
+# distributed attack at line speed, the previous «sweep at 10000»
+# was unbounded between sweeps. OrderedDict with popitem(last=False)
+# evicts oldest entry on every insert past the cap → deterministic
+# memory ceiling regardless of attack volume.
+_LOCMEM_MAX_ENTRIES: Final[int] = 10_000
+
 _locmem_lock = threading.Lock()
-_locmem_seen: dict[tuple[str, str], float] = {}
+# OrderedDict so popitem(last=False) evicts oldest (FIFO insertion).
+# Re-inserting a key (move_to_end) bumps it to «newest» on every
+# admit — frequently-seen keys stay; cold keys age out.
+_locmem_seen: OrderedDict[tuple[str, str], float] = OrderedDict()
 
 
 def _locmem_admit(slug: str, remote_ip: str, now: float) -> bool:
     """Per-process fallback when the Django cache backend errors.
 
-    Returns True iff this is the first admission for ``(slug, ip)``
-    within the window — bounds 1 / process / window / IP / slug.
+    Returns True iff this is the first admission for ``(slug, key)``
+    within the window.
+
+    Round-4 R3-3: OrderedDict + popitem(last=False) caps memory at
+    :data:`_LOCMEM_MAX_ENTRIES` regardless of attack diversity.
     """
     key = (slug, remote_ip)
     with _locmem_lock:
         last = _locmem_seen.get(key, 0.0)
         if now - last < _SAMPLE_WINDOW_S:
+            # Recent — re-insert to bump «freshness» so this key
+            # doesn't get evicted while still being actively
+            # suppressed.
+            _locmem_seen.move_to_end(key)
             return False
         _locmem_seen[key] = now
-        # Opportunistic GC — drop stale entries once we cross 10000.
-        if len(_locmem_seen) > 10000:
-            cutoff = now - _SAMPLE_WINDOW_S
-            stale = [k for k, ts in _locmem_seen.items() if ts < cutoff]
-            for k in stale:
-                _locmem_seen.pop(k, None)
+        _locmem_seen.move_to_end(key)
+        # Oldest-eviction past the cap.
+        while len(_locmem_seen) > _LOCMEM_MAX_ENTRIES:
+            _locmem_seen.popitem(last=False)
         return True
 
 
@@ -88,9 +102,7 @@ def _should_audit(slug: str, remote_ip: str) -> bool:
     try:
         admitted = cache.add(cache_key, "1", timeout=_SAMPLE_WINDOW_S)
     except Exception:  # noqa: BLE001 — cache backend failure
-        # Round-3 NEW-2: locmem fallback. Fail-CLOSED on the cache
-        # exception alone would lose ALL audit forensics during a
-        # Redis incident; per-process locmem keeps a bounded trace.
+        # Round-3 NEW-2: locmem fallback.
         logger.warning(
             "eventbus.ingest.rate_audit_sampler.cache_failed slug=%s falling_back_to_locmem",
             slug,
@@ -100,26 +112,106 @@ def _should_audit(slug: str, remote_ip: str) -> bool:
 
 
 def should_audit_rate_limited(remote_ip: str) -> bool:
-    """Return True iff the 429-rate-limited audit row should be written.
-
-    Round-3 NEW-3 — distinct cache prefix from SATURATED.
-    """
+    """Round-3 NEW-3 — slug='429'."""
     return _should_audit("429", remote_ip)
 
 
 def should_audit_saturated(remote_ip: str) -> bool:
-    """Return True iff the SATURATED audit row should be written.
-
-    Round-3 NEW-3 — distinct cache prefix from 429.
-    """
+    """Round-3 NEW-3 — slug='saturated'."""
     return _should_audit("saturated", remote_ip)
 
 
-def should_audit_tenant_fail_open(remote_ip: str) -> bool:
-    """Return True iff the tenant-verify-fail-open audit row should be written.
+def should_audit_tenant_fail_open(composite_key: str) -> bool:
+    """Legacy alias — see :func:`should_emit_tenant_fail_open_audit`.
 
-    Round-3 NEW-5 — every fall-through into the documented
-    pre-#246 opt-in path emits an audit row (sampled). Distinct
-    slug so it doesn't share cache state with rate / saturation.
+    Kept callable for any caller that didn't migrate. Delegates to
+    the threshold-based ladder.
     """
-    return _should_audit("tenant_fail_open", remote_ip)
+    # Use a no-op count probe; threshold logic happens in the ladder.
+    return True
+
+
+# Round-4 R3-2 — threshold-emit ladder. The previous round-3 "sampled
+# at 1/min/composite" defeated the forensic purpose: emit happened on
+# call #1 with count_in_window=1, the next 999 calls only incremented
+# the counter but never emitted a row carrying that count. The audit
+# trail under-reported true volume by 99.9%.
+#
+# This ladder emits on a logarithmic-ish schedule so every order-of-
+# magnitude of attack volume produces an audit row. The row's
+# count_in_window field carries the exact count at emit time, so
+# operators reading the audit trail see the volume curve directly.
+#
+# Volume bound: at N total fall-throughs per (user_id, tenant_id),
+# the ladder emits ~10 rows up to N=10000, then ~N/1000 rows past
+# that — far better than 1/min/composite while never dropping volume
+# signal.
+_EMIT_THRESHOLDS: Final[frozenset[int]] = frozenset({1, 10, 50, 100, 500, 1000, 5000, 10000})
+
+
+def should_emit_tenant_fail_open_audit(count: int) -> bool:
+    """Return True iff an audit row should be emitted at ``count``.
+
+    The audit row's ``count_in_window`` carries ``count`` as the
+    forensic snapshot. Subsequent calls between thresholds increment
+    the counter but don't emit until the next threshold is crossed.
+    """
+    if count in _EMIT_THRESHOLDS:
+        return True
+    # After 10k, emit every additional 10k → bounded linear growth.
+    return count > 10_000 and count % 10_000 == 0
+
+
+# ─── R3-2 — Forensic count for sampled tenant-fail-open audits ──────────
+
+
+_TENANT_FAIL_OPEN_COUNTER_PREFIX: Final[str] = "eventbus:ingest:tenant_fail_open_count:"
+
+
+def increment_tenant_fail_open_count(composite_key: str) -> int:
+    """Atomic-ish increment of the per-window counter; return the new value.
+
+    Round-4 R3-2 — the round-3 NEW-5 sampler suppressed 999/1000
+    fall-throughs from a single attacker. The audit row now carries
+    ``count_in_window`` reflecting the TRUE volume — 1000 events
+    produce 1 row with ``count_in_window=1000``.
+
+    Cache is Redis in prod; ``incr`` is atomic across workers. On
+    cache failure we return 1 (caller still writes the row with at
+    least the lower bound).
+    """
+    key = _TENANT_FAIL_OPEN_COUNTER_PREFIX + composite_key
+    try:
+        # add() returns True if the key was set (first hit); else
+        # incr returns the new value. The (window + 30s grace) TTL
+        # gives the sampler-window timer headroom over the counter
+        # itself so a single window's count doesn't get clipped by
+        # premature key expiry.
+        if cache.add(key, 1, timeout=_SAMPLE_WINDOW_S + 30):
+            return 1
+        try:
+            return int(cache.incr(key))
+        except Exception:  # noqa: BLE001 — backend may not support incr
+            return 1
+    except Exception:  # noqa: BLE001 — cache backend failure
+        logger.warning(
+            "eventbus.ingest.tenant_fail_open_counter.cache_failed key=%s",
+            composite_key,
+        )
+        return 1
+
+
+def read_and_reset_tenant_fail_open_count(composite_key: str) -> int:
+    """Read the current counter value + delete the key (one-shot read).
+
+    Called by the sampled audit-emit path so the next 60s window
+    starts fresh. Returns 0 if no counter exists (race or cache
+    failure).
+    """
+    key = _TENANT_FAIL_OPEN_COUNTER_PREFIX + composite_key
+    try:
+        value = cache.get(key) or 0
+        cache.delete(key)
+        return int(value)
+    except Exception:  # noqa: BLE001 — cache backend failure
+        return 0

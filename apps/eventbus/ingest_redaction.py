@@ -124,20 +124,27 @@ ALLOWED_ENUM_VALUES: Final[frozenset[str]] = frozenset(
         "exception_removed",
         "vacation_set",
         "vacation_cleared",
-        # service.updated.changed_fields
-        "name",
-        "price",
-        "duration",
-        "is_active",
-        "category_id",
-        "requires_consultation",
-        # user.profile.updated.changed_fields
-        "display_name",
-        "avatar_url",
-        "language",
-        "phone",
-        "email",
-        "birthday",
+        # Round-4 R3-1 — PII-FIELD-NAME strings DELIBERATELY EXCLUDED
+        # from the global allowlist. The contract §3 schema allows
+        # values like ``changed_fields=["name", "phone", "email"]``,
+        # but those literal strings are also valid attacker-controlled
+        # leaf values (e.g. customer_name="phone") that would pass
+        # redaction if the enum check accepted them.
+        #
+        # Tradeoff: ``changed_fields`` lists redact to
+        # ``[REDACTED, ...]`` — operator sees the change occurred,
+        # not which fields. Forensic cost is bounded; PII leak risk
+        # is eliminated. Per round-1 «conservative — better to lose
+        # forensic detail than leak free-text PII for 90 days».
+        #
+        # NOT in the allowlist (any of these strings as values
+        # → REDACTED):
+        #   name, price, duration, is_active, category_id,
+        #   requires_consultation, display_name, avatar_url, language,
+        #   phone, email, birthday
+        # service.updated.changed_fields — NUMERIC values that ARE
+        # actual data (not field names) MAY still pass via the
+        # decimal-string path below.
         # currency (ISO-4217 — limited set used by Ayla)
         "RUB",
         "USD",

@@ -167,9 +167,16 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             "pre-#246 consumer development."
         )
 
-    # Opt-in fall-through. Round-3 NEW-5 — log + audit row (sampled)
-    # per fall-through. The startup warning catches the deploy-time
-    # misconfig; this catches every runtime exposure event.
+    # Opt-in fall-through. Round-3 NEW-5 + Round-4 R3-2 — log +
+    # audit row (sampled per (user_id, tenant_id)) per fall-through.
+    # The startup warning catches the deploy-time misconfig; this
+    # catches every runtime exposure event.
+    #
+    # Round-4 R3-2 — sample by COMPOSITE (user_id, tenant_id), not
+    # just user_id. An attacker controlling user_id rotating
+    # tenant_id was dodging the sampler. AND we now track a counter
+    # that reflects the TRUE call volume — sampled audit row carries
+    # count_in_window so 1000 events produce 1 row with count=1000.
     logger.warning(
         "eventbus.ingest.tenant_verify_fail_open event_name=%s user_id=%s tenant_id=%s",
         event_name,
@@ -179,13 +186,20 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     try:
         from apps.audit.services import write_audit
         from apps.eventbus.ingest_rate_audit_sampler import (
-            should_audit_tenant_fail_open,
+            increment_tenant_fail_open_count,
+            should_emit_tenant_fail_open_audit,
         )
 
-        # Sampled by user_id (the affected user) so a flood from a
-        # single attacker's events bound the audit volume — same
-        # AS3-amplifier rationale.
-        if should_audit_tenant_fail_open(user_id):
+        composite_key = f"{user_id}:{tenant_id}"
+        # Round-4 R3-2 — increment-then-threshold-emit. Counter
+        # increments on every call (no sampling at counter layer).
+        # The threshold ladder decides which counts emit an audit
+        # row: {1, 10, 50, 100, 500, 1000, 5000, 10000} + every
+        # 10k thereafter. Each row carries count_in_window so
+        # operators see the volume curve.
+        count = increment_tenant_fail_open_count(composite_key)
+
+        if should_emit_tenant_fail_open_audit(count):
             write_audit(
                 action="eventbus.ingest.tenant_verify_fail_open",
                 target="eventbus.ingest",
@@ -193,6 +207,10 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
                     "event_name": event_name,
                     "user_id": user_id,
                     "tenant_id": tenant_id,
+                    # Round-4 R3-2 — forensic count surface. The
+                    # row reflects the TRUE call volume at the
+                    # ladder threshold.
+                    "count_in_window": count,
                 },
             )
     except Exception:  # noqa: BLE001 — audit MUST NEVER block the handler
