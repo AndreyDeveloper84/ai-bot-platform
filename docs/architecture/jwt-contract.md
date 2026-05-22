@@ -1,6 +1,6 @@
 # JWT Contract — Ayla djangoproject (issuer) → ai-bot-platform (verifier)
 
-> **Status:** v1.2 — round-3 amendments 2026-05-22 (addresses 6 NEW NS blockers from PR #523 adversarial pass N=9; chain framing revised — reshaped not severed)
+> **Status:** v1.3 — round-4 amendments 2026-05-22 (addresses 3 visible AS blockers + 2 NTH from PR #523 round-3 adversarial pass N=15; pattern stalled at 6 per round, tabular refactor candidate if round-5 still escalates)
 > **Owner:** Phase 0 Stream Beta (W4)
 > **Authority:** ADR-0009 §Hard rule #6 — this doc is the wire spec for the «`tenant_id` claim = `active_tenant_id`» rule the ADR establishes.
 > **Sibling spec:** [`docs/architecture/event-contract.md`](./event-contract.md) — same pattern (issuer is Ayla, consumer is bot-platform), different transport (HTTP request header instead of HMAC-signed POST).
@@ -344,7 +344,22 @@ This closes the chain-landing-zone hole: a compromised bot-platform that mints s
 
 1. **Function-based views (FBVs):** Django FBVs are plain callables — the `@global_scope` decorator works (wraps the function), but the middleware's reflection-via-URL-resolver MUST verify it found a callable, not a class. CI test: dispatch a sample FBV with `@global_scope` and a sample without; assert the middleware finds the decorator marker in both reflection paths.
 2. **Async views + custom WSGI handlers:** ASGI views bypass standard `urls.py` resolver in some custom setups (custom routing middleware, Channels). The middleware MUST run on the OUTERMOST middleware layer (before any custom routing) AND the registry check MUST also run as a startup-time check: enumerate every URL pattern + every view function + every ViewSet method via `urls.get_resolver()`, build the full set, cross-reference with the registry. Mismatch at startup → bot-platform refuses to boot with `IncompleteGlobalScopeRegistry` error.
-3. **Matcher rule for paths in the registry:** EXACT path match only. **NOT prefix.** Normalize trailing slash + percent-encoding before comparison. The v1.1 wording «allowlist registry» was open to interpretation — explicit now: registry entries are exact paths (regex match for URL parameters allowed but documented inline), and `/users/me/memory-bypass-X` does NOT inherit privileges of `/users/me/memory`. The startup enumeration catches drift; the path-match rule prevents prefix-shadow attacks.
+3. **Matcher rule for paths in the registry:** EXACT `(HTTP_METHOD, normalized_path)` tuples only — NOT prefix, NOT path-alone (round-4 AS3 tighten):
+
+   **Registry entry shape:** `("GET", "/api/v1/users/me/memory")`. A `GET` and a `PATCH` on the same path are SEPARATE registry entries; granting `@global_scope` to one does not grant it to the other. Prior wording «registry entry per path» was a coverage gap — a write-mutating PATCH endpoint sharing a path with a read-only GET could inherit the GET's permissive scope check.
+
+   **Path normalization (applied identically at registry-write time AND middleware-check time):**
+
+   1. **Percent-decode** the URL (`%2F` → `/`, etc.).
+   2. **Unicode normalize to NFKC** — handles homoglyph attacks (Cyrillic «а» vs Latin «a»; full-width vs half-width). Without NFKC, an attacker could register `/users/me/mеmory` (Cyrillic «е») and bypass the registry check on `/users/me/memory`.
+   3. **Strip trailing slash.**
+   4. **Lowercase** the path component (NOT the query string).
+
+   **Regex routes are FORBIDDEN in the registry.** Django supports regex URL patterns (`re_path`); they cannot be expressed as `(method, normalized_path)` tuples. The CI startup enumeration MUST raise `RegexRouteNotRegisterable` if any view with `@global_scope` decorator is reached via a `re_path` pattern. The view author MUST migrate to `path` patterns first.
+
+   **CI test:** `tests/test_global_scope_registry.py` exercises (a) NFKC homoglyph paths, (b) percent-encoded paths, (c) trailing-slash variants, (d) `(GET, /x)` vs `(PATCH, /x)` divergence, (e) regex-route detection.
+
+   The startup enumeration catches drift; the tuple-match rule prevents prefix-shadow + homoglyph + method-confusion attacks.
 
 These controls ship together in the middleware PR (follow-up §13.X).
 
@@ -378,7 +393,13 @@ For cross-repo REST calls (e.g. bot-platform calls Ayla `GET /api/v1/users/{user
 2. Extract `ayla.user_token` and validate it as a normal user access token (signature with Ayla's own public key, `exp` check, `iss` check).
 3. Cross-check: outer `ayla.user_on_behalf_of` MUST equal inner user-token's `sub`. Mismatch → 401 `s2s_consent_binding_violation`.
 4. Cross-check: outer `ayla.scope` MUST be a SUBSET of inner user-token's `ayla.scope`. The user cannot delegate more privilege than they have. Wider scope → 401 same error.
-5. Cross-check: inner user-token's `exp` MUST be in the future AND `iat` MUST be within the last 60 seconds (NS1 fix — replay-window cap). A user-token whose `iat` is older than 60s → reject with `s2s_inner_token_stale`. Without this cap, a compromised bot-platform could replay a single captured user-token in fresh s2s envelopes for the inner token's full lifetime (up to 15 min) — see §5.4 «Compromise impact» for the chain analysis. Alternative implementation: Ayla maintains a `s2s_seen_inner_jti` LRU dedup table with 60s TTL — same effect with strict single-use semantics.
+5. Cross-check: inner user-token's `exp` MUST be in the future. **AND** (round-4 AS1 fix — these are NOT equivalent options, mandating the stronger one):
+
+   **Primary (REQUIRED for production):** Ayla maintains a `s2s_seen_inner_jti` dedup table keyed by `inner_user_token.jti`, with TTL = 60 seconds. Each s2s call MUST insert (inner_jti, now) atomically; insert-collision = single-use violation, return 401 `s2s_inner_jti_reused`. **Strict single-use semantics: each captured user-token enables exactly ONE s2s call.**
+
+   **Fallback (acceptable ONLY if dedup-storage infrastructure infeasible at MVP):** require inner user-token's `iat` within last 60 seconds, reject older with 401 `s2s_inner_token_stale`. **This is WEAKER than the primary** — a compromised bot-platform can still pump N s2s calls per second within the 60s window (~60N exfiltration calls per captured user-token), not 1. v1.2's «alternative implementation» wording falsely implied equivalence; v1.3 corrects: 60s-freshness alone leaves an order-of-magnitude wider attack surface than jti-dedup.
+
+   The implementing ticket (#258 OAuth callback or its follow-up) MUST ship with the dedup table. The fallback exists for operator-side emergencies (Redis outage etc.) and SHOULD trip a high-priority alert because it reverts to the weaker bound.
 6. For sensitive reads (DOB, red-zone memory, payment history): Ayla additionally consults the **consent record** — a row in `users_consents` table — that records the user explicitly granted bot-platform the right to read this specific data category. Without a matching consent record, 403 `consent_required`.
 
 **Compromise impact under S3 fix — honest framing (revised v1.2 per adversarial N=9):**
@@ -393,20 +414,29 @@ If bot-platform's private key B leaks, attacker can mint s2s tokens with valid o
 
 **Residual attack (NS1):** for users with broad red-zone consent (e.g. memory-read consent covering all entries), a compromised bot-platform that captures a single user-token can wrap it in fresh s2s envelopes throughout the user-token's lifetime. Each s2s has a new `jti` (outer); refresh-blacklist doesn't catch the user-token. The window is therefore the inner user-token's remaining lifetime — up to 15 minutes for access tokens — PLUS amplification across many endpoints.
 
-**NS1 mitigation:** require inner user-token's `iat` to be within the last 60 seconds at s2s verification time. This caps the replay window to 60 seconds regardless of inner token's `exp`. Implementation:
+**NS1 mitigation (revised v1.3 round-4 AS1 — these were NOT equivalent options):**
+
+PRIMARY (REQUIRED): Ayla maintains a `s2s_seen_inner_jti` dedup table keyed by `inner_user_token.jti` with 60s TTL. Each s2s insertion MUST be atomic; collision = 401 `s2s_inner_jti_reused`. **Strict single-use semantics: each captured user-token enables exactly ONE s2s call.**
+
+FALLBACK (operator emergency only): if dedup storage is temporarily unavailable, require inner `iat` within last 60s. **WEAKER** — attacker pumps ~60N exfiltration calls in the 60s window vs 1 with dedup. Operator-side high-priority alert on fallback trip.
 
 ```python
-# Ayla-side s2s verifier (NS1 step)
+# Ayla-side s2s verifier — PRIMARY path
+try:
+    S2sSeenInnerJti.objects.create(
+        inner_jti=inner_user_token['jti'],
+        expires_at=now() + timedelta(seconds=60),
+    )
+except IntegrityError:  # unique constraint on inner_jti
+    raise S2sFreshnessViolation("inner user-token jti reused — single-use violated")
+
+# FALLBACK path activates only if dedup storage unreachable
 inner_iat = inner_user_token['iat']
 if (server_now - inner_iat) > 60:
-    raise S2sFreshnessViolation(
-        "inner user-token too old; must be issued within 60s of s2s call"
-    )
+    raise S2sFreshnessViolation("inner user-token too old (>60s)")
 ```
 
-Alternative implementation (chosen): Ayla maintains a **`s2s_seen_inner_jti` LRU dedup table** keyed by `inner_user_token.jti`, TTL 60s. Same effect (only «recent» inner tokens valid) with strict single-use semantics if desired. Either approach is acceptable; consumer ticket (#258 or follow-up) picks one.
-
-**Real bound under NS1 fix:** 60-second replay window per captured user-token, multiplied by the rate at which bot-platform can pump s2s calls inside that window. This is materially better than 15 minutes; it's still NOT zero. The audit-defensible framing is «60-second exfiltration window + consent-surface limit per category», NOT «severed».
+**Real bound under NS1+AS1 fix:** with PRIMARY (dedup), exactly 1 exfiltration call per captured user-token. With FALLBACK (60s-only), ~60N calls per captured user-token where N = bot-platform throughput. Production MUST run PRIMARY; FALLBACK is an emergency degradation path. Audit-defensible framing: «single-call exfiltration per captured user-token + consent-surface limit per category», NOT «severed» (architectural inevitability).
 
 **S1+S2+S3 chain status (v1.2):** RESHAPED. Bot-platform compromise = bounded PII exfiltration during sessions that overlap the compromise window, capped at the consent surface. Mitigated by: (a) shortest practical inner-token freshness (NS1, 60s); (b) consent-record gating per data category; (c) outbound bot-platform → Ayla traffic anomaly detection (operator-side observability, not in this doc's scope); (d) prompt key rotation per §4.3 emergency-rotation protocol on suspected compromise.
 
@@ -559,10 +589,11 @@ If all 3 hold, request proceeds + `worker.tenant_relationship_lag` event fires f
 
 If the in-token `granted_at` is older than 60 seconds OR bot-platform doesn't have the TUR row OR the timestamps diverge by >5s → reject + alert.
 
-**NS3 fix — TUR rapid grant-revoke-grant bypass:** the ±5s delta-match (condition 3 above) is insufficient if a compromised tenant admin can revoke + immediately re-grant a relationship to refresh `granted_at`. Defensive controls:
+**NS3 fix — TUR rapid grant-revoke-grant bypass:** the ±5s delta-match (condition 3 above) is insufficient if a compromised tenant admin can revoke + immediately re-grant a relationship to refresh `granted_at`. Defensive controls (round-4 AS2 — two-dimensional rate limit):
 
-- **Rate-limit grants per (user, tenant): max 1 per hour.** A second grant within 60 minutes of an existing or recently-revoked relationship → 429 Too Many Requests + audit event `provider.relationship_grant_throttled`.
-- **Alert on revoke→grant <60s:** any revoke followed by a re-grant of the same `(user, tenant)` within 60 seconds fires a high-priority `provider.relationship_churn_suspicious` alert and pages on-call. This is almost always either an admin mistake or active attack.
+- **Per-(user, tenant) cap: max 1 grant per hour.** A second grant within 60 minutes of an existing or recently-revoked relationship for the SAME `(user, tenant)` pair → 429 Too Many Requests + audit event `provider.relationship_grant_throttled`.
+- **Per-user cap (AS2 addition): max 3 grants per hour across ALL tenants.** A user with 10 legitimate tenant relationships hitting the per-(user, tenant) cap could still see 10 grants per hour (one per tenant, all within attacker-cycle window) — the per-user dimension closes that. Alert fires at **2+ grants per hour per user** (warning, not block) so on-call can investigate before the 3-grant block trips. Block on the 4th grant in a rolling hour → 429 `provider.user_grant_storm`.
+- **Alert on revoke→grant <60s:** any revoke followed by a re-grant of the same `(user, tenant)` within 60 seconds fires a high-priority `provider.relationship_churn_suspicious` alert and pages on-call. Almost always admin mistake or active attack.
 - These controls live in Ayla djangoproject's grant API; bot-platform's TUR mirror inherits them automatically because mirror updates only on observed Ayla events.
 
 ### 10.5 JWKS endpoint unreachable
@@ -638,6 +669,8 @@ These are tracked but DO NOT block this doc — they refine v2+ of the contract.
 ---
 
 ## Last verified
+
+2026-05-22 — v1.3 round-4 amendments addressing 3 visible AS blockers + 2 nice-to-haves from PR #523 round-3 adversarial pass (N=15). AS1 — NS1 dedup-vs-freshness clarified as NOT-equivalent; jti-dedup MANDATORY for production (single-use semantics), 60s-freshness is operator-emergency fallback only. AS2 — TUR grant rate-limit gains per-user dimension (3/h across all tenants + alert at 2+) to close 10-tenant cycle-attack window. AS3 — `@global_scope` registry entries tightened to `(METHOD, normalized_path)` tuples with NFKC + percent-decode + trailing-strip + lowercase normalization; regex routes forbidden. Pattern observation: round-3 adversarial found 6 → round-4 adversarial found 6 (still 6) — pattern stalled, not decelerating. If round-5 stays at 6+, tabular refactor candidate per memory `feedback_h3_waiver_pattern` N=15 (jwt-contract → extract token-table + scope-catalog + role/key-rotation matrix to `docs/specs/jwt-claim-spec.md`).
 
 2026-05-22 — v1.2 round-3 amendments addressing 6 new NS blockers + 2 nice-to-haves from PR #523 adversarial pass (N=9). Critical: S1+S2+S3 chain framing revised — RESHAPED not severed; bot-platform compromise has bounded (60s replay window) PII-exfiltration capability per ADR-0009 architecture inherent. NS1 inner user-token 60s freshness cap; NS2 dual-`kid` 10min coexistence + rotation drill SOP; NS3 grant rate-limit + revoke→grant alert; NS4 @global_scope coverage (FBV / async / exact-match); NS5 WebSocket §1.2 ticket-exchange exception; NS6 `user_global:*` scope catalog for tenant_id=null (closes chain landing zone). NS7/NS8 resolved (contract_version migration window + bot-platform JWKS public).
 
