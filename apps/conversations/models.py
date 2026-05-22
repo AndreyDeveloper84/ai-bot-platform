@@ -403,3 +403,146 @@ class Message(models.Model):
     def __str__(self) -> str:
         preview = (self.content or self.rendered_text)[:40]
         return f"Message[{self.role}]({preview!r})"
+
+
+class AiDraft(models.Model):
+    """LLM-generated reply suggestion for a master to act on (M6 / Bundle B item 4).
+
+    A *transient* artifact: replaced when regenerated, marked terminal
+    when the master sends as themselves / releases to AI / dismisses.
+    Drafts are NOT stored in :class:`Message` — they aren't messages
+    until sent. Once sent, a new :class:`Message` row with
+    ``action_type="master_compose"`` (or plain ``"assistant"``) is
+    created and the draft moves to a terminal status.
+
+    ### Status lifecycle
+
+    ``ACTIVE`` is the only writable state. Every other state is terminal::
+
+        ACTIVE ─┬─→ SENT_AS_MASTER     (master tapped «Отправить от себя»)
+                ├─→ RELEASED_TO_AI     (master tapped «Пусть помощник ответит»)
+                ├─→ REPLACED           (master regenerated)
+                └─→ DISMISSED          (reserved — endpoint not in this PR)
+
+    Per-conversation invariant: at most one ``ACTIVE`` row exists at any
+    time. Enforced via the partial unique constraint
+    :attr:`ai_draft_one_active_per_conversation` and a
+    ``select_for_update`` lock in the service layer (which also marks
+    the previous ACTIVE row as REPLACED in the same transaction).
+
+    ### Tenant scoping
+
+    Default manager filters by ``current_tenant()``. Service code that
+    needs cross-tenant access (cleanup sweeps, replay) goes through
+    :attr:`all_tenants`. The master detail GET reads via the tenant-
+    scoped manager so a cross-tenant master can't see a foreign draft
+    even if a UUID collision happened.
+
+    ### Spec quote (master-mobile §M6 line 706-712)
+
+        «When master taps «Отправить от себя» on a draft, the message
+        renders to the customer as «Помощник: …». Same single assistant
+        identity. Master's authorship is recorded in attribution
+        metadata (``actor_type=master``, ``composed_by=master_id``)»
+
+    ### Spec quote (master-mobile §M6 lines 662-671 — the draft card)
+
+        «✨ Предложенный ответ ... [Отправить от себя] [Отредактировать]
+        [Пусть помощник ответит]»
+
+    The three action endpoints in :mod:`apps.master_api.services.ai_drafts`
+    map 1:1 to these three buttons.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        SENT_AS_MASTER = "sent_as_master", "Sent by master"
+        RELEASED_TO_AI = "released_to_ai", "Released to AI auto-send"
+        REPLACED = "replaced", "Replaced by newer draft"
+        DISMISSED = "dismissed", "Dismissed by master"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="ai_drafts",
+        help_text="Owning tenant. CASCADE — drafts are transient artifacts; "
+        "tenant deletion already cascades through booking + conversation.",
+    )
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="ai_drafts",
+        help_text="Conversation this draft suggests a reply for.",
+    )
+    master = models.ForeignKey(
+        "catalog.CatalogMaster",
+        on_delete=models.CASCADE,
+        related_name="+",
+        help_text="Master the draft is suggested to.",
+    )
+    content = models.TextField(
+        help_text="The LLM-generated reply text — 1-3 sentences typical.",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    trigger_message = models.ForeignKey(
+        Message,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="The most recent customer message at generation time. "
+        "Used for the 60s idempotency window: if the master taps "
+        "«Generate» twice within 60 seconds AND no new customer message "
+        "arrived in between, we return the existing draft instead of "
+        "billing another LLM call.",
+    )
+    llm_provider = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Provider name as reported by the LLM router ('openai' / 'anthropic').",
+    )
+    llm_model = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Model id echoed by the provider (e.g. 'gpt-4o-mini').",
+    )
+    llm_cost_usd = models.DecimalField(
+        max_digits=8,
+        decimal_places=6,
+        default=0,
+        help_text="USD cost of the single LLM call. Computed via "
+        "apps.llm.pricing.compute_cost. 0 on stub / unknown model.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "AI draft"
+        verbose_name_plural = "AI drafts"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["conversation"],
+                condition=models.Q(status="active"),
+                name="ai_draft_one_active_per_conversation",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "master", "status"]),
+            models.Index(fields=["conversation", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        preview = (self.content or "")[:40]
+        return f"AiDraft[{self.status}]({preview!r})"

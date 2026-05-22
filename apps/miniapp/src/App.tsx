@@ -29,6 +29,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
 import { AdminChatsPlaceholderScreen } from "./screens/admin/AdminChatsPlaceholderScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
@@ -47,7 +48,8 @@ import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
-import { MasterProfilePlaceholderScreen } from "./screens/MasterProfilePlaceholderScreen";
+import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
+import { MasterProfileScreen } from "./screens/MasterProfileScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
 import { MyVisitsScreen } from "./screens/MyVisitsScreen";
@@ -127,6 +129,10 @@ function AdminRoutes({ me }: { me: MeResponse }) {
         path="/admin/services"
         element={<AdminServicesMatrixScreen me={me} />}
       />
+      <Route
+        path="/admin/availability-requests"
+        element={<AdminAvailabilityRequestsScreen me={me} />}
+      />
       <Route path="/admin/chats" element={<AdminChatsPlaceholderScreen />} />
       <Route
         path="/admin/settings"
@@ -150,7 +156,12 @@ function MasterRoutes() {
         path="/master/conversations/:id"
         element={<MasterConversationDetailScreen />}
       />
-      <Route path="/master/profile" element={<MasterProfilePlaceholderScreen />} />
+      <Route path="/master/profile" element={<MasterProfileScreen />} />
+      {/* M7 notification settings (Bundle B / item 3) */}
+      <Route
+        path="/master/settings/notifications"
+        element={<MasterNotificationSettingsScreen />}
+      />
       {/* Default + unknown — land on dashboard. */}
       <Route path="*" element={<Navigate to="/master/dashboard" replace />} />
     </Routes>

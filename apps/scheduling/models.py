@@ -549,6 +549,21 @@ class ScheduleChangeRequest(models.Model):
         blank=True,
         related_name="+",
     )
+    # M3-admin follow-up (PR #521 adversarial blocker #3): a direct
+    # BotUser id of the decider, populated when no Django User row is
+    # wired (the dominant case today — admin Mini App auth threads
+    # through BotUser only, not AUTH_USER_MODEL). Without this column
+    # the audit trail of «who approved request X» is only reachable
+    # via the audit row payload, which has shorter retention than the
+    # DB row. Phase 2 will introduce a proper BotUser↔User bridge and
+    # populate ``resolved_by`` as well; ``resolved_by_bot_user_id``
+    # stays as the durable, non-FK provenance handle.
+    resolved_by_bot_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="BotUser.id of the admin/owner who decided this "
+        "request. Populated even when ``resolved_by`` FK is NULL.",
+    )
     resolved_at = models.DateTimeField(null=True, blank=True)
     # Snapshot of the BotUser who submitted the request. Distinct from
     # ``master`` (the CatalogMaster row) and from ``resolved_by`` (the

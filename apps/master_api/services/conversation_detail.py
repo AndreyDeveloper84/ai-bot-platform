@@ -32,7 +32,10 @@ Spec quote (master-mobile §M6 line 765):
 * Frontend (M6 layout, compose box, promote modal). Separate PR.
 * Pre-send persona check engine — needs assistant-persona.md
   infrastructure not present yet.
-* AI draft generation — ``ai_draft`` returns null here. Separate PR.
+* AI draft *generation* — wired in Bundle B / item 4 backend
+  (apps.master_api.services.ai_drafts). This GET endpoint now
+  populates ``ai_draft_*`` from the latest ACTIVE :class:`AiDraft`
+  for the conversation when one exists; null otherwise.
 * «Позвать Аню» mention / «Открыть чат с Аней» deeplink — separate.
 * Editing or deleting previously-sent messages — never (forensic).
 """
@@ -52,7 +55,7 @@ from django.utils import timezone as dj_timezone
 from apps.audit.services import write_audit
 from apps.booking.models import BookingRequest
 from apps.catalog.models import CatalogMaster
-from apps.conversations.models import Conversation, Message
+from apps.conversations.models import AiDraft, Conversation, Message
 from apps.conversations.services import record_message
 from apps.events.services import emit
 from apps.events.vocabulary import (
@@ -377,6 +380,26 @@ def _redact_for_master(
     # resort.
     can_promote = not is_locked
 
+    # Bundle B / item 4 backend: surface the latest ACTIVE AI draft for
+    # this master. Tenant-scoped manager + explicit master filter so a
+    # cross-master draft (theoretically impossible — only one ACTIVE per
+    # conversation, the partial unique constraint enforces it — but
+    # defensive against a future drift) can never bleed through. Null
+    # whenever no ACTIVE row exists OR the conversation is HUMAN_LOCKED
+    # (draft is moot — master can't send anyway).
+    active_draft: AiDraft | None = None
+    if not is_locked:
+        active_draft = (
+            AiDraft.all_tenants.filter(
+                tenant_id=master.tenant_id,
+                conversation_id=conversation.id,
+                master_id=master.id,
+                status=AiDraft.Status.ACTIVE,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
     return ConversationDetailResponse(
         conversation_id=str(conversation.id),
         tier=conversation.tier,
@@ -393,9 +416,13 @@ def _redact_for_master(
         is_returning_customer=is_returning,
         visit_count=visit_count,
         messages=msg_items,
-        ai_draft_id=None,
-        ai_draft_content=None,
-        ai_draft_created_at=None,
+        ai_draft_id=str(active_draft.id) if active_draft is not None else None,
+        ai_draft_content=active_draft.content if active_draft is not None else None,
+        ai_draft_created_at=(
+            active_draft.created_at.isoformat()
+            if active_draft is not None and active_draft.created_at
+            else None
+        ),
         can_compose=can_compose,
         can_promote=can_promote,
     )

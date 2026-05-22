@@ -77,6 +77,10 @@ LOCAL_APPS = [
     "apps.orders",
     # Customer Mini App Phase 0a — master schedule + slot resolver.
     "apps.scheduling",
+    # Master Mini App M7 (Bundle B / item 3) — per-master notification
+    # toggles + quiet-hours window. See
+    # ``docs/design/handoffs/2026-05-18-master-mobile-handoff.md`` §M7.
+    "apps.notifications",
     # Customer Mini App Phase 0b — HTTP API for the MAX Mini App webview.
     "apps.miniapp_api",
     # Master Mini App PR 1 (M0 onboarding) — claim-invite flow + BotUser
@@ -556,6 +560,19 @@ CELERY_BEAT_SCHEDULE = {
         # transaction so a long dedupe sweep doesn't block the
         # DLQ task.
         "schedule": crontab(hour="4", minute="50"),
+    },
+    # PR #535 follow-up Blocker #5 Layer 2 — AI draft retention sweep.
+    # Hard-deletes terminal AiDraft rows (SENT_AS_MASTER / RELEASED_TO_AI
+    # / REPLACED / DISMISSED) older than 30 days. Layer 1 (immediate
+    # content clear on status flip) lives in
+    # apps/master_api/services/ai_drafts.py — that closes the at-rest
+    # PII window. Layer 2 sweeps the metadata stubs after the finance
+    # reconciliation window closes. Daily 03:15 UTC — slotted between
+    # the 03:00 audit cleanup and the 03:30 profile recompute to keep
+    # worker pool spikes staggered.
+    "purge_old_ai_drafts": {
+        "task": "apps.conversations.tasks.purge_old_ai_drafts",
+        "schedule": crontab(hour="3", minute="15"),
     },
 }
 

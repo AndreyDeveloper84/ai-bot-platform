@@ -61,12 +61,16 @@ import { ApiError } from "../lib/api";
 import {
   MASTER_COMPOSE_COUNTER_THRESHOLD,
   MASTER_COMPOSE_MAX_LENGTH,
+  generateDraft,
   getConversationDetail,
   markConversationRead,
   promoteConversationToHumanLocked,
+  releaseDraftToAi,
+  sendDraftAsMaster,
   sendMasterMessage,
   type ConversationDetailResponse,
   type ConversationMessage,
+  type DraftMessageResponse,
   type PromoteReasonClass,
 } from "../lib/master-api";
 import {
@@ -145,7 +149,20 @@ const COPY = {
   toastTierLocked:
     "Диалог уже передан админу — отправка недоступна",
   toastPromoted: "Передано админу",
-  toastReleaseAiSoon: "Скоро будет — помощник ещё не ходит сам",
+  toastDraftSent: "Отправлено",
+  toastDraftReleased: "Ответ отправлен помощником",
+  toastDraftAlreadyActed: "Этот черновик уже был использован",
+  // Generate-draft trigger + states
+  draftTrigger: "✨ Предложить ответ",
+  draftThinking: "✨ Помощник думает…",
+  draftErrorUnavailable: "Помощник недоступен. Попробуйте позже.",
+  draftErrorRetry: "Повторить",
+  // Release-to-AI confirm sheet
+  releaseConfirmTitle: "Передать помощнику?",
+  releaseConfirmBlurb:
+    "Помощник отправит этот ответ автоматически. Продолжить?",
+  releaseConfirmYes: "Да",
+  releaseConfirmCancel: "Отмена",
   // Master-facing only chip — never leaks to customer surface
   youChip: "вы",
   myMessageHint: "от вас · отправлено клиенту как «Помощник»",
@@ -206,6 +223,29 @@ export function MasterConversationDetailScreen() {
   const [composeValue, setComposeValue] = useState("");
   const [promoteOpen, setPromoteOpen] = useState(false);
   const [promoteSubmitting, setPromoteSubmitting] = useState(false);
+  /**
+   * When the master taps «Отредактировать», the draft card hides and the
+   * compose box prefills with the draft text. Until they send OR navigate
+   * away, this id flags the next outbound message to route via
+   * `sendDraftAsMaster(override_content=…)` instead of the plain
+   * `sendMasterMessage` path — so the draft is consumed (transition to
+   * SENT_AS_MASTER) rather than left as a phantom ACTIVE row alongside a
+   * brand-new message.
+   *
+   * NOTE: a fresh `getConversationDetail()` after send clears the draft
+   * naturally (it's no longer ACTIVE), but until then `activeDraftId`
+   * stays set so a master who types completely new text after editing
+   * still consumes the original draft. Spec scope-out decision in this
+   * PR — see PR body for rationale.
+   */
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
+  /** Pulsing «Помощник думает…» state during a generate request. */
+  const [generating, setGenerating] = useState(false);
+  /** Inline error when generate returns 503. Cleared on retry / reload. */
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  /** Confirm sheet for «Пусть помощник ответит». */
+  const [releaseConfirmOpen, setReleaseConfirmOpen] = useState(false);
+  const [releaseSubmitting, setReleaseSubmitting] = useState(false);
   const [toast, setToast] = useState<{ visible: boolean; message: string }>(
     { visible: false, message: "" },
   );
@@ -228,10 +268,15 @@ export function MasterConversationDetailScreen() {
 
   // --- Bridge: closing confirmation when compose is dirty -------------
 
+  // Treat the draft-edit path as dirty too — a master who tapped
+  // «Отредактировать», changed nothing, and tried to close the mini app
+  // would otherwise lose nothing meaningful, but the explicit prefill
+  // signals intent. Better one extra confirm than a silent loss when the
+  // master typed something AFTER the prefill.
   useEffect(() => {
-    const dirty = composeValue.trim().length > 0;
+    const dirty = composeValue.trim().length > 0 || activeDraftId !== null;
     setClosingConfirmation(dirty);
-  }, [composeValue]);
+  }, [composeValue, activeDraftId]);
 
   // --- Load --------------------------------------------------------------
 
@@ -331,8 +376,29 @@ export function MasterConversationDetailScreen() {
       setPending((prev) => [...prev, optimistic]);
       setComposeValue("");
 
+      // Route via draft-consume path when the master is editing a draft.
+      // The override_content path stamps `was_edited=true` on the message
+      // when the body differs from the draft's LLM text; we always pass
+      // the typed body as override so a master who clears+retypes still
+      // consumes the original draft (per spec scope decision).
+      const consumingDraftId = activeDraftId;
+
       try {
-        const result = await sendMasterMessage(conversationId, body);
+        let result: { message_id: string; content: string; sent_at: string };
+        if (consumingDraftId !== null) {
+          const draftResult: DraftMessageResponse = await sendDraftAsMaster(
+            conversationId,
+            consumingDraftId,
+            body,
+          );
+          result = {
+            message_id: draftResult.message_id,
+            content: draftResult.content,
+            sent_at: draftResult.sent_at,
+          };
+        } else {
+          result = await sendMasterMessage(conversationId, body);
+        }
         // Append the confirmed message into the existing list and drop
         // the optimistic placeholder. We don't re-fetch the whole detail
         // payload here — saves a round-trip and keeps scroll position.
@@ -346,34 +412,64 @@ export function MasterConversationDetailScreen() {
             composed_by_master: true,
             composed_by_master_id: null,
           };
+          // Clear the draft card from cached detail — the draft is
+          // consumed server-side, the in-memory copy must match.
+          const clearedDraft =
+            consumingDraftId !== null
+              ? { draft_id: null, content: null, created_at: null }
+              : prev.data.ai_draft;
           return {
             kind: "ready",
             data: {
               ...prev.data,
+              ai_draft: clearedDraft,
               messages: [...prev.data.messages, newMessage],
             },
           };
         });
         setPending((prev) => prev.filter((p) => p.tempId !== tempId));
+        if (consumingDraftId !== null) {
+          setActiveDraftId(null);
+          setToast({ visible: true, message: COPY.toastDraftSent });
+        }
       } catch (err) {
         hapticNotify("error");
         if (err instanceof ApiError && err.status === 403) {
           // Tier flipped to HUMAN_LOCKED while we composed. Reload.
           setPending((prev) => prev.filter((p) => p.tempId !== tempId));
+          setActiveDraftId(null);
           setToast({ visible: true, message: COPY.toastTierLocked });
           void load();
           return;
         }
         if (err instanceof ApiError && err.status === 404) {
           setPending((prev) => prev.filter((p) => p.tempId !== tempId));
+          setActiveDraftId(null);
           navigate("/master/conversations", {
             replace: true,
             state: { permissionCliff: true },
           });
           return;
         }
+        if (
+          err instanceof ApiError &&
+          err.status === 400 &&
+          err.slug === "draft_already_acted"
+        ) {
+          // Race lost — another tab acted on this draft. Silent reload
+          // + banner so the master sees the conversation as it is now.
+          setPending((prev) => prev.filter((p) => p.tempId !== tempId));
+          setActiveDraftId(null);
+          setToast({
+            visible: true,
+            message: COPY.toastDraftAlreadyActed,
+          });
+          void load();
+          return;
+        }
         // Generic failure — keep the optimistic row but flip status to
-        // "failed" so the user sees an inline retry CTA.
+        // "failed" so the user sees an inline retry CTA. Preserve
+        // activeDraftId so a retry routes via the same draft path.
         setPending((prev) =>
           prev.map((p) =>
             p.tempId === tempId ? { ...p, status: "failed" } : p,
@@ -381,7 +477,7 @@ export function MasterConversationDetailScreen() {
         );
       }
     },
-    [conversationId, navigate, phase, load],
+    [activeDraftId, conversationId, navigate, phase, load],
   );
 
   const onRetryPending = useCallback(
@@ -426,33 +522,267 @@ export function MasterConversationDetailScreen() {
     [conversationId, load],
   );
 
-  // --- AI draft action handlers (currently always null backend-side) --
+  // --- AI draft action handlers ---------------------------------------
 
-  const onAcceptDraft = useCallback(
-    async (content: string): Promise<void> => {
-      // Send the draft as the master. The customer sees «Помощник: …»
-      // (per §706-712) but the audit log records master attribution.
-      await onSend(content);
+  /**
+   * «Отправить от себя» — send the draft text untouched, attributed to
+   * the master (audit metadata). The customer surface still renders
+   * «Помощник: …» per §706-712.
+   *
+   * Optimistic: clear the draft from local state immediately, hit the
+   * dedicated send-as-me endpoint (no override_content → backend uses
+   * the LLM-generated text). On 400 `draft_already_acted` we silently
+   * reload — another tab acted first.
+   */
+  const onSendDraftAsMe = useCallback(
+    async (draftId: string, content: string): Promise<void> => {
+      hapticImpact("medium");
+
+      const tempId = `pending-draft-${Date.now()}`;
+      const optimistic: PendingMessage = {
+        tempId,
+        content,
+        startedAt: new Date().toISOString(),
+        status: "sending",
+      };
+      setPending((prev) => [...prev, optimistic]);
+
+      // Hide the draft card immediately for snappy UX — the server is
+      // about to mark it SENT_AS_MASTER anyway.
+      setPhase((prev) => {
+        if (prev.kind !== "ready") return prev;
+        return {
+          kind: "ready",
+          data: {
+            ...prev.data,
+            ai_draft: { draft_id: null, content: null, created_at: null },
+          },
+        };
+      });
+
+      try {
+        const result = await sendDraftAsMaster(conversationId, draftId);
+        setPhase((prev) => {
+          if (prev.kind !== "ready") return prev;
+          const newMessage: ConversationMessage = {
+            message_id: result.message_id,
+            role: "assistant",
+            content: result.content,
+            sent_at: result.sent_at || new Date().toISOString(),
+            composed_by_master: true,
+            composed_by_master_id: null,
+          };
+          return {
+            kind: "ready",
+            data: {
+              ...prev.data,
+              messages: [...prev.data.messages, newMessage],
+            },
+          };
+        });
+        setPending((prev) => prev.filter((p) => p.tempId !== tempId));
+        setToast({ visible: true, message: COPY.toastDraftSent });
+      } catch (err) {
+        hapticNotify("error");
+        setPending((prev) => prev.filter((p) => p.tempId !== tempId));
+        if (
+          err instanceof ApiError &&
+          err.status === 400 &&
+          err.slug === "draft_already_acted"
+        ) {
+          setToast({
+            visible: true,
+            message: COPY.toastDraftAlreadyActed,
+          });
+          void load();
+          return;
+        }
+        if (err instanceof ApiError && err.status === 403) {
+          setToast({ visible: true, message: COPY.toastTierLocked });
+          void load();
+          return;
+        }
+        if (err instanceof ApiError && err.status === 404) {
+          navigate("/master/conversations", {
+            replace: true,
+            state: { permissionCliff: true },
+          });
+          return;
+        }
+        // Generic — restore the card so the master can retry.
+        void load();
+      }
     },
-    [onSend],
+    [conversationId, load, navigate],
   );
 
-  const onEditDraft = useCallback((content: string): void => {
-    setComposeValue(content);
-    // Defer focus to the next tick — React needs to flush the value
-    // before the textarea is ready to take selection.
-    window.setTimeout(() => {
-      composeRef.current?.focus();
-      composeRef.current?.setSelectionRange(content.length, content.length);
-      composeRef.current?.scrollIntoView({ block: "center" });
-    }, 0);
+  /**
+   * «Отредактировать» — close the draft card, prefill the existing
+   * compose textarea with the draft text, remember which draft we're
+   * consuming so the next send routes through send-as-me with
+   * `override_content`. Reuses the existing compose box (per spec —
+   * simpler UX than a separate editor).
+   */
+  const onEditDraft = useCallback(
+    (draftId: string, content: string): void => {
+      hapticSelection();
+      setActiveDraftId(draftId);
+      setComposeValue(content);
+      // Hide the draft card so the master sees the compose box as the
+      // single point of interaction. The card returns naturally if they
+      // back out without sending — `activeDraftId` keeps the draft id
+      // pinned until either send completes OR the screen unmounts.
+      setPhase((prev) => {
+        if (prev.kind !== "ready") return prev;
+        return {
+          kind: "ready",
+          data: {
+            ...prev.data,
+            ai_draft: { draft_id: null, content: null, created_at: null },
+          },
+        };
+      });
+      // Defer focus to the next tick — React needs to flush the value
+      // before the textarea is ready to take selection.
+      window.setTimeout(() => {
+        composeRef.current?.focus();
+        composeRef.current?.setSelectionRange(content.length, content.length);
+        composeRef.current?.scrollIntoView({ block: "center" });
+      }, 0);
+    },
+    [],
+  );
+
+  /**
+   * «Пусть помощник ответит» — open the confirm sheet. Actual release
+   * fires in `onConfirmReleaseToAi` after the master taps Да.
+   */
+  const onAskReleaseDraftToAi = useCallback((): void => {
+    hapticSelection();
+    setReleaseConfirmOpen(true);
   }, []);
 
-  const onReleaseDraftToAi = useCallback((): void => {
-    // Not implemented backend-side — show a toast so the tap isn't a
-    // black hole. Documented in PR body as deferred.
-    setToast({ visible: true, message: COPY.toastReleaseAiSoon });
-  }, []);
+  /**
+   * Confirm sheet «Да» path. POSTs release-to-ai. The customer-facing
+   * message renders without master attribution (per §M6 single-identity
+   * policy). Audit log still records who released it.
+   */
+  const onConfirmReleaseToAi = useCallback(
+    async (draftId: string): Promise<void> => {
+      hapticImpact("heavy");
+      setReleaseSubmitting(true);
+      try {
+        const result = await releaseDraftToAi(conversationId, draftId);
+        setPhase((prev) => {
+          if (prev.kind !== "ready") return prev;
+          const newMessage: ConversationMessage = {
+            message_id: result.message_id,
+            role: "assistant",
+            content: result.content,
+            sent_at: result.sent_at || new Date().toISOString(),
+            // No master attribution — backend created a plain assistant
+            // message. The «вы» chip won't render for this one.
+            composed_by_master: false,
+            composed_by_master_id: null,
+          };
+          return {
+            kind: "ready",
+            data: {
+              ...prev.data,
+              ai_draft: { draft_id: null, content: null, created_at: null },
+              messages: [...prev.data.messages, newMessage],
+            },
+          };
+        });
+        setReleaseConfirmOpen(false);
+        setToast({ visible: true, message: COPY.toastDraftReleased });
+      } catch (err) {
+        hapticNotify("error");
+        if (
+          err instanceof ApiError &&
+          err.status === 400 &&
+          err.slug === "draft_already_acted"
+        ) {
+          setReleaseConfirmOpen(false);
+          setToast({
+            visible: true,
+            message: COPY.toastDraftAlreadyActed,
+          });
+          void load();
+          return;
+        }
+        if (err instanceof ApiError && err.status === 403) {
+          setReleaseConfirmOpen(false);
+          setToast({ visible: true, message: COPY.toastTierLocked });
+          void load();
+          return;
+        }
+        // Generic — keep sheet open so the master can retry.
+        const detail =
+          err instanceof ApiError ? err.detail : "Не получилось";
+        setToast({ visible: true, message: detail });
+      } finally {
+        setReleaseSubmitting(false);
+      }
+    },
+    [conversationId, load],
+  );
+
+  /**
+   * «✨ Предложить ответ» — manual trigger. Auto-trigger on inbound is
+   * deferred (needs Celery + rate limiting per Bundle B scope). The
+   * master taps this button when they want the LLM to draft something
+   * for them.
+   *
+   * 503 surfaces as an inline error message + retry. Other failures
+   * fall through to a toast (the screen is functional even without a
+   * draft).
+   */
+  const onGenerateDraft = useCallback(async (): Promise<void> => {
+    if (generating) return;
+    hapticSelection();
+    setGenerating(true);
+    setGenerateError(null);
+    try {
+      const payload = await generateDraft(conversationId);
+      hapticNotify("success");
+      setPhase((prev) => {
+        if (prev.kind !== "ready") return prev;
+        return {
+          kind: "ready",
+          data: {
+            ...prev.data,
+            ai_draft: {
+              draft_id: payload.draft_id,
+              content: payload.content,
+              created_at: payload.created_at,
+            },
+          },
+        };
+      });
+    } catch (err) {
+      hapticNotify("error");
+      if (err instanceof ApiError && err.status === 503) {
+        setGenerateError(COPY.draftErrorUnavailable);
+        return;
+      }
+      if (err instanceof ApiError && err.status === 400) {
+        // conversation_locked or other 400 — refresh to pick up state.
+        void load();
+        return;
+      }
+      if (err instanceof ApiError && err.status === 404) {
+        navigate("/master/conversations", {
+          replace: true,
+          state: { permissionCliff: true },
+        });
+        return;
+      }
+      setGenerateError(COPY.draftErrorUnavailable);
+    } finally {
+      setGenerating(false);
+    }
+  }, [conversationId, generating, load, navigate]);
 
   // --- Stubs for HUMAN_LOCKED footer actions -------------------------
 
@@ -498,6 +828,25 @@ export function MasterConversationDetailScreen() {
 
   const { data } = phase;
   const isLocked = data.tier === "human_locked";
+  const draftId = data.ai_draft?.draft_id ?? null;
+  const draftContent = data.ai_draft?.content ?? null;
+  const hasActiveDraft = !isLocked && !!draftId && !!draftContent;
+
+  // The «Предложить ответ» trigger appears when no ACTIVE draft is in
+  // play AND the last message is from the customer (USER role). Backend
+  // doesn't auto-trigger per Bundle B scope — this is the master's
+  // explicit «draft me a reply» entry point.
+  const lastMessage =
+    data.messages.length > 0
+      ? data.messages[data.messages.length - 1]
+      : null;
+  const lastIsCustomer = lastMessage?.role === "user";
+  const showDraftTrigger =
+    !isLocked &&
+    !hasActiveDraft &&
+    !activeDraftId &&
+    lastIsCustomer &&
+    data.permissions.can_compose;
 
   return (
     <div className="master-dashboard m6-screen">
@@ -522,12 +871,21 @@ export function MasterConversationDetailScreen() {
         endRef={messageListEndRef}
         onRetryPending={onRetryPending}
       />
-      {!isLocked && data.ai_draft?.content ? (
+      {hasActiveDraft ? (
         <AiDraftCard
-          content={data.ai_draft.content}
-          onAccept={() => void onAcceptDraft(data.ai_draft.content ?? "")}
-          onEdit={() => onEditDraft(data.ai_draft.content ?? "")}
-          onRelease={onReleaseDraftToAi}
+          content={draftContent!}
+          onAccept={() =>
+            void onSendDraftAsMe(draftId!, draftContent!)
+          }
+          onEdit={() => onEditDraft(draftId!, draftContent!)}
+          onRelease={onAskReleaseDraftToAi}
+        />
+      ) : null}
+      {showDraftTrigger ? (
+        <DraftTriggerRow
+          generating={generating}
+          errorMessage={generateError}
+          onGenerate={() => void onGenerateDraft()}
         />
       ) : null}
       {isLocked ? (
@@ -551,6 +909,16 @@ export function MasterConversationDetailScreen() {
           onClose={() => setPromoteOpen(false)}
           onConfirm={onPromote}
           submitting={promoteSubmitting}
+        />
+      ) : null}
+      {releaseConfirmOpen && (draftId || activeDraftId) ? (
+        <ReleaseConfirmSheet
+          onClose={() => setReleaseConfirmOpen(false)}
+          onConfirm={() => {
+            const id = draftId ?? activeDraftId;
+            if (id) void onConfirmReleaseToAi(id);
+          }}
+          submitting={releaseSubmitting}
         />
       ) : null}
       <Snackbar
@@ -833,34 +1201,139 @@ function AiDraftCard(props: {
   onEdit: () => void;
   onRelease: () => void;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <section className="m6-draft-card" aria-label={COPY.draftCardTitle}>
-      <div className="m6-draft-card__title">{COPY.draftCardTitle}</div>
-      <p className="m6-draft-card__content">«{props.content}»</p>
-      <div className="m6-draft-card__actions">
+      <button
+        type="button"
+        className="m6-draft-card__title"
+        onClick={() => setCollapsed((c) => !c)}
+        aria-expanded={!collapsed}
+      >
+        <span>{COPY.draftCardTitle}</span>
+        <span aria-hidden="true">{collapsed ? "▾" : "▴"}</span>
+      </button>
+      {collapsed ? null : (
+        <>
+          <p className="m6-draft-card__content">«{props.content}»</p>
+          <div className="m6-draft-card__actions">
+            <button
+              type="button"
+              className="m6-btn-primary"
+              onClick={props.onAccept}
+            >
+              {COPY.draftSendAsMe}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={props.onEdit}
+            >
+              {COPY.draftEdit}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={props.onRelease}
+            >
+              {COPY.draftReleaseToAi}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// --- «Предложить ответ» trigger row (no active draft + last inbound is customer) ---
+
+function DraftTriggerRow(props: {
+  generating: boolean;
+  errorMessage: string | null;
+  onGenerate: () => void;
+}) {
+  if (props.errorMessage) {
+    return (
+      <div className="m6-draft-trigger m6-draft-trigger--error" role="alert">
+        <span className="m6-draft-trigger__error-text">
+          {props.errorMessage}
+        </span>
         <button
           type="button"
-          className="m6-btn-primary"
-          onClick={props.onAccept}
+          className="btn-secondary m6-draft-trigger__retry"
+          onClick={props.onGenerate}
+          disabled={props.generating}
         >
-          {COPY.draftSendAsMe}
-        </button>
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={props.onEdit}
-        >
-          {COPY.draftEdit}
-        </button>
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={props.onRelease}
-        >
-          {COPY.draftReleaseToAi}
+          {COPY.draftErrorRetry}
         </button>
       </div>
-    </section>
+    );
+  }
+  if (props.generating) {
+    return (
+      <div
+        className="m6-draft-trigger m6-draft-trigger--thinking"
+        aria-live="polite"
+      >
+        <span className="m6-draft-trigger__pulse">{COPY.draftThinking}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="m6-draft-trigger">
+      <button
+        type="button"
+        className="btn-secondary m6-draft-trigger__cta"
+        onClick={props.onGenerate}
+      >
+        {COPY.draftTrigger}
+      </button>
+    </div>
+  );
+}
+
+// --- Release-to-AI confirm sheet ----------------------------------------
+
+function ReleaseConfirmSheet(props: {
+  onClose: () => void;
+  onConfirm: () => void;
+  submitting: boolean;
+}) {
+  return (
+    <div
+      className="m6-sheet-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={COPY.releaseConfirmTitle}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !props.submitting) {
+          props.onClose();
+        }
+      }}
+    >
+      <div className="m6-sheet">
+        <h2 className="m6-sheet__title">{COPY.releaseConfirmTitle}</h2>
+        <p className="m6-sheet__blurb">{COPY.releaseConfirmBlurb}</p>
+        <div className="m6-sheet__actions">
+          <button
+            type="button"
+            className="m6-btn-primary"
+            onClick={props.onConfirm}
+            disabled={props.submitting}
+          >
+            {COPY.releaseConfirmYes}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={props.onClose}
+            disabled={props.submitting}
+          >
+            {COPY.releaseConfirmCancel}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

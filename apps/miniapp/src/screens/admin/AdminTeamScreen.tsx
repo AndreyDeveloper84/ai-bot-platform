@@ -22,6 +22,7 @@ import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
 import { ApiError } from "../../lib/api";
 import {
+  getAvailabilityRequests,
   listMasters,
   reactivateMaster,
   type MasterListItem,
@@ -72,11 +73,34 @@ export function AdminTeamScreen({ me }: Props) {
   const [reactivating, setReactivating] = useState<boolean>(false);
   // Snackbar toast queue.
   const [toast, setToast] = useState<string>("");
+  // M3-admin (Bundle B) — pending availability-requests badge on the
+  // root nav card. Best-effort fetch; failure is silent and the card
+  // hides the count rather than blocking the team screen.
+  const [pendingAvailabilityCount, setPendingAvailabilityCount] =
+    useState<number>(0);
 
   useEffect(() => {
     // Tab bar is at the root — hide MAX BackButton on the team screen.
     setBackButton(false);
   }, []);
+
+  useEffect(() => {
+    if (!(me.is_owner || me.is_admin)) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const res = await getAvailabilityRequests(
+          { status: "pending", limit: 50 },
+          { signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
+        setPendingAvailabilityCount(res.items.length);
+      } catch {
+        // Silent — the card still renders without the badge.
+      }
+    })();
+    return () => controller.abort();
+  }, [me.is_admin, me.is_owner]);
 
   // Polish item (a) from PR #498 review — 300ms debounce on search +
   // AbortController to cancel in-flight requests when input changes.
@@ -299,6 +323,52 @@ export function AdminTeamScreen({ me }: Props) {
           className="admin-search-input"
         />
       </div>
+
+      {(me.is_owner || me.is_admin) && (
+        <button
+          type="button"
+          className="master-card"
+          style={{
+            width: "100%",
+            marginBottom: "var(--s-3)",
+            textAlign: "start",
+          }}
+          onClick={() => {
+            hapticSelection();
+            navigate("/admin/availability-requests");
+          }}
+          aria-label="Запросы на смену графика"
+        >
+          <span
+            className="master-card__avatar"
+            style={{ background: "var(--c-surface-2)" }}
+            aria-hidden="true"
+          >
+            📅
+          </span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span className="master-card__name">
+              Запросы на смену графика
+            </span>
+            <span
+              className="master-card__spec"
+              style={{ display: "block" }}
+            >
+              {pendingAvailabilityCount > 0
+                ? `${pendingAvailabilityCount} ожидают решения`
+                : "Все запросы рассмотрены"}
+            </span>
+          </span>
+          {pendingAvailabilityCount > 0 && (
+            <span
+              className="admin-count-chip"
+              aria-label={`ожидают: ${pendingAvailabilityCount}`}
+            >
+              {pendingAvailabilityCount}
+            </span>
+          )}
+        </button>
+      )}
 
       {loading && items === null && (
         <div className="callout" role="status">

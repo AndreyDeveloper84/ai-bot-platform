@@ -122,42 +122,88 @@ When the pre-flip checklist below is satisfied:
 - [ ] At least 7 consecutive days of `worker.tenant_required_missing`
       events triaged — zero legitimate handlers in the list.
 - [ ] All registered `TenantAwareTask` subclasses audited for their
-      effective `requires_tenant` value. Boot-audit logging tracked
-      in **issue #502** (B2 nice-to-have); until it lands, audit via
-      `grep -rn 'class.*TenantAwareTask' apps/` + manual review.
+      effective `requires_tenant` value. **Issue #502 shipped 2026-05-22**
+      — query the latest `worker.subscriber_audit` event for the live
+      inventory instead of `grep`:
+
+      ```python
+      from apps.events.models import Event
+      latest = Event.objects.filter(
+          event_type="worker.subscriber_audit"
+      ).latest("created_at")
+      for h in latest.payload["handlers"]:
+          print(h["stream"], h["handler_class"], h["requires_tenant"])
+      ```
+
+      Verify (a) MaxHandler is present with `requires_tenant=True`,
+      (b) no unexpected handlers with `requires_tenant=False` outside
+      the documented opt-out list, (c) MRO chain on each handler
+      doesn't show external-mixin shadowing.
 - [x] **Issue #499 (XAUTOCLAIM reaper) merged** — see §«Automatic DLQ»
       above. Opt-in via `PEL_REAPER_ENABLED`; flip alongside
       `STRICT_TENANT_REFUSE` so DLQ drain is active from the first
       strict-mode refusal.
-- [ ] **Issue #500** (D-2 operator-side ceilings: PEL length alert,
-      per-handler rate budget, audit-table baseline + growth alert,
-      alert dedup) — all 4 items checked off.
+- [ ] **Issue #500** (D-2 operator-side ceilings) — HARD GATE.
+      Tech-lead directive 2026-05-22: do NOT flip until all 4
+      ceilings below are wired (see «HARD GATE» section).
+      Specific thresholds: PEL alert warn N=1000 / page N=5000;
+      handler rate budget ≤100/min; audit table 2× baseline alert;
+      alert dedup on `(handler, hour)`.
 - [ ] At flip time: `PEL_REAPER_ENABLED=true` set in
       `/etc/ai-bot-platform/.env` alongside `STRICT_TENANT_REFUSE=true`
       (same worker restart picks both up).
 - [ ] Dev-team comms about the **worker-restart-required** flip
       semantics so nobody thinks the env-var flip is hot.
 
-### Adversarial-pass D-2 — operational ceilings (must be wired)
+### ⚠ HARD GATE — D-2 operational ceilings (issue #500)
 
-Without these, strict mode + a misbehaving ingress = unbounded
-PEL growth + unbounded audit-table growth + alert flood.
+Tech-lead directive 2026-05-22: **`STRICT_TENANT_REFUSE=true` MUST NOT
+be flipped until ALL 4 ceilings below are wired and verified.** This
+is not advisory — it's a pre-flip blocker. XAUTOCLAIM reaper (#499 —
+merged) and observability dashboard are separate, do NOT satisfy this
+gate.
 
-- [ ] **PEL length alert at N=1000.** `redis-cli XPENDING ingress:max
-      consumers IDLE 0` returns count; wire to monitoring with a 1000
-      threshold (warning) and 5000 (page). Drain via XCLAIM /
-      manual-claim runbook (or XAUTOCLAIM reaper once it ships).
-- [ ] **`worker.tenant_required_missing` per-handler rate budget.**
-      Audit dedup OR rate-limit at the emit site. Single-handler
-      runaway must cap at ~100 events/minute to bound the audit
-      table growth. Stub today; track as follow-up.
-- [ ] **Audit-table size baseline.** Snapshot `apps_audit_event`
-      table size + index size pre-flip. Set an alert at 2× baseline
-      growth rate in the 24h post-flip window — that ratio surfaces
-      a runaway before the table doubles.
-- [ ] **Alert suppression / dedup wired.** Any `worker.tenant_required_missing`
-      alert MUST dedup on `(handler, hour)` so a single bad ingress
-      doesn't flood the on-call page.
+Without these, strict mode + a misbehaving ingress = unbounded PEL
+growth + unbounded audit-table growth + alert flood. The 4 items:
+
+1. **PEL length alert** — `redis-cli XPENDING ingress:max consumers
+   IDLE 0` returns count; wire to monitoring with:
+   - **Warning at N=1000**
+   - **Page at N=5000**
+   Drain via XAUTOCLAIM reaper (already shipped in #499) or operator
+   XCLAIM if reaper is also paused.
+
+2. **`worker.tenant_required_missing` per-handler rate budget** —
+   single-handler runaway must cap at **~100 events/minute**. Two
+   acceptable implementations: audit-side dedup OR rate-limit at the
+   emit site. Either bounds the audit table growth under a misbehaving
+   ingress.
+
+3. **Audit-table size baseline** — snapshot
+   `apps_audit_event` row count + index size **before flip**. Set
+   alert at **2× baseline growth rate** in the 24h post-flip window.
+   The 2× ratio surfaces a runaway before the table doubles.
+
+4. **Alert suppression / dedup** — every `worker.tenant_required_missing`
+   alert MUST dedup on **`(handler, hour)`**. One misbehaving
+   ingress firing 5000/h must produce ≤1 page per handler per hour,
+   not 5000.
+
+### Operator checklist
+
+- [ ] (1) PEL length alert: warning N=1000, page N=5000 — wired in
+      monitoring + verified by manual XPENDING bump.
+- [ ] (2) Per-handler rate budget: 100 events/minute cap — wired
+      (audit dedup OR emit-site rate-limit) + verified with synthetic
+      load test.
+- [ ] (3) Audit baseline: row count + index size snapshot recorded
+      in `docs/runbooks/strict-tenant-refuse-flip-baseline.md` (TBD)
+      + 2× growth alert wired.
+- [ ] (4) Alert dedup on `(handler, hour)` — wired in monitoring
+      + verified by synthetic burst.
+
+Only after all 4 boxes are checked may the operator proceed with the
+flip sequence above.
 
 ## STRICT_TENANT_REFUSE × STRICT_TENANT_SCOPE coupling
 
