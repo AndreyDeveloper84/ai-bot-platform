@@ -55,6 +55,36 @@ _DEFAULT_RATE_LIMIT = 100
 # rotation boundaries and the audit-table baseline growth alert window.
 _WINDOW_TTL_SECONDS = 3600
 
+# Dedup window for the fail-open WARNING logs (`redis_unavailable` /
+# `incr_failed`). Code Reviewer §H.3 follow-up on PR #528: without
+# this dedup, a sustained Redis outage logs WARNING at the full emit
+# rate (every consumed entry). 60s window keeps the signal visible
+# in the operator log without flooding.
+_FAIL_OPEN_LOG_DEDUP_SECONDS = 60.0
+
+# Module-level last-logged timestamps per log-event key. Per-process
+# state — workers don't share. Acceptable: each worker independently
+# rate-limits its own log spam; aggregate log volume scales with
+# worker count, not emit rate.
+_last_fail_open_log_at: dict[str, float] = {}
+
+
+def _should_log_fail_open(key: str) -> bool:
+    """Return True if a fail-open WARNING for ``key`` should fire.
+
+    Dedups module-locally on a 60-second sliding window. The first call
+    after a quiet period returns True; subsequent calls within the
+    window return False. State is per-worker-process — restart resets
+    the dedup, which is the right behaviour (we WANT a fresh signal
+    after a restart confirms Redis is still down).
+    """
+    now = time.monotonic()
+    last = _last_fail_open_log_at.get(key, 0.0)
+    if now - last >= _FAIL_OPEN_LOG_DEDUP_SECONDS:
+        _last_fail_open_log_at[key] = now
+        return True
+    return False
+
 
 def should_emit_tenant_missing(handler_name: str) -> bool:
     """Return True if a ``worker.tenant_required_missing`` emit should fire.
@@ -96,11 +126,14 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
 
         redis = _client()
     except Exception as exc:  # noqa: BLE001
-        # Fail-open: log once and let the emit proceed.
-        logger.warning(
-            "workers.ceilings.redis_unavailable err=%s — emit allowed (fail-open)",
-            exc,
-        )
+        # Fail-open: log (deduped, 60s window) and let the emit proceed.
+        # Without dedup a sustained Redis outage would flood the worker
+        # log at the full emit rate. Code Reviewer §H.3 follow-up PR #528.
+        if _should_log_fail_open("redis_unavailable"):
+            logger.warning(
+                "workers.ceilings.redis_unavailable err=%s — emit allowed (fail-open)",
+                exc,
+            )
         return True
 
     hour_bucket = int(time.time()) // _WINDOW_TTL_SECONDS
@@ -124,11 +157,13 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
         # Caught by Code Reviewer adversarial pass on PR #528 / #500.
         redis.expire(key, _WINDOW_TTL_SECONDS)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "workers.ceilings.incr_failed handler=%s err=%s — emit allowed (fail-open)",
-            handler_name,
-            exc,
-        )
+        # Deduped (60s window) — see _should_log_fail_open rationale.
+        if _should_log_fail_open(f"incr_failed:{handler_name}"):
+            logger.warning(
+                "workers.ceilings.incr_failed handler=%s err=%s — emit allowed (fail-open)",
+                handler_name,
+                exc,
+            )
         return True
 
     if count > limit:

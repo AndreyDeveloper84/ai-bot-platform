@@ -156,6 +156,20 @@ class TestDisableEscapeHatch:
 
 
 class TestFailOpen:
+    @pytest.fixture(autouse=True)
+    def _reset_dedup_state(self):
+        """Each test starts with a clean fail-open dedup map.
+
+        Module-level _last_fail_open_log_at persists across test cases;
+        without this reset a later test sees the prior test's WARNING
+        suppressed by the 60s dedup window.
+        """
+        from apps.workers import ceilings
+
+        ceilings._last_fail_open_log_at.clear()
+        yield
+        ceilings._last_fail_open_log_at.clear()
+
     def test_redis_client_raises_returns_true(self, settings, monkeypatch, caplog):
         """If the Redis client construction itself blows up, ceiling is
         bypassed — telemetry is observability, not the critical path."""
@@ -179,3 +193,81 @@ class TestFailOpen:
         with caplog.at_level(logging.WARNING, logger="apps.workers.ceilings"):
             assert should_emit_tenant_missing("MaxHandler") is True
             assert any("incr_failed" in rec.message for rec in caplog.records)
+
+
+class TestFailOpenLogDedup:
+    """The fail-open WARNING logs must dedup on a 60s window so a sustained
+    Redis outage doesn't flood the worker log at the full emit rate.
+    Code Reviewer §H.3 follow-up on PR #528 (#500)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_dedup_state(self):
+        from apps.workers import ceilings
+
+        ceilings._last_fail_open_log_at.clear()
+        yield
+        ceilings._last_fail_open_log_at.clear()
+
+    def test_redis_unavailable_logged_once_per_window(self, settings, monkeypatch, caplog):
+        """100 calls during a Redis outage → exactly ONE WARNING line."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+
+        def _raise() -> None:
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr("apps.ingress.streams._client", _raise)
+        with caplog.at_level(logging.WARNING, logger="apps.workers.ceilings"):
+            for _ in range(100):
+                should_emit_tenant_missing("MaxHandler")
+        unavailable_lines = [r for r in caplog.records if "redis_unavailable" in r.message]
+        assert len(unavailable_lines) == 1
+
+    def test_incr_failed_deduped_per_handler(self, settings, monkeypatch, caplog):
+        """Different handlers get independent dedup keys — one floods,
+        the other still gets its first WARNING through."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        broken = MagicMock()
+        broken.incr.side_effect = RuntimeError("INCR boom")
+        monkeypatch.setattr("apps.ingress.streams._client", lambda: broken)
+
+        with caplog.at_level(logging.WARNING, logger="apps.workers.ceilings"):
+            for _ in range(10):
+                should_emit_tenant_missing("MaxHandler")
+            for _ in range(10):
+                should_emit_tenant_missing("TelegramHandler")
+
+        max_warns = [
+            r for r in caplog.records if "incr_failed" in r.message and "MaxHandler" in r.message
+        ]
+        tg_warns = [
+            r
+            for r in caplog.records
+            if "incr_failed" in r.message and "TelegramHandler" in r.message
+        ]
+        assert len(max_warns) == 1
+        assert len(tg_warns) == 1
+
+    def test_dedup_window_releases_after_elapsed_time(self, settings, monkeypatch, caplog):
+        """After the 60s window elapses, the next call logs again."""
+        from apps.workers import ceilings
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+
+        def _raise() -> None:
+            raise RuntimeError("down")
+
+        monkeypatch.setattr("apps.ingress.streams._client", _raise)
+
+        # Freeze monotonic to a controllable value.
+        fake_time = [1000.0]
+        monkeypatch.setattr(ceilings.time, "monotonic", lambda: fake_time[0])
+
+        with caplog.at_level(logging.WARNING, logger="apps.workers.ceilings"):
+            should_emit_tenant_missing("MaxHandler")  # log #1
+            fake_time[0] += 30.0  # still within window
+            should_emit_tenant_missing("MaxHandler")  # suppressed
+            fake_time[0] += 31.0  # past 60s window (now at +61s)
+            should_emit_tenant_missing("MaxHandler")  # log #2
+
+        unavailable_lines = [r for r in caplog.records if "redis_unavailable" in r.message]
+        assert len(unavailable_lines) == 2

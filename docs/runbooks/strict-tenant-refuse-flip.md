@@ -156,6 +156,9 @@ PEL growth + unbounded audit-table growth + alert flood.
       via `WORKER_TENANT_MISSING_RATE_LIMIT`. Set to 0 to disable
       (diagnostic escape hatch). One WARNING fires when the ceiling
       first triggers each window (grep `tenant_missing_rate_exceeded`).
+      Fail-open WARNING logs (`redis_unavailable` / `incr_failed`) are
+      deduped on a 60-second per-worker window — a sustained Redis
+      outage logs once per minute per worker rather than once per emit.
 - [x] **Audit-table size baseline.** Shipped: `python manage.py
       audit_table_baseline --format json` captures row count + total
       / heap / index sizes for `apps_audit_event`. Operator runs once
