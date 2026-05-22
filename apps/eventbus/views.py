@@ -34,6 +34,8 @@ from apps.eventbus.ingest_envelope import (
     IngestEnvelopeError,
     parse_envelope,
 )
+from apps.eventbus.ingest_ip import get_remote_ip
+from apps.eventbus.ingest_rate_audit_sampler import should_audit_rate_limited
 from apps.eventbus.ingest_security import (
     signature_header_from,
     timestamp_header_from,
@@ -76,6 +78,23 @@ AUDIT_RATE_LIMITED = "eventbus.ingest.rate_limited"
 _RATE_LIMIT_DEFAULT = "100/m"
 
 
+def _rate_limit_key(group, request) -> str:
+    """Proxy-aware rate-limit key — Round-2 AS1.
+
+    django-ratelimit's built-in ``key='ip'`` reads ``REMOTE_ADDR``,
+    which behind any reverse proxy is the proxy's IP — collapsing all
+    Ayla traffic into a single bucket. :func:`get_remote_ip` walks
+    ``X-Real-IP`` → trusted ``X-Forwarded-For`` chain → ``REMOTE_ADDR``,
+    using the proxy-trust depth from
+    ``settings.EVENT_INGEST_TRUSTED_PROXY_DEPTH``.
+
+    Empty string ⇒ no source identifiable ⇒ single bucket for the
+    «unknown» surface — bounded but loud (deliberately conservative
+    until ops sets up proxy headers).
+    """
+    return get_remote_ip(request) or "_unknown_"
+
+
 @method_decorator(csrf_exempt, name="dispatch")
 class InternalEventsIngestView(View):
     """``POST /api/v1/internal/events/ingest`` — Ayla → bot-platform ingress.
@@ -101,7 +120,8 @@ class InternalEventsIngestView(View):
 
     @method_decorator(
         ratelimit(
-            key="ip",
+            # AS1 — proxy-aware key. See :func:`_rate_limit_key`.
+            key=_rate_limit_key,
             # Rate is read from settings at request time via the lambda
             # form so deploys can tune without a code change.
             rate=lambda group, request: getattr(
@@ -114,26 +134,32 @@ class InternalEventsIngestView(View):
     def post(self, request: HttpRequest) -> JsonResponse:
         body = request.body or b""
 
-        # ── 0. Rate limit gate (§A2) ───────────────────────────────────
+        # ── 0. Rate limit gate (§A2 + Round-2 AS1/AS3) ─────────────────
         # django_ratelimit sets request.limited=True when the per-IP
         # bucket is exhausted (`block=False` form). We return 429 with
-        # a JSON body + audit row. Ayla treats 4xx as non-retryable
-        # per §6.3 — if the publisher hits this it's misbehaving (or
-        # under attack) and should back off.
+        # a JSON body. Audit writes are SAMPLED on this path (Round-2
+        # AS3) — without sampling a scanner without HMAC would
+        # generate unbounded AuditLog rows = unauthenticated DoS
+        # amplifier on the audit table.
         if getattr(request, "limited", False):
+            remote_ip = get_remote_ip(request) or "_unknown_"
             logger.warning(
                 "eventbus.ingest.rate_limited remote=%s body_bytes=%d",
-                request.META.get("REMOTE_ADDR") or "",
+                remote_ip,
                 len(body),
             )
-            write_audit(
-                action=AUDIT_RATE_LIMITED,
-                target="eventbus.ingest",
-                payload={
-                    "remote_ip": request.META.get("REMOTE_ADDR") or "",
-                    "body_bytes": len(body),
-                },
-            )
+            # AS3 — 1 audit row per IP per 60s window. Suppressed
+            # rows still count via Prometheus / ratelimit counters;
+            # audit captures the forensic «first hit» only.
+            if should_audit_rate_limited(remote_ip):
+                write_audit(
+                    action=AUDIT_RATE_LIMITED,
+                    target="eventbus.ingest",
+                    payload={
+                        "remote_ip": remote_ip,
+                        "body_bytes": len(body),
+                    },
+                )
             return JsonResponse(
                 {"status": "rate_limited", "reason": "rate_limit_exceeded"},
                 status=429,
