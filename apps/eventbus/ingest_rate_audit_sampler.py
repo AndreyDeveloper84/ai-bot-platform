@@ -121,16 +121,6 @@ def should_audit_saturated(remote_ip: str) -> bool:
     return _should_audit("saturated", remote_ip)
 
 
-def should_audit_tenant_fail_open(composite_key: str) -> bool:
-    """Legacy alias — see :func:`should_emit_tenant_fail_open_audit`.
-
-    Kept callable for any caller that didn't migrate. Delegates to
-    the threshold-based ladder.
-    """
-    # Use a no-op count probe; threshold logic happens in the ladder.
-    return True
-
-
 # Round-4 R3-2 — threshold-emit ladder. The previous round-3 "sampled
 # at 1/min/composite" defeated the forensic purpose: emit happened on
 # call #1 with count_in_window=1, the next 999 calls only incremented
@@ -172,9 +162,13 @@ def increment_tenant_fail_open_count(composite_key: str) -> int:
     """Atomic-ish increment of the per-window counter; return the new value.
 
     Round-4 R3-2 — the round-3 NEW-5 sampler suppressed 999/1000
-    fall-throughs from a single attacker. The audit row now carries
-    ``count_in_window`` reflecting the TRUE volume — 1000 events
-    produce 1 row with ``count_in_window=1000``.
+    fall-throughs from a single attacker. The ladder now emits one
+    row per threshold crossing — 1000 events produce 6 rows
+    {1, 10, 50, 100, 500, 1000} with the LAST row carrying
+    ``count_in_window=1000``. Operators read the volume curve from
+    the row sequence (count_in_window field IS the snapshot at emit
+    time; the counter does NOT reset between thresholds — it
+    decays only via the cache TTL after 90s of inactivity).
 
     Cache is Redis in prod; ``incr`` is atomic across workers. On
     cache failure we return 1 (caller still writes the row with at
@@ -201,17 +195,7 @@ def increment_tenant_fail_open_count(composite_key: str) -> int:
         return 1
 
 
-def read_and_reset_tenant_fail_open_count(composite_key: str) -> int:
-    """Read the current counter value + delete the key (one-shot read).
-
-    Called by the sampled audit-emit path so the next 60s window
-    starts fresh. Returns 0 if no counter exists (race or cache
-    failure).
-    """
-    key = _TENANT_FAIL_OPEN_COUNTER_PREFIX + composite_key
-    try:
-        value = cache.get(key) or 0
-        cache.delete(key)
-        return int(value)
-    except Exception:  # noqa: BLE001 — cache backend failure
-        return 0
+# read_and_reset_tenant_fail_open_count was removed (zero callers).
+# Counter decays via the cache TTL (window + 30s grace). If a future
+# round wants explicit per-window reset semantics, that's a follow-up
+# (see GH issue tracking R4-COMP-2).
