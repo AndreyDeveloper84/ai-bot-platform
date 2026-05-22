@@ -37,6 +37,28 @@ from apps.eventbus.ingest_timeout import (
 pytestmark = pytest.mark.real_timeout
 
 
+def _wait_for_inflight_drain(timeout_s: float = 3.0) -> None:
+    """Wait for the in-flight semaphore to drain to 0.
+
+    Tests that run concurrent / timed-out handlers leave the orphan-
+    tail draining in background threads. Without this, a downstream
+    test that asserts ``inflight_count() == 0`` at setup fails on
+    the leaked slots.
+    """
+    deadline = time.monotonic() + timeout_s
+    while inflight_count() != 0 and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+@pytest.fixture(autouse=True)
+def _drain_inflight_between_tests():
+    """Ensure clean inflight state at test start + give orphans time
+    to release at teardown."""
+    _wait_for_inflight_drain()
+    yield
+    _wait_for_inflight_drain()
+
+
 def _envelope(event_id: str = "01J9HXKM8Z2T4V6R8Q1P3D5F7E") -> IngestEnvelope:
     return IngestEnvelope(
         event_id=event_id,
