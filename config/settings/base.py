@@ -185,6 +185,31 @@ STRICT_TENANT_REFUSE = os.environ.get("STRICT_TENANT_REFUSE", "false").lower() =
 # window. Runbook: docs/runbooks/strict-tenant-refuse-flip.md (TBD).
 STRICT_TENANT_REFUSE_FLIP_AT = os.environ.get("STRICT_TENANT_REFUSE_FLIP_AT", "")
 
+# Issue #499 — XAUTOCLAIM-based PEL reaper.
+#
+# Drains the Redis Streams Pending Entries List (PEL) for every
+# registered ``ingress:*`` stream by claiming entries idle past
+# PEL_REAPER_IDLE_SECONDS via XAUTOCLAIM, classifying them, and
+# routing terminal entries to ``<stream>:dlq`` for operator triage.
+# See ``apps/workers/reaper.py`` + ``docs/runbooks/strict-tenant-refuse-flip.md``.
+#
+# Opt-in. The Celery beat task ``apps.workers.tasks.reap_pel`` is
+# scheduled below but no-ops while disabled — adding the schedule
+# entry is safe before flip.
+PEL_REAPER_ENABLED = os.environ.get("PEL_REAPER_ENABLED", "false").lower() == "true"
+
+# Minimum idle time before an entry is eligible for reaping.
+# Default 1h — long enough that a slow handler still in-flight on a
+# real workload isn't reaped out from under itself, short enough that
+# a strict-mode B4 refusal doesn't accumulate for a full day before
+# being moved to DLQ. Tunable per-env via env var.
+PEL_REAPER_IDLE_SECONDS = int(os.environ.get("PEL_REAPER_IDLE_SECONDS", "3600"))
+
+# Max entries claimed per beat tick (caps work per fire). Real Redis
+# handles much higher batches, but bounded here so a single tick can't
+# DoS the audit pipeline if 100K entries are stuck.
+PEL_REAPER_BATCH_SIZE = int(os.environ.get("PEL_REAPER_BATCH_SIZE", "100"))
+
 # Sprint 8 / F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip monitor armed.
 # Operator sets this to the ISO 8601 flip timestamp at the same moment
 # they roll STRICT_TENANT_SCOPE=strict in /etc/ai-bot-platform/.env.
@@ -503,6 +528,17 @@ CELERY_BEAT_SCHEDULE = {
         "task": "bookings.send_post_visit_followups",
         # 16:00 UTC = 19:00 МСК (UTC+3, Russia does not observe DST).
         "schedule": crontab(hour="16", minute="0"),
+    },
+    # Issue #499 — PEL reaper. No-ops while PEL_REAPER_ENABLED=False
+    # (default). Operator flips the flag after the STRICT_TENANT_REFUSE
+    # log-only soak completes; this beat entry is here in advance so
+    # enabling the flag is a one-line config change with no further
+    # deploy. Every 5 min — tight enough that strict-mode refusals
+    # don't pile up past the PEL alert threshold (issue #500), sparse
+    # enough that the audit table isn't hammered.
+    "workers.reap_pel": {
+        "task": "apps.workers.tasks.reap_pel",
+        "schedule": crontab(minute="*/5"),
     },
 }
 

@@ -14,7 +14,7 @@ handlers behave when a Redis Streams entry arrives with empty / invalid
 | Mode | Value | Behaviour |
 |---|---|---|
 | Log-only (Phase 0 default) | `False` | Handler proceeds against `tenant_scope(None)`. ERROR logged. `worker.tenant_required_missing` event audited. Same effective behaviour as pre-B4 (handlers ran against phantom tenant) — just loud. |
-| Strict (post-soak) | `True` | Handler refuses to run. `TenantRequiredButMissing` raises. The consumer does not XACK; **the entry stays in the PEL**. No automatic DLQ. |
+| Strict (post-soak) | `True` | Handler refuses to run. `TenantRequiredButMissing` raises. The consumer does not XACK; entry stays in the PEL until the XAUTOCLAIM reaper (issue #499, opt-in via `PEL_REAPER_ENABLED`) routes it to `<stream>:dlq`. See §«Automatic DLQ» below. |
 
 ## ⚠ Flip requires worker restart
 
@@ -36,27 +36,51 @@ the same pattern as Sprint 8 / F2 `STRICT_TENANT_SCOPE` — operationally
 familiar but easy to miss for the B4 flag because the surrounding code
 LOOKS hot-reloadable (per-message read of `settings.X`).
 
-## ⚠ No automatic DLQ retry
+## Automatic DLQ — XAUTOCLAIM reaper (issue #499)
 
-There is **no XAUTOCLAIM-based reaper** in this codebase as of 2026-05-21.
-When strict mode rejects a tenant-required handler, the entry sits in
-the PEL indefinitely until operator intervention. XREADGROUP's `>` ID
-returns only NEW entries, so the rejected entry will not redeliver on
-its own.
+A periodic XAUTOCLAIM-based reaper runs every 5 minutes via Celery
+beat (`apps.workers.tasks.reap_pel`). It claims entries idle past
+`settings.PEL_REAPER_IDLE_SECONDS` (default 1h) and routes them out
+of the source-stream PEL:
 
-Operator-side options when an entry lands in the PEL:
+- **Source-stream entries** → `<stream>:dlq` (e.g. `ingress:max:dlq`)
+  with forensic headers (`_reaped_from`, `_reaped_entry_id`,
+  `_reaped_classification`). Source entry is XACK'd.
+- **Audit row** `worker.pel_reaped` per entry with `classification`
+  (`tenant_required_missing` for B4 strict-mode refusals,
+  `handler_failure` for tenant-known dispatch failures) and `decision`
+  (`terminal` today; `replay` reserved for future classifier hooks).
 
-1. `XCLAIM` the entry to a separate diagnostic consumer, decide if it
-   should be replayed (with a correctly-resolved `resolved_tenant_id`)
-   or dropped (XACK after manual decision).
-2. Wait for the planned XAUTOCLAIM reaper PR (follow-up issue, no
-   timeline yet) to automate stale-PEL drain.
+### Opt-in via `PEL_REAPER_ENABLED`
 
-The XAUTOCLAIM reaper is **out of scope** for the
-`phase0/zeta/476-blockers-pre-flip` PR. It is on the Phase 1 backlog
-and MUST be filed as a separate issue before the strict-mode flip if
-the planned manual-claim path is not acceptable for the chosen
-deployment.
+Default `False`. The beat task no-ops while disabled, so the schedule
+entry is safe to ship before the flip. Enable on the same env-var
+flip as `STRICT_TENANT_REFUSE`:
+
+```
+PEL_REAPER_ENABLED=true
+PEL_REAPER_IDLE_SECONDS=3600     # default 1h
+PEL_REAPER_BATCH_SIZE=100        # default — cap per-tick work
+```
+
+### Operator triage from the DLQ stream
+
+```bash
+# Inspect what's been reaped (last 10 entries in DLQ).
+redis-cli XREVRANGE ingress:max:dlq + - COUNT 10
+
+# Replay an entry after fixing ingress: re-XADD to source.
+redis-cli XADD ingress:max '*' \
+  data '{...original payload...}' \
+  trace_id '<original>' \
+  resolved_tenant_id '<corrected>'
+
+# Forget a terminal entry permanently.
+redis-cli XDEL ingress:max:dlq <entry_id>
+```
+
+The reaper never auto-replays — operator decides per entry. Auto-replay
+with the same payload would just re-fail at the dispatch layer.
 
 ## Flip sequence (operator)
 
@@ -101,12 +125,16 @@ When the pre-flip checklist below is satisfied:
       effective `requires_tenant` value. Boot-audit logging tracked
       in **issue #502** (B2 nice-to-have); until it lands, audit via
       `grep -rn 'class.*TenantAwareTask' apps/` + manual review.
-- [ ] **Issue #499** (XAUTOCLAIM reaper) merged OR operator accepts
-      manual-XCLAIM as the post-flip PEL drain path with a documented
-      runbook.
+- [x] **Issue #499 (XAUTOCLAIM reaper) merged** — see §«Automatic DLQ»
+      above. Opt-in via `PEL_REAPER_ENABLED`; flip alongside
+      `STRICT_TENANT_REFUSE` so DLQ drain is active from the first
+      strict-mode refusal.
 - [ ] **Issue #500** (D-2 operator-side ceilings: PEL length alert,
       per-handler rate budget, audit-table baseline + growth alert,
       alert dedup) — all 4 items checked off.
+- [ ] At flip time: `PEL_REAPER_ENABLED=true` set in
+      `/etc/ai-bot-platform/.env` alongside `STRICT_TENANT_REFUSE=true`
+      (same worker restart picks both up).
 - [ ] Dev-team comms about the **worker-restart-required** flip
       semantics so nobody thinks the env-var flip is hot.
 

@@ -1,68 +1,219 @@
-"""HTTP views for the internal events ingest channel.
+"""HTTP views for the cross-service events ingest channel.
 
-Phase 0 / #432 scaffold. One view today —
-:class:`InternalEventsIngestView` — returns 501 Not Implemented
-until Beta #441 (``docs/architecture/event-contract.md``) lands.
-The HMAC verifier skeleton lives in
-:mod:`apps.eventbus.middleware`; it is intentionally not wired
-into settings.MIDDLEWARE yet (a stub that silently 200s is worse
-than a stub that loudly 501s).
+`docs/architecture/event-contract.md` §6 + §8 — entry point for
+domain events published by Ayla djangoproject. Orchestrates:
 
-See ``docs/plans/2026-05-20-phase-0-parallel-agent-runbook.md``
-§Sync 4 for the unblocking condition. The dispatch handler that
-fans events to consumers (#442-#446) follows the contract doc.
+  1. HMAC + timestamp verification (:mod:`apps.eventbus.ingest_security`).
+  2. Envelope parsing + validation (:mod:`apps.eventbus.ingest_envelope`).
+  3. Handler dispatch with dedupe + DLQ (:mod:`apps.eventbus.ingest_dispatcher`).
+
+Each layer is decoupled so unit tests can exercise it in isolation;
+this module's responsibility is the HTTP-shaped boundary — mapping
+each layer's outcome to the §8 status taxonomy.
 """
 
 from __future__ import annotations
 
 import logging
 
+from django.conf import settings
 from django.http import HttpRequest, JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
+from apps.audit.services import write_audit
+from apps.eventbus.ingest_dispatcher import (
+    DispatchOutcome,
+    DispatchResult,
+    dispatch_envelope,
+)
+from apps.eventbus.ingest_envelope import (
+    IngestEnvelope,
+    IngestEnvelopeError,
+    parse_envelope,
+)
+from apps.eventbus.ingest_security import (
+    signature_header_from,
+    timestamp_header_from,
+    verify_signature,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
+# Audit slugs — single source of truth so test assertions and forensic
+# grep stay aligned across the failure taxonomy.
+AUDIT_SIGNATURE_FAILED = "eventbus.ingest.signature_failed"
+AUDIT_MALFORMED = "eventbus.ingest.malformed"
+AUDIT_UNKNOWN_EVENT_NAME = "eventbus.ingest.unknown_event_name"
+AUDIT_UNKNOWN_EVENT_VERSION = "eventbus.ingest.unknown_event_version"
+AUDIT_HANDLER_EXCEPTION = "eventbus.ingest.handler_exception"
+AUDIT_DUPLICATE = "eventbus.ingest.duplicate"
+AUDIT_PROCESSED = "eventbus.ingest.processed"
+
+
 @method_decorator(csrf_exempt, name="dispatch")
 class InternalEventsIngestView(View):
-    """``POST /api/v1/internal/events/ingest/`` — stub returning 501.
+    """``POST /api/v1/internal/events/ingest`` — Ayla → bot-platform ingress.
 
-    A publisher hitting this endpoint should NOT retry on 501 — it
-    means the channel is reserved but the contract is unfinalised.
-    The publisher should hold the event until the contract lands and
-    the handler is filled.
+    Status code mapping per `event-contract.md` §8:
 
-    The class-based view shape is chosen over a function so the
-    follow-up PR can layer per-event-name dispatch methods (``_handle_booking``,
-    ``_handle_payment``) without rewriting the call signature, and so
-    middleware introspection (e.g. typed test fixtures) can target
-    the class.
+    | Outcome                          | Status | Retry by Ayla? | DLQ?  |
+    |----------------------------------|--------|----------------|-------|
+    | Signature / timestamp fail       | 401    | No (§6.3)      | No    |
+    | Malformed JSON / missing field   | 400    | No             | No    |
+    | Unknown event_name               | 422    | No             | Yes   |
+    | Unknown event_version            | 422    | No             | Yes   |
+    | Handler raised                   | 500    | Yes (§6.3)     | No*   |
+    | Duplicate delivery (dedupe hit)  | 200    | n/a (§8.7)     | No    |
+    | OK                               | 200    | n/a            | No    |
+
+    *  Handler-exception DLQ happens at the publisher (Ayla) after
+       §6.3 retry budget exhaustion, not in this view. Each failed
+       attempt here surfaces as 500; Ayla counts the attempts.
     """
 
     http_method_names = ["post"]
 
     def post(self, request: HttpRequest) -> JsonResponse:
-        logger.info(
-            "eventbus.ingest.stub_hit content_length=%s",
-            request.META.get("CONTENT_LENGTH") or "0",
+        body = request.body or b""
+
+        # ── 1. HMAC + timestamp ────────────────────────────────────────
+        sig_result = verify_signature(
+            body=body,
+            signature_header=signature_header_from(request),
+            timestamp_header=timestamp_header_from(request),
+            secret=getattr(settings, "EVENT_INGEST_HMAC_SECRET", "") or "",
         )
-        response = JsonResponse(
-            {
-                "status": "not_implemented",
-                "reason": (
-                    "Event ingest channel reserved; handler awaits "
-                    "Beta #441 event-contract.md (Phase 0 Sync 4)."
-                ),
+        if not sig_result.ok:
+            # Body deliberately NOT logged (§8.3 — partial valid data
+            # could leak via the prober's error stream).
+            logger.warning(
+                "eventbus.ingest.signature_failed reason=%s body_bytes=%d",
+                sig_result.reason,
+                len(body),
+            )
+            write_audit(
+                action=AUDIT_SIGNATURE_FAILED,
+                target="eventbus.ingest",
+                payload={"reason": sig_result.reason, "body_bytes": len(body)},
+            )
+            return JsonResponse(
+                {"status": "unauthorized", "reason": sig_result.reason},
+                status=401,
+            )
+
+        # ── 2. Envelope parsing + validation ───────────────────────────
+        try:
+            envelope = parse_envelope(body)
+        except IngestEnvelopeError as exc:
+            # §8.4/§8.5 — unknown event_name or unknown event_version
+            # shape-wise (e.g. version is a string) are 400 not 422 in
+            # this layer: the dispatcher decides 422 on KNOWN-name +
+            # UNREGISTERED-version. Here we only know that the JSON
+            # shape itself violated the envelope.
+            logger.info(
+                "eventbus.ingest.malformed reason=%s detail=%s",
+                exc.reason,
+                exc.detail[:200],
+            )
+            write_audit(
+                action=AUDIT_MALFORMED,
+                target="eventbus.ingest",
+                payload={"reason": exc.reason, "detail": exc.detail[:200]},
+            )
+            return JsonResponse(
+                {"status": "bad_request", "reason": exc.reason},
+                status=400,
+            )
+
+        # ── 3. Dispatch ────────────────────────────────────────────────
+        # The HTTP timeout from Ayla is 10s (§6.3) — the dispatcher must
+        # return well within that. Per-handler timeout enforcement (§8.10
+        # 8s) is a follow-up; with no consumers registered yet, no
+        # handler runs to time out.
+        result = dispatch_envelope(envelope)
+        return self._map_outcome(result, envelope=envelope, request=request)
+
+    def _map_outcome(
+        self,
+        result: DispatchResult,
+        *,
+        envelope: IngestEnvelope,
+        request: HttpRequest,
+    ) -> JsonResponse:
+        outcome = result.outcome
+
+        if outcome is DispatchOutcome.OK:
+            write_audit(
+                action=AUDIT_PROCESSED,
+                target="eventbus.ingest",
+                payload={
+                    "event_id": envelope.event_id,
+                    "event_name": envelope.event_name,
+                    "event_version": envelope.event_version,
+                },
+            )
+            return JsonResponse({"status": "ok"}, status=200)
+
+        if outcome is DispatchOutcome.DUPLICATE:
+            # §8.7 — expected and silent. NO alert; the audit is a
+            # forensic trail only, sampled by ops as needed.
+            write_audit(
+                action=AUDIT_DUPLICATE,
+                target="eventbus.ingest",
+                payload={
+                    "event_id": envelope.event_id,
+                    "event_name": envelope.event_name,
+                },
+            )
+            return JsonResponse({"status": "ok", "duplicate": True}, status=200)
+
+        if outcome is DispatchOutcome.UNKNOWN_EVENT_NAME:
+            write_audit(
+                action=AUDIT_UNKNOWN_EVENT_NAME,
+                target="eventbus.ingest",
+                payload={
+                    "event_id": envelope.event_id,
+                    "event_name": envelope.event_name,
+                },
+            )
+            return JsonResponse(
+                {"status": "unprocessable", "reason": "unknown_event_name"},
+                status=422,
+            )
+
+        if outcome is DispatchOutcome.UNKNOWN_EVENT_VERSION:
+            write_audit(
+                action=AUDIT_UNKNOWN_EVENT_VERSION,
+                target="eventbus.ingest",
+                payload={
+                    "event_id": envelope.event_id,
+                    "event_name": envelope.event_name,
+                    "event_version": envelope.event_version,
+                },
+            )
+            return JsonResponse(
+                {"status": "unprocessable", "reason": "unknown_event_version"},
+                status=422,
+            )
+
+        # HANDLER_EXCEPTION
+        exc_type = type(result.exception).__name__ if result.exception is not None else "Unknown"
+        write_audit(
+            action=AUDIT_HANDLER_EXCEPTION,
+            target="eventbus.ingest",
+            payload={
+                "event_id": envelope.event_id,
+                "event_name": envelope.event_name,
+                "event_version": envelope.event_version,
+                # PII rule: log exception TYPE only, not message.
+                "exception_type": exc_type,
             },
-            status=501,
         )
-        # 501 is in the 5xx family and many retry middlewares (urllib3
-        # Retry, httpx transport retries, cloud ingress) treat 5xx as
-        # retryable by default. Long Retry-After tells well-behaved
-        # publishers to hold the event until #441 lands rather than
-        # hammering this endpoint while the contract is unfinalised.
-        response["Retry-After"] = "86400"
-        return response
+        return JsonResponse(
+            {"status": "internal_error", "reason": "handler_exception"},
+            status=500,
+        )
