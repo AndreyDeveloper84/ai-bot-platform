@@ -29,6 +29,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
 import { AdminChatsPlaceholderScreen } from "./screens/admin/AdminChatsPlaceholderScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
@@ -126,6 +127,10 @@ function AdminRoutes({ me }: { me: MeResponse }) {
       <Route
         path="/admin/services"
         element={<AdminServicesMatrixScreen me={me} />}
+      />
+      <Route
+        path="/admin/availability-requests"
+        element={<AdminAvailabilityRequestsScreen me={me} />}
       />
       <Route path="/admin/chats" element={<AdminChatsPlaceholderScreen />} />
       <Route
