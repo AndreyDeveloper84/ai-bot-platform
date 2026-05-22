@@ -163,7 +163,7 @@ class TestGetAvailableDates:
         ) as mock:
             result = api.get_available_dates(staff_id=5)
 
-        assert mock.call_args.kwargs["url"] == ("https://yclients.test/api/v1/schedule/dates/42")
+        assert mock.call_args.kwargs["url"] == ("https://yclients.test/api/v1/book_dates/42")
         assert result == ["2026-05-15", "2026-05-18", "2026-05-20"]
         assert mock.call_args.kwargs["params"] == {"staff_id": 5}
 

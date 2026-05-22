@@ -483,12 +483,14 @@ class YClientsAPI:
         staff_id: int | None = None,
         service_ids: list[int] | None = None,
     ) -> list[str]:
-        """GET ``/schedule/dates/{company_id}`` → list of ``YYYY-MM-DD`` strings.
+        """GET ``/book_dates/{company_id}`` → list of ``YYYY-MM-DD`` strings.
 
-        The mysite source uses ``/book_dates/{company_id}``; both endpoints
-        live in YClients and return the same envelope. Spec ticket
-        (DRF-837) calls out ``/schedule/dates/`` so we follow it — the
-        envelope parsing handles either response shape.
+        The DRF-837 spec originally pointed at ``/schedule/dates/`` but
+        that endpoint returns HTTP 404 on the live YClients API
+        (verified 2026-05-21 against company 884045). The legacy mysite
+        path ``/book_dates/`` is the working endpoint and returns the
+        same envelope shape (``booking_dates`` / ``working_dates`` lists)
+        that :func:`_extract_dates` already understands.
         """
         params: dict[str, Any] = {}
         if staff_id is not None:
@@ -498,7 +500,7 @@ class YClientsAPI:
 
         payload = self._request(
             "GET",
-            f"/schedule/dates/{self.company_id}",
+            f"/book_dates/{self.company_id}",
             params=params or None,
         )
         if not payload.get("success", False):

@@ -311,38 +311,42 @@ class TestMasterPickCallback:
     def test_callback_dispatches_show_slots_no_phase1_llm(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
-        """Master pick → show_slots → slot-cards short-circuit (no Phase 1
-        LLM, no Phase 3 LLM). Zero completions consumed — both short-circuits
-        bypass the model. Regression guard: if any short-circuit path
-        accidentally calls the LLM, the test runs out of mock completions
-        and errors."""
+        """Master pick → date picker (NOT slots directly). UX feedback
+        2026-05-21: "меня не спросили про дату, а сразу на завтра предложили
+        время". After this PR master_pick fetches dates and renders a
+        date-cards keyboard; show_slots fires on the subsequent date tap.
+
+        Zero completions consumed — the short-circuit is fully deterministic.
+        """
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-05-20"]
+        client.dates = ["2026-05-22", "2026-05-23", "2026-05-25"]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-20T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
             message_text="cb:book:pick_master:11",
         )
-        # Zero completions mocked — both Phase 1 (callback short-circuit)
-        # and Phase 3 (slot-cards short-circuit) skip the model entirely.
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert result.should_handoff is False
-        # Slot-cards keyboard rendered deterministically.
-        assert result.reply_text == "Выберите время:"
+        # Date-cards keyboard rendered deterministically.
+        assert result.reply_text == "Выберите дату:"
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
-        assert any("cb:book:pick_slot:" in b["callback"] for b in buttons)
-        # Synthetic tool_call recorded for audit / replay.
-        assert len(result.tool_calls_made) == 1
-        assert result.tool_calls_made[0].name == "show_slots"
-        assert result.tool_calls_made[0].arguments == {"master_id": 11}
+        # One button per date, callback embeds master_id + date.
+        assert len(buttons) == 3
+        callbacks = [b["callback"] for b in buttons]
+        assert "cb:book:pick_date:11:2026-05-22" in callbacks
+        assert "cb:book:pick_date:11:2026-05-23" in callbacks
+        assert "cb:book:pick_date:11:2026-05-25" in callbacks
+        # No tool_call recorded — date picker is a direct YClients call,
+        # not an LLM-grounded artefact.
+        assert result.tool_calls_made == []
 
     def test_malformed_callback_id_handoffs_softly(
         self, context: SkillContext, tenant: Tenant
@@ -357,6 +361,87 @@ class TestMasterPickCallback:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert "имя" in result.reply_text.lower() or "ещё раз" in result.reply_text.lower()
+        assert result.tool_calls_made == []
+
+    def test_master_pick_no_dates_returns_friendly_message(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Empty dates list → friendly "no slots" reply, NOT handoff."""
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = []
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_master:11",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert result.should_handoff is False
+        assert "нет свободных дат" in result.reply_text.lower()
+
+
+class TestDatePickCallback:
+    """User taps a date button from the date-picker keyboard.
+
+    2026-05-21 UX fix: prevent show_slots auto-selecting the nearest
+    date. Date-pick callback synthesises show_slots(master_id, date_from)
+    so the existing slot-cards short-circuit takes over.
+    """
+
+    def test_matches_callback_prefix(self, context: SkillContext) -> None:
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_date:11:2026-05-22",
+        )
+        assert BookingSkill().matches(ctx) is True
+
+    def test_callback_dispatches_show_slots_with_date_from(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Date tap fires show_slots(master_id, date_from=<date>) directly
+        — no Phase 1 LLM, no Phase 3 LLM (slot-cards short-circuit takes
+        over). Zero completions consumed."""
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = ["2026-05-22"]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_date:11:2026-05-22",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert result.should_handoff is False
+        # Slot-cards short-circuit renders the keyboard.
+        assert result.reply_text == "Выберите время:"
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert "cb:book:pick_slot:2026-05-22T14:00:00" in [b["callback"] for b in buttons]
+        # Synthetic show_slots tool_call recorded with date_from.
+        assert len(result.tool_calls_made) == 1
+        tc = result.tool_calls_made[0]
+        assert tc.name == "show_slots"
+        assert tc.arguments == {"master_id": 11, "date_from": "2026-05-22"}
+
+    def test_malformed_payload_handoffs_softly(self, context: SkillContext, tenant: Tenant) -> None:
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_date:NOT_VALID",  # missing :date segment
+        )
+        with _patch_yclients(FakeYClients()), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert "дату" in result.reply_text.lower() or "ещё раз" in result.reply_text.lower()
         assert result.tool_calls_made == []
 
 

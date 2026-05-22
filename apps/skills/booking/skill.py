@@ -57,6 +57,7 @@ from typing import Any, ClassVar
 
 from apps.audit.services import write_audit
 from apps.bookings.keyboards import (
+    CALLBACK_BOOK_PICK_DATE_PREFIX,
     CALLBACK_BOOK_PICK_MASTER_PREFIX,
     CALLBACK_BOOK_PICK_SLOT_PREFIX,
 )
@@ -117,6 +118,14 @@ _MASTER_PICK_PROMPT = "Выберите мастера:"
 # Same pattern for slot picking after show_slots returns candidates.
 _SLOT_PICK_PROMPT = "Выберите время:"
 
+# Date picker — shown after master pick, before slot listing.
+_DATE_PICK_PROMPT = "Выберите дату:"
+_DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет свободных дат в ближайшее время."
+
+# How many dates to render in the picker. YClients usually returns
+# a 30-day window; trimming keeps the keyboard tappable on mobile.
+_MAX_DATE_BUTTONS = 14
+
 
 # Audit / event slugs.
 EVENT_BOOKING_HANDLED = "booking.handled"
@@ -175,10 +184,13 @@ class BookingSkill:
         # carries the deterministic prefix. Take these before the intent
         # classifier — the prefixes are unambiguous and the classifier
         # might mis-route a bare numeric string / ISO datetime.
-        #   * cb:book:pick_master:<staff_id>   — master cards (#505)
-        #   * cb:book:pick_slot:<iso_datetime> — slot cards (this PR)
+        #   * cb:book:pick_master:<staff_id>          — master cards (#505)
+        #   * cb:book:pick_date:<master_id>:<date>    — date picker (#517 fixup)
+        #   * cb:book:pick_slot:<iso_datetime>        — slot cards (#513)
         text = (context.message_text or "").strip()
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
+            return True
+        if text.startswith(CALLBACK_BOOK_PICK_DATE_PREFIX):
             return True
         if text.startswith(CALLBACK_BOOK_PICK_SLOT_PREFIX):
             return True
@@ -238,32 +250,52 @@ class BookingSkill:
 
         # ── Master-pick callback short-circuit ──────────────────────
         # User tapped a master-card button (cb:book:pick_master:<id>).
-        # Skip Phase 1 LLM entirely — we already know the user's intent
-        # is "show slots for this master". Synthesise the tool call
-        # deterministically and fall through to Phase 2 + Phase 3.
+        # Fetch the master's available dates and render them as a date
+        # picker. show_slots is NOT dispatched here — it would auto-pick
+        # the nearest date and surprise the user (UX feedback 2026-05-21:
+        # "меня не спросили про дату"). Date-pick callback fires
+        # show_slots(master_id, date_from=<date>) on the user's choice.
         text = (context.message_text or "").strip()
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
             raw_id = text[len(CALLBACK_BOOK_PICK_MASTER_PREFIX) :].strip()
             try:
                 master_id = int(raw_id)
             except (TypeError, ValueError):
-                # Malformed payload — UX is "I didn't catch that, pick again".
-                # Rare path: only fires if MAX delivers a corrupt button payload.
                 logger.warning("booking.pick_master.bad_id raw=%r", raw_id)
                 return _build_skill_result(
                     text="Не удалось распознать выбор мастера. Напишите имя ещё раз?",
                     tool_calls_made=[],
                     confidence=None,
                 )
-            # Synthesise the Phase-1 LLM response so the rest of handle()
-            # reads tool_calls + text exactly as on a real completion.
+            return _render_date_picker(
+                master_id=master_id,
+                yclients=yclients,
+                tenant_id=tenant_id,
+            )
+
+        # ── Date-pick callback short-circuit ────────────────────────
+        # User tapped a date button (cb:book:pick_date:<master_id>:<date>).
+        # Synthesise show_slots(master_id, date_from=<date>) so the
+        # existing slot-cards short-circuit picks up + renders times.
+        if text.startswith(CALLBACK_BOOK_PICK_DATE_PREFIX):
+            payload = text[len(CALLBACK_BOOK_PICK_DATE_PREFIX) :].strip()
+            try:
+                raw_master, raw_date = payload.split(":", 1)
+                master_id = int(raw_master)
+            except (TypeError, ValueError):
+                logger.warning("booking.pick_date.bad_payload raw=%r", payload)
+                return _build_skill_result(
+                    text="Не удалось распознать дату. Попробуйте ещё раз.",
+                    tool_calls_made=[],
+                    confidence=None,
+                )
             first = CompletionResult(
                 text="",
                 tool_calls=[
                     ToolCall(
-                        id=f"synth:pick_master:{master_id}",
+                        id=f"synth:pick_date:{master_id}:{raw_date}",
                         name=SHOW_SLOTS_TOOL_SPEC["name"],
-                        arguments={"master_id": master_id},
+                        arguments={"master_id": master_id, "date_from": raw_date},
                     )
                 ],
                 provider="synth",
@@ -700,6 +732,98 @@ _RU_MONTHS_SHORT = (
     "ноя",
     "дек",
 )
+
+
+def _render_date_picker(
+    *,
+    master_id: int,
+    yclients: Any,
+    tenant_id: str,
+) -> SkillResult:
+    """Build the date-picker SkillResult after a master pick.
+
+    Calls ``client.get_available_dates`` directly (no tool wrapper —
+    the dates list isn't an LLM-grounded artefact, it's pure ops data).
+    Renders the first :data:`_MAX_DATE_BUTTONS` dates as inline-keyboard
+    buttons with ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>`` payloads.
+
+    YClients failures fold into the same handoff path as the rest of
+    the booking flow — UX is "переключаю на менеджера" rather than a
+    raw error.
+    """
+    from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
+
+    try:
+        dates = yclients.get_available_dates(staff_id=master_id, service_ids=None)
+    except (YClientsAPIError, YClientsUnavailableError) as exc:
+        logger.warning("booking.pick_master.yclients_failed master=%s err=%s", master_id, exc)
+        return _handoff(
+            tool_calls_made=[],
+            reason="booking_yclients_failure",
+            text=_FALLBACK_HANDOFF_TEXT,
+            tenant_id=tenant_id,
+        )
+
+    if not dates:
+        # Valid empty result — render a friendly "no dates" reply so the
+        # user knows to pick a different master. Not a handoff — the
+        # bot still owns the conversation, just routes back to master list.
+        return _build_skill_result(
+            text=_DATE_PICKER_FALLBACK_NO_DATES,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+
+    capped = sorted(dates)[:_MAX_DATE_BUTTONS]
+    return _build_skill_result(
+        text=_DATE_PICK_PROMPT,
+        tool_calls_made=[],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_date_pick(master_id, capped),
+    )
+
+
+def _action_data_for_date_pick(master_id: int, dates: list[str]) -> dict[str, Any]:
+    """Build the date-cards keyboard from a YClients dates list.
+
+    One button per date, callback ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>``.
+    Master id is embedded so the date-pick callback can synthesise
+    show_slots without re-fetching the master from history.
+    """
+    buttons = [
+        {
+            "label": _date_button_label(d),
+            "callback": f"{CALLBACK_BOOK_PICK_DATE_PREFIX}{master_id}:{d}",
+        }
+        for d in dates
+    ]
+    return {
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {"buttons": buttons},
+            }
+        ],
+        "kind": "date_pick",
+        "master_id": master_id,
+    }
+
+
+def _date_button_label(date_str: str) -> str:
+    """Readable label for a date button. Format ``📅 22 мая (Ср)``.
+
+    Falls back to the raw ``YYYY-MM-DD`` if parsing fails — UX still
+    workable, just less pretty.
+    """
+    try:
+        from datetime import date as _date
+
+        d = _date.fromisoformat(date_str)
+    except (TypeError, ValueError):
+        return f"📅 {date_str}"
+    month = _RU_MONTHS_SHORT[d.month - 1] if 1 <= d.month <= 12 else ""
+    wd = _RU_WEEKDAYS_SHORT[d.weekday()] if 0 <= d.weekday() <= 6 else ""
+    return f"📅 {d.day} {month} ({wd})".strip()
 
 
 def _slot_button_label(slot) -> str:
