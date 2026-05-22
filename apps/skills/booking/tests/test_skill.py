@@ -423,6 +423,7 @@ class TestDatePickCallback:
         assert result.should_handoff is False
         # Slot-cards short-circuit renders the keyboard.
         assert result.reply_text == "Выберите время:"
+        assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
         assert "cb:book:pick_slot:2026-05-22T14:00:00" in [b["callback"] for b in buttons]
         # Synthetic show_slots tool_call recorded with date_from.
