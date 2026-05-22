@@ -92,6 +92,7 @@ class DispatchOutcome(str, Enum):
     UNKNOWN_EVENT_NAME = "unknown_event_name"  # §8.5 — 422 + DLQ.
     UNKNOWN_EVENT_VERSION = "unknown_event_version"  # §8.4 — 422 + DLQ.
     HANDLER_EXCEPTION = "handler_exception"  # §8.1 — 500, NO dedupe.
+    SATURATED = "saturated"  # Round-2 AS5/AS6 — 503 + Retry-After.
 
 
 @dataclass(frozen=True)

@@ -1,19 +1,19 @@
-"""Shared autouse fixture for all apps.eventbus tests.
+"""Shared autouse fixture for apps.eventbus tests — opt-out via marker.
 
-PR #507 A12 — the timeout wrapper submits ``dispatch_envelope`` to
-a ThreadPoolExecutor. Under the SQLite test backend, the worker
-thread's DB writes use a SEPARATE Django connection that escapes
-the test transaction — rows leak across tests and downstream
-modules see stale data (e.g. ``MultipleObjectsReturned`` on
-``IngestDLQ.objects.get(event_id=...)``).
+Round-2 adversarial pass AS11: the previous autouse-everywhere bypass
+meant the production code path through ``dispatch_with_timeout``
+(ThreadPoolExecutor submit + future.result(timeout)) was NEVER tested
+end-to-end. Real wrapper bugs — context-vars propagation, DB
+connection close timing, semaphore release race — would land in
+production unobserved.
 
-Monkey-patching ``apps.eventbus.views.dispatch_with_timeout`` to
-call ``dispatch_envelope`` directly keeps the §8 status table
-coverage on the view AND keeps the dispatcher's idempotency
-contract under the test transaction. The actual timeout contract
-is pinned by ``test_ingest_timeout.py`` (which mocks
-``dispatch_envelope`` entirely, no DB involvement) so we don't
-lose A12 coverage.
+Fix: autouse-but-opt-out via ``@pytest.mark.real_timeout``. Most
+tests in this directory exercise DB-backed dispatcher paths under the
+SQLite test backend, where the executor's worker thread deadlocks on
+"database table is locked"; for those tests the bypass is still on.
+Tests marked ``@pytest.mark.real_timeout`` exercise the actual
+threadpool wrapper (typically with ``dispatch_envelope`` mocked away
+to keep DB out of the worker thread).
 """
 
 from __future__ import annotations
@@ -21,11 +21,31 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _bypass_timeout_threadpool_under_sqlite(monkeypatch):
-    """Patch the view layer to skip the threadpool in all eventbus tests."""
-    from apps.eventbus import views as _views
-    from apps.eventbus.ingest_dispatcher import dispatch_envelope as _direct
+def pytest_configure(config):
+    """Register the ``real_timeout`` marker so pytest doesn't warn."""
+    config.addinivalue_line(
+        "markers",
+        "real_timeout: exercise the actual dispatch_with_timeout threadpool "
+        "wrapper (opt-out of the SQLite-bypass autouse fixture).",
+    )
 
-    monkeypatch.setattr(_views, "dispatch_with_timeout", _direct)
+
+@pytest.fixture(autouse=True)
+def _bypass_timeout_threadpool_under_sqlite(request, monkeypatch):
+    """Bypass the timeout wrapper unless test marked ``real_timeout``.
+
+    Without the bypass, the executor's worker thread uses a separate
+    Django DB connection that escapes the test transaction → SQLite
+    "database table is locked" + cross-test leakage. The bypass
+    monkey-patches ``views.dispatch_with_timeout`` to call
+    ``dispatch_envelope`` directly. The §8.10 timeout contract stays
+    pinned by tests in ``test_ingest_timeout.py`` (mocked
+    ``dispatch_envelope``, no DB) AND by the ``real_timeout``-marked
+    tests in ``test_round2_a12_cluster.py``.
+    """
+    if not request.node.get_closest_marker("real_timeout"):
+        from apps.eventbus import views as _views
+        from apps.eventbus.ingest_dispatcher import dispatch_envelope as _direct
+
+        monkeypatch.setattr(_views, "dispatch_with_timeout", _direct)
     yield

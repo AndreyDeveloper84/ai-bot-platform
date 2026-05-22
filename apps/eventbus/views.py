@@ -57,6 +57,7 @@ AUDIT_HANDLER_EXCEPTION = "eventbus.ingest.handler_exception"
 AUDIT_DUPLICATE = "eventbus.ingest.duplicate"
 AUDIT_PROCESSED = "eventbus.ingest.processed"
 AUDIT_RATE_LIMITED = "eventbus.ingest.rate_limited"
+AUDIT_SATURATED = "eventbus.ingest.saturated"
 
 
 # PR #507 adversarial A2 — rate limit on the ingest endpoint as
@@ -287,6 +288,38 @@ class InternalEventsIngestView(View):
                 {"status": "unprocessable", "reason": "unknown_event_version"},
                 status=422,
             )
+
+        if outcome is DispatchOutcome.SATURATED:
+            # Round-2 AS5/AS6 — in-flight executor exhausted. Return
+            # 503 + Retry-After so Ayla's outbox backs off per §6.3
+            # instead of amplifying the slow-Ayla cascade. Audit
+            # sampled-via-cache to avoid amplifier (same rationale as
+            # AS3 audit sampling on 429).
+            from apps.eventbus.ingest_rate_audit_sampler import (
+                should_audit_rate_limited as _should_audit_saturated,
+            )
+
+            remote_ip = get_remote_ip(request) or "_unknown_"
+            if _should_audit_saturated(remote_ip):
+                write_audit(
+                    action=AUDIT_SATURATED,
+                    target="eventbus.ingest",
+                    payload={
+                        "event_id": envelope.event_id,
+                        "event_name": envelope.event_name,
+                        "event_version": envelope.event_version,
+                        "remote_ip": remote_ip,
+                    },
+                )
+            response = JsonResponse(
+                {"status": "saturated", "reason": "executor_in_flight_exhausted"},
+                status=503,
+            )
+            # Per §6.3 — exponential backoff starts at 1s; Retry-After
+            # at 5s gives Ayla a generous window without bouncing the
+            # event off the retry budget too fast.
+            response["Retry-After"] = "5"
+            return response
 
         # HANDLER_EXCEPTION
         exc_type = type(result.exception).__name__ if result.exception is not None else "Unknown"
