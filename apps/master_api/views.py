@@ -65,6 +65,12 @@ from apps.master_api.services.conversation_detail import (
     send_master_message,
 )
 from apps.master_api.services.dashboard import build_dashboard
+from apps.master_api.services.notification_prefs import (
+    NotificationPrefsError,
+    get_or_create_prefs,
+    serialise_prefs,
+    update_prefs,
+)
 from apps.master_api.services.schedule import (
     AvailabilityRequestError,
     DEFAULT_RANGE_DAYS,
@@ -1110,3 +1116,62 @@ def availability_pending(request: HttpRequest) -> HttpResponse:
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     items = list_pending_requests(master, now=dj_timezone.now())
     return JsonResponse({"items": items})
+
+
+# --- M7 notification preferences (Bundle B / item 3) -----------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_master_init_data
+def notification_prefs(request: HttpRequest) -> HttpResponse:
+    """M7 per-master notification toggles + quiet-hours window.
+
+    Spec quote (master-mobile §M7 line 835):
+
+        «Settings persisted server-side (also writes to MAX bot
+        subscription DB)»
+
+    Spec quote (master-mobile §M7 line 805):
+
+        «Срочно (HUMAN_LOCKED) … нельзя выключить»
+
+    * ``GET``   — returns the master's prefs. First call lazily
+      creates the row with §M7 defaults; second call returns the
+      existing row without duplicate insert. No audit (read-only).
+    * ``PATCH`` — partial update with a JSON body. Validation:
+      - unknown keys → 400 ``bad_request``
+      - non-bool toggle / non-``HH:MM`` time → 400 ``bad_request`` /
+        ``time_invalid``
+      - ``urgent=False`` → 400 ``urgent_forced_on``
+      - quiet hours enabled + ``quiet_start == quiet_end`` → 400
+        ``time_invalid``
+      - quiet hours enabled + ``quiet_start > quiet_end`` is LEGAL
+        (overnight window per §M7 default 21:00 → 09:00)
+      Successful PATCH writes one ``master.notification_prefs_updated``
+      audit row with a ``changes`` diff. No-op PATCH (caller sent
+      only unchanged values) returns 200 without audit churn.
+
+    The MAX bot subscription DB write hinted at by §835 is deferred —
+    bot-platform does not own the out-of-band push channel; MAX has no
+    push beyond chat per the platform capabilities memo.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        prefs = get_or_create_prefs(master)
+        return JsonResponse({"prefs": serialise_prefs(prefs)})
+
+    # PATCH
+    body = _parse_json_body(request)
+    if isinstance(body, JsonResponse):
+        return body
+
+    try:
+        prefs = update_prefs(master, patch=body, actor=bot_user)
+    except NotificationPrefsError as exc:
+        return _error(exc.slug, exc.detail, 400)
+
+    return JsonResponse({"prefs": serialise_prefs(prefs)})
