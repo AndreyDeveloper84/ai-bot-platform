@@ -66,7 +66,6 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone as dj_timezone
@@ -131,6 +130,40 @@ def _resolved_by_name(user: Any) -> str:
     if full:
         return full
     return (user.username or "").strip()
+
+
+def _decided_by_name_from_bot_user(bot_user_id: UUID | None) -> str:
+    """Resolve a BotUser id → display name for the audit-trail surface.
+
+    PR #521 adversarial blocker #3: ``ScheduleChangeRequest.resolved_by``
+    (Django User FK) is NULL today because the admin Mini App auth
+    threads through BotUser only. Without this lookup the list endpoint
+    rendered an empty ``decided_by_name`` for every decided request,
+    breaking the audit trail. We resolve from the new
+    ``resolved_by_bot_user_id`` column directly.
+
+    Returns the BotUser's ``display_name`` / ``client_name`` /
+    ``channel_user_id`` (best available), or ``""`` if the BotUser row
+    has been deleted.
+    """
+
+    if bot_user_id is None:
+        return ""
+    # Local import — keeps the identity app out of the import graph for
+    # callers that never need it (e.g. the approve/reject services).
+    from apps.identity.models import BotUser
+
+    try:
+        bu = BotUser.all_tenants.only("display_name", "client_name", "channel_user_id").get(
+            id=bot_user_id
+        )
+    except BotUser.DoesNotExist:
+        return ""
+    return (
+        (bu.display_name or "").strip()
+        or (bu.client_name or "").strip()
+        or (bu.channel_user_id or "").strip()
+    )
 
 
 def _format_date_human(d: date_cls) -> str:
@@ -297,7 +330,15 @@ def list_pending_for_admin(
     for row in rows:
         master_name = row.master.name if row.master_id else ""
         decided_at = row.resolved_at.isoformat() if row.resolved_at else None
-        decided_by_name = _resolved_by_name(row.resolved_by) if row.resolved_at else ""
+        # PR #521 adversarial blocker #3: prefer the Django User FK
+        # (Phase 2+ will populate it); fall back to the BotUser id
+        # column which is populated today.
+        if row.resolved_at:
+            decided_by_name = _resolved_by_name(row.resolved_by)
+            if not decided_by_name:
+                decided_by_name = _decided_by_name_from_bot_user(row.resolved_by_bot_user_id)
+        else:
+            decided_by_name = ""
         items.append(
             {
                 "request_id": str(row.id),
@@ -328,7 +369,7 @@ def list_pending_for_admin(
 # --- master DM dispatch ---------------------------------------------------
 
 
-def _dispatch_master_dm_post_commit(
+def _enqueue_master_dm_post_commit(
     *,
     master: CatalogMaster,
     request_id: UUID,
@@ -336,13 +377,17 @@ def _dispatch_master_dm_post_commit(
     date_range_human: str,
     rejection_reason: str = "",
 ) -> None:
-    """Hook into ``transaction.on_commit`` to DM the master with the verdict.
+    """Enqueue the master DM via Celery — runs from ``transaction.on_commit``.
 
-    Mirror of :func:`apps.master_api.views._maybe_send_manager_dm` but
-    aimed at the master's ``linked_bot_user.chat_id``. Best-effort: a
-    MAX outage logs a warning and is swallowed — the audit row is the
-    durable record of truth, and the master can refresh the M3 «pending»
-    list to see the new status.
+    PR #521 adversarial blocker #2 fix: previously this helper called
+    ``send_message`` inline inside the HTTP request thread, blocking
+    the API response and silently swallowing ``MaxAPIError``. Now we
+    only enqueue a Celery task; the actual outbound MAX call runs in
+    a worker with bounded retry and dead-letter observability (see
+    :mod:`apps.admin_api.tasks`). The HTTP response returns immediately
+    after the txn commits; MAX-side transient failures auto-retry; a
+    sustained outage surfaces via Celery's failed-task path instead
+    of an inline warning that nobody reads.
     """
 
     linked = master.linked_bot_user
@@ -354,32 +399,28 @@ def _dispatch_master_dm_post_commit(
         )
         return
 
-    from apps.channels.max.outbound import MaxAPIError, send_message
+    # Local import keeps the task module out of the import graph for
+    # callers that never approve/reject (e.g. list endpoint), and avoids
+    # a circular import between services and tasks.
+    from apps.admin_api.tasks import dispatch_master_decision_dm
 
-    master_mini_app_url = getattr(
-        settings,
-        "MASTER_MINI_APP_URL",
-        "https://master.formulatela.ru/schedule",
-    )
-
-    if decision == "approved":
-        text = (
-            f"Ваш запрос на смену расписания на {date_range_human} одобрен. Готово. "
-            f"[Открыть расписание]({master_mini_app_url})"
-        )
-    elif decision == "rejected":
-        text = (
-            f"Запрос на смену расписания на {date_range_human} отклонён. "
-            f"Причина: {rejection_reason}. Спросите у Карины уточнить."
-        )
-    else:  # pragma: no cover — caller guarantees decision value
-        text = ""
-
+    # The enqueue call runs from ``transaction.on_commit`` AFTER the
+    # DB commit lands. If the broker is unreachable here, we must NOT
+    # let the exception propagate — the DB-level decision is already
+    # durable and the API has already returned (or is about to). A
+    # broker outage is an ops-visible event, not an API-caller error.
     try:
-        send_message(chat_id=linked.chat_id.strip(), text=text)
-    except MaxAPIError:
+        dispatch_master_decision_dm.delay(
+            chat_id=linked.chat_id.strip(),
+            decision=decision,
+            date_range_human=date_range_human,
+            request_id=str(request_id),
+            master_id=str(master.id),
+            rejection_reason=rejection_reason,
+        )
+    except Exception:  # noqa: BLE001 — broker-side errors are ops-visible
         logger.warning(
-            "admin_api.availability.master_dm_failed master=%s request=%s decision=%s",
+            "admin_api.availability.enqueue_failed master=%s request=%s decision=%s",
             master.id,
             request_id,
             decision,
@@ -470,6 +511,25 @@ def approve_availability_request(
                 status=400,
             )
 
+        master_id: UUID = req.master_id
+        # PR #521 adversarial blocker #1: lock the master row in
+        # addition to the request row. ``select_for_update`` on the
+        # request alone serialises updates to a SINGLE request only.
+        # Two admins approving two DIFFERENT pending requests for the
+        # SAME master with overlapping date windows would both pass
+        # their row-locks (different rows), both fail to find an
+        # existing ScheduleException (neither has committed yet), and
+        # both call ``update_or_create``. One wins the unique-on-
+        # (master, date) race; the second raises IntegrityError → 500.
+        # Locking the master row here forces serial execution of all
+        # approval activity for that master, so the second approver
+        # sees the freshly-committed ScheduleException and surfaces a
+        # clean 409 ``overlap_conflict`` instead of a 500.
+        try:
+            CatalogMaster.all_tenants.select_for_update().only("id").get(id=master_id)
+        except CatalogMaster.DoesNotExist as exc:  # pragma: no cover — FK guarantees existence
+            raise AvailabilityDecisionError("not_found", "master not found", status=404) from exc
+
         master: CatalogMaster = req.master
         tz = get_tenant_tz(master.tenant)
         dates = _covered_dates(req.requested_start, req.requested_end, tz)
@@ -517,12 +577,25 @@ def approve_availability_request(
             )
             materialised_dates.append(d)
 
-        # Flip request status.
+        # Flip request status. ``resolved_by_bot_user_id`` is the
+        # durable BotUser-side provenance handle (PR #521 adversarial
+        # blocker #3) — populated even when no Django User row is
+        # wired through (the dominant case while Phase 1 has no
+        # BotUser↔User bridge).
         req.status = ScheduleChangeRequest.Status.APPROVED
         req.resolved_at = now
         req.resolved_by = actor if getattr(actor, "pk", None) else None
+        req.resolved_by_bot_user_id = actor_bot_user_id
         req.resolution_note = ""
-        req.save(update_fields=["status", "resolved_at", "resolved_by", "resolution_note"])
+        req.save(
+            update_fields=[
+                "status",
+                "resolved_at",
+                "resolved_by",
+                "resolved_by_bot_user_id",
+                "resolution_note",
+            ]
+        )
 
         # Audit + event emit (both inside the txn so a roll-back nukes
         # both).
@@ -557,7 +630,7 @@ def approve_availability_request(
         captured_range = date_range_human
 
         def _approve_dispatch() -> None:
-            _dispatch_master_dm_post_commit(
+            _enqueue_master_dm_post_commit(
                 master=captured_master,
                 request_id=captured_request_id,
                 decision="approved",
@@ -635,8 +708,17 @@ def reject_availability_request(
         req.status = ScheduleChangeRequest.Status.REJECTED
         req.resolved_at = now
         req.resolved_by = actor if getattr(actor, "pk", None) else None
+        req.resolved_by_bot_user_id = actor_bot_user_id
         req.resolution_note = reason_stripped
-        req.save(update_fields=["status", "resolved_at", "resolved_by", "resolution_note"])
+        req.save(
+            update_fields=[
+                "status",
+                "resolved_at",
+                "resolved_by",
+                "resolved_by_bot_user_id",
+                "resolution_note",
+            ]
+        )
 
         payload = {
             "tenant_id": str(tenant_id),
@@ -672,7 +754,7 @@ def reject_availability_request(
         captured_range = date_range_human
 
         def _reject_dispatch() -> None:
-            _dispatch_master_dm_post_commit(
+            _enqueue_master_dm_post_commit(
                 master=captured_master,
                 request_id=captured_request_id,
                 decision="rejected",

@@ -85,20 +85,21 @@ def _resolve_django_user(bot_user: BotUser) -> Any:
     """Find the Django User row backing this BotUser, if any.
 
     BotUser ↔ User linkage isn't a model-level FK in this codebase
-    (admin Mini App auth threads through BotUser only). For the
-    ``ScheduleChangeRequest.resolved_by`` FK to AUTH_USER_MODEL we
-    look up by matching ``BotUser.id`` against a User row's username
-    OR by an existing convention. In practice this PR sets
-    ``resolved_by=None`` when no User row is wired and stores the
-    BotUser as ``actor_id`` in the audit payload — that's the
-    authoritative provenance handle.
+    (admin Mini App auth threads through BotUser only). The Phase 2
+    bridge between BotUser and AUTH_USER_MODEL will land alongside
+    proper staff-account introspection; until then we return ``None``.
+
+    The authoritative provenance handle for «who decided this request»
+    today lives in :attr:`ScheduleChangeRequest.resolved_by_bot_user_id`
+    (a direct UUIDField, set by the service layer from the
+    ``actor_bot_user_id`` kwarg). The audit row also carries the BotUser
+    id in its payload. PR #521 adversarial blocker #3 added the
+    BotUser-id column so the list endpoint can render a non-empty
+    ``decided_by_name`` even with ``resolved_by`` still NULL.
 
     Returns: a Django User instance or ``None``.
     """
 
-    # Phase 1: no BotUser↔User join. resolved_by stays NULL; actor_id
-    # in audit + decided_by_name in list output rely on the role-ctx
-    # display name instead.
     return None
 
 
