@@ -1,6 +1,7 @@
 """Customer-initiated reschedule of an existing booking.
 
-Atomic operation per customer-handoff §11 + Q12-α:
+Atomic operation per customer-handoff §11 + Q12-α (issue #478, founder
+ACK 2026-05-22):
 
 1. Lock the OLD booking row (select_for_update).
 2. Verify ownership: ``tenant == caller.tenant`` AND ``bot_user ==
@@ -8,15 +9,19 @@ Atomic operation per customer-handoff §11 + Q12-α:
 3. Verify status == CONFIRMED (only confirmed bookings reschedule;
    cancelled/rescheduled rows are terminal).
 4. Pull ``service`` + ``master`` from old row — reschedule keeps the
-   same service & master, only the time changes (per §11 line 626 "Mini
-   App opens at date picker pre-filled with same master+service").
-5. Inside transaction.atomic:
+   same service & master, only the time changes.
+5. **Q12-α continuation decision.** Compute whether this reschedule
+   preserves the continuation chain (same service, ≤90d from chain
+   root). If continuation → new row gets ``billable=False`` +
+   ``original_booking_event=root`` + ``billing_reason='reschedule_continuation'``.
+   If chain breaks → ``billable=True`` + ``billing_reason='reschedule_chain_broken: <reason>'``
+   (founder-ACK: «cancel breaks chain» is structural — only CONFIRMED
+   rows reach this code path).
+6. Inside transaction.atomic:
    - Old booking → ``status=RESCHEDULED``
-   - New booking created via ``create_customer_booking`` with
-     ``attribution_metadata.created_by='execute_reschedule'``
-   - ``compute_billable`` recognises ``created_by=execute_reschedule``
-     → ``billable=False`` (Q12-α retention rule)
-6. Emit ``booking.rescheduled`` event linking old → new ids.
+   - New booking created via ``create_customer_booking`` with the
+     continuation context computed in step 5.
+7. Emit ``booking.rescheduled`` event linking old → new ids.
 
 The new booking inherits the same partial unique constraint
 ``(master, visit_at) WHERE status=confirmed`` — race protection
@@ -31,6 +36,7 @@ from datetime import datetime
 from django.db import transaction
 
 from apps.booking.models import BookingRequest
+from apps.booking.services.attribution import compute_reschedule_continuation
 from apps.booking.services.create import (
     BookingCreateError,
     CreateBookingInput,
@@ -78,7 +84,18 @@ def reschedule_customer_booking(
                 "this booking is missing structured data and cannot be rescheduled",
             )
 
-        # Create new booking with execute_reschedule attribution.
+        # Q12-α continuation decision (issue #478): same service is
+        # enforced structurally above (we pull service_id from old).
+        # The continuation helper still receives ``new_service_id`` so
+        # the chain-root walk and 90-day threshold check run uniformly.
+        is_continuation, chain_break_reason, chain_root_id = compute_reschedule_continuation(
+            old=old,
+            new_service_id=str(old.service_id),
+            new_visit_at=new_visit_at,
+        )
+
+        # Create new booking with execute_reschedule attribution +
+        # continuation context.
         new_booking = create_customer_booking(
             inp=CreateBookingInput(
                 tenant=tenant,
@@ -87,6 +104,9 @@ def reschedule_customer_booking(
                 master_id=str(old.master_id),
                 visit_at=new_visit_at,
                 created_by="execute_reschedule",
+                is_reschedule_continuation=is_continuation,
+                chain_break_reason=chain_break_reason,
+                original_booking_event_id=chain_root_id,
             ),
             correlation_id=correlation_id,
         )

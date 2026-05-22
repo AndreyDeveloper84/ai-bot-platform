@@ -97,9 +97,17 @@ class CreateBookingInput:
     """Attribution tag — 'execute_confirm' (default) or 'execute_reschedule'.
 
     The reschedule service (apps.booking.services.reschedule) passes
-    'execute_reschedule' so compute_billable returns billable=False
-    per Q12-α.
+    'execute_reschedule' so compute_billable can apply Q12-α
+    continuation logic.
     """
+    # Q12-α continuation chain (issue #478, founder ACK 2026-05-22).
+    # Caller computes these via ``compute_reschedule_continuation``
+    # BEFORE invoking this service. For execute_confirm (fresh sale)
+    # leave at defaults. For execute_reschedule, the reschedule
+    # service is responsible for populating these.
+    is_reschedule_continuation: bool = False
+    chain_break_reason: str | None = None
+    original_booking_event_id: object | None = None  # UUID or None
 
 
 def _occupied_intervals(*, tenant, master, on_date, tz):
@@ -247,6 +255,8 @@ def create_customer_booking(
                 booking_source="ai_direct",
                 status=BookingRequest.Status.CONFIRMED,
                 created_by=inp.created_by,
+                is_reschedule_continuation=inp.is_reschedule_continuation,
+                chain_break_reason=inp.chain_break_reason,
             )
             ai_assist_score = compute_assist_score(booking_source="ai_direct")
 
@@ -268,6 +278,7 @@ def create_customer_booking(
                 billable=billable,
                 billing_reason=billing_reason,
                 attribution_metadata=attribution_metadata,
+                original_booking_event_id=inp.original_booking_event_id,
             )
 
     # Emit AFTER commit so consumers see the row.

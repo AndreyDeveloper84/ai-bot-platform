@@ -234,6 +234,26 @@ class BookingRequest(models.Model):
             "cannot be silently broken by deleting the old row."
         ),
     )
+    original_booking_event = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reschedule_continuations",
+        db_index=True,
+        help_text=(
+            "Q12-α continuation-chain root (issue #478, founder ACK "
+            "2026-05-22). NULL when this row starts a new billable chain "
+            "(fresh ai_direct booking OR a reschedule that broke the "
+            "chain via service_swap / >90d / partial-failure terminal). "
+            "Set to the chain ROOT's id when this row is a continuation "
+            "(same service, ≤90d from root, no intervening cancel). "
+            "PROTECT so a deleted root can't silently orphan the chain. "
+            "Always points at the ROOT, never at an intermediate link — "
+            "see apps/booking/services/attribution.py::"
+            "compute_reschedule_continuation."
+        ),
+    )
     reschedule_candidate = models.JSONField(
         default=dict,
         blank=True,

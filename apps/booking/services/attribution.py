@@ -16,11 +16,31 @@ update via decisions-log batch (Q-ATT-LOCKED-1).
 Score heuristic: mirrors attribution-policy §5 — pure ``ai_direct``
 booking earns 1.00; everything else 0.00 unless the source explicitly
 overrides (e.g. ai_assisted writer computes weighted score).
+
+Q12-α continuation chain (issue #478, founder ACK 2026-05-22):
+    Reschedules are NOT a billable event when they preserve the
+    continuation chain (same service, within 90d of the chain root,
+    no prior cancel). When the chain breaks (service swap, >90d,
+    partial-failure terminator), the new row IS billable as a fresh
+    sale. See :func:`compute_reschedule_continuation` for the decision
+    helper and :func:`compute_billable` ``is_reschedule_continuation``
+    / ``chain_break_reason`` kwargs for the writer.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
+from uuid import UUID
+
+if TYPE_CHECKING:  # avoid circular import at runtime
+    from apps.booking.models import BookingRequest
+
+
+# Q12-α threshold: founder ACK 2026-05-22 — 90 days from chain root
+# visit_at. Strictly greater than → break; exactly equal → continuation.
+RESCHEDULE_CONTINUATION_THRESHOLD_DAYS = 90
 
 
 def compute_billable(
@@ -28,14 +48,21 @@ def compute_billable(
     booking_source: str,
     status: str,
     created_by: str = "execute_confirm",
+    is_reschedule_continuation: bool = False,
+    chain_break_reason: str | None = None,
 ) -> tuple[bool, str]:
     """Return ``(billable, billing_reason)`` per locked rule.
 
     ``status`` must be one of :class:`BookingRequest.Status` values
     ('confirmed' / 'cancelled' / 'rescheduled'). The rule fires
-    ``billable=True`` only when status is 'confirmed' (which is the
-    insertion default — so freshly-created ai_direct rows are billable
-    immediately).
+    ``billable=True`` only when status is 'confirmed'.
+
+    Q12-α (issue #478): when ``created_by='execute_reschedule'``, the
+    caller MUST compute continuation and pass the result via
+    ``is_reschedule_continuation`` (+ ``chain_break_reason`` when
+    False). The default for a reschedule with neither kwarg set is
+    «chain broken» — better to over-charge once than to silently
+    undercharge the salon.
 
     The caller is responsible for never re-running this on an existing
     row — :attr:`BookingRequest.billable` is set at write time and
@@ -47,10 +74,116 @@ def compute_billable(
     if status != "confirmed":
         return (False, f"NOT billable: status={status} (must be confirmed)")
     if created_by == "execute_reschedule":
-        # Q12-α — reschedule is retention, not acquisition; not billable
-        # even when source=ai_direct + status=confirmed.
-        return (False, "NOT billable: execute_reschedule (Q12-α retention)")
+        if is_reschedule_continuation:
+            return (False, "reschedule_continuation")
+        # Chain broken or caller forgot to compute continuation.
+        # Default to «new sale» (billable=True) so we never silently
+        # undercharge. Tag the reason so finance can grep.
+        reason_tag = chain_break_reason or "missing_continuation_signal"
+        return (True, f"reschedule_chain_broken: {reason_tag}")
     return (True, "ai_direct + confirmed: customer-initiated via execute_confirm")
+
+
+def compute_reschedule_continuation(
+    *,
+    old: "BookingRequest",
+    new_service_id: str | UUID | int,
+    new_visit_at: datetime,
+    threshold_days: int = RESCHEDULE_CONTINUATION_THRESHOLD_DAYS,
+) -> tuple[bool, str | None, UUID | None]:
+    """Decide whether a reschedule preserves the continuation chain.
+
+    Per founder ACK 2026-05-22 (issue #478 close-out), the chain is
+    preserved when ALL of the following hold:
+
+    * **Same service_id** (strict equality — no category/price-equivalent
+      lookup; founder explicit «strict service_id equality»).
+    * **Within ``threshold_days`` of chain ROOT visit_at** (not the
+      most-recent reschedule — the threshold is anchored to the original
+      sale so the customer can't extend a non-billable chain forever by
+      rescheduling every 89 days). Default 90.
+    * (Implicit) The chain root is reachable — i.e. ``old`` is
+      CONFIRMED. The CONFIRMED-only precondition is enforced upstream
+      by :func:`apps.booking.services.reschedule.reschedule_customer_booking`;
+      this helper trusts the caller.
+
+    The «cancel breaks chain» rule from the founder ACK is enforced
+    structurally — a cancelled row can't be the source of a reschedule
+    (the service-layer check at ``services/reschedule.py`` rejects
+    non-CONFIRMED status), so a continuation can't span a cancel.
+    Partial-failure leaves the old row CANCELLED and writes NO new
+    row, so there's no continuation surface to break.
+
+    Args:
+      old: The existing :class:`BookingRequest` being rescheduled.
+        Already locked + verified CONFIRMED by the caller.
+      new_service_id: The proposed new service identifier. ``str`` or
+        ``int`` or ``UUID`` accepted; compared via ``==`` against
+        ``old.service_id`` (the LLM tool path stores strings; the
+        service-layer path stores UUIDs — both compare cleanly via
+        ``str(...)`` coercion). Pass the value the caller intends to
+        write on the new row.
+      new_visit_at: The proposed new ``visit_at`` datetime.
+      threshold_days: Override for tests. Production callers must use
+        the default (90) — the founder-ACK'd threshold.
+
+    Returns:
+      ``(is_continuation, chain_break_reason, chain_root_id)``:
+
+      * ``is_continuation`` — ``True`` when all chain-preservation
+        conditions hold.
+      * ``chain_break_reason`` — short tag (``"service_swap"`` /
+        ``"over_90d"``) when False; ``None`` when True.
+      * ``chain_root_id`` — the chain root's ``id`` when continuation
+        (write this onto the new row's ``original_booking_event_id``);
+        ``None`` when chain is broken (write None to start a fresh chain).
+    """
+
+    # Resolve the chain root: either ``old`` itself (if ``old`` is the
+    # root) or the row ``old.original_booking_event_id`` points at.
+    # We trust the FK invariant: a continuation row's ``original_booking_event_id``
+    # always points at the ROOT, not at the immediate predecessor —
+    # that's what the writers in services/reschedule.py and
+    # skills/booking/tools.py enforce. Single-hop chain walk.
+    if old.original_booking_event_id is not None:
+        # ``old`` is itself a continuation — its FK column already points
+        # at the chain ROOT (not the immediate predecessor — that's the
+        # invariant the writers enforce). Use ``all_tenants`` so a
+        # tenant-active flag rotation can't blind the lookup; the
+        # caller already holds ``tenant_scope(tenant)``.
+        from apps.booking.models import BookingRequest
+
+        try:
+            root = BookingRequest.all_tenants.get(id=old.original_booking_event_id)
+        except BookingRequest.DoesNotExist:
+            # Root deleted (shouldn't happen under PROTECT — defence
+            # in depth). Treat as chain broken.
+            return (False, "chain_root_missing", None)
+    else:
+        root = old
+
+    # 1. Strict service equality.
+    if str(old.service_id) != str(new_service_id):
+        # ``old.service_id`` is the most-recent link's service; if THAT
+        # differs from the proposed new service, the chain breaks here.
+        # (We also check ``root.service_id`` below as defence-in-depth
+        # against an inconsistent intermediate chain link.)
+        return (False, "service_swap", None)
+    if str(root.service_id) != str(new_service_id):
+        # Defence-in-depth: the chain root's service must match too.
+        return (False, "service_swap", None)
+
+    # 2. 90-day threshold measured from ROOT visit_at.
+    if root.visit_at is None:
+        # Legacy row without visit_at can't anchor a chain. Treat as
+        # missing root → chain broken (fresh sale).
+        return (False, "chain_root_no_visit_at", None)
+    # Founder phrasing: «больше чем на 90 дней» = strictly greater.
+    # Exactly 90d is continuation; 90d + 1 microsecond breaks.
+    if new_visit_at > root.visit_at + timedelta(days=threshold_days):
+        return (False, "over_90d", None)
+
+    return (True, None, root.id)
 
 
 def compute_assist_score(*, booking_source: str) -> Decimal:

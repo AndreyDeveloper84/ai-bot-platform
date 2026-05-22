@@ -1799,6 +1799,16 @@ def execute_reschedule(
                 "new_datetime": new_datetime,
                 "master_id": master_id,
                 "service_id": service_id,
+                # Q12-α (founder ACK 2026-05-22 decision #4): a
+                # partial-failure reschedule is a chain TERMINATOR —
+                # the old row is cancelled, the new row never written,
+                # so any future booking the customer makes is a fresh
+                # billable sale (a new chain via execute_confirm).
+                # Surface this on the audit row so admin/ops dashboards
+                # can filter for «manual rebook required» tickets
+                # without having to cross-reference the event_type.
+                "q12a_chain_terminator": True,
+                "q12a_chain_terminator_reason": "partial_failure",
             },
         )
         return BookingToolResult(error="booking_reschedule_partial_failure")
@@ -1820,16 +1830,33 @@ def execute_reschedule(
         comment__startswith=_new_idem_prefix,
     ).first()
     if existing_new is None:
-        # Phase 4a-IMPL1 closure: reschedule produces a NEW BookingRequest
-        # row with ai_direct attribution. Per Q12-α the locked rule today
-        # marks any ai_direct + CONFIRMED as billable; the «reschedule is
-        # not billable» refinement lives in policy but is not yet enforced
-        # in compute_billable (canonical create_customer_booking has the
-        # same behavior). attribution_metadata.created_by carries the
-        # discriminator so future billing logic can opt out cleanly.
+        # Q12-α continuation decision (issue #478, founder ACK 2026-05-22).
+        # The LLM reschedule tool always keeps the same service + master
+        # (the LLM prompt enforces it); a service swap is structurally
+        # not a normal LLM flow today. We pass ``booking.service_id`` as
+        # ``new_service_id`` so the helper's strict-equality check is
+        # tautologically satisfied — the 90-day chain-root threshold
+        # is the meaningful gate at this layer. If the LLM ever starts
+        # allowing service swaps from this path, this call site MUST be
+        # updated to pass the actually-new service id (and a
+        # ``compute_reschedule_continuation`` callsite test must cover
+        # the swap case via the LLM tool, not just the service-layer
+        # reschedule).
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        is_continuation, chain_break_reason, chain_root_id = compute_reschedule_continuation(
+            old=booking,
+            new_service_id=str(booking.service_id) if booking.service_id else "",
+            new_visit_at=visit_at_dt,
+        )
         billable, billing_reason = compute_billable(
             booking_source="ai_direct",
             status=BookingRequest.Status.CONFIRMED,
+            created_by="execute_reschedule",
+            is_reschedule_continuation=is_continuation,
+            chain_break_reason=chain_break_reason,
         )
         reschedule_metadata = build_customer_attribution_metadata(
             booking_created_at=dj_timezone.now().isoformat(),
@@ -1837,6 +1864,9 @@ def execute_reschedule(
         )
         reschedule_metadata["created_by"] = "execute_reschedule"
         reschedule_metadata["rescheduled_from_record_id"] = record_id
+        reschedule_metadata["q12a_is_continuation"] = is_continuation
+        if chain_break_reason:
+            reschedule_metadata["q12a_chain_break_reason"] = chain_break_reason
 
         # Hotfix D (retro review #2): the window between YClients-create
         # success and local-write success is the last split-brain gap
@@ -1866,6 +1896,7 @@ def execute_reschedule(
                 billable=billable,
                 billing_reason=billing_reason,
                 attribution_metadata=reschedule_metadata,
+                original_booking_event_id=chain_root_id,
             )
         except Exception as exc:  # noqa: BLE001 — recover, do not propagate
             # Split-brain recovery: try to cancel the new YClients record

@@ -134,13 +134,51 @@ class TestRescheduleCustomerBooking:
         )
         assert new.visit_at == new_visit
         assert new.booking_source == "ai_direct"
-        # Q12-α: reschedule NOT billable.
+        # Q12-α (founder ACK 2026-05-22): happy-path reschedule within
+        # 90d, same service → continuation chain → billable=False,
+        # billing_reason='reschedule_continuation', original_booking_event
+        # points at the chain root.
         assert new.billable is False
-        assert "execute_reschedule" in new.billing_reason
+        assert new.billing_reason == "reschedule_continuation"
+        assert new.original_booking_event_id == existing_booking.id
         assert new.attribution_metadata["created_by"] == "execute_reschedule"
         # Old marked RESCHEDULED.
         existing_booking.refresh_from_db()
         assert existing_booking.status == BookingRequest.Status.RESCHEDULED
+
+    def test_q12a_over_90d_breaks_chain(
+        self,
+        tenant,
+        bot_user,
+        master,
+        service,
+        master_service,
+        working_hours,
+        existing_booking,
+    ):
+        """Q12-α (founder ACK 2026-05-22): reschedule to >90d from chain
+        root → new row is billable=True (chain broken, fresh sale).
+        ``original_booking_event_id`` is NULL so the new row starts its
+        own chain."""
+
+        # 91 days from existing_booking.visit_at — strictly beyond 90.
+        d = existing_booking.visit_at.date() + timedelta(days=91)
+        while d.weekday() != 0:
+            d += timedelta(days=1)
+        # Working hours fixture covers Mon-Fri only — pick the next Monday.
+        new_visit = datetime.combine(d, time(14, 0), tzinfo=MSK)
+
+        new = reschedule_customer_booking(
+            tenant=tenant,
+            bot_user=bot_user,
+            old_booking_id=str(existing_booking.id),
+            new_visit_at=new_visit,
+        )
+
+        assert new.billable is True
+        assert "over_90d" in new.billing_reason
+        assert new.original_booking_event_id is None
+        assert new.attribution_metadata["created_by"] == "execute_reschedule"
 
     def test_not_owned_rejected(self, tenant, bot_user, other_bot_user, existing_booking):
         with pytest.raises(BookingCreateError) as exc_info:
