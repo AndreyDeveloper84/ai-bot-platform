@@ -143,21 +143,29 @@ When the pre-flip checklist below is satisfied:
 Without these, strict mode + a misbehaving ingress = unbounded
 PEL growth + unbounded audit-table growth + alert flood.
 
-- [ ] **PEL length alert at N=1000.** `redis-cli XPENDING ingress:max
-      consumers IDLE 0` returns count; wire to monitoring with a 1000
-      threshold (warning) and 5000 (page). Drain via XCLAIM /
-      manual-claim runbook (or XAUTOCLAIM reaper once it ships).
-- [ ] **`worker.tenant_required_missing` per-handler rate budget.**
-      Audit dedup OR rate-limit at the emit site. Single-handler
-      runaway must cap at ~100 events/minute to bound the audit
-      table growth. Stub today; track as follow-up.
-- [ ] **Audit-table size baseline.** Snapshot `apps_audit_event`
-      table size + index size pre-flip. Set an alert at 2× baseline
-      growth rate in the 24h post-flip window — that ratio surfaces
-      a runaway before the table doubles.
-- [ ] **Alert suppression / dedup wired.** Any `worker.tenant_required_missing`
-      alert MUST dedup on `(handler, hour)` so a single bad ingress
-      doesn't flood the on-call page.
+- [x] **PEL length alert at N=1000.** Shipped: `python manage.py
+      monitor_pel --warning 1000 --page 5000` (exit 0/1/2). Wire to
+      the monitoring stack with a cron / systemd-timer at 1-min
+      interval. JSON output via `--format json` for Prometheus /
+      Grafana ingestion. Drain via XCLAIM / manual-claim runbook (or
+      the XAUTOCLAIM reaper from #499 once `PEL_REAPER_ENABLED=true`).
+- [x] **`worker.tenant_required_missing` per-handler rate budget.**
+      Shipped: `apps/workers/ceilings.py::should_emit_tenant_missing`
+      gates the emit at both call sites (strict + log-only) in
+      `apps/workers/base.py`. Default 100 emits per (handler, hour)
+      via `WORKER_TENANT_MISSING_RATE_LIMIT`. Set to 0 to disable
+      (diagnostic escape hatch). One WARNING fires when the ceiling
+      first triggers each window (grep `tenant_missing_rate_exceeded`).
+- [x] **Audit-table size baseline.** Shipped: `python manage.py
+      audit_table_baseline --format json` captures row count + total
+      / heap / index sizes for `apps_audit_event`. Operator runs once
+      pre-flip; alert config compares against 2× the baseline-delta
+      24h post-flip. Postgres-only (vendor check raises clearly).
+- [x] **Alert suppression / dedup wired.** The rate-budget above
+      also dedups: once the per-(handler, hour) budget is exhausted,
+      subsequent emits drop silently. A single bad ingress emits at
+      most 100 audit rows per handler per hour → on-call page can't
+      flood from this code path.
 
 ## STRICT_TENANT_REFUSE × STRICT_TENANT_SCOPE coupling
 

@@ -356,24 +356,35 @@ class TenantAwareTask(ABC):
                 # to take effect. Documented in
                 # docs/runbooks/strict-tenant-refuse-flip.md.
                 strict = bool(getattr(settings, "STRICT_TENANT_REFUSE", False))
+                handler_name = type(self).__name__
+                # Issue #500 / D-2 Item 2 + Item 4: rate-limit the emit
+                # site so a misbehaving ingress (1000+ entries/hour with
+                # empty resolved_tenant_id) can't double the audit table
+                # or flood the on-call page. The logger.error fires every
+                # time (operator log is the always-available signal);
+                # only the DB-writing emit() is gated.
+                from apps.workers.ceilings import should_emit_tenant_missing
+
+                allow_emit = should_emit_tenant_missing(handler_name)
                 if strict:
                     logger.error(
                         "worker.tenant_required_missing handler=%s trace=%s "
                         "resolved_tenant_id=%r — refusing dispatch "
                         "(entry retained in PEL; no auto-DLQ)",
-                        type(self).__name__,
+                        handler_name,
                         trace_id,
                         raw_entry.get("resolved_tenant_id", ""),
                     )
-                    emit(
-                        "worker.tenant_required_missing",
-                        payload={
-                            "handler": type(self).__name__,
-                            "strict_mode": True,
-                        },
-                    )
+                    if allow_emit:
+                        emit(
+                            "worker.tenant_required_missing",
+                            payload={
+                                "handler": handler_name,
+                                "strict_mode": True,
+                            },
+                        )
                     raise TenantRequiredButMissing(
-                        f"{type(self).__name__} requires a tenant but "
+                        f"{handler_name} requires a tenant but "
                         f"resolved_tenant_id is empty/invalid (trace={trace_id})"
                     )
                 # Log-only rollout mode: loud ERROR but proceed.
@@ -381,17 +392,18 @@ class TenantAwareTask(ABC):
                     "worker.tenant_required_missing handler=%s trace=%s "
                     "resolved_tenant_id=%r — proceeding in log-only mode "
                     "(STRICT_TENANT_REFUSE=False)",
-                    type(self).__name__,
+                    handler_name,
                     trace_id,
                     raw_entry.get("resolved_tenant_id", ""),
                 )
-                emit(
-                    "worker.tenant_required_missing",
-                    payload={
-                        "handler": type(self).__name__,
-                        "strict_mode": False,
-                    },
-                )
+                if allow_emit:
+                    emit(
+                        "worker.tenant_required_missing",
+                        payload={
+                            "handler": handler_name,
+                            "strict_mode": False,
+                        },
+                    )
             elif not requires_tenant_value and tenant is None:
                 # Tenant-optional handler running without scope — INFO level.
                 logger.info(

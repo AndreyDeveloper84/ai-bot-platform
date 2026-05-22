@@ -176,6 +176,14 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 # ``docs/runbooks/strict-tenant-refuse-flip.md``.
 STRICT_TENANT_REFUSE = os.environ.get("STRICT_TENANT_REFUSE", "false").lower() == "true"
 
+# Issue #500 (D-2 operator-side ceilings): max
+# ``worker.tenant_required_missing`` audit emits per (handler, hour).
+# Default 100 keeps audit-table growth bounded even when a misbehaving
+# ingress pushes 1000+ entries/hour with empty ``resolved_tenant_id``.
+# Set to 0 to disable the ceiling entirely (every emit fires — escape
+# hatch for diagnostic windows).
+WORKER_TENANT_MISSING_RATE_LIMIT = int(os.environ.get("WORKER_TENANT_MISSING_RATE_LIMIT", "100"))
+
 # Tenancy retro B4 — post-flip monitor (mirrors STRICT_SCOPE_FLIP_AT
 # pattern from Sprint 8 / F2). Operator sets this to the ISO 8601 flip
 # timestamp at the same moment they roll STRICT_TENANT_REFUSE=true in
