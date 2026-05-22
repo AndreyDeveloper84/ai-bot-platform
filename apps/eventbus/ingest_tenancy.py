@@ -78,8 +78,11 @@ def _tenant_user_relationship_available() -> bool:
     transition from #246-pre to #246-post is automatic — no settings
     flip required at deploy.
     """
+    # The model lands with Sprint 1 #246; mypy under current tree
+    # can't resolve it. The try/except below catches the runtime
+    # ImportError when the model isn't yet shipped.
     try:
-        from apps.tenancy.models import TenantUserRelationship  # noqa: F401
+        from apps.tenancy.models import TenantUserRelationship  # type: ignore[attr-defined]  # noqa: F401
     except ImportError:
         return False
     except Exception:  # noqa: BLE001 — defensive
@@ -128,9 +131,7 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     if _tenant_user_relationship_available():
         # Sprint 1 #246 has shipped — do the real lookup.
         try:
-            from apps.tenancy.models import (  # type: ignore[import-not-found]
-                TenantUserRelationship,
-            )
+            from apps.tenancy.models import TenantUserRelationship  # type: ignore[attr-defined]
         except ImportError:
             # Race between probe + import — shouldn't happen, but if
             # it does, fall through to the fail-closed branch below.

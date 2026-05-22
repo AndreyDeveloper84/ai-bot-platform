@@ -107,7 +107,9 @@ class TestRateLimit:
             action="eventbus.ingest.rate_limited",
         )
         assert rate_rows.count() >= 1
-        payload = rate_rows.first().payload
+        first_row = rate_rows.first()
+        assert first_row is not None
+        payload = first_row.payload
         assert "remote_ip" in payload
         assert "body_bytes" in payload
 

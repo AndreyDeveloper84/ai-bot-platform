@@ -214,7 +214,9 @@ class TestHandlerException:
         )
         assert audit_rows.count() == 1
         # PII rule §7 — exception TYPE only, not message.
-        payload = audit_rows.first().payload
+        first_audit = audit_rows.first()
+        assert first_audit is not None
+        payload = first_audit.payload
         assert payload.get("exception_type") == "RuntimeError"
         assert "downstream timeout" not in str(payload)
 

@@ -195,7 +195,7 @@ class TestAS10CleanupBeatHealth:
     """
 
     @pytest.fixture(autouse=True)
-    def _clear_cache(self) -> None:
+    def _clear_cache(self):
         cache.clear()
         yield
         cache.clear()

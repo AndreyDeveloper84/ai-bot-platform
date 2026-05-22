@@ -58,7 +58,7 @@ def _post(client, body, *, real_ip=None, forwarded_for=None):
         INGEST_URL,
         data=body,
         content_type="application/json",
-        **headers,
+        **headers,  # type: ignore[arg-type]
     )
 
 

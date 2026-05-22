@@ -61,7 +61,7 @@ def _post(
         INGEST_URL,
         data=body,
         content_type="application/json",
-        **headers,
+        **headers,  # type: ignore[arg-type]
     )
 
 
