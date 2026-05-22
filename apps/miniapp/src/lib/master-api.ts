@@ -635,6 +635,128 @@ export const promoteConversationToHumanLocked = (
     }),
   });
 
+// --- M6 AI drafts (Bundle B / item 4 frontend) ----------------------------
+// Mirrors apps/master_api/services/ai_drafts.py
+// (DraftResponse / DraftMessageResponse) + apps/master_api/views.py
+// (conversation_draft_generate / send_as_me / release_to_ai).
+//
+// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M6
+// (lines 632-738). Backend PR #535.
+//
+// Error envelopes are the standard `{error: slug, detail: string}` shape
+// surfaced by the shared `request()` helper as `ApiError(status, slug,
+// detail)`. Callers `catch (err)` and switch on `err.slug` — there is
+// no separate structured response type needed.
+
+/**
+ * Generated draft payload returned by `POST .../drafts/generate`. Also
+ * the shape served back by `getConversationDetail()`'s `ai_draft` field
+ * when an ACTIVE draft exists for the caller's master — backend response
+ * only includes `draft_id`, `content`, `created_at` in that read path
+ * (no provider/model echo). We model both shapes via optional fields so
+ * the response interfaces stay structurally compatible.
+ */
+export interface AiDraftPayload {
+  draft_id: string;
+  content: string;
+  created_at: string;
+  /** Present only on POST .../drafts/generate; absent on detail GET. */
+  llm_provider?: string;
+  /** Present only on POST .../drafts/generate; absent on detail GET. */
+  llm_model?: string;
+}
+
+/**
+ * 201 response from send-as-me / release-to-ai. `composed_by_master`
+ * distinguishes the two paths (master-authored vs released-to-AI);
+ * `was_edited` is true only when the master tapped «Отредактировать»
+ * and passed `override_content`.
+ */
+export interface DraftMessageResponse {
+  message_id: string;
+  content: string;
+  sent_at: string;
+  composed_by_master: boolean;
+  was_edited: boolean;
+}
+
+/** Slugs the backend may emit on 4xx/5xx for the draft endpoints. */
+export type DraftErrorSlug =
+  | "draft_already_acted"
+  | "llm_unavailable"
+  | "conversation_locked"
+  | "tier_locked"
+  | "bad_request"
+  | "not_found";
+
+/**
+ * POST /api/v1/master/conversations/:id/drafts/generate
+ *
+ * Empty body. Returns the freshly-generated draft (or the existing
+ * ACTIVE draft if we're inside the 60s idempotency window AND no new
+ * customer message has arrived since).
+ *
+ * Throws `ApiError` with `.slug ∈ DraftErrorSlug`:
+ *   - 400 `conversation_locked` (HUMAN_LOCKED tier)
+ *   - 404 `not_found` (master not involved)
+ *   - 503 `llm_unavailable` (provider failure)
+ */
+export const generateDraft = (
+  conversationId: string,
+): Promise<AiDraftPayload> =>
+  request(`/conversations/${conversationId}/drafts/generate`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
+/**
+ * POST /api/v1/master/conversations/:id/drafts/:draftId/send-as-me
+ *
+ * Body: `{override_content?: string}`. When `overrideContent` is
+ * undefined we omit the field entirely — the backend uses the draft's
+ * LLM text. When provided, the backend uses the edited text and stamps
+ * `was_edited=true` in the message's attribution metadata.
+ *
+ * Throws `ApiError` with `.slug ∈ DraftErrorSlug`:
+ *   - 400 `draft_already_acted` (status != ACTIVE; race lost)
+ *   - 400 `bad_request` (override too long / empty)
+ *   - 403 `tier_locked` (HUMAN_LOCKED)
+ *   - 404 `not_found`
+ */
+export const sendDraftAsMaster = (
+  conversationId: string,
+  draftId: string,
+  overrideContent?: string,
+): Promise<DraftMessageResponse> => {
+  const body: Record<string, string> = {};
+  if (overrideContent !== undefined) body.override_content = overrideContent;
+  return request(`/conversations/${conversationId}/drafts/${draftId}/send-as-me`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+};
+
+/**
+ * POST /api/v1/master/conversations/:id/drafts/:draftId/release-to-ai
+ *
+ * Empty body. Releases the draft as a plain assistant message (no
+ * master attribution — customer-side render is indistinguishable from
+ * a fully-auto reply).
+ *
+ * Throws `ApiError` with `.slug ∈ DraftErrorSlug`:
+ *   - 400 `draft_already_acted`
+ *   - 403 `tier_locked`
+ *   - 404 `not_found`
+ */
+export const releaseDraftToAi = (
+  conversationId: string,
+  draftId: string,
+): Promise<DraftMessageResponse> =>
+  request(`/conversations/${conversationId}/drafts/${draftId}/release-to-ai`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
 // --- M7 notification preferences (Bundle B / item 3) --------------------
 // Mirrors apps/master_api/services/notification_prefs.py +
 // apps/master_api/views.py::notification_prefs. Backend envelope:

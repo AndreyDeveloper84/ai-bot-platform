@@ -1599,6 +1599,16 @@ a {
   font-weight: 600;
   color: var(--c-accent-pressed);
   margin-bottom: var(--s-2);
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
 }
 
 .m6-draft-card__content {
@@ -1612,6 +1622,62 @@ a {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
+}
+
+/* --- «Предложить ответ» trigger row (no active draft state) --- */
+
+.m6-draft-trigger {
+  margin: var(--s-2) 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.m6-draft-trigger__cta {
+  width: 100%;
+  color: var(--c-accent-pressed);
+  border-color: var(--c-accent-subtle);
+}
+
+.m6-draft-trigger--thinking {
+  justify-content: center;
+  padding: var(--s-2);
+  color: var(--c-text-secondary);
+  font-style: italic;
+}
+
+.m6-draft-trigger__pulse {
+  animation: m6-draft-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes m6-draft-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .m6-draft-trigger__pulse {
+    animation: none;
+    opacity: 0.85;
+  }
+}
+
+.m6-draft-trigger--error {
+  background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-1));
+  border: 1px solid color-mix(in srgb, var(--c-danger) 30%, transparent);
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-3);
+  flex-wrap: wrap;
+}
+
+.m6-draft-trigger__error-text {
+  flex: 1;
+  color: var(--c-text-primary);
+  font-size: 0.95em;
+}
+
+.m6-draft-trigger__retry {
+  flex-shrink: 0;
 }
 
 .m6-compose {
