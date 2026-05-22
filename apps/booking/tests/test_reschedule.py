@@ -202,6 +202,26 @@ class TestRescheduleCustomerBooking:
             )
         assert exc_info.value.slug == "not_reschedulable"
 
+    def test_q12a_cancel_requested_rejected(self, tenant, bot_user, existing_booking):
+        """Tech-lead double-pass S1: CANCEL_REQUESTED interim state
+        (5s undo window) MUST NOT be reschedulable. Service-layer
+        already enforces «only CONFIRMED» at line 75 — this test pins
+        that contract so a future relaxation can't slip through.
+        Mirrors the LLM-tool path enforcement added in tools.py.
+        """
+
+        existing_booking.status = BookingRequest.Status.CANCEL_REQUESTED
+        existing_booking.save()
+
+        with pytest.raises(BookingCreateError) as exc_info:
+            reschedule_customer_booking(
+                tenant=tenant,
+                bot_user=bot_user,
+                old_booking_id=str(existing_booking.id),
+                new_visit_at=_monday_at(15),
+            )
+        assert exc_info.value.slug == "not_reschedulable"
+
     def test_not_found_rejected(self, tenant, bot_user):
         import uuid
 

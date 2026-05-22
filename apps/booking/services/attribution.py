@@ -29,10 +29,13 @@ Q12-α continuation chain (issue #478, founder ACK 2026-05-22):
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # avoid circular import at runtime
     from apps.booking.models import BookingRequest
@@ -187,7 +190,15 @@ def compute_reschedule_continuation(
             root = BookingRequest.all_tenants.get(id=old.original_booking_event_id)
         except BookingRequest.DoesNotExist:
             # Root deleted (shouldn't happen under PROTECT — defence
-            # in depth). Treat as chain broken.
+            # in depth). Treat as chain broken. Tech-lead double-pass
+            # N2: ERROR-log so ops sees the PROTECT-bypass signal.
+            logger.error(
+                "billing.q12a.chain_root_missing old_id=%s root_id=%s "
+                "tenant_id=%s — PROTECT FK bypassed, treating as new chain",
+                old.id,
+                old.original_booking_event_id,
+                old.tenant_id,
+            )
             return (False, "chain_root_missing", None)
 
         # Adversarial-pass D1: defence-in-depth — `original_booking_event_id`
@@ -195,8 +206,18 @@ def compute_reschedule_continuation(
         # ``original_booking_event_id`` is None). If a DB-tampering /
         # buggy writer left a non-root in the FK, the 90d window would
         # be measured from the wrong anchor. Treat as chain broken
-        # rather than trust the inconsistent pointer.
+        # rather than trust the inconsistent pointer. Tech-lead N2:
+        # ERROR-log so ops sees the invariant violation.
         if root.original_booking_event_id is not None:
+            logger.error(
+                "billing.q12a.chain_root_invariant_violated old_id=%s "
+                "claimed_root_id=%s claimed_root.original_booking_event_id=%s "
+                "tenant_id=%s — writer/DB corruption suspected",
+                old.id,
+                root.id,
+                root.original_booking_event_id,
+                old.tenant_id,
+            )
             return (False, "chain_root_invariant_violated", None)
     else:
         root = old
@@ -228,7 +249,15 @@ def compute_reschedule_continuation(
     # 2. 90-day threshold measured from ROOT visit_at.
     if root.visit_at is None:
         # Legacy row without visit_at can't anchor a chain. Treat as
-        # missing root → chain broken (fresh sale).
+        # missing root → chain broken (fresh sale). Tech-lead N2:
+        # ERROR-log so ops sees that a legacy pre-Phase-1 row got
+        # caught in a chain — likely needs data backfill.
+        logger.error(
+            "billing.q12a.chain_root_no_visit_at root_id=%s tenant_id=%s "
+            "— legacy row, fresh-sale fallback",
+            root.id,
+            root.tenant_id,
+        )
         return (False, "chain_root_no_visit_at", None)
     # Adversarial-pass B4: defensive guard against TZ-naive new_visit_at.
     # ``root.visit_at`` is TZ-aware (Django USE_TZ=True). A naive

@@ -15,6 +15,12 @@ class Migration(migrations.Migration):
             name="original_booking_event",
             field=models.ForeignKey(
                 blank=True,
+                # Tech-lead double-pass S4: db_index=False here +
+                # migration 0010 creates the index via CREATE INDEX
+                # CONCURRENTLY. Inline db_index=True would issue
+                # ALTER TABLE + CREATE INDEX in one txn → multi-second
+                # AccessExclusiveLock on prod-tenant tables.
+                db_index=False,
                 help_text="Q12-α continuation-chain root (issue #478, founder ACK 2026-05-22). NULL when this row starts a new billable chain (fresh ai_direct booking OR a reschedule that broke the chain via service_swap / >90d / partial-failure terminal). Set to the chain ROOT's id when this row is a continuation (same service, ≤90d from root, no intervening cancel). PROTECT so a deleted root can't silently orphan the chain. Always points at the ROOT, never at an intermediate link — see apps/booking/services/attribution.py::compute_reschedule_continuation.",
                 null=True,
                 on_delete=django.db.models.deletion.PROTECT,

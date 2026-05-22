@@ -611,3 +611,81 @@ class TestQ12aAdversarialPassRegressions:
                 is_reschedule_continuation=True,
                 chain_break_reason="over_90d",
             )
+
+    # ---- Tech-lead double-pass round-2 — N2 ERROR-log signals ----
+
+    def test_n2_chain_root_missing_logs_error(self, tenant: Tenant, caplog, monkeypatch) -> None:
+        """Tech-lead N2: `chain_root_missing` is a PROTECT-FK-bypass
+        signal — must surface as ERROR for ops, not silent fallthrough.
+
+        SQLite enforces FK integrity even on raw UPDATE, so we can't
+        truly simulate a PROTECT bypass at the DB level. Instead we
+        mock the manager's ``.get()`` to raise ``DoesNotExist`` — the
+        exact branch the helper handles for the «PROTECT was bypassed»
+        defence.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        root = self._make_row(tenant, visit_at=timezone.now() + timedelta(days=7), service_id=None)
+        old = self._make_row(
+            tenant,
+            visit_at=root.visit_at + timedelta(days=5),
+            service_id=None,
+            original_booking_event=root,
+        )
+
+        # Monkeypatch the manager to simulate PROTECT-bypassed root.
+        from apps.booking.models import BookingRequest as BR
+
+        def raise_does_not_exist(*args, **kwargs):
+            raise BR.DoesNotExist("simulated PROTECT bypass")
+
+        monkeypatch.setattr(BR.all_tenants, "get", raise_does_not_exist)
+
+        with caplog.at_level("ERROR", logger="apps.booking.services.attribution"):
+            is_cont, break_reason, _ = compute_reschedule_continuation(
+                old=old,
+                new_service_id=None,
+                new_visit_at=old.visit_at + timedelta(days=5),
+            )
+
+        assert is_cont is False
+        assert break_reason == "chain_root_missing"
+        assert any("chain_root_missing" in rec.message for rec in caplog.records)
+
+    def test_n2_chain_root_invariant_violated_logs_error(self, tenant: Tenant, caplog) -> None:
+        """Tech-lead N2: `chain_root_invariant_violated` is a writer/DB
+        corruption signal — must ERROR-log for forensic audit."""
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        root_visit = timezone.now() + timedelta(days=7)
+        true_root = self._make_row(tenant, visit_at=root_visit, service_id=None)
+        fake_root = self._make_row(
+            tenant,
+            visit_at=root_visit + timedelta(days=2),
+            service_id=None,
+            original_booking_event=true_root,
+        )
+        compromised = self._make_row(
+            tenant,
+            visit_at=root_visit + timedelta(days=5),
+            service_id=None,
+            original_booking_event=fake_root,
+        )
+
+        with caplog.at_level("ERROR", logger="apps.booking.services.attribution"):
+            is_cont, break_reason, _ = compute_reschedule_continuation(
+                old=compromised,
+                new_service_id=None,
+                new_visit_at=root_visit + timedelta(days=10),
+            )
+
+        assert is_cont is False
+        assert break_reason == "chain_root_invariant_violated"
+        assert any("chain_root_invariant_violated" in rec.message for rec in caplog.records)

@@ -240,7 +240,12 @@ class BookingRequest(models.Model):
         null=True,
         blank=True,
         related_name="reschedule_continuations",
-        db_index=True,
+        # Tech-lead double-pass S4: db_index=False so the FK constraint
+        # adds without an auto-index. Migration 0010 then creates the
+        # index via ``CREATE INDEX CONCURRENTLY`` to avoid the multi-
+        # second AccessExclusiveLock that ``AddField(db_index=True)``
+        # would take on prod-tenant booking tables with >100k rows.
+        db_index=False,
         help_text=(
             "Q12-α continuation-chain root (issue #478, founder ACK "
             "2026-05-22). NULL when this row starts a new billable chain "
