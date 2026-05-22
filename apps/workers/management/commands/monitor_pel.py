@@ -27,8 +27,19 @@ unboundedly and exhaust Redis memory.
 - ``0`` — PEL count below ``--warning`` threshold
 - ``1`` — at or above ``--warning`` but below ``--page``
 - ``2`` — at or above ``--page``
+- ``3`` — non-NOGROUP Redis error (transient or sustained)
 - Non-zero from a healthy script means the monitoring stack should
   alert. Document this in the alert config wired by the operator.
+
+### Cron paging tuning (AS5, PR #528 round-3 non-blocker)
+
+A transient Redis blip surfaces here as exit 3 — without dedup, a
+1-minute cron emits one page per run. **Recommended alert config:**
+require ``≥ 3 consecutive runs`` of exit-3 before paging. Single-run
+exit-3 stays in the dashboard / log without paging. Tunable via the
+monitoring stack's "for: 3m" / consecutive-failures threshold;
+implementing it at the command level would duplicate state the
+monitoring stack already tracks.
 
 The runbook §«Adversarial-pass D-2 — operational ceilings» calls for
 N=1000 (warning) / N=5000 (page) on the ``ingress:max`` stream under

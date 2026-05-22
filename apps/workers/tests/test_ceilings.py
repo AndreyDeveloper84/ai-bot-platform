@@ -194,54 +194,82 @@ class TestFailOpen:
             assert should_emit_tenant_missing("MaxHandler") is True
             assert any("incr_failed" in rec.message for rec in caplog.records)
 
-    def test_connection_error_clears_lru_cache(self, settings, monkeypatch):
-        """AS2 (PR #528 tech-lead pass): ConnectionError during INCR must
-        clear the lru_cache so the NEXT call rebuilds the connection pool.
-
-        Without this fix a transient Redis blip poisons the cached pool —
-        cached dead sockets serve every subsequent emit, fail-open path
-        fires every time, rate budget permanently bypassed on the worker
-        until restart. Exactly the window when ceilings are needed.
-        """
-        import redis.exceptions
-
-        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+    def _broken_client_factory(self, exc: Exception):
+        """Build a fake `_client` lookalike that raises ``exc`` on INCR
+        and exposes a ``cache_clear`` spy."""
+        broken = MagicMock()
+        broken.incr.side_effect = exc
 
         cache_clears: list[bool] = []
-        broken = MagicMock()
-        broken.incr.side_effect = redis.exceptions.ConnectionError("connection refused")
 
-        def _client_factory():
+        def factory():
             return broken
 
         # Mimic the real lru_cache-wrapped callable: ``_client.cache_clear``
-        # is what production code calls. Use SimpleNamespace-like mock so
-        # the attribute exists for the production cache_clear() call.
-        _client_factory.cache_clear = lambda: cache_clears.append(True)  # type: ignore[attr-defined]
-        monkeypatch.setattr("apps.ingress.streams._client", _client_factory)
+        # is what production code calls. Direct attribute on the function.
+        factory.cache_clear = lambda: cache_clears.append(True)  # type: ignore[attr-defined]
+        return factory, cache_clears
 
-        # First call: ConnectionError → fail-open returns True, cache_clear called.
-        assert should_emit_tenant_missing("MaxHandler") is True
-        assert cache_clears == [True], "AS2: ConnectionError must trigger cache_clear()"
+    def test_redis_connection_error_clears_lru_cache(self, settings, monkeypatch):
+        """AS2 / AS2-NEW (PR #528 round-3): redis.exceptions.ConnectionError
+        during INCR triggers cache_clear so the NEXT call rebuilds the
+        connection pool. Without this a transient Redis blip permanently
+        bypasses the rate budget on the worker until restart."""
+        import redis.exceptions
 
-    def test_non_connection_error_does_not_clear_cache(self, settings, monkeypatch):
-        """AS2 fix scoped narrowly — a non-connection exception (e.g.
-        DataError on a malformed key) should NOT clear the cache. The
-        pool is still healthy, only the operation is broken."""
         settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
-
-        cache_clears: list[bool] = []
-        broken = MagicMock()
-        broken.incr.side_effect = RuntimeError("DataError: malformed key")
-
-        def _client_factory():
-            return broken
-
-        _client_factory.cache_clear = lambda: cache_clears.append(True)  # type: ignore[attr-defined]
-        monkeypatch.setattr("apps.ingress.streams._client", _client_factory)
+        factory, cache_clears = self._broken_client_factory(
+            redis.exceptions.ConnectionError("connection refused")
+        )
+        monkeypatch.setattr("apps.ingress.streams._client", factory)
 
         assert should_emit_tenant_missing("MaxHandler") is True
-        assert cache_clears == [], "Generic errors must NOT clear cache (AS2 narrow scope)"
+        assert cache_clears == [True]
+
+    def test_redis_timeout_error_clears_lru_cache(self, settings, monkeypatch):
+        """TimeoutError (different class, same transport-fault semantic)
+        also clears the cache."""
+        import redis.exceptions
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        factory, cache_clears = self._broken_client_factory(
+            redis.exceptions.TimeoutError("read timed out")
+        )
+        monkeypatch.setattr("apps.ingress.streams._client", factory)
+
+        assert should_emit_tenant_missing("MaxHandler") is True
+        assert cache_clears == [True]
+
+    def test_data_error_does_not_clear_cache(self, settings, monkeypatch):
+        """AS2-NEW (round-3): DataError is a redis.RedisError subclass
+        but NOT a transport fault — pool is healthy, only the operation
+        is broken. Must NOT clear the cache. Regression guard against
+        the OLD string-match heuristic that would have flagged any
+        exception with 'Error' in the name as a connection fault."""
+        import redis.exceptions
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        factory, cache_clears = self._broken_client_factory(
+            redis.exceptions.DataError("malformed key")
+        )
+        monkeypatch.setattr("apps.ingress.streams._client", factory)
+
+        assert should_emit_tenant_missing("MaxHandler") is True
+        assert cache_clears == [], "DataError must not clear cache (typed isinstance scope)"
+
+    def test_generic_runtime_error_does_not_clear_cache(self, settings, monkeypatch):
+        """A user-defined / library-side RuntimeError is not a Redis
+        transport fault; the cache stays. The old string-match
+        heuristic would have classified any exception with 'Timeout'
+        in its name as a connection fault — typed isinstance fixes that."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        factory, cache_clears = self._broken_client_factory(
+            RuntimeError("unrelated downstream failure")
+        )
+        monkeypatch.setattr("apps.ingress.streams._client", factory)
+
+        assert should_emit_tenant_missing("MaxHandler") is True
+        assert cache_clears == []
 
 
 class TestFailOpenLogDedup:

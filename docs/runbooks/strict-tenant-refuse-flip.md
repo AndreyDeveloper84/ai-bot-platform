@@ -173,24 +173,65 @@ growth + unbounded audit-table growth + alert flood.
       / heap / index sizes for `apps_audit_event`. Operator runs once
       pre-flip; alert config compares against 2× the baseline-delta
       24h post-flip. Postgres-only (vendor check raises clearly).
-- [ ] **Synthetic flood drill in staging** (AS6, tech-lead pass PR #528).
-      Ceilings code landed AFTER the soak started — the defense is
-      theoretical until exercised at production volume. Pre-flip
-      operator drill in staging:
+- [ ] **Synthetic flood drill in staging** (AS6 + AS6-NEW, tech-lead
+      pass PR #528 R3). Ceilings code landed AFTER the soak started —
+      the defense is theoretical until exercised at production volume.
+
+      **AS6-NEW (round-3): positive assertions REQUIRED.** Without them
+      the drill silently no-ops: if entries XADD'd to `ingress:max` are
+      never consumed (worker stopped, handler not registered), the
+      ceiling code never runs and the absence-only criteria
+      ("audit ≤ 100") trivially pass with `0 ≤ 100`. Drill "succeeds"
+      while exercising nothing. Memory N=17 insight #2: drill specs
+      MUST include positive assertions ("X must appear"), not only
+      absence assertions ("Y not exceed").
+
+      Pre-drill positive setup checks (all must pass):
+
+      - **Consumer running:** `ps aux | grep "workers.consumer"` returns
+        at least one row; `systemctl is-active ai-bot-platform-dev-consumer`
+        prints `active`.
+      - **Handler registered:** the handler whose entries you XADD MUST
+        appear in the dispatcher's installed-handler list. For
+        `ingress:max`, that's `MaxHandler` (`apps.channels.max.handler`).
+        Confirm via boot log line `workers.consumer.handler_registered
+        name=MaxHandler` from a recent worker restart.
+      - **Tenant-missing path live:** add an explicit
+        `resolved_tenant_id=` (empty) to the synthetic entries; the
+        `requires_tenant=True` value on `MaxHandler` is what triggers
+        the ceiling code path. Drill is meaningless without it.
+
+      Drill steps:
 
       1. Capture baseline: `python manage.py audit_table_baseline --format json`
       2. Capture PEL baseline: `python manage.py monitor_pel --format json`
       3. Synthesise 200 tenant-missing entries over ~5 min via
          `redis-cli XADD ingress:max '*' resolved_tenant_id ''` in a
          loop (use ``for i in $(seq 1 200); do redis-cli XADD …; sleep 1.5; done``).
-      4. Confirm: 1× `tenant_missing_rate_exceeded` WARNING in worker log
-         per affected handler, audit row count delta ≤ 100, and
-         `monitor_pel --warning 1000 --page 5000` exits 0 (PEL stays
-         well below threshold because consumer ACKs fast).
-      5. Drain residual PEL via reaper or manual XCLAIM.
+      4. **Wait for drain** — let the consumer process all 200 (verify
+         PEL ≤ 5 via `monitor_pel`) BEFORE checking assertions. Without
+         this wait, "1× WARNING per handler" can mean "ceiling not
+         exercised yet", not "ceiling working".
+      5. **Positive assertions** (all must hold):
 
-      If any of (1) the WARNING doesn't fire, (2) audit grows by >100,
-      or (3) PEL alert misfires — STOP the flip, file a follow-up.
+         - `grep "tenant_missing_rate_exceeded" /var/log/ai-bot-platform/worker.log
+           | wc -l` returns ≥ 1 (ceiling fired at least once)
+         - `grep "worker.tenant_required_missing handler=MaxHandler"
+           /var/log/ai-bot-platform/worker.log | wc -l` returns ≥ 50
+           (handler actually executed the path — not zero)
+         - Audit row count delta (`audit_table_baseline` post-drill
+           vs baseline) is **between 80 and 100** — proves emits fired
+           AND ceiling capped them. (≤ 100 alone is consistent with 0.)
+      6. **Absence assertions** (all must hold):
+
+         - Audit row count delta ≤ 100
+         - `monitor_pel --warning 1000 --page 5000` exits 0
+      7. Drain residual PEL via reaper or manual XCLAIM.
+
+      **STOP the flip** if any of: (a) pre-drill setup check fails;
+      (b) positive assertion fails (ceiling never exercised); (c)
+      absence assertion fails (ceiling failed to cap). File a
+      follow-up issue before proceeding.
 - [ ] **Post-Redis-incident worker restart** (AS2, tech-lead pass PR #528).
       `apps.ingress.streams._client` is lru_cached. The ceiling code
       now clears the cache on `ConnectionError` so transient blips

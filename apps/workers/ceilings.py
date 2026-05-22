@@ -40,7 +40,27 @@ from __future__ import annotations
 import logging
 import time
 
+import redis.exceptions
 from django.conf import settings
+
+
+# Connection-fault exception surface — any of these implies the cached
+# Redis connection pool is suspect and the lru_cache should be cleared.
+# AS2-NEW (PR #528 round-3 double-pass): typed isinstance check, not
+# string-match. Excludes redis.RedisError (too broad — DataError /
+# ResponseError do NOT indicate transport fault) and excludes builtin
+# ConnectionError (Python network-level errors propagate through
+# redis-py as redis.ConnectionError anyway).
+_CONNECTION_FAULT_EXC: tuple[type[Exception], ...] = (
+    redis.exceptions.ConnectionError,
+    redis.exceptions.TimeoutError,
+    redis.exceptions.BusyLoadingError,
+    redis.exceptions.ChildDeadlockedError,
+    redis.exceptions.ClusterDownError,
+    redis.exceptions.MasterDownError,
+    redis.exceptions.MaxConnectionsError,
+    redis.exceptions.ReadOnlyError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,10 +184,14 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
         # restart. Clear the cache on ConnectionError so the NEXT call
         # rebuilds the pool with a fresh socket.
         #
-        # Heuristic match on the exception class name covers
-        # redis.ConnectionError, redis.TimeoutError, and the broader
-        # ConnectionError builtin without importing redis-py here.
-        if "Connection" in type(exc).__name__ or "Timeout" in type(exc).__name__:
+        # AS2-NEW (round-3 double-pass): replaced string-match heuristic
+        # with typed exception tuple. The string-match would catch any
+        # exception named with "Connection" / "Timeout" (false-positive
+        # on user-defined subclasses) and miss cluster/topology faults
+        # that don't carry those names. The narrow set below is the
+        # canonical "transport-level fault" surface from redis-py — any
+        # of these implies the connection pool is suspect.
+        if isinstance(exc, _CONNECTION_FAULT_EXC):
             try:
                 _client.cache_clear()
             except AttributeError:
