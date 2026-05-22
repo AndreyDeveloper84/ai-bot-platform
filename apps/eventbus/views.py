@@ -26,7 +26,6 @@ from apps.audit.services import write_audit
 from apps.eventbus.ingest_dispatcher import (
     DispatchOutcome,
     DispatchResult,
-    dispatch_envelope,
 )
 from apps.eventbus.ingest_envelope import (
     IngestEnvelope,
@@ -38,6 +37,7 @@ from apps.eventbus.ingest_security import (
     timestamp_header_from,
     verify_signature,
 )
+from apps.eventbus.ingest_timeout import dispatch_with_timeout
 
 
 logger = logging.getLogger(__name__)
@@ -129,12 +129,15 @@ class InternalEventsIngestView(View):
                 status=400,
             )
 
-        # ── 3. Dispatch ────────────────────────────────────────────────
-        # The HTTP timeout from Ayla is 10s (§6.3) — the dispatcher must
-        # return well within that. Per-handler timeout enforcement (§8.10
-        # 8s) is a follow-up; with no consumers registered yet, no
-        # handler runs to time out.
-        result = dispatch_envelope(envelope)
+        # ── 3. Dispatch (with §8.10 per-handler 8s budget) ─────────────
+        # PR #507 adversarial A12 — Ayla's 10s outer HTTP timeout
+        # leaves 8s for handler work + 2s for return-trip transit. A
+        # slow handler (e.g. hung Ayla REST call from #442+) would
+        # otherwise pin a worker thread and block ALL ingestion.
+        # dispatch_with_timeout returns HANDLER_EXCEPTION + TimeoutError
+        # on budget exceed; the orphan thread continues independently
+        # but this request returns 500 promptly.
+        result = dispatch_with_timeout(envelope)
         return self._map_outcome(result, envelope=envelope, request=request)
 
     def _map_outcome(
