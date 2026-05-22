@@ -194,6 +194,55 @@ class TestFailOpen:
             assert should_emit_tenant_missing("MaxHandler") is True
             assert any("incr_failed" in rec.message for rec in caplog.records)
 
+    def test_connection_error_clears_lru_cache(self, settings, monkeypatch):
+        """AS2 (PR #528 tech-lead pass): ConnectionError during INCR must
+        clear the lru_cache so the NEXT call rebuilds the connection pool.
+
+        Without this fix a transient Redis blip poisons the cached pool —
+        cached dead sockets serve every subsequent emit, fail-open path
+        fires every time, rate budget permanently bypassed on the worker
+        until restart. Exactly the window when ceilings are needed.
+        """
+        import redis.exceptions
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+
+        cache_clears: list[bool] = []
+        broken = MagicMock()
+        broken.incr.side_effect = redis.exceptions.ConnectionError("connection refused")
+
+        def _client_factory():
+            return broken
+
+        # Mimic the real lru_cache-wrapped callable: ``_client.cache_clear``
+        # is what production code calls. Use SimpleNamespace-like mock so
+        # the attribute exists for the production cache_clear() call.
+        _client_factory.cache_clear = lambda: cache_clears.append(True)  # type: ignore[attr-defined]
+        monkeypatch.setattr("apps.ingress.streams._client", _client_factory)
+
+        # First call: ConnectionError → fail-open returns True, cache_clear called.
+        assert should_emit_tenant_missing("MaxHandler") is True
+        assert cache_clears == [True], "AS2: ConnectionError must trigger cache_clear()"
+
+    def test_non_connection_error_does_not_clear_cache(self, settings, monkeypatch):
+        """AS2 fix scoped narrowly — a non-connection exception (e.g.
+        DataError on a malformed key) should NOT clear the cache. The
+        pool is still healthy, only the operation is broken."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+
+        cache_clears: list[bool] = []
+        broken = MagicMock()
+        broken.incr.side_effect = RuntimeError("DataError: malformed key")
+
+        def _client_factory():
+            return broken
+
+        _client_factory.cache_clear = lambda: cache_clears.append(True)  # type: ignore[attr-defined]
+        monkeypatch.setattr("apps.ingress.streams._client", _client_factory)
+
+        assert should_emit_tenant_missing("MaxHandler") is True
+        assert cache_clears == [], "Generic errors must NOT clear cache (AS2 narrow scope)"
+
 
 class TestFailOpenLogDedup:
     """The fail-open WARNING logs must dedup on a 60s window so a sustained

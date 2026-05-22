@@ -93,13 +93,25 @@ class Command(BaseCommand):
 
         redis = _client()
 
-        # XPENDING returns a dict on redis-py: {"pending": int, "min": id, "max": id, "consumers": [...]}
-        # When the group doesn't exist OR the stream doesn't exist, redis-py
-        # may raise — treat that as "0 pending" rather than crash, so a
-        # cold-start monitor doesn't page on a not-yet-provisioned stream.
+        # XPENDING (summary form, 2-arg) returns a LIST per redis-py:
+        # ``[total_pending, min_id, max_id, [[consumer_name, count], ...]]``.
+        # Some wrappers / versions normalise to dict; handle both.
+        # Tech-lead adversarial pass on PR #528 AS1 caught the original
+        # dict-only assumption — in production this caused the monitor
+        # to self-page on every run because the dict.get() raised
+        # AttributeError on the real list shape.
+        #
+        # IDLE-form (XPENDING with consumer + range args) returns a list
+        # of [msg_id, consumer, idle_ms, deliveries] tuples — not used
+        # by this monitor; summary form is sufficient for length checks.
         try:
             info = redis.xpending(stream, group)
-            pending = int(info.get("pending", 0)) if isinstance(info, dict) else 0
+            if isinstance(info, dict):
+                pending = int(info.get("pending", 0))
+            elif isinstance(info, list) and info:
+                pending = int(info[0])
+            else:
+                pending = 0
         except Exception as exc:  # noqa: BLE001
             # Distinguish "group doesn't exist" (transient pre-bootstrap)
             # from real Redis trouble. redis-py raises ResponseError with

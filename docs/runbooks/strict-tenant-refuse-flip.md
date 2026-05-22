@@ -164,6 +164,37 @@ PEL growth + unbounded audit-table growth + alert flood.
       / heap / index sizes for `apps_audit_event`. Operator runs once
       pre-flip; alert config compares against 2× the baseline-delta
       24h post-flip. Postgres-only (vendor check raises clearly).
+- [ ] **Synthetic flood drill in staging** (AS6, tech-lead pass PR #528).
+      Ceilings code landed AFTER the soak started — the defense is
+      theoretical until exercised at production volume. Pre-flip
+      operator drill in staging:
+
+      1. Capture baseline: `python manage.py audit_table_baseline --format json`
+      2. Capture PEL baseline: `python manage.py monitor_pel --format json`
+      3. Synthesise 200 tenant-missing entries over ~5 min via
+         `redis-cli XADD ingress:max '*' resolved_tenant_id ''` in a
+         loop (use ``for i in $(seq 1 200); do redis-cli XADD …; sleep 1.5; done``).
+      4. Confirm: 1× `tenant_missing_rate_exceeded` WARNING in worker log
+         per affected handler, audit row count delta ≤ 100, and
+         `monitor_pel --warning 1000 --page 5000` exits 0 (PEL stays
+         well below threshold because consumer ACKs fast).
+      5. Drain residual PEL via reaper or manual XCLAIM.
+
+      If any of (1) the WARNING doesn't fire, (2) audit grows by >100,
+      or (3) PEL alert misfires — STOP the flip, file a follow-up.
+- [ ] **Post-Redis-incident worker restart** (AS2, tech-lead pass PR #528).
+      `apps.ingress.streams._client` is lru_cached. The ceiling code
+      now clears the cache on `ConnectionError` so transient blips
+      self-heal. BUT for a sustained outage where the dead-pool blip
+      isn't classified as ConnectionError (e.g. pod NetworkPolicy
+      drop, DNS poison), the cache stays poisoned. After any Redis
+      incident in the post-flip window:
+
+      ```
+      sudo systemctl restart ai-bot-platform-dev-consumer ai-bot-platform-prod-consumer
+      ```
+
+      This rebuilds the connection pool fresh.
 - [x] **Alert suppression / dedup wired.** The rate-budget above
       also dedups: once the per-(handler, hour) budget is exhausted,
       subsequent emits drop silently. A single bad ingress emits at

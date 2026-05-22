@@ -121,9 +121,9 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
     if limit <= 0:
         return True
 
-    try:
-        from apps.ingress.streams import _client
+    from apps.ingress.streams import _client
 
+    try:
         redis = _client()
     except Exception as exc:  # noqa: BLE001
         # Fail-open: log (deduped, 60s window) and let the emit proceed.
@@ -157,6 +157,24 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
         # Caught by Code Reviewer adversarial pass on PR #528 / #500.
         redis.expire(key, _WINDOW_TTL_SECONDS)
     except Exception as exc:  # noqa: BLE001
+        # AS2 (PR #528 tech-lead pass): `_client()` is lru_cached at the
+        # streams.py layer. On Redis restart / failover the cached pool
+        # serves dead sockets indefinitely — every emit hits this path
+        # and the rate budget is permanently bypassed until worker
+        # restart. Clear the cache on ConnectionError so the NEXT call
+        # rebuilds the pool with a fresh socket.
+        #
+        # Heuristic match on the exception class name covers
+        # redis.ConnectionError, redis.TimeoutError, and the broader
+        # ConnectionError builtin without importing redis-py here.
+        if "Connection" in type(exc).__name__ or "Timeout" in type(exc).__name__:
+            try:
+                _client.cache_clear()
+            except AttributeError:
+                # _client is not lru_cached in test stubs — fine, no
+                # cache to clear, the monkeypatched callable rebuilds
+                # the fake fresh on every invocation already.
+                pass
         # Deduped (60s window) — see _should_log_fail_open rationale.
         if _should_log_fail_open(f"incr_failed:{handler_name}"):
             logger.warning(
@@ -166,6 +184,12 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
             )
         return True
 
+    # Semantics: ``count > limit`` means EXACTLY ``limit`` emits fire
+    # per window; the (limit+1)-th call is the first to be blocked.
+    # Default ``WORKER_TENANT_MISSING_RATE_LIMIT=100`` therefore
+    # produces up to 100 audit rows per (handler, hour), not 101.
+    # Tech-lead pass AS7 (PR #528) flagged a possible off-by-one — the
+    # math here is intentional; the docstring documents it explicitly.
     if count > limit:
         if count == limit + 1:
             # Log the ceiling trigger exactly once per window — operator

@@ -10,16 +10,37 @@ from django.core.management import call_command
 
 
 class _FakeRedis:
-    """Stand-in with xpending returning a configurable dict."""
+    """Stand-in with xpending returning a configurable shape.
 
-    def __init__(self, pending: int = 0, raise_: Exception | None = None) -> None:
+    redis-py's actual XPENDING summary form returns a LIST:
+    ``[total_pending, min_id, max_id, [[consumer_name, count], ...]]``.
+    Some wrappers normalise to dict. Default mode is ``list`` (matches
+    production redis-py), with ``dict`` mode kept for backward compat
+    testing — both shapes must work.
+    """
+
+    def __init__(
+        self,
+        pending: int = 0,
+        raise_: Exception | None = None,
+        shape: str = "list",
+    ) -> None:
         self.pending = pending
         self.raise_ = raise_
+        self.shape = shape
 
     def xpending(self, stream: str, group: str):
         if self.raise_ is not None:
             raise self.raise_
-        return {"pending": self.pending, "min": None, "max": None, "consumers": []}
+        if self.shape == "dict":
+            return {
+                "pending": self.pending,
+                "min": None,
+                "max": None,
+                "consumers": [],
+            }
+        # Production redis-py shape: list summary.
+        return [self.pending, None, None, []]
 
 
 def _run(*args, **kwargs):
@@ -86,6 +107,34 @@ class TestOutputFormats:
         data = json.loads(out)
         assert data["stream"] == "ingress:telegram"
         assert data["group"] == "tg-consumers"
+
+
+class TestXpendingShapes:
+    """AS1 regression guard — production redis-py returns LIST, not dict.
+
+    Tech-lead adversarial pass on PR #528 caught the original dict-only
+    assumption; without these tests the fake would have continued to
+    mask the production AttributeError → exit 3 → self-page loop."""
+
+    def test_list_shape_parsed(self):
+        """Production redis-py: ``[total, min, max, [[consumer, count], ...]]``."""
+        with patch(
+            "apps.ingress.streams._client",
+            return_value=_FakeRedis(pending=1234, shape="list"),
+        ):
+            out, _, _ = _run("--format", "json")
+        data = json.loads(out)
+        assert data["pending"] == 1234
+
+    def test_dict_shape_parsed(self):
+        """Some redis-py wrappers normalise to dict — keep back-compat."""
+        with patch(
+            "apps.ingress.streams._client",
+            return_value=_FakeRedis(pending=1234, shape="dict"),
+        ):
+            out, _, _ = _run("--format", "json")
+        data = json.loads(out)
+        assert data["pending"] == 1234
 
 
 class TestFailureModes:
