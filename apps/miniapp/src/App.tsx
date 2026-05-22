@@ -48,6 +48,7 @@ import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
+import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
 import { MasterProfileScreen } from "./screens/MasterProfileScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
 import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
@@ -156,6 +157,11 @@ function MasterRoutes() {
         element={<MasterConversationDetailScreen />}
       />
       <Route path="/master/profile" element={<MasterProfileScreen />} />
+      {/* M7 notification settings (Bundle B / item 3) */}
+      <Route
+        path="/master/settings/notifications"
+        element={<MasterNotificationSettingsScreen />}
+      />
       {/* Default + unknown — land on dashboard. */}
       <Route path="*" element={<Navigate to="/master/dashboard" replace />} />
     </Routes>

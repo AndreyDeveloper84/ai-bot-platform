@@ -634,3 +634,77 @@ export const promoteConversationToHumanLocked = (
       reason_text: reasonText ?? "",
     }),
   });
+
+// --- M7 notification preferences (Bundle B / item 3) --------------------
+// Mirrors apps/master_api/services/notification_prefs.py +
+// apps/master_api/views.py::notification_prefs. Backend envelope:
+//   GET   200 → {prefs: MasterNotificationPrefs}
+//   PATCH 200 → {prefs: MasterNotificationPrefs}
+//   PATCH 400 → {error: slug, detail: string}  (parsed by request() → ApiError.slug)
+//
+// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M7
+// (lines 777-843). Quiet hours are stored as naive HH:MM strings in
+// the tenant's local timezone — no client-side TZ coercion.
+
+export interface MasterNotificationPrefs {
+  new_booking: boolean;
+  booking_change: boolean;
+  personal_message: boolean;
+  /** Always true. Backend rejects PATCH urgent=false with 400 urgent_forced_on. */
+  urgent: boolean;
+  quiet_hours_enabled: boolean;
+  /** "HH:MM" tenant-local. quiet_start > quiet_end means overnight window. */
+  quiet_start: string;
+  /** "HH:MM" tenant-local. */
+  quiet_end: string;
+  morning_brief: boolean;
+  evening_summary: boolean;
+  /** ISO datetime. */
+  updated_at: string;
+}
+
+/**
+ * Slugs the backend may emit on 400 (apps/master_api/services/notification_prefs.py).
+ * Surfaced via ApiError.slug — callers do not parse the body themselves.
+ */
+export type NotificationPrefsErrorSlug =
+  | "urgent_forced_on"
+  | "time_invalid"
+  | "bad_request";
+
+/** Partial-update shape — all fields optional, urgent intentionally NOT settable. */
+export type NotificationPrefsPatch = Partial<
+  Omit<MasterNotificationPrefs, "urgent" | "updated_at">
+>;
+
+interface PrefsEnvelope {
+  prefs: MasterNotificationPrefs;
+}
+
+/**
+ * GET current prefs. First call lazily creates the row on the backend
+ * with §M7 defaults (transparent — the UI does not show a «first load»
+ * banner). Subsequent calls are read-only.
+ */
+export const getNotificationPrefs = async (): Promise<MasterNotificationPrefs> => {
+  const env = await request<PrefsEnvelope>("/notification-prefs/", { method: "GET" });
+  return env.prefs;
+};
+
+/**
+ * PATCH a subset of fields. On 400 the request() helper throws ApiError —
+ * callers catch and inspect ``.slug`` against ``NotificationPrefsErrorSlug``.
+ *
+ * Trailing slash on the path matters: Django ``urlpatterns`` strips
+ * ``APPEND_SLASH`` redirects on PATCH (POST/PATCH/DELETE on a slashless
+ * URL get a 405 instead of the friendly 301).
+ */
+export const patchNotificationPrefs = async (
+  patch: NotificationPrefsPatch,
+): Promise<MasterNotificationPrefs> => {
+  const env = await request<PrefsEnvelope>("/notification-prefs/", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+  return env.prefs;
+};

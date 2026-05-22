@@ -101,12 +101,14 @@ const COPY = {
     services: "━━ УСЛУГИ ━━━━━━━━━━━━━━━━━━",
     workHours: "━━ РАБОЧЕЕ ВРЕМЯ ━━━━━━━━━━━━",
     reviews: "━━ ОТЗЫВЫ КЛИЕНТОВ ━━━━━━━━━━━",
+    settings: "━━ НАСТРОЙКИ ━━━━━━━━━━━━━━━",
   },
   buttons: {
     editPhoto: "Изменить фото",
     editBio: "Изменить «О себе»",
     writeToOwner: "Написать Карине ›",
     requestScheduleChange: "Запросить изменение ›",
+    notificationSettings: "Настройки уведомлений ›",
     save: "Сохранить",
     cancel: "Отмена",
     retry: "Попробовать снова",
@@ -363,6 +365,12 @@ export function MasterProfileScreen() {
     navigate("/master/schedule");
   }, [navigate]);
 
+  // M7 entry point — spec §M7 line 780 «Profile → «Уведомления»».
+  const goToNotificationSettings = useCallback(() => {
+    hapticSelection();
+    navigate("/master/settings/notifications");
+  }, [navigate]);
+
   // --- Render branches ---
   if (phase.kind === "loading") {
     return (
@@ -471,6 +479,25 @@ export function MasterProfileScreen() {
         >
           <p style={{ margin: 0 }}>{COPY.reviews.placeholder}</p>
         </div>
+      </ProfileSection>
+
+      {/*
+       * M7 entry-point per spec §M7 line 780. Placed in a dedicated
+       * «НАСТРОЙКИ» section at the bottom of the profile — the spec
+       * locates the link generically as «Profile → «Уведомления»» but
+       * doesn't pin a slot inside the M4 layout. Bottom of profile +
+       * its own section header gives it visibility without crowding
+       * the read-mostly «УСЛУГИ» / «ОТЗЫВЫ» blocks. M8 (App settings)
+       * isn't built yet — when it ships, it will deep-link here.
+       */}
+      <ProfileSection title={COPY.sections.settings}>
+        <button
+          type="button"
+          className="btn-secondary master-profile__action-btn"
+          onClick={goToNotificationSettings}
+        >
+          {COPY.buttons.notificationSettings}
+        </button>
       </ProfileSection>
 
       <MasterTabBar
