@@ -107,7 +107,12 @@ def should_emit_tenant_missing(handler_name: str) -> bool:
     key = f"worker:ceil:tenant_required_missing:{handler_name}:{hour_bucket}"
 
     try:
-        count = redis.incr(key)
+        # redis-py's stub-set surfaces an Awaitable union for INCR because
+        # async + sync clients share method names. We use the sync client
+        # (apps.ingress.streams._client returns redis.Redis, not
+        # redis.asyncio.Redis), so the runtime return is int. Cast to keep
+        # mypy quiet without hiding real type errors elsewhere.
+        count: int = int(redis.incr(key))  # type: ignore[arg-type]
         if count == 1:
             # First hit this window — set TTL so the key auto-rotates
             # at the hour boundary. Don't bother with PEXPIRE precision;
