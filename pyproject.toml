@@ -59,6 +59,13 @@ dependencies = [
     # called inside the seed_kb_from_gdocs management command which runs in
     # production environments — never in tests alone.
     "transliterate>=1.10",
+    # PR #524 round-1 A2 — per-IP rate limit on the cross-service
+    # events ingest endpoint. Used by
+    # apps.eventbus.views.InternalEventsIngestView via
+    # @method_decorator(ratelimit(...)). Production deploys may
+    # disable via RATELIMIT_ENABLE=False when WAF/CDN-level limits
+    # are deployed at the edge.
+    "django-ratelimit>=4.1,<5",
 ]
 
 [project.optional-dependencies]
