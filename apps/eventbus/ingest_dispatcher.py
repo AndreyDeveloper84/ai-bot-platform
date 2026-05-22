@@ -21,6 +21,36 @@ parses, verifies signatures, and maps outcomes to status codes. Pure
 business logic (look up the handler, run inside a DB transaction,
 write the dedupe row) belongs in this module so tests can exercise
 it without spinning up Django's request cycle.
+
+### Tenant-verification mandate (PR #507 adversarial pass A3)
+
+HMAC verification (§6.2 of `event-contract.md`) proves only that
+*some Ayla service holding the shared secret signed this body*. It
+does NOT prove that the envelope's ``tenant_id`` falls within the
+publisher's legitimate authority. A compromised Ayla worker, a
+debug script with the secret, or a misconfigured tenant-isolation
+boundary on the publisher side could mint an HMAC-valid envelope
+carrying ``tenant_id=<victim_tenant>`` + arbitrary ``data`` — and
+bot-platform would happily attribute writes to the victim tenant.
+
+**Therefore every registered handler MUST verify that the
+envelope's ``tenant_id`` is authorized for ``envelope.user_id``
+BEFORE any side-effect**, per ADR-0009 §Hard rule #6 (the
+``TenantUserRelationship`` check) and per ADR-0011 §9.1 (red-zone
+event handling).
+
+The canonical helper :func:`apps.eventbus.ingest_tenancy.assert_envelope_tenant_authorized`
+is the one place to call. It raises :class:`TenantAuthorizationError`
+on mismatch; the dispatcher catches and surfaces as
+``HANDLER_EXCEPTION`` per §8.1 (Ayla's retry won't help — the
+mismatch is permanent — but at least audit + DLQ capture the
+attempt). Handlers MUST NOT silently no-op on mismatch.
+
+The lint test :mod:`tests.contracts.test_consumer_tenant_verification_mandate`
+asserts every registered handler's source contains a call to this
+helper. The lint is permissive today (no handlers registered yet)
+and tightens to a fail-on-missing assertion when the
+:class:`TenantUserRelationship` model lands via Sprint 1 #246.
 """
 
 from __future__ import annotations
