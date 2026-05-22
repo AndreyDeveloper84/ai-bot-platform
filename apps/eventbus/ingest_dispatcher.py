@@ -65,6 +65,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.eventbus.ingest_envelope import IngestEnvelope
+from apps.eventbus.ingest_redaction import redact_data_for_dlq
 from apps.eventbus.models import IngestDedupe, IngestDLQ
 
 
@@ -255,6 +256,11 @@ def _write_dlq(envelope: IngestEnvelope, *, reason: str) -> None:
     is logged by the view layer separately if needed.
     """
     try:
+        # Round-2 AS4 — redact envelope.data BEFORE persisting. The
+        # DLQ retention is 90d (§6.4); without redaction, a publisher
+        # bug or v2 event with new fields = unredacted PII for 90
+        # days in a surface ops triages via Sentry/log-aggregator.
+        # See apps/eventbus/ingest_redaction.py.
         IngestDLQ.objects.create(
             event_id=envelope.event_id,
             event_name=envelope.event_name,
@@ -270,7 +276,7 @@ def _write_dlq(envelope: IngestEnvelope, *, reason: str) -> None:
                 "actor": envelope.actor,
                 "correlation_id": envelope.correlation_id,
                 "causation_id": envelope.causation_id,
-                "data": envelope.data,
+                "data": redact_data_for_dlq(envelope.data),
             },
         )
     except Exception:  # noqa: BLE001 — DLQ write MUST NEVER block the response

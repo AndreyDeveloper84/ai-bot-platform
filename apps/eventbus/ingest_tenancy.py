@@ -18,26 +18,35 @@ scans handler source code for a call to this exact function name. A
 single helper makes the lint reliable; six different verify-then-raise
 implementations across the consumer family would inevitably drift.
 
-### Activation timeline
+### Activation timeline — FAIL-CLOSED by default (Round-2 AS8)
 
-* **Today (Phase 0 #432 follow-up):** the function exists as a stub
-  that ONLY enforces the §2 "tenant_id MAY be null for
-  user.profile.updated" rule. The full ``TenantUserRelationship``
-  lookup is a no-op — the model arrives via Sprint 1 #246.
+Round-1 stub fail-OPENED when ``tenant_id`` was set and the
+canonical model unavailable. That would mean ZERO tenant-spoof
+defense if #442 ships before Sprint 1 #246. An attacker exploits
+the gap by minting an HMAC-valid envelope with
+``tenant_id=<victim_tenant>`` and bot-platform writes against it.
 
-* **After #246 ships:** the lookup is enabled. Re-grep + dispatcher
-  exception catch surface a P0 alert on the FIRST tenant-spoof attempt
-  in production.
+Round-2 fix: **fail-CLOSED by default**. If ``tenant_id`` is set
+and the canonical model is unavailable, raise
+:class:`TenantAuthorizationError`. The opt-in
+``settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN=True`` is the
+documented pre-#246 transition bridge — operators must explicitly
+flip it after reading this docstring + the startup warning.
 
-The stub today is deliberate: consumer authors writing #442-#446 SHALL
-import + call this function. When #246 ships, the function gains teeth
-without any consumer rewrite.
+When Sprint 1 #246 ships ``TenantUserRelationship``, the model
+becomes importable + the real lookup runs unconditionally — the
+fail-open flag stops mattering.
+
+The lint test :mod:`tests.contracts.test_consumer_tenant_verification_mandate`
+scans handler source code for a call to this exact function name.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
+
+from django.conf import settings
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +69,24 @@ class TenantAuthorizationError(Exception):
     """
 
 
+def _tenant_user_relationship_available() -> bool:
+    """True iff the canonical TenantUserRelationship model can be imported.
+
+    Sprint 1 #246 ships this model. Until then, the import is None.
+    Round-2 AS8: the answer drives fail-closed vs fall-back-open
+    behaviour. We probe at every call (cheap importlib check) so the
+    transition from #246-pre to #246-post is automatic — no settings
+    flip required at deploy.
+    """
+    try:
+        from apps.tenancy.models import TenantUserRelationship  # noqa: F401
+    except ImportError:
+        return False
+    except Exception:  # noqa: BLE001 — defensive
+        return False
+    return True
+
+
 def assert_envelope_tenant_authorized(envelope: Any) -> None:
     """Verify ``(envelope.user_id, envelope.tenant_id)`` authorization.
 
@@ -67,28 +94,25 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     ``None`` on success. Consumer handlers MUST call this BEFORE any
     side-effect.
 
-    Today's enforcement (stub state):
+    Round-2 AS8 — FAIL-CLOSED by default. The previous Round-1 stub
+    fail-OPENED when ``tenant_id`` was set + the canonical model
+    unavailable. That would mean ZERO tenant-spoof defense if #442
+    ships before Sprint 1 #246.
 
-    * If ``envelope.tenant_id is None`` and ``envelope.event_name``
-      is not in the §2 nullable set (i.e. not ``user.profile.updated``)
-      → raise.
-    * If ``envelope.tenant_id is None`` and the event IS nullable →
-      pass (user-global change; no tenant binding to verify).
-    * Otherwise (tenant_id is set): currently a NO-OP. The full
-      :class:`TenantUserRelationship` lookup arrives with Sprint 1
-      #246; the helper signature is stable so consumers don't change.
+    Decision matrix:
 
-    After #246 ships, the no-op branch becomes:
+    | tenant_id state | model available | flag set      | outcome    |
+    |-----------------|-----------------|---------------|------------|
+    | None + nullable | n/a             | n/a           | pass       |
+    | None + others   | n/a             | n/a           | RAISE      |
+    | set             | yes             | n/a           | real check |
+    | set             | no              | flag True     | log + pass |
+    | set             | no              | flag False    | RAISE      |
 
-    .. code-block:: python
-
-        from apps.tenancy.models import TenantUserRelationship
-        if not TenantUserRelationship.objects.filter(
-            user_id=envelope.user_id,
-            tenant_id=envelope.tenant_id,
-            is_active=True,
-        ).exists():
-            raise TenantAuthorizationError(...)
+    The "flag True + no model" branch is the documented opt-in
+    bridge for pre-#246 development. Operators must explicitly set
+    ``EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN=True`` to use it; the
+    startup warning surfaces the risk.
     """
     event_name = getattr(envelope, "event_name", "")
     user_id = getattr(envelope, "user_id", "")
@@ -101,13 +125,52 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             )
         return
 
-    # Sprint 1 #246 will replace this no-op with the real
-    # TenantUserRelationship lookup. The log line is here today so
-    # ops can confirm the helper is actually being called by every
-    # consumer (lint enforces presence in source; this confirms
-    # runtime invocation).
-    logger.debug(
-        "eventbus.ingest.tenant_verify_stub event_name=%s user_id=%s tenant_id=%s",
+    if _tenant_user_relationship_available():
+        # Sprint 1 #246 has shipped — do the real lookup.
+        try:
+            from apps.tenancy.models import (  # type: ignore[import-not-found]
+                TenantUserRelationship,
+            )
+        except ImportError:
+            # Race between probe + import — shouldn't happen, but if
+            # it does, fall through to the fail-closed branch below.
+            pass
+        else:
+            try:
+                exists = TenantUserRelationship.objects.filter(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    is_active=True,
+                ).exists()
+            except Exception as exc:  # noqa: BLE001 — DB lookup failure
+                # Fail-CLOSED on DB error too. A transient DB issue
+                # is a worse story for the operator than a brief
+                # rejection burst per §6.3 (which Ayla will retry).
+                raise TenantAuthorizationError(
+                    f"tenant_verify_db_error: {type(exc).__name__}"
+                ) from exc
+            if not exists:
+                raise TenantAuthorizationError(
+                    f"no_active_relationship user_id={user_id} tenant_id={tenant_id}"
+                )
+            return
+
+    # Canonical model not available (pre-#246 transition window).
+    # FAIL-CLOSED unless ops EXPLICITLY opts into the open mode.
+    fail_open = bool(getattr(settings, "EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN", False))
+    if not fail_open:
+        raise TenantAuthorizationError(
+            "TenantUserRelationship model not available + "
+            "EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN=False. Per Round-2 AS8 "
+            "the helper fails CLOSED until Sprint 1 #246 ships the "
+            "canonical model. Set the flag True explicitly to enable "
+            "pre-#246 consumer development."
+        )
+
+    # Opt-in fall-through. Log every invocation so ops sees the
+    # exposure window in the audit trail.
+    logger.warning(
+        "eventbus.ingest.tenant_verify_fail_open event_name=%s user_id=%s tenant_id=%s",
         event_name,
         user_id,
         tenant_id,

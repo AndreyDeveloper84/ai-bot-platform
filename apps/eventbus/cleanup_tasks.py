@@ -46,12 +46,24 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Final
+from typing import Any, Final
 
 from celery import shared_task  # type: ignore[import-untyped]
+from django.core.cache import cache
 from django.utils import timezone
 
 from apps.eventbus.models import IngestDedupe, IngestDLQ
+
+
+# Round-2 AS10 — beat-ran-recently marker cache keys.
+# Set at task end; checked by ``health.check_cleanup_beat_healthy``.
+# Cache is the right store: ephemeral, no migration, and the
+# 25h staleness window aligns with the daily cadence regardless.
+_DLQ_BEAT_LAST_RUN_CACHE_KEY = "eventbus:ingest:cleanup_dlq_last_ran_at"
+_DEDUPE_BEAT_LAST_RUN_CACHE_KEY = "eventbus:ingest:cleanup_dedupe_last_ran_at"
+# Cache TTL > 25h so the absence of a recent run reads as "stale"
+# (cache miss) rather than "not configured".
+_BEAT_HEARTBEAT_TTL_S = 30 * 24 * 3600  # 30 days
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +109,13 @@ def cleanup_ingest_dlq() -> dict[str, int]:
         dead_lettered_at__lt=aged_cutoff,
     ).delete()
 
+    # Round-2 AS10 — stamp the «beat ran» marker so the health check
+    # can assert recency. We set EVEN ON ZERO-DELETION runs because
+    # the marker is about beat aliveness, not deletion volume.
+    cache.set(
+        _DLQ_BEAT_LAST_RUN_CACHE_KEY, timezone.now().isoformat(), timeout=_BEAT_HEARTBEAT_TTL_S
+    )
+
     logger.info(
         "eventbus.ingest.cleanup_dlq deleted_replayed=%d deleted_aged=%d",
         deleted_replayed,
@@ -113,9 +132,61 @@ def cleanup_ingest_dedupe() -> dict[str, int]:
     """
     cutoff = timezone.now() - timedelta(days=DEDUPE_RETENTION_DAYS)
     deleted, _ = IngestDedupe.objects.filter(received_at__lt=cutoff).delete()
+
+    # Round-2 AS10 — beat-ran marker (see cleanup_ingest_dlq above).
+    cache.set(
+        _DEDUPE_BEAT_LAST_RUN_CACHE_KEY,
+        timezone.now().isoformat(),
+        timeout=_BEAT_HEARTBEAT_TTL_S,
+    )
+
     logger.info(
         "eventbus.ingest.cleanup_dedupe deleted=%d cutoff_days=%d",
         deleted,
         DEDUPE_RETENTION_DAYS,
     )
     return {"deleted": deleted}
+
+
+# ─── AS10 health check ────────────────────────────────────────────────────
+
+
+def cleanup_beat_health() -> dict[str, Any]:
+    """Snapshot of beat liveness for the two cleanup tasks.
+
+    Returns a dict with per-task status: ``{healthy: bool, last_ran_at: str|None, ...}``.
+
+    Health rule per AS10 acceptance: each task MUST have run within
+    the last 25h (daily cadence + 1h grace). A stale or missing
+    marker means the beat is dead OR mis-configured; either way the
+    DLQ retention guarantee is a comment in code.
+
+    The result shape is suitable for direct JSON serialisation in a
+    /health endpoint or a Celery-scheduled status emit.
+    """
+    import datetime as _dt
+
+    now = timezone.now()
+    cutoff = now - _dt.timedelta(hours=25)
+
+    def _check_marker(key: str) -> dict[str, Any]:
+        raw = cache.get(key)
+        if not raw:
+            return {"healthy": False, "last_ran_at": None, "reason": "no_marker"}
+        try:
+            last = _dt.datetime.fromisoformat(raw)
+        except ValueError:
+            return {"healthy": False, "last_ran_at": raw, "reason": "bad_marker_format"}
+        if last < cutoff:
+            return {
+                "healthy": False,
+                "last_ran_at": raw,
+                "reason": "stale",
+                "max_age_h": 25,
+            }
+        return {"healthy": True, "last_ran_at": raw}
+
+    return {
+        "cleanup_ingest_dlq": _check_marker(_DLQ_BEAT_LAST_RUN_CACHE_KEY),
+        "cleanup_ingest_dedupe": _check_marker(_DEDUPE_BEAT_LAST_RUN_CACHE_KEY),
+    }
