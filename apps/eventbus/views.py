@@ -22,6 +22,8 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
+from django_ratelimit.decorators import ratelimit  # type: ignore[import-untyped]
+
 from apps.audit.services import write_audit
 from apps.eventbus.ingest_dispatcher import (
     DispatchOutcome,
@@ -52,6 +54,26 @@ AUDIT_UNKNOWN_EVENT_VERSION = "eventbus.ingest.unknown_event_version"
 AUDIT_HANDLER_EXCEPTION = "eventbus.ingest.handler_exception"
 AUDIT_DUPLICATE = "eventbus.ingest.duplicate"
 AUDIT_PROCESSED = "eventbus.ingest.processed"
+AUDIT_RATE_LIMITED = "eventbus.ingest.rate_limited"
+
+
+# PR #507 adversarial A2 — rate limit on the ingest endpoint as
+# defense-in-depth against captured-tuple replay flood. The 5-min
+# anti-replay window (§6.2) means an attacker who captured ONE
+# valid (body, sig, ts) triple could fire it at line speed for up
+# to 5 minutes; each call burns HMAC verify CPU + DB lookup BEFORE
+# the dedupe short-circuit fires. The rate limit caps that
+# amplification at the source-IP level.
+#
+# Default 100/min per source IP — well above expected steady-state
+# traffic (Ayla's outbox dispatcher emits per-event, not in bursts).
+# Overridable via settings.EVENT_INGEST_RATE_LIMIT for tenants with
+# legitimately higher publish rates.
+#
+# Long-term defense is WAF/CDN rate limiting at the network edge;
+# this code-side limit is the defense-in-depth layer for the time
+# until that's deployed.
+_RATE_LIMIT_DEFAULT = "100/m"
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -77,8 +99,45 @@ class InternalEventsIngestView(View):
 
     http_method_names = ["post"]
 
+    @method_decorator(
+        ratelimit(
+            key="ip",
+            # Rate is read from settings at request time via the lambda
+            # form so deploys can tune without a code change.
+            rate=lambda group, request: getattr(
+                settings, "EVENT_INGEST_RATE_LIMIT", _RATE_LIMIT_DEFAULT
+            ),
+            method="POST",
+            block=False,
+        )
+    )
     def post(self, request: HttpRequest) -> JsonResponse:
         body = request.body or b""
+
+        # ── 0. Rate limit gate (§A2) ───────────────────────────────────
+        # django_ratelimit sets request.limited=True when the per-IP
+        # bucket is exhausted (`block=False` form). We return 429 with
+        # a JSON body + audit row. Ayla treats 4xx as non-retryable
+        # per §6.3 — if the publisher hits this it's misbehaving (or
+        # under attack) and should back off.
+        if getattr(request, "limited", False):
+            logger.warning(
+                "eventbus.ingest.rate_limited remote=%s body_bytes=%d",
+                request.META.get("REMOTE_ADDR") or "",
+                len(body),
+            )
+            write_audit(
+                action=AUDIT_RATE_LIMITED,
+                target="eventbus.ingest",
+                payload={
+                    "remote_ip": request.META.get("REMOTE_ADDR") or "",
+                    "body_bytes": len(body),
+                },
+            )
+            return JsonResponse(
+                {"status": "rate_limited", "reason": "rate_limit_exceeded"},
+                status=429,
+            )
 
         # ── 1. HMAC + timestamp ────────────────────────────────────────
         sig_result = verify_signature(

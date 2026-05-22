@@ -58,8 +58,28 @@ def _post(client: Client, body: bytes, *, secret: str = SECRET, ts: float | None
 
 
 @pytest.fixture(autouse=True)
-def _settings_and_registry(settings):
+def _settings_and_registry(settings, monkeypatch):
     settings.EVENT_INGEST_HMAC_SECRET = SECRET
+    # PR #507 A2 — the rate-limit decorator on the view would
+    # false-positive in non-rate-limit tests (we re-POST the same IP
+    # repeatedly to exercise dedupe, malformed body, etc.). Disable
+    # here; the rate-limit contract is pinned in test_ingest_rate_limit.py.
+    settings.RATELIMIT_ENABLE = False
+
+    # PR #507 A12 — the timeout wrapper submits dispatch_envelope to
+    # a ThreadPoolExecutor. Under the SQLite test backend the worker
+    # thread's IngestDedupe write deadlocks against the test
+    # transaction with "database table is locked". Monkey-patch the
+    # view's dispatch_with_timeout to call dispatch_envelope
+    # directly — sidesteps the SQLite race while keeping §8 status
+    # table coverage on the view. The actual timeout contract is
+    # pinned by test_ingest_timeout.py (which mocks dispatch_envelope
+    # entirely, no DB involvement).
+    from apps.eventbus import views as _views
+    from apps.eventbus.ingest_dispatcher import dispatch_envelope as _direct
+
+    monkeypatch.setattr(_views, "dispatch_with_timeout", _direct)
+
     yield
     for key in list(registered_handlers().keys()):
         unregister(*key)
