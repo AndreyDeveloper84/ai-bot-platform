@@ -688,3 +688,161 @@ export const patchServicesMapping = async (
   }
   return (await res.json()) as ServicesMappingBulkResult;
 };
+
+// --- M3-admin: availability requests approve/reject (PR #521 backend) -----
+
+/**
+ * Availability request row — mirrors the JSON shape emitted by
+ * :func:`apps.admin_api.services.availability.list_pending_for_admin`.
+ *
+ * Status uses the model's `ScheduleChangeRequest.Status` lowercase
+ * slugs. Only the three values the admin surface ever shows are
+ * declared as literals — `cancelled` / `auto_escalated` are out-of-scope
+ * for this UI but fall through the `string` widening (defence in depth).
+ */
+export interface AvailabilityRequestItem {
+  request_id: string;
+  master_id: string | null;
+  master_name: string;
+  requested_start: string | null;
+  requested_end: string | null;
+  reason_class: string;
+  reason_text: string;
+  status: "pending" | "approved" | "rejected" | string;
+  created_at: string;
+  decided_at: string | null;
+  decided_by_name: string;
+  resolution_note: string;
+}
+
+export interface AvailabilityListResponse {
+  items: AvailabilityRequestItem[];
+  next_cursor: string | null;
+}
+
+/**
+ * 409 envelope from approve/reject. Backend (PR #521) returns
+ * ``{"error": "already_decided" | "overlap_conflict", "detail": "..."}``
+ * — there's no structured `dates: [...]` field, conflicting dates are
+ * embedded as a stringified Python list inside the detail
+ * (e.g. ``"existing exceptions conflict on dates: ['2026-06-11']"``).
+ * We parse them client-side; see ``parseOverlapDates`` in the screen.
+ */
+export interface AvailabilityConflict {
+  __conflict: true;
+  conflict: "already_decided" | "overlap_conflict";
+  detail: string;
+  /** Best-effort parse of dates embedded in the detail string. */
+  dates?: string[];
+}
+
+export interface AvailabilityListParams {
+  status?: "pending" | "decided" | "all";
+  master_id?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export const getAvailabilityRequests = (
+  params: AvailabilityListParams = {},
+  init: { signal?: AbortSignal } = {},
+): Promise<AvailabilityListResponse> => {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.master_id) q.set("master_id", params.master_id);
+  if (params.cursor) q.set("cursor", params.cursor);
+  if (params.limit !== undefined) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return request<AvailabilityListResponse>(
+    `/api/v1/admin/availability-requests/${qs ? `?${qs}` : ""}`,
+    { method: "GET", signal: init.signal },
+  );
+};
+
+/**
+ * Approve or reject the request via direct ``fetch`` — bypasses the
+ * shared ``request`` helper because 409 carries a structured body
+ * (`{error, detail}`) that ``request`` would flatten into ApiError's
+ * stringified ``detail``. We need both the slug and the detail to
+ * branch on already_decided vs overlap_conflict + surface conflicting
+ * dates. Mirror of ``patchServicesMapping`` 409-handling pattern
+ * (PR #518) — same rationale, same shape.
+ */
+interface DecisionEnvelope {
+  request: AvailabilityRequestItem;
+}
+
+const DATE_REGEX = /\d{4}-\d{2}-\d{2}/g;
+
+function parseDatesFromDetail(detail: string): string[] {
+  const matches = detail.match(DATE_REGEX);
+  return matches ? Array.from(new Set(matches)) : [];
+}
+
+async function decisionFetch(
+  url: string,
+  body: Record<string, unknown>,
+): Promise<AvailabilityRequestItem | AvailabilityConflict> {
+  const initData = getInitData();
+  const headers = new Headers();
+  headers.set("Content-Type", "application/json");
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (res.status === 409) {
+    let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
+    try {
+      parsed = (await res.json()) as ErrorBody;
+    } catch {
+      /* non-JSON */
+    }
+    const slug = parsed.error;
+    if (slug !== "already_decided" && slug !== "overlap_conflict") {
+      // Unknown 409 — surface as ApiError so the caller's generic
+      // error path renders it.
+      throw new ApiError(res.status, slug, parsed.detail);
+    }
+    const detail = parsed.detail || "";
+    return {
+      __conflict: true,
+      conflict: slug,
+      detail,
+      dates: slug === "overlap_conflict" ? parseDatesFromDetail(detail) : undefined,
+    };
+  }
+
+  if (!res.ok) {
+    let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
+    try {
+      parsed = (await res.json()) as ErrorBody;
+    } catch {
+      /* non-JSON 5xx */
+    }
+    throw new ApiError(res.status, parsed.error, parsed.detail);
+  }
+  const envelope = (await res.json()) as DecisionEnvelope;
+  return envelope.request;
+}
+
+export const approveAvailabilityRequest = (
+  requestId: string,
+): Promise<AvailabilityRequestItem | AvailabilityConflict> =>
+  decisionFetch(
+    `/api/v1/admin/availability-requests/${requestId}/approve/`,
+    {},
+  );
+
+export const rejectAvailabilityRequest = (
+  requestId: string,
+  rejection_reason: string,
+): Promise<AvailabilityRequestItem | AvailabilityConflict> =>
+  decisionFetch(
+    `/api/v1/admin/availability-requests/${requestId}/reject/`,
+    { rejection_reason },
+  );
