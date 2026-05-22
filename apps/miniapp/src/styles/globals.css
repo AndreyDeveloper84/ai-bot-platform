@@ -2072,3 +2072,230 @@ a {
   white-space: nowrap;
   border: 0;
 }
+
+/* =========================================================================
+   M4 — Master profile editor
+   Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M4
+   ========================================================================= */
+
+.master-profile {
+  padding: var(--s-3) var(--s-3) calc(var(--s-6) + var(--safe-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-profile__section {
+  margin-bottom: var(--s-3);
+}
+
+.master-profile__section-title {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--c-text-secondary);
+  margin: 0 0 var(--s-2);
+}
+
+.master-profile__header-row {
+  display: flex;
+  gap: var(--s-3);
+  align-items: flex-start;
+}
+
+.master-profile__avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--c-surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.master-profile__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.master-profile__identity {
+  flex: 1;
+  min-width: 0;
+}
+
+.master-profile__name {
+  font-weight: 600;
+  color: var(--c-text-primary);
+  margin-bottom: 2px;
+}
+
+.master-profile__specialization {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  margin-bottom: var(--s-2);
+}
+
+.master-profile__bio-quote {
+  margin: var(--s-1) 0 0;
+  padding: 0 0 0 var(--s-2);
+  border-left: 2px solid var(--c-divider);
+  color: var(--c-text-primary);
+  font-style: italic;
+  line-height: var(--leading-base);
+}
+
+.master-profile__bio-empty {
+  margin: var(--s-1) 0 0;
+  color: var(--c-text-secondary);
+  font-style: italic;
+}
+
+.master-profile__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+
+.master-profile__action-btn {
+  width: 100%;
+}
+
+.master-profile__hint {
+  margin: var(--s-2) 0 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.master-profile__error {
+  margin: var(--s-2) 0 0;
+  color: var(--c-danger);
+  font-size: var(--font-size-200);
+}
+
+.master-profile__services {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.master-profile__service-item {
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+  color: var(--c-text-primary);
+}
+
+.master-profile__service-item:last-child {
+  border-bottom: 0;
+}
+
+.master-profile__service-meta {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.master-profile__loading-label {
+  color: var(--c-text-secondary);
+  text-align: center;
+  margin: var(--s-2) 0 var(--s-3);
+}
+
+.master-profile__skeleton-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+/* Bio editor sheet — bottom-anchored modal */
+.master-profile__sheet {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 200;
+}
+
+.master-profile__sheet-card {
+  width: 100%;
+  max-width: 480px;
+  background: var(--c-surface-1);
+  border-top-left-radius: var(--r-lg, 16px);
+  border-top-right-radius: var(--r-lg, 16px);
+  padding: var(--s-4);
+  padding-bottom: calc(var(--s-4) + var(--safe-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-profile__sheet-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  margin: 0 0 var(--s-2);
+}
+
+.master-profile__textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  resize: vertical;
+}
+
+.master-profile__textarea:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+
+.master-profile__counter {
+  text-align: right;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.master-profile__counter--bad {
+  color: var(--c-danger);
+  font-weight: 600;
+}
+
+.master-profile__sheet-actions {
+  display: flex;
+  gap: var(--s-2);
+  justify-content: flex-end;
+  margin-top: var(--s-2);
+}
+
+/* Primary save button — reuse accent treatment. */
+.master-profile__sheet .btn-primary,
+.master-profile .btn-primary {
+  background: var(--c-accent);
+  color: #fff;
+  border: 0;
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-4);
+  font: inherit;
+  font-weight: 600;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.master-profile__sheet .btn-primary:disabled,
+.master-profile .btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
