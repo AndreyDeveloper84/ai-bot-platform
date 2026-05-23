@@ -698,3 +698,123 @@ class TestConcurrentDrillLock:
         )
         assert exit_code == 7
         assert _FakeRedis._lock_store.get("strict_flip_drill:lock") is None
+
+
+# ───────────────────────────────────────────────────────────────────────
+# #576 — Drill payload tag для точного cleanup
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestCleanupByPayloadTag:
+    """SQL контракт для _cleanup_audit_rows: DELETE фильтрует по
+    ``payload->>'drill' = 'true'`` (primary defense — точный таргетинг
+    drill-rows) + ``created_at BETWEEN ...`` (secondary defense — окно
+    текущего drill-а, защита от прошлых drill-tagged residuals)."""
+
+    def test_cleanup_sql_contains_drill_filter(self, monkeypatch):
+        """Проверяю что SQL DELETE содержит обе защиты: drill tag +
+        timestamp range. Регрессионный guard: если кто-то уберёт фильтр
+        по тэгу, cleanup начнёт удалять legitimate events."""
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        captured_sql: list[str] = []
+        captured_params: list[list] = []
+
+        class _SpyCursor:
+            def execute(self, sql, params):
+                captured_sql.append(sql)
+                captured_params.append(params)
+                self.rowcount = 80
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class _SpyConnection:
+            def cursor(self):
+                return _SpyCursor()
+
+        monkeypatch.setattr(mod, "connection", _SpyConnection())
+
+        start = datetime(2099, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2099, 6, 15, 12, 5, 0, tzinfo=timezone.utc)
+        deleted = mod._cleanup_audit_rows("apps_audit_event", "MaxHandler", start, end)
+
+        assert deleted == 80
+        sql = captured_sql[0]
+        # Primary defense — drill tag фильтр.
+        assert "payload->>'drill' = 'true'" in sql, (
+            "#576: cleanup MUST filter by payload.drill tag — без этого "
+            "legitimate events в drill window будут удалены."
+        )
+        # Secondary defense — timestamp range (legacy #592 fix).
+        assert "created_at BETWEEN" in sql
+        # Параметры: handler, start_ts, end_ts (handler filter сохранён).
+        assert captured_params[0] == ["MaxHandler", start, end]
+
+    def test_audit_count_filters_by_drill_tag(self, monkeypatch):
+        """_audit_count baseline тоже должен фильтровать по drill тэгу —
+        чтобы legitimate events не загрязняли delta calculation."""
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        captured_sql: list[str] = []
+
+        class _SpyCursor:
+            def execute(self, sql, params):
+                captured_sql.append(sql)
+
+            def fetchone(self):
+                return (42,)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class _SpyConnection:
+            def cursor(self):
+                return _SpyCursor()
+
+        monkeypatch.setattr(mod, "connection", _SpyConnection())
+        result = mod._audit_count("apps_audit_event", "MaxHandler")
+        assert result == 42
+        assert "payload->>'drill' = 'true'" in captured_sql[0]
+
+
+class TestDrillEntryCarriesTag:
+    """Drill команда XADD-ит entries с ``_drill=1`` полем. apps/workers/base.py
+    видит этот маркер и пробрасывает в emit payload. Этот тест локально
+    pin-ит что drill команда действительно ставит маркер на каждой entry —
+    регрессионный guard на случай если refactor забудет."""
+
+    def test_generate_flood_sets_drill_field_on_every_entry(self, monkeypatch):
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        redis = _FakeRedis()
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+
+        opts = mod._Opts(
+            stream="ingress:max",
+            group="consumers",
+            handler_name="MaxHandler",
+            duration=1,
+            target_count=5,
+            worker_log="/tmp/x",
+            audit_table="apps_audit_event",
+            skip_cleanup=True,
+            json=False,
+        )
+        progress: list = []
+        mod._generate_flood(redis, opts, on_progress=lambda s, t: progress.append((s, t)))
+
+        assert len(redis.xadd_calls) == 5
+        for call in redis.xadd_calls:
+            assert call["fields"].get("_drill") == "1", (
+                "#576: каждая drill XADD должна нести _drill=1 — без "
+                "этого base.py не пробросит тэг в payload, cleanup "
+                "по тэгу не найдёт rows."
+            )
+            assert call["fields"].get("resolved_tenant_id") == ""

@@ -266,11 +266,27 @@ growth + unbounded audit-table growth + alert flood.
       - Handler `MaxHandler` registered (queryable via Issue #502
         `worker.subscriber_audit` event — see «Pre-flip checklist»
         item further up).
-      - No parallel manual tenant-missing test running on staging
-        for the duration of the drill (timestamp-scoped cleanup
-        would delete those rows too — see issue #576 for the
-        `payload.drill=true` tag improvement that removes this
-        constraint).
+      - **#576 shipped 2026-05-23**: cleanup теперь фильтрует rows по
+        `payload->>'drill' = 'true'` (primary defense) + timestamp range
+        (secondary). Параллельные legitimate `tenant_required_missing`
+        события в drill-окне больше НЕ удаляются. Constraint про
+        «no parallel manual tests» сохраняется только как good practice
+        (чтобы не путаться в логах) — но cleanup safety гарантирована.
+
+      **⚠ One-time cleanup pre-#576 untagged residuals** (do once
+      after the #576 merge lands on dev): если в staging audit-таблице
+      остались rows от drill runs ДО #576, они не имеют `payload.drill`
+      тэга и не будут учитываться новым `_audit_count`. Удалить вручную:
+
+      ```sql
+      DELETE FROM apps_audit_event
+      WHERE event_type = 'worker.tenant_required_missing'
+        AND payload->>'handler' = 'MaxHandler'
+        AND (payload->>'drill') IS NULL
+        AND created_at < '<#576 merge date>';
+      ```
+
+      (Adversarial pass vector 2 на PR #576 — operator hygiene step.)
 
       **Why positive assertions are non-negotiable.** Without them
       the drill silently no-ops: if entries XADD'd to `ingress:max`

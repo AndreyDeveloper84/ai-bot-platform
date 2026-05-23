@@ -366,6 +366,21 @@ class TenantAwareTask(ABC):
                 from apps.workers.ceilings import should_emit_tenant_missing
 
                 allow_emit = should_emit_tenant_missing(handler_name)
+                # Issue #576: если raw_entry помечен ``_drill`` маркером
+                # (drill команда XADD-ит synthetic entries с этим полем
+                # — см. apps/workers/management/commands/run_strict_flip_drill.py),
+                # пробрасываем тэг в payload. Cleanup в drill команде
+                # удаляет ТОЛЬКО строки с этим тэгом → синтетический
+                # нагрузочный тест не сможет случайно затронуть
+                # legitimate tenant-missing события, которые попали в
+                # тот же временной интервал.
+                # Точный match на "1" вместо truthy check — оператор
+                # вручную XADD-ит `_drill=0` для регрессионных тестов
+                # ceiling без drill-семантики и не должен быть удивлён
+                # что row помечен drill=True (Python truthy: bool("0") = True).
+                drill_payload: dict[str, Any] = (
+                    {"drill": True} if raw_entry.get("_drill") == "1" else {}
+                )
                 if strict:
                     logger.error(
                         "worker.tenant_required_missing handler=%s trace=%s "
@@ -381,6 +396,7 @@ class TenantAwareTask(ABC):
                             payload={
                                 "handler": handler_name,
                                 "strict_mode": True,
+                                **drill_payload,
                             },
                         )
                     raise TenantRequiredButMissing(
@@ -402,6 +418,7 @@ class TenantAwareTask(ABC):
                         payload={
                             "handler": handler_name,
                             "strict_mode": False,
+                            **drill_payload,
                         },
                     )
             elif not requires_tenant_value and tenant is None:

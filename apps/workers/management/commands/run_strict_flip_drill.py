@@ -490,16 +490,30 @@ def _check_canary(redis: Any, opts: "_Opts") -> float:
 
 
 def _audit_count(table: str, handler_name: str) -> int:
-    """COUNT строк в audit-таблице с event_type=worker.tenant_required_missing.
+    """COUNT drill-tagged строк в audit-таблице.
 
-    Фильтр на handler_name внутри payload→handler — чтобы счёт был
-    специфичен для дрилл-handler-а, не для всех tenant-missing
-    событий staging-а.
+    Issue #576: baseline+after counts фильтруются по
+    ``payload->>'drill' = 'true'`` тэгу — drill-команда таким образом
+    считает ТОЛЬКО synthetic events которые она сама породила.
+
+    **Зачем фильтровать:** без drill-фильтра ``audit_count_before``
+    включает все legitimate tenant-missing events от других bug-ов в
+    staging-е. Если в drill-окно по совпадению попал реальный
+    incident — delta может пробить ``_MAX_AUDIT_DELTA=100`` →
+    false-positive exit 6 «ceiling не cap-нул» → паника перед flip-date.
+    Drill-фильтр исключает не-drill noise.
+
+    Side effect: если предыдущий cleanup упал (exit 8) и оператор не
+    почистил вручную → baseline_before > 0 (residual drill rows от
+    прошлого запуска). Это honestly отражено в delta и не ломает
+    assertion при условии что текущий drill добавил ≥ MIN_AUDIT_DELTA
+    новых tagged rows. Не считается багом.
     """
     sql = (
         f"SELECT COUNT(*) FROM {table} "
         "WHERE event_type = 'worker.tenant_required_missing' "
-        "AND payload->>'handler' = %s"
+        "AND payload->>'handler' = %s "
+        "AND payload->>'drill' = 'true'"
     )
     with connection.cursor() as cur:
         cur.execute(sql, [handler_name])
@@ -704,12 +718,37 @@ def _cleanup_audit_rows(
     start_ts: datetime,
     end_ts: datetime,
 ) -> int:
-    """DELETE строк audit между start_ts и end_ts — точечный cleanup."""
+    """DELETE drill-tagged строк audit в указанном временном окне.
+
+    Issue #576 (fundamental fix): cleanup сходит ТОЛЬКО на строки с
+    ``payload->>'drill' = 'true'`` — это маркер который drill команда
+    проставляет в synthetic entries через XADD field ``_drill=1``, а
+    ``apps/workers/base.py`` пробрасывает в emit payload.
+
+    **Двойной фильтр (defense-in-depth):**
+
+    - **Primary**: ``payload->>'drill' = 'true'`` — семантика «удаляем
+      то что drill породил, не любую активность в окне». Защищает от
+      случайного удаления legitimate ``tenant_required_missing`` событий
+      которые попали в drill-окно (например рассинхронизация в Sentinel
+      failover, временной баг в ingress).
+    - **Secondary**: ``created_at BETWEEN start_ts AND end_ts`` —
+      defense на случай если в audit залежались drill-tagged строки от
+      прошлых drill runs (предыдущий cleanup упал с exit 8 → оператор
+      не удалил вручную). Tag-only cleanup такие строки бы тоже снёс,
+      что технически OK (они всё равно drill-мусор), но «удалим только
+      то что СЕЙЧАСНИЙ drill породил» — более предсказуемый контракт.
+
+    Issue #592 timestamp-fix (DB-side NOW()) остаётся актуальным —
+    secondary defense polagается на корректные timestamps для разделения
+    «сегодняшнего» drill-а от «вчерашнего».
+    """
     sql = (
         f"DELETE FROM {table} "
         "WHERE event_type = 'worker.tenant_required_missing' "
         "AND payload->>'handler' = %s "
-        "AND created_at BETWEEN %s AND %s"
+        "AND payload->>'drill' = 'true' "  # #576 primary defense
+        "AND created_at BETWEEN %s AND %s"  # #592 secondary defense
     )
     with connection.cursor() as cur:
         cur.execute(sql, [handler_name, start_ts, end_ts])

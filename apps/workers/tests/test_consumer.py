@@ -597,6 +597,97 @@ class TestRetroB4BlockersPreFlip:
             "B1: log-only emit must also fire inside trace_id_scope"
         )
 
+    def test_576_drill_tag_forwarded_to_payload(self, settings, monkeypatch):
+        """#576: если raw_entry имеет ``_drill`` маркер, ``emit()`` payload
+        должен содержать ``drill=True``. Это маркер по которому drill
+        cleanup отличает synthetic от legitimate tenant-missing rows."""
+        from apps.workers import base as base_mod
+
+        settings.STRICT_TENANT_REFUSE = False
+        captured_payload: dict[str, Any] = {}
+
+        def spy_emit(event_type: str, *, payload: dict[str, Any] | None = None) -> None:
+            if event_type == "worker.tenant_required_missing":
+                captured_payload.update(payload or {})
+
+        monkeypatch.setattr(base_mod, "emit", spy_emit)
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        _SpyHandler()(
+            {
+                "data": "{}",
+                "trace_id": "trace-576",
+                "resolved_tenant_id": "",
+                "_drill": "1",
+            }
+        )
+        assert captured_payload.get("drill") is True
+        assert captured_payload.get("handler") == "_SpyHandler"
+        assert captured_payload.get("strict_mode") is False
+
+    def test_576_no_drill_tag_means_no_drill_field(self, settings, monkeypatch):
+        """Mirror: legitimate entry без ``_drill`` маркера НЕ должна
+        получить ``drill`` в payload. Защита от false-positive cleanup."""
+        from apps.workers import base as base_mod
+
+        settings.STRICT_TENANT_REFUSE = False
+        captured_payload: dict[str, Any] = {}
+
+        def spy_emit(event_type: str, *, payload: dict[str, Any] | None = None) -> None:
+            if event_type == "worker.tenant_required_missing":
+                captured_payload.update(payload or {})
+
+        monkeypatch.setattr(base_mod, "emit", spy_emit)
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        _SpyHandler()(
+            {
+                "data": "{}",
+                "trace_id": "trace-no-drill",
+                "resolved_tenant_id": "",
+                # NO _drill field
+            }
+        )
+        assert "drill" not in captured_payload, (
+            "#576: legitimate entry без _drill не должна иметь drill=True в payload"
+        )
+
+    def test_576_explicit_non_one_drill_value_ignored(self, settings, monkeypatch):
+        """#576 — точный match на "1": пустая строка и "0" не должны
+        активировать drill-маркер. Документирует intent явного opt-in
+        (адверсарий-pass vectors 3+4 — `bool("0")=True` сюрприз)."""
+        from apps.workers import base as base_mod
+
+        settings.STRICT_TENANT_REFUSE = False
+        monkeypatch.setattr(
+            base_mod, "emit", lambda *a, **k: captured.update(k.get("payload") or {})
+        )
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        for non_one_value in ("", "0", "true", "yes"):
+            captured: dict[str, Any] = {}
+            _SpyHandler()(
+                {
+                    "data": "{}",
+                    "trace_id": "trace-non-one",
+                    "resolved_tenant_id": "",
+                    "_drill": non_one_value,
+                }
+            )
+            assert "drill" not in captured, (
+                f"#576: _drill={non_one_value!r} НЕ должно активировать "
+                "drill-маркер (точный match на '1')"
+            )
+
     # ---- B2: __init_subclass__ MRO bypass guard ----
 
     def test_b2_mixin_with_requires_tenant_attr_rejected_at_class_creation(self):
