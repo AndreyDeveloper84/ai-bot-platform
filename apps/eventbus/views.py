@@ -22,22 +22,26 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
+from django_ratelimit.decorators import ratelimit  # type: ignore[import-untyped]
+
 from apps.audit.services import write_audit
 from apps.eventbus.ingest_dispatcher import (
     DispatchOutcome,
     DispatchResult,
-    dispatch_envelope,
 )
 from apps.eventbus.ingest_envelope import (
     IngestEnvelope,
     IngestEnvelopeError,
     parse_envelope,
 )
+from apps.eventbus.ingest_ip import get_remote_ip
+from apps.eventbus.ingest_rate_audit_sampler import should_audit_rate_limited
 from apps.eventbus.ingest_security import (
     signature_header_from,
     timestamp_header_from,
     verify_signature,
 )
+from apps.eventbus.ingest_timeout import dispatch_with_timeout
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,44 @@ AUDIT_UNKNOWN_EVENT_VERSION = "eventbus.ingest.unknown_event_version"
 AUDIT_HANDLER_EXCEPTION = "eventbus.ingest.handler_exception"
 AUDIT_DUPLICATE = "eventbus.ingest.duplicate"
 AUDIT_PROCESSED = "eventbus.ingest.processed"
+AUDIT_RATE_LIMITED = "eventbus.ingest.rate_limited"
+AUDIT_SATURATED = "eventbus.ingest.saturated"
+
+
+# PR #507 adversarial A2 — rate limit on the ingest endpoint as
+# defense-in-depth against captured-tuple replay flood. The 5-min
+# anti-replay window (§6.2) means an attacker who captured ONE
+# valid (body, sig, ts) triple could fire it at line speed for up
+# to 5 minutes; each call burns HMAC verify CPU + DB lookup BEFORE
+# the dedupe short-circuit fires. The rate limit caps that
+# amplification at the source-IP level.
+#
+# Default 100/min per source IP — well above expected steady-state
+# traffic (Ayla's outbox dispatcher emits per-event, not in bursts).
+# Overridable via settings.EVENT_INGEST_RATE_LIMIT for tenants with
+# legitimately higher publish rates.
+#
+# Long-term defense is WAF/CDN rate limiting at the network edge;
+# this code-side limit is the defense-in-depth layer for the time
+# until that's deployed.
+_RATE_LIMIT_DEFAULT = "100/m"
+
+
+def _rate_limit_key(group, request) -> str:
+    """Proxy-aware rate-limit key — Round-2 AS1.
+
+    django-ratelimit's built-in ``key='ip'`` reads ``REMOTE_ADDR``,
+    which behind any reverse proxy is the proxy's IP — collapsing all
+    Ayla traffic into a single bucket. :func:`get_remote_ip` walks
+    ``X-Real-IP`` → trusted ``X-Forwarded-For`` chain → ``REMOTE_ADDR``,
+    using the proxy-trust depth from
+    ``settings.EVENT_INGEST_TRUSTED_PROXY_DEPTH``.
+
+    Empty string ⇒ no source identifiable ⇒ single bucket for the
+    «unknown» surface — bounded but loud (deliberately conservative
+    until ops sets up proxy headers).
+    """
+    return get_remote_ip(request) or "_unknown_"
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -77,8 +119,52 @@ class InternalEventsIngestView(View):
 
     http_method_names = ["post"]
 
+    @method_decorator(
+        ratelimit(
+            # AS1 — proxy-aware key. See :func:`_rate_limit_key`.
+            key=_rate_limit_key,
+            # Rate is read from settings at request time via the lambda
+            # form so deploys can tune without a code change.
+            rate=lambda group, request: getattr(
+                settings, "EVENT_INGEST_RATE_LIMIT", _RATE_LIMIT_DEFAULT
+            ),
+            method="POST",
+            block=False,
+        )
+    )
     def post(self, request: HttpRequest) -> JsonResponse:
         body = request.body or b""
+
+        # ── 0. Rate limit gate (§A2 + Round-2 AS1/AS3) ─────────────────
+        # django_ratelimit sets request.limited=True when the per-IP
+        # bucket is exhausted (`block=False` form). We return 429 with
+        # a JSON body. Audit writes are SAMPLED on this path (Round-2
+        # AS3) — without sampling a scanner without HMAC would
+        # generate unbounded AuditLog rows = unauthenticated DoS
+        # amplifier on the audit table.
+        if getattr(request, "limited", False):
+            remote_ip = get_remote_ip(request) or "_unknown_"
+            logger.warning(
+                "eventbus.ingest.rate_limited remote=%s body_bytes=%d",
+                remote_ip,
+                len(body),
+            )
+            # AS3 — 1 audit row per IP per 60s window. Suppressed
+            # rows still count via Prometheus / ratelimit counters;
+            # audit captures the forensic «first hit» only.
+            if should_audit_rate_limited(remote_ip):
+                write_audit(
+                    action=AUDIT_RATE_LIMITED,
+                    target="eventbus.ingest",
+                    payload={
+                        "remote_ip": remote_ip,
+                        "body_bytes": len(body),
+                    },
+                )
+            return JsonResponse(
+                {"status": "rate_limited", "reason": "rate_limit_exceeded"},
+                status=429,
+            )
 
         # ── 1. HMAC + timestamp ────────────────────────────────────────
         sig_result = verify_signature(
@@ -129,12 +215,15 @@ class InternalEventsIngestView(View):
                 status=400,
             )
 
-        # ── 3. Dispatch ────────────────────────────────────────────────
-        # The HTTP timeout from Ayla is 10s (§6.3) — the dispatcher must
-        # return well within that. Per-handler timeout enforcement (§8.10
-        # 8s) is a follow-up; with no consumers registered yet, no
-        # handler runs to time out.
-        result = dispatch_envelope(envelope)
+        # ── 3. Dispatch (with §8.10 per-handler 8s budget) ─────────────
+        # PR #507 adversarial A12 — Ayla's 10s outer HTTP timeout
+        # leaves 8s for handler work + 2s for return-trip transit. A
+        # slow handler (e.g. hung Ayla REST call from #442+) would
+        # otherwise pin a worker thread and block ALL ingestion.
+        # dispatch_with_timeout returns HANDLER_EXCEPTION + TimeoutError
+        # on budget exceed; the orphan thread continues independently
+        # but this request returns 500 promptly.
+        result = dispatch_with_timeout(envelope)
         return self._map_outcome(result, envelope=envelope, request=request)
 
     def _map_outcome(
@@ -199,6 +288,38 @@ class InternalEventsIngestView(View):
                 {"status": "unprocessable", "reason": "unknown_event_version"},
                 status=422,
             )
+
+        if outcome is DispatchOutcome.SATURATED:
+            # Round-2 AS5/AS6 — in-flight executor exhausted. Return
+            # 503 + Retry-After so Ayla's outbox backs off per §6.3.
+            # Round-3 NEW-3 — distinct sampler slug from rate-limit
+            # path so SATURATED + 429 audits don't suppress each
+            # other for the same IP.
+            from apps.eventbus.ingest_rate_audit_sampler import (
+                should_audit_saturated,
+            )
+
+            remote_ip = get_remote_ip(request) or "_unknown_"
+            if should_audit_saturated(remote_ip):
+                write_audit(
+                    action=AUDIT_SATURATED,
+                    target="eventbus.ingest",
+                    payload={
+                        "event_id": envelope.event_id,
+                        "event_name": envelope.event_name,
+                        "event_version": envelope.event_version,
+                        "remote_ip": remote_ip,
+                    },
+                )
+            response = JsonResponse(
+                {"status": "saturated", "reason": "executor_in_flight_exhausted"},
+                status=503,
+            )
+            # Per §6.3 — exponential backoff starts at 1s; Retry-After
+            # at 5s gives Ayla a generous window without bouncing the
+            # event off the retry budget too fast.
+            response["Retry-After"] = "5"
+            return response
 
         # HANDLER_EXCEPTION
         exc_type = type(result.exception).__name__ if result.exception is not None else "Unknown"

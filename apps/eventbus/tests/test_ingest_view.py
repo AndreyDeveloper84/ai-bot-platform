@@ -58,8 +58,28 @@ def _post(client: Client, body: bytes, *, secret: str = SECRET, ts: float | None
 
 
 @pytest.fixture(autouse=True)
-def _settings_and_registry(settings):
+def _settings_and_registry(settings, monkeypatch):
     settings.EVENT_INGEST_HMAC_SECRET = SECRET
+    # PR #507 A2 — the rate-limit decorator on the view would
+    # false-positive in non-rate-limit tests (we re-POST the same IP
+    # repeatedly to exercise dedupe, malformed body, etc.). Disable
+    # here; the rate-limit contract is pinned in test_ingest_rate_limit.py.
+    settings.RATELIMIT_ENABLE = False
+
+    # PR #507 A12 — the timeout wrapper submits dispatch_envelope to
+    # a ThreadPoolExecutor. Under the SQLite test backend the worker
+    # thread's IngestDedupe write deadlocks against the test
+    # transaction with "database table is locked". Monkey-patch the
+    # view's dispatch_with_timeout to call dispatch_envelope
+    # directly — sidesteps the SQLite race while keeping §8 status
+    # table coverage on the view. The actual timeout contract is
+    # pinned by test_ingest_timeout.py (which mocks dispatch_envelope
+    # entirely, no DB involvement).
+    from apps.eventbus import views as _views
+    from apps.eventbus.ingest_dispatcher import dispatch_envelope as _direct
+
+    monkeypatch.setattr(_views, "dispatch_with_timeout", _direct)
+
     yield
     for key in list(registered_handlers().keys()):
         unregister(*key)
@@ -167,6 +187,38 @@ class TestHandlerException:
         assert response.status_code == 500
         # §5.1 — dedupe row rolled back on handler exception so retry re-processes.
         assert IngestDedupe.objects.filter(event_id=VALID_BODY["event_id"]).count() == 0
+
+    def test_handler_exception_audit_row_persists(self, client: Client) -> None:
+        """PR #507 adversarial A5 — audit row survives handler exception.
+
+        The dedupe rolls back (§5.1 — Ayla retry needs to re-process),
+        but the audit row MUST persist for ops triage. View-layer
+        write_audit() runs AFTER dispatch_envelope returns + outside
+        the inner atomic block, so the audit row commits independently
+        of the inner rollback.
+        """
+        from apps.audit.models import AuditLog
+
+        def _boom(env: IngestEnvelope) -> None:
+            raise RuntimeError("downstream timeout")
+
+        register("booking.created", 1, _boom)
+
+        body = json.dumps(VALID_BODY).encode()
+        response = _post(client, body)
+
+        assert response.status_code == 500
+        # Audit row exists despite dedupe rollback.
+        audit_rows = AuditLog.all_tenants.filter(
+            action="eventbus.ingest.handler_exception",
+        )
+        assert audit_rows.count() == 1
+        # PII rule §7 — exception TYPE only, not message.
+        first_audit = audit_rows.first()
+        assert first_audit is not None
+        payload = first_audit.payload
+        assert payload.get("exception_type") == "RuntimeError"
+        assert "downstream timeout" not in str(payload)
 
 
 class TestVerbPolicy:
