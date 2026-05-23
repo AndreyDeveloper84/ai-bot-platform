@@ -54,6 +54,7 @@ import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
 import { MasterProfileScreen } from "./screens/MasterProfileScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
+import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
 import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
 import { MyVisitsScreen } from "./screens/MyVisitsScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
@@ -181,6 +182,11 @@ function MasterRoutes() {
       <Route
         path="/master/settings/notifications"
         element={<MasterNotificationSettingsScreen />}
+      />
+      {/* M8 minimal — logout-only (full M8 deferred post-pilot) */}
+      <Route
+        path="/master/settings"
+        element={<MasterSettingsScreen />}
       />
       {/* Internal chat «Со студией» (master-admin internal-chat handoff §3) */}
       <Route
