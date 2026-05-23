@@ -234,6 +234,22 @@ class BookingRequest(models.Model):
             "cannot be silently broken by deleting the old row."
         ),
     )
+    commercial_identity_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Q12-α #541 (founder ACK 2026-05-23) — snapshot of the "
+            "service's commercial identity at booking write time. Used "
+            "by reschedule continuation chain to break when the salon "
+            "admin mutates the service (price hike, duration change, "
+            "currency swap, FK relink). Schema: {service_id, "
+            "service_name, sticker_price_amount, currency, "
+            "duration_minutes}. Only 4 fields are compared "
+            "(service_name is informational). Pre-#541 rows have NULL "
+            "→ chain check skipped per memory "
+            "q12a-billing-founder-gate (legacy chains preserved)."
+        ),
+    )
     original_booking_event = models.ForeignKey(
         "self",
         on_delete=models.PROTECT,

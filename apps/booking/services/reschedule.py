@@ -84,6 +84,29 @@ def reschedule_customer_booking(
                 "this booking is missing structured data and cannot be rescheduled",
             )
 
+        # Q12-α #541 (founder ACK 2026-05-23): build the LIVE commercial
+        # identity from old.service (which is the same service the new
+        # booking will reference — reschedule keeps service constant).
+        # The comparator inside ``compute_reschedule_continuation`` will
+        # break the chain if the root's snapshot diverges from this live
+        # view (admin price hike, currency swap, duration change).
+        # The legacy_row guard above proves ``old.service_id is not
+        # None``; ``old.service`` is the matching FK row eager-loaded
+        # via ``select_related``.
+        live_service = old.service
+        assert live_service is not None  # narrowed by legacy_row guard
+        live_commercial_identity = {
+            "service_id": str(live_service.id),
+            "service_name": live_service.name,
+            "sticker_price_amount": (
+                str(live_service.price_from) if live_service.price_from is not None else None
+            ),
+            "currency": "RUB",
+            "duration_minutes": (
+                int(live_service.duration_min) if live_service.duration_min else None
+            ),
+        }
+
         # Q12-α continuation decision (issue #478): same service is
         # enforced structurally above (we pull service_id from old).
         # The continuation helper still receives ``new_service_id`` so
@@ -92,7 +115,21 @@ def reschedule_customer_booking(
             old=old,
             new_service_id=str(old.service_id),
             new_visit_at=new_visit_at,
+            new_commercial_identity=live_commercial_identity,
         )
+
+        # On continuation, preserve the ROOT's commercial identity
+        # snapshot — that's the commercial truth of the original sale,
+        # not the (potentially mutated) live view. On chain break, leave
+        # None → create_customer_booking will snapshot fresh from the
+        # live service, starting a new chain at the current price.
+        carry_snapshot: dict | None = None
+        if is_continuation and chain_root_id is not None:
+            try:
+                root = BookingRequest.all_tenants.get(id=chain_root_id)
+                carry_snapshot = root.commercial_identity_snapshot
+            except BookingRequest.DoesNotExist:
+                carry_snapshot = None
 
         # Create new booking with execute_reschedule attribution +
         # continuation context.
@@ -107,6 +144,7 @@ def reschedule_customer_booking(
                 is_reschedule_continuation=is_continuation,
                 chain_break_reason=chain_break_reason,
                 original_booking_event_id=chain_root_id,
+                commercial_identity_snapshot=carry_snapshot,
             ),
             correlation_id=correlation_id,
         )

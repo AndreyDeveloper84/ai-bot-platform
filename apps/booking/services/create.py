@@ -108,6 +108,12 @@ class CreateBookingInput:
     is_reschedule_continuation: bool = False
     chain_break_reason: str | None = None
     original_booking_event_id: object | None = None  # UUID or None
+    # Q12-α #541 (founder ACK 2026-05-23). Reschedule callers pass the
+    # ROOT chain's snapshot through unchanged so the new row preserves
+    # the original commercial identity. Fresh sales leave this None →
+    # ``create_customer_booking`` snapshots from the live ``service``
+    # row at write time.
+    commercial_identity_snapshot: dict | None = None
 
 
 def _occupied_intervals(*, tenant, master, on_date, tz):
@@ -245,6 +251,33 @@ def create_customer_booking(
             if not any(slot.start == local_visit for slot in free):
                 raise BookingCreateError("slot_unavailable", "slot is no longer available")
 
+            # Q12-α #541 (founder ACK 2026-05-23): snapshot the
+            # service's commercial identity at write time. Reschedule
+            # callers pass the ROOT chain's snapshot through unchanged
+            # via ``inp.commercial_identity_snapshot`` to preserve the
+            # original sale's commercial truth across the chain. Fresh
+            # sales (None) snapshot from the live ``service`` row.
+            #
+            # Field mapping (bot-platform catalog → founder spec):
+            #   service.price_from      → sticker_price_amount
+            #   "RUB"                   → currency (bot-platform doesn't
+            #                              track per-tenant currency at
+            #                              Phase 0; pilot is RUB-only
+            #                              per project_pricing_model_hybrid)
+            commercial_identity_snapshot = inp.commercial_identity_snapshot
+            if commercial_identity_snapshot is None:
+                commercial_identity_snapshot = {
+                    "service_id": str(service.id),
+                    "service_name": service.name,
+                    "sticker_price_amount": (
+                        str(service.price_from) if service.price_from is not None else None
+                    ),
+                    "currency": "RUB",
+                    "duration_minutes": (
+                        int(service.duration_min) if service.duration_min else None
+                    ),
+                }
+
             now_iso = timezone.now().isoformat()
             attribution_metadata = build_customer_attribution_metadata(
                 booking_created_at=now_iso,
@@ -279,6 +312,7 @@ def create_customer_booking(
                 billing_reason=billing_reason,
                 attribution_metadata=attribution_metadata,
                 original_booking_event_id=inp.original_booking_event_id,
+                commercial_identity_snapshot=commercial_identity_snapshot,
             )
 
     # Emit AFTER commit so consumers see the row.
