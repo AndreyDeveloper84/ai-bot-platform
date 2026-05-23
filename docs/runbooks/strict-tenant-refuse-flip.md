@@ -196,61 +196,85 @@ growth + unbounded audit-table growth + alert flood.
       pass PR #528 R3). Ceilings code landed AFTER the soak started —
       the defense is theoretical until exercised at production volume.
 
-      **AS6-NEW (round-3): positive assertions REQUIRED.** Without them
-      the drill silently no-ops: if entries XADD'd to `ingress:max` are
-      never consumed (worker stopped, handler not registered), the
-      ceiling code never runs and the absence-only criteria
-      ("audit ≤ 100") trivially pass with `0 ≤ 100`. Drill "succeeds"
-      while exercising nothing. Memory N=17 insight #2: drill specs
-      MUST include positive assertions ("X must appear"), not only
-      absence assertions ("Y not exceed").
+      **Now automated via management command** (shipped 2026-05-23):
 
-      Pre-drill positive setup checks (all must pass):
+      ```
+      python manage.py run_strict_flip_drill \
+          --duration 300 \
+          --target-count 200 \
+          --worker-log /var/log/ai-bot-platform/worker.log \
+          --json
+      ```
 
-      - **Consumer running:** `ps aux | grep "workers.consumer"` returns
-        at least one row; `systemctl is-active ai-bot-platform-dev-consumer`
-        prints `active`.
-      - **Handler registered:** the handler whose entries you XADD MUST
-        appear in the dispatcher's installed-handler list. For
-        `ingress:max`, that's `MaxHandler` (`apps.channels.max.handler`).
-        Confirm via boot log line `workers.consumer.handler_registered
-        name=MaxHandler` from a recent worker restart.
-      - **Tenant-missing path live:** add an explicit
-        `resolved_tenant_id=` (empty) to the synthetic entries; the
-        `requires_tenant=True` value on `MaxHandler` is what triggers
-        the ceiling code path. Drill is meaningless without it.
+      The command executes all 3 pre-checks, baseline capture, flood
+      generation, drain wait, the 3 positive assertions, and the
+      timestamp-scoped cleanup automatically. Exit-code contract:
 
-      Drill steps:
+      | Exit | Meaning | Flip OK? |
+      |---|---|---|
+      | 0 | All 3 positive assertions passed. Cleanup completed. | ✅ |
+      | 1 | Pre-check 1 failed: worker process not running. | ❌ |
+      | 2 | Pre-check 2 failed: consumer group missing / no active consumer. | ❌ |
+      | 3 | Pre-check 3 failed: canary entry not consumed within 5s. | ❌ |
+      | 4 | Assertion failed: `rate_budget_exhausted` WARNING not in log (ceiling did not fire). | ❌ |
+      | 5 | Assertion failed: audit delta < 50 (handler path did not execute). | ❌ |
+      | 6 | Assertion failed: audit delta > 100 (ceiling failed to cap). | ❌ |
+      | 7 | Internal command error during main phase (Redis / DB / pre-checks). Cleanup NOT attempted. | ❌ |
+      | 8 | **Assertions PASS, but cleanup DELETE threw.** Drill semantically succeeded; audit-table has orphan drill-rows. | ✅ — see «Exit 8 recovery» below |
 
-      1. Capture baseline: `python manage.py audit_table_baseline --format json`
-      2. Capture PEL baseline: `python manage.py monitor_pel --format json`
-      3. Synthesise 200 tenant-missing entries over ~5 min via
-         `redis-cli XADD ingress:max '*' resolved_tenant_id ''` in a
-         loop (use ``for i in $(seq 1 200); do redis-cli XADD …; sleep 1.5; done``).
-      4. **Wait for drain** — let the consumer process all 200 (verify
-         PEL ≤ 5 via `monitor_pel`) BEFORE checking assertions. Without
-         this wait, "1× WARNING per handler" can mean "ceiling not
-         exercised yet", not "ceiling working".
-      5. **Positive assertions** (all must hold):
+      **STOP the flip** on ANY non-zero exit OTHER than 8. Exit 8 is
+      a partial-success: assertions verdict in `--json` output shows
+      PASS; only the cleanup phase failed.
 
-         - `grep "tenant_missing_rate_exceeded" /var/log/ai-bot-platform/worker.log
-           | wc -l` returns ≥ 1 (ceiling fired at least once)
-         - `grep "worker.tenant_required_missing handler=MaxHandler"
-           /var/log/ai-bot-platform/worker.log | wc -l` returns ≥ 50
-           (handler actually executed the path — not zero)
-         - Audit row count delta (`audit_table_baseline` post-drill
-           vs baseline) is **between 80 and 100** — proves emits fired
-           AND ceiling capped them. (≤ 100 alone is consistent with 0.)
-      6. **Absence assertions** (all must hold):
+      **Exit 8 recovery:**
 
-         - Audit row count delta ≤ 100
-         - `monitor_pel --warning 1000 --page 5000` exits 0
-      7. Drain residual PEL via reaper or manual XCLAIM.
+      1. Read `fail_reason` field from `--json` output — it describes
+         which SQL exception triggered cleanup failure.
+      2. Verify assertions did pass by checking `warning_count >= 1`,
+         `audit_delta in [50, 100]` fields.
+      3. Manually clean drill rows:
 
-      **STOP the flip** if any of: (a) pre-drill setup check fails;
-      (b) positive assertion fails (ceiling never exercised); (c)
-      absence assertion fails (ceiling failed to cap). File a
-      follow-up issue before proceeding.
+         ```sql
+         DELETE FROM apps_audit_event
+         WHERE event_type = 'worker.tenant_required_missing'
+           AND payload->>'handler' = 'MaxHandler'
+           AND created_at BETWEEN '<drill_start_ts>' AND '<drill_end_ts>';
+         ```
+
+         (timestamps printed in `--json` output)
+
+      4. Continue pre-flip checklist — the drill itself is a PASS.
+
+      **Pre-condition: target_count > WORKER_TENANT_MISSING_RATE_LIMIT.**
+      Default `target_count=200` is sized against default ceiling
+      limit `100`. If staging has the rate limit raised (for unrelated
+      load tests) and the drill is run with default `target_count`,
+      assertion 4 (`rate_budget_exhausted` WARNING) will false-fail
+      because ceiling never reaches its cap. The command logs a
+      WARNING to stdout if this invariant is violated — re-run with
+      higher `--target-count` OR confirm intentional ceiling-disabled
+      baseline test.
+
+      Pre-flight before running the command:
+
+      - Worker consumer service running:
+        `systemctl is-active ai-bot-platform-dev-consumer` → `active`.
+      - Handler `MaxHandler` registered (queryable via Issue #502
+        `worker.subscriber_audit` event — see «Pre-flip checklist»
+        item further up).
+      - No parallel manual tenant-missing test running on staging
+        for the duration of the drill (timestamp-scoped cleanup
+        would delete those rows too — see issue #576 for the
+        `payload.drill=true` tag improvement that removes this
+        constraint).
+
+      **Why positive assertions are non-negotiable.** Without them
+      the drill silently no-ops: if entries XADD'd to `ingress:max`
+      are never consumed (worker stopped, handler not registered),
+      the ceiling code never runs and the absence-only criteria
+      ("audit ≤ 100") trivially pass with `0 ≤ 100`. Drill
+      "succeeds" while exercising nothing. The command's 3 pre-checks
+      + 3 positive assertions are the structural defence against this.
 - [ ] **Post-Redis-incident worker restart** (AS2, tech-lead pass PR #528).
       `apps.ingress.streams._client` is lru_cached. The ceiling code
       now clears the cache on `ConnectionError` so transient blips
