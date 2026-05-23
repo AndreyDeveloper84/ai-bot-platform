@@ -171,6 +171,17 @@ class Conversation(models.Model):
         help_text="Set by record_message() on every insert. Drives the "
         "by-recency admin list and inactivity-cleanup queries.",
     )
+    last_booking_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Tenant-local datetime of the customer's most recent confirmed "
+            "booking start. Set from booking.confirmed event data.start_at "
+            "per docs/architecture/event-contract.md §3.1.4. Used by AI "
+            "grounding to anchor «когда вы у нас были последний раз»."
+        ),
+    )
     # Master M6 / PR M6.1 — conversation ownership tier per
     # docs/design/policies/conversation-ownership-policy.md §4.
     tier = models.CharField(

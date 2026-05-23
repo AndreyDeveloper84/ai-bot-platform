@@ -144,6 +144,37 @@ class TestMessageManager:
         assert ids == [ma.id]
 
 
+class TestLastBookingAt:
+    def test_conversation_last_booking_at_nullable_and_indexed(
+        self, tenant_a, bot_user_a, settings
+    ) -> None:
+        """Gamma #442 booking consumer sets this from event data.start_at."""
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            c = Conversation.objects.create(tenant=tenant_a, bot_user=bot_user_a)
+        # Default is NULL on a freshly-created Conversation — existing rows
+        # stay NULL until the booking consumer populates them.
+        assert c.last_booking_at is None
+
+        # Accepts datetime writes.
+        moment = timezone.now()
+        c.last_booking_at = moment
+        c.save(update_fields=["last_booking_at"])
+        c.refresh_from_db()
+        assert c.last_booking_at == moment
+
+        # Field declares db_index=True on the model so by-recency lookups
+        # ("clients with no booking in 90 days") stay index-backed.
+        # Cast to ``Field`` — base ``FieldDescriptor`` doesn't expose these
+        # attrs in the mypy stubs; the concrete DateTimeField does.
+        field = Conversation._meta.get_field("last_booking_at")
+        field_attrs = field.deconstruct()[3]
+        assert field_attrs.get("db_index") is True
+        assert field_attrs.get("null") is True
+        assert field_attrs.get("blank") is True
+
+
 class TestLastMessageAtOrdering:
     def test_default_ordering_by_last_message_at_desc(self, tenant_a, bot_user_a, settings):
         """Conversation default ordering surfaces the most-recent first."""
