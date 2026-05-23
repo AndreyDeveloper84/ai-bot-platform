@@ -240,6 +240,39 @@ class TestFailOpen:
         assert should_emit_tenant_missing("MaxHandler") is True
         assert cache_clears == [True]
 
+    def test_redis_busy_loading_error_clears_lru_cache(self, settings, monkeypatch):
+        """AS2-NEW round-4: BusyLoadingError surfaces during Redis
+        startup / failover (replica promoted, RDB still loading).
+        Pool sees stale connection; cache_clear forces rebuild against
+        the now-primary endpoint. Sentinel/Cluster failover = NORMAL
+        operation in production; this path must clear."""
+        import redis.exceptions
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        factory, cache_clears = self._broken_client_factory(
+            redis.exceptions.BusyLoadingError("LOADING Redis is loading the dataset in memory")
+        )
+        monkeypatch.setattr("apps.ingress.streams._client", factory)
+
+        assert should_emit_tenant_missing("MaxHandler") is True
+        assert cache_clears == [True]
+
+    def test_redis_cluster_down_error_clears_lru_cache(self, settings, monkeypatch):
+        """AS2-NEW round-4: ClusterDownError fires on Redis Cluster
+        topology change (slot migration mid-flight). String-match
+        heuristic would have MISSED this — name doesn't contain
+        'Connection' or 'Timeout'. Typed isinstance fixes the gap."""
+        import redis.exceptions
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        factory, cache_clears = self._broken_client_factory(
+            redis.exceptions.ClusterDownError("CLUSTERDOWN The cluster is down")
+        )
+        monkeypatch.setattr("apps.ingress.streams._client", factory)
+
+        assert should_emit_tenant_missing("MaxHandler") is True
+        assert cache_clears == [True]
+
     def test_data_error_does_not_clear_cache(self, settings, monkeypatch):
         """AS2-NEW (round-3): DataError is a redis.RedisError subclass
         but NOT a transport fault — pool is healthy, only the operation
