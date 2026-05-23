@@ -506,11 +506,27 @@ def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
     this assertion turns that into a loud :class:`ImproperlyConfigured`
     on Django boot rather than a subtle production correctness bug.
 
+    Additionally guards two env-derived failure modes the BACKEND check
+    alone cannot catch (adversarial review PRE_PILOT findings on PR #552):
+
+    * **REDIS_URL silent localhost fallback.** ``CACHES['default']['LOCATION']``
+      defaults to ``redis://localhost:6379/0`` when ``REDIS_URL`` is unset.
+      In production this points at a Redis the host does not run; boot
+      succeeds, the first cache write ``ConnectionError``s. Reject
+      ``localhost`` / ``127.0.0.1`` LOCATION when ``DEBUG=False``.
+    * **DJANGO_ENV unset → keyspace collision.** ``KEY_PREFIX`` interpolates
+      ``DJANGO_ENV`` (defaults to ``local``). On a shared Redis instance
+      across dev/staging/prod, a prod boot with ``DJANGO_ENV`` unset
+      collides with dev's ``local`` namespace → SETNX idempotency
+      false-positives + rate-limit cross-contamination. Reject
+      ``DJANGO_ENV`` unset/``local`` when ``DEBUG=False``.
+
     Local dev + tests run with ``DEBUG=True`` and may use locmem freely.
 
     Raises:
         django.core.exceptions.ImproperlyConfigured: when DEBUG=False and
-          the ``default`` cache BACKEND is not a Redis-backed backend.
+          any of (BACKEND not Redis, LOCATION points at localhost, empty
+          LOCATION, DJANGO_ENV unset/``local``).
     """
 
     from django.core.exceptions import ImproperlyConfigured
@@ -518,28 +534,73 @@ def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
     if debug:
         return  # Local dev + tests tolerate locmem.
 
-    backend = caches.get("default", {}).get("BACKEND", "")
+    cache_cfg = caches.get("default") or {}
+    backend = cache_cfg.get("BACKEND", "")
     # Accept both django-redis (RedisCache class) and Django 4+ built-in
     # (django.core.cache.backends.redis.RedisCache) — both deliver atomic
     # cross-worker SETNX/INCR via the same Redis server. ``delete_pattern``
     # is django-redis-specific; faq/tools.py degrades gracefully when the
     # method is absent (falls back to ``cache.clear()``), so the built-in
     # backend is also acceptable for the assertion gate.
-    if "RedisCache" in backend:
-        return
+    if "RedisCache" not in backend:
+        raise ImproperlyConfigured(
+            f"Production cache backend must be Redis (got {backend!r}). "
+            "Rate limiters (apps.master_api.services.ai_draft_limits) and "
+            "idempotency locks (apps.admin_api.tasks) depend on cross-worker "
+            "atomic cache operations (SETNX/INCR). LocMem is per-worker and "
+            "silently bypasses these guards — each gunicorn worker holds its "
+            "own counter, so the effective rate cap becomes N×configured. "
+            "Set REDIS_URL and ensure CACHES['default']['BACKEND'] resolves "
+            "to 'django_redis.cache.RedisCache' (or Django 4+ built-in "
+            "'django.core.cache.backends.redis.RedisCache'). See "
+            "config/settings/base.py CACHES docstring for the rationale."
+        )
 
-    raise ImproperlyConfigured(
-        f"Production cache backend must be Redis (got {backend!r}). "
-        "Rate limiters (apps.master_api.services.ai_draft_limits) and "
-        "idempotency locks (apps.admin_api.tasks) depend on cross-worker "
-        "atomic cache operations (SETNX/INCR). LocMem is per-worker and "
-        "silently bypasses these guards — each gunicorn worker holds its "
-        "own counter, so the effective rate cap becomes N×configured. "
-        "Set REDIS_URL and ensure CACHES['default']['BACKEND'] resolves "
-        "to 'django_redis.cache.RedisCache' (or Django 4+ built-in "
-        "'django.core.cache.backends.redis.RedisCache'). See "
-        "config/settings/base.py CACHES docstring for the rationale."
-    )
+    # PRE_PILOT #1 — REDIS_URL silent localhost fallback.
+    location = str(cache_cfg.get("LOCATION", ""))
+    if not location:
+        raise ImproperlyConfigured(
+            "CACHES['default']['LOCATION'] is empty in production. Set "
+            "REDIS_URL env to a non-empty Redis URL "
+            "(e.g. redis://redis.internal:6379/0)."
+        )
+    if "localhost" in location or "127.0.0.1" in location:
+        raise ImproperlyConfigured(
+            f"CACHES['default']['LOCATION']={location!r} points at localhost "
+            "in production. This is the silent fallback that triggers when "
+            "the REDIS_URL env var is unset (see CACHES config in "
+            "config/settings/base.py). Set REDIS_URL to the real Redis URL "
+            "(e.g. redis://redis.internal:6379/0). Boot would otherwise "
+            "succeed but the first cache.add/incr call would ConnectionError "
+            "at runtime."
+        )
+
+    # PRE_PILOT #2 — DJANGO_ENV unset → keyspace collision.
+    # Two layers of defence: the KEY_PREFIX-suffix check catches whatever
+    # the prefix interpolation resolved to, and the env-var check catches
+    # the upstream cause directly. Either one alone leaves a gap (custom
+    # KEY_PREFIX could bypass the suffix check; an explicit DJANGO_ENV
+    # plus a hand-edited prefix could bypass the env check), so both run.
+    key_prefix = str(cache_cfg.get("KEY_PREFIX", ""))
+    if key_prefix.endswith(":local") or key_prefix.endswith(":"):
+        raise ImproperlyConfigured(
+            f"CACHES['default']['KEY_PREFIX']={key_prefix!r} suggests "
+            "DJANGO_ENV is unset or set to 'local' in production. KEY_PREFIX "
+            "uses DJANGO_ENV to namespace cache keys; a missing/'local' "
+            "value collides with dev/CI environments on a shared Redis "
+            "instance (SETNX idempotency false-positives + rate-limit "
+            "cross-contamination). Set DJANGO_ENV=production "
+            "(or staging/canary/etc) to differentiate the keyspace."
+        )
+
+    env = os.environ.get("DJANGO_ENV", "")
+    if not env or env == "local":
+        raise ImproperlyConfigured(
+            "DJANGO_ENV env var must be set to a non-'local' value in "
+            f"production (currently {env!r}). KEY_PREFIX uses DJANGO_ENV "
+            "to namespace cache keys; missing/'local' value collides with "
+            "dev environments on a shared Redis instance."
+        )
 
 
 # Sprint 2 / E3 — Celery broker + beat schedule for retention tasks.
