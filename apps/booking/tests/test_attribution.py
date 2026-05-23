@@ -689,3 +689,315 @@ class TestQ12aAdversarialPassRegressions:
         assert is_cont is False
         assert break_reason == "chain_root_invariant_violated"
         assert any("chain_root_invariant_violated" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #541 — Commercial identity snapshot (founder ACK 2026-05-23)
+# ---------------------------------------------------------------------------
+
+
+class TestCommercialIdentitySnapshot:
+    """4-field commercial-identity comparator: service_id +
+    sticker_price_amount + currency + duration_minutes. Founder spec
+    2026-05-23: chain continues ONLY if all 4 unchanged. NULL snapshot
+    on either side → skip check (preserves legacy chains per memory
+    `q12a-billing-founder-gate`).
+    """
+
+    @pytest.fixture
+    def tenant(self, db) -> Tenant:
+        return Tenant.objects.create(slug="ci-snap", name="Commercial-id snap")
+
+    def _row(
+        self,
+        tenant: Tenant,
+        *,
+        visit_at,
+        snapshot=None,
+        original_booking_event=None,
+        status="confirmed",
+    ) -> BookingRequest:
+
+        with tenant_scope(tenant):
+            return BookingRequest.objects.create(
+                tenant=tenant,
+                service_name="Manicure",
+                client_name="Test",
+                client_phone="+79991234567",
+                visit_at=visit_at,
+                duration_min=60,
+                status=status,
+                booking_source="ai_direct",
+                billable=True,
+                billing_reason="ai_direct + confirmed",
+                attribution_metadata={
+                    "actor_type": "customer",
+                    "created_by": "execute_confirm",
+                },
+                service_id=None,
+                original_booking_event=original_booking_event,
+                commercial_identity_snapshot=snapshot,
+            )
+
+    def _snapshot(
+        self,
+        *,
+        service_id="9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+        service_name="Маникюр",
+        sticker_price_amount="1500.00",
+        currency="RUB",
+        duration_minutes=60,
+    ) -> dict:
+        return {
+            "service_id": service_id,
+            "service_name": service_name,
+            "sticker_price_amount": sticker_price_amount,
+            "currency": currency,
+            "duration_minutes": duration_minutes,
+        }
+
+    # ---- Happy path: 4 fields unchanged → continuation ----
+
+    def test_identity_unchanged_continues_chain(self, tenant: Tenant) -> None:
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        snap = self._snapshot()
+        old = self._row(tenant, visit_at=timezone.now() + timedelta(days=7), snapshot=snap)
+
+        is_cont, break_reason, root_id = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(),  # Identical.
+        )
+        assert is_cont is True
+        assert break_reason is None
+        assert root_id == old.id
+
+    # ---- 4 break-vectors per field ----
+
+    def test_price_changed_breaks_chain(self, tenant: Tenant) -> None:
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(sticker_price_amount="1500.00"),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(sticker_price_amount="5000.00"),
+        )
+        assert is_cont is False
+        assert break_reason is not None
+        assert "sticker_price_amount" in break_reason
+
+    def test_currency_changed_breaks_chain(self, tenant: Tenant) -> None:
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(currency="RUB"),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(currency="USD"),
+        )
+        assert is_cont is False
+        assert break_reason is not None
+        assert "currency" in break_reason
+
+    def test_duration_changed_breaks_chain(self, tenant: Tenant) -> None:
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(duration_minutes=60),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(duration_minutes=90),
+        )
+        assert is_cont is False
+        assert break_reason is not None
+        assert "duration_minutes" in break_reason
+
+    def test_service_id_in_snapshot_changed_breaks_chain(self, tenant: Tenant) -> None:
+        """`service_id` is one of the 4 compared fields too — captured
+        in the snapshot at write time so a service rename + relink
+        (rare admin op) breaks the chain even when the row's local
+        `service_id` field happens to match."""
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(service_id="aaa11111-1111-4111-8111-111111111111"),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(
+                service_id="bbb22222-2222-4222-8222-222222222222"
+            ),
+        )
+        assert is_cont is False
+        assert break_reason is not None
+        assert "service_id" in break_reason
+
+    # ---- service_name informational only ----
+
+    def test_service_name_renamed_does_not_break_chain(self, tenant: Tenant) -> None:
+        """Founder spec: «service_name informational, не сравнивается».
+        Salon renames «Маникюр» → «Маникюр Premium» without changing
+        price/duration/currency → chain continues."""
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(service_name="Маникюр"),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(
+                service_name="Маникюр Premium"  # ← renamed but otherwise identical
+            ),
+        )
+        assert is_cont is True
+        assert break_reason is None
+
+    # ---- NULL snapshot — skip check ----
+
+    def test_null_snapshot_on_old_skips_check(self, tenant: Tenant) -> None:
+        """Legacy pre-#541 rows have NULL `commercial_identity_snapshot`.
+        Per memory `q12a-billing-founder-gate`: chains rooted before
+        deploy are NOT backfilled. Skip the check to preserve those
+        chains (safer than retroactive break of already-billed rows)."""
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=None,  # ← legacy
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(sticker_price_amount="9999.00"),
+        )
+        assert is_cont is True
+        assert break_reason is None
+
+    def test_null_snapshot_on_new_skips_check(self, tenant: Tenant) -> None:
+        """Caller forgot to pass `new_commercial_identity` (None). Old
+        path → skip the check, preserve chain continuity at this layer.
+        Service-layer caller is responsible for passing the snapshot
+        when available."""
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=None,  # ← caller didn't snapshot
+        )
+        assert is_cont is True
+        assert break_reason is None
+
+    # ---- Decimal normalisation ----
+
+    def test_price_decimal_normalised_boundary(self, tenant: Tenant) -> None:
+        """`Decimal('1500.00')` vs `Decimal('1500')` quantize to same
+        2-decimal value → no spurious break. Founder spec: «strict
+        equality + Decimal normalisation»."""
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(sticker_price_amount="1500.00"),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(
+                sticker_price_amount="1500"  # ← no trailing zeros
+            ),
+        )
+        assert is_cont is True
+        assert break_reason is None
+
+    def test_price_sub_kopeck_difference_breaks_chain(self, tenant: Tenant) -> None:
+        """Sub-kopeck differences (rare but possible from external
+        rounding) DO break chain after quantize. 1500.00 vs 1500.01 →
+        different at 2-decimal precision → break."""
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        old = self._row(
+            tenant,
+            visit_at=timezone.now() + timedelta(days=7),
+            snapshot=self._snapshot(sticker_price_amount="1500.00"),
+        )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=old,
+            new_service_id=None,
+            new_visit_at=old.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
+            new_commercial_identity=self._snapshot(sticker_price_amount="1500.01"),
+        )
+        assert is_cont is False
+        assert break_reason is not None
+        assert "sticker_price_amount" in break_reason

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -233,3 +234,90 @@ class TestRescheduleCustomerBooking:
                 new_visit_at=_monday_at(14),
             )
         assert exc_info.value.slug == "not_found"
+
+    def test_q12a_541_price_hike_breaks_chain_end_to_end(
+        self,
+        tenant,
+        bot_user,
+        master,
+        service,
+        master_service,
+        working_hours,
+    ):
+        """Q12-α #541 (founder ACK 2026-05-23): admin mutates the
+        service's ``price_from`` between root sale and reschedule →
+        chain breaks at the commercial-identity comparator → new row
+        is billable=True with reason
+        ``commercial_identity_changed:sticker_price_amount`` and starts
+        a fresh chain (``original_booking_event_id is None``)."""
+
+        service.price_from = Decimal("1500.00")
+        service.save()
+
+        root = create_customer_booking(
+            inp=CreateBookingInput(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_id=str(service.id),
+                master_id=str(master.id),
+                visit_at=_monday_at(12),
+            ),
+        )
+        assert root.commercial_identity_snapshot["sticker_price_amount"] == "1500.00"
+
+        # Admin price hike between sale + reschedule.
+        service.price_from = Decimal("2000.00")
+        service.save()
+
+        new = reschedule_customer_booking(
+            tenant=tenant,
+            bot_user=bot_user,
+            old_booking_id=str(root.id),
+            new_visit_at=_monday_at(14),
+        )
+
+        assert new.billable is True
+        assert "commercial_identity_changed:sticker_price_amount" in new.billing_reason
+        assert new.original_booking_event_id is None
+        # New chain root snapshots the CURRENT (mutated) price.
+        assert new.commercial_identity_snapshot["sticker_price_amount"] == "2000.00"
+
+    def test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot(
+        self,
+        tenant,
+        bot_user,
+        master,
+        service,
+        master_service,
+        working_hours,
+    ):
+        """Q12-α #541: when commercial identity is unchanged the chain
+        continues AND the new row carries the ROOT's snapshot forward
+        (not a fresh live snapshot) — that's the commercial truth of
+        the original sale, per founder ACK 2026-05-23."""
+
+        service.price_from = Decimal("1500.00")
+        service.save()
+
+        root = create_customer_booking(
+            inp=CreateBookingInput(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_id=str(service.id),
+                master_id=str(master.id),
+                visit_at=_monday_at(12),
+            ),
+        )
+
+        new = reschedule_customer_booking(
+            tenant=tenant,
+            bot_user=bot_user,
+            old_booking_id=str(root.id),
+            new_visit_at=_monday_at(14),
+        )
+
+        assert new.billable is False
+        assert new.billing_reason == "reschedule_continuation"
+        assert new.original_booking_event_id == root.id
+        # Snapshot carried from root, not re-derived from live service.
+        assert new.commercial_identity_snapshot == root.commercial_identity_snapshot

@@ -1882,11 +1882,49 @@ def execute_reschedule(
             # meaningful gate at this layer. If the LLM ever starts
             # allowing service swaps from this path, this call site
             # MUST be updated.
+            # Q12-α #541 (founder ACK 2026-05-23): live commercial
+            # identity for chain-break detection. ``booking.service``
+            # may be None on legacy LLM rows (B1 adversarial-pass note);
+            # in that case skip the snapshot — the comparator's NULL-on-
+            # either-side rule keeps the chain intact and preserves the
+            # legacy chain (consistent with q12a-billing-founder-gate).
+            live_commercial_identity: dict | None = None
+            if booking.service is not None:
+                live_commercial_identity = {
+                    "service_id": str(booking.service.id),
+                    "service_name": booking.service.name,
+                    "sticker_price_amount": (
+                        str(booking.service.price_from)
+                        if booking.service.price_from is not None
+                        else None
+                    ),
+                    "currency": "RUB",
+                    "duration_minutes": (
+                        int(booking.service.duration_min) if booking.service.duration_min else None
+                    ),
+                }
+
             is_continuation, chain_break_reason, chain_root_id = compute_reschedule_continuation(
                 old=booking,
                 new_service_id=str(booking.service_id) if booking.service_id else "",
                 new_visit_at=visit_at_dt,
+                new_commercial_identity=live_commercial_identity,
             )
+
+            # Carry root's snapshot on continuation; fresh-snapshot on
+            # chain break. Mirrors services/reschedule.py logic.
+            carry_snapshot: dict | None = None
+            if is_continuation and chain_root_id is not None:
+                try:
+                    root = BookingRequest.all_tenants.get(id=chain_root_id)
+                    carry_snapshot = root.commercial_identity_snapshot
+                except BookingRequest.DoesNotExist:
+                    carry_snapshot = None
+            elif live_commercial_identity is not None:
+                # Chain broken → new chain root, snapshot the current
+                # live view so future reschedules anchor against it.
+                carry_snapshot = live_commercial_identity
+
             billable, billing_reason = compute_billable(
                 booking_source="ai_direct",
                 status=BookingRequest.Status.CONFIRMED,
@@ -1903,6 +1941,12 @@ def execute_reschedule(
             reschedule_metadata["q12a_is_continuation"] = is_continuation
             if chain_break_reason:
                 reschedule_metadata["q12a_chain_break_reason"] = chain_break_reason
+            # Founder ACK 2026-05-23 option (b): mirror the snapshot
+            # into attribution_metadata for the LLM path so an analyst
+            # can replay the commercial-identity decision from a single
+            # JSON blob without joining back through the chain.
+            if carry_snapshot is not None:
+                reschedule_metadata["commercial_identity_snapshot"] = carry_snapshot
 
             # Hotfix D (retro review #2): the window between YClients-
             # create success and local-write success is the last split-
@@ -1934,6 +1978,7 @@ def execute_reschedule(
                     billing_reason=billing_reason,
                     attribution_metadata=reschedule_metadata,
                     original_booking_event_id=chain_root_id,
+                    commercial_identity_snapshot=carry_snapshot,
                 )
             except Exception as exc:  # noqa: BLE001 — recover, do not propagate
                 # Split-brain recovery: try to cancel the new YClients record

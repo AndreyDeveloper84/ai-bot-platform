@@ -117,11 +117,71 @@ def compute_billable(
     return (True, "ai_direct + confirmed: customer-initiated via execute_confirm")
 
 
+_COMMERCIAL_IDENTITY_FIELDS = (
+    "service_id",
+    "sticker_price_amount",
+    "currency",
+    "duration_minutes",
+)
+
+
+def _normalise_commercial_identity_field(field: str, value: object) -> object:
+    """Normalise a single commercial-identity field for strict comparison.
+
+    Founder spec 2026-05-23: «strict equality + Decimal normalisation».
+    Only ``sticker_price_amount`` needs normalisation (Decimal.quantize
+    to 2 places — eliminates spurious differences like ``"1500"`` vs
+    ``"1500.00"`` which represent the same kopeck-precision price).
+    Other fields are string / int — direct equality.
+    """
+
+    if value is None:
+        return None
+    if field == "sticker_price_amount":
+        try:
+            return Decimal(str(value)).quantize(Decimal("0.01"))
+        except (ValueError, ArithmeticError):
+            # Malformed price — return raw so the equality compare
+            # surfaces the discrepancy (defensive — should never happen
+            # from CatalogService.price_from which is DecimalField).
+            return value
+    return value
+
+
+def _commercial_identity_changed_field(
+    old_snapshot: dict | None,
+    new_snapshot: dict | None,
+) -> str | None:
+    """Compare two commercial-identity snapshots; return the first
+    differing field name, or None if identical / either side missing.
+
+    Founder spec 2026-05-23: 4 fields are compared
+    (``service_id, sticker_price_amount, currency, duration_minutes``).
+    ``service_name`` is informational — captured in the snapshot for
+    audit/UI but NOT part of the chain-break decision.
+
+    NULL on either side → return None (skip check). Per memory
+    ``q12a-billing-founder-gate``: pre-#541 rows have NULL snapshot,
+    chain preserved by policy (legacy chains not retroactively broken).
+    """
+
+    if old_snapshot is None or new_snapshot is None:
+        return None
+
+    for field in _COMMERCIAL_IDENTITY_FIELDS:
+        old_norm = _normalise_commercial_identity_field(field, old_snapshot.get(field))
+        new_norm = _normalise_commercial_identity_field(field, new_snapshot.get(field))
+        if old_norm != new_norm:
+            return field
+    return None
+
+
 def compute_reschedule_continuation(
     *,
     old: "BookingRequest",
     new_service_id: str | UUID | int | None,
     new_visit_at: datetime,
+    new_commercial_identity: dict | None = None,
     threshold_days: int = RESCHEDULE_CONTINUATION_THRESHOLD_DAYS,
 ) -> tuple[bool, str | None, UUID | None]:
     """Decide whether a reschedule preserves the continuation chain.
@@ -272,6 +332,19 @@ def compute_reschedule_continuation(
     # Exactly 90d is continuation; 90d + 1 microsecond breaks.
     if new_visit_at > root.visit_at + timedelta(days=threshold_days):
         return (False, "over_90d", None)
+
+    # 3. Commercial-identity check (issue #541, founder ACK 2026-05-23).
+    # Compare the ROOT's snapshot — not ``old``'s — so a service
+    # mutation that happened mid-chain (admin price hike after link2
+    # was created) still breaks the chain on the next reschedule. The
+    # root snapshot is the «commercial truth» of the original sale.
+    #
+    # NULL on either side → skip (legacy pre-#541 rows OR caller didn't
+    # snapshot at this layer). Per memory q12a-billing-founder-gate.
+    root_snapshot = getattr(root, "commercial_identity_snapshot", None)
+    changed_field = _commercial_identity_changed_field(root_snapshot, new_commercial_identity)
+    if changed_field is not None:
+        return (False, f"commercial_identity_changed:{changed_field}", None)
 
     return (True, None, root.id)
 
