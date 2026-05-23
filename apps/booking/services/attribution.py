@@ -125,6 +125,66 @@ _COMMERCIAL_IDENTITY_FIELDS = (
 )
 
 
+# Q12-α #560 (PRE_PILOT 2026-07-15): explicit ALLOW-lists for status
+# gates. Exclude-list pattern (``status != CONFIRMED`` / ``status ==
+# CANCELLED``) silently grandfathers ANY future enum addition into
+# «reschedulable» / «valid chain root» — a footgun that's invisible at
+# code review. ALLOW-list inverts the default: a new enum value is
+# rejected by both gates until someone explicitly adds it here. That
+# forces a deliberate semantic decision rather than an accidental one.
+#
+# Read these as documentation of the policy:
+#   ``CONFIRMED``  is the only state where a customer can reschedule
+#                  their booking (RESCHEDULE_REQUESTED is mid-flight;
+#                  CANCEL_REQUESTED is in the 5s undo window; CANCELLED
+#                  + RESCHEDULED are terminal).
+#   ``CONFIRMED + RESCHEDULED`` are the only states where a row can
+#                  serve as the anchor of a continuation chain — a
+#                  RESCHEDULED root means «this chain already advanced
+#                  once; the original commercial sale is still the
+#                  anchor». Interim states (CANCEL_REQUESTED /
+#                  RESCHEDULE_REQUESTED) and CANCELLED → chain broken.
+def _build_status_allowlists() -> tuple[frozenset[str], frozenset[str]]:
+    """Lazy resolution of ``BookingRequest.Status`` — top-level import
+    is not safe (Django app-registry boot ordering).
+    """
+
+    from apps.booking.models import BookingRequest
+
+    return (
+        frozenset({BookingRequest.Status.CONFIRMED}),
+        frozenset({BookingRequest.Status.CONFIRMED, BookingRequest.Status.RESCHEDULED}),
+    )
+
+
+# Resolved on first access to avoid Django app-registry boot ordering
+# issues; cached after first call. Direct importers (tests, callers)
+# should use ``get_reschedulable_statuses()`` /
+# ``get_valid_chain_root_statuses()``.
+_RESCHEDULABLE_STATUSES_CACHE: frozenset[str] | None = None
+_VALID_CHAIN_ROOT_STATUSES_CACHE: frozenset[str] | None = None
+
+
+def get_reschedulable_statuses() -> frozenset[str]:
+    """Return the ALLOW-list of statuses where customer reschedule is
+    permitted. Q12-α #560 (PRE_PILOT 2026-07-15)."""
+
+    global _RESCHEDULABLE_STATUSES_CACHE
+    if _RESCHEDULABLE_STATUSES_CACHE is None:
+        _RESCHEDULABLE_STATUSES_CACHE, _ = _build_status_allowlists()
+    return _RESCHEDULABLE_STATUSES_CACHE
+
+
+def get_valid_chain_root_statuses() -> frozenset[str]:
+    """Return the ALLOW-list of statuses where a row may serve as a
+    valid chain root. Q12-α #560 (PRE_PILOT 2026-07-15)."""
+
+    global _VALID_CHAIN_ROOT_STATUSES_CACHE
+    if _VALID_CHAIN_ROOT_STATUSES_CACHE is None:
+        _, _VALID_CHAIN_ROOT_STATUSES_CACHE = _build_status_allowlists()
+    return _VALID_CHAIN_ROOT_STATUSES_CACHE
+
+
 def _normalise_commercial_identity_field(field: str, value: object) -> object:
     """Normalise a single commercial-identity field for strict comparison.
 
@@ -288,8 +348,13 @@ def compute_reschedule_continuation(
     # GDPR erasure stub, audit job, etc.) while ``old`` (a non-root
     # link) is still CONFIRMED. Founder rule #1 is explicit — a
     # cancelled chain anywhere terminates the continuation.
-    if root.status == BookingRequest.Status.CANCELLED:
-        return (False, "chain_root_cancelled", None)
+    #
+    # Q12-α #560 (PRE_PILOT 2026-07-15): converted from exclude-list
+    # (``status == CANCELLED``) to ALLOW-list. CANCELLED, CANCEL_REQUESTED,
+    # RESCHEDULE_REQUESTED all break the chain; only CONFIRMED + RESCHEDULED
+    # are valid roots. Default-deny for any future enum addition.
+    if root.status not in get_valid_chain_root_statuses():
+        return (False, f"chain_root_invalid_status:{root.status}", None)
 
     # 1. Strict service equality. Normalise both sides via
     # ``_normalise_service_id`` so the LLM tool path (where rows lack

@@ -375,6 +375,52 @@ Plus refund rules per [Q15](../decisions-log.md):
 - No-show via YC webhook → auto-credit −100 ₽ (Q12-c)
 - Window 1h–24h → CSM-discretion, audited
 
+## 6.5. Status gate semantics (ALLOW-list — Q12-α #560)
+
+**Status:** Locked 2026-05-23 (PR for #560).
+
+The reschedule continuation chain has two status-driven gates:
+
+1. **«Reschedulable old row»** (where customer can initiate reschedule)
+   — `get_reschedulable_statuses() == {CONFIRMED}`. Enforced in:
+   - `apps/booking/services/reschedule.py` (REST path)
+   - `apps/skills/booking/tools.py::execute_reschedule` (LLM path)
+
+2. **«Valid chain root»** (where a row can anchor a continuation chain)
+   — `get_valid_chain_root_statuses() == {CONFIRMED, RESCHEDULED}`.
+   Enforced in `apps/booking/services/attribution.py::compute_reschedule_continuation`.
+
+Both gates are **ALLOW-list**, not exclude-list. A new `BookingRequest.Status`
+enum value is default-rejected by both gates until it is explicitly admitted
+in `_build_status_allowlists()`. This forces a deliberate semantic decision
+at code-review time rather than an accidental grandfathering.
+
+The ALLOW-lists are exposed as lazily-initialised module-level helpers (not
+top-level constants — Django app-registry boot ordering forbids importing
+`BookingRequest` at module load).
+
+### Per-status verdict
+
+| Status                  | Reschedulable? | Valid chain root? | Notes |
+|-------------------------|----------------|-------------------|-------|
+| `CONFIRMED`             | ✅             | ✅                | Normal active booking |
+| `RESCHEDULED`           | ❌             | ✅                | Original sale anchor after reschedule (terminal on row, but the chain continues) |
+| `CANCELLED`             | ❌             | ❌                | Founder rule #1: «cancel breaks chain» |
+| `CANCEL_REQUESTED`      | ❌             | ❌                | 5s undo window — mid-flight, ambiguous semantics |
+| `RESCHEDULE_REQUESTED`  | ❌             | ❌                | Mid-flight reschedule — chain-root state non-deterministic |
+
+When a chain-root check fails, the helper returns
+`(False, "chain_root_invalid_status:<status_value>", None)`. Finance / ops
+can grep specific terminal states (e.g. `chain_root_invalid_status:cancelled`)
+from logs and audit events.
+
+### Test contract
+
+`apps/booking/tests/test_attribution.py::TestStatusAllowLists` pins
+the exact ALLOW-list shape AND the full enum membership. Any future
+enum addition fails the `test_every_status_enum_value_classified`
+test until the ALLOW-list and this table are both updated.
+
 ## 7. Edge case decision matrix
 
 20 scenarios from Q12 brainstorm, fully resolved:
