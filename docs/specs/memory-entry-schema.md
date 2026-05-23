@@ -135,32 +135,44 @@ Five roles. Two routine + one DDL + one backup + one break-glass.
 3. 2-reviewer GH approval required on labeled PRs (configured in `.github/CODEOWNERS` + branch protection).
 4. CODEOWNERS for `apps/identity/migrations/*` includes founder + security steward.
 
-## 9. `BEFORE SELECT` trigger on `memory_entry`
+## 9. Red-zone SELECT guard on `memory_entry`
 
-| Trigger name | Fires on | Condition | Action |
+> **Implementation note (added 2026-05-23 / veha 2):** §9 originally specified «`BEFORE SELECT` trigger». PostgreSQL does not support row-level BEFORE SELECT triggers. Implemented as **Row-Level Security (RLS) policy** with equivalent semantics — policy checks `current_setting(...)` against UUID regex, **denying** SELECT visibility on red rows unless valid context is set. This matches the «implementer's choice between RLS-policy expression OR equivalent mechanism» clause in the original §9 wording.
+>
+> Behavioural difference vs the original spec: a forbidden read no longer **raises** — RLS-filtered rows are simply invisible to the SELECT. The Python accessor (§10) ensures every red read goes through the audit-logging path which sets the GUC explicitly; any code path that bypasses the accessor sees empty results, NOT plaintext. Defence-in-depth holds (RLS at DB layer + accessor + AST lint at code layer).
+
+| Mechanism | Fires on | Condition | Action |
 |---|---|---|---|
-| `memory_entry_red_select_guard` | `BEFORE SELECT` (via row-level RLS hook OR a `BEFORE` trigger reading session GUC) | Row's `sensitivity_zone = 'red'` AND current session is `ayla_app` | Check `coalesce(current_setting('ayla.red_zone_access_context', true), '')` matches UUID regex `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`. On mismatch → raise `check_violation` with «Red-zone access requires UUID context». |
+| RLS policy `memory_entry_non_red_visible` | Every SELECT against `identity_memoryentry` | Row's `sensitivity_zone = 'red'` AND current session GUC `ayla.red_zone_access_context` is NOT a valid UUID | Row is invisible (filtered out by Postgres before result returns). NO exception raised — empty result instead. |
+
+**Operational implication for ops/dev:** if you run `SELECT * FROM identity_memoryentry WHERE sensitivity_zone='red'` directly via `psql` as `ayla_app` without setting the GUC, you get **zero rows back** (not an error). This is intentional defence-in-depth — bypass attempts return nothing, not «access denied» (which leaks the existence of red rows). For legitimate ops access, use the break-glass procedure (§8).
 
 ```sql
--- Trigger body (round-3 A8 — empty-string-safe, UUID-validated)
-CREATE OR REPLACE FUNCTION fn_memory_entry_red_select_guard()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF NEW.sensitivity_zone = 'red' THEN
-    IF coalesce(current_setting('ayla.red_zone_access_context', true), '') !~
-       '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-    THEN
-      RAISE EXCEPTION 'Red-zone access requires UUID context (got %)',
-        coalesce(current_setting('ayla.red_zone_access_context', true), '<unset>')
-        USING ERRCODE = 'check_violation';
-    END IF;
-  END IF;
-  RETURN NEW;
-END;
-$$;
+-- RLS policy (round-3 A8 — empty-string-safe, UUID-validated)
+ALTER TABLE identity_memoryentry ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY memory_entry_non_red_visible
+    ON identity_memoryentry
+    FOR SELECT
+    USING (
+        sensitivity_zone != 'red'
+        OR (
+            current_setting('ayla.red_zone_access_context', true) ~
+                '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        )
+    );
+
+-- FORCE means the policy applies even to the table owner (otherwise owner
+-- bypasses RLS). Required because Django migrations + admin might run as
+-- owner-equivalent role.
+ALTER TABLE identity_memoryentry FORCE ROW LEVEL SECURITY;
+
+-- ayla_migrator needs full table access for schema changes; ALL includes
+-- BYPASSRLS-equivalent via grants (RLS still applies but migrator can DDL).
+GRANT ALL ON identity_memoryentry TO ayla_migrator;
 ```
 
-**Note on Postgres `BEFORE SELECT`:** Postgres doesn't natively support `BEFORE SELECT` triggers on tables in v1; the equivalent is Row-Level Security (RLS) policy. The actual implementation MAY use either a `BEFORE SELECT` rule (Postgres 16 `CREATE TRIGGER ... ON ... FOR SELECT` is supported via a row-level security policy expression). The semantic is what matters: red-zone reads MUST raise unless the session GUC is set to a valid UUID. The implementer of #230 chooses RLS-policy expression OR equivalent mechanism.
+**Why RLS, not trigger:** Postgres has no row-level `BEFORE SELECT` trigger. Statement-level triggers don't see individual rows, and the «trigger raises exception» semantics from the original §9 spec cannot be implemented row-by-row on SELECT. RLS gives equivalent protection (red rows invisible without GUC) with native Postgres mechanism + zero accessor pattern code changes (`MemoryEntry.objects.get()` just naturally returns `DoesNotExist` when RLS filters the row out — which is the correct behaviour for the Django accessor pattern).
 
 **pgbouncer caveat (S3):** with pgbouncer transaction-pooling, the session GUC is reset between transactions. The accessor (§10) MUST set the GUC INSIDE the transaction (`SET LOCAL ayla.red_zone_access_context = ...`) so it's bound to the transaction. With session-pooling, behaviour is also safe because pgbouncer ties a session to one transaction lifetime. Pseudo-code in §10 uses `SET LOCAL` semantically.
 
