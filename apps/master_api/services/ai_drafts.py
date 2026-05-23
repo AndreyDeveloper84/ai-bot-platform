@@ -139,6 +139,7 @@ from apps.conversations.models import AiDraft, Conversation, Message
 from apps.conversations.services import record_message
 from apps.events.services import emit
 from apps.events.vocabulary import (
+    MASTER_AI_DRAFT_AUTO_GENERATED,
     MASTER_AI_DRAFT_GENERATED,
     MASTER_DRAFT_RELEASED_TO_AI,
     MASTER_DRAFT_SENT_AS_SELF,
@@ -447,8 +448,20 @@ def generate_draft_for_conversation(
     conversation_id: uuid.UUID | str,
     master: CatalogMaster,
     actor_bot_user: Any,
+    is_auto: bool = False,
 ) -> DraftResponse:
     """Generate a fresh AI draft for the master.
+
+    Args:
+      is_auto: When True the audit + analytics emit
+        :data:`MASTER_AI_DRAFT_AUTO_GENERATED` instead of
+        :data:`MASTER_AI_DRAFT_GENERATED`. Set by the
+        :func:`apps.master_api.tasks.auto_generate_draft_for_inbound`
+        Celery task; the on-demand view path leaves the default
+        ``False`` so its analytics row reads as a manual «✨ Предложить
+        ответ» tap. The rest of the flow (cost cap, rate guard,
+        idempotency, staleness) is identical — auto and manual share
+        the same quota by design (single $5/day per master).
 
     Flow (Blocker #1 + #3 + #5 + #6 hardened):
       1. Verify master is involved in the conversation (else 404 —
@@ -697,14 +710,15 @@ def generate_draft_for_conversation(
                 str(latest_customer_msg_id) if latest_customer_msg_id is not None else ""
             ),
         }
+        audit_slug = MASTER_AI_DRAFT_AUTO_GENERATED if is_auto else MASTER_AI_DRAFT_GENERATED
         write_audit(
-            MASTER_AI_DRAFT_GENERATED,
+            audit_slug,
             target="AiDraft",
             target_id=draft.id,
             payload=payload,
             actor_id=actor_bot_user.id if actor_bot_user is not None else None,
         )
-        emit(MASTER_AI_DRAFT_GENERATED, properties=payload)
+        emit(audit_slug, properties=payload)
 
     logger.info(
         "ai_drafts.generate.persisted draft_id=%s conv=%s master=%s model=%s cost_usd=%s",
