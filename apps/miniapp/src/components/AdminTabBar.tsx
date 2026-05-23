@@ -114,7 +114,12 @@ export function AdminTabBar() {
       to: "/admin/services",
       icon: <IconServices />,
     },
-    { key: "chats", label: "Чаты", to: "/admin/chats", icon: <IconChats /> },
+    {
+      key: "chats",
+      label: "Чаты",
+      to: "/admin/internal-chat",
+      icon: <IconChats />,
+    },
     {
       key: "settings",
       label: "Настройки",

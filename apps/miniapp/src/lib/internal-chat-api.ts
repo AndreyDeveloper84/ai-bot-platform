@@ -1,19 +1,26 @@
 /**
- * Master ↔ Admin internal-chat API client — master-side.
+ * Master ↔ Admin internal-chat API client — both surfaces.
  *
  * Mirrors backend at apps/internal_chat/views.py + apps/internal_chat/urls.py
- * routed under /api/v1/internal-chat/master/.
+ * routed under /api/v1/internal-chat/{master,admin}/. The master and
+ * admin endpoint families share envelopes / payload shapes (returned by
+ * the same ``_serialize_thread_*`` helpers in views.py) so it is cheaper
+ * to keep them in a single client module than to split parallel files.
  *
- * Auth: MAX initData header (master-init-data gated decorator on the
- * backend — apps/master_api/auth.require_master_init_data).
+ * Auth: MAX initData header.
+ *   - master/* → require_master_init_data decorator (apps/master_api/auth)
+ *   - admin/*  → require_admin_role decorator      (apps/admin_api/auth)
  *
  * Spec sources:
  *   - docs/design/handoffs/2026-05-19-master-admin-internal-chat-handoff.md
- *   - apps/internal_chat/models.py + views.py + tests/test_master_views.py
+ *   - apps/internal_chat/models.py + views.py
+ *   - apps/internal_chat/tests/test_{master,admin}_views.py
  *
- * §2.7 sender-display rule lives in the UI layer
- * (MasterInternalChatThreadScreen) — the API returns the raw
- * sender_admin_signed_name field; the screen decides display.
+ * §2.7 sender-display rule lives in the UI layer — the API returns the
+ * raw sender_admin_signed_name field; the screen decides display via
+ * senderDisplayForMaster (master side) or senderDisplayForAdmin
+ * (admin side). The two have opposite privacy intents and MUST NOT
+ * cross-call.
  *
  * §2.11 enforcement is also a UI concern — the API faithfully returns
  * what the backend stores; the UI never auto-formats customer names.
@@ -170,6 +177,14 @@ export interface InternalChatThreadSummary {
   created_at: string;
   last_activity_at: string;
   resolved_at: string | null;
+  /**
+   * Master pointer is attached by the ADMIN list endpoint
+   * (apps/internal_chat/views.py::admin_threads_collection) — it is
+   * absent in the master list payload because the master only sees
+   * own threads. UI code should treat it as optional and gracefully
+   * fall back to «Мастер» when missing.
+   */
+  master?: { id: string; name: string };
 }
 
 export interface InternalChatMessage {
@@ -284,6 +299,82 @@ export const escalateMasterInternalThreadToFounder = (
     body: JSON.stringify({ reason }),
   });
 
+// --- admin endpoints ------------------------------------------------------
+
+/**
+ * List ALL threads in the tenant (admin queue).
+ *
+ * Mirrors backend at apps/internal_chat/views.py::admin_threads_collection.
+ * Auth: MAX initData header gated by require_admin_role decorator.
+ * Owner + Admin see every row. Receptionist sees the list too but
+ * sensitive-thread subjects are redacted server-side. Customer / unrelated
+ * users → 403.
+ *
+ * Query params:
+ *   - status:             filter by ThreadStatus
+ *   - topic:              filter by TopicCode
+ *   - master_id:          filter to a single master
+ *   - assigned_admin_id:  filter to threads pinned to an admin
+ *   - search:             icontains on subject (case-insensitive)
+ *   - limit / offset:     pagination (server caps limit at 50)
+ */
+export const listAdminThreads = (params?: {
+  status?: ThreadStatus;
+  topic?: TopicCode;
+  master_id?: string;
+  assigned_admin_id?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ListThreadsResponse> => {
+  const q = new URLSearchParams();
+  if (params?.status) q.set("status", params.status);
+  if (params?.topic) q.set("topic", params.topic);
+  if (params?.master_id) q.set("master_id", params.master_id);
+  if (params?.assigned_admin_id)
+    q.set("assigned_admin_id", params.assigned_admin_id);
+  if (params?.search) q.set("search", params.search);
+  if (params?.limit != null) q.set("limit", String(params.limit));
+  if (params?.offset != null) q.set("offset", String(params.offset));
+  const qs = q.toString();
+  return request(`/admin/threads/${qs ? `?${qs}` : ""}`, { method: "GET" });
+};
+
+export const getAdminThread = (
+  threadId: string,
+): Promise<ThreadEnvelope> =>
+  request(`/admin/threads/${threadId}/`, { method: "GET" });
+
+/**
+ * Send a message as admin. Body field ``sender_admin_signed_name`` is the
+ * §2.7 opt-in signature: when non-empty, the master will see
+ * «Студия — Натали» instead of the default «Студия». An empty value
+ * (or omission) keeps the message attributed to the generic admin team.
+ */
+export const sendAdminMessage = (
+  threadId: string,
+  payload: { body: string; sender_admin_signed_name?: string },
+): Promise<MessageEnvelope> =>
+  request(`/admin/threads/${threadId}/messages/`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+export const markAdminThreadRead = (
+  threadId: string,
+): Promise<MarkReadResponse> =>
+  request(`/admin/threads/${threadId}/mark-read/`, { method: "POST" });
+
+/**
+ * Close (resolve) a thread from the admin side. Mirrors
+ * apps/internal_chat/views.py::admin_close_thread — returns the
+ * thread summary with ``status=resolved`` and ``resolved_at`` set.
+ */
+export const closeAdminThread = (
+  threadId: string,
+): Promise<ThreadSummaryEnvelope> =>
+  request(`/admin/threads/${threadId}/close/`, { method: "POST" });
+
 // --- derived helpers ------------------------------------------------------
 
 /**
@@ -320,4 +411,101 @@ export function unreadCountForMaster(
     if (m.read_by_master_at == null) n += 1;
   }
   return n;
+}
+
+/**
+ * Sender-display from the ADMIN perspective.
+ *
+ * Admin SEES the master's full identity per handoff §4.2 (which differs
+ * from §2.7 — that privacy rule applies only to the master direction).
+ * Admin → admin shows «Вы» for own messages; admin → other-admin shows
+ * the signed name when present, else generic «Студия» — admins on the
+ * same tenant are surface-level interchangeable in the queue.
+ *
+ * @param message     The message to label.
+ * @param masterName  Display name of the thread's master (from thread.master.name);
+ *                    falls back to «Мастер» when missing.
+ * @param meBotUserId Optional — current admin's BotUser.id. When provided,
+ *                    own admin messages render as «Вы».
+ */
+export function senderDisplayForAdmin(
+  message: InternalChatMessage,
+  masterName: string,
+  meBotUserId?: string | null,
+): string {
+  if (message.sender_role === "master") return masterName || "Мастер";
+  if (message.sender_role === "founder") return "Основатель";
+  if (message.sender_role === "system") return "Система";
+  // admin path — show «Вы» for self, else use the signed name when present
+  if (meBotUserId && message.sender_user_id === meBotUserId) return "Вы";
+  const signed = (message.sender_admin_signed_name || "").trim();
+  if (signed) return `Студия — ${signed}`;
+  return "Студия";
+}
+
+/**
+ * Compute admin-side unread counts from a fetched message list.
+ *
+ * Counts messages NOT yet ``read_by_admin_at`` that were authored by
+ * the master / founder / system — admin's own outbound messages are
+ * never "unread to admin". Used to render the thread-card unread dot
+ * and the AdminTeamScreen nav-badge total.
+ */
+export function unreadCountForAdmin(
+  messages: InternalChatMessage[],
+): number {
+  let n = 0;
+  for (const m of messages) {
+    if (m.sender_role === "admin") continue;
+    if (m.read_by_admin_at == null) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Heuristic: does this thread need an admin response right now?
+ *
+ * Used for the admin home nav badge — the master-side already updates
+ * ``status`` to ``master_responded`` when the master sends a message
+ * into an open thread, so this is the cheapest proxy for «admin owes
+ * a reply». Active threads stuck in ``open`` (master started, admin
+ * hasn't replied yet) also need attention.
+ */
+export function threadNeedsAdminResponse(
+  thread: InternalChatThreadSummary,
+): boolean {
+  return thread.status === "master_responded" || thread.status === "open";
+}
+
+/**
+ * Group threads into the three admin filter buckets per handoff §4.1:
+ *   - awaitingResponse → status ∈ {open, master_responded}
+ *   - inDiscussion     → status ∈ {admin_responded, active_discussion}
+ *   - escalated        → founder_added_at set OR status = escalated_to_founder
+ *   - resolved         → status = resolved
+ *   - archived         → status = auto_closed_inactive
+ *
+ * Escalated threads are removed from the awaiting/discussion buckets
+ * (deduped) so the queue stays clean.
+ */
+export type AdminThreadBucket =
+  | "awaiting"
+  | "discussion"
+  | "escalated"
+  | "resolved"
+  | "archived";
+
+export function adminBucketFor(
+  thread: InternalChatThreadSummary,
+): AdminThreadBucket {
+  if (
+    thread.founder_added_at ||
+    thread.status === "escalated_to_founder"
+  )
+    return "escalated";
+  if (thread.status === "resolved") return "resolved";
+  if (thread.status === "auto_closed_inactive") return "archived";
+  if (thread.status === "open" || thread.status === "master_responded")
+    return "awaiting";
+  return "discussion";
 }
