@@ -200,6 +200,31 @@ export function setDeviceStorage(key: string, value: string): void {
 }
 
 /**
+ * Remove a value from MAX's per-app device storage. Used by M8 logout
+ * to clear the master session token. Mirrors ``setDeviceStorage``
+ * shape: best-effort on the bridge, fall back to localStorage with
+ * the ``max:`` prefix when the bridge is absent (dev browser / SSR).
+ */
+export function removeDeviceStorage(key: string): void {
+  const ds = maxBridge()?.DeviceStorage;
+  if (ds?.removeItem) {
+    try {
+      ds.removeItem(key);
+      return;
+    } catch (err) {
+      console.warn("[max-sdk] DeviceStorage.removeItem failed, falling back", err);
+    }
+  }
+  if (typeof window !== "undefined" && window.localStorage) {
+    try {
+      window.localStorage.removeItem(`max:${key}`);
+    } catch {
+      /* private mode / SSR — best effort */
+    }
+  }
+}
+
+/**
  * Ask MAX to close the Mini App. Falls back to ``history.back()`` when
  * the bridge isn't available — at least navigates the dev browser away.
  */

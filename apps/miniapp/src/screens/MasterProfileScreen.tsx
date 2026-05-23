@@ -110,6 +110,7 @@ const COPY = {
     requestScheduleChange: "Запросить изменение ›",
     notificationSettings: "Настройки уведомлений ›",
     internalChat: "Со студией ›",
+    appSettings: "Настройки приложения ›",
     save: "Сохранить",
     cancel: "Отмена",
     retry: "Попробовать снова",
@@ -371,6 +372,13 @@ export function MasterProfileScreen() {
     navigate("/master/settings/notifications");
   }, [navigate]);
 
+  // M8 minimal entry point — logout-only app settings screen.
+  // Full M8 (theme/font/help/about/version) deferred post-pilot.
+  const goToAppSettings = useCallback(() => {
+    hapticSelection();
+    navigate("/master/settings");
+  }, [navigate]);
+
   // Internal-chat entry — opens new thread tagged ``general`` so the
   // M4 «Написать Карине ›» CTA lands directly on the compose flow
   // (handoff §3.3 + §5.3 — generic CTA defaults to `general` topic).
@@ -515,6 +523,18 @@ export function MasterProfileScreen() {
           onClick={goToNotificationSettings}
         >
           {COPY.buttons.notificationSettings}
+        </button>
+        {/*
+         * M8 minimal — logout-only app settings. Full M8 layout
+         * (theme/font/help/about/version) deferred to a post-pilot
+         * FOLLOW_UP issue per TL plan Step 2.
+         */}
+        <button
+          type="button"
+          className="btn-secondary master-profile__action-btn"
+          onClick={goToAppSettings}
+        >
+          {COPY.buttons.appSettings}
         </button>
       </ProfileSection>
 
