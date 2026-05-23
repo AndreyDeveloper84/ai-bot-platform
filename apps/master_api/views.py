@@ -1127,8 +1127,10 @@ def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> H
       400  — ``conversation_locked``: HUMAN_LOCKED tier
       404  — master not involved / conversation not found
       429  — ``rate_limit_exceeded`` (per-master 10/min, 100/day) /
-             ``cost_cap_exceeded`` (per-master $X/day cumulative). Both
-             include a ``Retry-After`` header.
+             ``cost_cap_exceeded`` (per-master $X/day cumulative) /
+             ``generate_in_flight`` (another concurrent generate holds
+             the Conversation row lock; issue #550). All three include
+             a ``Retry-After`` header.
       503  — ``llm_unavailable``: provider raised; refer to logs
     """
 
@@ -1151,8 +1153,23 @@ def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> H
             actor_bot_user=bot_user,
         )
     except ConversationDetailError as exc:
-        resp = _error(exc.slug, exc.detail, exc.status)
-        if exc.slug == "cost_cap_exceeded":
+        # Issue #550: ``generate_in_flight`` carries
+        # ``extra={"retry_after_seconds": 3}`` so the frontend gets a
+        # concrete hint how long «Помощник уже думает…» should hold
+        # before re-enabling the tap. Also surface the field in the
+        # JSON body so clients that don't read headers (e.g. some
+        # MAX Mini App fetch shims) can still implement the wait.
+        retry_after = exc.extra.get("retry_after_seconds") if exc.extra else None
+        body: dict[str, Any] = {"error": exc.slug, "detail": exc.detail}
+        if isinstance(retry_after, int) and retry_after > 0:
+            body["retry_after_seconds"] = retry_after
+        resp = JsonResponse(body, status=exc.status)
+        if exc.slug == "generate_in_flight":
+            # Hardcoded 3s aligns with extra dict default; uses the
+            # actual ``retry_after_seconds`` value when present.
+            secs = retry_after if isinstance(retry_after, int) and retry_after > 0 else 3
+            resp["Retry-After"] = str(secs)
+        elif exc.slug == "cost_cap_exceeded":
             # Service layer raises 429 with a 1h retry-after suggestion.
             resp["Retry-After"] = "3600"
         return resp

@@ -117,6 +117,18 @@ AUTO_DRAFT_TASK_RESULT_EXPIRES_S = 3600
 
 # Slugs from :class:`DraftActionError` that represent a legitimate
 # refusal — not a system failure. Treated as INFO + no retry.
+#
+# ``generate_in_flight`` (issue #550) belongs on this list: another
+# concurrent generate (master tap OR another auto-task triggered by a
+# rapid-fire follow-up customer message) is already holding the
+# Conversation row lock. The holder will produce a draft; retrying
+# this task would either re-collide on the lock OR succeed but
+# duplicate-bill a draft for a now-superseded trigger. The per-
+# conversation debounce (``cache.add(... TTL=15s)``) earlier in the
+# task already de-duplicates most of these — generate_in_flight is the
+# narrow race where the debounce key got cleaned up (legitimate
+# refusal cleanup) BUT a parallel master tap re-acquired the lock
+# before this task could.
 _NON_RETRY_SLUGS: frozenset[str] = frozenset(
     {
         "rate_limit_exceeded",
@@ -127,6 +139,7 @@ _NON_RETRY_SLUGS: frozenset[str] = frozenset(
         "draft_stale",
         "bad_request",
         "tier_locked",
+        "generate_in_flight",
     }
 )
 

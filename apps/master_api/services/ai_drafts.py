@@ -130,7 +130,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
@@ -486,6 +486,11 @@ def generate_draft_for_conversation(
       :class:`DraftActionError`:
         * ``not_found`` (404) — master not involved
         * ``conversation_locked`` (400) — HUMAN_LOCKED tier
+        * ``generate_in_flight`` (429) — another concurrent generate
+          holds the Conversation row lock. Carries
+          ``extra={"retry_after_seconds": 3}`` so the view can set the
+          ``Retry-After: 3`` header. Refinement of PR #540's blocking
+          lock per issue #550.
         * ``cost_cap_exceeded`` (429) — per-master daily $ cap trip
         * ``llm_unavailable`` (503) — provider raised any LLMError /
           LLMProviderUnavailable, OR an unexpected exception bubbled
@@ -505,16 +510,61 @@ def generate_draft_for_conversation(
     # transaction with select_for_update on the Conversation row. The
     # lock serialises concurrent generate calls per conversation so
     # rapid-double-tap can't trigger two paid LLM calls.
+    #
+    # Issue #550: the lock is acquired with ``nowait=True``. Pre-#550
+    # the lock was blocking, so a rapid double-tap from the master
+    # serialised correctly but the SECOND request hung on the lock for
+    # up to the full LLM timeout (60s worst case) — bad UX for the
+    # pilot's 50+ masters. With NOWAIT the second concurrent call
+    # fails IMMEDIATELY with a ``DatabaseError`` (PostgreSQL SQLState
+    # 55P03 ``lock_not_available``); we translate that to a 429
+    # ``generate_in_flight`` so the frontend can show «Помощник уже
+    # думает…» state instead of a spinning UI.
     with transaction.atomic():
         # Lock the conversation row. Re-fetch via all_tenants so the
         # row matches what _verify_master_involved returned (which used
         # the tenant-scoped manager) — locks travel by id, not by
         # manager.
-        locked_conv = (
-            Conversation.all_tenants.select_for_update()
-            .filter(id=conv.id, tenant_id=master.tenant_id)
-            .first()
-        )
+        #
+        # The try/except is SCOPED to the single ORM call that issues
+        # the SELECT FOR UPDATE NOWAIT. Any DatabaseError raised here
+        # is, by elimination, the lock-not-available signal — the
+        # filter + .first() pair touches no other DB rows, no other
+        # tables. Subsequent statements inside ``transaction.atomic``
+        # (the AiDraft INSERT under Blocker #6, the audit row, the
+        # event emit) are NOT covered by this except — a deadlock
+        # there must surface normally so its own try/except (e.g. the
+        # IntegrityError handler) catches it.
+        try:
+            locked_conv = (
+                Conversation.all_tenants.select_for_update(nowait=True)
+                .filter(id=conv.id, tenant_id=master.tenant_id)
+                .first()
+            )
+        except DatabaseError as exc:
+            # PostgreSQL raises ``django.db.OperationalError`` (subclass
+            # of ``DatabaseError``) with SQLState 55P03 on
+            # lock_not_available. We use the broader ``DatabaseError``
+            # catch because (a) it's the documented supertype, (b) it
+            # covers psycopg2/psycopg3 differences, (c) the scope is
+            # tight enough that no other DatabaseError source is
+            # reachable on this line. SQLite ignores ``nowait=True``
+            # (treats it as a no-op) — tests that need to exercise the
+            # 429 path mock either ``Conversation.all_tenants`` or the
+            # ``select_for_update`` call itself.
+            logger.info(
+                "ai_drafts.generate.lock_contention conv=%s master=%s — "
+                "another generate holds the conversation lock; returning 429",
+                conv.id,
+                master.id,
+            )
+            raise DraftActionError(
+                "generate_in_flight",
+                "Помощник уже думает над ответом. Попробуйте через несколько секунд.",
+                status=429,
+                extra={"retry_after_seconds": 3},
+            ) from exc
+
         if locked_conv is None:
             # Conversation was deleted between the involvement check
             # and the lock — extremely unlikely under normal flow, but
