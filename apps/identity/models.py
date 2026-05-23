@@ -62,6 +62,30 @@ class BotUser(models.Model):
         help_text="Owning tenant. Same (channel, channel_user_id) under "
         "different tenants → two distinct BotUsers by design.",
     )
+
+    # Bridge to the canonical Ayla User UUID (Ayla djangoproject `users.User.id`).
+    # NULL until the user has been linked — typically populated when a
+    # `booking.created` event arrives via the cross-service event contract
+    # (Gamma's #442 booking consumer) and we observe envelope.user_id for
+    # the first time.
+    #
+    # NOT a Django FK because the canonical User lives in Ayla djangoproject
+    # per ADR-0009 §Hard rule #1 (no duplicate canonical state; no shared DB).
+    #
+    # No unique constraint at this stage: a single Ayla User may have BotUsers
+    # in multiple channels (MAX, future Telegram, etc.) or multiple tenants.
+    # Lookup pattern: `BotUser.all_tenants.filter(tenant=t, ayla_user_id=u).first()`.
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Canonical Ayla User UUID (from Ayla djangoproject "
+        "users.User.id). NULL until the bridge is established — typically "
+        "populated when the booking event consumer (Gamma #442) sees this "
+        "channel-user for the first time. Used by the consumer to resolve "
+        "envelope.user_id → BotUser for BookingReminder + Conversation update.",
+    )
+
     channel = models.CharField(
         max_length=32,
         help_text="Channel slug — 'max', 'telegram', 'whatsapp', 'web'.",
