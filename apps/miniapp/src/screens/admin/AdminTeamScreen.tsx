@@ -28,6 +28,10 @@ import {
   type MasterListItem,
   type MeResponse,
 } from "../../lib/admin-api";
+import {
+  listAdminThreads,
+  threadNeedsAdminResponse,
+} from "../../lib/internal-chat-api";
 import { hapticImpact, hapticSelection, setBackButton } from "../../lib/max-sdk";
 
 interface Props {
@@ -78,6 +82,13 @@ export function AdminTeamScreen({ me }: Props) {
   // hides the count rather than blocking the team screen.
   const [pendingAvailabilityCount, setPendingAvailabilityCount] =
     useState<number>(0);
+  // «Чаты с мастерами» nav badge — count of threads in the tenant
+  // queue that need admin response (status ∈ {open, master_responded}).
+  // Best-effort fetch; failure is silent and the card renders without
+  // the badge rather than blocking the team screen. Mirrors the
+  // existing availability-requests pattern above.
+  const [internalChatUnreadCount, setInternalChatUnreadCount] =
+    useState<number>(0);
 
   useEffect(() => {
     // Tab bar is at the root — hide MAX BackButton on the team screen.
@@ -100,6 +111,29 @@ export function AdminTeamScreen({ me }: Props) {
       }
     })();
     return () => controller.abort();
+  }, [me.is_admin, me.is_owner]);
+
+  // «Чаты с мастерами» unread badge — best-effort. The internal-chat
+  // list endpoint doesn't expose per-thread unread counts, so we use
+  // status-based proxy via threadNeedsAdminResponse (open +
+  // master_responded). Same silent-failure pattern as availability
+  // requests above.
+  useEffect(() => {
+    if (!(me.is_owner || me.is_admin)) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await listAdminThreads({ limit: 50 });
+        if (cancelled) return;
+        const count = res.items.filter(threadNeedsAdminResponse).length;
+        setInternalChatUnreadCount(count);
+      } catch {
+        // Silent — the card renders without the badge.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [me.is_admin, me.is_owner]);
 
   // Polish item (a) from PR #498 review — 300ms debounce on search +
@@ -365,6 +399,50 @@ export function AdminTeamScreen({ me }: Props) {
               aria-label={`ожидают: ${pendingAvailabilityCount}`}
             >
               {pendingAvailabilityCount}
+            </span>
+          )}
+        </button>
+      )}
+
+      {(me.is_owner || me.is_admin) && (
+        <button
+          type="button"
+          className="master-card"
+          style={{
+            width: "100%",
+            marginBottom: "var(--s-3)",
+            textAlign: "start",
+          }}
+          onClick={() => {
+            hapticSelection();
+            navigate("/admin/internal-chat");
+          }}
+          aria-label="Чаты с мастерами"
+        >
+          <span
+            className="master-card__avatar"
+            style={{ background: "var(--c-surface-2)" }}
+            aria-hidden="true"
+          >
+            💬
+          </span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span className="master-card__name">Чаты с мастерами</span>
+            <span
+              className="master-card__spec"
+              style={{ display: "block" }}
+            >
+              {internalChatUnreadCount > 0
+                ? `${internalChatUnreadCount} требуют ответа`
+                : "Новых обсуждений нет"}
+            </span>
+          </span>
+          {internalChatUnreadCount > 0 && (
+            <span
+              className="admin-count-chip"
+              aria-label={`требуют ответа: ${internalChatUnreadCount}`}
+            >
+              {internalChatUnreadCount}
             </span>
           )}
         </button>

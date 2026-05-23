@@ -2730,6 +2730,20 @@ a {
   font-size: 0.95em;
 }
 
+/* Admin queue: master name leads the card row before the topic chip. */
+.internal-chat-list__card-master {
+  font-weight: 700;
+  font-size: 1em;
+  color: var(--c-text-primary, inherit);
+  margin-right: var(--s-2);
+}
+
+/* Admin-side close-thread CTA — sits below the composer. */
+.internal-chat-thread__close-action {
+  margin-top: var(--s-2);
+  width: 100%;
+}
+
 .internal-chat-list__card-subject {
   font-weight: 500;
 }

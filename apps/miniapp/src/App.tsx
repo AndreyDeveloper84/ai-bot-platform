@@ -30,8 +30,9 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
 import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
-import { AdminChatsPlaceholderScreen } from "./screens/admin/AdminChatsPlaceholderScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
+import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatListScreen";
+import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChatThreadScreen";
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
@@ -135,7 +136,24 @@ function AdminRoutes({ me }: { me: MeResponse }) {
         path="/admin/availability-requests"
         element={<AdminAvailabilityRequestsScreen me={me} />}
       />
-      <Route path="/admin/chats" element={<AdminChatsPlaceholderScreen />} />
+      {/* Master ↔ admin internal chat — admin queue ("Чаты с мастерами"). */}
+      <Route
+        path="/admin/internal-chat"
+        element={<AdminInternalChatListScreen me={me} />}
+      />
+      <Route
+        path="/admin/internal-chat/threads/:threadId"
+        element={<AdminInternalChatThreadScreen me={me} />}
+      />
+      {/*
+        Legacy /admin/chats path (used by AdminTabBar) → redirect to the
+        live internal-chat surface. Keeps deep-links from older bot DMs
+        working.
+      */}
+      <Route
+        path="/admin/chats"
+        element={<Navigate to="/admin/internal-chat" replace />}
+      />
       <Route
         path="/admin/settings"
         element={<AdminSettingsPlaceholderScreen />}
