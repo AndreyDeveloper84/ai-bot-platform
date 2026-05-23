@@ -90,13 +90,31 @@ class ConversationDetailError(Exception):
     """Validation / authz failure surfaced by the service layer.
 
     ``slug`` is the stable string the view layer maps to an HTTP status.
+
+    ``extra`` is an optional dict of structured metadata the view layer
+    may surface as response-body keys and/or HTTP headers. Added for
+    issue #550 so the ``generate_in_flight`` 429 can transport its
+    ``retry_after_seconds`` hint without overloading ``detail`` or
+    introducing a per-slug regex parse in the view. Existing callers
+    pass ``extra=None`` (the default) and stay byte-for-byte
+    compatible — the view layer only consults ``extra`` when present
+    AND only on a known-slug allow-list (no risk of leaking arbitrary
+    service-layer state into responses).
     """
 
-    def __init__(self, slug: str, detail: str, status: int = 400) -> None:
+    def __init__(
+        self,
+        slug: str,
+        detail: str,
+        status: int = 400,
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.slug = slug
         self.detail = detail
         self.status = status
+        self.extra: dict[str, Any] = dict(extra) if extra else {}
 
 
 class ConversationNotInvolved(ConversationDetailError):

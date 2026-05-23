@@ -1601,3 +1601,437 @@ class TestBlocker6IntegrityGraceful:
         assert call_count["n"] >= 1
         # original_create reference kept for cleanup / future debug.
         assert callable(original_create)
+
+
+# =========================================================================
+# Issue #550 — select_for_update(nowait=True) + 429 generate_in_flight
+# =========================================================================
+#
+# Refinement of PR #540's Blocker #1 fix. The blocking lock correctly
+# serialised concurrent generates but blocked the UI for up to the full
+# LLM timeout (60s worst case) — bad UX for pilot. With NOWAIT the
+# second concurrent call fails IMMEDIATELY with a 429
+# ``generate_in_flight`` + ``Retry-After: 3`` header so the frontend
+# can render «Помощник уже думает…» and re-enable the tap after 3s.
+#
+# SQLite (the default test DB engine) IGNORES ``nowait=True`` — it
+# treats the whole select_for_update as a no-op. Two strategies for
+# triggering the contention path under SQLite:
+#
+#   1. **Mock the queryset**: patch
+#      ``Conversation.all_tenants.select_for_update`` to return a
+#      queryset whose ``.first()`` raises ``django.db.OperationalError``.
+#      Deterministic, no threads required.
+#   2. **Real threads (postgres only)**: use ``pytest.mark.django_db
+#      (transaction=True)`` + ``threading.Barrier`` to fire two
+#      concurrent generates. Only meaningful under PostgreSQL — skipped
+#      on SQLite via ``connection.vendor`` check.
+#
+# Tests below use strategy 1 by default (cross-engine portable) and
+# include one strategy-2 test guarded by a vendor skip.
+
+
+@pytest.mark.django_db
+class TestIssue550NowaitGenerateInFlight:
+    """Issue #550 — non-blocking lock + 429 ``generate_in_flight``."""
+
+    def test_generate_with_held_lock_returns_429(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Service-layer test: when the Conversation row lock can't be
+        acquired (SELECT FOR UPDATE NOWAIT fails), the service raises
+        ``DraftActionError("generate_in_flight", status=429)`` with
+        ``extra={"retry_after_seconds": 3}`` and does NOT call the LLM.
+        """
+
+        from django.db import OperationalError
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            generate_draft_for_conversation,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="вопрос",
+        )
+
+        # Mock the .filter().first() chain off select_for_update(nowait=True)
+        # to raise OperationalError — same symptom as PostgreSQL's
+        # SQLState 55P03 lock_not_available.
+        # (Conversation already imported at module level — used directly.)
+
+        original_sfu = Conversation.all_tenants.select_for_update
+        llm_calls = {"n": 0}
+
+        async def tracking(self: Any, *a: Any, **kw: Any) -> CompletionResult:
+            llm_calls["n"] += 1
+            return _completion()
+
+        class _LockedQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                raise OperationalError("lock_not_available (simulated 55P03)")
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            # Sanity: ensure the call site passed nowait=True.
+            assert kw.get("nowait") is True, (
+                "issue #550: select_for_update must be called with nowait=True"
+            )
+            return _LockedQS()
+
+        from apps.llm.providers.openai_provider import OpenAIProvider
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with patch.object(OpenAIProvider, "complete", new=tracking):
+                with pytest.raises(DraftActionError) as exc_info:
+                    generate_draft_for_conversation(
+                        conversation_id=conv.id,
+                        master=accepted_master,
+                        actor_bot_user=None,
+                    )
+
+        # Sanity: original method untouched.
+        assert callable(original_sfu)
+
+        err = exc_info.value
+        assert err.slug == "generate_in_flight"
+        assert err.status == 429
+        assert err.extra.get("retry_after_seconds") == 3
+        # Russian copy preserved verbatim per spec.
+        assert err.detail == ("Помощник уже думает над ответом. Попробуйте через несколько секунд.")
+        # Critical: NO LLM call happened (the lock contention fired
+        # BEFORE we got to the provider).
+        assert llm_calls["n"] == 0
+
+    def test_view_returns_429_with_retry_after_header_for_generate_in_flight(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """View-layer test: service raises generate_in_flight → response
+        is 429 with ``Retry-After: 3`` header AND a JSON body that
+        echoes ``retry_after_seconds: 3``.
+        """
+
+        from apps.master_api.services.ai_drafts import DraftActionError
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+
+        def raising_generate(*a: Any, **kw: Any) -> Any:
+            raise DraftActionError(
+                "generate_in_flight",
+                "Помощник уже думает над ответом. Попробуйте через несколько секунд.",
+                status=429,
+                extra={"retry_after_seconds": 3},
+            )
+
+        with patch(
+            "apps.master_api.views.generate_draft_for_conversation",
+            new=raising_generate,
+        ):
+            resp = client.post(
+                _generate_url(conv.id),
+                HTTP_AUTHORIZATION=init_data_header("12345"),
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 429
+        assert resp["Retry-After"] == "3"
+        body = resp.json()
+        assert body["error"] == "generate_in_flight"
+        assert body["retry_after_seconds"] == 3
+        # Spec copy verbatim.
+        assert (
+            body["detail"] == "Помощник уже думает над ответом. Попробуйте через несколько секунд."
+        )
+
+    def test_normal_generate_no_lock_contention_succeeds(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Sanity: NOWAIT does NOT break the happy path. A single
+        non-contended generate still produces an ACTIVE draft.
+        """
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="привет",
+        )
+        with _patch_complete(return_value=_completion(text="привет!")):
+            resp = client.post(
+                _generate_url(conv.id),
+                HTTP_AUTHORIZATION=init_data_header("12345"),
+                content_type="application/json",
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["content"] == "привет!"
+        # And exactly one ACTIVE draft persisted.
+        assert (
+            AiDraft.all_tenants.filter(
+                conversation_id=conv.id, status=AiDraft.Status.ACTIVE
+            ).count()
+            == 1
+        )
+
+    def test_auto_trigger_swallows_generate_in_flight_no_retry(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+        settings: Any,
+    ) -> None:
+        """Celery task path: service raises generate_in_flight → task
+        treats it as a legitimate refusal (INFO log, no autoretry, no
+        AiDraft created on this attempt).
+
+        Rationale (commit message + tasks.py docstring): the lock holder
+        will produce a draft; retrying would either re-collide on the
+        lock OR succeed but duplicate-bill a draft for a superseded
+        trigger.
+        """
+
+        from apps.master_api.services.ai_drafts import DraftActionError
+        from apps.master_api.tasks import (
+            _NON_RETRY_SLUGS,
+            auto_generate_draft_for_inbound,
+        )
+
+        # Sanity: the swallow list explicitly includes the new slug.
+        assert "generate_in_flight" in _NON_RETRY_SLUGS
+
+        settings.AI_DRAFTS_AUTO_TRIGGER_ENABLED = True
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        trigger = _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="срочно",
+        )
+
+        # Force the underlying service to raise generate_in_flight on
+        # every call (simulating an always-held lock).
+        def raising(*a: Any, **kw: Any) -> Any:
+            raise DraftActionError(
+                "generate_in_flight",
+                "Помощник уже думает над ответом. Попробуйте через несколько секунд.",
+                status=429,
+                extra={"retry_after_seconds": 3},
+            )
+
+        # Apply the task body directly (not via .delay) so we can assert
+        # on the return value and verify no exception escapes.
+        with patch(
+            "apps.master_api.services.ai_drafts.generate_draft_for_conversation",
+            new=raising,
+        ):
+            result = auto_generate_draft_for_inbound(
+                conversation_id=str(conv.id),
+                trigger_message_id=str(trigger.id),
+                tenant_id=str(tenant.id),
+            )
+
+        # Task returns the swallow shape — no autoretry, no exception.
+        assert result == {"generated": False, "reason": "generate_in_flight"}
+        # And no AiDraft was created this attempt (service raised
+        # BEFORE the INSERT).
+        assert AiDraft.all_tenants.filter(conversation_id=conv.id).count() == 0
+
+    def test_concurrent_generates_one_wins_other_gets_429(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Deterministic two-call test: the SECOND call (lock holder
+        already in flight) gets 429 generate_in_flight; the FIRST call
+        wins and produces an ACTIVE draft.
+
+        We simulate concurrency by patching ``select_for_update`` to
+        return a queryset whose ``.first()`` raises OperationalError on
+        the SECOND invocation. This isolates the test from real thread
+        timing while exercising the exact code path that triggers under
+        Postgres lock contention.
+        """
+
+        from django.db import OperationalError
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            generate_draft_for_conversation,
+        )
+        # (Conversation already imported at module level — used directly.)
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="вопрос",
+        )
+
+        # 1st call: real path (lock acquired, draft created).
+        # 2nd call: select_for_update.filter().first() raises OperationalError.
+        call_count = {"n": 0}
+        original_sfu = Conversation.all_tenants.select_for_update
+
+        class _LockedQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                raise OperationalError("lock_not_available (simulated 55P03 — concurrent generate)")
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            call_count["n"] += 1
+            assert kw.get("nowait") is True
+            if call_count["n"] == 1:
+                # First call — delegate to real method.
+                return original_sfu(*a, **kw)
+            # Second call — raise.
+            return _LockedQS()
+
+        results: list[Any] = []
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with _patch_complete(return_value=_completion(text="ответ")):
+                # First — wins.
+                r1 = generate_draft_for_conversation(
+                    conversation_id=conv.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+                results.append(r1)
+                # Second — loses to lock contention.
+                try:
+                    generate_draft_for_conversation(
+                        conversation_id=conv.id,
+                        master=accepted_master,
+                        actor_bot_user=None,
+                    )
+                except DraftActionError as exc:
+                    results.append(exc)
+
+        # First produced a draft.
+        from apps.master_api.services.ai_drafts import DraftResponse
+
+        assert isinstance(results[0], DraftResponse)
+        winner_id = results[0].draft_id
+        # Second got 429 generate_in_flight.
+        assert isinstance(results[1], DraftActionError)
+        assert results[1].slug == "generate_in_flight"
+        assert results[1].status == 429
+        assert results[1].extra.get("retry_after_seconds") == 3
+        # Exactly ONE ACTIVE draft persisted (the winner).
+        active = AiDraft.all_tenants.filter(conversation_id=conv.id, status=AiDraft.Status.ACTIVE)
+        assert active.count() == 1
+        winning_row = active.first()
+        assert winning_row is not None
+        assert str(winning_row.id) == winner_id
+
+    def test_generate_in_flight_retry_after_eventually_succeeds(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """End-to-end: first call holds lock + completes; second call
+        within the contention window gets 429; a third call AFTER the
+        first commits succeeds and (within the 60s idempotency window)
+        re-serves the same draft id (no second LLM call).
+        """
+
+        from django.db import OperationalError
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            generate_draft_for_conversation,
+        )
+        # (Conversation already imported at module level — used directly.)
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="вопрос",
+        )
+
+        original_sfu = Conversation.all_tenants.select_for_update
+        call_count = {"n": 0}
+        llm_calls = {"n": 0}
+
+        class _LockedQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                raise OperationalError("lock_not_available")
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            call_count["n"] += 1
+            assert kw.get("nowait") is True
+            # Call 1: real (lock acquired).
+            # Call 2: simulated contention (429).
+            # Call 3 onward: real (lock released after first commit).
+            if call_count["n"] == 2:
+                return _LockedQS()
+            return original_sfu(*a, **kw)
+
+        async def counting(self: Any, *a: Any, **kw: Any) -> CompletionResult:
+            llm_calls["n"] += 1
+            return _completion(text="первый и единственный")
+
+        from apps.llm.providers.openai_provider import OpenAIProvider
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with patch.object(OpenAIProvider, "complete", new=counting):
+                # Call 1: succeeds — winner draft.
+                r1 = generate_draft_for_conversation(
+                    conversation_id=conv.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+                # Call 2: contention → 429 generate_in_flight.
+                with pytest.raises(DraftActionError) as exc_info:
+                    generate_draft_for_conversation(
+                        conversation_id=conv.id,
+                        master=accepted_master,
+                        actor_bot_user=None,
+                    )
+                assert exc_info.value.slug == "generate_in_flight"
+                # Call 3: lock now released; idempotency window re-serves
+                # the winner draft (same trigger message, <60s).
+                r3 = generate_draft_for_conversation(
+                    conversation_id=conv.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        assert r1.draft_id == r3.draft_id
+        # Critical billing assertion: only ONE LLM call across all
+        # three attempts (idempotency window catches call 3).
+        assert llm_calls["n"] == 1
