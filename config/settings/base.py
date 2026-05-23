@@ -428,6 +428,120 @@ YOOKASSA_TEST_MODE = os.environ.get("YOOKASSA_TEST_MODE", "true").lower() in (
 # MAX chat id to receive 🚨 messages on breaker open/close.
 ADMIN_MAX_CHAT_ID = os.environ.get("ADMIN_MAX_CHAT_ID", "")
 
+# Issue #552 — Django CACHES backed by Redis (django-redis).
+#
+# WHY THIS EXISTS
+# ---------------
+# Several production code paths rely on the Django cache framework for
+# *cross-worker* atomic semantics — namely:
+#
+#   * apps.master_api.services.ai_draft_limits — per-master rate limit
+#     (cache.add SETNX + cache.incr) for the M6 AI drafts endpoint
+#     (PR #540).
+#   * apps.admin_api.tasks — per-(request_id, decision) SETNX lock that
+#     prevents duplicate MAX DMs after a Celery broker hiccup (PR #539).
+#   * apps.llm.providers.anthropic_provider — daily-token-counter INCR
+#     used by the L5 cost-cap router fallback (DRF-585).
+#   * apps.skills.faq.tools — invalidate_kb_search_cache uses
+#     ``cache.delete_pattern`` (django-redis-specific API).
+#
+# Without an explicit CACHES configuration Django falls through to
+# ``locmem``, which is *per-worker*. Under N gunicorn workers each
+# worker maintains its own counters and SETNX locks; the rate limiter
+# silently caps at 10/min × N and idempotency locks let through
+# duplicate DMs whenever the second delivery happens to land on a
+# different worker. The production boot assertion below
+# (``_assert_production_cache_backend``) fails fast if CACHES ends up
+# pointing at a non-Redis backend in production.
+#
+# KEY_PREFIX
+# ----------
+# Single Redis instance is shared across dev / staging / prod environments
+# in some single-tenant deployments. The prefix scopes cache keys per
+# environment + service so a staging rate-limiter never collides with a
+# production rate-limiter on the same key. ``DJANGO_ENV`` (already used
+# by ``DEPLOYMENT_ENVIRONMENT``) selects the suffix; defaults to ``local``.
+#
+# CONNECTION_POOL_KWARGS
+# ----------------------
+# ``max_connections=50`` per process is the django-redis recommended
+# default and matches the gunicorn workers × Celery workers × eventloops
+# arithmetic for the Phase 1 single-tenant deploy (4 web × 4 celery × ~3
+# concurrent cache calls each = ~48 peak). Raise via env if multi-tenant
+# Phase 2 fan-out increases the per-process concurrency.
+#
+# TIMEOUT
+# -------
+# 300s (5 min) default applies only to callers that pass no explicit
+# ``timeout``. The rate limiter and SETNX callers above pass explicit
+# TTLs (90 / 90_000 / 3600 / 86_400 seconds); they are unaffected by
+# this default.
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        "KEY_PREFIX": f"ai_bot_platform:{os.environ.get('DJANGO_ENV', 'local')}",
+        "TIMEOUT": 300,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "CONNECTION_POOL_KWARGS": {
+                "max_connections": 50,
+                "retry_on_timeout": True,
+            },
+            # IGNORE_EXCEPTIONS=False (default) — surface Redis outages
+            # as ConnectionError to the caller. The rate limiter would
+            # otherwise silently allow every request through on a
+            # transient Redis blip (worse than 503-ing the request).
+        },
+    },
+}
+
+
+def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
+    """Fail-fast guard wired into apps.master_api.apps.MasterApiConfig.ready().
+
+    Verifies the configured ``default`` cache BACKEND is a Redis-backed
+    backend whenever DEBUG=False. LocMem in production silently breaks
+    rate limiters and idempotency locks (see CACHES docstring above);
+    this assertion turns that into a loud :class:`ImproperlyConfigured`
+    on Django boot rather than a subtle production correctness bug.
+
+    Local dev + tests run with ``DEBUG=True`` and may use locmem freely.
+
+    Raises:
+        django.core.exceptions.ImproperlyConfigured: when DEBUG=False and
+          the ``default`` cache BACKEND is not a Redis-backed backend.
+    """
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    if debug:
+        return  # Local dev + tests tolerate locmem.
+
+    backend = caches.get("default", {}).get("BACKEND", "")
+    # Accept both django-redis (RedisCache class) and Django 4+ built-in
+    # (django.core.cache.backends.redis.RedisCache) — both deliver atomic
+    # cross-worker SETNX/INCR via the same Redis server. ``delete_pattern``
+    # is django-redis-specific; faq/tools.py degrades gracefully when the
+    # method is absent (falls back to ``cache.clear()``), so the built-in
+    # backend is also acceptable for the assertion gate.
+    if "RedisCache" in backend:
+        return
+
+    raise ImproperlyConfigured(
+        f"Production cache backend must be Redis (got {backend!r}). "
+        "Rate limiters (apps.master_api.services.ai_draft_limits) and "
+        "idempotency locks (apps.admin_api.tasks) depend on cross-worker "
+        "atomic cache operations (SETNX/INCR). LocMem is per-worker and "
+        "silently bypasses these guards — each gunicorn worker holds its "
+        "own counter, so the effective rate cap becomes N×configured. "
+        "Set REDIS_URL and ensure CACHES['default']['BACKEND'] resolves "
+        "to 'django_redis.cache.RedisCache' (or Django 4+ built-in "
+        "'django.core.cache.backends.redis.RedisCache'). See "
+        "config/settings/base.py CACHES docstring for the rationale."
+    )
+
+
 # Sprint 2 / E3 — Celery broker + beat schedule for retention tasks.
 # CELERY_BROKER_URL falls through to REDIS_URL so dev/prod share one
 # Redis instance for both queue + cache + streams.

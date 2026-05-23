@@ -29,6 +29,18 @@ dependencies = [
     # `--scheduler django_celery_beat.schedulers:DatabaseScheduler`.
     "django-celery-beat>=2.7",
     "redis>=5.0",
+    # Issue #552 — django-redis backend for the Django CACHES framework.
+    # Required because:
+    #   * Rate limiters (apps.master_api.services.ai_draft_limits) and DM
+    #     idempotency locks (apps.admin_api.tasks) depend on cross-worker
+    #     atomic SETNX/INCR semantics. Django's built-in locmem cache is
+    #     per-worker and silently bypasses these guards (each worker has
+    #     its own counter → effective limit = N × configured limit).
+    #   * apps.skills.faq.tools.invalidate_kb_search_cache uses the
+    #     ``delete_pattern`` extension, a django-redis-specific API.
+    # The boot assertion in apps.master_api.apps fails fast in production
+    # when the configured BACKEND is not a Redis backend.
+    "django-redis>=5.4",
     "psycopg[binary]>=3.2",
     "chromadb>=0.5",
     "openai>=1.50",
