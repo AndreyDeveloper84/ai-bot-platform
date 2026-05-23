@@ -216,47 +216,71 @@ class Command(BaseCommand):
                 f"{rate_limit} ИЛИ это намеренный baseline-тест с ceiling-disabled."
             )
 
+        # #593 (PR #585 adversarial pass): SETNX lock против concurrent
+        # запусков. Два оператора параллельно → флоды складываются →
+        # audit delta пробьёт MAX → false-positive exit 6 → паника перед
+        # flip-датой. Lock TTL = duration + 120s (запас на cleanup) —
+        # auto-release если drill crash-нулся.
+        from apps.ingress.streams import _client
+
+        redis = _client()
+        lock_acquired = _acquire_drill_lock(redis, ttl_seconds=opts.duration + 120)
+        if not lock_acquired:
+            holder_pid = _drill_lock_holder(redis)
+            raise CommandError(
+                f"Drill уже запущен (PID {holder_pid!r}). Подожди завершения "
+                f"(~{opts.duration + 120}s макс. — lock TTL) ИЛИ если ты "
+                f"уверен что предыдущий запуск умер: "
+                f"`redis-cli DEL {_DRILL_LOCK_KEY}`."
+            )
+
         result = _DrillResult()
         # Main фаза: pre-checks + baseline + flood + drain + assertions.
         # ВАЖНО: cleanup НЕ здесь — иначе DELETE exception затрёт
         # успешный assertion verdict (adversarial pass #5).
         try:
-            self._run_drill(opts, result)
-        except _DrillFailed as exc:
-            result.exit_code = exc.exit_code
-            result.fail_reason = exc.reason
-        except Exception as exc:  # noqa: BLE001
-            result.exit_code = 7
-            result.fail_reason = f"unexpected error: {type(exc).__name__}: {exc}"
-            logger.exception("drill.unexpected_error")
-
-        # Cleanup-фаза отдельным блоком. Только если assertions прошли
-        # И cleanup явно не отключён. Failure cleanup-а даёт exit 8 —
-        # PASS verdict сохраняется в --json output.
-        if result.exit_code == 0 and not opts.skip_cleanup:
             try:
-                assert result.drill_start_ts is not None  # mypy narrow
-                assert result.drill_end_ts is not None
-                self.stdout.write("== Cleanup ==")
-                result.cleanup_deleted = _cleanup_audit_rows(
-                    opts.audit_table,
-                    opts.handler_name,
-                    result.drill_start_ts,
-                    result.drill_end_ts,
-                )
-                self.stdout.write(f"  удалено строк: {result.cleanup_deleted}")
+                self._run_drill(opts, result)
+            except _DrillFailed as exc:
+                result.exit_code = exc.exit_code
+                result.fail_reason = exc.reason
             except Exception as exc:  # noqa: BLE001
-                result.exit_code = 8
-                result.cleanup_failed = True
-                result.fail_reason = (
-                    f"assertions PASS, but cleanup failed: "
-                    f"{type(exc).__name__}: {exc}. "
-                    "Drill semantically успешен — продолжай pre-flip checklist. "
-                    "Drill-rows в audit-таблице удали вручную (см. docstring §exit 8)."
-                )
-                logger.exception("drill.cleanup_failed")
-        elif opts.skip_cleanup:
-            self.stdout.write("== Cleanup: SKIPPED по флагу --skip-cleanup ==")
+                result.exit_code = 7
+                result.fail_reason = f"unexpected error: {type(exc).__name__}: {exc}"
+                logger.exception("drill.unexpected_error")
+
+            # Cleanup-фаза отдельным блоком. Только если assertions
+            # прошли И cleanup явно не отключён. Failure cleanup-а
+            # даёт exit 8 — PASS verdict сохраняется в --json output.
+            if result.exit_code == 0 and not opts.skip_cleanup:
+                try:
+                    assert result.drill_start_ts is not None  # mypy narrow
+                    assert result.drill_end_ts is not None
+                    self.stdout.write("== Cleanup ==")
+                    result.cleanup_deleted = _cleanup_audit_rows(
+                        opts.audit_table,
+                        opts.handler_name,
+                        result.drill_start_ts,
+                        result.drill_end_ts,
+                    )
+                    self.stdout.write(f"  удалено строк: {result.cleanup_deleted}")
+                except Exception as exc:  # noqa: BLE001
+                    result.exit_code = 8
+                    result.cleanup_failed = True
+                    result.fail_reason = (
+                        f"assertions PASS, but cleanup failed: "
+                        f"{type(exc).__name__}: {exc}. "
+                        "Drill semantically успешен — продолжай pre-flip checklist. "
+                        "Drill-rows в audit-таблице удали вручную (см. docstring §exit 8)."
+                    )
+                    logger.exception("drill.cleanup_failed")
+            elif opts.skip_cleanup:
+                self.stdout.write("== Cleanup: SKIPPED по флагу --skip-cleanup ==")
+        finally:
+            # #593: release lock ВСЕГДА — даже на exception в drill.
+            # Без finally-блока crash в main фазе оставит stale lock на
+            # TTL секунд, блокируя оператора от retry.
+            _release_drill_lock(redis)
 
         self._emit_result(opts, result)
         if result.exit_code:
@@ -286,7 +310,13 @@ class Command(BaseCommand):
         # ── Baseline ──
         self.stdout.write("== Baseline ==")
         result.audit_count_before = _audit_count(opts.audit_table, opts.handler_name)
-        result.drill_start_ts = datetime.now(timezone.utc)
+        # #592 (PR #585 adversarial pass): timestamps берём из БД, не
+        # из Python. Если drill запущен на одном host-е, audit-таблица
+        # лежит на другом (типичный staging: k8s + managed Postgres),
+        # clock drift ±200ms-±2s оставит первые/последние audit rows
+        # за пределами Python-окна → cleanup их пропустит → загрязнение.
+        # SELECT NOW() в той же DB что и audit-таблица = нет дрифта.
+        result.drill_start_ts = _db_now()
         result.pel_count_before = _pel_count(redis, opts.stream, opts.group)
         self.stdout.write(
             f"  audit_count={result.audit_count_before} pel_count={result.pel_count_before}"
@@ -305,7 +335,7 @@ class Command(BaseCommand):
             baseline=result.pel_count_before,
             on_progress=lambda c: self.stdout.write(f"  pel={c}"),
         )
-        result.drill_end_ts = datetime.now(timezone.utc)
+        result.drill_end_ts = _db_now()  # #592: DB-side timestamp
 
         # ── Positive assertions ──
         self.stdout.write("== Positive assertions ==")
@@ -474,6 +504,114 @@ def _audit_count(table: str, handler_name: str) -> int:
     with connection.cursor() as cur:
         cur.execute(sql, [handler_name])
         return int(cur.fetchone()[0])
+
+
+_DRILL_LOCK_KEY = "strict_flip_drill:lock"
+
+
+def _acquire_drill_lock(redis: Any, *, ttl_seconds: int) -> bool:
+    """SETNX-style lock acquire через redis.set(nx=True, ex=ttl).
+
+    redis-py ``set(key, value, nx=True, ex=ttl)`` атомарно ставит ключ
+    ТОЛЬКО если его ещё нет + ставит TTL. Это canonical SETNX-pattern
+    из Redis docs §«Distributed locks» (упрощённая версия, без Redlock —
+    нам не нужна устойчивость к partition, drill это staging-only).
+
+    Возвращает True если lock acquired, False если занят. Никаких
+    exceptions — caller сам решает что делать через CommandError.
+
+    TTL включает запас на cleanup (~120s сверху от duration). Если
+    drill крашится без `finally`-release, lock auto-expire-нется на TTL.
+
+    ⚠ **Fail-open поведение:** если ``redis.set`` кинет exception
+    (Redis недоступен, partition, …), функция возвращает **True**
+    как если бы lock был успешно acquired. Это осознанный trade-off:
+    drill всё равно упадёт на следующем Redis-вызове (``_pel_count``
+    в baseline, ``_check_canary``), поэтому защита от concurrent
+    runs выполнить мы не сможем, но добавлять отдельный exit для
+    «lock module недоступен» — overkill. Self-adversarial pass на
+    #593 подтвердил приемлемость этого пути для staging-only tool.
+    """
+    pid = os.getpid()
+    try:
+        # redis-py возвращает True/None (None если key уже есть и nx=True).
+        result = redis.set(_DRILL_LOCK_KEY, str(pid), nx=True, ex=ttl_seconds)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drill_lock.acquire_failed err=%s — fail-open", exc)
+        return True
+    return bool(result)
+
+
+def _drill_lock_holder(redis: Any) -> str | None:
+    """Возвращает PID процесса который держит lock (или None).
+
+    Полезно для сообщения оператору: «занято процессом 12345» — он
+    может проверить `ps -p 12345` живой ли тот процесс.
+    """
+    try:
+        val = redis.get(_DRILL_LOCK_KEY)
+    except Exception:  # noqa: BLE001
+        return None
+    if val is None:
+        return None
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
+def _release_drill_lock(redis: Any) -> None:
+    """Безусловно DELETE-ит lock-ключ. Никаких own-PID checks.
+
+    Why no PID check on release: lock TTL уже короче чем любой
+    разумный stale-window. Если ключа нет (auto-expired или другой
+    процесс DEL-нул) — DEL idempotent. Если ключ принадлежит другому
+    процессу (TTL expired + новый процесс acquire-нул) — мы НЕ должны
+    были этот release вызвать, это означает баг в caller-логике
+    (превысили TTL без cleanup). Лучше fail loud при разработке чем
+    защитный no-op.
+
+    На самом деле редкая race-условие: процесс N запустил drill, lock
+    expired через TTL, процесс M acquire-нул, процесс N всё ещё бежит
+    и в `finally` DELETE-нёт M-овский lock. Митигация: TTL ставится
+    с большим запасом (duration + 120s); процесс N должен закончиться
+    за это окно или быть прибит.
+    """
+    try:
+        redis.delete(_DRILL_LOCK_KEY)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drill_lock.release_failed err=%s", exc)
+
+
+def _db_now() -> datetime:
+    """Возвращает «сейчас» по часам DB-сервера.
+
+    #592 (PR #585 adversarial pass): cleanup в drill-команде использует
+    timestamp range вокруг drill_start_ts и drill_end_ts. Если эти
+    timestamps берутся через ``datetime.now(timezone.utc)`` на Django
+    host-е, а audit-таблица пишется на отдельном Postgres host-е (типичный
+    staging: k8s + managed Postgres), clock drift ±200ms-±2s оставит
+    первые/последние audit rows за пределами окна → cleanup их пропустит.
+
+    Postgres ``NOW()`` возвращает timestamp с timezone (timestamptz),
+    Django маппит его в aware ``datetime``. Используем тот же DB-server-time
+    для baseline и для end-марки — нулевой drift.
+
+    SQLite fallback: ``CURRENT_TIMESTAMP`` без timezone. Test-only —
+    drill команда production-ом запускается на Postgres staging-е.
+    """
+    with connection.cursor() as cur:
+        if connection.vendor == "postgresql":
+            cur.execute("SELECT NOW()")
+        else:
+            # SQLite: CURRENT_TIMESTAMP возвращает naive UTC, нормализуем.
+            cur.execute("SELECT CURRENT_TIMESTAMP")
+        row = cur.fetchone()[0]
+        if isinstance(row, datetime):
+            if row.tzinfo is None:
+                return row.replace(tzinfo=timezone.utc)
+            return row
+        # Какой-то совсем экзотический бэкенд → fallback на Python.
+        return datetime.now(timezone.utc)
 
 
 def _pel_count(redis: Any, stream: str, group: str) -> int:
