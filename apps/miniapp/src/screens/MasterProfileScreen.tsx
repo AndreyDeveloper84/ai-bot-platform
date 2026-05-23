@@ -109,6 +109,7 @@ const COPY = {
     writeToOwner: "Написать Карине ›",
     requestScheduleChange: "Запросить изменение ›",
     notificationSettings: "Настройки уведомлений ›",
+    internalChat: "Со студией ›",
     save: "Сохранить",
     cancel: "Отмена",
     retry: "Попробовать снова",
@@ -133,8 +134,7 @@ const COPY = {
     "Изменение имени требует подтверждения от Карины — скоро.",
   reviewsTooltip:
     "Отзывы появятся позже — мы готовим этот раздел.",
-  writeToOwnerTooltip:
-    "Скоро здесь будет переписка с Кариной. Пока напишите в общем чате салона.",
+  internalChatHint: "Личный канал общения с админами студии.",
   toasts: {
     saved: "✓ Сохранено",
     photoSaved: "✓ Фото обновлено",
@@ -371,6 +371,21 @@ export function MasterProfileScreen() {
     navigate("/master/settings/notifications");
   }, [navigate]);
 
+  // Internal-chat entry — opens new thread tagged ``general`` so the
+  // M4 «Написать Карине ›» CTA lands directly on the compose flow
+  // (handoff §3.3 + §5.3 — generic CTA defaults to `general` topic).
+  const goToWriteOwner = useCallback(() => {
+    hapticSelection();
+    navigate("/master/internal-chat?new=1&topic=general");
+  }, [navigate]);
+
+  // «Со студией ›» — opens the list view (master's archive of threads
+  // with the admin team).
+  const goToInternalChatList = useCallback(() => {
+    hapticSelection();
+    navigate("/master/internal-chat");
+  }, [navigate]);
+
   // --- Render branches ---
   if (phase.kind === "loading") {
     return (
@@ -447,12 +462,7 @@ export function MasterProfileScreen() {
         <button
           type="button"
           className="btn-secondary master-profile__action-btn"
-          aria-disabled="true"
-          title={COPY.writeToOwnerTooltip}
-          onClick={(e) => {
-            e.preventDefault();
-            hapticSelection();
-          }}
+          onClick={goToWriteOwner}
         >
           {COPY.buttons.writeToOwner}
         </button>
@@ -491,6 +501,14 @@ export function MasterProfileScreen() {
        * isn't built yet — when it ships, it will deep-link here.
        */}
       <ProfileSection title={COPY.sections.settings}>
+        <button
+          type="button"
+          className="btn-secondary master-profile__action-btn"
+          onClick={goToInternalChatList}
+        >
+          {COPY.buttons.internalChat}
+        </button>
+        <p className="master-profile__hint">{COPY.internalChatHint}</p>
         <button
           type="button"
           className="btn-secondary master-profile__action-btn"
