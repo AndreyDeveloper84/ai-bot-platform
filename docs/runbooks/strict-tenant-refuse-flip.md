@@ -163,6 +163,11 @@ is not advisory — it's a pre-flip blocker. XAUTOCLAIM reaper (#499 —
 merged) and observability dashboard are separate, do NOT satisfy this
 gate.
 
+**Operator wire-up commands**: see companion runbook
+[`strict-tenant-refuse-d2-ceilings-checklist.md`](strict-tenant-refuse-d2-ceilings-checklist.md)
+for concrete commands + apply order for all 4 ceilings + the mandatory
+synthetic flood drill in staging.
+
 Without these, strict mode + a misbehaving ingress = unbounded PEL
 growth + unbounded audit-table growth + alert flood.
 
