@@ -353,6 +353,24 @@ MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
 SITE_DOMAIN = os.environ.get("SITE_DOMAIN", "http://localhost:5173")
 MASTER_BOT_USERNAME = os.environ.get("MASTER_BOT_USERNAME", "")
 
+# M6 AI drafts auto-trigger (deferred follow-up from PR #535 / #540).
+#
+# When True, every inbound customer Message (``role=USER``) on a
+# conversation that involves a master enqueues a Celery task that
+# generates an :class:`apps.conversations.models.AiDraft` proactively —
+# so the master sees «✨ Предложен ответ» on M5 list refresh without
+# tapping «✨ Предложить ответ» first (spec §M6 line 660 «— помощник
+# готовит ответ —»).
+#
+# Default False keeps the pilot launch ramp conservative. Operators
+# flip per-environment via env var once cost / rate telemetry is
+# stable. The Celery task is enqueued unconditionally from the hook;
+# the flag is re-checked inside the worker as a cheap short-circuit
+# so an LLM call NEVER happens with the flag off.
+AI_DRAFTS_AUTO_TRIGGER_ENABLED = os.environ.get(
+    "AI_DRAFTS_AUTO_TRIGGER_ENABLED", "false"
+).lower() in ("true", "1")
+
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
 # than silently 500ing on a misconfigured prod box.

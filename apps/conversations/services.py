@@ -284,6 +284,36 @@ def record_message(
             },
         )
     )
+
+    # M6 AI drafts auto-trigger (deferred follow-up from PR #535 / #540).
+    # Spec §M6 line 660: «— помощник готовит ответ —» — every inbound
+    # customer message kicks off a proactive draft generation in the
+    # background.  The Celery task re-checks the feature flag, master
+    # involvement, tier, staleness and per-conversation debounce inside
+    # the worker; this hook only ENQUEUES on the role=USER fast path.
+    # We import the task module lazily inside the if-block to avoid a
+    # module-load circular: master_api imports conversations heavily.
+    # `transaction.on_commit` defers the enqueue until after the DB
+    # commit so the worker can never read a Message that hasn't
+    # actually landed.
+    if role == Message.Role.USER:
+        captured_msg_id = message.id
+        captured_conv_id = conversation.id
+        captured_tenant_id = tenant.id
+
+        def _enqueue_auto_draft() -> None:
+            # Lazy import — keeps the producer-side import graph thin
+            # and avoids the master_api → conversations circular at
+            # app boot.
+            from apps.master_api.tasks import auto_generate_draft_for_inbound
+
+            auto_generate_draft_for_inbound.delay(
+                conversation_id=str(captured_conv_id),
+                trigger_message_id=str(captured_msg_id),
+                tenant_id=str(captured_tenant_id),
+            )
+
+        transaction.on_commit(_enqueue_auto_draft)
     logger.info(
         "conversations.message.stored id=%s conversation=%s role=%s",
         message.id,

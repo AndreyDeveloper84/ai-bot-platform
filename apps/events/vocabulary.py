@@ -198,6 +198,14 @@ MASTER_NOTIFICATION_PREFS_UPDATED = "master.notification_prefs_updated"
 # exact precision the cost-tracker uses; no PII (message content stays
 # in the AiDraft row, never on the bus).
 MASTER_AI_DRAFT_GENERATED = "master.ai_draft_generated"
+# M6 deferred follow-up: distinct slug for the auto-trigger path so
+# analytics can split «master tapped ✨ Предложить ответ» (manual) from
+# «assistant proactively drafted on customer inbound» (auto, spec §M6
+# line 660 «— помощник готовит ответ —»). Payload shape mirrors the
+# manual slug — adding ``trigger="auto"`` would have worked too but a
+# distinct slug keeps consumer code paths grep-able and lets the events
+# bus partition cleanly.
+MASTER_AI_DRAFT_AUTO_GENERATED = "master.ai_draft_auto_generated"
 MASTER_DRAFT_SENT_AS_SELF = "master.draft_sent_as_self"
 MASTER_DRAFT_RELEASED_TO_AI = "master.draft_released_to_ai"
 
@@ -281,6 +289,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED,
         MASTER_NOTIFICATION_PREFS_UPDATED,
         MASTER_AI_DRAFT_GENERATED,
+        MASTER_AI_DRAFT_AUTO_GENERATED,
         MASTER_DRAFT_SENT_AS_SELF,
         MASTER_DRAFT_RELEASED_TO_AI,
     }
