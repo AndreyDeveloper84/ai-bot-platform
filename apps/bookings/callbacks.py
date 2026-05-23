@@ -809,13 +809,18 @@ def _render_reschedule_success_text(
     )
 
 
-def _try_yclients_cancel(yclients_record_id: str) -> bool:
+def _try_yclients_cancel(yclients_record_id: str | None) -> bool:
     """Best-effort upstream cancel. Returns True on success.
 
     Wrapped in a broad exception handler — a YClients outage, a
     missing/misconfigured integration client, or a 4xx from YClients
     all map to ``False`` here. The local cancel already happened by
     the time this runs; the upstream call is informational.
+
+    ``yclients_record_id`` is ``str | None`` because the column is
+    nullable as of #442 (Ayla consumer path writes NULL). Pre-existing
+    YClients rows still carry a string; Ayla rows skip the upstream
+    cancel via the early-return below.
     """
     if not yclients_record_id:
         return False
