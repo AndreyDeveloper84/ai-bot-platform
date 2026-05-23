@@ -25,7 +25,14 @@ from apps.workers.ceilings import should_emit_tenant_missing
 
 
 class _FakeRedis:
-    """Tiny in-memory stand-in for the parts of redis-py we use."""
+    """Tiny in-memory stand-in for the parts of redis-py we use.
+
+    Без ``register_script`` — fallback path (non-atomic INCR + EXPIRE)
+    активируется. Это соответствует unit-test семантике: мы хотим
+    проверить логику ceiling, не сам Lua механизм. Production redis-py
+    имеет register_script и активирует Lua-path; покрывается отдельным
+    fake-ом ``_FakeRedisWithLua`` в TestLuaAtomicAcquire.
+    """
 
     def __init__(self) -> None:
         self.store: dict[str, int] = {}
@@ -184,30 +191,67 @@ class TestFailOpen:
             assert any("redis_unavailable" in rec.message for rec in caplog.records)
 
     def test_incr_raises_returns_true(self, settings, monkeypatch, caplog):
-        """INCR throwing (e.g. transient Redis error mid-operation) →
-        fail-open. Better to risk audit-table spike than lose visibility."""
+        """INCR throwing (transient Redis error mid-operation) → fail-open.
+        Better to risk audit-table spike than lose visibility.
+
+        #574: после Lua-fix-а phantom register_script + script callable
+        тоже должен raise exc — иначе fail-open path не активируется
+        (Lua path подавит RuntimeError из incr.side_effect)."""
+        from apps.workers import ceilings
+
+        ceilings._invalidate_incr_and_expire_script()
+
         settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
         broken_redis = MagicMock()
-        broken_redis.incr.side_effect = RuntimeError("INCR timeout")
+        exc = RuntimeError("INCR timeout")
+        broken_redis.incr.side_effect = exc
+
+        def _raising_script(*, keys, args):
+            raise exc
+
+        broken_redis.register_script = lambda lua: _raising_script
+
         monkeypatch.setattr("apps.ingress.streams._client", lambda: broken_redis)
         with caplog.at_level(logging.WARNING, logger="apps.workers.ceilings"):
             assert should_emit_tenant_missing("MaxHandler") is True
-            assert any("incr_failed" in rec.message for rec in caplog.records)
+            assert any("rate_budget_failed" in rec.message for rec in caplog.records)
 
     def _broken_client_factory(self, exc: Exception):
-        """Build a fake `_client` lookalike that raises ``exc`` on INCR
-        and exposes a ``cache_clear`` spy."""
+        """Build a fake `_client` lookalike that raises ``exc`` on the
+        rate-budget Redis call (both Lua и fallback пути) и exposes a
+        ``cache_clear`` spy.
+
+        #574: после Lua atomic fix-а production-путь идёт через Lua
+        callable (``redis.register_script(...)``), не через прямой
+        ``redis.incr()``. MagicMock автоматически создаст
+        ``register_script`` который возвращает callable mock,
+        не raise-ящий — тогда наш fail-open path не сработает, тесты
+        упадут с false negative. Чтобы сохранить контракт «exception
+        на rate-budget вызове → cache_clear + log», phantom Lua callable
+        тоже raise-ит ``exc``.
+        """
         broken = MagicMock()
+        # Fallback path (no Lua): прямой INCR кидает exc.
         broken.incr.side_effect = exc
+
+        # Lua-path: register_script возвращает callable, который тоже
+        # кидает exc при выполнении.
+        def _raising_script_callable(*, keys, args):
+            raise exc
+
+        broken.register_script = lambda lua_text: _raising_script_callable
 
         cache_clears: list[bool] = []
 
         def factory():
             return broken
 
-        # Mimic the real lru_cache-wrapped callable: ``_client.cache_clear``
-        # is what production code calls. Direct attribute on the function.
         factory.cache_clear = lambda: cache_clears.append(True)  # type: ignore[attr-defined]
+        # #574: сбросить script cache, иначе предыдущий тест может
+        # пере-использовать кэшированный callable.
+        from apps.workers import ceilings
+
+        ceilings._invalidate_incr_and_expire_script()
         return factory, cache_clears
 
     def test_redis_connection_error_clears_lru_cache(self, settings, monkeypatch):
@@ -335,9 +379,21 @@ class TestFailOpenLogDedup:
     def test_incr_failed_deduped_per_handler(self, settings, monkeypatch, caplog):
         """Different handlers get independent dedup keys — one floods,
         the other still gets its first WARNING through."""
+        from apps.workers import ceilings
+
+        ceilings._invalidate_incr_and_expire_script()
+
         settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
         broken = MagicMock()
-        broken.incr.side_effect = RuntimeError("INCR boom")
+        exc = RuntimeError("INCR boom")
+        broken.incr.side_effect = exc
+
+        # #574: phantom Lua callable тоже raise-ит — иначе Lua path
+        # подавит exception и fail-open warning не появится.
+        def _raising_script(*, keys, args):
+            raise exc
+
+        broken.register_script = lambda lua: _raising_script
         monkeypatch.setattr("apps.ingress.streams._client", lambda: broken)
 
         with caplog.at_level(logging.WARNING, logger="apps.workers.ceilings"):
@@ -347,12 +403,14 @@ class TestFailOpenLogDedup:
                 should_emit_tenant_missing("TelegramHandler")
 
         max_warns = [
-            r for r in caplog.records if "incr_failed" in r.message and "MaxHandler" in r.message
+            r
+            for r in caplog.records
+            if "rate_budget_failed" in r.message and "MaxHandler" in r.message
         ]
         tg_warns = [
             r
             for r in caplog.records
-            if "incr_failed" in r.message and "TelegramHandler" in r.message
+            if "rate_budget_failed" in r.message and "TelegramHandler" in r.message
         ]
         assert len(max_warns) == 1
         assert len(tg_warns) == 1
@@ -381,3 +439,150 @@ class TestFailOpenLogDedup:
 
         unavailable_lines = [r for r in caplog.records if "redis_unavailable" in r.message]
         assert len(unavailable_lines) == 2
+
+
+# ───────────────────────────────────────────────────────────────────────
+# #574 — Lua atomic INCR+EXPIRE
+# ───────────────────────────────────────────────────────────────────────
+
+
+class _FakeRedisWithLua:
+    """Fake redis client который умеет ``register_script`` — активирует
+    Lua-path в ``should_emit_tenant_missing``.
+
+    Имитирует redis-py Script callable: фабрика создаёт callable, который
+    при вызове выполняет наш Lua верстку «локально» через простые
+    incr+expire (мы тестируем что вызов Lua callable идёт правильно, не
+    что Redis Lua engine работает — это уже не наша зона).
+    """
+
+    def __init__(self) -> None:
+        self.store: dict[str, int] = {}
+        self.expires: dict[str, int] = {}
+        self.script_calls: list[dict] = []
+        self.script_load_count = 0
+
+    def register_script(self, lua_text: str):
+        self.script_load_count += 1
+        self._registered_lua = lua_text
+
+        def _script_callable(*, keys, args):
+            # Имитация работы Lua-скрипта: INCR + EXPIRE атомарно.
+            self.script_calls.append({"keys": keys, "args": args})
+            key = keys[0]
+            ttl = int(args[0])
+            self.store[key] = self.store.get(key, 0) + 1
+            self.expires[key] = ttl
+            return self.store[key]
+
+        return _script_callable
+
+    # Fallback методы — НЕ должны вызываться когда register_script
+    # доступен. Если в тесте вдруг вызываются — assertion явно поймает.
+    def incr(self, key: str) -> int:
+        raise AssertionError(
+            "INCR не должен вызываться когда register_script доступен — "
+            "это означает Lua-path не активировался (#574 регрессия)"
+        )
+
+    def expire(self, key: str, ttl: int) -> bool:
+        raise AssertionError("EXPIRE не должен вызываться когда register_script доступен")
+
+
+@pytest.fixture
+def fake_redis_lua(monkeypatch):
+    fake = _FakeRedisWithLua()
+    monkeypatch.setattr("apps.ingress.streams._client", lambda: fake)
+    # Сбросить script cache между тестами — иначе registered script от
+    # предыдущего теста переиспользуется + script_load_count не растёт.
+    from apps.workers import ceilings
+
+    ceilings._invalidate_incr_and_expire_script()
+    return fake
+
+
+class TestLuaAtomicAcquire:
+    """#574: атомарный INCR+EXPIRE через Lua-скрипт. Закрывает race
+    window между двумя отдельными Redis вызовами — если процесс крашится
+    между INCR и EXPIRE, ключ остаётся без TTL и handler permabudgeted.
+    Lua выполняется атомарно на сервере: либо обе команды либо ни одна."""
+
+    def test_lua_path_used_when_register_script_available(self, settings, fake_redis_lua):
+        """register_script доступен → Lua callable вызывается вместо
+        отдельных incr+expire. _FakeRedisWithLua.incr/expire raise-ит
+        AssertionError если случайно вызвался — тест автоматически
+        падает на любой регрессии."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        result = should_emit_tenant_missing("MaxHandler")
+        assert result is True
+        assert len(fake_redis_lua.script_calls) == 1
+
+    def test_lua_called_with_correct_keys_and_args(self, settings, fake_redis_lua):
+        """Lua скрипт получает (key, ttl) в правильных позициях.
+        KEYS[1] = redis ключ, ARGV[1] = TTL в секундах."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        should_emit_tenant_missing("MaxHandler")
+
+        call = fake_redis_lua.script_calls[0]
+        assert len(call["keys"]) == 1
+        # Ключ содержит handler name + hour bucket — точная форма
+        # ``worker:ceil:tenant_required_missing:<handler>:<hour>``.
+        assert call["keys"][0].startswith("worker:ceil:tenant_required_missing:MaxHandler:")
+        assert call["args"] == [3600]  # _WINDOW_TTL_SECONDS
+
+    def test_script_registered_once_then_cached(self, settings, fake_redis_lua):
+        """register_script вызывается ОДИН раз для данного client-а; повторные
+        emit-ы переиспользуют тот же script callable (через
+        _invalidate_incr_and_expire_script). Без этого каждый emit делал бы
+        SCRIPT LOAD round-trip — медленно и шумно в Redis log-е."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        for _ in range(5):
+            should_emit_tenant_missing("MaxHandler")
+
+        assert fake_redis_lua.script_load_count == 1, (
+            "register_script должен вызываться лениво ровно один раз "
+            "(закэшировано в _invalidate_incr_and_expire_script)"
+        )
+        assert len(fake_redis_lua.script_calls) == 5  # script_callable — 5 раз
+
+    def test_lua_path_blocks_over_budget(self, settings, fake_redis_lua):
+        """Поведение rate-budget идентично между Lua и fallback паттернами:
+        101-я попытка при limit=100 → False (ceiling сработал)."""
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 3
+        assert should_emit_tenant_missing("MaxHandler") is True  # 1
+        assert should_emit_tenant_missing("MaxHandler") is True  # 2
+        assert should_emit_tenant_missing("MaxHandler") is True  # 3 (at limit)
+        assert should_emit_tenant_missing("MaxHandler") is False  # 4 (over)
+
+    def test_fallback_path_active_when_no_register_script(self, settings, monkeypatch):
+        """Защитный тест: client БЕЗ register_script (legacy redis-py
+        versions / mock objects) → fallback на INCR+EXPIRE. Сейчас ВСЕ
+        существующие тесты (TestHappyPath и др.) используют _FakeRedis
+        без register_script — этот тест документирует контракт явно."""
+        from apps.workers import ceilings
+
+        ceilings._invalidate_incr_and_expire_script()
+
+        class _NoLua:
+            def __init__(self):
+                self.store = {}
+                self.incr_calls = 0
+                self.expire_calls = 0
+
+            def incr(self, key):
+                self.store[key] = self.store.get(key, 0) + 1
+                self.incr_calls += 1
+                return self.store[key]
+
+            def expire(self, key, ttl):
+                self.expire_calls += 1
+                return True
+
+        no_lua = _NoLua()
+        monkeypatch.setattr("apps.ingress.streams._client", lambda: no_lua)
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 100
+        assert should_emit_tenant_missing("MaxHandler") is True
+        # Fallback path: оба incr и expire вызваны (не атомарно, но
+        # тестов на crash-window не делаем — это runtime поведение).
+        assert no_lua.incr_calls == 1
+        assert no_lua.expire_calls == 1
