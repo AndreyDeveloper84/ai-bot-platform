@@ -164,46 +164,106 @@ merged) and observability dashboard are separate, do NOT satisfy this
 gate.
 
 Without these, strict mode + a misbehaving ingress = unbounded PEL
-growth + unbounded audit-table growth + alert flood. The 4 items:
+growth + unbounded audit-table growth + alert flood.
 
-1. **PEL length alert** — `redis-cli XPENDING ingress:max consumers
-   IDLE 0` returns count; wire to monitoring with:
-   - **Warning at N=1000**
-   - **Page at N=5000**
-   Drain via XAUTOCLAIM reaper (already shipped in #499) or operator
-   XCLAIM if reaper is also paused.
+- [x] **PEL length alert at N=1000.** Shipped: `python manage.py
+      monitor_pel --warning 1000 --page 5000` (exit 0/1/2). Wire to
+      the monitoring stack with a cron / systemd-timer at 1-min
+      interval. JSON output via `--format json` for Prometheus /
+      Grafana ingestion. Drain via XCLAIM / manual-claim runbook (or
+      the XAUTOCLAIM reaper from #499 once `PEL_REAPER_ENABLED=true`).
+- [x] **`worker.tenant_required_missing` per-handler rate budget.**
+      Shipped: `apps/workers/ceilings.py::should_emit_tenant_missing`
+      gates the emit at both call sites (strict + log-only) in
+      `apps/workers/base.py`. Default 100 emits per (handler, hour)
+      via `WORKER_TENANT_MISSING_RATE_LIMIT`. Set to 0 to disable
+      (diagnostic escape hatch). One WARNING fires when the ceiling
+      first triggers each window (grep `tenant_missing_rate_exceeded`).
+      Fail-open WARNING logs (`redis_unavailable` / `incr_failed`) are
+      deduped on a 60-second per-worker window — a sustained Redis
+      outage logs once per minute per worker rather than once per emit.
+- [x] **Audit-table size baseline.** Shipped: `python manage.py
+      audit_table_baseline --format json` captures row count + total
+      / heap / index sizes for `apps_audit_event`. Operator runs once
+      pre-flip; alert config compares against 2× the baseline-delta
+      24h post-flip. Postgres-only (vendor check raises clearly).
+- [ ] **Synthetic flood drill in staging** (AS6 + AS6-NEW, tech-lead
+      pass PR #528 R3). Ceilings code landed AFTER the soak started —
+      the defense is theoretical until exercised at production volume.
 
-2. **`worker.tenant_required_missing` per-handler rate budget** —
-   single-handler runaway must cap at **~100 events/minute**. Two
-   acceptable implementations: audit-side dedup OR rate-limit at the
-   emit site. Either bounds the audit table growth under a misbehaving
-   ingress.
+      **AS6-NEW (round-3): positive assertions REQUIRED.** Without them
+      the drill silently no-ops: if entries XADD'd to `ingress:max` are
+      never consumed (worker stopped, handler not registered), the
+      ceiling code never runs and the absence-only criteria
+      ("audit ≤ 100") trivially pass with `0 ≤ 100`. Drill "succeeds"
+      while exercising nothing. Memory N=17 insight #2: drill specs
+      MUST include positive assertions ("X must appear"), not only
+      absence assertions ("Y not exceed").
 
-3. **Audit-table size baseline** — snapshot
-   `apps_audit_event` row count + index size **before flip**. Set
-   alert at **2× baseline growth rate** in the 24h post-flip window.
-   The 2× ratio surfaces a runaway before the table doubles.
+      Pre-drill positive setup checks (all must pass):
 
-4. **Alert suppression / dedup** — every `worker.tenant_required_missing`
-   alert MUST dedup on **`(handler, hour)`**. One misbehaving
-   ingress firing 5000/h must produce ≤1 page per handler per hour,
-   not 5000.
+      - **Consumer running:** `ps aux | grep "workers.consumer"` returns
+        at least one row; `systemctl is-active ai-bot-platform-dev-consumer`
+        prints `active`.
+      - **Handler registered:** the handler whose entries you XADD MUST
+        appear in the dispatcher's installed-handler list. For
+        `ingress:max`, that's `MaxHandler` (`apps.channels.max.handler`).
+        Confirm via boot log line `workers.consumer.handler_registered
+        name=MaxHandler` from a recent worker restart.
+      - **Tenant-missing path live:** add an explicit
+        `resolved_tenant_id=` (empty) to the synthetic entries; the
+        `requires_tenant=True` value on `MaxHandler` is what triggers
+        the ceiling code path. Drill is meaningless without it.
 
-### Operator checklist
+      Drill steps:
 
-- [ ] (1) PEL length alert: warning N=1000, page N=5000 — wired in
-      monitoring + verified by manual XPENDING bump.
-- [ ] (2) Per-handler rate budget: 100 events/minute cap — wired
-      (audit dedup OR emit-site rate-limit) + verified with synthetic
-      load test.
-- [ ] (3) Audit baseline: row count + index size snapshot recorded
-      in `docs/runbooks/strict-tenant-refuse-flip-baseline.md` (TBD)
-      + 2× growth alert wired.
-- [ ] (4) Alert dedup on `(handler, hour)` — wired in monitoring
-      + verified by synthetic burst.
+      1. Capture baseline: `python manage.py audit_table_baseline --format json`
+      2. Capture PEL baseline: `python manage.py monitor_pel --format json`
+      3. Synthesise 200 tenant-missing entries over ~5 min via
+         `redis-cli XADD ingress:max '*' resolved_tenant_id ''` in a
+         loop (use ``for i in $(seq 1 200); do redis-cli XADD …; sleep 1.5; done``).
+      4. **Wait for drain** — let the consumer process all 200 (verify
+         PEL ≤ 5 via `monitor_pel`) BEFORE checking assertions. Without
+         this wait, "1× WARNING per handler" can mean "ceiling not
+         exercised yet", not "ceiling working".
+      5. **Positive assertions** (all must hold):
 
-Only after all 4 boxes are checked may the operator proceed with the
-flip sequence above.
+         - `grep "tenant_missing_rate_exceeded" /var/log/ai-bot-platform/worker.log
+           | wc -l` returns ≥ 1 (ceiling fired at least once)
+         - `grep "worker.tenant_required_missing handler=MaxHandler"
+           /var/log/ai-bot-platform/worker.log | wc -l` returns ≥ 50
+           (handler actually executed the path — not zero)
+         - Audit row count delta (`audit_table_baseline` post-drill
+           vs baseline) is **between 80 and 100** — proves emits fired
+           AND ceiling capped them. (≤ 100 alone is consistent with 0.)
+      6. **Absence assertions** (all must hold):
+
+         - Audit row count delta ≤ 100
+         - `monitor_pel --warning 1000 --page 5000` exits 0
+      7. Drain residual PEL via reaper or manual XCLAIM.
+
+      **STOP the flip** if any of: (a) pre-drill setup check fails;
+      (b) positive assertion fails (ceiling never exercised); (c)
+      absence assertion fails (ceiling failed to cap). File a
+      follow-up issue before proceeding.
+- [ ] **Post-Redis-incident worker restart** (AS2, tech-lead pass PR #528).
+      `apps.ingress.streams._client` is lru_cached. The ceiling code
+      now clears the cache on `ConnectionError` so transient blips
+      self-heal. BUT for a sustained outage where the dead-pool blip
+      isn't classified as ConnectionError (e.g. pod NetworkPolicy
+      drop, DNS poison), the cache stays poisoned. After any Redis
+      incident in the post-flip window:
+
+      ```
+      sudo systemctl restart ai-bot-platform-dev-consumer ai-bot-platform-prod-consumer
+      ```
+
+      This rebuilds the connection pool fresh.
+- [x] **Alert suppression / dedup wired.** The rate-budget above
+      also dedups: once the per-(handler, hour) budget is exhausted,
+      subsequent emits drop silently. A single bad ingress emits at
+      most 100 audit rows per handler per hour → on-call page can't
+      flood from this code path.
 
 ## STRICT_TENANT_REFUSE × STRICT_TENANT_SCOPE coupling
 
