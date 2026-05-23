@@ -46,6 +46,8 @@ import { HelloScreen } from "./screens/HelloScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
+import { MasterInternalChatListScreen } from "./screens/MasterInternalChatListScreen";
+import { MasterInternalChatThreadScreen } from "./screens/MasterInternalChatThreadScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
@@ -161,6 +163,15 @@ function MasterRoutes() {
       <Route
         path="/master/settings/notifications"
         element={<MasterNotificationSettingsScreen />}
+      />
+      {/* Internal chat «Со студией» (master-admin internal-chat handoff §3) */}
+      <Route
+        path="/master/internal-chat"
+        element={<MasterInternalChatListScreen />}
+      />
+      <Route
+        path="/master/internal-chat/threads/:threadId"
+        element={<MasterInternalChatThreadScreen />}
       />
       {/* Default + unknown — land on dashboard. */}
       <Route path="*" element={<Navigate to="/master/dashboard" replace />} />
