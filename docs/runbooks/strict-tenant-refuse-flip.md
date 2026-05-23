@@ -205,20 +205,50 @@ growth + unbounded audit-table growth + alert flood.
       generation, drain wait, the 3 positive assertions, and the
       timestamp-scoped cleanup automatically. Exit-code contract:
 
-      | Exit | Meaning |
-      |---|---|
-      | 0 | All 3 positive assertions passed. Cleanup completed. |
-      | 1 | Pre-check 1 failed: worker process not running. |
-      | 2 | Pre-check 2 failed: consumer group missing / no active consumer. |
-      | 3 | Pre-check 3 failed: canary entry not consumed within 5s. |
-      | 4 | Assertion failed: `rate_budget_exhausted` WARNING not in log (ceiling did not fire). |
-      | 5 | Assertion failed: audit delta < 50 (handler path did not execute). |
-      | 6 | Assertion failed: audit delta > 100 (ceiling failed to cap). |
-      | 7 | Internal command error (Redis / DB fault). Cleanup may be incomplete. |
+      | Exit | Meaning | Flip OK? |
+      |---|---|---|
+      | 0 | All 3 positive assertions passed. Cleanup completed. | ✅ |
+      | 1 | Pre-check 1 failed: worker process not running. | ❌ |
+      | 2 | Pre-check 2 failed: consumer group missing / no active consumer. | ❌ |
+      | 3 | Pre-check 3 failed: canary entry not consumed within 5s. | ❌ |
+      | 4 | Assertion failed: `rate_budget_exhausted` WARNING not in log (ceiling did not fire). | ❌ |
+      | 5 | Assertion failed: audit delta < 50 (handler path did not execute). | ❌ |
+      | 6 | Assertion failed: audit delta > 100 (ceiling failed to cap). | ❌ |
+      | 7 | Internal command error during main phase (Redis / DB / pre-checks). Cleanup NOT attempted. | ❌ |
+      | 8 | **Assertions PASS, but cleanup DELETE threw.** Drill semantically succeeded; audit-table has orphan drill-rows. | ✅ — see «Exit 8 recovery» below |
 
-      **STOP the flip** on ANY non-zero exit. File a follow-up issue
-      describing the exit code and the `fail_reason` field from
-      `--json` output.
+      **STOP the flip** on ANY non-zero exit OTHER than 8. Exit 8 is
+      a partial-success: assertions verdict in `--json` output shows
+      PASS; only the cleanup phase failed.
+
+      **Exit 8 recovery:**
+
+      1. Read `fail_reason` field from `--json` output — it describes
+         which SQL exception triggered cleanup failure.
+      2. Verify assertions did pass by checking `warning_count >= 1`,
+         `audit_delta in [50, 100]` fields.
+      3. Manually clean drill rows:
+
+         ```sql
+         DELETE FROM apps_audit_event
+         WHERE event_type = 'worker.tenant_required_missing'
+           AND payload->>'handler' = 'MaxHandler'
+           AND created_at BETWEEN '<drill_start_ts>' AND '<drill_end_ts>';
+         ```
+
+         (timestamps printed in `--json` output)
+
+      4. Continue pre-flip checklist — the drill itself is a PASS.
+
+      **Pre-condition: target_count > WORKER_TENANT_MISSING_RATE_LIMIT.**
+      Default `target_count=200` is sized against default ceiling
+      limit `100`. If staging has the rate limit raised (for unrelated
+      load tests) and the drill is run with default `target_count`,
+      assertion 4 (`rate_budget_exhausted` WARNING) will false-fail
+      because ceiling never reaches its cap. The command logs a
+      WARNING to stdout if this invariant is violated — re-run with
+      higher `--target-count` OR confirm intentional ceiling-disabled
+      baseline test.
 
       Pre-flight before running the command:
 

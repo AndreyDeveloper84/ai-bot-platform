@@ -329,6 +329,94 @@ class TestHappyPath:
         assert cleanup_called[0] is False
         assert "SKIPPED" in out
 
+    def test_cleanup_failure_exits_8_preserves_pass(self, monkeypatch, tmp_path):
+        """AS6-#5 (adversarial PR #585): если cleanup DELETE кинет
+        exception, exit code должен быть 8 — отдельный от exit 7. Это
+        говорит оператору «assertions PASS, но в audit остался мусор».
+        Без отдельного exit code оператор увидит 7 и подумает что
+        дрилл сломался во время main фазы."""
+        _setup_pre_checks_pass(monkeypatch)
+        log = tmp_path / "worker.log"
+        log.write_text('{"ts": "2099-01-01T00:00:00Z", "msg": "rate_budget_exhausted"}\n')
+
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        counts = iter([10, 90])
+        monkeypatch.setattr(mod, "_audit_count", lambda *a, **k: next(counts))
+        monkeypatch.setattr(mod, "_grep_warning_count", lambda *a, **k: 3)
+
+        def _raise_cleanup(*a, **k):
+            raise RuntimeError("FK constraint kicked")
+
+        monkeypatch.setattr(mod, "_cleanup_audit_rows", _raise_cleanup)
+
+        _, err, exit_code = _run_command(
+            "--target-count",
+            "10",
+            "--duration",
+            "1",
+            "--worker-log",
+            str(log),
+        )
+        assert exit_code == 8
+        # Reason должен явно сказать что assertions прошли.
+        assert "assertions PASS" in err
+        assert "cleanup failed" in err.lower()
+
+    def test_target_count_below_rate_limit_logs_warning(self, monkeypatch, tmp_path, settings):
+        """AS6-#7 (adversarial PR #585): если оператор поднял
+        WORKER_TENANT_MISSING_RATE_LIMIT выше target_count, drill всё
+        равно стартует но печатает явное WARNING в stdout — иначе
+        assertion 4 false-negative с часом дебага."""
+        _setup_pre_checks_pass(monkeypatch)
+        log = tmp_path / "worker.log"
+        log.write_text('{"ts": "2099-01-01T00:00:00Z", "msg": "rate_budget_exhausted"}\n')
+
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        counts = iter([10, 90])
+        monkeypatch.setattr(mod, "_audit_count", lambda *a, **k: next(counts))
+        monkeypatch.setattr(mod, "_grep_warning_count", lambda *a, **k: 3)
+        monkeypatch.setattr(mod, "_cleanup_audit_rows", lambda *a, **k: 80)
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 500
+        out, _, exit_code = _run_command(
+            "--target-count",
+            "10",
+            "--duration",
+            "1",
+            "--worker-log",
+            str(log),
+        )
+        assert exit_code == 0
+        assert "target_count" in out
+        assert "ceiling не успеет сработать" in out or "WORKER_TENANT_MISSING_RATE_LIMIT" in out
+
+    def test_target_count_above_rate_limit_no_warning(self, monkeypatch, tmp_path, settings):
+        """Mirror проверка — invariant не нарушен → WARNING не выводится."""
+        _setup_pre_checks_pass(monkeypatch)
+        log = tmp_path / "worker.log"
+        log.write_text('{"ts": "2099-01-01T00:00:00Z", "msg": "rate_budget_exhausted"}\n')
+
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        counts = iter([10, 90])
+        monkeypatch.setattr(mod, "_audit_count", lambda *a, **k: next(counts))
+        monkeypatch.setattr(mod, "_grep_warning_count", lambda *a, **k: 3)
+        monkeypatch.setattr(mod, "_cleanup_audit_rows", lambda *a, **k: 80)
+
+        settings.WORKER_TENANT_MISSING_RATE_LIMIT = 50
+        out, _, exit_code = _run_command(
+            "--target-count",
+            "200",
+            "--duration",
+            "1",
+            "--worker-log",
+            str(log),
+        )
+        assert exit_code == 0
+        assert "ceiling не успеет сработать" not in out
+
     def test_json_output(self, monkeypatch, tmp_path):
         _setup_pre_checks_pass(monkeypatch)
         log = tmp_path / "worker.log"

@@ -56,8 +56,31 @@ checklist остаётся неполным.
   не выполнялся).
 - ``6`` — positive assertion failed: audit delta > 100 (ceiling не
   cap-нул).
-- ``7`` — что-то поломалось в самой command (Redis fault, DB fault).
-  Cleanup MAY быть incomplete.
+- ``7`` — что-то поломалось в самой command во время основной фазы
+  (pre-checks / baseline / flood / drain / assertions). Cleanup НЕ
+  запускался.
+- ``8`` — assertions ПРОШЛИ (drill semantically PASS), но cleanup DELETE
+  кинул exception. Audit-таблица содержит drill-rows которые нужно
+  удалить вручную через ``--skip-cleanup`` повторный запуск ИЛИ через
+  ``DELETE FROM apps_audit_event WHERE event_type = 'worker.tenant_required_missing'
+  AND payload->>'handler' = 'MaxHandler' AND created_at BETWEEN <drill_start_ts>
+  AND <drill_end_ts>;``. Тех. решение flip-а — оператор смотрит
+  ``--json`` output (assertion поля показывают PASS) и продолжает
+  pre-flip checklist; cleanup делает вручную.
+
+### AS6-#7 (adversarial pass round-2): target_count vs RATE_LIMIT
+
+Drill default ``target_count=200`` намеренно больше дефолта
+``WORKER_TENANT_MISSING_RATE_LIMIT=100`` чтобы ceiling гарантированно
+сработал (101-я entry уйдёт в drop, ``rate_budget_exhausted`` WARNING
+вылетит). Если оператор переопределил limit в staging до значения
+``≥ target_count``, drill не сможет triggerнуть ceiling — assertion 4
+упадёт с exit 4 и оператор час дебага без понимания почему.
+
+Команда читает ``settings.WORKER_TENANT_MISSING_RATE_LIMIT`` на старте
+и log-ает WARNING если invariant нарушен. Команда продолжает (это не
+exit), потому что есть валидные use cases с limit=0 (disabled
+ceiling для baseline-теста).
 
 ### Использование
 
@@ -158,6 +181,8 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args: Any, **options: Any) -> None:
+        from django.conf import settings as dj_settings
+
         opts = _Opts(
             **{
                 k: options[k]
@@ -179,7 +204,22 @@ class Command(BaseCommand):
                 f"unsafe audit_table identifier {opts.audit_table!r}; expected snake_case"
             )
 
+        # AS6-#7 invariant: target_count > RATE_LIMIT иначе ceiling
+        # никогда не сработает и assertion 4 даст false-negative.
+        rate_limit = int(getattr(dj_settings, "WORKER_TENANT_MISSING_RATE_LIMIT", 100))
+        if rate_limit > 0 and opts.target_count <= rate_limit:
+            self.stdout.write(
+                f"⚠ ВНИМАНИЕ: target_count ({opts.target_count}) <= "
+                f"WORKER_TENANT_MISSING_RATE_LIMIT ({rate_limit}). Ceiling не "
+                "успеет сработать — assertion 4 (rate_budget_exhausted WARNING) "
+                "упадёт даже если drill в порядке. Подними --target-count > "
+                f"{rate_limit} ИЛИ это намеренный baseline-тест с ceiling-disabled."
+            )
+
         result = _DrillResult()
+        # Main фаза: pre-checks + baseline + flood + drain + assertions.
+        # ВАЖНО: cleanup НЕ здесь — иначе DELETE exception затрёт
+        # успешный assertion verdict (adversarial pass #5).
         try:
             self._run_drill(opts, result)
         except _DrillFailed as exc:
@@ -189,6 +229,35 @@ class Command(BaseCommand):
             result.exit_code = 7
             result.fail_reason = f"unexpected error: {type(exc).__name__}: {exc}"
             logger.exception("drill.unexpected_error")
+
+        # Cleanup-фаза отдельным блоком. Только если assertions прошли
+        # И cleanup явно не отключён. Failure cleanup-а даёт exit 8 —
+        # PASS verdict сохраняется в --json output.
+        if result.exit_code == 0 and not opts.skip_cleanup:
+            try:
+                assert result.drill_start_ts is not None  # mypy narrow
+                assert result.drill_end_ts is not None
+                self.stdout.write("== Cleanup ==")
+                result.cleanup_deleted = _cleanup_audit_rows(
+                    opts.audit_table,
+                    opts.handler_name,
+                    result.drill_start_ts,
+                    result.drill_end_ts,
+                )
+                self.stdout.write(f"  удалено строк: {result.cleanup_deleted}")
+            except Exception as exc:  # noqa: BLE001
+                result.exit_code = 8
+                result.cleanup_failed = True
+                result.fail_reason = (
+                    f"assertions PASS, but cleanup failed: "
+                    f"{type(exc).__name__}: {exc}. "
+                    "Drill semantically успешен — продолжай pre-flip checklist. "
+                    "Drill-rows в audit-таблице удали вручную (см. docstring §exit 8)."
+                )
+                logger.exception("drill.cleanup_failed")
+        elif opts.skip_cleanup:
+            self.stdout.write("== Cleanup: SKIPPED по флагу --skip-cleanup ==")
+
         self._emit_result(opts, result)
         if result.exit_code:
             sys.exit(result.exit_code)
@@ -272,18 +341,9 @@ class Command(BaseCommand):
             f"(в диапазоне [{_MIN_AUDIT_DELTA}, {_MAX_AUDIT_DELTA}])"
         )
 
-        # ── Cleanup ──
-        if opts.skip_cleanup:
-            self.stdout.write("== Cleanup: SKIPPED по флагу --skip-cleanup ==")
-        else:
-            self.stdout.write("== Cleanup ==")
-            result.cleanup_deleted = _cleanup_audit_rows(
-                opts.audit_table,
-                opts.handler_name,
-                result.drill_start_ts,
-                result.drill_end_ts,
-            )
-            self.stdout.write(f"  удалено строк: {result.cleanup_deleted}")
+        # Cleanup происходит в handle() — НЕ внутри try/except этого
+        # метода, иначе DELETE exception затирает PASS verdict. См.
+        # adversarial pass #5 на PR #585.
 
         result.exit_code = 0
 
@@ -567,6 +627,7 @@ class _DrillResult:
         self.drill_end_ts: datetime | None = None
         self.warning_count: int | None = None
         self.cleanup_deleted: int | None = None
+        self.cleanup_failed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -583,6 +644,7 @@ class _DrillResult:
             "drill_end_ts": self.drill_end_ts,
             "warning_count": self.warning_count,
             "cleanup_deleted": self.cleanup_deleted,
+            "cleanup_failed": self.cleanup_failed,
         }
 
 
