@@ -36,7 +36,10 @@ from datetime import datetime
 from django.db import transaction
 
 from apps.booking.models import BookingRequest
-from apps.booking.services.attribution import compute_reschedule_continuation
+from apps.booking.services.attribution import (
+    compute_reschedule_continuation,
+    get_reschedulable_statuses,
+)
 from apps.booking.services.create import (
     BookingCreateError,
     CreateBookingInput,
@@ -72,7 +75,10 @@ def reschedule_customer_booking(
 
         if old.bot_user_id != bot_user.id:
             raise BookingCreateError("forbidden", "booking belongs to another customer")
-        if old.status != BookingRequest.Status.CONFIRMED:
+        # Q12-α #560 (PRE_PILOT 2026-07-15): ALLOW-list — any status not
+        # explicitly admitted by ``get_reschedulable_statuses()`` is
+        # default-rejected. Default-deny for any future enum addition.
+        if old.status not in get_reschedulable_statuses():
             raise BookingCreateError(
                 "not_reschedulable",
                 f"booking status={old.status} (only confirmed bookings can reschedule)",

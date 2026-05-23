@@ -90,6 +90,7 @@ from apps.booking.services.attribution import (
     build_customer_attribution_metadata,
     compute_assist_score,
     compute_billable,
+    get_reschedulable_statuses,
 )
 from apps.eventbus import services as eventbus_services
 from apps.bookings.keyboards import confirm_2_button
@@ -1648,7 +1649,10 @@ def execute_reschedule(
     # via the LLM would have the LLM tool happily reschedule a cancel-
     # pending row. Service-layer rejects; LLM path used to silently
     # accept. Same business invariant now enforced in BOTH places.
-    if booking.status != BookingRequest.Status.CONFIRMED:
+    # Q12-α #560 (PRE_PILOT 2026-07-15): ALLOW-list — mirrors
+    # services/reschedule.py gate. Default-deny for any future enum
+    # addition.
+    if booking.status not in get_reschedulable_statuses():
         logger.info(
             "booking.reschedule.exec.not_reschedulable record_id=%s status=%s",
             record_id,

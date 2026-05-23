@@ -515,7 +515,11 @@ class TestQ12aAdversarialPassRegressions:
             new_visit_at=root_visit + timedelta(days=10),
         )
         assert is_cont is False
-        assert break_reason == "chain_root_cancelled"
+        # Q12-α #560: reason flipped from exclude-list literal
+        # ``chain_root_cancelled`` to the ALLOW-list form
+        # ``chain_root_invalid_status:<status>``. The status name is
+        # embedded so finance + ops can grep specific terminal states.
+        assert break_reason == "chain_root_invalid_status:cancelled"
         assert root_id is None
 
     # ---- B4: timezone-naive new_visit_at must not crash the batch ----
@@ -1001,3 +1005,201 @@ class TestCommercialIdentitySnapshot:
         assert is_cont is False
         assert break_reason is not None
         assert "sticker_price_amount" in break_reason
+
+
+class TestStatusAllowLists:
+    """Q12-α #560 (PRE_PILOT 2026-07-15): explicit ALLOW-list constants
+    for status gates. Pinning tests so a future enum addition can't
+    silently invalidate the gate — the test FAILS LOUDLY whenever
+    ``BookingRequest.Status`` gains a new value, forcing whoever adds
+    it to update the ALLOW-list explicitly.
+    """
+
+    def test_reschedulable_statuses_is_exactly_confirmed(self) -> None:
+        from apps.booking.services.attribution import get_reschedulable_statuses
+
+        assert get_reschedulable_statuses() == frozenset({BookingRequest.Status.CONFIRMED})
+
+    def test_valid_chain_root_statuses_is_exactly_confirmed_plus_rescheduled(self) -> None:
+        from apps.booking.services.attribution import get_valid_chain_root_statuses
+
+        assert get_valid_chain_root_statuses() == frozenset(
+            {BookingRequest.Status.CONFIRMED, BookingRequest.Status.RESCHEDULED}
+        )
+
+    def test_every_status_enum_value_classified(self) -> None:
+        """If a developer adds a new ``Status`` enum value without
+        updating the ALLOW-lists, this test fails — directing them to
+        decide whether the new status is reschedulable / valid as chain
+        root. Default-deny behaviour ships safely; this is a
+        documentation-only nudge.
+        """
+
+        from apps.booking.services.attribution import (
+            get_reschedulable_statuses,
+            get_valid_chain_root_statuses,
+        )
+
+        all_statuses = frozenset(s.value for s in BookingRequest.Status)
+        # Snapshot the lists as of #560. If the enum changes, this set
+        # also changes and the assertion below pushes the developer to
+        # update the allow-lists deliberately.
+        expected_known = frozenset(
+            {
+                BookingRequest.Status.CONFIRMED,
+                BookingRequest.Status.CANCEL_REQUESTED,
+                BookingRequest.Status.RESCHEDULE_REQUESTED,
+                BookingRequest.Status.CANCELLED,
+                BookingRequest.Status.RESCHEDULED,
+            }
+        )
+        assert all_statuses == expected_known, (
+            "BookingRequest.Status changed — review ALLOW-lists in "
+            "apps/booking/services/attribution.py:_build_status_allowlists "
+            "to decide if the new status is reschedulable / valid root, "
+            "AND update docs/design/policies/attribution-policy.md §6.5 "
+            "per-status verdict table to keep doc in sync with code."
+        )
+
+        # Sanity: ALLOW-lists are subsets of the enum (no orphaned values).
+        assert get_reschedulable_statuses() <= all_statuses
+        assert get_valid_chain_root_statuses() <= all_statuses
+
+    @pytest.mark.parametrize(
+        "root_status,expected_continuation,expected_reason_fragment",
+        [
+            ("confirmed", True, None),  # Happy path: CONFIRMED root continues.
+            ("rescheduled", True, None),  # RESCHEDULED root also valid.
+            ("cancelled", False, "chain_root_invalid_status:cancelled"),
+            (
+                "cancel_requested",
+                False,
+                "chain_root_invalid_status:cancel_requested",
+            ),
+            (
+                "reschedule_requested",
+                False,
+                "chain_root_invalid_status:reschedule_requested",
+            ),
+        ],
+    )
+    def test_chain_root_status_gate_per_enum_value(
+        self,
+        tenant: Tenant,
+        root_status: str,
+        expected_continuation: bool,
+        expected_reason_fragment: str | None,
+    ) -> None:
+        """Parametrized check: every current ``Status`` enum value
+        produces the expected continuation verdict at the root gate.
+        """
+
+        from apps.booking.services.attribution import compute_reschedule_continuation
+
+        root_visit = timezone.now() + timedelta(days=7)
+        with tenant_scope(tenant):
+            root = BookingRequest.objects.create(
+                tenant=tenant,
+                service_name="Test",
+                client_name="Test",
+                client_phone="+79991234567",
+                visit_at=root_visit,
+                duration_min=60,
+                status=root_status,
+                booking_source="ai_direct",
+                billable=True,
+                billing_reason="root",
+                attribution_metadata={
+                    "actor_type": "customer",
+                    "created_by": "execute_confirm",
+                },
+                service_id=None,
+            )
+            link = BookingRequest.objects.create(
+                tenant=tenant,
+                service_name="Test",
+                client_name="Test",
+                client_phone="+79991234567",
+                visit_at=root_visit + timedelta(days=5),
+                duration_min=60,
+                status="confirmed",
+                booking_source="ai_direct",
+                billable=False,
+                billing_reason="link",
+                attribution_metadata={
+                    "actor_type": "customer",
+                    "created_by": "execute_reschedule",
+                },
+                service_id=None,
+                original_booking_event=root,
+            )
+
+        is_cont, break_reason, _ = compute_reschedule_continuation(
+            old=link,
+            new_service_id=None,
+            new_visit_at=root_visit + timedelta(days=10),
+        )
+
+        assert is_cont is expected_continuation
+        if expected_reason_fragment is None:
+            assert break_reason is None
+        else:
+            assert break_reason == expected_reason_fragment
+
+    def test_rescheduled_root_continues_chain_under_new_semantics(self, tenant: Tenant) -> None:
+        """New positive case under #560: a RESCHEDULED root (the natural
+        post-reschedule terminal state on the original sale row) still
+        anchors a continuation chain. Under the old exclude-list this
+        worked accidentally (only CANCELLED was rejected); under the
+        new ALLOW-list this is explicit and load-bearing.
+        """
+
+        from apps.booking.services.attribution import compute_reschedule_continuation
+
+        root_visit = timezone.now() + timedelta(days=7)
+        with tenant_scope(tenant):
+            root = BookingRequest.objects.create(
+                tenant=tenant,
+                service_name="Test",
+                client_name="Test",
+                client_phone="+79991234567",
+                visit_at=root_visit,
+                duration_min=60,
+                status=BookingRequest.Status.RESCHEDULED,
+                booking_source="ai_direct",
+                billable=True,
+                billing_reason="root",
+                attribution_metadata={
+                    "actor_type": "customer",
+                    "created_by": "execute_confirm",
+                },
+                service_id=None,
+            )
+            link = BookingRequest.objects.create(
+                tenant=tenant,
+                service_name="Test",
+                client_name="Test",
+                client_phone="+79991234567",
+                visit_at=root_visit + timedelta(days=5),
+                duration_min=60,
+                status=BookingRequest.Status.CONFIRMED,
+                booking_source="ai_direct",
+                billable=False,
+                billing_reason="link",
+                attribution_metadata={
+                    "actor_type": "customer",
+                    "created_by": "execute_reschedule",
+                },
+                service_id=None,
+                original_booking_event=root,
+            )
+
+        is_cont, break_reason, root_id = compute_reschedule_continuation(
+            old=link,
+            new_service_id=None,
+            new_visit_at=root_visit + timedelta(days=10),
+        )
+
+        assert is_cont is True
+        assert break_reason is None
+        assert root_id == root.id
