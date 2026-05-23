@@ -3,6 +3,10 @@
 > Tenancy retro B4 (PR #476 — `requires_tenant` tag + `STRICT_TENANT_REFUSE` flag).
 > Follow-up adversarial-pass blockers fixed in branch `phase0/zeta/476-blockers-pre-flip`.
 > Earliest planned flip: **2026-05-28** (1-week log-only soak after PR #476 merged 2026-05-21 / commit `fe88135`).
+>
+> **Flip-day operators — start with the [quick-reference](strict-tenant-refuse-flip-quickref.md)** for the
+> condensed decision tree + commands. This long-form runbook covers the
+> «why» behind each step.
 
 ## What this controls
 
