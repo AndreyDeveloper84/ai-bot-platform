@@ -70,6 +70,38 @@ class _FakeRedis:
             return []
         return [{"message_id": min, "consumer": "worker-0", "time_since_delivered": 1000}]
 
+    # ───── SETNX lock surface для #593 ─────
+    # Хранилище разделяется между всеми операциями set/get/delete.
+    # Используем class attribute чтобы fake вёл себя как настоящий
+    # Redis (per-process state, не per-instance).
+    _lock_store: dict[str, str] = {}
+
+    def set(self, key: str, value, *, nx: bool = False, ex: int | None = None):
+        """redis-py set(...) с nx=True возвращает True/None."""
+        if nx and key in self._lock_store:
+            return None  # busy
+        self._lock_store[key] = str(value)
+        return True
+
+    def get(self, key: str):
+        return self._lock_store.get(key)
+
+    def delete(self, key: str):
+        return 1 if self._lock_store.pop(key, None) is not None else 0
+
+    @classmethod
+    def reset_lock_store(cls):
+        cls._lock_store.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_lock_store():
+    """Каждый тест начинает с пустого lock-store. Без этого тест
+    предыдущего теста (lock acquired) блокирует следующий."""
+    _FakeRedis.reset_lock_store()
+    yield
+    _FakeRedis.reset_lock_store()
+
 
 @pytest.fixture
 def fake_redis():
@@ -188,6 +220,16 @@ def _setup_pre_checks_pass(monkeypatch, *, pel_count: int = 0):
     from apps.workers.management.commands import run_strict_flip_drill as mod
 
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+
+    # #592: _db_now дёргает реальную БД через connection.cursor().
+    # pytest-django блокирует DB-access без явного маркера. По
+    # умолчанию мокаем фиксированные timestamps; тесты которые
+    # специально проверяют DB-side-ness (TestDbSideTimestamps) сами
+    # перекрывают _db_now своими значениями.
+    fixed_start = datetime(2099, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    fixed_end = datetime(2099, 6, 15, 12, 5, 0, tzinfo=timezone.utc)
+    ts_iter = iter([fixed_start, fixed_end])
+    monkeypatch.setattr(mod, "_db_now", lambda: next(ts_iter))
     return redis
 
 
@@ -492,3 +534,167 @@ class TestGrepWarningCount:
         log.write_text("plain text rate_budget_exhausted line\n")
         since = datetime.now(timezone.utc) - timedelta(hours=1)
         assert _grep_warning_count(str(log), since) == 1
+
+
+# ───────────────────────────────────────────────────────────────────────
+# #592 — DB-side timestamps (PR #585 adversarial)
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestDbSideTimestamps:
+    """drill_start_ts + drill_end_ts должны браться через SELECT NOW()
+    в той же DB-сессии что и audit-таблица — клок дрифт между Python
+    host-ом и Postgres host-ом не должен влиять на cleanup range."""
+
+    def test_drill_start_ts_uses_db_now_not_python_now(self, monkeypatch, tmp_path):
+        """Регрессионный тест: симулирую clock drift между Python
+        и DB. drill_start_ts должен совпадать с DB-side value, а НЕ
+        с Python-side value. Без fix-а #592 drill брал бы Python-now()."""
+        _setup_pre_checks_pass(monkeypatch)
+        log = tmp_path / "worker.log"
+        log.write_text('{"ts": "2099-01-01T00:00:00Z", "msg": "rate_budget_exhausted"}\n')
+
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        # Counts iter — first call в baseline → 10, второй в assertions → 90.
+        counts = iter([10, 90])
+        monkeypatch.setattr(mod, "_audit_count", lambda *a, **k: next(counts))
+        monkeypatch.setattr(mod, "_grep_warning_count", lambda *a, **k: 3)
+        monkeypatch.setattr(mod, "_cleanup_audit_rows", lambda *a, **k: 80)
+
+        # DB clock на 5 секунд опережает Python clock — типичный staging drift.
+        db_ts_values = [
+            datetime(2099, 6, 15, 12, 0, 5, tzinfo=timezone.utc),  # start
+            datetime(2099, 6, 15, 12, 0, 10, tzinfo=timezone.utc),  # end
+        ]
+        db_ts_iter = iter(db_ts_values)
+        monkeypatch.setattr(mod, "_db_now", lambda: next(db_ts_iter))
+
+        # Capture то что передаётся в cleanup — это и есть наша точка
+        # проверки: drill_start_ts == DB value, не Python value.
+        cleanup_args: list[tuple] = []
+        monkeypatch.setattr(
+            mod,
+            "_cleanup_audit_rows",
+            lambda table, h, s, e: cleanup_args.append((s, e)) or 80,
+        )
+
+        _, _, exit_code = _run_command(
+            "--target-count",
+            "10",
+            "--duration",
+            "1",
+            "--worker-log",
+            str(log),
+        )
+        assert exit_code == 0
+        assert len(cleanup_args) == 1
+        start_ts, end_ts = cleanup_args[0]
+        # ТочнО те timestamps что вернул _db_now — не Python datetime.now().
+        assert start_ts == db_ts_values[0]
+        assert end_ts == db_ts_values[1]
+
+
+# ───────────────────────────────────────────────────────────────────────
+# #593 — Concurrent drill SETNX lock (PR #585 adversarial)
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestConcurrentDrillLock:
+    """Два параллельных оператора не должны мочь запустить drill
+    одновременно. SETNX lock в начале handle() гарантирует mutex."""
+
+    def test_lock_acquired_when_free(self, monkeypatch, tmp_path):
+        """Happy path — никто lock не держит, drill acquire-ит и
+        выполняется нормально."""
+        _setup_pre_checks_pass(monkeypatch)
+        log = tmp_path / "worker.log"
+        log.write_text('{"ts": "2099-01-01T00:00:00Z", "msg": "rate_budget_exhausted"}\n')
+
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        counts = iter([10, 90])
+        monkeypatch.setattr(mod, "_audit_count", lambda *a, **k: next(counts))
+        monkeypatch.setattr(mod, "_grep_warning_count", lambda *a, **k: 3)
+        monkeypatch.setattr(mod, "_cleanup_audit_rows", lambda *a, **k: 80)
+
+        _, _, exit_code = _run_command(
+            "--target-count",
+            "10",
+            "--duration",
+            "1",
+            "--worker-log",
+            str(log),
+        )
+        assert exit_code == 0
+        # После завершения lock должен быть released — иначе следующий
+        # запуск зависнет.
+        assert _FakeRedis._lock_store.get("strict_flip_drill:lock") is None
+
+    def test_concurrent_drill_blocked_with_pid(self, monkeypatch, tmp_path):
+        """Второй параллельный запуск должен exit-ить с явным
+        сообщением о PID держателя lock-а."""
+        # Pre-acquire lock как "другой процесс" — PID 99999.
+        _FakeRedis._lock_store["strict_flip_drill:lock"] = "99999"
+
+        _setup_pre_checks_pass(monkeypatch)
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError) as excinfo:
+            call_command(
+                "run_strict_flip_drill",
+                "--target-count",
+                "10",
+                "--duration",
+                "1",
+                stdout=StringIO(),
+                stderr=StringIO(),
+            )
+        assert "99999" in str(excinfo.value)
+        assert "redis-cli DEL" in str(excinfo.value)
+
+    def test_lock_released_on_drill_failure(self, monkeypatch, tmp_path):
+        """Если drill упал на assertion — lock всё равно должен
+        освободиться через finally-блок. Иначе следующая попытка
+        оператора зависнет на TTL минут."""
+        _setup_pre_checks_pass(monkeypatch)
+        log = tmp_path / "worker.log"
+        log.write_text("[empty]\n")  # нет rate_budget_exhausted → exit 4
+
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        counts = iter([10, 70])
+        monkeypatch.setattr(mod, "_audit_count", lambda *a, **k: next(counts))
+
+        _, _, exit_code = _run_command(
+            "--target-count",
+            "10",
+            "--duration",
+            "1",
+            "--worker-log",
+            str(log),
+        )
+        assert exit_code == 4
+        # КРИТИЧНО: даже при assertion fail lock должен быть released.
+        assert _FakeRedis._lock_store.get("strict_flip_drill:lock") is None
+
+    def test_lock_released_on_unexpected_exception(self, monkeypatch, tmp_path):
+        """Mirror — exception вне _DrillFailed (exit 7) тоже не должен
+        оставить stale lock."""
+        _setup_pre_checks_pass(monkeypatch)
+
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        def _explode(*a, **k):
+            raise RuntimeError("redis blew up mid-flood")
+
+        monkeypatch.setattr(mod, "_generate_flood", _explode)
+
+        _, _, exit_code = _run_command(
+            "--target-count",
+            "10",
+            "--duration",
+            "1",
+        )
+        assert exit_code == 7
+        assert _FakeRedis._lock_store.get("strict_flip_drill:lock") is None
