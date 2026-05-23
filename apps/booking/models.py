@@ -536,15 +536,31 @@ class BookingReminder(models.Model):
     yclients_record_id = models.CharField(
         max_length=64,
         db_index=True,
+        null=True,
         blank=True,
         help_text="YClients record id (stringified — YClients ints fit "
         "fine but the API will return larger opaque ids on enterprise "
-        "tenants per their roadmap).",
+        "tenants per their roadmap). Nullable so the Ayla consumer path "
+        "(#442) writes NULL here while the legacy unique_together "
+        "(yclients_record_id, kind) stays non-conflicting — NULL ≠ NULL "
+        "in Postgres uniqueness, so two Ayla appointments with the same "
+        "kind don't collide.",
     )
     chat_id = models.CharField(
         max_length=128,
         help_text="Snapshot of BotUser.chat_id at write time. "
         "Snapshot — chat_id may change in BotUser later.",
+    )
+    ayla_appointment_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Ayla appointment UUID per ADR-0009 event contract. "
+        "When set, replaces yclients_record_id as the idempotency key "
+        "for Ayla-side reminders (#442 booking consumer). Coexists with "
+        "the YClients legacy path: rows from the YClients webhook keep "
+        "yclients_record_id + leave this nullable; rows from the Ayla "
+        "consumer set this + leave yclients_record_id blank.",
     )
     visit_at = models.DateTimeField(
         help_text="When the actual salon visit is scheduled.",
@@ -582,6 +598,15 @@ class BookingReminder(models.Model):
             models.Index(fields=["tenant", "yclients_record_id"]),
             models.Index(fields=["kind", "visit_at"]),
         ]
+        # #442 booking consumer — partial unique on the Ayla side is
+        # created via raw RunSQL in migration 0012 (CREATE UNIQUE INDEX
+        # CONCURRENTLY) so prod doesn't acquire a table lock on a
+        # large bookingreminder. Declared as a Postgres index, NOT as
+        # a Django UniqueConstraint, on purpose: Django's constraint
+        # path runs ALTER TABLE → table-level lock + sync DDL. The
+        # index gives the same uniqueness guarantee with non-blocking
+        # online creation. See migration
+        # 0012_remote_booking_proxy_and_ayla_appointment_id.py.
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()} {self.master_name} {self.visit_at:%d.%m %H:%M}"
@@ -699,3 +724,164 @@ class PendingBookingAction(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()} pending={self.consumed_at is None}"
+
+
+class RemoteBookingProxy(models.Model):
+    """Local mirror of an Ayla djangoproject ``Appointment`` row.
+
+    Per ADR-0009 §Domain ownership matrix, Ayla djangoproject owns the
+    canonical booking; bot-platform keeps a thin read-cache for AI
+    grounding, reminder scheduling, and RFM/sentiment fan-out.
+
+    ### What lives here
+
+    Identifier (``appointment_id`` from Ayla), schedule windows
+    (``start_at`` / ``end_at`` — needed for reminder math and for
+    ``booking.rescheduled`` duration preservation), status, source,
+    and two opaque ID references (``service_id`` + ``specialist_id``)
+    that the AI uses to look up display names via the catalog mirror
+    on demand.
+
+    ### What does NOT live here (PII rule §7 of event-contract.md)
+
+    No customer name / phone / email / price. The AI fetches those
+    from Ayla REST on demand or from the catalog mirror; storing them
+    locally would duplicate PII surface for 90+ days of retention.
+
+    ### Idempotency surface
+
+    ``last_synced_event_id`` records the ULID of the last
+    cross-service event that updated this row. The ingest-side
+    dedupe table (``IngestDedupe``) is the canonical de-duplicator
+    on ``event_id``; this field is for forensic trace + observable
+    «which event last touched this proxy» rather than the primary
+    idempotency mechanism.
+
+    Pattern note: copies the catalog ``_MirrorBase`` shape
+    (``TenantScopedManager`` + ``all_tenants`` + ``synced_at``) by
+    composition, not inheritance — the base assumes a mysite
+    ``IntegerField`` for ``external_id``, ours is a UUID.
+    """
+
+    class Status(models.TextChoices):
+        """Mirrors event-contract.md §3.1 + §3.4 enum values."""
+
+        CONFIRMED = "confirmed", "Confirmed"
+        PENDING_PAYMENT = "pending_payment", "Pending payment"
+        TENTATIVE = "tentative", "Tentative"
+        CANCELLED = "cancelled", "Cancelled"
+        COMPLETED = "completed", "Completed"
+
+    class Source(models.TextChoices):
+        """Mirrors event-contract.md §3.1 source enum."""
+
+        MOBILE_APP = "mobile_app", "Mobile app"
+        ADMIN_CONSOLE = "admin_console", "Admin console"
+        AUTOMATION = "automation", "Automation"
+        YCLIENTS_SYNC = "yclients_sync", "YClients sync"
+
+    appointment_id = models.UUIDField(
+        primary_key=True,
+        editable=False,
+        help_text="Canonical Ayla djangoproject Appointment.id (UUID).",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="remote_booking_proxies",
+        help_text="Owning tenant. CASCADE — the proxy is derived data; "
+        "if the tenant goes, the local mirror goes too.",
+    )
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="remote_booking_proxies",
+        help_text="Channel-side user identity. Nullable: an Ayla "
+        "mobile-only customer can have bookings before ever opening "
+        "the bot, so the proxy is written orphan and a post_save "
+        "signal on BotUser backfills the ref when the user appears "
+        "via any channel. CASCADE applies only to the linked case: "
+        "if the BotUser is purged (GDPR erasure), linked mirrors go "
+        "too — orphan rows are unaffected (no link to cascade through).",
+    )
+
+    # ── Schedule window (for reminders + reschedule math) ──────────
+    start_at = models.DateTimeField(
+        db_index=True,
+        help_text="Appointment start, salon-local timezone. Reminder "
+        "math (T-24h / T-2h) computes against this.",
+    )
+    end_at = models.DateTimeField(
+        help_text="Appointment end. Round-3 spec §3.3: reschedule "
+        "preserves duration via "
+        "``new_end_at = new_start_at + (old_end_at - old_start_at)`` — "
+        "this field is what the math reads.",
+    )
+
+    # ── Status + source (mirrors §3 enums) ─────────────────────────
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        db_index=True,
+    )
+    source = models.CharField(
+        max_length=20,
+        choices=Source.choices,
+        blank=True,
+        default="",
+        help_text="Where the booking originated. Empty when source isn't "
+        "carried in the event (booking.cancelled / .rescheduled / "
+        ".completed don't repeat the source).",
+    )
+
+    # ── Opaque references (catalog mirror does the name lookup) ────
+    service_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Ayla Service.id — looked up via catalog mirror for "
+        "the AI to say 'у тебя стрижка'. Nullable because update "
+        "events (cancelled / rescheduled / completed) don't repeat "
+        "the service reference; the row keeps the value set at "
+        "creation time.",
+    )
+    specialist_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Ayla Master.id — analogous to ``service_id``.",
+    )
+
+    # ── Audit / observability ──────────────────────────────────────
+    last_synced_event_id = models.CharField(
+        max_length=26,
+        blank=True,
+        default="",
+        help_text="ULID of the last cross-service event that touched "
+        "this row. Forensic trace, not the primary idempotency key "
+        "(that's the IngestDedupe table on the ingest side).",
+    )
+    synced_at = models.DateTimeField(
+        auto_now=True,
+        help_text="When the platform last updated this row.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Remote booking proxy"
+        verbose_name_plural = "Remote booking proxies"
+        ordering = ["-start_at"]
+        indexes = [
+            # «Next booking for this user» — hot read path for the AI.
+            models.Index(fields=["bot_user", "start_at"]),
+            # «Active bookings for tenant analytics».
+            models.Index(fields=["tenant", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"RemoteBookingProxy[{self.appointment_id} {self.status}]"

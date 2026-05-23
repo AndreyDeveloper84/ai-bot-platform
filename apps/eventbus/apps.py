@@ -32,6 +32,14 @@ class EventBusConfig(AppConfig):
         # window in the ops dashboard at first deploy.
         warn_if_tenant_verify_fail_open()
 
+        # #442 — Register booking.* consumer family handlers with the
+        # ingest dispatcher. Each consumer module exposes a
+        # ``register_*_handlers`` function that's called here so the
+        # registry shape is deterministic at every Django start.
+        from apps.eventbus.consumers.booking import register_booking_handlers
+
+        register_booking_handlers()
+
         # Hotfix C (retro review #3): the subscriber registry is cached
         # after first resolution per :func:`_subscribers`. Wire the
         # Django ``setting_changed`` signal so:
