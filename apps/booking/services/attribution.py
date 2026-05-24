@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # avoid circular import at runtime
     from apps.booking.models import BookingRequest
+    from apps.catalog.models import CatalogService
 
 
 # Q12-α threshold: founder ACK 2026-05-22 — 90 days from chain root
@@ -183,6 +184,51 @@ def get_valid_chain_root_statuses() -> frozenset[str]:
     if _VALID_CHAIN_ROOT_STATUSES_CACHE is None:
         _, _VALID_CHAIN_ROOT_STATUSES_CACHE = _build_status_allowlists()
     return _VALID_CHAIN_ROOT_STATUSES_CACHE
+
+
+def build_live_commercial_identity(service: "CatalogService") -> dict:
+    """Build the 5-field commercial-identity snapshot dict from a live
+    :class:`CatalogService` row. Single source of truth for snapshot
+    construction — referenced from ``services/create.py``,
+    ``services/reschedule.py``, and ``skills/booking/tools.py``.
+
+    Q12-α #541 (founder ACK 2026-05-23) — schema is locked at 5 fields:
+    ``service_id``, ``service_name``, ``sticker_price_amount``,
+    ``currency``, ``duration_minutes``. ``service_name`` is informational
+    (not compared by the chain comparator); the other 4 are part of
+    the chain-break decision via
+    :func:`_commercial_identity_changed_field`.
+
+    Field mapping (bot-platform catalog → founder spec):
+
+    * ``service.price_from``  → ``sticker_price_amount`` (string-ified
+      Decimal; ``None`` preserved)
+    * ``"RUB"``               → ``currency`` (hardcoded for pilot —
+      see #617; bot-platform catalog has no currency field at Phase 0
+      and the Penza pilot is RUB-only per
+      ``project_pricing_model_hybrid``)
+    * ``service.duration_min``→ ``duration_minutes`` (int; ``None``
+      preserved when service has no configured duration)
+
+    Q12-α #618 (DRY follow-up to #541): extracted from three duplicated
+    inline dict-builders. A future schema addition (new field) is now
+    a single-site change.
+    """
+
+    # TODO(#617): hardcoded "RUB" — must be sourced from tenant /
+    # service before any non-RUB tenant onboards. PRE_PILOT? No —
+    # downgraded to FOLLOW_UP because the pilot scope is Penza/RUB-only
+    # (Ayla-first strategic pivot 2026-05-19). Re-elevate when
+    # multi-currency expansion (Phase 2+) starts.
+    return {
+        "service_id": str(service.id),
+        "service_name": service.name,
+        "sticker_price_amount": (
+            str(service.price_from) if service.price_from is not None else None
+        ),
+        "currency": "RUB",
+        "duration_minutes": (int(service.duration_min) if service.duration_min else None),
+    }
 
 
 def _normalise_commercial_identity_field(field: str, value: object) -> object:

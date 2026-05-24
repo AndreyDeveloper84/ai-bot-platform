@@ -37,6 +37,7 @@ from django.db import transaction
 
 from apps.booking.models import BookingRequest
 from apps.booking.services.attribution import (
+    build_live_commercial_identity,
     compute_reschedule_continuation,
     get_reschedulable_statuses,
 )
@@ -99,19 +100,11 @@ def reschedule_customer_booking(
         # The legacy_row guard above proves ``old.service_id is not
         # None``; ``old.service`` is the matching FK row eager-loaded
         # via ``select_related``.
+        # #618 follow-up: shape lives in
+        # ``attribution.build_live_commercial_identity``.
         live_service = old.service
         assert live_service is not None  # narrowed by legacy_row guard
-        live_commercial_identity = {
-            "service_id": str(live_service.id),
-            "service_name": live_service.name,
-            "sticker_price_amount": (
-                str(live_service.price_from) if live_service.price_from is not None else None
-            ),
-            "currency": "RUB",
-            "duration_minutes": (
-                int(live_service.duration_min) if live_service.duration_min else None
-            ),
-        }
+        live_commercial_identity = build_live_commercial_identity(live_service)
 
         # Q12-α continuation decision (issue #478): same service is
         # enforced structurally above (we pull service_id from old).
@@ -138,7 +131,10 @@ def reschedule_customer_booking(
                 carry_snapshot = None
 
         # Create new booking with execute_reschedule attribution +
-        # continuation context.
+        # continuation context. ``_commercial_identity_snapshot`` is
+        # passed as a private kwarg (NOT a CreateBookingInput field)
+        # per #619/A6 trust boundary (2026-05-24) — keeps the field off
+        # any future REST/webhook schema binding.
         new_booking = create_customer_booking(
             inp=CreateBookingInput(
                 tenant=tenant,
@@ -150,9 +146,9 @@ def reschedule_customer_booking(
                 is_reschedule_continuation=is_continuation,
                 chain_break_reason=chain_break_reason,
                 original_booking_event_id=chain_root_id,
-                commercial_identity_snapshot=carry_snapshot,
             ),
             correlation_id=correlation_id,
+            _commercial_identity_snapshot=carry_snapshot,
         )
 
         # Mark old as RESCHEDULED (terminal).
