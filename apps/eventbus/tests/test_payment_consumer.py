@@ -682,6 +682,7 @@ class TestResolveConversationDeterministic:
         second_pick = _resolve_conversation(tenant=tenant, user_id=AYLA_USER_ID)
 
         assert first_pick is not None
+        assert second_pick is not None
         assert first_pick.pk == second_pick.pk
         assert first_pick.pk in {conv_a.pk, conv_b.pk}
 
