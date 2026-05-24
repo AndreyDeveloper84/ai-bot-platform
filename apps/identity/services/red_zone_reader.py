@@ -112,6 +112,19 @@ class RedZoneReader:
         if accessor_principal is None:
             accessor_principal = _default_principal_for_role(accessor_role)
 
+        # ops_admin = privileged break-glass access. The fallback
+        # `"unknown"` would be a 152-ФЗ Chapter 3 forensic blind spot —
+        # auditor query «who did this access» would yield nothing
+        # actionable. Per tech-lead direction 2026-05-23 (Q2 fork):
+        # ops_admin MUST supply explicit staff identity, fail-loud.
+        if accessor_role == RedZoneAccessLog.ACCESSOR_OPS_ADMIN and accessor_principal == "unknown":
+            raise ValueError(
+                "ops_admin role requires explicit accessor_principal "
+                "(staff User UUID) per 152-ФЗ Chapter 3 audit "
+                "traceability requirement. Pass accessor_principal="
+                "str(request.user.id) at call site."
+            )
+
         with transaction.atomic():
             # Step 1 — set the GUC so RLS allows the row through (Postgres).
             # SQLite has no RLS — SET ... is unknown syntax there, so the

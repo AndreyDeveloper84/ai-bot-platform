@@ -64,3 +64,20 @@ repos:
         # `files` regex scopes the hook: it only runs when the matching
         # file is actually staged. Unrelated commits → no invocation,
         # no failure.
+
+      # Red-zone direct-access guard (#229 + spec §13 row 14.25). AST
+      # scan blocks direct ORM reads of red MemoryEntry rows outside
+      # the sanctioned `RedZoneReader` accessor. First line of defence
+      # per ADR-0011 §10; RLS policy (`memory_entry_non_red_visible`)
+      # is the final line. See `tools/lint/red_zone_guard.py` for the
+      # documented detection scope + known limitations.
+      - id: red-zone-guard
+        name: Red-zone direct-access guard (AST lint)
+        entry: python tools/lint/red_zone_guard.py apps/
+        language: system
+        # Run on any staged `.py` change under `apps/`. The script
+        # scans the whole `apps/` tree anyway, so `pass_filenames` is
+        # off — we don't want pre-commit to pass each staged file
+        # separately to a CLI that already does its own globbing.
+        files: ^apps/.*\.py$
+        pass_filenames: false
