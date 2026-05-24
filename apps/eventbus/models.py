@@ -269,3 +269,89 @@ class IngestDLQ(models.Model):
 
     def __str__(self) -> str:
         return f"IngestDLQ[{self.event_name} {self.event_id} {self.reason}]"
+
+
+class PaymentTerminalDedupe(models.Model):
+    """Per-payment terminal-state dedupe for #443 payment consumer.
+
+    Round-1 adversarial BLOCKER-1: two ``payment.captured`` (or
+    ``payment.refunded``) events with DIFFERENT ``event_id`` but the
+    SAME ``payment_id`` would bypass the handler-level
+    ``Conversation.last_payment_event_id`` short-circuit and double-fire
+    ``loyalty_bonus_eligible`` / ``loyalty_refund_reverse`` — pushing the
+    loyalty subscriber (Epic #289) into a double-accrual / double-reverse
+    state. Real triggers:
+
+    * Ayla operator manually re-fires after a Sentry alert with a fresh
+      ULID.
+    * Outbox publisher loses dedupe state on a DB failover and re-mints.
+
+    This table is a SECOND idempotency layer, keyed by ``(payment_id,
+    terminal_state)`` rather than by ``event_id``. ``IngestDedupe``
+    remains the primary canonical guard; this one specifically protects
+    the terminal-state fan-out (captured / refunded) where loyalty
+    side-effects compound.
+
+    NOT used for ``payment.authorized`` (not terminal — pending slot
+    can be re-issued) or ``payment.failed`` (intentionally counts
+    repeat failures via ``consecutive_payment_failures``).
+
+    Retention: same 120-day window as IngestDedupe (§5.3). Cleanup is
+    a Celery beat (follow-up).
+    """
+
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    class TerminalState(models.TextChoices):
+        CAPTURED = "captured", "Captured"
+        REFUNDED = "refunded", "Refunded"
+
+    id = models.BigAutoField(primary_key=True)
+    tenant_id = models.UUIDField(
+        help_text="Tenant scoping the dedupe row. Round-2 NEW-1: without "
+        "this, a malicious tenant could pre-claim a victim's "
+        "(payment_id, terminal_state) globally and block the victim's "
+        "legitimate loyalty fan-out forever — category-2 cross-tenant "
+        "DoS. UUIDField (not FK) — this is a system-level dedupe "
+        "ledger; we keep CASCADE semantics out of the picture and "
+        "rely on retention sweeps for cleanup.",
+    )
+    payment_id = models.UUIDField(
+        help_text="Canonical Ayla Payment.id from the event payload.",
+    )
+    terminal_state = models.CharField(
+        max_length=16,
+        choices=TerminalState.choices,
+        help_text="Which terminal state we've already processed for "
+        "this payment_id. A row's existence is the dedupe signal.",
+    )
+    event_id = models.CharField(
+        max_length=26,
+        help_text="ULID of the event that first reached this terminal "
+        "state. Forensic trace — distinct events with the same "
+        "(tenant_id, payment_id, terminal_state) tuple after this row "
+        "exists are no-op'd at the handler layer.",
+    )
+    processed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Payment terminal dedupe row"
+        verbose_name_plural = "Payment terminal dedupe ledger"
+        constraints = [
+            # Primary dedupe guarantee: at most one row per
+            # (tenant_id, payment_id, terminal_state). Round-2 NEW-1
+            # fix: tenant_id in the key blocks cross-tenant pre-claim
+            # DoS.
+            models.UniqueConstraint(
+                fields=["tenant_id", "payment_id", "terminal_state"],
+                name="evbus_payment_terminal_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["processed_at"], name="evbus_payment_term_proc_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"PaymentTerminalDedupe[t={self.tenant_id} p={self.payment_id} {self.terminal_state}]"
+        )

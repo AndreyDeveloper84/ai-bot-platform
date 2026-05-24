@@ -258,6 +258,14 @@ AUDIT_LOG_RETENTION_MODE = os.environ.get("AUDIT_LOG_RETENTION_MODE", "hard")
 # dedup tokens, not forensic data (Order carries the forensic trail).
 PAYMENT_EVENT_RETENTION_DAYS = int(os.environ.get("PAYMENT_EVENT_RETENTION_DAYS", "90"))
 
+# #443 — payment.failed consumer threshold. After N consecutive failures
+# without an intervening capture, the consumer emits
+# ``payment_failed_skill_triggered`` (separate PR for the skill itself).
+# Env-driven so founder can dial without a code change. Bumping mid-flight
+# is forward-compatible: counter is per-Conversation, the next failure
+# event re-evaluates against the new threshold.
+PAYMENT_FAILED_HANDOFF_THRESHOLD = int(os.environ.get("PAYMENT_FAILED_HANDOFF_THRESHOLD", "3"))
+
 # Sprint 5 / A3 — Replay infrastructure config (PHASE0_DESIGN §7.1).
 # Per-env sample rate so prod/staging stay at 100% (1 tenant, low traffic;
 # ~30MB/30d retention) while tests default to 0 to avoid noisy row creation
