@@ -2436,3 +2436,109 @@ class TestIssue551SendReleaseLockSymmetry:
         # We invoked the staleness helper at least twice (outer + inner)
         # — the very pattern that closes the race window.
         assert call_count["n"] >= 2
+
+    def test_send_with_deleted_conversation_returns_404(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Issue #551 round-1 amendment: explicit None-guard after the
+        Conversation ``select_for_update(...).first()``. If the row
+        vanished between the outer :func:`_verify_master_involved`
+        check and the lock acquisition, we MUST raise
+        ``DraftActionError("not_found", status=404)`` rather than
+        silently no-op the lock and proceed.
+        """
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            send_draft_as_master,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        # Simulate the race: the involvement check resolved a row, but
+        # by the time the lock fires the row is gone — .first() returns
+        # None. We patch select_for_update to return a QS whose .first()
+        # is None (NOT raising).
+        class _MissingQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                return None
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            assert kw.get("nowait") is True
+            return _MissingQS()
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with pytest.raises(DraftActionError) as exc_info:
+                send_draft_as_master(
+                    conversation_id=conv.id,
+                    draft_id=draft.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        err = exc_info.value
+        assert err.slug == "not_found"
+        assert err.status == 404
+        # Draft NOT flipped; no Message created.
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.ACTIVE
+        assert draft.content
+        assert (
+            Message.all_tenants.filter(conversation_id=conv.id, role=Message.Role.ASSISTANT).count()
+            == 0
+        )
+
+    def test_release_with_deleted_conversation_returns_404(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Same shape on the release path — None-guard symmetry."""
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            release_draft_to_ai,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        class _MissingQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                return None
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            assert kw.get("nowait") is True
+            return _MissingQS()
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with pytest.raises(DraftActionError) as exc_info:
+                release_draft_to_ai(
+                    conversation_id=conv.id,
+                    draft_id=draft.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        err = exc_info.value
+        assert err.slug == "not_found"
+        assert err.status == 404
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.ACTIVE
+        assert (
+            Message.all_tenants.filter(conversation_id=conv.id, role=Message.Role.ASSISTANT).count()
+            == 0
+        )

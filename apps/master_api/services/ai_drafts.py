@@ -853,14 +853,33 @@ def send_draft_as_master(
       6. Validate override_content length (≤ :data:`MAX_OVERRIDE_LENGTH`).
       7. Atomically (Issue #551 — Conversation lock BEFORE AiDraft lock):
          * acquire Conversation row ``select_for_update(nowait=True)``
-           — 429 ``conversation_busy`` on contention
+           — 429 ``conversation_busy`` on contention; 404 ``not_found``
+           if the row vanished mid-flight
          * acquire AiDraft row ``select_for_update`` — blocks briefly
            on a peer send/release for the same draft
-         * re-validate ACTIVE + freshness inside the locks
+         * re-validate ACTIVE + freshness inside the transaction —
+           this re-check is the load-bearing defence against the
+           customer-ingest race (see lock-vs-recheck commentary below)
          * create assistant Message with attribution metadata
            ``{actor_type: master, composed_by: <master_id>}``
          * mark draft SENT_AS_MASTER + clear content (Blocker #5 Layer 1)
          * audit + emit ``master.draft_sent_as_self``
+
+    Lock semantics — what the Conversation lock DOES and DOES NOT do:
+      * DOES: serialise peer operations on this conversation. Concurrent
+        generate / send / release attempts on the same Conversation get
+        429 ``conversation_busy`` rather than racing into a partial state.
+      * DOES NOT: block customer Message INSERTs from the ingest path.
+        ``apps.conversations.services.record_message`` performs a
+        **non-locking** UPDATE on ``Conversation.last_message_at`` — it
+        does NOT call ``select_for_update`` before the INSERT. A customer
+        Message that commits while we hold this lock IS visible to the
+        ``_validate_draft_fresh`` re-check below.
+      * The defence against the «master sends reply stale to just-arrived
+        customer message» race is the ``_validate_draft_fresh()``
+        re-check inside this transaction (PR #540 Blocker #4). The
+        Conversation lock closes peer-operation races; the re-check
+        closes the customer-ingest race.
 
     Raises:
       :class:`DraftActionError`:
@@ -868,7 +887,11 @@ def send_draft_as_master(
           generate / send / release holds the Conversation row lock.
           Carries ``extra={"retry_after_seconds": 3}`` so the view sets
           ``Retry-After: 3``. Slug distinct from ``generate_in_flight``
-          because the holder may be ANY of the three operations.
+          to aid log triage / Sentry filtering by which operation
+          contended; the frontend treats both identically.
+        * ``not_found`` (404) — Conversation row vanished between the
+          outer ``_verify_master_involved`` check and the lock
+          acquisition (extremely rare; mirrors generate-path handling).
     """
 
     conv = _verify_master_involved(master, conversation_id)
@@ -905,30 +928,41 @@ def send_draft_as_master(
         body = draft.content
 
     with transaction.atomic():
-        # Issue #551: Conversation row lock BEFORE the AiDraft lock —
-        # mirrors :func:`generate_draft_for_conversation`'s post-#540 +
-        # #550 pattern. The AiDraft-only lock left a microsecond window
-        # where a new customer Message (different table from AiDraft)
-        # could INSERT between the staleness check + the draft status
-        # flip, letting master send a reply stale to the just-arrived
-        # message. Locking the Conversation row first closes the window:
-        # generate / send / release / customer Message INSERT (via the
-        # ingest path's own Conversation lock) all serialise on the
-        # same row.
+        # Issue #551: Conversation row lock BEFORE the AiDraft lock.
+        # Mirrors :func:`generate_draft_for_conversation`'s post-#540 +
+        # #550 pattern so peer operations (generate / send / release)
+        # against the same conversation serialise on a single row.
         #
-        # Lock ordering Conversation → AiDraft matches generate's
-        # ordering (generate takes Conversation only; AiDraft is touched
-        # inside that lock) — no inverted-ordering deadlock possible.
+        # What this lock does:
+        #   * Serialises generate / send / release on this conversation
+        #     — a peer caller hitting NOWAIT contention is mapped to
+        #     429 ``conversation_busy`` rather than racing.
         #
-        # NOWAIT semantics + DraftActionError("conversation_busy") map
-        # to the same 429 + Retry-After:3 UX as #550's
-        # ``generate_in_flight``. The slug is distinct because the
-        # semantic is broader — the holder could be generate OR another
-        # send/release on the same conversation.
+        # What this lock does NOT do (honesty note — corrects pre-review
+        # docstring claim):
+        #   * It does NOT block customer Message INSERTs from the
+        #     ingest path. ``apps.conversations.services.record_message``
+        #     performs a non-locking UPDATE on Conversation.last_message_at
+        #     — it does not ``select_for_update`` the Conversation row
+        #     before the Message INSERT. A customer Message that commits
+        #     while we hold this lock is therefore visible to the
+        #     ``_validate_draft_fresh`` re-check below.
+        #
+        # The load-bearing defence against the «master sends reply stale
+        # to just-arrived customer message» race is the staleness
+        # re-check inside this transaction (PR #540 Blocker #4) — NOT
+        # this lock. The Conversation lock closes peer-operation races;
+        # the re-check closes the customer-ingest race.
+        #
+        # Lock ordering Conversation → AiDraft is also used by the
+        # generate path; no path in this module locks AiDraft before
+        # Conversation, so inverted-ordering deadlocks are not possible.
         try:
-            Conversation.all_tenants.select_for_update(nowait=True).filter(
-                id=conv.id, tenant_id=master.tenant_id
-            ).first()
+            locked_conv = (
+                Conversation.all_tenants.select_for_update(nowait=True)
+                .filter(id=conv.id, tenant_id=master.tenant_id)
+                .first()
+            )
         except DatabaseError as exc:
             logger.info(
                 "ai_drafts.send.lock_contention conv=%s master=%s draft=%s — "
@@ -944,16 +978,28 @@ def send_draft_as_master(
                 extra={"retry_after_seconds": 3},
             ) from exc
 
+        if locked_conv is None:
+            # Conversation was deleted between the outer
+            # _verify_master_involved check and the lock — mirrors the
+            # generate-path defence (line ~568). Without this guard the
+            # lock would silently no-op and we'd race into a partial
+            # state on a vanished conversation.
+            raise DraftActionError(
+                "not_found",
+                "conversation not found",
+                status=404,
+            )
+
         # Lock the draft row so a concurrent release-to-ai / regenerate
         # can't transition it under us between the status check and
         # the status update.
         locked = AiDraft.all_tenants.select_for_update().get(pk=draft.pk)
         _validate_draft_actionable(locked)
-        # Re-check staleness inside both locks — with the Conversation
-        # lock held above, a new customer Message INSERT on this
-        # conversation will block (the ingest path acquires the same
-        # row lock before writing). Re-validating here catches any
-        # write that landed between the outer check + lock acquisition.
+        # Re-check staleness INSIDE the transaction. This is the
+        # load-bearing defence — see lock-vs-recheck note above. A
+        # customer Message that landed between the outer check and
+        # this point is visible here because record_message does not
+        # take the Conversation lock; the re-check catches it.
         _validate_draft_fresh(locked, conv)
 
         msg = record_message(
@@ -1025,9 +1071,14 @@ def release_draft_to_ai(
       5. Validate freshness (Blocker #4) → else 409 ``draft_stale``.
       6. Atomically (Issue #551 — Conversation lock BEFORE AiDraft lock):
          * acquire Conversation row ``select_for_update(nowait=True)``
-           — 429 ``conversation_busy`` on contention
+           — 429 ``conversation_busy`` on contention; 404 ``not_found``
+           if the row vanished mid-flight
          * acquire AiDraft row ``select_for_update``
-         * re-validate ACTIVE + freshness inside the locks
+         * re-validate ACTIVE + freshness inside the transaction —
+           the staleness re-check (not the lock) is the load-bearing
+           defence against the customer-ingest race; see
+           :func:`send_draft_as_master` for the full lock-vs-recheck
+           commentary
          * create plain assistant Message (action_type='ai_draft_released',
            no master attribution metadata)
          * mark draft RELEASED_TO_AI + clear content (Blocker #5 Layer 1)
@@ -1037,6 +1088,8 @@ def release_draft_to_ai(
       :class:`DraftActionError`:
         * ``conversation_busy`` (429) — Issue #551 lock symmetry; same
           shape + frontend UX as in :func:`send_draft_as_master`.
+        * ``not_found`` (404) — Conversation vanished between the outer
+          involvement check and the lock acquisition.
     """
 
     conv = _verify_master_involved(master, conversation_id)
@@ -1057,13 +1110,18 @@ def release_draft_to_ai(
     with transaction.atomic():
         # Issue #551: Conversation row lock BEFORE the AiDraft lock —
         # same symmetry fix as :func:`send_draft_as_master`. See that
-        # function's commentary for the rationale. The staleness window
-        # is identical on the release path because both end in a draft
-        # status flip + Message INSERT.
+        # function's commentary for the full lock-vs-recheck rationale:
+        # this lock serialises peer generate / send / release operations;
+        # it does NOT block customer Message INSERTs (record_message is
+        # non-locking on Conversation), and the load-bearing defence
+        # against the customer-ingest race remains the staleness
+        # re-check inside this transaction.
         try:
-            Conversation.all_tenants.select_for_update(nowait=True).filter(
-                id=conv.id, tenant_id=master.tenant_id
-            ).first()
+            locked_conv = (
+                Conversation.all_tenants.select_for_update(nowait=True)
+                .filter(id=conv.id, tenant_id=master.tenant_id)
+                .first()
+            )
         except DatabaseError as exc:
             logger.info(
                 "ai_drafts.release.lock_contention conv=%s master=%s draft=%s — "
@@ -1079,8 +1137,20 @@ def release_draft_to_ai(
                 extra={"retry_after_seconds": 3},
             ) from exc
 
+        if locked_conv is None:
+            # Conversation deleted between outer involvement check and
+            # lock acquisition — mirrors send + generate handling.
+            raise DraftActionError(
+                "not_found",
+                "conversation not found",
+                status=404,
+            )
+
         locked = AiDraft.all_tenants.select_for_update().get(pk=draft.pk)
         _validate_draft_actionable(locked)
+        # Staleness re-check inside the transaction — load-bearing
+        # defence against the customer-ingest race (see send_draft_as_master
+        # commentary).
         _validate_draft_fresh(locked, conv)
 
         msg = record_message(
