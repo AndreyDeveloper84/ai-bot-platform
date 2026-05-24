@@ -88,6 +88,7 @@ from apps.audit.services import write_audit
 from apps.booking.models import BookingRequest, PendingBookingAction
 from apps.booking.services.attribution import (
     build_customer_attribution_metadata,
+    build_live_commercial_identity,
     compute_assist_score,
     compute_billable,
     get_reschedulable_statuses,
@@ -1892,21 +1893,13 @@ def execute_reschedule(
             # in that case skip the snapshot — the comparator's NULL-on-
             # either-side rule keeps the chain intact and preserves the
             # legacy chain (consistent with q12a-billing-founder-gate).
-            live_commercial_identity: dict | None = None
-            if booking.service is not None:
-                live_commercial_identity = {
-                    "service_id": str(booking.service.id),
-                    "service_name": booking.service.name,
-                    "sticker_price_amount": (
-                        str(booking.service.price_from)
-                        if booking.service.price_from is not None
-                        else None
-                    ),
-                    "currency": "RUB",
-                    "duration_minutes": (
-                        int(booking.service.duration_min) if booking.service.duration_min else None
-                    ),
-                }
+            # #618 follow-up: shape lives in
+            # ``attribution.build_live_commercial_identity``.
+            live_commercial_identity: dict | None = (
+                build_live_commercial_identity(booking.service)
+                if booking.service is not None
+                else None
+            )
 
             is_continuation, chain_break_reason, chain_root_id = compute_reschedule_continuation(
                 old=booking,
