@@ -82,6 +82,10 @@ const COPY = {
     other: (n: number) => `━━ ПРОЧЕЕ (${n}) ━━━━━━━━━━━`,
   },
   returning: "постоянный клиент",
+  // Per spec §M5 line 584-585: cards in the «ПРЕДЛОЖЕН ОТВЕТ» section
+  // surface a fixed preview hint (NOT the draft content peek). The user
+  // taps through to M6 to read the suggestion.
+  draftPreview: "Помощник предложил черновик — посмотрите",
   emptyActive: "Все ваши клиенты сейчас довольны. Спасибо за работу!",
   emptyAll: "Здесь будут диалоги с вашими клиентами.",
   emptyResolved: "Здесь будут решённые диалоги.",
@@ -589,6 +593,13 @@ function ConversationCard({
       ) : null}
       {isResolved && item.resolved_outcome ? (
         <div className="m-card__hint">→ {item.resolved_outcome}</div>
+      ) : item.section === "ai_drafted" ? (
+        // Per spec §M5 line 584-585: the «ПРЕДЛОЖЕН ОТВЕТ» card hides
+        // the customer-message excerpt behind a fixed hint, nudging the
+        // master to open M6 where the LLM-generated draft is shown in
+        // full. No content peek — that's deliberate (no «AI revealed
+        // its hand» surface on the inbox).
+        <div className="m-card__hint">{COPY.draftPreview}</div>
       ) : item.last_message_excerpt ? (
         <div className="m-card__excerpt">
           «{item.last_message_excerpt}»

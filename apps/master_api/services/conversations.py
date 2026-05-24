@@ -24,9 +24,11 @@ Spec quote (master-mobile §M5, lines 602-613 of
 
 * M5 frontend (layout, tabs, search bar) — separate PR.
 * M6 conversation detail backend — separate PR.
-* AI draft reply generation — separate PR. ``ai_drafted_reply_available``
-  is hard-False here; the ``ai_drafted`` section is therefore empty in
-  practice until that work lands.
+* AI draft reply generation — wired in #581 (this PR for the M5 surface):
+  ``ai_drafted_reply_available`` now reflects an ACTIVE :class:`AiDraft`
+  row for the conversation, and the ``ai_drafted`` section populates
+  accordingly. Generation / send / dismiss flow lives in
+  :mod:`apps.master_api.services.ai_drafts`.
 * Direct-master-complaint detection — heuristic too noisy for this
   PR; reason_chip is null for every conversation for now (so we
   never leak a «жалоба» on a master). Refined later.
@@ -52,11 +54,12 @@ The filter is implemented with a single
 ### Section classification (5 sections)
 
 * ``awaiting_master`` — last :class:`~apps.conversations.models.Message`
-  is from ``role='user'`` (customer) AND no AI draft pending. Master
-  needs to reply.
-* ``ai_drafted`` — AI prepared a draft reply. No backing field exists
-  yet, so this section is permanently empty until the AI-draft model
-  lands. Kept in the response for forward compatibility.
+  is from ``role='user'`` (customer) AND no ACTIVE :class:`AiDraft`
+  pending. Master needs to reply from scratch.
+* ``ai_drafted`` — last message is ``role='user'`` AND an ACTIVE
+  :class:`AiDraft` row exists for the conversation (AI prepared a
+  reply suggestion). Takes priority over ``awaiting_master`` per spec
+  §M5 line 580-587 («━━ ПРЕДЛОЖЕН ОТВЕТ (N) ━━━»).
 * ``ai_handling`` — last reply is from ``role='assistant'``. Bot is
   speaking; master doesn't need to act.
 * ``resolved`` — ``is_active=False`` OR ``outcome != ''``. The
@@ -106,7 +109,7 @@ from django.utils import timezone as dj_timezone
 
 from apps.booking.models import BookingRequest
 from apps.catalog.models import CatalogMaster
-from apps.conversations.models import Conversation, Message
+from apps.conversations.models import AiDraft, Conversation, Message
 
 logger = logging.getLogger(__name__)
 
@@ -412,19 +415,35 @@ def _is_returning(bot_user: Any, master: CatalogMaster) -> bool:
 # --- section classification --------------------------------------------
 
 
-def _section_for(conversation: Conversation, last_message: Message | None) -> Section:
+def _section_for(
+    conversation: Conversation,
+    last_message: Message | None,
+    *,
+    has_active_draft: bool = False,
+) -> Section:
     """Classify a conversation into one of the 5 master-inbox sections.
 
     Pure function — caller passes the pre-fetched last :class:`Message`
-    so this helper does no DB access. Spec §M5 categories:
+    and the «has active AI draft» boolean so this helper does no DB
+    access. Spec §M5 categories:
 
     * resolved      → is_active=False OR outcome non-empty
-    * awaiting_master → last message is role='user'
-    * ai_handling   → last message is role='assistant' (bot speaking)
-    * ai_drafted    → AI draft pending; no model field yet, so always
-                      False here (placeholder kept for forward-
-                      compatibility — refined when draft model lands)
-    * other         → catch-all (e.g. last message is role='tool')
+    * ai_drafted    → last message is role='user' AND
+                      ``has_active_draft`` is True (an
+                      :class:`~apps.conversations.models.AiDraft` with
+                      ``status=ACTIVE`` exists for the conversation).
+                      Takes priority over ``awaiting_master`` per spec
+                      §M5 line 580-587.
+    * awaiting_master → last message is role='user' AND no active draft.
+    * ai_handling   → last message is role='assistant' (bot speaking).
+                      Drafts on assistant-last conversations don't bump
+                      the section: «ПРЕДЛОЖЕН ОТВЕТ» means «master action
+                      pending», but if the assistant already replied
+                      the draft is conceptually obsolete (PR #540 transitions
+                      such drafts to a terminal status on the next
+                      autotrigger pass). We classify by message-state
+                      ground truth here and don't double-surface.
+    * other         → catch-all (e.g. last message is role='tool').
     """
 
     # Resolved is computed first — a closed conversation's last
@@ -437,8 +456,17 @@ def _section_for(conversation: Conversation, last_message: Message | None) -> Se
 
     role = last_message.role
     if role == Message.Role.USER:
+        # Active draft + customer-last → master should see «ПРЕДЛОЖЕН
+        # ОТВЕТ». No draft → plain «ЖДУТ ВАШЕГО ОТВЕТА».
+        if has_active_draft:
+            return "ai_drafted"
         return "awaiting_master"
     if role == Message.Role.ASSISTANT:
+        # Edge case: ACTIVE draft + assistant-last message can occur
+        # transiently (e.g. master sent an outbound between generation
+        # and PR #540's terminal-status sweep). Treat as ai_handling —
+        # the bot/master already spoke; «ПРЕДЛОЖЕН ОТВЕТ» would be
+        # double-classification.
         return "ai_handling"
     # tool / system messages end up here — bot internals, not a
     # customer-visible state.
@@ -453,6 +481,7 @@ def _redact_for_master(
     section: str,
     is_returning: bool,
     resolved_outcome: str | None,
+    has_active_draft: bool,
     now: datetime,
 ) -> ConversationItem:
     """Assemble the master-facing :class:`ConversationItem`.
@@ -492,8 +521,10 @@ def _redact_for_master(
         last_message_excerpt=body,
         last_message_at=last_msg_iso,
         sla_tier=tier,
-        # AI draft model not yet present; never True until that ships.
-        ai_drafted_reply_available=False,
+        # True iff an ACTIVE AiDraft row exists for this conversation
+        # in the master's tenant. Computed via SQL Exists annotation
+        # in :func:`list_master_conversations` — no per-row DB hit.
+        ai_drafted_reply_available=has_active_draft,
         # «Direct master complaint» detection is too noisy a heuristic
         # for this PR; we suppress reason chips entirely so we never
         # leak a «жалоба» on a master. Refined when the policy lands.
@@ -643,6 +674,19 @@ def list_master_conversations(
         bot_user_id=OuterRef("bot_user_id"),
     )
 
+    # «Active AI draft» predicate (#581): True iff at least one AiDraft
+    # row exists for this conversation with status=ACTIVE inside the
+    # master's tenant. Single SQL roundtrip via Exists subquery — no
+    # N+1 over the page. Tenant scoping is explicit (same pattern as
+    # the involves_master subquery above; the outer Conversation query
+    # filters on master.tenant_id, and we mirror that here so a foreign
+    # tenant's draft can never leak even if a UUID collision happened).
+    active_draft = AiDraft.all_tenants.filter(
+        tenant_id=master.tenant_id,
+        conversation_id=OuterRef("pk"),
+        status=AiDraft.Status.ACTIVE,
+    )
+
     qs = (
         Conversation.all_tenants.filter(
             tenant_id=master.tenant_id,
@@ -651,6 +695,7 @@ def list_master_conversations(
             bot_user__isnull=False,
         )
         .annotate(_involves=Exists(involves_master))
+        .annotate(_has_active_draft=Exists(active_draft))
         .filter(_involves=True)
         .select_related("bot_user")
     )
@@ -740,7 +785,12 @@ def list_master_conversations(
     for conv in candidates:
         last_msg = last_msgs_by_conv.get(conv.id)
         last_user_at = last_user_at_by_conv.get(conv.id)
-        section = _section_for(conv, last_msg)
+        # `_has_active_draft` is annotated by the SQL query above; we
+        # read it via getattr to keep `_section_for` callable in unit
+        # tests that pass plain Conversation instances without the
+        # annotation.
+        has_active_draft = bool(getattr(conv, "_has_active_draft", False))
+        section = _section_for(conv, last_msg, has_active_draft=has_active_draft)
         section_count[section] += 1
         if section == "resolved" and (
             conv.last_message_at is None or conv.last_message_at >= resolved_today_cutoff
@@ -767,6 +817,7 @@ def list_master_conversations(
             section=section,
             is_returning=conv.bot_user_id in returning_set,
             resolved_outcome=resolved_outcome,
+            has_active_draft=has_active_draft,
             now=now,
         )
         items.append(item)
