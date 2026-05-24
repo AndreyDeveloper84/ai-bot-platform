@@ -239,6 +239,34 @@ INTERNAL_CHAT_THREAD_ASSIGNED = "internal_chat.thread_assigned"
 INTERNAL_CHAT_ESCALATED_TO_FOUNDER = "internal_chat.escalated_to_founder"
 INTERNAL_CHAT_MARKED_READ = "internal_chat.marked_read"
 
+# --- Payment fan-out (#443 — payment.* consumer family) -------------------
+# Internal snake_case events emitted by the apps/eventbus/consumers/payment
+# handlers. Distinct from the cross-service ``payment.*`` dot.notation
+# events in apps/eventbus/ — these are in-process analytics + skill
+# triggers on the apps/events/ bus.
+#
+# Payload contracts:
+#   loyalty_bonus_eligible (after payment.captured):
+#     {user_id, tenant_id, payment_id, appointment_id, amount, currency}
+#     -> downstream loyalty subscriber (Epic #289) computes + writes
+#     the ledger row.
+#
+#   loyalty_refund_reverse (after payment.refunded):
+#     {user_id, tenant_id, payment_id, appointment_id, refund_amount,
+#      currency, reason}
+#     -> loyalty subscriber reverses the accrual tied to the original
+#     capture.
+#
+#   payment_failed_skill_triggered (after Nth payment.failed, threshold
+#   via settings.PAYMENT_FAILED_HANDOFF_THRESHOLD):
+#     {user_id, tenant_id, payment_id, appointment_id, failure_code,
+#      consecutive_failures}
+#     -> payment_failed skill (separate PR, deferred FOLLOW_UP)
+#     subscribes + prompts user with retry / handoff buttons.
+LOYALTY_BONUS_ELIGIBLE = "loyalty_bonus_eligible"
+LOYALTY_REFUND_REVERSE = "loyalty_refund_reverse"
+PAYMENT_FAILED_SKILL_TRIGGERED = "payment_failed_skill_triggered"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -292,6 +320,9 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_AI_DRAFT_AUTO_GENERATED,
         MASTER_DRAFT_SENT_AS_SELF,
         MASTER_DRAFT_RELEASED_TO_AI,
+        LOYALTY_BONUS_ELIGIBLE,
+        LOYALTY_REFUND_REVERSE,
+        PAYMENT_FAILED_SKILL_TRIGGERED,
     }
 )
 

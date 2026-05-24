@@ -40,6 +40,11 @@ class EventBusConfig(AppConfig):
 
         register_booking_handlers()
 
+        # #443 — Register payment.* consumer family handlers.
+        from apps.eventbus.consumers.payment import register_payment_handlers
+
+        register_payment_handlers()
+
         # Hotfix C (retro review #3): the subscriber registry is cached
         # after first resolution per :func:`_subscribers`. Wire the
         # Django ``setting_changed`` signal so:
