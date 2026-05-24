@@ -851,11 +851,24 @@ def send_draft_as_master(
       4. Validate draft.status == ACTIVE → else 400 ``draft_already_acted``.
       5. Validate freshness (Blocker #4) → else 409 ``draft_stale``.
       6. Validate override_content length (≤ :data:`MAX_OVERRIDE_LENGTH`).
-      7. Atomically:
+      7. Atomically (Issue #551 — Conversation lock BEFORE AiDraft lock):
+         * acquire Conversation row ``select_for_update(nowait=True)``
+           — 429 ``conversation_busy`` on contention
+         * acquire AiDraft row ``select_for_update`` — blocks briefly
+           on a peer send/release for the same draft
+         * re-validate ACTIVE + freshness inside the locks
          * create assistant Message with attribution metadata
            ``{actor_type: master, composed_by: <master_id>}``
          * mark draft SENT_AS_MASTER + clear content (Blocker #5 Layer 1)
          * audit + emit ``master.draft_sent_as_self``
+
+    Raises:
+      :class:`DraftActionError`:
+        * ``conversation_busy`` (429) — Issue #551: another concurrent
+          generate / send / release holds the Conversation row lock.
+          Carries ``extra={"retry_after_seconds": 3}`` so the view sets
+          ``Retry-After: 3``. Slug distinct from ``generate_in_flight``
+          because the holder may be ANY of the three operations.
     """
 
     conv = _verify_master_involved(master, conversation_id)
@@ -892,13 +905,55 @@ def send_draft_as_master(
         body = draft.content
 
     with transaction.atomic():
+        # Issue #551: Conversation row lock BEFORE the AiDraft lock —
+        # mirrors :func:`generate_draft_for_conversation`'s post-#540 +
+        # #550 pattern. The AiDraft-only lock left a microsecond window
+        # where a new customer Message (different table from AiDraft)
+        # could INSERT between the staleness check + the draft status
+        # flip, letting master send a reply stale to the just-arrived
+        # message. Locking the Conversation row first closes the window:
+        # generate / send / release / customer Message INSERT (via the
+        # ingest path's own Conversation lock) all serialise on the
+        # same row.
+        #
+        # Lock ordering Conversation → AiDraft matches generate's
+        # ordering (generate takes Conversation only; AiDraft is touched
+        # inside that lock) — no inverted-ordering deadlock possible.
+        #
+        # NOWAIT semantics + DraftActionError("conversation_busy") map
+        # to the same 429 + Retry-After:3 UX as #550's
+        # ``generate_in_flight``. The slug is distinct because the
+        # semantic is broader — the holder could be generate OR another
+        # send/release on the same conversation.
+        try:
+            Conversation.all_tenants.select_for_update(nowait=True).filter(
+                id=conv.id, tenant_id=master.tenant_id
+            ).first()
+        except DatabaseError as exc:
+            logger.info(
+                "ai_drafts.send.lock_contention conv=%s master=%s draft=%s — "
+                "conversation lock held; returning 429 conversation_busy",
+                conv.id,
+                master.id,
+                draft.id,
+            )
+            raise DraftActionError(
+                "conversation_busy",
+                "Диалог сейчас обновляется. Попробуйте через несколько секунд.",
+                status=429,
+                extra={"retry_after_seconds": 3},
+            ) from exc
+
         # Lock the draft row so a concurrent release-to-ai / regenerate
         # can't transition it under us between the status check and
         # the status update.
         locked = AiDraft.all_tenants.select_for_update().get(pk=draft.pk)
         _validate_draft_actionable(locked)
-        # Re-check staleness inside the lock — a customer message could
-        # have arrived between the outer check and the lock acquisition.
+        # Re-check staleness inside both locks — with the Conversation
+        # lock held above, a new customer Message INSERT on this
+        # conversation will block (the ingest path acquires the same
+        # row lock before writing). Re-validating here catches any
+        # write that landed between the outer check + lock acquisition.
         _validate_draft_fresh(locked, conv)
 
         msg = record_message(
@@ -968,11 +1023,20 @@ def release_draft_to_ai(
       3. Resolve draft → 404 if cross-master / cross-tenant.
       4. Validate ACTIVE → else 400 ``draft_already_acted``.
       5. Validate freshness (Blocker #4) → else 409 ``draft_stale``.
-      6. Atomically:
+      6. Atomically (Issue #551 — Conversation lock BEFORE AiDraft lock):
+         * acquire Conversation row ``select_for_update(nowait=True)``
+           — 429 ``conversation_busy`` on contention
+         * acquire AiDraft row ``select_for_update``
+         * re-validate ACTIVE + freshness inside the locks
          * create plain assistant Message (action_type='ai_draft_released',
            no master attribution metadata)
          * mark draft RELEASED_TO_AI + clear content (Blocker #5 Layer 1)
          * audit + emit
+
+    Raises:
+      :class:`DraftActionError`:
+        * ``conversation_busy`` (429) — Issue #551 lock symmetry; same
+          shape + frontend UX as in :func:`send_draft_as_master`.
     """
 
     conv = _verify_master_involved(master, conversation_id)
@@ -991,6 +1055,30 @@ def release_draft_to_ai(
     body = draft.content
 
     with transaction.atomic():
+        # Issue #551: Conversation row lock BEFORE the AiDraft lock —
+        # same symmetry fix as :func:`send_draft_as_master`. See that
+        # function's commentary for the rationale. The staleness window
+        # is identical on the release path because both end in a draft
+        # status flip + Message INSERT.
+        try:
+            Conversation.all_tenants.select_for_update(nowait=True).filter(
+                id=conv.id, tenant_id=master.tenant_id
+            ).first()
+        except DatabaseError as exc:
+            logger.info(
+                "ai_drafts.release.lock_contention conv=%s master=%s draft=%s — "
+                "conversation lock held; returning 429 conversation_busy",
+                conv.id,
+                master.id,
+                draft.id,
+            )
+            raise DraftActionError(
+                "conversation_busy",
+                "Диалог сейчас обновляется. Попробуйте через несколько секунд.",
+                status=429,
+                extra={"retry_after_seconds": 3},
+            ) from exc
+
         locked = AiDraft.all_tenants.select_for_update().get(pk=draft.pk)
         _validate_draft_actionable(locked)
         _validate_draft_fresh(locked, conv)
