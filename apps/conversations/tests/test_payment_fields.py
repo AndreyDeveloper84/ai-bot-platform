@@ -178,3 +178,84 @@ class TestPaymentFields:
             assert field_attrs.get("db_index", False) is False, name
             assert field_attrs.get("null") is True, name
             assert field_attrs.get("blank") is True, name
+
+
+class TestPaymentEventIdempotency:
+    """Schema-level sanity for ``last_payment_event_id`` — the handler-level
+    idempotency tail added for Gamma's payment consumer (PR #443). Mirrors
+    the ``RemoteBookingProxy.last_synced_event_id`` pattern from #442.
+
+    NB: NOT the primary idempotency guard — that's IngestDedupe at the
+    dispatcher layer. This field is forensic trace + short-circuit on
+    IngestDedupe-disabled replays (testing tooling, operator manual re-fire,
+    dispatcher refactor regressions).
+    """
+
+    def test_last_payment_event_id_default_empty_string(
+        self, tenant_pay: Tenant, bot_user_pay: BotUser, settings
+    ) -> None:
+        """CharField defaults to empty string (NOT None) — blank=True default=''."""
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        conv = _make_conversation(tenant_pay, bot_user_pay)
+        assert conv.last_payment_event_id == ""
+
+    def test_last_payment_event_id_accepts_ulid_format(
+        self, tenant_pay: Tenant, bot_user_pay: BotUser, settings
+    ) -> None:
+        """26-char ULID-shaped string round-trips through save/refetch."""
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        conv = _make_conversation(tenant_pay, bot_user_pay)
+
+        ulid = "01HXYZABCDEFGHJKMNPQRSTVWXYZ"[:26]  # pragma: allowlist secret
+        assert len(ulid) == 26
+
+        conv.last_payment_event_id = ulid
+        conv.save(update_fields=["last_payment_event_id"])
+        conv.refresh_from_db()
+        assert conv.last_payment_event_id == ulid
+
+    def test_last_payment_event_id_max_length_26(
+        self, tenant_pay: Tenant, bot_user_pay: BotUser, settings
+    ) -> None:
+        """Boundary: 26 chars OK, 27 chars fails ``full_clean`` validation."""
+
+        from django.core.exceptions import ValidationError
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        conv = _make_conversation(tenant_pay, bot_user_pay)
+
+        with tenant_scope(tenant_pay):
+            # 26 chars — exactly at the limit, must round-trip.
+            boundary = "a" * 26
+            conv.last_payment_event_id = boundary
+            conv.full_clean()
+            conv.save(update_fields=["last_payment_event_id"])
+            conv.refresh_from_db()
+            assert conv.last_payment_event_id == boundary
+            assert len(conv.last_payment_event_id) == 26
+
+            # 27 chars — over the limit, full_clean must raise.
+            conv.last_payment_event_id = "a" * 27
+            with pytest.raises(ValidationError):
+                conv.full_clean()
+
+        # Surface the contract on the Field.
+        field = Conversation._meta.get_field("last_payment_event_id")
+        assert isinstance(field, Field)
+        field_attrs = field.deconstruct()[3]
+        assert field_attrs.get("max_length") == 26
+        assert field_attrs.get("blank") is True
+        assert field_attrs.get("default") == ""
+
+    def test_last_payment_event_id_no_db_index(self) -> None:
+        """Equality check against known event_id only — no range scan, no
+        index. Documents the «no index» design decision (Gamma confirmed
+        adding one would be premature).
+        """
+
+        field = Conversation._meta.get_field("last_payment_event_id")
+        assert isinstance(field, Field)
+        field_attrs = field.deconstruct()[3]
+        assert field_attrs.get("db_index", False) is False
