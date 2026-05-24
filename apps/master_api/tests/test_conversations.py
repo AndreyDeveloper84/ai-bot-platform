@@ -4,8 +4,8 @@ Covers:
 * Auth — customer / archived / accepted master.
 * «Involves master» — booking-based inclusion + cross-master /
   cross-tenant isolation.
-* Section classification (awaiting_master / ai_handling / resolved /
-  other; ai_drafted is permanently empty for now).
+* Section classification (awaiting_master / ai_drafted / ai_handling /
+  resolved / other). ai_drafted is wired to AiDraft (#581).
 * Filter (active / all / resolved with 30-day cutoff).
 * Search — first-name only; no phone / email / full-last-name leak.
 * PII gating — JSON contains no phone / last_name / email / LTV keys.
@@ -25,9 +25,12 @@ from zoneinfo import ZoneInfo
 from django.test import Client
 from django.urls import reverse
 
+from django.test.utils import CaptureQueriesContext
+from django.db import connection
+
 from apps.booking.models import BookingRequest
 from apps.catalog.models import CatalogMaster
-from apps.conversations.models import Conversation, Message
+from apps.conversations.models import AiDraft, Conversation, Message
 from apps.identity.models import BotUser
 from apps.master_api.services import conversations as conv_svc
 from apps.master_api.tests.conftest import init_data_header, make_master
@@ -519,7 +522,8 @@ class TestFilter:
         self._seed(tenant, accepted_master, now)
         result = conv_svc.list_master_conversations(accepted_master, now=now, filter="active")
         sections = {i.section for i in result.items}
-        # ai_drafted is permanently empty for now; active = awaiting_master only.
+        # «Active» keeps awaiting_master + ai_drafted (both need attention);
+        # this seed has no draft rows so only awaiting_master appears.
         assert sections == {"awaiting_master"}
 
     def test_filter_all_returns_everything(
@@ -1037,6 +1041,435 @@ class TestSectionCounts:
         assert result.section_counts.ai_drafted == 0
 
 
+# --- AI-drafted section (#581) -------------------------------------------
+
+
+def _seed_active_draft(
+    *,
+    tenant: Tenant,
+    master: CatalogMaster,
+    conversation: Conversation,
+    content: str = "Помощник: спасибо!",
+    status: str = AiDraft.Status.ACTIVE,
+) -> AiDraft:
+    """Seed an :class:`AiDraft` for tests in this module.
+
+    Mirrors the helper in :mod:`apps.master_api.tests.test_ai_drafts`.
+    """
+
+    return AiDraft.all_tenants.create(
+        tenant=tenant,
+        conversation=conversation,
+        master=master,
+        content=content,
+        status=status,
+        llm_provider="openai",
+        llm_model="gpt-4o-mini",
+    )
+
+
+class TestAiDraftedSection:
+    """Verify M5 wires «ПРЕДЛОЖЕН ОТВЕТ (N)» counter to AiDraft (#581)."""
+
+    def test_conversation_with_active_draft_classifies_as_ai_drafted(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+        client = _make_bot_user(tenant=tenant, name="Ксения Л.", channel_user_id="d1")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=client,
+            visit_local=datetime(2026, 5, 22, 12, 0, tzinfo=MSK),
+        )
+        conv = _make_conversation(tenant=tenant, bot_user=client, last_message_at=now)
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="хочу записаться",
+            created_at=now - timedelta(minutes=5),
+        )
+        _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+        result = conv_svc.list_master_conversations(accepted_master, now=now, filter="all")
+        assert len(result.items) == 1
+        item = result.items[0]
+        assert item.section == "ai_drafted"
+        assert item.ai_drafted_reply_available is True
+
+    def test_conversation_with_terminal_draft_does_not_appear_ai_drafted(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        """Terminal-status drafts (REPLACED/SENT/RELEASED/DISMISSED) must not
+        bump the section. The partial unique constraint also guarantees these
+        rows can coexist with a future ACTIVE row — here we test the
+        no-active-row case."""
+
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+        terminal_statuses = [
+            AiDraft.Status.REPLACED,
+            AiDraft.Status.SENT_AS_MASTER,
+            AiDraft.Status.RELEASED_TO_AI,
+            AiDraft.Status.DISMISSED,
+        ]
+        for idx, status in enumerate(terminal_statuses):
+            client = _make_bot_user(
+                tenant=tenant, name=f"Терм {idx}", channel_user_id=f"term-{idx}"
+            )
+            _make_booking(
+                tenant=tenant,
+                master=accepted_master,
+                bot_user=client,
+                visit_local=datetime(2026, 5, 22, 12 + idx, 0, tzinfo=MSK),
+            )
+            conv = _make_conversation(
+                tenant=tenant, bot_user=client, last_message_at=now - timedelta(seconds=idx)
+            )
+            _add_message(
+                tenant=tenant,
+                conversation=conv,
+                role=Message.Role.USER,
+                content="?",
+                created_at=now - timedelta(minutes=5 + idx),
+            )
+            _seed_active_draft(
+                tenant=tenant,
+                master=accepted_master,
+                conversation=conv,
+                status=status,
+            )
+        result = conv_svc.list_master_conversations(accepted_master, now=now, filter="all")
+        assert len(result.items) == len(terminal_statuses)
+        for item in result.items:
+            assert item.section == "awaiting_master", item
+            assert item.ai_drafted_reply_available is False, item
+
+    def test_conversation_with_no_drafts_classifies_as_awaiting_master(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        """Baseline: no AiDraft rows at all → classic awaiting_master path."""
+
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+        client = _make_bot_user(tenant=tenant, name="Базовый Б.", channel_user_id="b1")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=client,
+            visit_local=datetime(2026, 5, 22, 12, 0, tzinfo=MSK),
+        )
+        conv = _make_conversation(tenant=tenant, bot_user=client, last_message_at=now)
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="?",
+            created_at=now - timedelta(minutes=5),
+        )
+        result = conv_svc.list_master_conversations(accepted_master, now=now, filter="all")
+        assert len(result.items) == 1
+        assert result.items[0].section == "awaiting_master"
+        assert result.items[0].ai_drafted_reply_available is False
+
+    def test_active_draft_with_assistant_last_message_classifies_ai_handling(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        """Edge: ACTIVE draft + assistant-last message → ai_handling, NOT
+        ai_drafted. Per service docstring: the bot/master already replied,
+        so the draft is conceptually obsolete (PR #540 transitions such
+        drafts on the next autotrigger sweep). We classify by ground truth."""
+
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+        client = _make_bot_user(tenant=tenant, name="Эдж Э.", channel_user_id="edge-1")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=client,
+            visit_local=datetime(2026, 5, 22, 12, 0, tzinfo=MSK),
+        )
+        conv = _make_conversation(tenant=tenant, bot_user=client, last_message_at=now)
+        # Customer asked, then assistant replied — last message is assistant.
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="?",
+            created_at=now - timedelta(minutes=15),
+        )
+        _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.ASSISTANT,
+            content="ответ",
+            created_at=now - timedelta(minutes=5),
+        )
+        # Stale ACTIVE draft still lingering.
+        _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+        result = conv_svc.list_master_conversations(accepted_master, now=now, filter="all")
+        assert len(result.items) == 1
+        item = result.items[0]
+        assert item.section == "ai_handling"
+        # The boolean still reports the underlying truth — only section
+        # classification suppresses the double-classification.
+        assert item.ai_drafted_reply_available is True
+
+    def test_section_counts_ai_drafted_increments(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        """Mixed list: 2 ai_drafted + 1 awaiting + 1 ai_handling →
+        section_counts.ai_drafted == 2."""
+
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+
+        def _seed(idx: int, role: str, has_draft: bool) -> None:
+            client = _make_bot_user(tenant=tenant, name=f"M {idx}", channel_user_id=f"mix-{idx}")
+            _make_booking(
+                tenant=tenant,
+                master=accepted_master,
+                bot_user=client,
+                visit_local=datetime(2026, 5, 22, 12, idx * 5, tzinfo=MSK),
+            )
+            conv = _make_conversation(
+                tenant=tenant, bot_user=client, last_message_at=now - timedelta(seconds=idx)
+            )
+            if role == Message.Role.ASSISTANT:
+                _add_message(
+                    tenant=tenant,
+                    conversation=conv,
+                    role=Message.Role.USER,
+                    content="?",
+                    created_at=now - timedelta(minutes=20 + idx),
+                )
+            _add_message(
+                tenant=tenant,
+                conversation=conv,
+                role=role,
+                content="x",
+                created_at=now - timedelta(minutes=10 + idx),
+            )
+            if has_draft:
+                _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        _seed(0, Message.Role.USER, has_draft=True)
+        _seed(1, Message.Role.USER, has_draft=True)
+        _seed(2, Message.Role.USER, has_draft=False)
+        _seed(3, Message.Role.ASSISTANT, has_draft=False)
+        result = conv_svc.list_master_conversations(accepted_master, now=now, filter="all")
+        assert result.section_counts.ai_drafted == 2
+        assert result.section_counts.awaiting_master == 1
+        assert result.section_counts.ai_handling == 1
+
+    def test_cross_tenant_isolation_ai_drafted(
+        self,
+        tenant: Tenant,
+        other_tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Foreign-tenant AiDraft must NOT leak into master A's view even
+        if a same-shape conversation exists. We seed a draft in tenant B
+        for an unrelated conversation, plus a clean awaiting conversation
+        for master A, and assert master A's view classifies as
+        awaiting_master with ai_drafted_reply_available=False."""
+
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+        # Master A's own awaiting conversation.
+        client_a = _make_bot_user(tenant=tenant, name="A A", channel_user_id="ten-a")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=client_a,
+            visit_local=datetime(2026, 5, 22, 12, 0, tzinfo=MSK),
+        )
+        conv_a = _make_conversation(tenant=tenant, bot_user=client_a, last_message_at=now)
+        _add_message(
+            tenant=tenant,
+            conversation=conv_a,
+            role=Message.Role.USER,
+            content="?",
+            created_at=now - timedelta(minutes=5),
+        )
+        # Tenant B: build an unrelated draft on a separate conversation +
+        # master. Wire the FK to a tenant-B master/conversation so the
+        # data is internally consistent. This row's tenant_id differs
+        # from accepted_master.tenant_id; the SQL Exists must reject it.
+        other_client = BotUser.all_tenants.create(
+            tenant=other_tenant,
+            channel="max",
+            channel_user_id="other-cli",
+            display_name="Чужой",
+            client_name="Чужой Клиент",
+            chat_id="other-cli",
+        )
+        other_master = make_master(
+            other_tenant,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            invite_token=None,
+            expires_in_days=None,
+            linked_bot_user=other_client,
+            name="Чужой Мастер",
+        )
+        other_conv = Conversation.all_tenants.create(
+            tenant=other_tenant, bot_user=other_client, is_active=True
+        )
+        _seed_active_draft(tenant=other_tenant, master=other_master, conversation=other_conv)
+
+        result = conv_svc.list_master_conversations(accepted_master, now=now, filter="all")
+        # Only master A's own conversation; classified as awaiting_master.
+        assert len(result.items) == 1
+        item = result.items[0]
+        assert item.conversation_id == str(conv_a.id)
+        assert item.section == "awaiting_master"
+        assert item.ai_drafted_reply_available is False
+        assert result.section_counts.ai_drafted == 0
+
+    def test_n_plus_one_query_count_bounded(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        """Listing 20 conversations each with an ACTIVE draft must NOT
+        scale SQL query count linearly. The AiDraft predicate is wired
+        as a single Exists annotation; the page must fit in a constant
+        number of queries (≤ ~10 regardless of N)."""
+
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+        for i in range(20):
+            client = _make_bot_user(tenant=tenant, name=f"N {i}", channel_user_id=f"n-{i}")
+            # Stagger visit times so the (master_id, visit_at) unique
+            # constraint doesn't trip — booking dates are irrelevant to
+            # the query-count assertion.
+            _make_booking(
+                tenant=tenant,
+                master=accepted_master,
+                bot_user=client,
+                visit_local=datetime(2026, 5, 22, 8, 0, tzinfo=MSK) + timedelta(minutes=i * 15),
+            )
+            conv = _make_conversation(
+                tenant=tenant, bot_user=client, last_message_at=now - timedelta(seconds=i)
+            )
+            _add_message(
+                tenant=tenant,
+                conversation=conv,
+                role=Message.Role.USER,
+                content="?",
+                created_at=now - timedelta(minutes=5 + i),
+            )
+            _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        # Warm any one-shot bootstrap queries (auth-style preflights).
+        conv_svc.list_master_conversations(accepted_master, now=now, filter="all", limit=50)
+
+        with CaptureQueriesContext(connection) as ctx:
+            result = conv_svc.list_master_conversations(
+                accepted_master, now=now, filter="all", limit=50
+            )
+        # All 20 should be classified ai_drafted.
+        ai_drafted_items = [i for i in result.items if i.section == "ai_drafted"]
+        assert len(ai_drafted_items) == 20
+        # Bound: the service issues a fixed handful of queries regardless
+        # of N — conversation list, last-message-overall, last-user-
+        # message, returning-customer aggregate, plus annotation. A
+        # generous ceiling of 10 catches a real N+1 regression (which
+        # would push the count past 20).
+        assert len(ctx.captured_queries) <= 10, (
+            f"expected ≤10 queries, got {len(ctx.captured_queries)}\n"
+            + "\n".join(q["sql"] for q in ctx.captured_queries)
+        )
+
+    def test_section_sort_order_ai_drafted_between_awaiting_and_ai_handling(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        """With one of each section visible, output order must be
+        awaiting_master → ai_drafted → ai_handling → resolved."""
+
+        now = _utc(datetime(2026, 5, 21, 14, 0, tzinfo=MSK))
+
+        # Resolved (recent).
+        cR = _make_bot_user(tenant=tenant, name="Резолв", channel_user_id="ord-r")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=cR,
+            visit_local=datetime(2026, 5, 20, 12, 0, tzinfo=MSK),
+        )
+        convR = _make_conversation(
+            tenant=tenant,
+            bot_user=cR,
+            last_message_at=now - timedelta(minutes=5),
+            is_active=False,
+        )
+        _add_message(
+            tenant=tenant,
+            conversation=convR,
+            role=Message.Role.ASSISTANT,
+            content="закрыто",
+            created_at=now - timedelta(minutes=5),
+        )
+        # AI handling.
+        cH = _make_bot_user(tenant=tenant, name="Хендл", channel_user_id="ord-h")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=cH,
+            visit_local=datetime(2026, 5, 22, 12, 0, tzinfo=MSK),
+        )
+        convH = _make_conversation(
+            tenant=tenant, bot_user=cH, last_message_at=now - timedelta(minutes=8)
+        )
+        _add_message(
+            tenant=tenant,
+            conversation=convH,
+            role=Message.Role.USER,
+            content="q",
+            created_at=now - timedelta(minutes=15),
+        )
+        _add_message(
+            tenant=tenant,
+            conversation=convH,
+            role=Message.Role.ASSISTANT,
+            content="a",
+            created_at=now - timedelta(minutes=8),
+        )
+        # Awaiting.
+        cA = _make_bot_user(tenant=tenant, name="Авейт", channel_user_id="ord-a")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=cA,
+            visit_local=datetime(2026, 5, 22, 13, 0, tzinfo=MSK),
+        )
+        convA = _make_conversation(
+            tenant=tenant, bot_user=cA, last_message_at=now - timedelta(minutes=20)
+        )
+        _add_message(
+            tenant=tenant,
+            conversation=convA,
+            role=Message.Role.USER,
+            content="?",
+            created_at=now - timedelta(minutes=20),
+        )
+        # AI drafted (between awaiting and ai_handling per _SECTION_ORDER).
+        cD = _make_bot_user(tenant=tenant, name="Драфт", channel_user_id="ord-d")
+        _make_booking(
+            tenant=tenant,
+            master=accepted_master,
+            bot_user=cD,
+            visit_local=datetime(2026, 5, 22, 14, 0, tzinfo=MSK),
+        )
+        convD = _make_conversation(
+            tenant=tenant, bot_user=cD, last_message_at=now - timedelta(minutes=10)
+        )
+        _add_message(
+            tenant=tenant,
+            conversation=convD,
+            role=Message.Role.USER,
+            content="?",
+            created_at=now - timedelta(minutes=10),
+        )
+        _seed_active_draft(tenant=tenant, master=accepted_master, conversation=convD)
+
+        result = conv_svc.list_master_conversations(accepted_master, now=now, filter="all")
+        sections = [i.section for i in result.items]
+        assert sections == ["awaiting_master", "ai_drafted", "ai_handling", "resolved"]
+
+
 # --- helpers --------------------------------------------------------------
 
 
@@ -1076,6 +1509,16 @@ class TestServiceHelpers:
             content="tool",
         )
         assert conv_svc._section_for(conv, msg3) == "other"
+        # ai_drafted — customer-last + has_active_draft=True (#581).
+        msg_user = _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="q again",
+        )
+        assert conv_svc._section_for(conv, msg_user, has_active_draft=True) == "ai_drafted"
+        # Plain awaiting_master when has_active_draft is omitted (default).
+        assert conv_svc._section_for(conv, msg_user) == "awaiting_master"
 
     def test_is_returning_helper(self, tenant: Tenant, accepted_master: CatalogMaster) -> None:
         customer = _make_bot_user(tenant=tenant)
