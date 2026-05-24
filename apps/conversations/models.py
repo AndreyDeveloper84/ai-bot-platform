@@ -182,6 +182,59 @@ class Conversation(models.Model):
             "grounding to anchor «когда вы у нас были последний раз»."
         ),
     )
+    # Payment event grounding fields. Populated by Gamma's payment consumer
+    # from Ayla canonical payment.* events per event-contract.md §3.5-§3.8.
+    # All nullable — pre-existing rows stay NULL until first payment event.
+    last_payment_captured_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "When the customer's most recent successful payment "
+            "was captured (Ayla canonical payment.captured event). "
+            "Used for AI context grounding."
+        ),
+    )
+    last_payment_failed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the customer's most recent payment attempt failed.",
+    )
+    last_payment_failure_code = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text=(
+            "Enum code for last failure reason. Values: "
+            "'insufficient_funds' | 'card_expired' | 'card_declined' "
+            "| 'three_d_secure_failed' | 'other'. "
+            "CRITICAL: enum-only — YooKassa error messages may "
+            "contain PII (card numbers). Free-text reasons must be "
+            "mapped to enum in payment consumer."
+        ),
+    )
+    last_payment_refunded_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the customer's most recent payment was refunded.",
+    )
+    pending_payment_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Ayla canonical payment_id for currently-pending payment "
+            "(authorized but not yet captured/failed). Reset to NULL "
+            "on captured/failed/refunded."
+        ),
+    )
+    consecutive_payment_failures = models.PositiveSmallIntegerField(
+        default=0,
+        help_text=(
+            "Counter incremented on payment.failed, reset to 0 on "
+            "payment.captured. Used for human handoff threshold "
+            "(PAYMENT_FAILED_HANDOFF_THRESHOLD env var)."
+        ),
+    )
     # Master M6 / PR M6.1 — conversation ownership tier per
     # docs/design/policies/conversation-ownership-policy.md §4.
     tier = models.CharField(
