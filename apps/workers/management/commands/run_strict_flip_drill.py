@@ -224,14 +224,16 @@ class Command(BaseCommand):
         from apps.ingress.streams import _client
 
         redis = _client()
-        lock_acquired = _acquire_drill_lock(redis, ttl_seconds=opts.duration + 120)
-        if not lock_acquired:
-            holder_pid = _drill_lock_holder(redis)
+        lock_value = _acquire_drill_lock(redis, ttl_seconds=opts.duration + 120)
+        if lock_value is None:
+            holder = _drill_lock_holder(redis)
             raise CommandError(
-                f"Drill уже запущен (PID {holder_pid!r}). Подожди завершения "
+                f"Drill уже запущен (держит {holder!r}). Подожди завершения "
                 f"(~{opts.duration + 120}s макс. — lock TTL) ИЛИ если ты "
                 f"уверен что предыдущий запуск умер: "
-                f"`redis-cli DEL {_DRILL_LOCK_KEY}`."
+                f"`redis-cli DEL {_DRILL_LOCK_KEY}`. "
+                f"holder формат — `hostname:pid`; ssh на этот host и проверь "
+                "`ps -p <pid>`."
             )
 
         result = _DrillResult()
@@ -280,7 +282,10 @@ class Command(BaseCommand):
             # #593: release lock ВСЕГДА — даже на exception в drill.
             # Без finally-блока crash в main фазе оставит stale lock на
             # TTL секунд, блокируя оператора от retry.
-            _release_drill_lock(redis)
+            # #598: передаём expected_value для CAS — Lua скрипт DEL-ит
+            # только если значение всё ещё наше (не другого процесса,
+            # который acquired-ил после нашего TTL expiry).
+            _release_drill_lock(redis, lock_value)
 
         self._emit_result(opts, result)
         if result.exit_code:
@@ -523,44 +528,97 @@ def _audit_count(table: str, handler_name: str) -> int:
 _DRILL_LOCK_KEY = "strict_flip_drill:lock"
 
 
-def _acquire_drill_lock(redis: Any, *, ttl_seconds: int) -> bool:
+# #598 Item 1 (Lua-CAS): atomic compare-and-delete на release.
+#
+# До этого фикса ``_release_drill_lock`` безусловно DEL-ил ключ. Race-
+# сценарий (vector 1 из self-adversarial pass на PR #599):
+#   1. Процесс A запустил drill, TTL=420s.
+#   2. Drill A завис на 421s, lock auto-expired.
+#   3. Процесс B стартует, acquires lock (свежий).
+#   4. Drill A finally-блок просыпается, DELETE-ит → удаляет B's lock.
+#   5. Процесс C может теперь acquire параллельно с B → флоды складываются.
+#
+# Lua-CAS: GET → compare expected value → DEL только при match. Атомарно
+# на server-side. Если value уже не наш (TTL expired + другой процесс
+# acquired) — DEL skipped, нет collateral damage.
+_RELEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+else
+    return 0
+end
+"""
+
+# Cached Lua-script callable (lazy register). Аналогично ceilings.py
+# pattern — register_script один раз на процесс, exec через EVALSHA.
+_release_script: object | None = None
+
+
+def _get_release_script(redis_client: object) -> object | None:
+    """Возвращает Lua-callable для CAS release. Lazy register на первом вызове.
+
+    Если client не имеет ``register_script`` (test stubs без полного
+    surface-а) — возвращает None, caller fall-back на безусловный DEL
+    (старое поведение, acceptable для тестов).
+    """
+    global _release_script
+    if _release_script is not None:
+        return _release_script
+    register = getattr(redis_client, "register_script", None)
+    if register is None:
+        return None
+    _release_script = register(_RELEASE_LUA)
+    return _release_script
+
+
+def _build_lock_value() -> str:
+    """#598 Item 2: lock value = ``<hostname>:<pid>``.
+
+    PID локален к host. Если оператор A запустил drill на ``staging-1``,
+    оператор B на ``staging-2`` увидит «занято PID 12345» и
+    ``ps -p 12345`` на staging-2 покажет неправильный (или
+    несуществующий) процесс. Hostname prefix снимает ambiguity.
+    """
+    import socket
+
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _acquire_drill_lock(redis: Any, *, ttl_seconds: int) -> str | None:
     """SETNX-style lock acquire через redis.set(nx=True, ex=ttl).
 
-    redis-py ``set(key, value, nx=True, ex=ttl)`` атомарно ставит ключ
-    ТОЛЬКО если его ещё нет + ставит TTL. Это canonical SETNX-pattern
-    из Redis docs §«Distributed locks» (упрощённая версия, без Redlock —
-    нам не нужна устойчивость к partition, drill это staging-only).
+    Возвращает lock value (``hostname:pid`` string) если lock acquired,
+    None если занят. Caller передаёт возвращённое значение в
+    :func:`_release_drill_lock` для CAS verification (Lua-CAS path).
 
-    Возвращает True если lock acquired, False если занят. Никаких
-    exceptions — caller сам решает что делать через CommandError.
+    redis-py ``set(key, value, nx=True, ex=ttl)`` атомарно ставит ключ
+    ТОЛЬКО если его ещё нет + ставит TTL.
 
     TTL включает запас на cleanup (~120s сверху от duration). Если
-    drill крашится без `finally`-release, lock auto-expire-нется на TTL.
+    drill крашится без ``finally``-release, lock auto-expire-нется.
 
-    ⚠ **Fail-open поведение:** если ``redis.set`` кинет exception
-    (Redis недоступен, partition, …), функция возвращает **True**
-    как если бы lock был успешно acquired. Это осознанный trade-off:
-    drill всё равно упадёт на следующем Redis-вызове (``_pel_count``
-    в baseline, ``_check_canary``), поэтому защита от concurrent
-    runs выполнить мы не сможем, но добавлять отдельный exit для
-    «lock module недоступен» — overkill. Self-adversarial pass на
-    #593 подтвердил приемлемость этого пути для staging-only tool.
+    ⚠ **Fail-open поведение:** если ``redis.set`` кинет exception,
+    функция возвращает synthetic lock value как если бы acquired. Drill
+    всё равно упадёт на следующем Redis-вызове; добавлять отдельный
+    exit для «lock module недоступен» — overkill для staging-tool.
     """
-    pid = os.getpid()
+    value = _build_lock_value()
     try:
         # redis-py возвращает True/None (None если key уже есть и nx=True).
-        result = redis.set(_DRILL_LOCK_KEY, str(pid), nx=True, ex=ttl_seconds)
+        result = redis.set(_DRILL_LOCK_KEY, value, nx=True, ex=ttl_seconds)
     except Exception as exc:  # noqa: BLE001
         logger.warning("drill_lock.acquire_failed err=%s — fail-open", exc)
-        return True
-    return bool(result)
+        return value  # fail-open: pretend acquired
+    if not result:
+        return None
+    return value
 
 
 def _drill_lock_holder(redis: Any) -> str | None:
-    """Возвращает PID процесса который держит lock (или None).
+    """Возвращает текущее lock value (``hostname:pid``) или None.
 
-    Полезно для сообщения оператору: «занято процессом 12345» — он
-    может проверить `ps -p 12345` живой ли тот процесс.
+    Полезно для сообщения оператору: «занято на staging-1 PID 12345» —
+    он знает на каком host-е смотреть `ps`.
     """
     try:
         val = redis.get(_DRILL_LOCK_KEY)
@@ -573,25 +631,42 @@ def _drill_lock_holder(redis: Any) -> str | None:
     return str(val)
 
 
-def _release_drill_lock(redis: Any) -> None:
-    """Безусловно DELETE-ит lock-ключ. Никаких own-PID checks.
+def _release_drill_lock(redis: Any, expected_value: str | None) -> None:
+    """CAS release — DEL только если значение всё ещё наше.
 
-    Why no PID check on release: lock TTL уже короче чем любой
-    разумный stale-window. Если ключа нет (auto-expired или другой
-    процесс DEL-нул) — DEL idempotent. Если ключ принадлежит другому
-    процессу (TTL expired + новый процесс acquire-нул) — мы НЕ должны
-    были этот release вызвать, это означает баг в caller-логике
-    (превысили TTL без cleanup). Лучше fail loud при разработке чем
-    защитный no-op.
+    #598 Item 1: атомарный compare-and-delete через Lua-script. Защищает
+    от collateral damage если наш TTL expired + другой процесс acquired
+    свежий lock.
 
-    На самом деле редкая race-условие: процесс N запустил drill, lock
-    expired через TTL, процесс M acquire-нул, процесс N всё ещё бежит
-    и в `finally` DELETE-нёт M-овский lock. Митигация: TTL ставится
-    с большим запасом (duration + 120s); процесс N должен закончиться
-    за это окно или быть прибит.
+    Args:
+      redis: Redis client.
+      expected_value: lock value которое мы получили из :func:`_acquire_drill_lock`.
+                      None означает «acquire failed» (caller не должен
+                      release-ить) или legacy path для tests без Lua.
+
+    Fallback path: если client не поддерживает ``register_script``
+    (test stubs), делаем безусловный DEL — старое поведение, для тестов
+    приемлемо (race window там не симулируется).
+
+    Никогда НЕ raise — finally-блок не должен ломать main exit code.
     """
+    if expected_value is None:
+        # Acquire не дал нам lock (или мы fail-open вернули synth value
+        # которое потеряли). Пропускаем release — не пытаемся DELETE
+        # чужой ключ.
+        return
+
+    script = _get_release_script(redis)
     try:
-        redis.delete(_DRILL_LOCK_KEY)
+        if script is not None:
+            # Lua-CAS path: GET → compare → DEL atomically.
+            # redis-py register_script возвращает Any-callable, mypy типизирует
+            # как ``object`` — игнор аналогичен ceilings.py.
+            script(keys=[_DRILL_LOCK_KEY], args=[expected_value])  # type: ignore[operator]
+        else:
+            # Fallback (test stubs без register_script) — безусловный
+            # DEL. Race не симулируется в этих окружениях.
+            redis.delete(_DRILL_LOCK_KEY)
     except Exception as exc:  # noqa: BLE001
         logger.warning("drill_lock.release_failed err=%s", exc)
 

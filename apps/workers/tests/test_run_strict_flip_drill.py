@@ -600,6 +600,19 @@ class TestDbSideTimestamps:
 # ───────────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _reset_release_script_cache():
+    """#598: module-global _release_script caches Lua callable. Если
+    предыдущий тест зарегистрировал callable, оставшийся объект
+    сделает реальный Redis-вызов в нашем тесте → fail (no Redis в CI).
+    Reset перед каждым тестом — изолируем module state."""
+    from apps.workers.management.commands import run_strict_flip_drill as mod
+
+    mod._release_script = None
+    yield
+    mod._release_script = None
+
+
 class TestConcurrentDrillLock:
     """Два параллельных оператора не должны мочь запустить drill
     одновременно. SETNX lock в начале handle() гарантирует mutex."""
@@ -677,6 +690,103 @@ class TestConcurrentDrillLock:
         assert exit_code == 4
         # КРИТИЧНО: даже при assertion fail lock должен быть released.
         assert _FakeRedis._lock_store.get("strict_flip_drill:lock") is None
+
+    def test_lock_value_contains_hostname_and_pid(self):
+        """#598 Item 2: lock value формат = ``<hostname>:<pid>``. Помогает
+        оператору на multi-host окружении сразу узнать на каком сервере
+        смотреть `ps -p`."""
+        from apps.workers.management.commands.run_strict_flip_drill import (
+            _build_lock_value,
+        )
+
+        value = _build_lock_value()
+        # Hostname часть + ":" + pid (число).
+        assert ":" in value
+        host, pid = value.rsplit(":", 1)
+        assert host  # non-empty
+        assert pid.isdigit()
+
+    def test_lua_cas_release_skips_when_value_mismatch(self, monkeypatch):
+        """#598 Item 1: Lua-CAS release — DEL только если value совпадает
+        с expected_value. Симуляция race: lock auto-expired, другой
+        процесс acquired свежий → наш release не должен удалить чужой."""
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        # Fake redis с register_script: симулируем Lua execution локально.
+        class _FakeWithLua:
+            def __init__(self):
+                self.store = {"strict_flip_drill:lock": "OTHER-HOST:99999"}
+                self.script_calls: list[dict] = []
+
+            def register_script(self, lua_text):
+                def _exec(*, keys, args):
+                    self.script_calls.append({"keys": keys, "args": args})
+                    # Lua semantics: GET → compare → DEL only on match.
+                    key = keys[0]
+                    expected = args[0]
+                    if self.store.get(key) == expected:
+                        del self.store[key]
+                        return 1
+                    return 0
+
+                return _exec
+
+        fake = _FakeWithLua()
+        # Пытаемся release с НАШИМ value, который НЕ совпадает с тем
+        # что в store (другой процесс держит).
+        mod._release_drill_lock(fake, "MY-HOST:11111")
+
+        # CAS отказался удалить — чужой lock остался intact.
+        assert fake.store.get("strict_flip_drill:lock") == "OTHER-HOST:99999"
+        # Но скрипт был вызван (verified by spy).
+        assert len(fake.script_calls) == 1
+
+    def test_lua_cas_release_deletes_when_value_matches(self):
+        """Happy path Lua-CAS: value совпадает → DEL выполняется."""
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        class _FakeWithLua:
+            def __init__(self):
+                self.store = {"strict_flip_drill:lock": "MY-HOST:11111"}
+
+            def register_script(self, lua_text):
+                def _exec(*, keys, args):
+                    if self.store.get(keys[0]) == args[0]:
+                        del self.store[keys[0]]
+                        return 1
+                    return 0
+
+                return _exec
+
+        fake = _FakeWithLua()
+        mod._release_drill_lock(fake, "MY-HOST:11111")
+        assert "strict_flip_drill:lock" not in fake.store
+
+    def test_release_noop_when_expected_value_none(self, monkeypatch):
+        """Если acquire вернул None (lock busy), release должен no-op —
+        не пытаться DELETE чужой ключ."""
+        from apps.workers.management.commands import run_strict_flip_drill as mod
+
+        class _FakeRecorder:
+            def __init__(self):
+                self.script_calls = 0
+                self.delete_calls = 0
+
+            def register_script(self, lua_text):
+                def _exec(*, keys, args):
+                    self.script_calls += 1
+                    return 0
+
+                return _exec
+
+            def delete(self, key):
+                self.delete_calls += 1
+                return 0
+
+        fake = _FakeRecorder()
+        mod._release_drill_lock(fake, None)  # expected_value=None
+        assert fake.script_calls == 0
+        assert fake.delete_calls == 0
 
     def test_lock_released_on_unexpected_exception(self, monkeypatch, tmp_path):
         """Mirror — exception вне _DrillFailed (exit 7) тоже не должен
