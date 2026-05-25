@@ -355,3 +355,60 @@ class PaymentTerminalDedupe(models.Model):
         return (
             f"PaymentTerminalDedupe[t={self.tenant_id} p={self.payment_id} {self.terminal_state}]"
         )
+
+
+class ReviewProcessedDedupe(models.Model):
+    """Per-review dedupe for #445 review.created consumer.
+
+    Per event-contract.md §3.9 step 1: «idempotent — same review_id
+    MUST NOT double-count». The dispatcher's :class:`IngestDedupe`
+    table dedupes on ``event_id``, which is necessary but not
+    sufficient — an operator manual re-fire with a fresh ULID would
+    bypass it and double-count the sentiment update.
+
+    Same pattern as :class:`PaymentTerminalDedupe` (#443):
+    ``IngestDedupe`` is the primary canonical guard; this one
+    specifically protects the review fan-out (ClientProfile sentiment
+    bump) where double-application would distort RFM-adjacent state.
+
+    Retention: same 120-day window as IngestDedupe (§5.3). Cleanup is
+    a Celery beat (follow-up).
+    """
+
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    id = models.BigAutoField(primary_key=True)
+    tenant_id = models.UUIDField(
+        help_text="Tenant scoping the dedupe row. Mirrors the "
+        "PaymentTerminalDedupe.tenant_id pattern (#443 Round-2 NEW-1) "
+        "so a malicious tenant cannot pre-claim a victim's review_id.",
+    )
+    review_id = models.UUIDField(
+        help_text="Canonical Ayla Review.id from the event payload.",
+    )
+    event_id = models.CharField(
+        max_length=26,
+        help_text="ULID of the event that first processed this review. "
+        "Forensic trace — distinct events with the same "
+        "(tenant_id, review_id) after this row exists are no-op'd.",
+    )
+    processed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Review processed dedupe row"
+        verbose_name_plural = "Review processed dedupe ledger"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant_id", "review_id"],
+                name="evbus_review_processed_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["processed_at"],
+                name="evbus_review_proc_proc_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"ReviewProcessedDedupe[t={self.tenant_id} r={self.review_id}]"
