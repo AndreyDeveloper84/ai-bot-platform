@@ -117,6 +117,35 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
+def _draft_error_response(exc: Any) -> JsonResponse:
+    """Map a :class:`DraftActionError` to a JSON response.
+
+    Mirrors the inline mapping in
+    :func:`conversation_draft_generate` for the ``generate_in_flight``
+    slug (Issue #550). Generalised here so the send/release endpoints
+    surface ``conversation_busy`` (Issue #551 — lock symmetry) with the
+    same shape: JSON body carries ``retry_after_seconds`` AND the
+    response has a ``Retry-After`` header for clients that read it.
+
+    Slugs handled with Retry-After:
+      * ``generate_in_flight`` — Issue #550 (generate path)
+      * ``conversation_busy`` — Issue #551 (send / release path)
+      * ``cost_cap_exceeded`` — fixed 1h hint
+    """
+
+    retry_after = exc.extra.get("retry_after_seconds") if exc.extra else None
+    body: dict[str, Any] = {"error": exc.slug, "detail": exc.detail}
+    if isinstance(retry_after, int) and retry_after > 0:
+        body["retry_after_seconds"] = retry_after
+    resp = JsonResponse(body, status=exc.status)
+    if exc.slug in ("generate_in_flight", "conversation_busy"):
+        secs = retry_after if isinstance(retry_after, int) and retry_after > 0 else 3
+        resp["Retry-After"] = str(secs)
+    elif exc.slug == "cost_cap_exceeded":
+        resp["Retry-After"] = "3600"
+    return resp
+
+
 def _parse_json_body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
     if not request.body:
         return {}
@@ -1153,26 +1182,14 @@ def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> H
             actor_bot_user=bot_user,
         )
     except ConversationDetailError as exc:
-        # Issue #550: ``generate_in_flight`` carries
-        # ``extra={"retry_after_seconds": 3}`` so the frontend gets a
-        # concrete hint how long «Помощник уже думает…» should hold
-        # before re-enabling the tap. Also surface the field in the
-        # JSON body so clients that don't read headers (e.g. some
-        # MAX Mini App fetch shims) can still implement the wait.
-        retry_after = exc.extra.get("retry_after_seconds") if exc.extra else None
-        body: dict[str, Any] = {"error": exc.slug, "detail": exc.detail}
-        if isinstance(retry_after, int) and retry_after > 0:
-            body["retry_after_seconds"] = retry_after
-        resp = JsonResponse(body, status=exc.status)
-        if exc.slug == "generate_in_flight":
-            # Hardcoded 3s aligns with extra dict default; uses the
-            # actual ``retry_after_seconds`` value when present.
-            secs = retry_after if isinstance(retry_after, int) and retry_after > 0 else 3
-            resp["Retry-After"] = str(secs)
-        elif exc.slug == "cost_cap_exceeded":
-            # Service layer raises 429 with a 1h retry-after suggestion.
-            resp["Retry-After"] = "3600"
-        return resp
+        # Issue #550 + #551: ``generate_in_flight`` /
+        # ``conversation_busy`` carry ``extra={"retry_after_seconds": 3}``
+        # so the frontend gets a concrete hint how long «Помощник уже
+        # думает…» should hold before re-enabling the tap. The shared
+        # :func:`_draft_error_response` helper surfaces the field in
+        # the JSON body AND sets the ``Retry-After`` header for clients
+        # that don't read JSON shims.
+        return _draft_error_response(exc)
     return JsonResponse(response.to_dict())
 
 
@@ -1224,7 +1241,7 @@ def conversation_draft_send_as_me(
             override_content=override_content,
         )
     except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
+        return _draft_error_response(exc)
     return JsonResponse(response.to_dict(), status=201)
 
 
@@ -1260,7 +1277,7 @@ def conversation_draft_release_to_ai(
             actor_bot_user=bot_user,
         )
     except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
+        return _draft_error_response(exc)
     return JsonResponse(response.to_dict(), status=201)
 
 

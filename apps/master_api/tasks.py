@@ -140,6 +140,12 @@ _NON_RETRY_SLUGS: frozenset[str] = frozenset(
         "bad_request",
         "tier_locked",
         "generate_in_flight",
+        # Issue #551: send/release lock-symmetry slug. The auto-trigger
+        # task only ever calls ``generate_draft_for_conversation`` (not
+        # send/release), so this entry is defensive — if a future task
+        # bridges to send/release, the same «don't retry, the holder
+        # will finish» rationale applies.
+        "conversation_busy",
     }
 )
 

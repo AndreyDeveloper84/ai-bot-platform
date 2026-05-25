@@ -2035,3 +2035,510 @@ class TestIssue550NowaitGenerateInFlight:
         # Critical billing assertion: only ONE LLM call across all
         # three attempts (idempotency window catches call 3).
         assert llm_calls["n"] == 1
+
+
+# =========================================================================
+# Issue #551 — send/release Conversation lock symmetry (conversation_busy)
+# =========================================================================
+#
+# PR #540 fixed Blocker #1 by locking the Conversation row on the GENERATE
+# path; PR #550 refined it to NOWAIT + 429 ``generate_in_flight``. The
+# SEND and RELEASE paths still locked only the AiDraft row, leaving a
+# microsecond window where a new customer Message could INSERT (different
+# table) between the staleness check and the draft status flip. Issue
+# #551 fixes the asymmetry: send/release now lock the Conversation row
+# first (with NOWAIT → 429 ``conversation_busy``), then the AiDraft row.
+#
+# Test strategy mirrors :class:`TestIssue550NowaitGenerateInFlight` —
+# patch ``Conversation.all_tenants.select_for_update`` to return a
+# queryset whose ``.first()`` raises ``OperationalError`` (same symptom
+# as PostgreSQL SQLState 55P03 ``lock_not_available``).
+
+
+@pytest.mark.django_db
+class TestIssue551SendReleaseLockSymmetry:
+    """Issue #551 — send/release lock the Conversation row before AiDraft."""
+
+    def test_send_with_held_conversation_lock_returns_429_conversation_busy(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Service layer: when the Conversation row lock can't be
+        acquired on the send path, the service raises
+        ``DraftActionError("conversation_busy", status=429)`` with
+        ``extra={"retry_after_seconds": 3}`` and does NOT mutate the
+        draft / create a Message.
+        """
+
+        from django.db import OperationalError
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            send_draft_as_master,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        original_sfu = Conversation.all_tenants.select_for_update
+
+        class _LockedQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                raise OperationalError("lock_not_available (simulated 55P03)")
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            # The send/release lock acquisition MUST pass nowait=True
+            # — same fail-fast semantics as #550.
+            assert kw.get("nowait") is True, (
+                "issue #551: select_for_update must be called with nowait=True"
+            )
+            return _LockedQS()
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with pytest.raises(DraftActionError) as exc_info:
+                send_draft_as_master(
+                    conversation_id=conv.id,
+                    draft_id=draft.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        assert callable(original_sfu)
+        err = exc_info.value
+        assert err.slug == "conversation_busy"
+        assert err.status == 429
+        assert err.extra.get("retry_after_seconds") == 3
+        assert err.detail == ("Диалог сейчас обновляется. Попробуйте через несколько секунд.")
+        # Draft was NOT flipped to a terminal status.
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.ACTIVE
+        assert draft.content  # not cleared
+        # No assistant Message was created (the lock fired before the
+        # record_message call).
+        assert (
+            Message.all_tenants.filter(conversation_id=conv.id, role=Message.Role.ASSISTANT).count()
+            == 0
+        )
+
+    def test_release_with_held_conversation_lock_returns_429(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Same shape on the release path — Issue #551 covers both."""
+
+        from django.db import OperationalError
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            release_draft_to_ai,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        class _LockedQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                raise OperationalError("lock_not_available")
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            assert kw.get("nowait") is True
+            return _LockedQS()
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with pytest.raises(DraftActionError) as exc_info:
+                release_draft_to_ai(
+                    conversation_id=conv.id,
+                    draft_id=draft.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        err = exc_info.value
+        assert err.slug == "conversation_busy"
+        assert err.status == 429
+        assert err.extra.get("retry_after_seconds") == 3
+        # Draft + Message untouched.
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.ACTIVE
+        assert (
+            Message.all_tenants.filter(conversation_id=conv.id, role=Message.Role.ASSISTANT).count()
+            == 0
+        )
+
+    def test_send_normal_path_acquires_then_releases_locks(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Sanity: the new Conversation lock does NOT break the happy
+        path. A non-contended send still creates the message + flips
+        the draft to SENT_AS_MASTER.
+        """
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        # Track that select_for_update was called with nowait=True on
+        # the Conversation manager (proves lock ordering).
+        sfu_calls: list[dict[str, Any]] = []
+        original_sfu = Conversation.all_tenants.select_for_update
+
+        def tracking_sfu(*a: Any, **kw: Any) -> Any:
+            sfu_calls.append(dict(kw))
+            return original_sfu(*a, **kw)
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=tracking_sfu):
+            resp = client.post(
+                _send_as_me_url(conv.id, draft.id),
+                HTTP_AUTHORIZATION=init_data_header("12345"),
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 201
+        # At least one call with nowait=True (the Conversation lock).
+        assert any(kw.get("nowait") is True for kw in sfu_calls), (
+            "issue #551: Conversation.select_for_update(nowait=True) must be "
+            "invoked on the send path"
+        )
+        # Draft transitioned to SENT_AS_MASTER + content cleared.
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.SENT_AS_MASTER
+        assert draft.content == ""
+        # Master-attributed assistant message persisted.
+        msg = Message.all_tenants.get(pk=resp.json()["message_id"])
+        assert msg.action_type == "master_compose"
+        assert (msg.action_data or {})["actor_type"] == "master"
+
+    def test_release_normal_path_acquires_then_releases_locks(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Same sanity check on the release path."""
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        sfu_calls: list[dict[str, Any]] = []
+        original_sfu = Conversation.all_tenants.select_for_update
+
+        def tracking_sfu(*a: Any, **kw: Any) -> Any:
+            sfu_calls.append(dict(kw))
+            return original_sfu(*a, **kw)
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=tracking_sfu):
+            resp = client.post(
+                _release_url(conv.id, draft.id),
+                HTTP_AUTHORIZATION=init_data_header("12345"),
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 201
+        assert any(kw.get("nowait") is True for kw in sfu_calls), (
+            "issue #551: Conversation.select_for_update(nowait=True) must be "
+            "invoked on the release path"
+        )
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.RELEASED_TO_AI
+        assert draft.content == ""
+
+    def test_view_returns_429_with_retry_after_header_for_send_conversation_busy(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """View layer: send raises ``conversation_busy`` → 429 +
+        ``Retry-After: 3`` header + JSON body with ``retry_after_seconds``.
+
+        This is the public-API guarantee that the frontend's existing
+        429 handler (added for #550's ``generate_in_flight``) also works
+        for the send path's ``conversation_busy`` slug.
+        """
+
+        from apps.master_api.services.ai_drafts import DraftActionError
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        def raising_send(*a: Any, **kw: Any) -> Any:
+            raise DraftActionError(
+                "conversation_busy",
+                "Диалог сейчас обновляется. Попробуйте через несколько секунд.",
+                status=429,
+                extra={"retry_after_seconds": 3},
+            )
+
+        with patch(
+            "apps.master_api.views.send_draft_as_master",
+            new=raising_send,
+        ):
+            resp = client.post(
+                _send_as_me_url(conv.id, draft.id),
+                HTTP_AUTHORIZATION=init_data_header("12345"),
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 429
+        assert resp["Retry-After"] == "3"
+        body = resp.json()
+        assert body["error"] == "conversation_busy"
+        assert body["retry_after_seconds"] == 3
+        assert body["detail"] == ("Диалог сейчас обновляется. Попробуйте через несколько секунд.")
+
+    def test_view_returns_429_with_retry_after_header_for_release_conversation_busy(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Same 429 + Retry-After mapping for the release endpoint."""
+
+        from apps.master_api.services.ai_drafts import DraftActionError
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        def raising_release(*a: Any, **kw: Any) -> Any:
+            raise DraftActionError(
+                "conversation_busy",
+                "Диалог сейчас обновляется. Попробуйте через несколько секунд.",
+                status=429,
+                extra={"retry_after_seconds": 3},
+            )
+
+        with patch(
+            "apps.master_api.views.release_draft_to_ai",
+            new=raising_release,
+        ):
+            resp = client.post(
+                _release_url(conv.id, draft.id),
+                HTTP_AUTHORIZATION=init_data_header("12345"),
+                content_type="application/json",
+            )
+
+        assert resp.status_code == 429
+        assert resp["Retry-After"] == "3"
+        body = resp.json()
+        assert body["error"] == "conversation_busy"
+        assert body["retry_after_seconds"] == 3
+
+    def test_send_staleness_check_inside_lock_re_fires_on_new_message(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Race-window closure: staleness check runs INSIDE the
+        Conversation lock. We simulate the race deterministically by
+        inserting a new customer Message AFTER the outer staleness
+        check but BEFORE the inner one. The inner re-check must fire
+        and raise ``draft_stale``.
+
+        The actual race-prevention guarantee is that the Conversation
+        row lock serialises customer Message INSERT (which acquires the
+        same lock via the ingest path) with send/release. This test
+        verifies the re-check exists and fires — the lock-serialisation
+        property is a postgres semantic that the unit test can't
+        exercise under SQLite, but the inner re-check IS the load-
+        bearing line of defence on the post-#540 architecture.
+        """
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            send_draft_as_master,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        trigger = _add_message(
+            tenant=tenant,
+            conversation=conv,
+            role=Message.Role.USER,
+            content="первый вопрос",
+        )
+        draft = AiDraft.all_tenants.create(
+            tenant=tenant,
+            conversation=conv,
+            master=accepted_master,
+            content="ответ на первый",
+            status=AiDraft.Status.ACTIVE,
+            trigger_message=trigger,
+            llm_provider="openai",
+            llm_model="gpt-4o-mini",
+        )
+
+        # Patch the internal staleness helper to inject a new customer
+        # message on its SECOND invocation (mimicking «after outer
+        # check, before inner check»). The new message defeats the
+        # inner _validate_draft_fresh re-check.
+        from apps.master_api.services import ai_drafts as svc
+
+        original_latest = svc._latest_customer_message_id
+        call_count = {"n": 0}
+
+        def racing_latest(c: Conversation) -> Any:
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                # Simulate a customer Message landing between outer and
+                # inner staleness checks.
+                _add_message(
+                    tenant=tenant,
+                    conversation=conv,
+                    role=Message.Role.USER,
+                    content="второй вопрос (race)",
+                    created_at=trigger.created_at + timedelta(seconds=1),
+                )
+            return original_latest(c)
+
+        with patch.object(svc, "_latest_customer_message_id", new=racing_latest):
+            with pytest.raises(DraftActionError) as exc_info:
+                send_draft_as_master(
+                    conversation_id=conv.id,
+                    draft_id=draft.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        # Inner check fired → draft_stale 409, not a successful send.
+        assert exc_info.value.slug == "draft_stale"
+        assert exc_info.value.status == 409
+        # And the draft is still ACTIVE (no terminal flip on the
+        # race-loss path).
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.ACTIVE
+        assert (
+            Message.all_tenants.filter(conversation_id=conv.id, role=Message.Role.ASSISTANT).count()
+            == 0
+        )
+        # We invoked the staleness helper at least twice (outer + inner)
+        # — the very pattern that closes the race window.
+        assert call_count["n"] >= 2
+
+    def test_send_with_deleted_conversation_returns_404(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Issue #551 round-1 amendment: explicit None-guard after the
+        Conversation ``select_for_update(...).first()``. If the row
+        vanished between the outer :func:`_verify_master_involved`
+        check and the lock acquisition, we MUST raise
+        ``DraftActionError("not_found", status=404)`` rather than
+        silently no-op the lock and proceed.
+        """
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            send_draft_as_master,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        # Simulate the race: the involvement check resolved a row, but
+        # by the time the lock fires the row is gone — .first() returns
+        # None. We patch select_for_update to return a QS whose .first()
+        # is None (NOT raising).
+        class _MissingQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                return None
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            assert kw.get("nowait") is True
+            return _MissingQS()
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with pytest.raises(DraftActionError) as exc_info:
+                send_draft_as_master(
+                    conversation_id=conv.id,
+                    draft_id=draft.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        err = exc_info.value
+        assert err.slug == "not_found"
+        assert err.status == 404
+        # Draft NOT flipped; no Message created.
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.ACTIVE
+        assert draft.content
+        assert (
+            Message.all_tenants.filter(conversation_id=conv.id, role=Message.Role.ASSISTANT).count()
+            == 0
+        )
+
+    def test_release_with_deleted_conversation_returns_404(
+        self,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+    ) -> None:
+        """Same shape on the release path — None-guard symmetry."""
+
+        from apps.master_api.services.ai_drafts import (
+            DraftActionError,
+            release_draft_to_ai,
+        )
+
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+
+        class _MissingQS:
+            def filter(self, *a: Any, **kw: Any) -> Any:
+                return self
+
+            def first(self) -> Any:
+                return None
+
+        def fake_sfu(*a: Any, **kw: Any) -> Any:
+            assert kw.get("nowait") is True
+            return _MissingQS()
+
+        with patch.object(Conversation.all_tenants, "select_for_update", new=fake_sfu):
+            with pytest.raises(DraftActionError) as exc_info:
+                release_draft_to_ai(
+                    conversation_id=conv.id,
+                    draft_id=draft.id,
+                    master=accepted_master,
+                    actor_bot_user=None,
+                )
+
+        err = exc_info.value
+        assert err.slug == "not_found"
+        assert err.status == 404
+        draft.refresh_from_db()
+        assert draft.status == AiDraft.Status.ACTIVE
+        assert (
+            Message.all_tenants.filter(conversation_id=conv.id, role=Message.Role.ASSISTANT).count()
+            == 0
+        )
