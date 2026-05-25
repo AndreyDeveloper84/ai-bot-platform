@@ -472,6 +472,15 @@ def compute_reschedule_continuation(
         new_visit_at = new_visit_at.replace(tzinfo=root.visit_at.tzinfo)
     # Founder phrasing: «больше чем на 90 дней» = strictly greater.
     # Exactly 90d is continuation; 90d + 1 microsecond breaks.
+    #
+    # Backward-reschedule semantics (#533 D7): when ``new_visit_at`` is
+    # STRICTLY EARLIER than ``root.visit_at`` (customer moved their
+    # appointment to a date BEFORE the original sale's visit_at — e.g.
+    # rescheduling the May-15 appointment to May-10), this `>`
+    # comparison is False → no `over_90d` break → chain continues.
+    # This matches the founder intent: a backward move is still a
+    # «same booking window» reschedule. Pinned in
+    # ``apps/booking/tests/test_attribution.py::test_q12a_533_d7_backward_reschedule_continues_chain``.
     if new_visit_at > root.visit_at + timedelta(days=threshold_days):
         return (False, "over_90d", None)
 

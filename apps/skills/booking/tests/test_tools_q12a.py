@@ -329,7 +329,14 @@ class TestQ12aPartialFailureAuditLLMPath:
         self, tenant: Tenant, bot_user: BotUser
     ) -> None:
         """YClients cancel succeeds, create fails → audit row tagged
-        as chain TERMINATOR. The exact audit shape is:
+        as chain TERMINATOR.
+
+        Also closes Q12-α #533 D5 (partial-failure audit field
+        assertion) — the «refactor could silently drop the field»
+        regression is pinned by this test's assertions on
+        ``q12a_chain_terminator`` + ``q12a_chain_terminator_reason``.
+
+        The exact audit shape is:
 
         * ``payload["q12a_chain_terminator"] is True``
         * ``payload["q12a_chain_terminator_reason"] == "partial_failure"``
