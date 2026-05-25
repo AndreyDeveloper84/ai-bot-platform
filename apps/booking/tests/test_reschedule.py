@@ -340,6 +340,14 @@ class TestRescheduleCustomerBooking:
         concurrent reschedules on different links of the same chain
         serialize on the root row.
 
+        Also closes Q12-α #533 D8 (concurrent reschedule on same chain
+        regression pin) — this test + the companion
+        ``test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self``
+        below document the contract that two-link concurrent rebook
+        cannot double-bill: both threads acquire the same root lock
+        via ``select_for_update``, only one can proceed at a time, so
+        chain semantics are preserved per-thread.
+
         Contract test — captures SQL via ``CaptureQueriesContext`` and
         asserts a ``FOR UPDATE`` clause is present on the root SELECT
         when running against Postgres. Skipped on SQLite where

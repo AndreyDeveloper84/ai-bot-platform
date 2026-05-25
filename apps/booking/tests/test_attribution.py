@@ -112,7 +112,18 @@ class TestComputeBillable:
         (passes ``created_by=execute_reschedule`` without
         ``is_reschedule_continuation``), the safe default is to treat the
         chain as broken (= billable). Better to over-charge a customer
-        than to silently undercharge the salon."""
+        than to silently undercharge the salon.
+
+        Q12-α #533 D6: tightened from substring match («either
+        ``chain_broken`` OR ``missing_continuation_signal``») to exact
+        equality. A future relaxation of the safe-default tag would
+        otherwise pass silently — finance teams grep for this exact
+        literal in audit logs to find «caller bug — should have
+        computed continuation» rows. Once #561 (Prometheus counter
+        on the safe-default branch) ships, the same literal will
+        also drive an alert rule — coordinate any change to this
+        string across both sites.
+        """
 
         billable, reason = compute_billable(
             booking_source="ai_direct",
@@ -120,7 +131,8 @@ class TestComputeBillable:
             created_by="execute_reschedule",
         )
         assert billable is True
-        assert "chain_broken" in reason or "missing_continuation_signal" in reason
+        # Q12-α #533 D6: exact match — the literal is finance-greppable.
+        assert reason == "reschedule_chain_broken: missing_continuation_signal"
 
 
 class TestComputeAssistScore:
@@ -261,6 +273,72 @@ class TestComputeRescheduleContinuation:
             new_visit_at=chain_root.visit_at + timedelta(days=10),  # type: ignore[operator,union-attr,arg-type]
         )
         assert is_cont is True
+        assert break_reason is None
+        assert root_id == chain_root.id
+
+    def test_q12a_533_d7_backward_reschedule_continues_chain(
+        self, chain_root: BookingRequest
+    ) -> None:
+        """Q12-α #533 D7: backward reschedule (``new_visit_at`` < ``root.visit_at``)
+        preserves the continuation chain.
+
+        Customer scenario: appointment on May-15 → customer wants to
+        move it EARLIER to May-10. The 90d threshold check is
+        ``new_visit_at > root.visit_at + 90d`` — strictly greater. With
+        a negative timedelta, the comparison is False → no
+        ``over_90d`` break → chain continues. This is the founder-
+        intended semantics («same booking window»), but pre-#533 was
+        not explicitly tested. Pinning so a future refactor (e.g.
+        switching to ``abs(delta) > 90d``) is caught loudly.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        is_cont, break_reason, root_id = compute_reschedule_continuation(
+            old=chain_root,
+            new_service_id=chain_root.service_id,
+            # 3 days BEFORE the root's visit_at.
+            new_visit_at=chain_root.visit_at - timedelta(days=3),  # type: ignore[operator,union-attr,arg-type]
+        )
+        assert is_cont is True
+        assert break_reason is None
+        assert root_id == chain_root.id
+
+    def test_q12a_533_d7_extreme_backward_reschedule_still_continues(
+        self, chain_root: BookingRequest
+    ) -> None:
+        """Q12-α #533 D7 companion: an EXTREME backward reschedule
+        (365 days before root.visit_at) is also continuation under
+        current code — the helper has NO lower bound on backward
+        delta, only the strict-greater upper-bound 90-day check.
+
+        Why pin this separately from the 3-day case: if a future
+        founder decision adds an «absolute-delta > 90d breaks chain»
+        rule, the 3-day test still passes (3 < 90), but THIS test
+        would fail-loud. Coupling the «no backward bound» invariant
+        to a single test means an asymmetric refactor can never slip
+        through silently.
+        """
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
+        )
+
+        is_cont, break_reason, root_id = compute_reschedule_continuation(
+            old=chain_root,
+            new_service_id=chain_root.service_id,
+            # A year BEFORE the root's visit_at — would fail under an
+            # `abs(delta) > 90d` rule.
+            new_visit_at=chain_root.visit_at - timedelta(days=365),  # type: ignore[operator,union-attr,arg-type]
+        )
+        assert is_cont is True, (
+            "Extreme backward reschedule MUST continue chain under "
+            "current rule (only forward >90d breaks). If this fails, "
+            "someone added a lower-bound check — review the founder "
+            "rationale before unblocking."
+        )
         assert break_reason is None
         assert root_id == chain_root.id
 
