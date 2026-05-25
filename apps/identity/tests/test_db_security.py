@@ -4,7 +4,7 @@ Per spec `docs/specs/memory-entry-schema.md` §8 (DB roles) + §9 (RLS policy).
 
 # Postgres-only
 
-The migration 0007_red_zone_db_security is postgres-only (CREATE ROLE +
+The migration 0008_red_zone_db_security is postgres-only (CREATE ROLE +
 RLS policy + view are not supported on SQLite). All tests in this file
 are pytest.mark.skipif'd for SQLite.
 

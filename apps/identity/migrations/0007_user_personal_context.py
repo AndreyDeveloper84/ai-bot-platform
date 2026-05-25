@@ -139,7 +139,7 @@ class Migration(migrations.Migration):
     atomic = False  # CRITICAL — see module docstring
 
     dependencies = [
-        ("identity", "0005_botuser_ayla_user_id"),
+        ("identity", "0006_botuser_avatar_url"),
     ]
 
     operations = [

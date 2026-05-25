@@ -708,7 +708,7 @@ class MemoryEntry(models.Model):
                 ),
             ),
         ]
-        # NOTE: 3 DB CHECK constraints are managed by migration 0006 via
+        # NOTE: 3 DB CHECK constraints are managed by migration 0007 via
         # RunSQL with NOT VALID + VALIDATE pattern (spec §4 + §12). We do
         # NOT use models.CheckConstraint here because:
         # 1. Django CheckConstraint adds the constraint in CreateModel
@@ -717,7 +717,7 @@ class MemoryEntry(models.Model):
         #    step to run in a separate transaction on a populated table).
         # 2. Future schema-tightening migrations on populated production
         #    tables would have the same problem; standardize on RunSQL.
-        # See migration 0006_user_personal_context for the actual SQL.
+        # See migration 0007_user_personal_context for the actual SQL.
         # Application-side validation lives in apps/identity/services/
         # memory_writer.py (veha 3).
 

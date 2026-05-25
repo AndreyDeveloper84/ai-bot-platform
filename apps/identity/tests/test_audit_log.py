@@ -161,7 +161,7 @@ class TestAuditorQueryIndex:
 
     Postgres-only because:
       - `EXPLAIN ANALYZE` syntax differs across engines
-      - The index itself is created by Django ORM in migration 0006
+      - The index itself is created by Django ORM in migration 0007
         (model `Meta.indexes`), which Postgres + SQLite both honour,
         but only Postgres exposes `pg_indexes` for verification.
     """

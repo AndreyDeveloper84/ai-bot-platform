@@ -268,7 +268,7 @@ class Migration(migrations.Migration):
     atomic = False  # CRITICAL — see module docstring
 
     dependencies = [
-        ("identity", "0006_user_personal_context"),
+        ("identity", "0007_user_personal_context"),
     ]
 
     operations = [
