@@ -70,6 +70,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # postgresql-client (pg_dump / pg_restore) needed for
+      # apps/identity/tests/test_backup_restore.py — the test verifies
+      # ADR-0011 §11.1 invariant (tombstoned entries stay unreadable
+      # after restore). Without these binaries the test self-skips via
+      # `shutil.which('pg_dump') is None`, so the gate is defence-in-
+      # depth: install here so CI exercises the real backup cycle; the
+      # skipif keeps local dev (Windows, minimal Docker) from breaking.
+      - name: Install postgresql-client (for backup-restore test)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -106,6 +116,15 @@ jobs:
 
       - name: ruff format check
         run: uv run ruff format --check .
+
+      # Red-zone direct-access guard — AST lint that blocks
+      # `MemoryEntry.objects.filter(sensitivity_zone='red')` and
+      # related patterns outside the sanctioned `RedZoneReader`
+      # accessor. First line of defence per ADR-0011 §10 (RLS policy
+      # is the final line). See `tools/lint/red_zone_guard.py`
+      # docstring for what is + is not detected.
+      - name: Red-zone guard (AST lint)
+        run: uv run python tools/lint/red_zone_guard.py apps/
 
       - name: Django manage.py check
         run: uv run python manage.py check
