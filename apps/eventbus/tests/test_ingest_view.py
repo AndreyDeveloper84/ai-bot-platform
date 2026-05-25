@@ -17,8 +17,6 @@ from django.test import Client
 
 from apps.eventbus.ingest_dispatcher import (
     register,
-    registered_handlers,
-    unregister,
 )
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.models import IngestDedupe, IngestDLQ
@@ -80,9 +78,19 @@ def _settings_and_registry(settings, monkeypatch):
 
     monkeypatch.setattr(_views, "dispatch_with_timeout", _direct)
 
-    yield
-    for key in list(registered_handlers().keys()):
-        unregister(*key)
+    # #433 umbrella fix: snapshot + restore the registry around each
+    # test so production handlers (booking.*, payment.*, etc.) don't
+    # leak into the test's register() calls — and aren't wiped for
+    # subsequent test modules that depend on the boot-time registry.
+    import apps.eventbus.ingest_dispatcher as dispatcher_module
+
+    snapshot = dict(dispatcher_module._REGISTRY)
+    dispatcher_module._REGISTRY.clear()
+    try:
+        yield
+    finally:
+        dispatcher_module._REGISTRY.clear()
+        dispatcher_module._REGISTRY.update(snapshot)
 
 
 @pytest.fixture

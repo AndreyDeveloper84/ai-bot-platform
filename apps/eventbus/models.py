@@ -250,7 +250,16 @@ class IngestDLQ(models.Model):
         "limit what may appear here, but operators MUST treat this table "
         "as 152-ФЗ-sensitive nonetheless."
     )
-    dead_lettered_at = models.DateTimeField(auto_now_add=True)
+    dead_lettered_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="Time the row was first dead-lettered. ``auto_now_add`` "
+        "(NOT ``auto_now``) is intentional: with the #433 upsert "
+        "pattern, subsequent failures past threshold REFRESH the row "
+        "via ``update_or_create`` but MUST NOT overwrite this "
+        "timestamp. Operator triage cares about «when did this event "
+        "first fail», not «when was the most recent retry». The most-"
+        "recent-retry signal lives on HandlerFailureTracker.last_attempt_at.",
+    )
     replayed_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -266,9 +275,119 @@ class IngestDLQ(models.Model):
             models.Index(fields=["-dead_lettered_at"], name="evbus_dlq_recent_idx"),
             models.Index(fields=["reason"], name="evbus_dlq_reason_idx"),
         ]
+        constraints = [
+            # #433 umbrella — upsert key for ``_write_dlq``. Distinct
+            # reasons share an ``event_id`` (a malformed envelope can
+            # produce both ``unknown_event_name`` and a later
+            # ``handler_exception`` after a payload retry), so the
+            # composite is the right shape. Round-1 DLQ work landed
+            # this without a constraint; #433 closes the gap so the
+            # HANDLER_EXCEPTION-threshold path can do
+            # ``update_or_create`` instead of racing.
+            models.UniqueConstraint(
+                fields=["event_id", "reason"],
+                name="evbus_dlq_event_reason_unique",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"IngestDLQ[{self.event_name} {self.event_id} {self.reason}]"
+
+
+class HandlerFailureTracker(models.Model):
+    """Per-(event_id, handler) attempt counter for #433 umbrella.
+
+    Problem the model solves: ``HANDLER_EXCEPTION`` outcomes today
+    only surface in the application log + Sentry. Ayla retries per
+    §6.3 — but bot-platform has no DB record of «this event has
+    failed N times». Operator triage means digging through log
+    aggregator with no row-level handle.
+
+    Solution: an attempt counter that survives outside the
+    handler's transaction (incremented in its own atomic block
+    AFTER the handler's transaction rolled back). When the counter
+    crosses ``settings.EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD``,
+    the dispatcher upserts a DLQ row with ``reason="handler_exception"``.
+
+    Why not store on ``IngestDedupe``: that table only gets a row
+    on successful processing (same-transaction with the handler).
+    On exception the row never lands. We need a parallel counter
+    that survives rollback.
+
+    ### Retention
+
+    Same 120-day window as IngestDedupe (§5.3). Cleanup is a Celery
+    beat (FOLLOW_UP).
+
+    ### Forensic trace
+
+    ``last_error`` is truncated at 1024 chars and contains only the
+    exception class + message — NEVER the full stack trace (that's
+    in the log aggregator). PII-bearing exception messages are an
+    upstream contract bug; we accept best-effort truncation here.
+    """
+
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    id = models.BigAutoField(primary_key=True)
+    event_id = models.CharField(
+        max_length=26,
+        help_text="ULID from envelope §2.event_id.",
+    )
+    handler_name = models.CharField(
+        max_length=140,
+        help_text="``{event_name}@v{event_version}`` — the registered "
+        "handler whose invocation raised. Distinct handlers for the "
+        "same event_id (theoretical multi-handler future) keep "
+        "independent counters.",
+    )
+    outcome = models.CharField(
+        max_length=32,
+        default="handler_exception",
+        help_text="Future-proof for richer outcomes (timeout, "
+        "permanent_failure). MVP only writes ``handler_exception``.",
+    )
+    attempt_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of failed dispatch attempts for this "
+        "(event_id, handler, outcome) triple. Incremented on every "
+        "HANDLER_EXCEPTION; reset only by operator action.",
+    )
+    last_error = models.CharField(
+        max_length=1024,
+        blank=True,
+        default="",
+        help_text="Truncated ``exc_type: str(exc)`` from the most "
+        "recent failure. Stack traces live in the log aggregator.",
+    )
+    first_attempt_at = models.DateTimeField(auto_now_add=True)
+    last_attempt_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Handler failure tracker"
+        verbose_name_plural = "Handler failure tracker"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event_id", "handler_name", "outcome"],
+                name="evbus_handler_failure_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["-last_attempt_at"],
+                name="evbus_handler_fail_recent_idx",
+            ),
+            models.Index(
+                fields=["handler_name"],
+                name="evbus_handler_fail_name_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"HandlerFailureTracker[{self.handler_name} {self.event_id} "
+            f"attempts={self.attempt_count}]"
+        )
 
 
 class PaymentTerminalDedupe(models.Model):

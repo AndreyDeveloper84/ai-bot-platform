@@ -266,6 +266,18 @@ PAYMENT_EVENT_RETENTION_DAYS = int(os.environ.get("PAYMENT_EVENT_RETENTION_DAYS"
 # event re-evaluates against the new threshold.
 PAYMENT_FAILED_HANDOFF_THRESHOLD = int(os.environ.get("PAYMENT_FAILED_HANDOFF_THRESHOLD", "3"))
 
+# #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
+# raises gets retried by Ayla per §6.3; after this many failed
+# attempts (counted per event_id + handler), bot-platform upserts a
+# DLQ row with reason="handler_exception" so operator triage has a
+# DB-level handle instead of digging through log aggregator. Below
+# threshold = silent retries (current behaviour); at-or-above =
+# operator-visible row. Env-driven so ops can tighten/loosen without
+# a deploy. See ``apps/eventbus/models.py::HandlerFailureTracker``.
+EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD = int(
+    os.environ.get("EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD", "3")
+)
+
 # Sprint 5 / A3 — Replay infrastructure config (PHASE0_DESIGN §7.1).
 # Per-env sample rate so prod/staging stay at 100% (1 tenant, low traffic;
 # ~30MB/30d retention) while tests default to 0 to avoid noisy row creation
