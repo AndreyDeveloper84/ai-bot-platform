@@ -26,9 +26,9 @@ covers the full HTTP round-trip if needed.
 | ``booking.*`` (4 events) | #442 | ✅ Active replay-3× |
 | ``payment.*`` (4 events) | #443 | ✅ Active replay-3× |
 | ``service.updated`` | #444 | ✅ Active replay-3× |
+| ``user.profile.updated`` | #446 | ✅ Active replay-3× |
 | ``master.schedule.updated`` | #445 open | ⚠️ DLQ smoke |
 | ``review.created`` | #445 open | ⚠️ DLQ smoke |
-| ``user.profile.updated`` | #446 open | ⚠️ DLQ smoke |
 
 The DLQ smoke (``TestUnshippedConsumerNamesDeadLetter``) is the
 mechanical enforcement of «no consumer ships without this gate»: it
@@ -541,6 +541,62 @@ class TestCatalogIdempotency:
         _dispatch_3x_and_assert(env, side_effect_check=check)
 
 
+# ─── identity.user.profile.updated (#446) ──────────────────────────────────
+
+
+class TestIdentityIdempotency:
+    """The ``user.profile.updated`` consumer fetches the PII subset
+    (display_name + avatar_url) from Ayla REST and writes it to
+    BotUser. Idempotency contract: 3 dispatches of the same envelope
+    cause exactly ONE REST fetch + ONE DB write at the dispatcher
+    layer (IngestDedupe blocks 2nd + 3rd).
+
+    Note on tenant_id: ``user.profile.updated`` is the only event
+    family where tenant_id MAY be null per §3.12. The contract test
+    uses non-null TENANT_ID for fixture simplicity (matches the rest
+    of the suite); the null-tenant case is covered separately in
+    apps/eventbus/tests/test_identity_consumer.py.
+    """
+
+    def test_user_profile_updated_idempotent(self, tenant: Tenant) -> None:
+        from unittest.mock import patch
+
+        from apps.integrations.ayla.profile_client import ProfileFields
+
+        bot_user = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="9001",
+            chat_id="chat-9001",
+            ayla_user_id=AYLA_USER_ID,
+            display_name="Old",
+        )
+
+        env = _envelope(
+            event_name="user.profile.updated",
+            data={
+                "user_id": AYLA_USER_ID,
+                "changed_fields": ["display_name"],
+            },
+        )
+
+        with patch(
+            "apps.eventbus.consumers.identity.fetch_profile_fields",
+            return_value=ProfileFields(display_name="New Name", avatar_url=""),
+        ) as mock_fetch:
+
+            def check() -> None:
+                bot_user.refresh_from_db()
+                # 1st dispatch wrote "New Name"; 2nd + 3rd
+                # short-circuit at IngestDedupe BEFORE handler runs,
+                # so REST is NOT called again and the value stays.
+                assert bot_user.display_name == "New Name"
+                # REST called exactly once across all 3 dispatches.
+                assert mock_fetch.call_count == 1
+
+            _dispatch_3x_and_assert(env, side_effect_check=check)
+
+
 # ─── Unshipped consumers: DLQ smoke (Round-1 M1 fix) ───────────────────────
 
 
@@ -563,9 +619,9 @@ class TestUnshippedConsumerNamesDeadLetter:
         "event_name",
         [
             # service.updated SHIPPED in #444 — moved to TestCatalogIdempotency below.
+            # user.profile.updated SHIPPED in #446 — moved to TestIdentityIdempotency below.
             "master.schedule.updated",  # #445
             "review.created",  # #445
-            "user.profile.updated",  # #446
         ],
     )
     def test_unshipped_consumer_name_dead_letters(self, event_name: str) -> None:

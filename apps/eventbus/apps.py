@@ -50,6 +50,11 @@ class EventBusConfig(AppConfig):
 
         register_catalog_handlers()
 
+        # #446 — Register identity (user.profile.updated) consumer.
+        from apps.eventbus.consumers.identity import register_identity_handlers
+
+        register_identity_handlers()
+
         # Hotfix C (retro review #3): the subscriber registry is cached
         # after first resolution per :func:`_subscribers`. Wire the
         # Django ``setting_changed`` signal so:
