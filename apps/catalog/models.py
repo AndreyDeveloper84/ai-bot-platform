@@ -213,6 +213,17 @@ class CatalogMaster(_MirrorBase):
         help_text="YClients staff id — pre-populated from mysite so the "
         "Phase 1 booking flow can dispatch without a second lookup.",
     )
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla user_id (UUID) for this master. Bridge for "
+            "event-payload master_user_id → CatalogMaster ORM JOIN. "
+            "Nullable because legacy mysite-synced rows lack this — "
+            "back-filled by catalog-sync service or master event consumer."
+        ),
+    )
     raw = models.JSONField(default=dict, blank=True)
 
     invite_status = models.CharField(

@@ -93,6 +93,77 @@ class TestCatalogMaster:
         assert "Анна" in str(m)
 
 
+class TestCatalogMasterAylaUserId:
+    """W2 handoff: ``CatalogMaster.ayla_user_id`` bridge field.
+
+    Pattern mirrors #595/#634/#635. Bridges event-payload ``master_user_id``
+    (Ayla UUID) → local ``CatalogMaster`` ORM row so the W2 ``payment_failed``
+    skill can resolve the master without an extra REST round-trip.
+    """
+
+    def test_ayla_user_id_default_none(self, tenant: Tenant) -> None:
+        m = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11,
+            external_updated_at=_ts(),
+            name="Без Ayla",
+        )
+        assert m.ayla_user_id is None
+
+    def test_ayla_user_id_accepts_uuid(self, tenant: Tenant) -> None:
+        import uuid
+
+        ayla_uuid = uuid.uuid4()
+        m = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=12,
+            external_updated_at=_ts(),
+            name="С Ayla",
+            ayla_user_id=ayla_uuid,
+        )
+        m.refresh_from_db()
+        assert m.ayla_user_id == ayla_uuid
+
+    def test_ayla_user_id_indexed(self) -> None:
+        field = CatalogMaster._meta.get_field("ayla_user_id")
+        # ``django-stubs`` types ``_meta.get_field`` return as the field
+        # subclass (``UUIDField``), which lacks ``db_index`` in the stub
+        # generic args — use ``getattr`` so mypy stays happy without
+        # casting to the private base.
+        assert getattr(field, "db_index") is True
+        assert getattr(field, "null") is True
+        assert getattr(field, "blank") is True
+
+    def test_ayla_user_id_lookup_by_value(self, tenant: Tenant) -> None:
+        import uuid
+
+        target = uuid.uuid4()
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=13,
+            external_updated_at=_ts(),
+            name="Lookup Target",
+            ayla_user_id=target,
+        )
+        # A second row with a different UUID so the filter is meaningful.
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=14,
+            external_updated_at=_ts(),
+            name="Other",
+            ayla_user_id=uuid.uuid4(),
+        )
+        # And one with no Ayla id at all.
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=15,
+            external_updated_at=_ts(),
+            name="No Ayla",
+        )
+        match = CatalogMaster.all_tenants.get(ayla_user_id=target)
+        assert match.external_id == 13
+
+
 class TestCatalogFaq:
     def test_unique_per_tenant(self, tenant: Tenant) -> None:
         CatalogFaq.all_tenants.create(
