@@ -86,6 +86,26 @@ class BotUser(models.Model):
         "envelope.user_id → BotUser for BookingReminder + Conversation update.",
     )
 
+    # Synced from Ayla's `user.profile.updated` domain event (Gamma #446,
+    # event-contract.md §3.12). Mirror-only — Ayla owns the canonical
+    # value per ADR-0009 §Hard rule #1. Refresh via REST GET
+    # /api/v1/users/{ayla_user_id} on event receipt OR re-sync from event
+    # payload. Used by bot-platform UI surfaces (mini app, conversation
+    # thread, master-side internal-chat) for visual rendering only.
+    # Empty string default for backward compat with rows that pre-date
+    # the bridge / for users with no avatar set in Ayla.
+    avatar_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Avatar URL mirrored from Ayla user.profile.updated event "
+        "(per event-contract.md §3.12). Used by bot-platform for UI "
+        "rendering (mini app, conversation thread). NOT a canonical "
+        "store — Ayla djangoproject is. Refresh via REST GET "
+        "/api/v1/users/{ayla_user_id} on event receipt. Empty string "
+        "default for backward compat.",
+    )
+
     channel = models.CharField(
         max_length=32,
         help_text="Channel slug — 'max', 'telegram', 'whatsapp', 'web'.",
