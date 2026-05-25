@@ -148,11 +148,18 @@ Five roles. Two routine + one DDL + one backup + one break-glass.
 **Operational implication for ops/dev:** if you run `SELECT * FROM identity_memoryentry WHERE sensitivity_zone='red'` directly via `psql` as `ayla_app` without setting the GUC, you get **zero rows back** (not an error). This is intentional defence-in-depth — bypass attempts return nothing, not «access denied» (which leaks the existence of red rows). For legitimate ops access, use the break-glass procedure (§8).
 
 ```sql
--- RLS policy (round-3 A8 — empty-string-safe, UUID-validated)
+-- RLS policy (round-3 A8 — empty-string-safe, UUID-validated;
+--             round-5 Cat-4 fix — AS RESTRICTIVE so the filter actually applies)
 ALTER TABLE identity_memoryentry ENABLE ROW LEVEL SECURITY;
 
+-- AS RESTRICTIVE: Postgres combines permissive policies via OR, then
+-- AND's each restrictive into the result. Without RESTRICTIVE, a
+-- companion `FOR ALL ... USING (true)` permissive write-authorisation
+-- policy would OR-collapse the SELECT filter to `true` and leak red
+-- rows. RESTRICTIVE forces the filter to intersect, not union.
 CREATE POLICY memory_entry_non_red_visible
     ON identity_memoryentry
+    AS RESTRICTIVE
     FOR SELECT
     USING (
         sensitivity_zone != 'red'

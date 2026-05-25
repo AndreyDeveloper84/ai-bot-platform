@@ -153,6 +153,33 @@ class TestDbRolesAndViewExist:
             f"Expected policy not found. Got: {policies}"
         )
 
+    def test_select_filter_is_restrictive(self):
+        """Round-5 Cat 4 regression — SELECT filter MUST be RESTRICTIVE.
+
+        Postgres combines permissive policies via OR. Without RESTRICTIVE
+        on the SELECT-filter, a companion `FOR ALL USING (true)` permissive
+        policy would OR-collapse the SELECT filter to `true` → red zone
+        leaks. RESTRICTIVE forces AND-intersection, so the filter applies
+        independently of how many permissive write-authorisation policies
+        exist.
+
+        If this test fails, the RLS layer has regressed and red rows
+        leak via direct ORM access. Do NOT merge.
+        """
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT policyname, permissive FROM pg_policies "
+                "WHERE tablename = 'identity_memoryentry' "
+                "AND policyname = 'memory_entry_non_red_visible'"
+            )
+            row = cur.fetchone()
+        assert row is not None, "SELECT filter policy missing"
+        # pg_policies.permissive is the literal text 'PERMISSIVE' or 'RESTRICTIVE'.
+        assert row[1] == "RESTRICTIVE", (
+            f"memory_entry_non_red_visible MUST be RESTRICTIVE — got {row[1]!r}. "
+            "PERMISSIVE would OR-collapse with the write_all policy and leak red."
+        )
+
 
 class TestRlsBlocksRedWithoutGuc:
     """Test 14.17 — RLS filters red rows when GUC unset.

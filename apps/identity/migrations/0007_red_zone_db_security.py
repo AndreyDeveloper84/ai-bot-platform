@@ -141,10 +141,26 @@ def _add_red_zone_security(apps, schema_editor):
     # FORCE — policy applies even to the table owner (Django migrations run
     # as owner-equivalent role; without FORCE they bypass RLS).
     schema_editor.execute("ALTER TABLE identity_memoryentry FORCE ROW LEVEL SECURITY")
+
+    # Postgres RLS policy combination semantics:
+    #   final_visibility = (OR of all PERMISSIVE.USING)
+    #                      AND (AND of all RESTRICTIVE.USING)
+    #
+    # ⚠️  Round-2 friendly-reviewer finding: we previously had BOTH the
+    # SELECT-filter policy AND a `FOR ALL ... USING (true)` policy as
+    # PERMISSIVE. For SELECT they OR'd → `(zone != 'red' OR GUC) OR true`
+    # = `true` → SELECT-filter bypassed → red zone leaked. Cat 4 data-
+    # corruption / RLS-gap PRE_MERGE blocker.
+    #
+    # Fix: SELECT-filter MUST be RESTRICTIVE so it AND's into the result.
+    # The `FOR ALL ... USING (true)` permissive policy still authorises
+    # all four commands (SELECT/INSERT/UPDATE/DELETE) for ayla_app, but
+    # the restrictive SELECT-filter narrows SELECT to non-red OR GUC.
     schema_editor.execute(
         """
         CREATE POLICY memory_entry_non_red_visible
             ON identity_memoryentry
+            AS RESTRICTIVE
             FOR SELECT
             USING (
                 sensitivity_zone != 'red'
@@ -153,8 +169,13 @@ def _add_red_zone_security(apps, schema_editor):
             );
         """
     )
-    # Allow ayla_app to INSERT/UPDATE/DELETE — RLS only filters SELECT.
-    # Writes are gated at the application layer (memory_writer, veha 3).
+    # Permissive `FOR ALL ... USING (true)` authorises all four DML
+    # commands. For SELECT it OR-combines to `true` then AND-combines
+    # with the restrictive policy above → effective SELECT filter is
+    # `zone != 'red' OR GUC`. For INSERT/UPDATE/DELETE no restrictive
+    # policy applies → `true` → allowed. Writes are app-gated via
+    # `memory_writer` (veha 3) — DB-level RLS just authorises the
+    # command class.
     schema_editor.execute(
         """
         CREATE POLICY memory_entry_write_all
