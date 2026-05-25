@@ -379,6 +379,26 @@ AI_DRAFTS_AUTO_TRIGGER_ENABLED = os.environ.get(
     "AI_DRAFTS_AUTO_TRIGGER_ENABLED", "false"
 ).lower() in ("true", "1")
 
+# M6 auto-trigger idle-active-draft suppress window (issue #659).
+# If an ACTIVE draft on a conversation is younger than this many seconds,
+# skip auto-trigger regeneration — the master is probably still viewing
+# the existing draft. Prevents the documented #659 collision race:
+#
+#   1. Customer message arrives → auto-trigger task starts LLM call
+#      (1-3s under Conversation row lock).
+#   2. Master taps «Отправить от себя» on the ACTIVE draft visible in UI.
+#   3. send_draft_as_master returns 429 conversation_busy (PR #551 lock).
+#   4. Frontend retries after Retry-After: 3 — by then auto-trigger has
+#      REPLACED the visible draft with a fresh one.
+#   5. send-as-me targets REPLACED draft → 400 draft_already_acted.
+#
+# Suppressing auto-trigger while the master likely still has the draft
+# on-screen breaks the race at step 1. Setting this to 0 disables the
+# suppress (regression escape hatch for ops).
+IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = int(
+    os.environ.get("IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS", "60")
+)
+
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
 # than silently 500ing on a misconfigured prod box.
