@@ -33,7 +33,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # package (no `__init__.py`). The script is intended as CLI but we
 # also want to exercise its functions in tests.
 sys.path.insert(0, str(_PROJECT_ROOT / "tools" / "lint"))
-import red_zone_guard  # noqa: E402
+import red_zone_guard  # type: ignore[import-not-found]  # noqa: E402
 
 
 def _write_py(tmp_path: Path, name: str, source: str) -> Path:

@@ -74,8 +74,9 @@ def _pg_env() -> dict[str, str]:
     """
     db = settings.DATABASES["default"]
     env = os.environ.copy()
-    if db.get("PASSWORD"):
-        env["PGPASSWORD"] = db["PASSWORD"]
+    password = db.get("PASSWORD")
+    if password:
+        env["PGPASSWORD"] = str(password)
     return env
 
 
@@ -83,12 +84,15 @@ def _pg_conn_args() -> list[str]:
     """Build connection args (`-h`, `-p`, `-U`, `-d`) for pg_dump / psql."""
     db = settings.DATABASES["default"]
     args: list[str] = []
-    if db.get("HOST"):
-        args += ["-h", db["HOST"]]
-    if db.get("PORT"):
-        args += ["-p", str(db["PORT"])]
-    if db.get("USER"):
-        args += ["-U", db["USER"]]
+    host = db.get("HOST")
+    if host:
+        args += ["-h", str(host)]
+    port = db.get("PORT")
+    if port:
+        args += ["-p", str(port)]
+    user = db.get("USER")
+    if user:
+        args += ["-U", str(user)]
     # Note: -d is supplied by callers (dump source != restore target).
     return args
 
@@ -116,7 +120,7 @@ def test_delete_requested_entries_stay_hidden_after_restore(tmp_path: Path) -> N
     NOT NULL stay unreadable after restore».
     """
     db = settings.DATABASES["default"]
-    db_name = db["NAME"]
+    db_name = str(db["NAME"])
     dump_file = tmp_path / "backup.dump"
 
     # ─── Seed ────────────────────────────────────────────────────────
