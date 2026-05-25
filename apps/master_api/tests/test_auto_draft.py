@@ -47,16 +47,23 @@ from apps.tenancy.models import Tenant
 
 @pytest.fixture(autouse=True)
 def _isolated_env(settings: Any) -> Any:
-    """Reset shared state between tests — flag, router cache, locmem cache."""
+    """Reset shared state between tests — flag, router cache, locmem cache.
+
+    Issue #692 (follow-up from #659 review): we deliberately do NOT
+    override ``IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS`` here.  The
+    earlier blanket ``=0`` override hid any future regression in the
+    suppress gate from the rest of the suite — every test would have
+    run with the gate disabled.  Tests that genuinely need the gate
+    disabled (notably the debounce-release test, which seeds + then
+    regenerates an ACTIVE draft within the same conversation) set the
+    override explicitly per-test.  Everyone else runs against the
+    production default (60s) and so will fail loudly if the suppress
+    semantics ever drift.
+    """
 
     settings.LLM_PROVIDER = "openai"
     settings.SKILL_LLM_PROVIDER = {}
     settings.AI_DRAFTS_AUTO_TRIGGER_ENABLED = True
-    # Issue #659 suppress is disabled by default in tests — individual
-    # ``TestIssue659IdleActiveSuppress`` cases override.  This preserves
-    # baseline behaviour for the pre-#659 test suite (e.g. the debounce
-    # release test seeds an ACTIVE draft then expects regeneration).
-    settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 0
     reset_router_cache()
     cache.clear()
     yield
@@ -1012,3 +1019,96 @@ class TestIssue659IdleActiveSuppress:
         ]
         assert suppress_msgs, "same-trigger suppress INFO log must be emitted"
         assert str(draft.id) in suppress_msgs[0]
+
+    # -----------------------------------------------------------------
+    # Issue #691 — cross-tenant isolation regression guard.
+    #
+    # Adversarial Code Reviewer finding from PR #700 round-1 review:
+    # the suppress gate query in :func:`auto_generate_draft_for_inbound`
+    # filters AiDraft by ``tenant_id=tenant_uuid`` (explicit, because
+    # the Celery worker runs outside ambient ``tenant_scope``).  If
+    # that filter were ever dropped — e.g. a refactor switches to
+    # ``.objects.filter(...)`` thinking it inherits scope — a fresh
+    # ACTIVE draft in Tenant B would suppress an auto-trigger task
+    # running for Tenant A's conversation.  Cross-tenant data leak +
+    # broken auto-trigger.
+    # -----------------------------------------------------------------
+
+    def test_suppress_gate_isolates_across_tenants(self, settings: Any) -> None:
+        """Tenant B's fresh ACTIVE draft must be invisible to a task
+        running with Tenant A's ``tenant_id``.
+
+        Setup:
+          * Tenant A has a conversation + customer message but NO
+            existing ACTIVE draft.
+          * Tenant B has a fresh ACTIVE draft (5s old, well inside
+            the 60s suppress window).
+          * Auto-trigger task runs with Tenant A's conversation +
+            tenant_id.
+
+        Expected: suppress does NOT fire (Tenant B's draft invisible
+        to Tenant A's task) → generate proceeds → new ACTIVE draft
+        created in Tenant A.
+
+        A regression here (dropped ``tenant_id`` filter on the suppress
+        query) would surface as a phantom suppress: Tenant A's task
+        returns ``idle_active_draft_skipped`` even though Tenant A
+        has no draft, because it «sees» Tenant B's row.
+        """
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+
+        # Tenant A — the target of the auto-trigger task.
+        tenant_a = _make_tenant(slug="tenant-a-isolation")
+        bu_a = _make_bot_user(tenant_a, channel_user_id="client-a")
+        master_a = _make_master(tenant_a, external_id=101)
+        conv_a = _make_conversation(tenant_a, bu_a)
+        _make_booking(tenant_a, master_a, bu_a)
+        msg_a = _add_msg(tenant_a, conv_a, role=Message.Role.USER, content="нужна запись")
+
+        # Tenant B — separate tenant with a fresh ACTIVE draft.  If the
+        # suppress gate's tenant filter is dropped, this draft would
+        # bleed into Tenant A's query and force a false suppress.
+        tenant_b = _make_tenant(slug="tenant-b-isolation")
+        bu_b = _make_bot_user(tenant_b, channel_user_id="client-b")
+        master_b = _make_master(tenant_b, external_id=202)
+        conv_b = _make_conversation(tenant_b, bu_b)
+        _make_booking(tenant_b, master_b, bu_b)
+        # Seed a fresh ACTIVE draft in Tenant B (well inside the
+        # 60s window — 5s old).
+        self._seed_active_draft(
+            tenant_b,
+            conv_b,
+            master_b,
+            age_seconds=5,
+            content="чужой черновик из другого салона",
+        )
+
+        with _patch_complete(return_value=_completion(text="свой ответ для Tenant A")):
+            res = auto_generate_draft_for_inbound(
+                conversation_id=str(conv_a.id),
+                trigger_message_id=str(msg_a.id),
+                tenant_id=str(tenant_a.id),
+            )
+
+        # Suppress did NOT fire — Tenant B's draft was invisible.
+        # Tenant A's task proceeded to generate.
+        assert res["generated"] is True, (
+            "Suppress gate must scope by tenant_id; Tenant B's draft must not "
+            "trip suppression on a Tenant A task."
+        )
+
+        # Tenant A now has exactly one ACTIVE draft (the newly generated
+        # one), Tenant B's ACTIVE draft is untouched.
+        actives_a = AiDraft.all_tenants.filter(tenant_id=tenant_a.id, status=AiDraft.Status.ACTIVE)
+        actives_b = AiDraft.all_tenants.filter(tenant_id=tenant_b.id, status=AiDraft.Status.ACTIVE)
+        assert actives_a.count() == 1
+        assert actives_b.count() == 1
+        # Sanity — the two drafts belong to different conversations
+        # and different tenants (no accidental cross-wiring).
+        a_draft = actives_a.first()
+        b_draft = actives_b.first()
+        assert a_draft is not None and b_draft is not None
+        assert a_draft.conversation_id == conv_a.id
+        assert b_draft.conversation_id == conv_b.id
+        assert a_draft.id != b_draft.id

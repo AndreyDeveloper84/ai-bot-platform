@@ -309,10 +309,15 @@ def auto_generate_draft_for_inbound(
         # (REPLACED / SENT_AS_MASTER / RELEASED_TO_AI / DISMISSED)
         # are not on-screen — master has already acted on them.
         # The partial unique constraint
-        # ``ai_draft_one_active_per_conversation`` (PR #535) guarantees
-        # at most one ACTIVE row; the ``order_by("-created_at")`` is
-        # belt-and-braces against legacy / replay scenarios where the
-        # constraint may not yet have been enforced.
+        # ``ai_draft_one_active_per_conversation`` (PR #535,
+        # apps/conversations/models.py :: AiDraft.Meta.constraints)
+        # guarantees at most one ACTIVE row per conversation; the
+        # ``order_by("-created_at").first()`` is belt-and-braces and
+        # documents intent in case the invariant ever loosens — e.g.
+        # the partial unique constraint is dropped or the status enum
+        # is extended with another «active-ish» variant that the
+        # constraint's ``Q(status=ACTIVE)`` filter excludes.
+        # Issue #694 (follow-up from #659 review).
         existing_active = (
             AiDraft.all_tenants.filter(
                 tenant_id=tenant_uuid,
