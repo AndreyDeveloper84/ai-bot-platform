@@ -173,11 +173,12 @@ This is the **ground-truth signal** the window should approximate.
 
 - **Source**: time delta between `auto_draft.generated` slug (`apps/master_api/tasks.py:552`) and the master's tap on the corresponding draft.
 
-**Caveat — there is NO INFO log slug today on send-as-me / release-to-ai.** The endpoints `apps/master_api/views.py::conversation_draft_send_as_me` (line 1199) and `conversation_draft_release_to_ai` (line 1251) update `AiDraft.status` in the DB (`SENT_AS_MASTER` / `RELEASED_TO_AI`) but do not emit a structured log line. Three ways to recover tap-to-decide latency at pilot:
+**Canonical source (PR #707):** `master_api.tasks.auto_draft.acted` INFO slug emitted from `apps/master_api/views.py::conversation_draft_send_as_me` + `conversation_draft_release_to_ai`. Format: `"master_api.tasks.auto_draft.acted conv=%s draft=%s action=<sent_as_master|released_to_ai> draft_age_seconds=%.1f trigger_age_seconds=%.1f"`. Panel 4 = pure log scrape — `draft_age_seconds` IS the tap-to-decide latency (delta between generate slug `auto_draft.generated` and acted slug, per draft UUID). `trigger_age_seconds=-1.0` when the draft has no trigger_message (legacy or manually-generated). Slug prefix matches PR #700 by **operational namespace** (auto-draft pipeline), not by code module — the emitter is `views.py`, not `tasks.py`.
 
-1. **DB-derived (canonical for week 1):** join `AiDraft` rows where `status IN (SENT_AS_MASTER, RELEASED_TO_AI)` to themselves on the generate event — compute `acted_at - created_at`. `acted_at` lives in `AiDraft.updated_at` for these terminal statuses. Read-only SQL on prod replica; no code change required.
+Fallbacks if the log scrape is unavailable:
+
+1. **DB-derived (audit trail / replica):** join `AiDraft` rows where `status IN (SENT_AS_MASTER, RELEASED_TO_AI)` to themselves on the generate event — compute `acted_at - created_at`. `acted_at` lives in `AiDraft.updated_at` for these terminal statuses. Read-only SQL on prod replica; no code change required.
 2. **Nginx / WSGI access log:** the `POST /api/master/conversations/<uuid>/drafts/<uuid>/send-as-me` and `.../release-to-ai` requests are in the access log with timestamps. Pair with the audit row keyed by `draft_id`.
-3. **Future enhancement:** emit `auto_draft.acted` INFO slug from both view handlers with `conv=%s draft=%s decision=<send_as_me|edit|release_to_ai> latency_ms=%d`. **Filed as nice-to-have (separate issue, see §Nice-to-have).**
 
 - **Visualization**: histogram of `acted_at - created_at` for ACTIVE-then-terminal drafts.
 - **Healthy median**: 30-60s.
@@ -310,8 +311,8 @@ data migration is involved.
 
 ## Nice-to-have (file as separate issues)
 
-- **`auto_draft.acted` INFO slug from `conversation_draft_send_as_me` + `conversation_draft_release_to_ai`** with `decision=<send_as_me|edit|release_to_ai> latency_ms=%d` — would make Panel 4 (tap-to-decide latency) a pure-log derivation instead of requiring a DB join. Today's workaround: SQL on `AiDraft(status, updated_at - created_at)`.
-- **Per-tenant `IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS`** — current MVP is a process-wide env var. Bimodal `age_seconds` distribution across tenants (panel 3 anomaly) would motivate this.
+- ~~`auto_draft.acted` INFO slug from `conversation_draft_send_as_me` + `conversation_draft_release_to_ai`~~ — **shipped in PR #707**. Panel 4 is now a pure-log derivation; the DB-JOIN workaround is retained as fallback only.
+- **Per-tenant `IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS`** — current MVP is a process-wide env var. Bimodal `age_seconds` distribution across tenants (panel 3 anomaly) would motivate this. Tracked in issue #708.
 - **Histogram metric exporter** for `age_seconds` and `tap-to-decide` — would make panels 3 + 4 first-class instead of jq-derived. Aligns with issue #698.
 
 ## Related

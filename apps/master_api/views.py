@@ -51,6 +51,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.conversations.models import AiDraft
 from apps.master_api.services.conversations import (
     ConversationsListError,
     DEFAULT_LIMIT as CONVERSATIONS_DEFAULT_LIMIT,
@@ -1193,6 +1194,53 @@ def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> H
     return JsonResponse(response.to_dict())
 
 
+def _log_auto_draft_acted(draft_id: str, action_kind: str) -> None:
+    """Emit ``master_api.tasks.auto_draft.acted`` INFO slug (issue #707).
+
+    Slug prefix ``master_api.tasks.auto_draft.`` is the **logical
+    operational namespace** for the M6 auto-draft pipeline — it
+    intentionally matches PR #700's task-side prefix
+    (``apps/master_api/tasks.py``) so log triage / Grafana dashboards
+    (runbook ``m6-auto-draft-suppress-tuning.md`` Panel 4) can scrape a
+    single namespace regardless of whether the event came from the
+    Celery task or this HTTP view. We are NOT in ``tasks.py`` here, but
+    the namespace is by operational concern, not by code module.
+
+    Payload is PII-safe: UUIDs + enum + floats only. No customer
+    content — that's the contract that classifies this PR as NON-§H.3.
+    """
+
+    draft = AiDraft.all_tenants.filter(pk=draft_id).first()
+    if draft is None:
+        # Defence-in-depth: service path guaranteed the row existed at
+        # 201-return time, but a parallel hard-delete window is
+        # theoretically possible. Skip the log rather than 500.
+        return
+    now = dj_timezone.now()
+    draft_age_seconds = (now - draft.created_at).total_seconds()
+    trigger_id = draft.trigger_message_id
+    if trigger_id is None:
+        trigger_age_seconds = -1.0
+    else:
+        # Avoid triggering an extra Message fetch when we just need
+        # created_at. trigger_message FK is auto-fetched lazily; the
+        # `.trigger_message` access loads the related row.
+        trigger_msg = draft.trigger_message
+        trigger_age_seconds = (
+            (now - trigger_msg.created_at).total_seconds() if trigger_msg is not None else -1.0
+        )
+    logger.info(
+        "master_api.tasks.auto_draft.acted "
+        "conv=%s draft=%s action=%s "
+        "draft_age_seconds=%.1f trigger_age_seconds=%.1f",
+        draft.conversation_id,
+        draft.id,
+        action_kind,
+        draft_age_seconds,
+        trigger_age_seconds,
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
@@ -1242,6 +1290,8 @@ def conversation_draft_send_as_me(
         )
     except ConversationDetailError as exc:
         return _draft_error_response(exc)
+    # Issue #707: ground-truth log for Panel 4 (tap-to-decide latency).
+    _log_auto_draft_acted(draft_id, "sent_as_master")
     return JsonResponse(response.to_dict(), status=201)
 
 
@@ -1278,6 +1328,8 @@ def conversation_draft_release_to_ai(
         )
     except ConversationDetailError as exc:
         return _draft_error_response(exc)
+    # Issue #707: ground-truth log for Panel 4 (tap-to-decide latency).
+    _log_auto_draft_acted(draft_id, "released_to_ai")
     return JsonResponse(response.to_dict(), status=201)
 
 

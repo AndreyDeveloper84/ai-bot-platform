@@ -16,6 +16,7 @@ do NOT exercise real OpenAI / Anthropic SDKs in unit tests.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
@@ -843,6 +844,108 @@ class TestReleaseToAi:
         )
         assert resp.status_code == 400
         assert resp.json()["error"] == "draft_already_acted"
+
+
+@pytest.mark.django_db
+class TestAutoDraftActedInfoLog:
+    """Issue #707 — ``auto_draft.acted`` INFO slug on send + release.
+
+    Ground-truth log for runbook Panel 4 (tap-to-decide latency).
+    Slug prefix ``master_api.tasks.auto_draft.`` matches PR #700 by
+    operational namespace (not by code module). PII-safe payload:
+    UUIDs + enum + floats only.
+    """
+
+    def test_send_as_me_emits_auto_draft_acted_info_log(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+        caplog.set_level(logging.INFO, logger="apps.master_api.views")
+        resp = client.post(
+            _send_as_me_url(conv.id, draft.id),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+        records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO and "master_api.tasks.auto_draft.acted" in r.getMessage()
+        ]
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "action=sent_as_master" in msg
+        assert f"draft={draft.id}" in msg
+        assert f"conv={conv.id}" in msg
+        assert "draft_age_seconds=" in msg
+        assert "trigger_age_seconds=" in msg
+
+    def test_release_to_ai_emits_auto_draft_acted_info_log(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+        caplog.set_level(logging.INFO, logger="apps.master_api.views")
+        resp = client.post(
+            _release_url(conv.id, draft.id),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+        records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO and "master_api.tasks.auto_draft.acted" in r.getMessage()
+        ]
+        assert len(records) == 1
+        msg = records[0].getMessage()
+        assert "action=released_to_ai" in msg
+        assert f"draft={draft.id}" in msg
+        assert f"conv={conv.id}" in msg
+
+    def test_acted_log_with_null_trigger_message_logs_negative_one(
+        self,
+        client: Client,
+        tenant: Tenant,
+        accepted_master: CatalogMaster,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Draft with ``trigger_message=None`` → ``trigger_age_seconds=-1.0``.
+
+        Guards the sentinel: drafts seeded without a trigger row (some
+        legacy flows + this test helper) must not 500 the log path.
+        """
+        customer = _make_bot_user(tenant=tenant)
+        _make_booking(tenant=tenant, master=accepted_master, bot_user=customer)
+        conv = _make_conversation(tenant=tenant, bot_user=customer)
+        draft = _seed_active_draft(tenant=tenant, master=accepted_master, conversation=conv)
+        # _seed_active_draft does not set trigger_message — confirm.
+        assert draft.trigger_message_id is None
+        caplog.set_level(logging.INFO, logger="apps.master_api.views")
+        resp = client.post(
+            _send_as_me_url(conv.id, draft.id),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+        records = [
+            r for r in caplog.records if "master_api.tasks.auto_draft.acted" in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert "trigger_age_seconds=-1.0" in records[0].getMessage()
 
 
 # =========================================================================
