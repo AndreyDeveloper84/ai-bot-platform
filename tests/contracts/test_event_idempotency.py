@@ -25,7 +25,7 @@ covers the full HTTP round-trip if needed.
 |--------|----------|-------------|
 | ``booking.*`` (4 events) | #442 | ✅ Active replay-3× |
 | ``payment.*`` (4 events) | #443 | ✅ Active replay-3× |
-| ``service.updated`` | #444 open | ⚠️ DLQ smoke (fail-on-ship) |
+| ``service.updated`` | #444 | ✅ Active replay-3× |
 | ``master.schedule.updated`` | #445 open | ⚠️ DLQ smoke |
 | ``review.created`` | #445 open | ⚠️ DLQ smoke |
 | ``user.profile.updated`` | #446 open | ⚠️ DLQ smoke |
@@ -50,6 +50,7 @@ from uuid import UUID
 import pytest
 
 from apps.booking.models import BookingReminder, RemoteBookingProxy
+from apps.catalog.models import CatalogService
 from apps.conversations.models import Conversation
 from apps.eventbus import ingest_dispatcher
 from apps.eventbus.ingest_dispatcher import (
@@ -499,6 +500,47 @@ class TestPaymentIdempotency:
             _dispatch_3x_and_assert(env, side_effect_check=check)
 
 
+# ─── catalog.service.updated (#444) ────────────────────────────────────────
+
+
+class TestCatalogIdempotency:
+    """The ``service.updated`` consumer mirrors Ayla service changes
+    into ``CatalogService``. Idempotency contract: 3 dispatches of the
+    same envelope bump ``cache_version`` exactly ONCE (the dispatcher's
+    IngestDedupe blocks the 2nd and 3rd dispatches from reaching the
+    handler)."""
+
+    def test_service_updated_idempotent(self, tenant: Tenant) -> None:
+        # Pre-existing mirror row for the Ayla service.
+        mirror = CatalogService.all_tenants.create(
+            tenant=tenant,
+            external_id=42,
+            ayla_service_id=UUID(SERVICE_ID),
+            external_updated_at=dt.datetime(2026, 5, 20, 10, 0, tzinfo=dt.timezone.utc),
+            slug="haircut",
+            name="Стрижка",
+            cache_version=0,
+        )
+
+        env = _envelope(
+            event_name="service.updated",
+            data={
+                "service_id": SERVICE_ID,
+                "changed_fields": ["price"],
+                "previous_values": {"price": "1800.00"},
+            },
+        )
+
+        def check() -> None:
+            mirror.refresh_from_db()
+            # Counter == 1 across all 3 dispatches (dispatcher
+            # IngestDedupe short-circuits 2nd + 3rd before reaching
+            # the handler).
+            assert mirror.cache_version == 1
+
+        _dispatch_3x_and_assert(env, side_effect_check=check)
+
+
 # ─── Unshipped consumers: DLQ smoke (Round-1 M1 fix) ───────────────────────
 
 
@@ -520,7 +562,7 @@ class TestUnshippedConsumerNamesDeadLetter:
     @pytest.mark.parametrize(
         "event_name",
         [
-            "service.updated",  # #444
+            # service.updated SHIPPED in #444 — moved to TestCatalogIdempotency below.
             "master.schedule.updated",  # #445
             "review.created",  # #445
             "user.profile.updated",  # #446

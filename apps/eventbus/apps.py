@@ -45,6 +45,11 @@ class EventBusConfig(AppConfig):
 
         register_payment_handlers()
 
+        # #444 — Register catalog (service.updated) consumer.
+        from apps.eventbus.consumers.catalog import register_catalog_handlers
+
+        register_catalog_handlers()
+
         # Hotfix C (retro review #3): the subscriber registry is cached
         # after first resolution per :func:`_subscribers`. Wire the
         # Django ``setting_changed`` signal so:
