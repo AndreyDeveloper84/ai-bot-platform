@@ -387,6 +387,35 @@ class ClientProfile(models.Model):
         help_text="bronze | silver | gold | platinum.",
     )
 
+    # --- Reviews (Gamma #446 review.created consumer handoff) ---
+    # Synced from Ayla's `review.created` domain event per event-contract.md
+    # §3.13. Mirror-only — Ayla djangoproject owns the canonical Review
+    # state. These fields are the bot-platform's denormalised projection
+    # for admin queue / sentiment analytics / proactive nudge logic.
+    last_review_rating = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Rating (1-5) of this client's most recent review, "
+        "from review.created event payload. NULL = no reviews yet.",
+    )
+    last_review_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the most recent review.created event "
+        "was emitted (Ayla domain). NULL = no reviews yet.",
+    )
+    low_rating_flag = models.BooleanField(
+        default=False,
+        help_text="True if the most recent review had rating <= 2. "
+        "Triggers admin queue «review attention» surfacing.",
+    )
+    sentiment_score = models.FloatField(
+        default=0.0,
+        help_text="Derived from last_review_rating: 5→1.0, 4→0.5, 3→0.0, "
+        "2→-0.5, 1→-1.0. Bonus field for future analytics. Stays 0.0 "
+        "for clients with no reviews yet.",
+    )
+
     # --- Bookkeeping ---
     last_recomputed_at = models.DateTimeField(
         null=True,
