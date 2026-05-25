@@ -61,12 +61,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.ingest_redaction import redact_data_for_dlq
-from apps.eventbus.models import IngestDedupe, IngestDLQ
+from apps.eventbus.models import HandlerFailureTracker, IngestDedupe, IngestDLQ
 
 
 logger = logging.getLogger(__name__)
@@ -238,45 +240,69 @@ def dispatch_envelope(envelope: IngestEnvelope) -> DispatchResult:
             envelope.event_name,
             envelope.event_version,
         )
+        # #433 umbrella — track failure attempts in a SEPARATE
+        # transaction (the outer atomic just rolled back, so a
+        # tracker row in there would also roll back). On threshold
+        # crossing, upsert a DLQ row so operator triage has a
+        # DB-level handle instead of digging through Sentry.
+        # Tracker insert is best-effort — a failure here MUST NOT
+        # escape past the original handler exception.
+        try:
+            _track_handler_failure(envelope, exc)
+        except Exception:  # noqa: BLE001 — tracker is observability, not load-bearing
+            logger.exception(
+                "eventbus.ingest.failure_tracking_error event_id=%s",
+                envelope.event_id,
+            )
         return DispatchResult(outcome=DispatchOutcome.HANDLER_EXCEPTION, exception=exc)
 
     return DispatchResult(outcome=DispatchOutcome.OK)
 
 
+def _build_dlq_raw_body(envelope: IngestEnvelope) -> dict:
+    """Build the redacted envelope dict for IngestDLQ.raw_body.
+
+    Round-2 AS4 — redact envelope.data BEFORE persisting. DLQ
+    retention is 90d (§6.4); without redaction, a publisher bug or
+    v2 event with new fields = unredacted PII for 90 days in a
+    surface ops triages via Sentry/log-aggregator. See
+    apps/eventbus/ingest_redaction.py.
+    """
+    return {
+        "event_id": envelope.event_id,
+        "event_name": envelope.event_name,
+        "event_version": envelope.event_version,
+        "occurred_at": envelope.occurred_at.isoformat(),
+        "tenant_id": envelope.tenant_id,
+        "user_id": envelope.user_id,
+        "actor": envelope.actor,
+        "correlation_id": envelope.correlation_id,
+        "causation_id": envelope.causation_id,
+        "data": redact_data_for_dlq(envelope.data),
+    }
+
+
 def _write_dlq(envelope: IngestEnvelope, *, reason: str) -> None:
     """Persist a DLQ row for an event that cannot be processed.
 
-    Separate function so the view layer can call it for cases where
-    the envelope failed earlier validation but the operator still
-    benefits from a persistent record (e.g. retry-budget exhaustion
-    when implemented in the dispatcher layer later).
+    Upsert-shaped (#433 umbrella): if a row already exists for
+    ``(event_id, reason)`` it's updated, not duplicated. UniqueConstraint
+    on the table guarantees idempotency.
 
-    Stores the envelope's fields as a flat dict (event-contract.md
-    §6.4 calls for the "full envelope payload"); the raw HTTP body
-    is logged by the view layer separately if needed.
+    Called from:
+    * The dispatcher for ``UNKNOWN_EVENT_NAME`` / ``UNKNOWN_EVENT_VERSION``.
+    * :func:`_track_handler_failure` once the retry-counter crosses
+      ``settings.EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD``.
+    * The view layer for early-validation rejects (HMAC/timestamp).
     """
     try:
-        # Round-2 AS4 — redact envelope.data BEFORE persisting. The
-        # DLQ retention is 90d (§6.4); without redaction, a publisher
-        # bug or v2 event with new fields = unredacted PII for 90
-        # days in a surface ops triages via Sentry/log-aggregator.
-        # See apps/eventbus/ingest_redaction.py.
-        IngestDLQ.objects.create(
+        IngestDLQ.objects.update_or_create(
             event_id=envelope.event_id,
-            event_name=envelope.event_name,
-            event_version=envelope.event_version,
             reason=reason,
-            raw_body={
-                "event_id": envelope.event_id,
+            defaults={
                 "event_name": envelope.event_name,
                 "event_version": envelope.event_version,
-                "occurred_at": envelope.occurred_at.isoformat(),
-                "tenant_id": envelope.tenant_id,
-                "user_id": envelope.user_id,
-                "actor": envelope.actor,
-                "correlation_id": envelope.correlation_id,
-                "causation_id": envelope.causation_id,
-                "data": redact_data_for_dlq(envelope.data),
+                "raw_body": _build_dlq_raw_body(envelope),
             },
         )
     except Exception:  # noqa: BLE001 — DLQ write MUST NEVER block the response
@@ -285,3 +311,52 @@ def _write_dlq(envelope: IngestEnvelope, *, reason: str) -> None:
             envelope.event_id,
             reason,
         )
+
+
+def _track_handler_failure(envelope: IngestEnvelope, exc: BaseException) -> None:
+    """Increment the per-(event_id, handler) attempt counter and
+    upsert a DLQ row once it crosses the threshold.
+
+    Called from the dispatcher's ``except Exception`` arm AFTER the
+    outer ``transaction.atomic`` has rolled back. We open our own
+    atomic so the tracker write commits independently of the
+    handler's rollback (the whole point — otherwise the counter
+    would never persist).
+
+    #433 umbrella: closes the observability gap where HANDLER_EXCEPTION
+    outcomes left no DB-level record for operator triage.
+    """
+    handler_name = f"{envelope.event_name}@v{envelope.event_version}"
+    outcome = "handler_exception"
+    error_msg = f"{type(exc).__name__}: {exc}"[:1024]
+
+    with transaction.atomic():
+        tracker, created = HandlerFailureTracker.objects.get_or_create(
+            event_id=envelope.event_id,
+            handler_name=handler_name,
+            outcome=outcome,
+            defaults={"attempt_count": 1, "last_error": error_msg},
+        )
+        if not created:
+            # Atomic increment + error refresh. F() avoids the
+            # read-modify-write race when two concurrent retries
+            # land in parallel.
+            HandlerFailureTracker.objects.filter(pk=tracker.pk).update(
+                attempt_count=F("attempt_count") + 1,
+                last_error=error_msg,
+            )
+            tracker.refresh_from_db(fields=["attempt_count"])
+
+        threshold = getattr(settings, "EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD", 3)
+        if tracker.attempt_count >= threshold:
+            # Upsert — second/third attempts past threshold refresh
+            # the row but don't create new ones.
+            _write_dlq(envelope, reason=outcome)
+            logger.warning(
+                "eventbus.ingest.handler_exception_threshold "
+                "event_id=%s handler=%s attempts=%d threshold=%d",
+                envelope.event_id,
+                handler_name,
+                tracker.attempt_count,
+                threshold,
+            )

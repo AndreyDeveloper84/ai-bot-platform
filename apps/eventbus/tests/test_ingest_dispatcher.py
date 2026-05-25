@@ -15,7 +15,6 @@ from apps.eventbus.ingest_dispatcher import (
     dispatch_envelope,
     register,
     registered_handlers,
-    unregister,
 )
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.models import IngestDedupe, IngestDLQ
@@ -46,10 +45,25 @@ def _envelope(
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """Reset the module-level registry between tests."""
-    yield
-    for key in list(registered_handlers().keys()):
-        unregister(*key)
+    """Snapshot + restore the module-level registry around each test.
+
+    #433 umbrella fix: the previous version only cleaned AFTER the
+    test, leaking production handlers (booking.*, payment.*, etc.
+    registered at boot in ``EventBusConfig.ready``) into tests in
+    this module that ``register`` their own handlers — those calls
+    then raised ``ValueError: already registered``. Snapshotting
+    BEFORE the test gives this module a clean slate AND preserves
+    the registry for downstream modules in the same pytest session.
+    """
+    import apps.eventbus.ingest_dispatcher as dispatcher_module
+
+    snapshot = dict(dispatcher_module._REGISTRY)
+    dispatcher_module._REGISTRY.clear()
+    try:
+        yield
+    finally:
+        dispatcher_module._REGISTRY.clear()
+        dispatcher_module._REGISTRY.update(snapshot)
 
 
 class TestRegistry:
