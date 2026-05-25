@@ -45,6 +45,49 @@ class TestBotUserBasics:
         assert "max" in str(u)
 
 
+class TestBotUserAvatarUrl:
+    """avatar_url mirror field (#446 Gamma handoff for user.profile.updated)."""
+
+    def test_avatar_url_defaults_to_empty_string(self, tenant_a, settings):
+        """Backward-compat default: existing rows have empty string, not NULL."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            u = BotUser.objects.create(
+                tenant=tenant_a,
+                channel="max",
+                channel_user_id="avatar-default",
+            )
+        assert u.avatar_url == ""
+
+    def test_avatar_url_accepts_valid_url(self, tenant_a, settings):
+        """Round-trip with a realistic Ayla CDN URL."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            u = BotUser.objects.create(
+                tenant=tenant_a,
+                channel="max",
+                channel_user_id="avatar-set",
+                avatar_url="https://cdn.ayla.example/avatars/123.png",
+            )
+        u.refresh_from_db()
+        assert u.avatar_url == "https://cdn.ayla.example/avatars/123.png"
+
+    def test_avatar_url_rejects_invalid_via_full_clean(self, tenant_a, settings):
+        """`full_clean()` (DRF / admin path) rejects non-URL strings."""
+        from django.core.exceptions import ValidationError
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            u = BotUser(
+                tenant=tenant_a,
+                channel="max",
+                channel_user_id="avatar-bad",
+                avatar_url="not-a-url-just-garbage",
+            )
+            with pytest.raises(ValidationError):
+                u.full_clean()
+
+
 class TestBotUserUniqueness:
     def test_same_tenant_channel_channel_user_id_unique(self, tenant_a, settings):
         settings.STRICT_TENANT_SCOPE = "strict"
