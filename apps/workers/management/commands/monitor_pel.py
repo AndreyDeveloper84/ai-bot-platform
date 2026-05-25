@@ -31,15 +31,26 @@ unboundedly and exhaust Redis memory.
 - Non-zero from a healthy script means the monitoring stack should
   alert. Document this in the alert config wired by the operator.
 
-### Cron paging tuning (AS5, PR #528 round-3 non-blocker)
+### Cron paging tuning + transient-blip dedup (AS5 / #577)
 
-A transient Redis blip surfaces here as exit 3 — without dedup, a
-1-minute cron emits one page per run. **Recommended alert config:**
-require ``≥ 3 consecutive runs`` of exit-3 before paging. Single-run
-exit-3 stays in the dashboard / log without paging. Tunable via the
-monitoring stack's "for: 3m" / consecutive-failures threshold;
-implementing it at the command level would duplicate state the
-monitoring stack already tracks.
+Single Redis blip otherwise surfaces here as exit 3 — without dedup,
+a 1-minute cron would page once per run. Shipped 2026-05-25 (#577):
+the command itself dedups by counting **consecutive** Redis faults
+in a small JSON state file. Only after ``N`` consecutive non-NOGROUP
+Redis errors does the exit transition from 0 (warning-only) to 3
+(page). One successful run resets the counter.
+
+* State file path: ``--state-file <path>`` или env
+  ``MONITOR_PEL_STATE_FILE``. Default
+  ``/var/run/ai-bot-platform/monitor_pel.state`` — оператор настроит
+  per environment.
+* Threshold: ``--transient-runs N`` или env ``MONITOR_PEL_TRANSIENT_RUNS``,
+  default ``3``.
+
+Defense-in-depth: on Redis fault команда ALSO clears the lru_cache
+of ``apps.ingress.streams._client`` — следующая попытка построит
+fresh connection pool (same self-heal pattern that ``ceilings.py``
+uses on connection faults).
 
 The runbook §«Adversarial-pass D-2 — operational ceilings» calls for
 N=1000 (warning) / N=5000 (page) on the ``ingress:max`` stream under
@@ -49,15 +60,25 @@ the ``consumers`` group; defaults match.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sys
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from django.core.management.base import BaseCommand
+
+logger = logging.getLogger(__name__)
 
 
 # Defaults per runbook §«D-2 operational ceilings».
 _DEFAULT_STREAM = "ingress:max"
 _DEFAULT_GROUP = "consumers"
+
+# #577 dedup defaults.
+_DEFAULT_STATE_FILE = "/var/run/ai-bot-platform/monitor_pel.state"
+_DEFAULT_TRANSIENT_RUNS = 3
 
 
 class Command(BaseCommand):
@@ -92,6 +113,28 @@ class Command(BaseCommand):
             default="text",
             help="Output format. JSON for monitoring stack ingestion.",
         )
+        # #577: transient-blip dedup state.
+        parser.add_argument(
+            "--state-file",
+            default=os.environ.get("MONITOR_PEL_STATE_FILE", _DEFAULT_STATE_FILE),
+            help=(
+                "Path to consecutive-failures state file. Env "
+                "MONITOR_PEL_STATE_FILE overrides. Default: "
+                f"{_DEFAULT_STATE_FILE}"
+            ),
+        )
+        parser.add_argument(
+            "--transient-runs",
+            type=int,
+            default=int(
+                os.environ.get("MONITOR_PEL_TRANSIENT_RUNS", _DEFAULT_TRANSIENT_RUNS),
+            ),
+            help=(
+                "How many consecutive Redis faults before exiting 3. "
+                f"Default {_DEFAULT_TRANSIENT_RUNS}. Set to 0 to disable "
+                "dedup (every fault → exit 3 immediately)."
+            ),
+        )
 
     def handle(self, *args: Any, **options: Any) -> None:
         stream = options["stream"]
@@ -99,6 +142,8 @@ class Command(BaseCommand):
         warning = options["warning"]
         page = options["page"]
         fmt = options["format"]
+        state_file = options["state_file"]
+        transient_runs = max(0, int(options["transient_runs"]))
 
         from apps.ingress.streams import _client
 
@@ -129,16 +174,34 @@ class Command(BaseCommand):
             # "NOGROUP" in the message for the former.
             if "NOGROUP" in str(exc):
                 pending = 0
+                # NOGROUP — это cold-start, не настоящий fault.
+                # Reset consecutive counter (если был накопил).
+                _reset_state_file(state_file)
             else:
-                # Real fault — surface for operator. Exit non-zero so
-                # monitoring catches it.
-                if fmt == "json":
-                    self.stdout.write(
-                        json.dumps({"error": str(exc), "stream": stream, "group": group})
-                    )
-                else:
-                    self.stderr.write(f"redis error: {exc}")
-                sys.exit(3)
+                # Real fault. #577: defense-in-depth — клиаpим
+                # lru_cache на Redis-уровне (same self-heal как ceilings.py),
+                # потом проверяем consecutive counter.
+                _safe_cache_clear(_client)
+                consecutive = _bump_state_file(state_file)
+                _emit_fault(self, exc, fmt, stream, group, consecutive, transient_runs)
+                if transient_runs == 0 or consecutive >= transient_runs:
+                    # Threshold breached — exit 3 (page).
+                    sys.exit(3)
+                # Below threshold — exit 0 with WARNING log only.
+                # Cron не paged, оператор увидит на dashboard.
+                logger.warning(
+                    "monitor_pel.transient_fault stream=%s group=%s "
+                    "consecutive=%d/%d err=%s — exit 0 (below threshold)",
+                    stream,
+                    group,
+                    consecutive,
+                    transient_runs,
+                    exc,
+                )
+                return
+
+        # XPENDING succeeded — reset consecutive counter.
+        _reset_state_file(state_file)
 
         # Pick severity.
         severity = "ok"
@@ -171,3 +234,141 @@ class Command(BaseCommand):
 
         if exit_code:
             sys.exit(exit_code)
+
+
+# ───────────────────────────────────────────────────────────────────────
+# #577 — consecutive-failures state file helpers
+# ───────────────────────────────────────────────────────────────────────
+
+
+def _read_state_file(path: str) -> int:
+    """Прочитать consecutive_failures counter из state-file.
+
+    Tolerates: отсутствующий файл, malformed JSON, missing key, не-int.
+    Возвращает 0 в любом из этих случаев. Это безопасный default — если
+    state потерян, начнём counter с нуля (рискуем pageoм за следующие
+    N consecutive faults). Лучше чем фантомный stale counter.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+    try:
+        return int(data.get("consecutive_failures", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_state_file(path: str, count: int) -> None:
+    """Атомарно записать counter (write→fsync→rename pattern).
+
+    Не raise: если запись failed (например permission denied,
+    disk full, parent dir missing) — log + continue. Без state file
+    counter каждый run начинает с 0 — мы переходим в более paranoid
+    режим (page after first fault) но не блокируем работу команды.
+    """
+    target = Path(path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "monitor_pel.state_dir_mkdir_failed path=%s err=%s",
+            path,
+            exc,
+        )
+        return
+
+    payload = json.dumps({"consecutive_failures": int(count)})
+    try:
+        # Atomic write через temp file + rename — защищает от corrupted
+        # state если процесс убит mid-write (cron timeout etc.).
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".monitor_pel-",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError as exc:
+        logger.warning(
+            "monitor_pel.state_write_failed path=%s err=%s",
+            path,
+            exc,
+        )
+
+
+def _bump_state_file(path: str) -> int:
+    """Инкрементировать counter; возвращает новое значение.
+
+    Idempotent на ошибки чтения/записи — если оба failed, возвращает
+    минимум 1 (сегодняшний fault зачитан).
+    """
+    current = _read_state_file(path)
+    new_value = current + 1
+    _write_state_file(path, new_value)
+    return new_value
+
+
+def _reset_state_file(path: str) -> None:
+    """Reset counter после successful XPENDING / NOGROUP.
+
+    Если state file не существует — no-op (не создаём пустой row).
+    Это economy: cron на свежем deploy не плодит /var/run-стурус
+    мусор пока не было ни одной ошибки.
+    """
+    if _read_state_file(path) == 0:
+        return  # уже 0 либо файла нет
+    _write_state_file(path, 0)
+
+
+def _safe_cache_clear(client_factory: Any) -> None:
+    """Defense-in-depth: clear lru_cache on Redis fault.
+
+    Same self-heal pattern as ``apps/workers/ceilings.py`` — next call
+    rebuilds connection pool с fresh socket. Idempotent: если
+    factory не lru_cached (test stubs), просто noop.
+    """
+    try:
+        client_factory.cache_clear()
+    except AttributeError:
+        pass
+
+
+def _emit_fault(
+    cmd: BaseCommand,
+    exc: Exception,
+    fmt: str,
+    stream: str,
+    group: str,
+    consecutive: int,
+    threshold: int,
+) -> None:
+    """Print fault info в нужном формате (text|json) + дополнительные
+    поля consecutive/threshold чтобы monitoring stack видел dedup status."""
+    if fmt == "json":
+        cmd.stdout.write(
+            json.dumps(
+                {
+                    "error": str(exc),
+                    "stream": stream,
+                    "group": group,
+                    "consecutive_failures": consecutive,
+                    "transient_threshold": threshold,
+                }
+            ),
+        )
+    else:
+        cmd.stderr.write(
+            f"redis error: {exc} (consecutive={consecutive}/{threshold})",
+        )
