@@ -226,6 +226,42 @@ class CatalogMaster(_MirrorBase):
     )
     raw = models.JSONField(default=dict, blank=True)
 
+    # Canonical Ayla user_id for master. Added on dev via 0007
+    # migration (parallel work). Used by the #445 master.schedule.
+    # updated consumer + the #443 booking consumer's master_user_id
+    # bridge. Symmetric with BotUser.ayla_user_id (#442) +
+    # CatalogService.ayla_service_id (#444).
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla user_id (UUID) for this master. Bridge "
+            "for event-payload master_user_id → CatalogMaster ORM "
+            "JOIN. Nullable because legacy mysite-synced rows lack "
+            "this — back-filled by catalog-sync service or master "
+            "event consumer."
+        ),
+    )
+
+    # #445 — slot cache staleness counter. Bumped on every
+    # master.schedule.updated event. Forward-compatible signal for
+    # downstream slot cache layers (apps/scheduling has no active
+    # cache today); incrementing this invalidates cache keys
+    # transparently once a cache layer reads it. Same pattern as
+    # CatalogService.cache_version (#444).
+    cache_version = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Slot-cache staleness counter, incremented on every "
+            "master.schedule.updated event. Future cache layers "
+            "(Redis, in-memory) include this in their key so "
+            "increments transparently invalidate stale slot lookups. "
+            "No active cache layer reads this today — it's a "
+            "forward-compatible signal."
+        ),
+    )
+
     invite_status = models.CharField(
         max_length=16,
         choices=InviteStatus.choices,

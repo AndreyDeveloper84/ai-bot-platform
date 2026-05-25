@@ -55,6 +55,16 @@ class EventBusConfig(AppConfig):
 
         register_identity_handlers()
 
+        # #445 — Register schedule (master.schedule.updated) consumer.
+        from apps.eventbus.consumers.schedule import register_schedule_handlers
+
+        register_schedule_handlers()
+
+        # #445 — Register reviews (review.created) consumer.
+        from apps.eventbus.consumers.reviews import register_reviews_handlers
+
+        register_reviews_handlers()
+
         # Hotfix C (retro review #3): the subscriber registry is cached
         # after first resolution per :func:`_subscribers`. Wire the
         # Django ``setting_changed`` signal so:

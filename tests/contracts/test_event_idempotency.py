@@ -27,8 +27,11 @@ covers the full HTTP round-trip if needed.
 | ``payment.*`` (4 events) | #443 | ✅ Active replay-3× |
 | ``service.updated`` | #444 | ✅ Active replay-3× |
 | ``user.profile.updated`` | #446 | ✅ Active replay-3× |
-| ``master.schedule.updated`` | #445 open | ⚠️ DLQ smoke |
-| ``review.created`` | #445 open | ⚠️ DLQ smoke |
+| ``master.schedule.updated`` | #445 | ✅ Active replay-3× |
+| ``review.created`` | #445 | ✅ Active replay-3× |
+
+**All 12 §3 events covered.** The DLQ-smoke harness is retired (one
+negative test remains for «unknown event_name» dispatcher contract).
 
 The DLQ smoke (``TestUnshippedConsumerNamesDeadLetter``) is the
 mechanical enforcement of «no consumer ships without this gate»: it
@@ -597,44 +600,95 @@ class TestIdentityIdempotency:
             _dispatch_3x_and_assert(env, side_effect_check=check)
 
 
-# ─── Unshipped consumers: DLQ smoke (Round-1 M1 fix) ───────────────────────
+# ─── schedule.master.schedule.updated (#445) ───────────────────────────────
+
+
+class TestScheduleIdempotency:
+    """The ``master.schedule.updated`` consumer bumps CatalogMaster's
+    cache_version. 3 dispatches of the same envelope cause exactly
+    ONE bump (IngestDedupe blocks 2nd + 3rd before the handler runs)."""
+
+    def test_master_schedule_updated_idempotent(self, tenant: Tenant) -> None:
+        from apps.catalog.models import CatalogMaster
+
+        master_id = "8d4e5f6a-7b8c-4d9e-0f1a-2b3c4d5e6f7a"
+        mirror = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=99,
+            ayla_user_id=UUID(master_id),
+            external_updated_at=dt.datetime(2026, 5, 20, 10, 0, tzinfo=dt.timezone.utc),
+            name="Анна",
+            cache_version=0,
+        )
+
+        env = _envelope(
+            event_name="master.schedule.updated",
+            data={
+                "master_id": master_id,
+                "change_type": "vacation_set",
+                "affected_all_dates": False,
+                "affected_dates": ["2026-06-15"],
+            },
+        )
+
+        def check() -> None:
+            mirror.refresh_from_db()
+            assert mirror.cache_version == 1
+
+        _dispatch_3x_and_assert(env, side_effect_check=check)
+
+
+# ─── reviews.review.created (#445) ─────────────────────────────────────────
+
+
+class TestReviewsIdempotency:
+    """The ``review.created`` consumer writes a ReviewProcessedDedupe
+    row (per-(tenant, review_id) idempotency). 3 dispatches cause
+    exactly ONE dedupe row (IngestDedupe blocks 2nd + 3rd)."""
+
+    def test_review_created_idempotent(self, tenant: Tenant) -> None:
+        from apps.eventbus.models import ReviewProcessedDedupe
+
+        review_id = "6d7e8f9a-0b1c-4d2e-3f4a-5b6c7d8e9f0a"
+        env = _envelope(
+            event_name="review.created",
+            data={
+                "review_id": review_id,
+                "appointment_id": APPOINTMENT_ID,
+                "rating": 5,
+                "has_text": True,
+                "is_anonymous": False,
+            },
+        )
+
+        def check() -> None:
+            assert (
+                ReviewProcessedDedupe.objects.filter(
+                    tenant_id=tenant.id, review_id=UUID(review_id)
+                ).count()
+                == 1
+            )
+
+        _dispatch_3x_and_assert(env, side_effect_check=check)
+
+
+# ─── All consumer families shipped — DLQ smoke retired ─────────────────────
 
 
 class TestUnshippedConsumerNamesDeadLetter:
-    """Round-1 adversarial M1: ``xfail(strict=False)`` is the WRONG
-    primitive for «consumer ships without idempotency» because the
-    handler's side-effects are not measurable from this file (consumer
-    not even imported yet). XPASS would be a silent log line, not a
-    CI alert.
-
-    Better contract: assert that the dispatcher sends unshipped event
-    names to the DLQ via ``UNKNOWN_EVENT_VERSION``. When #444/#445/#446
-    ships, the new consumer registers a handler → these tests start
-    failing → that PR MUST replace this test with a real
-    ``_dispatch_3x_and_assert`` for the new consumer. Forcing the
-    follow-up author into the contract is the whole point.
+    """All 6 consumer families from #442-#446 are now shipped. The
+    DLQ-smoke harness from Round-1 M1 (forcing-function for unshipped
+    consumers) is retained as a single negative test that pins the
+    «unknown event_name → UNKNOWN_EVENT_NAME via DLQ» dispatcher
+    contract. When a NEW event family is added to the §3 catalog
+    without a handler, this test would still pass (different code
+    path: UNKNOWN_EVENT_NAME, not UNKNOWN_EVENT_VERSION) — which is
+    correct, that's the dispatcher's responsibility, not this file's.
     """
 
-    @pytest.mark.parametrize(
-        "event_name",
-        [
-            # service.updated SHIPPED in #444 — moved to TestCatalogIdempotency below.
-            # user.profile.updated SHIPPED in #446 — moved to TestIdentityIdempotency below.
-            "master.schedule.updated",  # #445
-            "review.created",  # #445
-        ],
-    )
-    def test_unshipped_consumer_name_dead_letters(self, event_name: str) -> None:
-        """No handler registered → dispatcher writes a DLQ row with
-        reason='unknown_event_version'. This test FAILS the moment a
-        consumer ships, forcing the consumer's PR to replace it with
-        a real idempotency assertion."""
-        env = _envelope(event_name=event_name, data={})
+    def test_truly_unknown_event_name_dlq(self) -> None:
+        """An event name NOT in event-contract.md §3 catalog → DLQ via
+        UNKNOWN_EVENT_NAME outcome."""
+        env = _envelope(event_name="totally.fake.event", data={})
         result = dispatch_envelope(env)
-        assert result.outcome == DispatchOutcome.UNKNOWN_EVENT_VERSION, (
-            f"Expected UNKNOWN_EVENT_VERSION for unshipped {event_name!r}; "
-            f"got {result.outcome}. If you just shipped this consumer, "
-            f"REMOVE this case from the parametrize list AND add a real "
-            f"_dispatch_3x_and_assert test for the new event in the "
-            f"shipped-families section above."
-        )
+        assert result.outcome == DispatchOutcome.UNKNOWN_EVENT_NAME
