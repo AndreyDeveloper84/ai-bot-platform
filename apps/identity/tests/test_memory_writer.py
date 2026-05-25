@@ -304,37 +304,42 @@ class TestZonePromotionGuard:
 # ───────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.django_db(transaction=True)
 class TestFailClosedAuditDurability:
     """Round-5 F2 regression — write_rejected_dob_lookup audit MUST persist
-    independently of caller's outer transaction (ADR-0011 §11.3).
+    durably via `atomic(durable=True)` (ADR-0011 §11.3).
 
-    The adversarial pass caught: when a caller wraps `write_entry()` in
-    their own `transaction.atomic()` block AND that block rolls back
-    (any exception raised after `write_entry` returns), the audit row
-    rolls back too — silent 152-ФЗ Chapter 3 forensic evidence loss.
+    # Why transaction=True (Round-5 F2-A finding)
 
-    Fix: `_audit_write_rejected()` opens its own
-    `transaction.atomic(durable=True)` block. Two consequences:
+    Default `@pytest.mark.django_db` wraps each test in a TestCase
+    transaction that rolls back at test end. Crucially that wrapper
+    sets `connection.set_autocommit(False)` (so `in_atomic_block=True`)
+    but DOES NOT create a savepoint, so `savepoint_ids=[]`. Django's
+    `atomic(durable=True)` check inspects `savepoint_ids`, sees empty,
+    and DOES NOT raise — meaning the audit INSERT runs inside the
+    pytest wrapper txn and is rolled back at test end. Tests would
+    pass for the WRONG reason: row visible inside wrapper, but not
+    actually committed durably.
 
-    1. Audit INSERT commits independently of the caller's outer txn.
-       Caller rollback CANNOT erase the audit row.
-
-    2. `durable=True` raises `TransactionManagementError` if the caller
-       is already inside their own `atomic()` — fail-loud per Q2 fork
-       2026-05-25 (silent evidence loss is worse than runtime error).
-       Documents the contract: callers MUST NOT wrap `write_entry()`.
+    `transaction=True` switches pytest-django to TransactionTestCase
+    semantics: NO wrapper atomic. Tests run in autocommit mode; the
+    DB is cleaned via TRUNCATE between tests. Now:
+      - `atomic(durable=True)` inside `_audit_write_rejected` is truly
+        the top-level atomic → commits the INSERT on exit.
+      - After `write_entry` returns, the audit row IS on disk.
+      - Tests that wrap our writer in `atomic()` create a real savepoint
+        → `durable=True` correctly raises RuntimeError.
     """
 
-    def test_audit_persists_after_caller_side_logic_exception(self, upc) -> None:
-        """No outer atomic + caller raises AFTER write_entry → audit survives.
+    def test_audit_committed_by_durable_atomic(self, upc) -> None:
+        """write_entry returns → audit row is committed durably (NOT just visible).
 
-        Default autocommit mode: each ORM `create()` commits independently.
-        The audit row from `_audit_write_rejected` is already durable
-        before the caller's subsequent code raises.
+        Under transaction=True there is no wrapper txn to give false-
+        positive «visible inside wrapper» readings. If this assertion
+        passes, the row was genuinely committed by the durable atomic.
         """
         request_id = uuid.uuid4()
 
-        # Caller logic AROUND write_entry — no atomic block.
         write_entry(
             user_id=upc.user_id,
             personal_context=upc,
@@ -347,35 +352,78 @@ class TestFailClosedAuditDurability:
             consent_at=timezone.now(),
         )
 
-        # Caller raises AFTER the writer returned. Without outer atomic
-        # there's no rollback boundary — the audit row is already committed.
-        try:
-            raise RuntimeError("simulated caller-side bug")
-        except RuntimeError:
-            pass
-
-        # Audit row MUST still exist — 152-ФЗ §11.3 forensic invariant.
         log = RedZoneAccessLog.objects.filter(request_id=request_id).first()
         assert log is not None, (
-            "Audit row lost — 152-ФЗ Chapter 3 forensic evidence missing "
-            "after caller-side exception."
+            "Audit row not committed by durable atomic — write_entry "
+            "returned but the row is missing. F2 fix not effective."
         )
         assert log.access_type == RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB
 
-    def test_durable_atomic_raises_when_caller_wraps(self, upc) -> None:
-        """Outer atomic + write_entry → TransactionManagementError (fail-loud).
+    def test_audit_survives_subsequent_rollback(self, upc) -> None:
+        """Round-5 F2-A headline regression — audit row survives explicit
+        rollback in a separate transaction after write_entry returns.
 
-        `transaction.atomic(durable=True)` is documented to raise when
-        used inside another `atomic()` block. This is the intentional
-        contract: callers MUST NOT wrap `write_entry()` in their own
-        transaction, otherwise the rejection audit row would be at
-        rollback-risk. Failing loud at the call site is the correct
-        behaviour per Q2 fork 2026-05-25.
+        Proves the durable atomic actually decoupled the audit INSERT
+        from any subsequent rollback. A pre-F2 implementation (bare
+        ORM create() without durable atomic) under transaction=True
+        would also survive this specific scenario (autocommit), but
+        under mixed contexts (caller wrapping us in atomic and rolling
+        back) would fail. The combination of `durable=True` + this
+        regression test locks in the invariant across all contexts.
         """
         from django.db import transaction
-        from django.db.transaction import TransactionManagementError
 
-        with pytest.raises((TransactionManagementError, RuntimeError)):
+        request_id = uuid.uuid4()
+
+        write_entry(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
+            source=MemoryEntry.SOURCE_EXPLICIT,
+            kind="symptom",
+            content={"data": "rejected"},
+            request_id=request_id,
+            purpose="symptom_capture",
+            consent_at=timezone.now(),
+        )
+
+        # Open a SEPARATE atomic, modify the audit row, then raise to
+        # roll back the UPDATE. The original audit row was already
+        # committed by the durable atomic before write_entry returned;
+        # this rollback only affects the in-atomic UPDATE.
+        try:
+            with transaction.atomic():
+                RedZoneAccessLog.objects.filter(request_id=request_id).update(
+                    purpose="MODIFIED_WILL_ROLL_BACK"
+                )
+                raise RuntimeError("simulated caller-side rollback after writer")
+        except RuntimeError:
+            pass
+
+        log = RedZoneAccessLog.objects.filter(request_id=request_id).first()
+        assert log is not None, (
+            "Audit row erased by subsequent rollback — durability invariant "
+            "(ADR-0011 §11.3) violated. F2 fix not effective."
+        )
+        assert log.purpose == "symptom_capture", (
+            "Audit row UPDATE rolled back correctly but the row itself "
+            f"survived (durable INSERT). Got purpose={log.purpose!r}."
+        )
+
+    def test_durable_atomic_raises_when_caller_wraps(self, upc) -> None:
+        """Outer atomic + write_entry → RuntimeError (fail-loud).
+
+        Django's `atomic(durable=True)` raises `RuntimeError` when nested
+        in another `atomic()` block that has created a savepoint. Under
+        transaction=True the caller's explicit `atomic()` creates a real
+        savepoint, so the durable check fires correctly.
+
+        Contract: callers MUST NOT wrap `write_entry()` in their own
+        transaction — fail-loud per Q2 fork 2026-05-25.
+        """
+        from django.db import transaction
+
+        with pytest.raises(RuntimeError, match="durable atomic"):
             with transaction.atomic():
                 write_entry(
                     user_id=upc.user_id,
