@@ -90,6 +90,16 @@ class CatalogService(_MirrorBase):
     `seo_title`/`seo_description`. M2M relations (`related_services`,
     `options`) intentionally NOT mirrored — Sprint 7 retrieval only
     needs scalar fields.
+
+    ### Ayla event-driven update path (#444)
+
+    ``ayla_service_id`` and ``cache_version`` were added in migration
+    ``0006_catalogservice_ayla_service_id_cache_version`` so the
+    ``service.updated`` cross-service event consumer in
+    ``apps/eventbus/consumers/catalog.py`` can find mirror rows by
+    Ayla's canonical UUID and signal cache invalidation to downstream
+    readers. ADR-0009 hard rule #1: bot-platform mirror is a
+    read-replica, never the source of truth.
     """
 
     slug = models.SlugField(max_length=100)
@@ -106,6 +116,40 @@ class CatalogService(_MirrorBase):
     requires_health_check = models.BooleanField(default=False)
     contraindications = models.TextField(blank=True, default="")
     raw = models.JSONField(default=dict, blank=True)
+
+    # #444 — link to Ayla's canonical Service.id (UUID). Coexists with
+    # the legacy mysite integer ``external_id``: mysite-synced rows set
+    # external_id + leave this nullable; Ayla-event-fed rows set this
+    # + may leave external_id null. Lookup key for the
+    # service.updated consumer.
+    ayla_service_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla Service.id (UUID). Lookup key for the "
+            "apps/eventbus service.updated consumer. Coexists with "
+            "legacy integer external_id while mysite sync still runs; "
+            "a separate cleanup PR removes external_id once mysite is "
+            "fully retired."
+        ),
+    )
+
+    # #444 — mirror-staleness signal. Bumped on every service.updated
+    # event. Future cache layers (Redis, in-memory) include cache_version
+    # in their key so a version bump invalidates the old cache
+    # transparently. No active cache layer reads this today — it is a
+    # forward-compatible signal so the consumer can land before the
+    # cache layer ships.
+    cache_version = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Mirror-staleness counter, incremented on every "
+            "service.updated event. Downstream cache layers include "
+            "it in their cache key so increments transparently "
+            "invalidate stale entries. No active cache reads it today."
+        ),
+    )
 
     class Meta:
         verbose_name = "Catalog: service"
