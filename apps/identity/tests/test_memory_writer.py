@@ -297,3 +297,116 @@ class TestZonePromotionGuard:
         promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_YELLOW)
         entry.refresh_from_db()
         assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_YELLOW
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Round-5 F2 regression — fail-closed audit row must survive caller rollback
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestFailClosedAuditDurability:
+    """Round-5 F2 regression — write_rejected_dob_lookup audit MUST persist
+    independently of caller's outer transaction (ADR-0011 §11.3).
+
+    The adversarial pass caught: when a caller wraps `write_entry()` in
+    their own `transaction.atomic()` block AND that block rolls back
+    (any exception raised after `write_entry` returns), the audit row
+    rolls back too — silent 152-ФЗ Chapter 3 forensic evidence loss.
+
+    Fix: `_audit_write_rejected()` opens its own
+    `transaction.atomic(durable=True)` block. Two consequences:
+
+    1. Audit INSERT commits independently of the caller's outer txn.
+       Caller rollback CANNOT erase the audit row.
+
+    2. `durable=True` raises `TransactionManagementError` if the caller
+       is already inside their own `atomic()` — fail-loud per Q2 fork
+       2026-05-25 (silent evidence loss is worse than runtime error).
+       Documents the contract: callers MUST NOT wrap `write_entry()`.
+    """
+
+    def test_audit_persists_after_caller_side_logic_exception(self, upc) -> None:
+        """No outer atomic + caller raises AFTER write_entry → audit survives.
+
+        Default autocommit mode: each ORM `create()` commits independently.
+        The audit row from `_audit_write_rejected` is already durable
+        before the caller's subsequent code raises.
+        """
+        request_id = uuid.uuid4()
+
+        # Caller logic AROUND write_entry — no atomic block.
+        write_entry(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
+            source=MemoryEntry.SOURCE_EXPLICIT,
+            kind="symptom",
+            content={"data": "x"},
+            request_id=request_id,
+            purpose="symptom_capture",
+            consent_at=timezone.now(),
+        )
+
+        # Caller raises AFTER the writer returned. Without outer atomic
+        # there's no rollback boundary — the audit row is already committed.
+        try:
+            raise RuntimeError("simulated caller-side bug")
+        except RuntimeError:
+            pass
+
+        # Audit row MUST still exist — 152-ФЗ §11.3 forensic invariant.
+        log = RedZoneAccessLog.objects.filter(request_id=request_id).first()
+        assert log is not None, (
+            "Audit row lost — 152-ФЗ Chapter 3 forensic evidence missing "
+            "after caller-side exception."
+        )
+        assert log.access_type == RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB
+
+    def test_durable_atomic_raises_when_caller_wraps(self, upc) -> None:
+        """Outer atomic + write_entry → TransactionManagementError (fail-loud).
+
+        `transaction.atomic(durable=True)` is documented to raise when
+        used inside another `atomic()` block. This is the intentional
+        contract: callers MUST NOT wrap `write_entry()` in their own
+        transaction, otherwise the rejection audit row would be at
+        rollback-risk. Failing loud at the call site is the correct
+        behaviour per Q2 fork 2026-05-25.
+        """
+        from django.db import transaction
+        from django.db.transaction import TransactionManagementError
+
+        with pytest.raises((TransactionManagementError, RuntimeError)):
+            with transaction.atomic():
+                write_entry(
+                    user_id=upc.user_id,
+                    personal_context=upc,
+                    sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
+                    source=MemoryEntry.SOURCE_EXPLICIT,
+                    kind="symptom",
+                    content={"data": "x"},
+                    request_id=uuid.uuid4(),
+                    purpose="symptom_capture",
+                    consent_at=timezone.now(),
+                )
+
+    def test_green_write_inside_atomic_still_works(self, upc) -> None:
+        """Green writes don't trigger the audit path, so caller atomic is fine.
+
+        Confirms F2 fix doesn't break the green-write happy path —
+        only the fail-closed audit path is durable.
+        """
+        from django.db import transaction
+
+        with transaction.atomic():
+            entry = write_entry(
+                user_id=upc.user_id,
+                personal_context=upc,
+                sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+                source=MemoryEntry.SOURCE_EXPLICIT,
+                kind="preference",
+                content={"likes": "manicure"},
+                request_id=uuid.uuid4(),
+                purpose="write_preference",
+            )
+        assert entry is not None
+        assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN

@@ -125,47 +125,68 @@ class RedZoneReader:
                 "str(request.user.id) at call site."
             )
 
-        with transaction.atomic():
-            # Step 1 — set the GUC so RLS allows the row through (Postgres).
-            # SQLite has no RLS — SET ... is unknown syntax there, so the
-            # call is gated on `connection.vendor`. On SQLite the read
-            # works without RLS gating; the audit + ownership checks still
-            # run (application-side defence works on both engines).
+        # Round-5 F1 fix: the GUC binds to the outermost (sub)transaction,
+        # not to the SAVEPOINT that Django opens when `atomic()` is nested.
+        # Without an explicit RESET, the GUC survives past `read()` return
+        # and the caller's NEXT ORM query inside their outer `atomic()`
+        # would pass RLS for red rows of unrelated users. Cat 3 cross-
+        # tenant leak vector identical-blast-radius to the round-4 Cat-4
+        # policy-stacking fix. We chose variant B (explicit RESET in
+        # finally, no `durable=True`) per tech-lead 2026-05-25 to avoid
+        # breaking legitimate Celery / skills callers that wrap our
+        # accessor in their own `transaction.atomic()`.
+        try:
+            with transaction.atomic():
+                # Step 1 — set the GUC so RLS allows the row through (Postgres).
+                # SQLite has no RLS — SET ... is unknown syntax there, so the
+                # call is gated on `connection.vendor`. On SQLite the read
+                # works without RLS gating; the audit + ownership checks still
+                # run (application-side defence works on both engines).
+                if connection.vendor == "postgresql":
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT set_config('ayla.red_zone_access_context', %s, true)",
+                            [str(request_id)],
+                        )
+
+                # Step 2 — ownership-scoped SELECT. If entry_id is missing OR
+                # the entry belongs to a different user, DoesNotExist fires
+                # and the atomic block rolls back — no audit row is committed
+                # (the no-orphan-log invariant from round-2 AS1).
+                entry = MemoryEntry.objects.get(id=entry_id, user_id=user_id)
+
+                # Step 3 — cross-tenant carve-out check (ADR-0011 §9.1).
+                # When the caller pins a tenant scope, the entry's source
+                # tenant MUST match. None means «system-wide context, e.g.
+                # ayla_llm building cross-tenant memory» — allowed.
+                if expected_source_tenant_id is not None:
+                    if entry.source_tenant_id != expected_source_tenant_id:
+                        raise TenantScopeViolation(
+                            f"Red-zone entry {entry_id} belongs to tenant "
+                            f"{entry.source_tenant_id!s} but caller expected "
+                            f"{expected_source_tenant_id!s}."
+                        )
+
+                # Step 4 — audit row LAST, inside the same transaction, so
+                # it's only committed when the access actually succeeded.
+                RedZoneAccessLog.objects.create(
+                    memory_entry_id=entry_id,
+                    user_id=user_id,
+                    accessor_role=accessor_role,
+                    accessor_principal=accessor_principal,
+                    access_type=RedZoneAccessLog.ACCESS_READ,
+                    request_id=request_id,
+                    purpose=purpose,
+                )
+
+                return entry
+        finally:
+            # Round-5 F1: clear the GUC regardless of success/failure/exception
+            # path so the next ORM query on this connection cannot inherit
+            # red-zone visibility. RESET runs even when the atomic block
+            # rolled back (set_config with is_local=true is supposed to clear
+            # at transaction END, but caller's OUTER atomic keeps the txn
+            # alive past our SAVEPOINT release — hence explicit RESET).
             if connection.vendor == "postgresql":
                 with connection.cursor() as cursor:
-                    cursor.execute(
-                        "SELECT set_config('ayla.red_zone_access_context', %s, true)",
-                        [str(request_id)],
-                    )
-
-            # Step 2 — ownership-scoped SELECT. If entry_id is missing OR
-            # the entry belongs to a different user, DoesNotExist fires
-            # and the atomic block rolls back — no audit row is committed
-            # (the no-orphan-log invariant from round-2 AS1).
-            entry = MemoryEntry.objects.get(id=entry_id, user_id=user_id)
-
-            # Step 3 — cross-tenant carve-out check (ADR-0011 §9.1).
-            # When the caller pins a tenant scope, the entry's source
-            # tenant MUST match. None means «system-wide context, e.g.
-            # ayla_llm building cross-tenant memory» — allowed.
-            if expected_source_tenant_id is not None:
-                if entry.source_tenant_id != expected_source_tenant_id:
-                    raise TenantScopeViolation(
-                        f"Red-zone entry {entry_id} belongs to tenant "
-                        f"{entry.source_tenant_id!s} but caller expected "
-                        f"{expected_source_tenant_id!s}."
-                    )
-
-            # Step 4 — audit row LAST, inside the same transaction, so
-            # it's only committed when the access actually succeeded.
-            RedZoneAccessLog.objects.create(
-                memory_entry_id=entry_id,
-                user_id=user_id,
-                accessor_role=accessor_role,
-                accessor_principal=accessor_principal,
-                access_type=RedZoneAccessLog.ACCESS_READ,
-                request_id=request_id,
-                purpose=purpose,
-            )
-
-            return entry
+                    cursor.execute("RESET ayla.red_zone_access_context")

@@ -304,3 +304,160 @@ class TestDirectAccessIsUnaudited:
             purpose="contraindication_check",
         )
         assert RedZoneAccessLog.objects.count() == log_count_before + 1
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Round-5 F1 regression — GUC must be RESET after accessor returns
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestGucResetAfterAccessor:
+    """Round-5 F1 regression — GUC cannot leak past `read()` return.
+
+    The adversarial pass caught: a caller wrapping `RedZoneReader.read()`
+    inside their own `transaction.atomic()` saw the GUC persist into
+    their next ORM query, granting red-zone visibility for unrelated
+    rows. Cat 3 cross-tenant leak identical-blast-radius to the Cat 4
+    RLS policy-stacking fix from round 4.
+
+    Fix: explicit `RESET ayla.red_zone_access_context` in `finally`
+    block. These tests verify the RESET runs on every exit path —
+    success, ownership mismatch, DoesNotExist, TenantScopeViolation,
+    arbitrary exception.
+
+    Postgres-only because the GUC mechanism is Postgres-only. SQLite
+    path is a no-op (no SET, no RESET — accessor still works for the
+    ownership + audit checks).
+    """
+
+    @pytest.mark.skipif(
+        __import__("django.db", fromlist=["connection"]).connection.vendor != "postgresql",
+        reason="GUC mechanism is Postgres-only.",
+    )
+    def test_guc_reset_after_successful_read(self, red_entry) -> None:
+        """Successful read → GUC cleared on return."""
+        from django.db import connection
+
+        RedZoneReader.read(
+            entry_id=red_entry.id,
+            user_id=red_entry.user_id,
+            accessor_role=RedZoneAccessLog.ACCESSOR_AYLA_LLM,
+            request_id=uuid.uuid4(),
+            purpose="contraindication_check",
+        )
+        with connection.cursor() as cur:
+            cur.execute("SELECT current_setting('ayla.red_zone_access_context', true)")
+            value = cur.fetchone()[0]
+        assert value == "" or value is None, (
+            f"GUC leaked past read() return — value={value!r}. RLS would "
+            "grant red visibility for subsequent queries by other code "
+            "paths on the same connection. Cat 3 cross-tenant leak."
+        )
+
+    @pytest.mark.skipif(
+        __import__("django.db", fromlist=["connection"]).connection.vendor != "postgresql",
+        reason="GUC mechanism is Postgres-only.",
+    )
+    def test_guc_reset_after_doesnotexist(self, upc) -> None:
+        """DoesNotExist path → GUC cleared on exit."""
+        from django.db import connection
+
+        with pytest.raises(MemoryEntry.DoesNotExist):
+            RedZoneReader.read(
+                entry_id=uuid.uuid4(),  # nonexistent
+                user_id=upc.user_id,
+                accessor_role=RedZoneAccessLog.ACCESSOR_AYLA_LLM,
+                request_id=uuid.uuid4(),
+                purpose="contraindication_check",
+            )
+        with connection.cursor() as cur:
+            cur.execute("SELECT current_setting('ayla.red_zone_access_context', true)")
+            value = cur.fetchone()[0]
+        assert value == "" or value is None, "GUC leaked after DoesNotExist exit path"
+
+    @pytest.mark.skipif(
+        __import__("django.db", fromlist=["connection"]).connection.vendor != "postgresql",
+        reason="GUC mechanism is Postgres-only.",
+    )
+    def test_guc_reset_after_tenant_violation(self, red_entry) -> None:
+        """TenantScopeViolation path → GUC cleared on exit."""
+        from django.db import connection
+
+        with pytest.raises(TenantScopeViolation):
+            RedZoneReader.read(
+                entry_id=red_entry.id,
+                user_id=red_entry.user_id,
+                accessor_role=RedZoneAccessLog.ACCESSOR_AYLA_LLM,
+                request_id=uuid.uuid4(),
+                purpose="contraindication_check",
+                expected_source_tenant_id=uuid.uuid4(),  # not the entry's tenant
+            )
+        with connection.cursor() as cur:
+            cur.execute("SELECT current_setting('ayla.red_zone_access_context', true)")
+            value = cur.fetchone()[0]
+        assert value == "" or value is None, "GUC leaked after TenantScopeViolation exit path"
+
+    @pytest.mark.skipif(
+        __import__("django.db", fromlist=["connection"]).connection.vendor != "postgresql",
+        reason="GUC mechanism is Postgres-only.",
+    )
+    def test_nested_atomic_no_red_leak_after_accessor(self, red_entry) -> None:
+        """Round-5 F1 headline regression — nested atomic + post-accessor
+        ORM query cannot see red rows of unrelated users.
+
+        Simulates the attack: HTTP view opens outer `atomic()`, calls
+        `RedZoneReader.read()`, then queries `MemoryEntry` again via
+        plain ORM. The plain ORM query MUST be subject to RLS filtering
+        — no carryover GUC visibility.
+
+        We do this by switching role inside the test (`SET LOCAL ROLE
+        ayla_app`) so RLS actually applies; otherwise test runs as the
+        DB owner role which bypasses RLS even with FORCE.
+        """
+        from django.db import connection, transaction
+
+        other_upc = UserPersonalContext.objects.create(user_id=uuid.uuid4())
+        other_red = MemoryEntry.objects.create(
+            user_id=other_upc.user_id,
+            personal_context=other_upc,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
+            source=MemoryEntry.SOURCE_EXPLICIT,
+            consent_at=timezone.now(),
+            content={"marker": "OTHER_USER_PII"},
+            source_tenant_id=uuid.uuid4(),
+        )
+
+        # Caller wraps the accessor in their own atomic — this is the
+        # scenario the GUC-leak attack relied on.
+        with transaction.atomic():
+            # First — accessor reads the legitimate red entry.
+            entry = RedZoneReader.read(
+                entry_id=red_entry.id,
+                user_id=red_entry.user_id,
+                accessor_role=RedZoneAccessLog.ACCESSOR_AYLA_LLM,
+                request_id=uuid.uuid4(),
+                purpose="contraindication_check",
+            )
+            assert entry.id == red_entry.id
+
+            # Second — caller tries to query red entries WITHOUT going
+            # through the accessor. We switch to ayla_app role so RLS
+            # actually applies (default test runner is superuser which
+            # bypasses RLS even with FORCE).
+            with connection.cursor() as cur:
+                cur.execute("SET LOCAL ROLE ayla_app")
+                cur.execute(
+                    "SELECT id FROM identity_memoryentry "
+                    "WHERE sensitivity_zone = 'red' AND id = %s",
+                    [str(other_red.id)],
+                )
+                rows = cur.fetchall()
+
+            # Without the F1 fix the GUC would still hold red_entry's
+            # request_id (a valid UUID), RLS would pass, and the OTHER
+            # user's red row would be visible — cross-tenant leak.
+            assert rows == [], (
+                f"GUC leaked: caller's post-accessor query saw {len(rows)} "
+                "red rows owned by a different user. Cat 3 cross-tenant "
+                "leak via GUC carryover. F1 fix not effective."
+            )

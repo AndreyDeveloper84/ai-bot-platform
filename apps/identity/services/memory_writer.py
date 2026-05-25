@@ -43,6 +43,7 @@ import socket
 import uuid
 from typing import Any, Optional
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
@@ -86,22 +87,35 @@ def _audit_write_rejected(
     request_id: uuid.UUID,
     purpose: str,
 ) -> None:
-    """Append a write_rejected_dob_lookup audit row.
+    """Append a write_rejected_dob_lookup audit row — durable per ADR-0011 §11.3.
 
     Called from the fail-closed paths (DOB lookup failed OR minor_lock
     set). No MemoryEntry row was created, so `memory_entry_id` uses a
     placeholder uuid4() — the access_type already conveys «no entry
     exists for this row» semantics.
+
+    Round-5 F2 fix: `transaction.atomic(durable=True)` commits the
+    audit INSERT independently of the caller's outer atomic block. Per
+    ADR-0011 §11.3 the rejection audit row is 152-ФЗ Chapter 3 forensic
+    evidence — «platform refused to write sensitive data because age
+    unverifiable». Losing the row to a caller-side rollback would
+    break the regulatory invariant the writer was designed to uphold.
+
+    `durable=True` raises `TransactionManagementError` if the caller is
+    inside their own `transaction.atomic()` — this is intentional:
+    callers MUST NOT wrap `write_entry()` in their atomic block, or
+    they risk silent forensic loss. Fail-loud per Q2 fork 2026-05-25.
     """
-    RedZoneAccessLog.objects.create(
-        memory_entry_id=uuid.uuid4(),  # no real entry was created
-        user_id=user_id,
-        accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
-        accessor_principal=_writer_principal(),
-        access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB,
-        request_id=request_id,
-        purpose=purpose,
-    )
+    with transaction.atomic(durable=True):
+        RedZoneAccessLog.objects.create(
+            memory_entry_id=uuid.uuid4(),  # no real entry was created
+            user_id=user_id,
+            accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+            accessor_principal=_writer_principal(),
+            access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB,
+            request_id=request_id,
+            purpose=purpose,
+        )
 
 
 def write_entry(
