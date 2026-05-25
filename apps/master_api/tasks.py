@@ -308,6 +308,11 @@ def auto_generate_draft_for_inbound(
         # tenant_id).  ACTIVE-only because terminal states
         # (REPLACED / SENT_AS_MASTER / RELEASED_TO_AI / DISMISSED)
         # are not on-screen — master has already acted on them.
+        # The partial unique constraint
+        # ``ai_draft_one_active_per_conversation`` (PR #535) guarantees
+        # at most one ACTIVE row; the ``order_by("-created_at")`` is
+        # belt-and-braces against legacy / replay scenarios where the
+        # constraint may not yet have been enforced.
         existing_active = (
             AiDraft.all_tenants.filter(
                 tenant_id=tenant_uuid,
@@ -320,24 +325,73 @@ def auto_generate_draft_for_inbound(
         if existing_active is not None:
             age_seconds = (timezone.now() - existing_active.created_at).total_seconds()
             if age_seconds < suppress_window_seconds:
-                # Telemetry: log-only.  No counter pattern exists in
-                # master_api/llm/orchestrator (grepped — see PR body).
-                # Operators alert on this slug via log search /
-                # Sentry breadcrumb until a formal metric backbone
-                # lands.  Includes draft_id + age + window so the
-                # window value can be validated post-pilot.
+                # Round-1 adversarial review (Finding #1, agent
+                # a33339da6e0aded43): suppress MUST also check that the
+                # existing ACTIVE draft is still relevant to the latest
+                # customer message before skipping.  Otherwise bursty
+                # input (T=0 Msg1→Draft1, T=10s Msg2 debounced, T=20s
+                # Msg3 debounce released) leaves a stale Draft1
+                # pointing at Msg1 ACTIVE on screen — master taps
+                # «Отправить от себя» and sends a reply to the wrong
+                # turn.  Manual send catches this via PR #540
+                # Blocker #4 (409 draft_stale → master re-gen), but the
+                # auto-trigger's «invisible refresh» REPLACE transition
+                # is lost.
+                #
+                # Tenant-scoped Message query (no ambient scope in the
+                # Celery worker).  If the existing draft's trigger is
+                # NULL (legacy drafts pre-staleness-tracking, or paths
+                # that didn't persist trigger_message) we treat it as
+                # «not safe to suppress» — fall through so generate
+                # produces a fresh draft tied to the current trigger.
+                latest_user_msg_id = (
+                    Message.all_tenants.filter(
+                        tenant_id=tenant_uuid,
+                        conversation_id=conv_uuid,
+                        role=Message.Role.USER,
+                    )
+                    .order_by("-created_at")
+                    .values_list("id", flat=True)
+                    .first()
+                )
+                same_trigger = (
+                    existing_active.trigger_message_id is not None
+                    and existing_active.trigger_message_id == latest_user_msg_id
+                )
+                if same_trigger:
+                    # Telemetry: log-only.  No counter pattern exists in
+                    # master_api/llm/orchestrator (grepped — see PR body).
+                    # Operators alert on this slug via log search /
+                    # Sentry breadcrumb until a formal metric backbone
+                    # lands.  Includes draft_id + age + window so the
+                    # window value can be validated post-pilot.
+                    logger.info(
+                        "master_api.tasks.auto_draft.idle_active_draft_skipped "
+                        "conv=%s draft=%s age_seconds=%.1f window=%ds",
+                        conversation_id,
+                        existing_active.id,
+                        age_seconds,
+                        suppress_window_seconds,
+                    )
+                    return {
+                        "generated": False,
+                        "reason": "idle_active_draft_skipped",
+                    }
+                # Trigger drift: existing draft's trigger doesn't match
+                # the latest customer message (or the draft has no
+                # trigger recorded).  Don't suppress — fall through so
+                # generate proceeds and the existing ACTIVE row
+                # transitions to REPLACED via #540 Blocker #1 logic.
                 logger.info(
-                    "master_api.tasks.auto_draft.idle_active_draft_skipped "
-                    "conv=%s draft=%s age_seconds=%.1f window=%ds",
+                    "master_api.tasks.auto_draft.suppress_skipped_trigger_drift "
+                    "conv=%s draft=%s draft_trigger=%s latest_user_msg=%s "
+                    "age_seconds=%.1f",
                     conversation_id,
                     existing_active.id,
+                    existing_active.trigger_message_id,
+                    latest_user_msg_id,
                     age_seconds,
-                    suppress_window_seconds,
                 )
-                return {
-                    "generated": False,
-                    "reason": "idle_active_draft_skipped",
-                }
 
     # Step 3: master involvement. Find the master linked to this
     # conversation's bot_user via the booking history — same predicate

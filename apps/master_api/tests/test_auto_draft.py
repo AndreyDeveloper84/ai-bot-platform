@@ -673,6 +673,7 @@ class TestIssue659IdleActiveSuppress:
         *,
         age_seconds: float,
         content: str = "старый черновик",
+        trigger_message: Message | None = None,
     ) -> AiDraft:
         """Seed an ACTIVE draft with ``created_at`` shifted into the past.
 
@@ -680,6 +681,12 @@ class TestIssue659IdleActiveSuppress:
         because ``auto_now_add=True`` overrides anything passed in; we
         backdate via a follow-up ``UPDATE`` (same trick the test helper
         ``_add_msg`` uses for Message).
+
+        Pass ``trigger_message=<Message>`` to set the draft's
+        ``trigger_message`` FK — required for the round-1 amendment
+        staleness-aware suppress logic (PR #659 amendments).  Leaving
+        it ``None`` simulates legacy / pre-staleness-tracking drafts
+        and exercises the «not safe to suppress» fallback path.
         """
 
         draft = AiDraft.all_tenants.create(
@@ -691,6 +698,7 @@ class TestIssue659IdleActiveSuppress:
             llm_provider="openai",
             llm_model="gpt-4o-mini",
             llm_cost_usd=0,
+            trigger_message=trigger_message,
         )
         backdated = datetime.now(tz=timezone.utc) - timedelta(seconds=age_seconds)
         AiDraft.all_tenants.filter(pk=draft.pk).update(created_at=backdated)
@@ -700,7 +708,12 @@ class TestIssue659IdleActiveSuppress:
     def test_auto_trigger_suppressed_when_active_draft_younger_than_window(
         self, settings: Any
     ) -> None:
-        """ACTIVE draft 30s old < 60s window → suppress, no LLM call."""
+        """ACTIVE draft 30s old < 60s window AND tied to the latest
+        customer Msg → suppress, no LLM call.
+
+        Round-1 amendment: the draft's ``trigger_message`` must match
+        the conversation's latest USER Msg.  Otherwise suppress falls
+        through (trigger-drift branch tested separately)."""
 
         settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
         tenant = _make_tenant()
@@ -708,8 +721,12 @@ class TestIssue659IdleActiveSuppress:
         master = _make_master(tenant)
         conv = _make_conversation(tenant, bu)
         _make_booking(tenant, master, bu)
-        self._seed_active_draft(tenant, conv, master, age_seconds=30)
+        # Seed the customer message FIRST so we can wire the draft's
+        # trigger_message to it.  Auto-trigger task is invoked with the
+        # same msg.id as its trigger_message_id, exercising the
+        # same-trigger suppress path.
         msg = _add_msg(tenant, conv, role=Message.Role.USER, content="новое")
+        self._seed_active_draft(tenant, conv, master, age_seconds=30, trigger_message=msg)
         with patch("apps.master_api.services.ai_drafts.generate_draft_for_conversation") as gen:
             with _patch_complete(return_value=_completion(text="не должно вызваться")):
                 res = auto_generate_draft_for_inbound(
@@ -844,8 +861,10 @@ class TestIssue659IdleActiveSuppress:
         master = _make_master(tenant)
         conv = _make_conversation(tenant, bu)
         _make_booking(tenant, master, bu)
-        draft = self._seed_active_draft(tenant, conv, master, age_seconds=20)
+        # Round-1 amendment: draft must be tied to the latest user Msg
+        # for the same-trigger suppress branch to fire.
         msg = _add_msg(tenant, conv, role=Message.Role.USER, content="новое")
+        draft = self._seed_active_draft(tenant, conv, master, age_seconds=20, trigger_message=msg)
         with caplog.at_level(_logging.INFO, logger="apps.master_api.tasks"):
             res = auto_generate_draft_for_inbound(
                 conversation_id=str(conv.id),
@@ -854,7 +873,12 @@ class TestIssue659IdleActiveSuppress:
             )
         assert res == {"generated": False, "reason": "idle_active_draft_skipped"}
         suppress_msgs = [
-            r.getMessage() for r in caplog.records if "idle_active_draft_skipped" in r.getMessage()
+            r.getMessage()
+            for r in caplog.records
+            if "idle_active_draft_skipped" in r.getMessage()
+            # Filter out the trigger_drift slug (which contains
+            # «suppress_skipped» but not «idle_active_draft_skipped» in
+            # the message body).
         ]
         assert suppress_msgs, "suppress INFO log must be emitted"
         line = suppress_msgs[0]
@@ -862,3 +886,129 @@ class TestIssue659IdleActiveSuppress:
         assert str(draft.id) in line
         assert "age_seconds=" in line
         assert "window=60" in line
+
+    # -----------------------------------------------------------------
+    # Round-1 amendments (adversarial review Finding #1 — staleness-aware
+    # suppress).  Without these, suppress would fire on a fresh ACTIVE
+    # draft whose ``trigger_message`` no longer matches the latest
+    # customer Msg, leaving a stale draft visible to the master across
+    # bursty inbound messages.
+    # -----------------------------------------------------------------
+
+    def test_suppress_skipped_when_newer_customer_message_arrived(
+        self, settings: Any, caplog: Any
+    ) -> None:
+        """Bursty scenario:
+
+        * T=0  Msg1 arrives → Draft1 generated, trigger=Msg1
+        * T=10s Msg2 arrives but is debounced (PR #584)
+        * T=20s Msg3 arrives → debounce released, auto-trigger fires
+
+        Existing ACTIVE Draft1 is younger than the 60s window but its
+        trigger (Msg1) is no longer the latest customer Msg (Msg3 is).
+        Suppress MUST fall through; generate proceeds and REPLACEs the
+        stale draft.
+        """
+
+        import logging as _logging
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        # Msg1 (older) — referenced by the existing ACTIVE Draft1.
+        msg1 = _add_msg(
+            tenant,
+            conv,
+            role=Message.Role.USER,
+            content="можно записаться?",
+            created_at=datetime.now(tz=timezone.utc) - timedelta(seconds=25),
+        )
+        old_draft = self._seed_active_draft(
+            tenant,
+            conv,
+            master,
+            age_seconds=20,
+            trigger_message=msg1,
+            content="старый ответ на Msg1",
+        )
+        # Msg3 — latest customer Msg (Msg2 omitted; the debounce
+        # behaviour isn't what's under test here).  Auto-trigger fires
+        # with Msg3 as the task's trigger_message_id.
+        msg3 = _add_msg(tenant, conv, role=Message.Role.USER, content="на завтра")
+        with caplog.at_level(_logging.INFO, logger="apps.master_api.tasks"):
+            with _patch_complete(return_value=_completion(text="свежий ответ на Msg3")):
+                res = auto_generate_draft_for_inbound(
+                    conversation_id=str(conv.id),
+                    trigger_message_id=str(msg3.id),
+                    tenant_id=str(tenant.id),
+                )
+        # Generate proceeded — suppress did NOT fire.
+        assert res["generated"] is True
+        # Stale draft transitioned to REPLACED by generate's existing
+        # #540 Blocker #1 logic.
+        old_draft.refresh_from_db()
+        assert old_draft.status == AiDraft.Status.REPLACED
+        # Exactly one ACTIVE row, and it's a NEW draft (not the old one)
+        # tied to Msg3.
+        actives = list(
+            AiDraft.all_tenants.filter(conversation_id=conv.id, status=AiDraft.Status.ACTIVE)
+        )
+        assert len(actives) == 1
+        assert actives[0].id != old_draft.id
+        assert actives[0].trigger_message_id == msg3.id
+        # The trigger_drift INFO log must be emitted with both ids +
+        # age for post-pilot tuning visibility.
+        drift_msgs = [
+            r.getMessage()
+            for r in caplog.records
+            if "suppress_skipped_trigger_drift" in r.getMessage()
+        ]
+        assert drift_msgs, "trigger-drift INFO log must be emitted"
+        line = drift_msgs[0]
+        assert str(conv.id) in line
+        assert str(old_draft.id) in line
+        assert str(msg1.id) in line  # draft_trigger
+        assert str(msg3.id) in line  # latest_user_msg
+        assert "age_seconds=" in line
+
+    def test_suppress_fires_when_no_new_customer_message_since_draft(
+        self, settings: Any, caplog: Any
+    ) -> None:
+        """Steady-state scenario:
+
+        * T=0  Msg1 → Draft1 (trigger=Msg1)
+        * T=20s auto-trigger fires AGAIN for Msg1 (e.g. spurious
+          re-enqueue, hook replay).  No newer customer Msg exists.
+
+        Existing ACTIVE Draft1's trigger still matches the latest
+        customer Msg → safe to suppress.  This is the «master is
+        viewing this exact draft for this exact turn» case.
+        """
+
+        import logging as _logging
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        msg1 = _add_msg(tenant, conv, role=Message.Role.USER, content="привет")
+        draft = self._seed_active_draft(tenant, conv, master, age_seconds=20, trigger_message=msg1)
+        with caplog.at_level(_logging.INFO, logger="apps.master_api.tasks"):
+            with patch("apps.master_api.services.ai_drafts.generate_draft_for_conversation") as gen:
+                res = auto_generate_draft_for_inbound(
+                    conversation_id=str(conv.id),
+                    trigger_message_id=str(msg1.id),
+                    tenant_id=str(tenant.id),
+                )
+        assert res == {"generated": False, "reason": "idle_active_draft_skipped"}
+        assert not gen.called  # no LLM call
+        suppress_msgs = [
+            r.getMessage() for r in caplog.records if "idle_active_draft_skipped" in r.getMessage()
+        ]
+        assert suppress_msgs, "same-trigger suppress INFO log must be emitted"
+        assert str(draft.id) in suppress_msgs[0]
