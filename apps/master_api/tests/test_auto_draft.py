@@ -52,6 +52,11 @@ def _isolated_env(settings: Any) -> Any:
     settings.LLM_PROVIDER = "openai"
     settings.SKILL_LLM_PROVIDER = {}
     settings.AI_DRAFTS_AUTO_TRIGGER_ENABLED = True
+    # Issue #659 suppress is disabled by default in tests — individual
+    # ``TestIssue659IdleActiveSuppress`` cases override.  This preserves
+    # baseline behaviour for the pre-#659 test suite (e.g. the debounce
+    # release test seeds an ACTIVE draft then expects regeneration).
+    settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 0
     reset_router_cache()
     cache.clear()
     yield
@@ -630,3 +635,230 @@ class TestConcurrencyTwoInbounds:
         # One ACTIVE draft on the conversation.
         active = AiDraft.all_tenants.filter(conversation_id=conv.id, status=AiDraft.Status.ACTIVE)
         assert active.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #659 — idle-active-draft suppress window
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestIssue659IdleActiveSuppress:
+    """Suppress auto-trigger when an ACTIVE draft on the conversation is
+    younger than ``IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS``.
+
+    The race the suppress prevents (documented in #659):
+
+        1. Customer message lands → auto-trigger Celery task starts an
+           LLM call under the Conversation row lock (1-3s typical).
+        2. Master taps «Отправить от себя» on the visible ACTIVE draft.
+        3. ``send_draft_as_master`` returns 429 ``conversation_busy``
+           (PR #551 lock symmetry).
+        4. Frontend retries after ``Retry-After: 3``; by then
+           auto-trigger has REPLACED the on-screen draft.
+        5. send-as-me targets the REPLACED row → 400
+           ``draft_already_acted`` — master sees «черновик уже
+           использован» chain.
+
+    Suppressing regeneration while the master is likely still viewing
+    the existing draft breaks the race at step 1.  Older ACTIVE drafts
+    fall through to the existing REPLACED-transition logic.
+    """
+
+    def _seed_active_draft(
+        self,
+        tenant: Tenant,
+        conv: Conversation,
+        master: CatalogMaster,
+        *,
+        age_seconds: float,
+        content: str = "старый черновик",
+    ) -> AiDraft:
+        """Seed an ACTIVE draft with ``created_at`` shifted into the past.
+
+        We can't pass ``created_at`` to ``AiDraft.all_tenants.create``
+        because ``auto_now_add=True`` overrides anything passed in; we
+        backdate via a follow-up ``UPDATE`` (same trick the test helper
+        ``_add_msg`` uses for Message).
+        """
+
+        draft = AiDraft.all_tenants.create(
+            tenant=tenant,
+            conversation=conv,
+            master=master,
+            content=content,
+            status=AiDraft.Status.ACTIVE,
+            llm_provider="openai",
+            llm_model="gpt-4o-mini",
+            llm_cost_usd=0,
+        )
+        backdated = datetime.now(tz=timezone.utc) - timedelta(seconds=age_seconds)
+        AiDraft.all_tenants.filter(pk=draft.pk).update(created_at=backdated)
+        draft.refresh_from_db()
+        return draft
+
+    def test_auto_trigger_suppressed_when_active_draft_younger_than_window(
+        self, settings: Any
+    ) -> None:
+        """ACTIVE draft 30s old < 60s window → suppress, no LLM call."""
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        self._seed_active_draft(tenant, conv, master, age_seconds=30)
+        msg = _add_msg(tenant, conv, role=Message.Role.USER, content="новое")
+        with patch("apps.master_api.services.ai_drafts.generate_draft_for_conversation") as gen:
+            with _patch_complete(return_value=_completion(text="не должно вызваться")):
+                res = auto_generate_draft_for_inbound(
+                    conversation_id=str(conv.id),
+                    trigger_message_id=str(msg.id),
+                    tenant_id=str(tenant.id),
+                )
+        assert res == {"generated": False, "reason": "idle_active_draft_skipped"}
+        assert not gen.called
+        # Existing ACTIVE draft untouched — still ACTIVE, not REPLACED.
+        actives = AiDraft.all_tenants.filter(conversation_id=conv.id, status=AiDraft.Status.ACTIVE)
+        assert actives.count() == 1
+
+    def test_auto_trigger_proceeds_when_active_draft_older_than_window(self, settings: Any) -> None:
+        """ACTIVE draft 90s old > 60s window → generate proceeds,
+        existing draft transitions to REPLACED, new ACTIVE created."""
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        old_draft = self._seed_active_draft(tenant, conv, master, age_seconds=90, content="старый")
+        msg = _add_msg(tenant, conv, role=Message.Role.USER, content="новое")
+        with _patch_complete(return_value=_completion(text="свежий ответ")):
+            res = auto_generate_draft_for_inbound(
+                conversation_id=str(conv.id),
+                trigger_message_id=str(msg.id),
+                tenant_id=str(tenant.id),
+            )
+        assert res["generated"] is True
+        # Old draft transitioned to REPLACED.
+        old_draft.refresh_from_db()
+        assert old_draft.status == AiDraft.Status.REPLACED
+        # Exactly one ACTIVE draft on the conversation, and it's a new
+        # row (not the old one being re-used).
+        actives = AiDraft.all_tenants.filter(conversation_id=conv.id, status=AiDraft.Status.ACTIVE)
+        assert actives.count() == 1
+        first_active = actives.first()
+        assert first_active is not None
+        assert first_active.id != old_draft.id
+
+    def test_auto_trigger_proceeds_when_no_active_draft(self, settings: Any) -> None:
+        """Sanity check: no existing draft → suppress logic is a no-op
+        and the baseline pre-#659 behaviour is preserved."""
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        msg = _add_msg(tenant, conv, role=Message.Role.USER, content="первое")
+        with _patch_complete(return_value=_completion(text="ответ")):
+            res = auto_generate_draft_for_inbound(
+                conversation_id=str(conv.id),
+                trigger_message_id=str(msg.id),
+                tenant_id=str(tenant.id),
+            )
+        assert res["generated"] is True
+
+    def test_auto_trigger_proceeds_when_active_draft_was_terminal(self, settings: Any) -> None:
+        """Terminal-state draft (REPLACED / SENT_AS_MASTER / etc.) is
+        NOT on screen — master has already acted.  Suppress logic
+        must NOT consider it.  Fresh REPLACED draft 10s old should
+        still allow a new auto-trigger to run."""
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        # Seed a REPLACED draft (terminal) 10s old.
+        terminal_draft = AiDraft.all_tenants.create(
+            tenant=tenant,
+            conversation=conv,
+            master=master,
+            content="старый отправленный",
+            status=AiDraft.Status.REPLACED,
+            llm_provider="openai",
+            llm_model="gpt-4o-mini",
+            llm_cost_usd=0,
+        )
+        backdated = datetime.now(tz=timezone.utc) - timedelta(seconds=10)
+        AiDraft.all_tenants.filter(pk=terminal_draft.pk).update(created_at=backdated)
+        msg = _add_msg(tenant, conv, role=Message.Role.USER, content="новое")
+        with _patch_complete(return_value=_completion(text="свежий")):
+            res = auto_generate_draft_for_inbound(
+                conversation_id=str(conv.id),
+                trigger_message_id=str(msg.id),
+                tenant_id=str(tenant.id),
+            )
+        # Suppress must NOT fire — terminal drafts don't count.
+        assert res["generated"] is True
+
+    def test_suppress_window_env_var_override_disables_suppress(self, settings: Any) -> None:
+        """``IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=0`` disables the
+        suppress entirely — regression escape hatch for ops."""
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 0
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        # Even with a fresh (5s old) ACTIVE draft, suppress is off, so
+        # generate must proceed.
+        self._seed_active_draft(tenant, conv, master, age_seconds=5)
+        msg = _add_msg(tenant, conv, role=Message.Role.USER, content="новое")
+        with _patch_complete(return_value=_completion(text="свежий")):
+            res = auto_generate_draft_for_inbound(
+                conversation_id=str(conv.id),
+                trigger_message_id=str(msg.id),
+                tenant_id=str(tenant.id),
+            )
+        assert res["generated"] is True
+
+    def test_suppress_log_contains_draft_id_and_age_and_window(
+        self, settings: Any, caplog: Any
+    ) -> None:
+        """Operator observability: the INFO log must carry draft_id,
+        age_seconds, and window so post-pilot tuning of the window
+        value is grounded in real numbers."""
+
+        import logging as _logging
+
+        settings.IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = 60
+        tenant = _make_tenant()
+        bu = _make_bot_user(tenant)
+        master = _make_master(tenant)
+        conv = _make_conversation(tenant, bu)
+        _make_booking(tenant, master, bu)
+        draft = self._seed_active_draft(tenant, conv, master, age_seconds=20)
+        msg = _add_msg(tenant, conv, role=Message.Role.USER, content="новое")
+        with caplog.at_level(_logging.INFO, logger="apps.master_api.tasks"):
+            res = auto_generate_draft_for_inbound(
+                conversation_id=str(conv.id),
+                trigger_message_id=str(msg.id),
+                tenant_id=str(tenant.id),
+            )
+        assert res == {"generated": False, "reason": "idle_active_draft_skipped"}
+        suppress_msgs = [
+            r.getMessage() for r in caplog.records if "idle_active_draft_skipped" in r.getMessage()
+        ]
+        assert suppress_msgs, "suppress INFO log must be emitted"
+        line = suppress_msgs[0]
+        assert str(conv.id) in line
+        assert str(draft.id) in line
+        assert "age_seconds=" in line
+        assert "window=60" in line

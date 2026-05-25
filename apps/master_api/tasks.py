@@ -89,6 +89,7 @@ from typing import Any
 from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
 from django.core.cache import cache
+from django.utils import timezone
 
 from apps.llm.protocol import LLMError
 
@@ -236,7 +237,7 @@ def auto_generate_draft_for_inbound(
     # booking, LLM router). Keeping them out of module-load avoids a
     # circular at app startup and trims the producer-side import graph.
     from apps.booking.models import BookingRequest
-    from apps.conversations.models import Conversation, Message
+    from apps.conversations.models import AiDraft, Conversation, Message
     from apps.master_api.services.ai_drafts import (
         DraftActionError,
         generate_draft_for_conversation,
@@ -284,6 +285,59 @@ def auto_generate_draft_for_inbound(
             conversation_id,
         )
         return {"generated": False, "reason": "human_locked"}
+
+    # Step 2b (issue #659): suppress if an idle ACTIVE draft already
+    # exists on this conversation and is younger than the suppress
+    # window.  Master is probably still viewing it; regenerating now
+    # would either be wasted LLM cost (if master sends as-is) or
+    # trigger the documented #659 collision race:
+    #
+    #   master tap «Отправить от себя» → 429 conversation_busy →
+    #   frontend retry after Retry-After: 3 → auto-trigger has
+    #   REPLACED the on-screen draft → send-as-me targets REPLACED
+    #   draft → 400 draft_already_acted.
+    #
+    # Setting ``IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=0`` disables
+    # the suppress (operator escape hatch).  Older ACTIVE drafts fall
+    # through so generate's existing REPLACED-transition logic
+    # (#540 Blocker #1) refreshes the draft normally.
+    suppress_window_seconds = getattr(settings, "IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS", 60)
+    if suppress_window_seconds > 0:
+        # Explicit tenant scoping — task runs outside ambient
+        # tenant_scope (mirrors how the manual path queries by
+        # tenant_id).  ACTIVE-only because terminal states
+        # (REPLACED / SENT_AS_MASTER / RELEASED_TO_AI / DISMISSED)
+        # are not on-screen — master has already acted on them.
+        existing_active = (
+            AiDraft.all_tenants.filter(
+                tenant_id=tenant_uuid,
+                conversation_id=conv_uuid,
+                status=AiDraft.Status.ACTIVE,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if existing_active is not None:
+            age_seconds = (timezone.now() - existing_active.created_at).total_seconds()
+            if age_seconds < suppress_window_seconds:
+                # Telemetry: log-only.  No counter pattern exists in
+                # master_api/llm/orchestrator (grepped — see PR body).
+                # Operators alert on this slug via log search /
+                # Sentry breadcrumb until a formal metric backbone
+                # lands.  Includes draft_id + age + window so the
+                # window value can be validated post-pilot.
+                logger.info(
+                    "master_api.tasks.auto_draft.idle_active_draft_skipped "
+                    "conv=%s draft=%s age_seconds=%.1f window=%ds",
+                    conversation_id,
+                    existing_active.id,
+                    age_seconds,
+                    suppress_window_seconds,
+                )
+                return {
+                    "generated": False,
+                    "reason": "idle_active_draft_skipped",
+                }
 
     # Step 3: master involvement. Find the master linked to this
     # conversation's bot_user via the booking history — same predicate
