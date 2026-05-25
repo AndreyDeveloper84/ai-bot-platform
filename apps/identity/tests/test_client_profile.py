@@ -49,6 +49,12 @@ class TestModel:
         assert profile.avg_visit_interval_days is None
         assert profile.loyalty_tier == "bronze"
         assert profile.last_recomputed_at is None
+        # Review fields (Gamma #446 review.created handoff) — defaults
+        # match «no reviews yet» semantics for fresh profiles.
+        assert profile.last_review_rating is None
+        assert profile.last_review_at is None
+        assert profile.low_rating_flag is False
+        assert profile.sentiment_score == 0.0
 
     def test_signal_idempotent_on_resave(self, bot_user):
         """Re-saving BotUser doesn't create a second profile."""
@@ -66,6 +72,58 @@ class TestModel:
         bu_id = bot_user.id
         bot_user.delete()
         assert ClientProfile.all_tenants.filter(bot_user_id=bu_id).count() == 0
+
+
+class TestReviewFields:
+    """Review-mirror fields (Gamma #446 review.created consumer handoff)."""
+
+    def test_review_fields_can_be_set_and_read_back(self, bot_user):
+        """Round-trip all 4 fields via consumer-style assignment."""
+        from django.utils import timezone
+
+        profile = bot_user.client_profile
+        now = timezone.now()
+        profile.last_review_rating = 5
+        profile.last_review_at = now
+        profile.low_rating_flag = False
+        profile.sentiment_score = 1.0
+        profile.save()
+
+        profile.refresh_from_db()
+        assert profile.last_review_rating == 5
+        assert profile.last_review_at is not None
+        assert profile.low_rating_flag is False
+        assert profile.sentiment_score == 1.0
+
+    def test_low_rating_flag_set_with_negative_sentiment(self, bot_user):
+        """Consumer pattern: rating <= 2 → low_rating_flag=True + sentiment <= -0.5."""
+        from django.utils import timezone
+
+        profile = bot_user.client_profile
+        profile.last_review_rating = 2
+        profile.last_review_at = timezone.now()
+        profile.low_rating_flag = True
+        profile.sentiment_score = -0.5
+        profile.save()
+
+        profile.refresh_from_db()
+        assert profile.last_review_rating == 2
+        assert profile.low_rating_flag is True
+        assert profile.sentiment_score == -0.5
+
+    def test_sentiment_accepts_full_float_range(self, bot_user):
+        """FloatField has no validators — derivation logic lives in Gamma's handler."""
+        profile = bot_user.client_profile
+        # Edge values from the spec'd derivation table: 5→1.0 / 1→-1.0.
+        profile.sentiment_score = 1.0
+        profile.save()
+        profile.refresh_from_db()
+        assert profile.sentiment_score == 1.0
+
+        profile.sentiment_score = -1.0
+        profile.save()
+        profile.refresh_from_db()
+        assert profile.sentiment_score == -1.0
 
 
 class TestTenantProtect:
