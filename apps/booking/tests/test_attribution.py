@@ -642,12 +642,16 @@ class TestQ12aAdversarialPassRegressions:
         )
 
         # Monkeypatch the manager to simulate PROTECT-bypassed root.
+        # Q12-α #616 (2026-05-24): root read is now
+        # ``select_for_update().get()``, so we patch select_for_update
+        # to return a stub queryset whose .get raises.
         from apps.booking.models import BookingRequest as BR
 
-        def raise_does_not_exist(*args, **kwargs):
-            raise BR.DoesNotExist("simulated PROTECT bypass")
+        class _MissingRootQS:
+            def get(self, *args, **kwargs):  # noqa: ANN001
+                raise BR.DoesNotExist("simulated PROTECT bypass")
 
-        monkeypatch.setattr(BR.all_tenants, "get", raise_does_not_exist)
+        monkeypatch.setattr(BR.all_tenants, "select_for_update", lambda *a, **kw: _MissingRootQS())
 
         with caplog.at_level("ERROR", logger="apps.booking.services.attribution"):
             is_cont, break_reason, _ = compute_reschedule_continuation(

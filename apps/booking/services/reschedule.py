@@ -122,10 +122,27 @@ def reschedule_customer_booking(
         # not the (potentially mutated) live view. On chain break, leave
         # None → create_customer_booking will snapshot fresh from the
         # live service, starting a new chain at the current price.
+        #
+        # #616 (PRE_PILOT 2026-07-15) concurrency lock — root read uses
+        # bare ``select_for_update()`` so two parallel reschedules on
+        # different links of the same chain serialize on the root row.
+        # ``of=`` is omitted: Postgres-only arg, and our ``.get(id=...)``
+        # has no JOIN to scope. Without this lock both threads would
+        # read the same snapshot, both would carry it forward, and any
+        # future writer that mutates ``root.commercial_identity_snapshot``
+        # (backfill job, GDPR redaction, analytics enrichment) could
+        # land between the two reads → carriers diverge. Belt-and-
+        # braces because today the snapshot is write-once, but the cost
+        # is zero and the contract holds against future mutating
+        # writers.
+        #
+        # FOOT-GUN: do NOT add ``.select_related(...)`` here without
+        # re-evaluating lock scope — joining a related table expands
+        # FOR UPDATE to those rows on Postgres.
         carry_snapshot: dict | None = None
         if is_continuation and chain_root_id is not None:
             try:
-                root = BookingRequest.all_tenants.get(id=chain_root_id)
+                root = BookingRequest.all_tenants.select_for_update().get(id=chain_root_id)
                 carry_snapshot = root.commercial_identity_snapshot
             except BookingRequest.DoesNotExist:
                 carry_snapshot = None

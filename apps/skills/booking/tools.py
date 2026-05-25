@@ -1910,10 +1910,15 @@ def execute_reschedule(
 
             # Carry root's snapshot on continuation; fresh-snapshot on
             # chain break. Mirrors services/reschedule.py logic.
+            # #616 (PRE_PILOT 2026-07-15) — root read locked via bare
+            # ``select_for_update()`` (``of=`` omitted, see
+            # services/reschedule.py for full rationale). FOOT-GUN:
+            # do NOT add ``.select_related(...)`` here — would expand
+            # FOR UPDATE scope to joined tables on Postgres.
             carry_snapshot: dict | None = None
             if is_continuation and chain_root_id is not None:
                 try:
-                    root = BookingRequest.all_tenants.get(id=chain_root_id)
+                    root = BookingRequest.all_tenants.select_for_update().get(id=chain_root_id)
                     carry_snapshot = root.commercial_identity_snapshot
                 except BookingRequest.DoesNotExist:
                     carry_snapshot = None

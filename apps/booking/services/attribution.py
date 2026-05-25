@@ -292,6 +292,18 @@ def compute_reschedule_continuation(
 ) -> tuple[bool, str | None, UUID | None]:
     """Decide whether a reschedule preserves the continuation chain.
 
+    **CONTRACT — caller MUST hold an open ``transaction.atomic()`` block.**
+    Per #616 (PRE_PILOT 2026-07-15) this helper issues
+    ``select_for_update()`` on the chain root row when walking
+    ``old.original_booking_event_id``. Outside ``transaction.atomic()``
+    Django raises ``TransactionManagementError``. Both current callers
+    (``services/reschedule.py::reschedule_customer_booking`` and
+    ``skills/booking/tools.py::execute_reschedule``) wrap their entire
+    flow in ``transaction.atomic()`` — any future caller MUST do the
+    same. If you're calling this from an analytics backfill, admin
+    shell, or management command, wrap in ``transaction.atomic()``
+    yourself.
+
     Per founder ACK 2026-05-22 (issue #478 close-out), the chain is
     preserved when ALL of the following hold:
 
@@ -352,8 +364,27 @@ def compute_reschedule_continuation(
         # invariant the writers enforce). Use ``all_tenants`` so a
         # tenant-active flag rotation can't blind the lookup; the
         # caller already holds ``tenant_scope(tenant)``.
+        #
+        # #616 (PRE_PILOT 2026-07-15) concurrency lock — the root read
+        # uses bare ``select_for_update()`` so two parallel reschedules
+        # on different links of the same chain serialize on the root
+        # row. ``of=`` is omitted intentionally: Postgres-only argument,
+        # and our ``.get(id=...)`` has no JOIN to scope, so the default
+        # «lock the FROM row» is correct AND keeps SQLite-test parity.
+        # Both callers wrap this in ``transaction.atomic()`` so the lock
+        # is held for the duration of the comparator. See
+        # ``services/reschedule.py`` and ``skills/booking/tools.py`` for
+        # the symmetric carry-snapshot lock.
+        #
+        # FOOT-GUN: do NOT add ``.select_related(...)`` before this
+        # ``.get(...)`` without re-evaluating the lock scope — joining
+        # a related table expands the FOR UPDATE to those rows on
+        # Postgres. If you need related fields, fetch them in a
+        # separate query after the lock window.
         try:
-            root = BookingRequest.all_tenants.get(id=old.original_booking_event_id)
+            root = BookingRequest.all_tenants.select_for_update().get(
+                id=old.original_booking_event_id
+            )
         except BookingRequest.DoesNotExist:
             # Root deleted (shouldn't happen under PROTECT — defence
             # in depth). Treat as chain broken. Tech-lead double-pass
