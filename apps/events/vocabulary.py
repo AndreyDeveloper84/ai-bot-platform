@@ -64,6 +64,15 @@ BOOKING_RESCHEDULE_REQUESTED = "booking.reschedule_requested"
 BOOKING_RESCHEDULE_ABANDONED = "booking.reschedule_abandoned"
 BOOKING_RESCHEDULED = "booking.rescheduled"
 
+# --- payment_failed skill triggered (W2/Epsilon, #443 + Variant C) -----
+# Emitted by Gamma's #443 payment.failed consumer when delegating to
+# the payment_failed skill (apps/skills/payment_failed/). Observability
+# row — actual skill behavior (master DM info + client DM retry button)
+# is driven by direct function call, not pub/sub. Payload contract:
+# {payment_id}.
+PAYMENT_FAILED_SKILL_TRIGGERED = "payment_failed_skill_triggered"
+
+
 # --- Master M0 onboarding (master-mobile §M0 + master-management MM2) ---
 # Audit slugs registered here so out-of-vocab warnings stay silent in CI.
 # Payload contract: {tenant_id, master_id, bot_user_id, ...extra}.
@@ -293,6 +302,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_ONBOARDING_ACCEPTED,
         MASTER_ONBOARDING_REJECTED,
         MASTER_PROFILE_INITIALIZED,
+        PAYMENT_FAILED_SKILL_TRIGGERED,
         MASTER_PROFILE_UPDATED_BY_ADMIN,
         MASTER_PHOTO_UPDATED_BY_ADMIN,
         MASTER_INVITED,
