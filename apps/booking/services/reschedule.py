@@ -37,6 +37,7 @@ from django.db import transaction
 
 from apps.booking.models import BookingRequest
 from apps.booking.services.attribution import (
+    CommercialIdentitySnapshot,
     build_live_commercial_identity,
     compute_reschedule_continuation,
     get_reschedulable_statuses,
@@ -139,7 +140,7 @@ def reschedule_customer_booking(
         # FOOT-GUN: do NOT add ``.select_related(...)`` here without
         # re-evaluating lock scope — joining a related table expands
         # FOR UPDATE to those rows on Postgres.
-        carry_snapshot: dict | None = None
+        carry_snapshot: CommercialIdentitySnapshot | None = None
         if is_continuation and chain_root_id is not None:
             try:
                 root = BookingRequest.all_tenants.select_for_update().get(id=chain_root_id)

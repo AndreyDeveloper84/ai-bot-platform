@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -165,6 +165,36 @@ _COMMERCIAL_IDENTITY_FIELDS = (
 )
 
 
+class CommercialIdentitySnapshot(TypedDict):
+    """Q12-α #541 (founder ACK 2026-05-23) — 5-field shape of the
+    commercial-identity snapshot stored on ``BookingRequest`` rows.
+
+    Q12-α #642 follow-up: tightened from a loose ``dict`` return type
+    so mypy catches drift — a refactor that renames or removes a key
+    used to silently no-op the comparator (which uses ``.get(field)``
+    on hardcoded field names) and lose chain-break detection.
+
+    Schema is shared by:
+    * :func:`build_live_commercial_identity` — producer (single source
+      of truth for snapshot construction).
+    * :data:`_COMMERCIAL_IDENTITY_FIELDS` — the 4-field tuple the
+      comparator iterates over. ``service_name`` is informational
+      (in the snapshot for audit/UI, NOT compared).
+    * ``BookingRequest.commercial_identity_snapshot`` JSONField —
+      schema-on-read on the DB side.
+
+    Note: TypedDict gives structural typing at static-check time but
+    is a plain ``dict`` at runtime — JSONField (de)serialisation is
+    unchanged.
+    """
+
+    service_id: str
+    service_name: str
+    sticker_price_amount: str | None
+    currency: str
+    duration_minutes: int | None
+
+
 # Q12-α #560 (PRE_PILOT 2026-07-15): explicit ALLOW-lists for status
 # gates. Exclude-list pattern (``status != CONFIRMED`` / ``status ==
 # CANCELLED``) silently grandfathers ANY future enum addition into
@@ -225,8 +255,10 @@ def get_valid_chain_root_statuses() -> frozenset[str]:
     return _VALID_CHAIN_ROOT_STATUSES_CACHE
 
 
-def build_live_commercial_identity(service: "CatalogService") -> dict:
-    """Build the 5-field commercial-identity snapshot dict from a live
+def build_live_commercial_identity(
+    service: "CatalogService",
+) -> CommercialIdentitySnapshot:
+    """Build the 5-field commercial-identity snapshot from a live
     :class:`CatalogService` row. Single source of truth for snapshot
     construction — referenced from ``services/create.py``,
     ``services/reschedule.py``, and ``skills/booking/tools.py``.
@@ -252,6 +284,31 @@ def build_live_commercial_identity(service: "CatalogService") -> dict:
     Q12-α #618 (DRY follow-up to #541): extracted from three duplicated
     inline dict-builders. A future schema addition (new field) is now
     a single-site change.
+
+    Q12-α #642 (typing follow-up to #541): return type tightened from
+    loose ``dict`` to :class:`CommercialIdentitySnapshot` (TypedDict)
+    so mypy catches schema drift at edit time.
+
+    **TRUST BOUNDARY (Q12-α #641 follow-up to #541).** This function is
+    module-public but is NOT a request-handler. Callers MUST pass a
+    DB-loaded ``CatalogService`` row — never a user-supplied object
+    constructed from a REST payload, webhook body, LLM tool argument,
+    or any other untrusted source. The returned snapshot is
+    billing-affecting (it drives the chain-break decision in
+    :func:`compute_reschedule_continuation` via the comparator at
+    :func:`_commercial_identity_changed_field`); a forged ``service``
+    whose attributes spoof a legitimate row could produce a snapshot
+    that bypasses the chain-break check → silent overcharge or
+    silent under-charge.
+
+    Forged-object spoof surface: a malicious caller would need to
+    fake **4 attribute reads** — ``.id`` (UUID), ``.name`` (str),
+    ``.price_from`` (Decimal | None), ``.duration_min`` (int | None).
+
+    If a future caller needs to construct a snapshot from external
+    input, add a server-side integrity check that re-fetches the
+    matching ``CatalogService`` row by FK and compares it against the
+    supplied values BEFORE calling this helper.
     """
 
     # TODO(#617): hardcoded "RUB" — must be sourced from tenant /
@@ -294,8 +351,8 @@ def _normalise_commercial_identity_field(field: str, value: object) -> object:
 
 
 def _commercial_identity_changed_field(
-    old_snapshot: dict | None,
-    new_snapshot: dict | None,
+    old_snapshot: "CommercialIdentitySnapshot | dict | None",
+    new_snapshot: "CommercialIdentitySnapshot | dict | None",
 ) -> str | None:
     """Compare two commercial-identity snapshots; return the first
     differing field name, or None if identical / either side missing.
@@ -326,7 +383,7 @@ def compute_reschedule_continuation(
     old: "BookingRequest",
     new_service_id: str | UUID | int | None,
     new_visit_at: datetime,
-    new_commercial_identity: dict | None = None,
+    new_commercial_identity: "CommercialIdentitySnapshot | None" = None,
     threshold_days: int = RESCHEDULE_CONTINUATION_THRESHOLD_DAYS,
 ) -> tuple[bool, str | None, UUID | None]:
     """Decide whether a reschedule preserves the continuation chain.
