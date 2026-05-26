@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from apps.conversations.models import Conversation
@@ -262,7 +262,7 @@ def _evaluate_thresholds(
     latency_p95_ms: int,
     fallback_rate: float,
     mean_cost_usd: Decimal,
-) -> dict[str, dict]:
+) -> dict[str, Any]:
     """Per-metric threshold verdict for dashboard + alerting.
 
     Boundary semantics (adversarial focus Веха 4):
@@ -372,8 +372,8 @@ def aggregate_daily_metrics(target_date: _date, tenant) -> AIDailyMetricSummary:
 
         tokens_in = sum(r["llm_tokens_input"] or 0 for r in rows)
         tokens_out = sum(r["llm_tokens_output"] or 0 for r in rows)
-        total_cost = sum((r["llm_cost_usd"] or Decimal("0")) for r in rows)
-        mean_cost = (total_cost / total) if total else Decimal("0")
+        total_cost: Decimal = sum((r["llm_cost_usd"] or Decimal("0") for r in rows), Decimal("0"))
+        mean_cost: Decimal = (total_cost / total) if total else Decimal("0")
 
         success_rate = (correlated_count / total) if total else 0.0
         fb_rate = (fallback_count / total) if total else 0.0
