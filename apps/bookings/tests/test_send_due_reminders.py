@@ -508,7 +508,9 @@ class TestSendTimeRecheck:
             target_id=reminder.pk,
         )
         assert audit_rows.exists()
-        payload = audit_rows.first().payload
+        first_row = audit_rows.first()
+        assert first_row is not None  # narrow для mypy
+        payload = first_row.payload
         assert payload["reason"] == "booking_status_cancelled"
         assert payload["booking_request_id"] == str(booking.pk)
         assert payload["kind"] == BookingReminder.Kind.DAY_BEFORE
