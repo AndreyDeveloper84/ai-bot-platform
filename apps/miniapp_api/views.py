@@ -1222,3 +1222,86 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
         },
         status=200,
     )
+
+
+# --- /customer/recommendations — Ayla catalog proxy ------------------------
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_recommendations(request: HttpRequest) -> HttpResponse:
+    """Proxy recommendations call onto Ayla per identity-bridging contract.
+
+    The Mini App calls ``POST /api/v1/customer/recommendations`` with a
+    JSON body describing what to score (``lat`` / ``lon`` / ``goal`` /
+    ``tenant_history``). This view translates the call onto Ayla's
+    ``POST /internal/me/catalog/recommendations/`` endpoint using the
+    service-to-service identity bridge:
+
+    * ``Authorization: Bearer {AYLA_SERVICE_TOKEN}`` — bot-platform's
+      service credential. The customer's initData HMAC stays here; we
+      never forward it to Ayla.
+    * ``X-External-User-ID: bot:{channel}:{channel_user_id}`` — Ayla
+      resolves this to its ProxyUser via the user_proxy mapping.
+
+    The Ayla response body is passed through verbatim. The Mini App
+    side owns the rendering contract, so adding a translation layer
+    here only creates a release-lockstep tax.
+
+    Failure mapping:
+
+    * 400 — body not valid JSON object, OR Ayla returned 4xx
+      (Ayla's response body forwarded under ``ayla_error``).
+    * 502 — Ayla timeout / 5xx / malformed JSON.
+    * 503 — bot-platform misconfigured (missing service token / base URL).
+    """
+    import json
+
+    from apps.integrations.ayla import external_user_id_for
+    from apps.integrations.ayla.recommendations_client import (
+        RecommendationsBadRequest,
+        RecommendationsConfigError,
+        RecommendationsUnavailable,
+        fetch_recommendations,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # Match the /auth/verify pattern: only parse JSON when the caller
+    # explicitly declares `Content-Type: application/json`. Empty/
+    # multipart bodies are treated as «no scoring hints» — Ayla receives
+    # `{}` and returns its default ranking.
+    body: dict = {}
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type == "application/json" and request.body:
+        try:
+            parsed = json.loads(request.body)
+        except ValueError:
+            return _error("malformed", "body is not valid JSON", 400)
+        if not isinstance(parsed, dict):
+            return _error("malformed", "body must be a JSON object", 400)
+        body = parsed
+
+    try:
+        ayla_body = fetch_recommendations(
+            external_user_id=external_user_id_for(bot_user),
+            payload=body,
+        )
+    except RecommendationsConfigError as exc:
+        logger.error("customer_recommendations.config_error: %s", exc)
+        return _error("not_configured", "ayla recommendations not configured", 503)
+    except RecommendationsBadRequest as exc:
+        return JsonResponse(
+            {
+                "error": "ayla_bad_request",
+                "detail": f"ayla returned HTTP {exc.status_code}",
+                "ayla_error": exc.body,
+            },
+            status=400,
+        )
+    except RecommendationsUnavailable as exc:
+        logger.warning("customer_recommendations.unavailable: %s", exc)
+        return _error("ayla_unavailable", "ayla recommendations unavailable", 502)
+
+    return JsonResponse(ayla_body)
