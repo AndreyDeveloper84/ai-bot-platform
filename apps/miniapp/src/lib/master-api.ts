@@ -830,3 +830,81 @@ export const patchNotificationPrefs = async (
   });
   return env.prefs;
 };
+
+// --- Tier 2 read-only Клиенты / Услуги (master-solo-surface §4.3 / §4.4) -
+// Mirrors apps/master_api/services/customers.py + catalog.py. Backend
+// envelopes:
+//   GET /customers → {customers: MasterCustomer[]}
+//   GET /catalog   → {services:  MasterServiceItem[]}
+// Both endpoints are read-only and tenant-scoped at the backend.
+
+/**
+ * One row in the solo-provider customer roster. Phone is server-masked
+ * (the full string never leaves the backend). Reveal endpoint with
+ * audit event is deferred post-pilot — see W1 tracking issue
+ * "Phone reveal с audit event (RedZoneReader pattern)".
+ */
+export interface MasterCustomer {
+  bot_user_id: string;
+  /** First display name only (Tau §4.3 card title). */
+  first_name: string;
+  /** "+7 ••• ••• 14 67" — empty string when no phone on record. */
+  phone_masked: string;
+  /** ISO 8601 UTC, or null when no qualifying visit. */
+  last_visit_at: string | null;
+  last_visit_service_name: string;
+  total_visits: number;
+  /** True when total_visits >= 2 (mirrors master dashboard semantics). */
+  is_returning: boolean;
+  /**
+   * True when last_visit_at > 60d ago AND total_visits >= 3.
+   * Drives the "Давно не были" section per Tau §4.3.
+   */
+  at_risk: boolean;
+}
+
+interface CustomersEnvelope {
+  customers: MasterCustomer[];
+}
+
+/**
+ * GET the read-only customer roster for the calling master. Sorted by
+ * `last_visit_at` DESC. Empty array when the master has no bookings yet
+ * (cold-start tenant).
+ */
+export const getMasterCustomers = async (): Promise<MasterCustomer[]> => {
+  const env = await request<CustomersEnvelope>("/customers", { method: "GET" });
+  return env.customers;
+};
+
+/**
+ * One row in the master's services catalog. Sourced from the
+ * `MasterService` mapping (PR #518); price + duration are snapshot from
+ * the linked `CatalogService` mirror.
+ */
+export interface MasterServiceItem {
+  service_id: string;
+  name: string;
+  /** Integer roubles. Null when service is "by request" / legacy unpriced. */
+  price_rub: number | null;
+  /** 0 when unknown (legacy mirror rows). */
+  duration_min: number;
+  description: string;
+  /** Coarse bucket derived from service slug. Used for Tau §4.4 section headers. */
+  category: string;
+  is_active: boolean;
+}
+
+interface CatalogEnvelope {
+  services: MasterServiceItem[];
+}
+
+/**
+ * GET the read-only services list for the calling master. Sorted by
+ * `(category, name)`. Empty array when no services are mapped — the
+ * screen renders Tau's empty-state copy.
+ */
+export const getMasterCatalog = async (): Promise<MasterServiceItem[]> => {
+  const env = await request<CatalogEnvelope>("/catalog", { method: "GET" });
+  return env.services;
+};

@@ -58,6 +58,7 @@ import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
+import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
 import { MasterInternalChatListScreen } from "./screens/MasterInternalChatListScreen";
 import { MasterInternalChatThreadScreen } from "./screens/MasterInternalChatThreadScreen";
@@ -66,6 +67,7 @@ import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
 import { MasterProfileScreen } from "./screens/MasterProfileScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
+import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
 import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
 import { MyVisitsScreen } from "./screens/MyVisitsScreen";
@@ -489,59 +491,124 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
 }
 
 /**
- * Solo provider unified surface — Tau §5 MVP.
+ * Solo provider unified surface — Variant B navigation per Tau §3 verdict
+ * (master-solo-surface.md r1 2026-05-26). Rebuilt from PR #798's 8-tab
+ * horizontal-scroll Variant A to the 5-tab + «Ещё» bottom-sheet pattern
+ * mandated by founder + Tau review for WCAG 2.5.8 compliance on 360dp
+ * viewport (360 ÷ 5 = 72dp per tab, no label truncation).
  *
- * Activated only when `me.is_solo_provider === true` (W4 PR #760 added
- * the field to `/api/v1/me`; the helper rule is `len(active_staff_user_ids
- * ∪ active_master_user_ids) == 1` per Tau §3.1). For these tenants the
- * chooser used by `UnifiedAdminMasterRoutes` is overkill — Ольга is the
- * only person in her tenant, so we collapse everything to a single 8-tab
- * shell and skip the «Салон vs Мой профиль мастера» pick.
+ * Activated only when `me.is_solo_provider === true` (W4 PR #760).
  *
- * Memory ref: `project_solo_provider_universal_ui` (founder 2026-05-25).
+ * Bottom-bar tabs (5):
+ *   📋 День     → MasterDashboardScreen  (today agenda; reuse)
+ *   📅 Записи   → MasterScheduleScreen   (booking calendar; reuse)
+ *   👥 Клиенты  → MasterCustomersScreen  (Tier 2 read-only roster — this PR)
+ *   💼 Услуги   → MasterServicesScreen   (Tier 2 read-only catalog — this PR)
+ *   ⋯ Ещё      → opens bottom sheet (does NOT navigate)
  *
- * Tab → screen mapping (decided here; documented in PR body):
- *   📋 Мой день   → MasterDashboardScreen  (today agenda; reuse)
- *   📅 Записи     → MasterScheduleScreen   (booking calendar; reuse)
- *   👥 Клиенты    → SoonScreen (no screen built — placeholder)
- *   💼 Услуги     → SoonScreen (AdminServicesMatrixScreen exists but is
- *                   team-tenant overkill for 1-master — separate solo
- *                   screen tracked post-pilot)
- *   ⏰ Расписание → MasterScheduleScreen   (same screen as Записи; the
- *                   separate working-hours editor is not built yet)
- *   💰 Доходы     → SoonScreen
- *   ⭐ Отзывы     → SoonScreen (per pilot runbook 3.2.3 — N/A reviews
- *                   not built)
- *   🤖 AI         → MasterConversationsScreen (M5 list w/ AI drafts —
- *                   most pragmatic «chat с Ayla» surface today)
+ * «Ещё» bottom sheet (Tau §3 spec):
+ *   ⏰ Расписание   → MasterScheduleScreen  (same screen as Записи today)
+ *   💰 Доходы       → SoonScreen            (post-pilot per pilot runbook)
+ *   ⭐ Отзывы       → SoonScreen            (post-pilot)
+ *   🤖 AI-помощник → MasterConversationsScreen (M5 + AI drafts)
+ *   ──────────────
+ *   👤 Профиль      → MasterProfileScreen
+ *   ⚙ Настройки     → MasterSettingsScreen (M8 logout-only)
  *
- * Legacy `/admin/*` + `/master/*` routes are also mounted inside this
- * shell so deep-links from bot DMs / bookmarks keep working — Ольга
- * who has the URL to `/admin/services` still gets there. The bottom nav
- * just doesn't surface those paths anymore.
+ * Deep-link behaviour for /solo/more: a direct URL hit (e.g. from a stale
+ * bookmark) redirects to /solo/my-day AND opens the sheet — Tau's
+ * "implementation choice: simplest" instruction. Tap «Ещё» tab from the
+ * bottom bar toggles the sheet without navigation.
+ *
+ * Legacy `/admin/*` + `/master/*` routes are still mounted so deep-links
+ * from bot DMs keep working. The bottom nav just doesn't surface them.
  */
-const SOLO_TABS: ReadonlyArray<{
+const SOLO_NAV_TABS: ReadonlyArray<{
   path: string;
   label: string;
   icon: string;
   ariaLabel: string;
+  /** When true, taps toggle the «Ещё» sheet instead of navigating. */
+  opensSheet?: boolean;
 }> = [
   { path: "/solo/my-day", label: "День", icon: "📋", ariaLabel: "Мой день" },
   { path: "/solo/bookings", label: "Записи", icon: "📅", ariaLabel: "Записи" },
-  { path: "/solo/clients", label: "Клиенты", icon: "👥", ariaLabel: "Клиенты" },
+  { path: "/solo/customers", label: "Клиенты", icon: "👥", ariaLabel: "Клиенты" },
   { path: "/solo/services", label: "Услуги", icon: "💼", ariaLabel: "Услуги и цены" },
-  { path: "/solo/schedule", label: "Расп.", icon: "⏰", ariaLabel: "Расписание" },
-  { path: "/solo/earnings", label: "Доходы", icon: "💰", ariaLabel: "Доходы" },
-  { path: "/solo/reviews", label: "Отзывы", icon: "⭐", ariaLabel: "Отзывы" },
-  { path: "/solo/ai", label: "AI", icon: "🤖", ariaLabel: "AI-помощник" },
+  { path: "/solo/more", label: "Ещё", icon: "⋯", ariaLabel: "Меню «Ещё»", opensSheet: true },
 ];
 
-function SoloBottomNav() {
+interface SoloMoreSheetItem {
+  path: string;
+  label: string;
+  icon: string;
+  ariaLabel: string;
+  /** Divider sits between functional and settings items per Tau §3 mock. */
+  trailingDivider?: boolean;
+}
+
+const SOLO_MORE_SHEET_ITEMS: ReadonlyArray<SoloMoreSheetItem> = [
+  { path: "/solo/schedule", label: "Расписание", icon: "⏰", ariaLabel: "Расписание" },
+  { path: "/solo/earnings", label: "Доходы", icon: "💰", ariaLabel: "Доходы" },
+  { path: "/solo/reviews", label: "Отзывы", icon: "⭐", ariaLabel: "Отзывы" },
+  {
+    path: "/solo/ai",
+    label: "AI-помощник",
+    icon: "🤖",
+    ariaLabel: "AI-помощник",
+    trailingDivider: true,
+  },
+  { path: "/solo/profile", label: "Профиль", icon: "👤", ariaLabel: "Профиль" },
+  { path: "/solo/settings", label: "Настройки", icon: "⚙", ariaLabel: "Настройки" },
+];
+
+/**
+ * Bottom-bar nav for the solo surface. Five tabs; the «Ещё» tab does
+ * NOT navigate — it toggles the sheet via the `onOpenSheet` callback.
+ * Active-state highlighting tracks the actual route prefix so the
+ * indicator stays put even after the user dismisses the sheet.
+ */
+function SoloBottomNav({
+  onOpenSheet,
+  sheetOpen,
+}: {
+  onOpenSheet: () => void;
+  sheetOpen: boolean;
+}) {
   const location = useLocation();
   return (
     <nav className="solo-tabbar" aria-label="Основная навигация">
-      {SOLO_TABS.map((t) => {
-        const isActive = location.pathname.startsWith(t.path);
+      {SOLO_NAV_TABS.map((t) => {
+        // «Ещё» is active iff sheet open OR pathname is in one of the
+        // nested sheet items (deep-link case).
+        const isMore = t.opensSheet === true;
+        const matchesPath = location.pathname.startsWith(t.path);
+        const matchesSheetItem =
+          isMore &&
+          SOLO_MORE_SHEET_ITEMS.some((it) =>
+            location.pathname.startsWith(it.path),
+          );
+        const isActive = isMore
+          ? sheetOpen || matchesSheetItem
+          : matchesPath;
+        if (isMore) {
+          return (
+            <button
+              key={t.path}
+              type="button"
+              className={`solo-tabbar__tab${isActive ? " solo-tabbar__tab--active" : ""}`}
+              aria-label={t.ariaLabel}
+              aria-haspopup="menu"
+              aria-expanded={sheetOpen}
+              onClick={onOpenSheet}
+            >
+              <span className="solo-tabbar__icon" aria-hidden="true">
+                {t.icon}
+              </span>
+              <span className="solo-tabbar__label">{t.label}</span>
+            </button>
+          );
+        }
         return (
           <Link
             key={t.path}
@@ -562,12 +629,88 @@ function SoloBottomNav() {
 }
 
 /**
- * Empty-state «скоро» placeholder for the four solo tabs whose
- * underlying screens haven't shipped (Клиенты / Услуги / Доходы /
- * Отзывы). Voice follows Tau §5.4 — frame as a promise, not as
- * «functionality is broken». Tracking issues filed separately
- * post-PR; the slug is rendered as a small debug breadcrumb so QA
- * can repro from a screenshot.
+ * «Ещё» bottom sheet (Tau §3). Modal-like overlay anchored to the
+ * bottom edge; tap-outside dismisses, Escape dismisses. Each item is a
+ * full-width row; tapping navigates AND auto-dismisses per Tau spec.
+ *
+ * Accessibility: role=dialog + aria-modal so SR users get the modal
+ * semantic. Focus is trapped via a no-op — keyboard users tab through
+ * items naturally. The trigger button manages aria-expanded itself.
+ */
+function SoloMoreSheet({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const navigate = useNavigate();
+
+  // Escape-key dismiss for keyboard users.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const handleItemClick = (path: string) => {
+    onClose();
+    navigate(path);
+  };
+
+  return (
+    <div className="solo-more-sheet" role="presentation">
+      {/* Backdrop — tap-outside dismiss. */}
+      <button
+        type="button"
+        className="solo-more-sheet__backdrop"
+        aria-label="Закрыть меню"
+        onClick={onClose}
+      />
+      <div
+        className="solo-more-sheet__panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Меню «Ещё»"
+      >
+        <div className="solo-more-sheet__grip" aria-hidden="true" />
+        <h2 className="solo-more-sheet__title">Ещё</h2>
+        <ul className="solo-more-sheet__list">
+          {SOLO_MORE_SHEET_ITEMS.map((it) => (
+            <li key={it.path}>
+              <button
+                type="button"
+                className="solo-more-sheet__item"
+                aria-label={it.ariaLabel}
+                onClick={() => handleItemClick(it.path)}
+              >
+                <span className="solo-more-sheet__item-icon" aria-hidden="true">
+                  {it.icon}
+                </span>
+                <span className="solo-more-sheet__item-label">{it.label}</span>
+              </button>
+              {it.trailingDivider && (
+                <hr className="solo-more-sheet__divider" aria-hidden="true" />
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Empty-state «скоро» placeholder for tabs in the «Ещё» sheet whose
+ * underlying screens haven't shipped (Доходы / Отзывы post-pilot).
+ * Voice follows Tau §5.4 — frame as a promise, not as «functionality is
+ * broken». The slug is rendered as a small debug breadcrumb so QA can
+ * repro from a screenshot.
  */
 function SoonScreen({ tab, slug }: { tab: string; slug: string }) {
   return (
@@ -590,32 +733,44 @@ function SoonScreen({ tab, slug }: { tab: string; slug: string }) {
   );
 }
 
+/**
+ * Lands the user on /solo/my-day AND opens the «Ещё» sheet. Used for
+ * deep-link hits to /solo/more so a stale URL still surfaces the menu
+ * (the sheet would otherwise close on every full-page reload).
+ */
+function SoloMoreLanding({ onOpenSheet }: { onOpenSheet: () => void }) {
+  useEffect(() => {
+    onOpenSheet();
+  }, [onOpenSheet]);
+  return <Navigate to="/solo/my-day" replace />;
+}
+
 function UnifiedSoloSurface({ me }: { me: MeResponse }) {
+  const [moreOpen, setMoreOpen] = useState(false);
+  const openSheet = useCallback(() => setMoreOpen(true), []);
+  const closeSheet = useCallback(() => setMoreOpen(false), []);
+
   return (
     <div className="solo-surface">
       <Routes>
         {/* Default landing — Tau §5.1 specifies «Мой день» as solo home. */}
         <Route path="/" element={<Navigate to="/solo/my-day" replace />} />
 
-        {/* Tabs with real screens — reuse existing master surface. */}
+        {/* Bottom-bar destinations. */}
         <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
         <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
-        {/* Schedule shares the master schedule screen for now — separate
-         * working-hours editor lives in MM3 backlog (not built). */}
-        <Route path="/solo/schedule" element={<MasterScheduleScreen />} />
-        <Route path="/solo/ai" element={<MasterConversationsScreen />} />
+        <Route path="/solo/customers" element={<MasterCustomersScreen />} />
+        <Route path="/solo/services" element={<MasterServicesScreen />} />
+        {/* /solo/more — deep-link only; renders nothing and opens the
+         * sheet on mount before redirecting to /solo/my-day. The bottom
+         * bar tap path uses the click handler instead (no navigation). */}
+        <Route
+          path="/solo/more"
+          element={<SoloMoreLanding onOpenSheet={openSheet} />}
+        />
 
-        {/* Tabs whose screens haven't been built yet — placeholder. */}
-        <Route
-          path="/solo/clients"
-          element={<SoonScreen tab="Клиенты" slug="solo-clients-screen" />}
-        />
-        <Route
-          path="/solo/services"
-          element={
-            <SoonScreen tab="Услуги и цены" slug="solo-services-screen" />
-          }
-        />
+        {/* «Ещё» sheet destinations. */}
+        <Route path="/solo/schedule" element={<MasterScheduleScreen />} />
         <Route
           path="/solo/earnings"
           element={<SoonScreen tab="Доходы" slug="solo-earnings-screen" />}
@@ -624,6 +779,9 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
           path="/solo/reviews"
           element={<SoonScreen tab="Отзывы" slug="solo-reviews-screen" />}
         />
+        <Route path="/solo/ai" element={<MasterConversationsScreen />} />
+        <Route path="/solo/profile" element={<MasterProfileScreen />} />
+        <Route path="/solo/settings" element={<MasterSettingsScreen />} />
 
         {/* Legacy admin/master routes still accessible via deep link.
          * The bot DM might link directly to `/admin/services` or
@@ -635,7 +793,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         {/* Catch-all → land on solo home. */}
         <Route path="*" element={<CatchAllRedirect to="/solo/my-day" />} />
       </Routes>
-      <SoloBottomNav />
+      <SoloBottomNav onOpenSheet={openSheet} sheetOpen={moreOpen} />
+      <SoloMoreSheet open={moreOpen} onClose={closeSheet} />
     </div>
   );
 }

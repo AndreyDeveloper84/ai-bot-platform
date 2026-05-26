@@ -71,6 +71,8 @@ from apps.master_api.services.conversation_detail import (
     promote_to_human_locked,
     send_master_message,
 )
+from apps.master_api.services.catalog import list_master_services
+from apps.master_api.services.customers import list_master_customers
 from apps.master_api.services.dashboard import build_dashboard
 from apps.master_api.services.notification_prefs import (
     NotificationPrefsError,
@@ -1409,3 +1411,64 @@ def notification_prefs(request: HttpRequest) -> HttpResponse:
         return _error(exc.slug, exc.detail, 400)
 
     return JsonResponse({"prefs": serialise_prefs(prefs)})
+
+
+# --- Tier 2 read-only Клиенты / Услуги (master-solo-surface §4.3 / §4.4) ---
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def customers_list(request: HttpRequest) -> HttpResponse:
+    """Read-only customer roster for the calling master (Tau §4.3 P0 tab).
+
+    Aggregates :class:`apps.booking.BookingRequest` history grouped by
+    ``bot_user_id``. See :func:`apps.master_api.services.customers.list_master_customers`
+    for the field shape + counting rules. Tenant scope is enforced by
+    :func:`require_master_init_data`; the service layer adds an explicit
+    ``tenant_id`` filter as defence-in-depth.
+
+    Phase 1 Tier 2 scope:
+      * Read-only — no notes CRUD, no phone reveal, no detail screen.
+      * No pagination — Phase 1 pilot rosters are bounded.
+
+    Response shape (always 200 on auth pass):
+
+    .. code-block:: json
+
+        {"customers": [...]}
+
+    Empty array when the master has no bookings yet.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    items = list_master_customers(master=master)
+    return JsonResponse({"customers": items})
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def catalog_list(request: HttpRequest) -> HttpResponse:
+    """Read-only services list for the calling master (Tau §4.4 P0 tab).
+
+    Sourced from the :class:`apps.catalog.models.MasterService` mapping
+    (PR #518). See :func:`apps.master_api.services.catalog.list_master_services`
+    for the field shape + filtering rules.
+
+    Phase 1 Tier 2 scope:
+      * Read-only — no edit / add / archive. Mutations belong to Ayla per
+        ADR-0009 §Hard rule #4 (no new transactional domains here).
+      * Inactive (archived) services hidden.
+      * Categories derived from slug prefix (best-effort).
+
+    Response shape (always 200 on auth pass):
+
+    .. code-block:: json
+
+        {"services": [...]}
+
+    Empty array when the master has no service mappings.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    items = list_master_services(master=master)
+    return JsonResponse({"services": items})

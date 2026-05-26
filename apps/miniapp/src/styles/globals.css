@@ -1038,41 +1038,34 @@ a {
 /* ---- Solo provider 8-tab bottom nav (Tau §5.1) ---- */
 
 /*
- * 8 tabs on a 360–414dp viewport = ~45–52px per tab — tight but workable
- * with single-word truncated labels («День» / «Записи» / «Клиенты» /
- * «Услуги» / «Расп.» / «Доходы» / «Отзывы» / «AI»).  Per Tau §5.2,
- * fallback when content doesn't fit = horizontal scroll, NOT a 5-tab
- * squeeze. We use `overflow-x: auto` + `flex` rather than the 4-column
- * grid the master tab bar uses, so labels never clip on the narrow
- * iPhone SE (375dp) and Android Go (360dp) classes.
+ * Variant B navigation (Tau master-solo-surface §3 r1 2026-05-26) —
+ * 5 tabs + «Ещё» bottom sheet, rebuilt from PR #798's horizontal-scroll
+ * Variant A. On 360dp viewport (Android Go / iPhone SE 1st gen) each
+ * tab is 360 ÷ 5 = 72dp wide, exactly hitting the WCAG 2.5.8 touch
+ * target threshold. No horizontal scroll, no label truncation.
  */
 .solo-tabbar {
   position: fixed;
   inset-inline: 0;
   bottom: 0;
-  display: flex;
-  overflow-x: auto;
-  overflow-y: hidden;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
   z-index: 100;
-  scrollbar-width: none;
-}
-
-.solo-tabbar::-webkit-scrollbar {
-  display: none;
 }
 
 .solo-tabbar__tab {
-  flex: 1 0 auto;
-  min-width: 56px;
+  /* WCAG 2.5.8 — minimum 72dp x 72dp touch target on 360dp viewport. */
+  min-width: 72px;
+  min-height: 72px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  justify-content: center;
+  gap: 4px;
   padding: var(--s-1) var(--s-1);
-  min-height: 48px;
   color: var(--c-text-secondary);
   cursor: pointer;
   background: none;
@@ -1087,7 +1080,7 @@ a {
 }
 
 .solo-tabbar__icon {
-  font-size: 18px;
+  font-size: 20px;
   line-height: 1;
 }
 
@@ -1099,7 +1092,239 @@ a {
 /* Pad bottom of every solo screen so the fixed tabbar doesn't cover
  * content (Tau §5.1). Matches the master tabbar offset pattern. */
 .solo-surface .screen {
-  padding-bottom: calc(72px + var(--safe-bottom));
+  padding-bottom: calc(96px + var(--safe-bottom));
+}
+
+/* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
+
+.solo-more-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.solo-more-sheet__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  border: 0;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+}
+
+.solo-more-sheet__panel {
+  position: relative;
+  width: 100%;
+  max-width: 540px;
+  max-height: 60vh;
+  background: var(--c-surface-1);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--safe-bottom));
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.15);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.solo-more-sheet__grip {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--c-divider);
+  margin: 0 auto var(--s-2);
+}
+
+.solo-more-sheet__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+
+.solo-more-sheet__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.solo-more-sheet__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  /* WCAG 2.5.8 — minimum 48dp height per item is generous; 56dp gives
+   * room for icon + label without crowding. */
+  min-height: 56px;
+  padding: var(--s-2) var(--s-2);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: start;
+  color: var(--c-text-primary);
+}
+
+.solo-more-sheet__item:hover,
+.solo-more-sheet__item:focus-visible {
+  background: var(--c-surface-2, rgba(0, 0, 0, 0.04));
+}
+
+.solo-more-sheet__item-icon {
+  font-size: 20px;
+  line-height: 1;
+  flex: 0 0 28px;
+  text-align: center;
+}
+
+.solo-more-sheet__item-label {
+  font-size: var(--font-size-200);
+}
+
+.solo-more-sheet__divider {
+  border: 0;
+  border-top: 1px solid var(--c-divider);
+  margin: var(--s-2) 0;
+}
+
+/* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
+
+.master-customers,
+.master-services {
+  padding: var(--s-3) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.master-customers__header h1,
+.master-services__header h1 {
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  margin: 0;
+}
+
+.master-services__catalog-note {
+  margin: var(--s-1) 0 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.master-customers__controls {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.master-customers__search,
+.master-customers__sort {
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+  font: inherit;
+  color: var(--c-text-secondary);
+}
+
+.master-customers__search:disabled,
+.master-customers__sort:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.master-customers__section,
+.master-services__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-customers__section-title,
+.master-services__section-title {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  text-transform: none;
+}
+
+.master-customers__empty,
+.master-services__empty {
+  padding: var(--s-5) var(--s-4);
+  text-align: center;
+  color: var(--c-text-secondary);
+}
+
+.customer-card,
+.service-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.customer-card--at-risk {
+  border-color: var(--c-warning, #d97706);
+}
+
+.customer-card--skel,
+.service-card--skel {
+  min-height: 72px;
+}
+
+.customer-card__name,
+.service-card__name {
+  font-weight: 600;
+  font-size: var(--font-size-200);
+}
+
+.customer-card__phone {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+  font-variant-numeric: tabular-nums;
+}
+
+.customer-card__last-visit,
+.service-card__meta {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.service-card__description {
+  margin: var(--s-1) 0 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+  line-height: 1.4;
+}
+
+.customer-card__lost-hint {
+  color: var(--c-warning, #d97706);
+  font-size: var(--font-size-100);
+}
+
+.customer-card__visit-count {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.master-services__locked-edit-note {
+  margin: var(--s-4) 0 0;
+  padding: var(--s-3);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+  background: var(--c-surface-2, rgba(0, 0, 0, 0.03));
+  border-radius: var(--r-md);
+  text-align: center;
 }
 
 /* ---- Solo «Скоро» placeholder screen (Tau §5.4 empty-state voice) ---- */
