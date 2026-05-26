@@ -81,7 +81,13 @@ If ANY precondition fails → switch to Path B.
    `apps.integrations.yookassa_retired` mini-app. **That's
    intentional during the flip transition** — incoming retries get
    forensic capture but don't process. Real processing resumes
-   after step 4.
+   **after step 5** (code rollback restores the live handler).
+
+   **Mute** the 410 rate-limit / sample dashboards / Sentry alerts
+   before this step if practical — every YooKassa retry during
+   steps 2-5 will hit the 410 path and contribute to the
+   sampler's audit / log volume. Don't be alarmed at elevated
+   warning-level signal during the restore window.
 2. **Identify the snapshot file.**
 
    ```bash
@@ -91,12 +97,26 @@ If ANY precondition fails → switch to Path B.
    ```
 
 3. **Restore the dropped tables** (as DB superuser — `pg_restore`
-   needs CREATE TABLE permission):
+   needs CREATE TABLE permission). Sanity-check the dump FIRST,
+   then restore atomically:
 
    ```bash
-   # On the DB host:
+   # On the DB host — list the dump's contents to confirm both
+   # tables are present + the format matches what pg_dump -F c
+   # produced in the deploy runbook step 2:
+   sudo -u postgres pg_restore -l \
+     /backups/bot-platform/orders-pre-T4-<TIMESTAMP>.dump \
+     | grep -E 'orders_(order|paymentevent)'
+
+   # Atomic restore — --single-transaction ensures partial failure
+   # rolls back cleanly instead of leaving tables present but
+   # missing indexes / FK constraints. --format=c is explicit
+   # fail-fast guard against accidentally pointing at a plain-SQL
+   # dump someone left in /backups/.
    sudo -u postgres pg_restore \
      --dbname=ai_bot_platform \
+     --format=c \
+     --single-transaction \
      --table=orders_order \
      --table=orders_paymentevent \
      /backups/bot-platform/orders-pre-T4-<TIMESTAMP>.dump
@@ -108,40 +128,82 @@ If ANY precondition fails → switch to Path B.
    someone partially restored — investigate before retrying.
 4. **Rebuild Django migration history.** The
    `0002_drop_orders_tables` migration is still recorded as applied,
-   but the tables now exist again. Reverse `0002` to align reality:
+   but the tables now exist again. **Use `--fake`** to mark `0002`
+   as unapplied WITHOUT running the schema operations — running the
+   actual reverse SQL would crash with `relation "orders_paymentevent"
+   already exists` because Django's `DeleteModel.database_backwards`
+   issues a plain `CREATE TABLE` (no `IF NOT EXISTS`), and
+   `pg_restore` in step 3 already recreated both tables with their
+   indexes + FK constraints. Mirrors the symmetric `--fake` idiom
+   used in the forward runbook §«Failure mode recovery»:
 
    ```bash
    sudo -u ai-bot-platform uv run python manage.py migrate \
-     orders 0001_initial
+     --fake orders 0001_initial
    ```
 
-   This walks the migration history backward to `0001_initial` —
-   Django will note `0002_drop_orders_tables` as unapplied. Tables
-   stay as restored.
-5. **Revert the code deploy.** Ship the pre-#739 image (the merge
-   commit immediately before `cb030c17fd66caae65a6d315caa20c418347c450`).
-   Use `docs/runbooks/rollback-procedure.md` Path B (full image
-   rollback) for the mechanics.
-6. **Switch YooKassa Cabinet URL** to point AT bot-platform (NOT
-   the 410 Gone yookassa_retired path — point at the ACTUAL revived
-   `/api/v1/yookassa/webhook/` route now that the code rollback
-   restored the live handler).
-7. **Replay 410-captured retries.** Query the audit log for any
-   retries that hit the 410 endpoint during the rollback window:
+   After this, `showmigrations orders` reports
+   `[X] 0001_initial`, `[ ] 0002_drop_orders_tables` — Django's
+   history aligned with the restored DB.
+5. **Revert the code deploy.** The pre-#739 image tag is the `dev`
+   build immediately preceding the #739 merge
+   (`cb030c17fd66caae65a6d315caa20c418347c450`). Identify it via:
+
+   ```bash
+   gh pr list --state merged --base dev \
+     --search "merged:<DATE_BEFORE_T4>..<T4_DATE>" \
+     --json number,mergedAt,headRefOid --limit 5
+   ```
+
+   Pick the youngest entry with `mergedAt < T4 timestamp`. Use
+   that `headRefOid` (or its derived image tag) as the rollback
+   target. Then follow `docs/runbooks/rollback-procedure.md`
+   Path B (full image rollback) for the deploy mechanics.
+
+   Pinning to an image tag (NOT «the commit immediately before
+   cb030c1») avoids ambiguity on a non-linear `dev` graph with
+   parallel-agent merges.
+6. **Verify YooKassa Cabinet URL** is still set to bot-platform's
+   `/api/v1/yookassa/webhook/` (you flipped it there in step 1;
+   this is a defence-in-depth recheck — confirm no one else
+   flipped it during steps 2-5). The URL string hasn't changed,
+   but as of step 5 it now resolves to the **LIVE** webhook
+   handler instead of the 410 Gone retired endpoint. Verify with
+   the smoke test in §«Path A verification» step 3.
+7. **Replay missed YooKassa events.** The 410 mini-app's audit
+   log is **sampled** (per-IP +60s windows — see
+   `apps/integrations/yookassa_retired/views.py:140-160`) so it
+   UNDER-counts retries by an unknown factor, and YooKassa
+   traffic typically arrives from a narrow source-IP range that
+   compresses heavily under the sampler. **DO NOT** treat the
+   audit query as the canonical source of missed events.
+
+   **Canonical source: YooKassa Personal Cabinet's own event
+   log.** Cabinet's per-payment view lists every webhook
+   delivery attempt + its 4xx/5xx/2xx classification. For each
+   payment with a 410 / 5xx in the rollback window, click the
+   per-payment «resend webhook» button.
+
+   The audit query below is a best-effort cross-check for the
+   YooKassa-side audit — DO NOT rely on it as the only source:
 
    ```sql
-   SELECT created_at, payload
+   -- Best-effort sample (per-IP sampling under-counts):
+   SELECT created_at, payload->>'remote_ip' AS remote_ip,
+          payload->>'body_bytes' AS body_bytes
    FROM audit_auditlog
    WHERE action = 'yookassa.webhook_received_after_retirement'
      AND created_at >= '<T4 timestamp>'
    ORDER BY created_at;
    ```
 
-   Each row represents a retry attempt that didn't process. Ask
-   ops to manually trigger YooKassa to resend (Cabinet has a
-   per-payment «resend webhook» button) OR accept the small data
-   loss (sample-bounded by the 30-day retention window of YooKassa
-   retries).
+   The payload deliberately omits the YooKassa event UUID (no
+   body parsing per PII rule §7 — see views.py:35-50). Use
+   `remote_ip` only to confirm the rows came from YooKassa's IP
+   ranges, not from scanners.
+
+   If Cabinet's resend window has closed (>24h since the original
+   payment event), small per-payment data loss is unavoidable.
 
 ### Path A verification
 
@@ -158,8 +220,25 @@ After all 7 steps:
    (`yookassa.cert.payment_captured` etc.) appearing again for
    new YooKassa events.
 
-Time-to-stable target: 30 min from operator decision to full
-verification.
+**Time-to-stable budget — 30-60 min realistic, escalate at 45 min
+if not on track to converge.** Per-step honest estimate:
+
+| Step | Realistic time |
+|---|---|
+| 1. Cabinet flip + propagation + alert muting | 3-10 min |
+| 2. Find snapshot | 1 min |
+| 3. `pg_restore` (atomic, single-transaction; thousands of rows + indexes + FKs) | 1-5 min |
+| 4. `migrate --fake` | 30 sec |
+| 5. Image rollback (per `rollback-procedure.md` Path B — ≤ 5 min target) | 5-10 min |
+| 6. Cabinet URL recheck | 1 min |
+| 7. Replay via Cabinet «resend» per-payment (variable — depends on payment count in window) | 5-30 min |
+| Verification (4 substeps) | 2-5 min |
+| **Total P50** | **~45 min** |
+| **Total P95** | **~65 min** |
+
+The 30-minute floor is only achievable on a drill with a small
+payment-count window + Cabinet operator standing by. Escalate per
+§Escalation contacts at 45 min if step 7 (resend loop) is dragging.
 
 ## Path B — Accept-and-replay (post-24h or snapshot lost)
 
@@ -181,10 +260,10 @@ repairs bot-platform-side observability.
    - Loyalty fan-out events may have been missed.
    - Customer DM for `payment.failed` N=3 threshold may have been
      missed.
-3. **Pull the Ayla outbox replay tooling.** Ayla djangoproject has
-   a management command to replay events to bot-platform. The
-   command lives in Ayla repo (not bot-platform); ask Alpha tech
-   lead to invoke:
+3. **Pull the Ayla outbox replay tooling.** Ayla djangoproject is
+   expected to ship a management command to replay events to
+   bot-platform. The command lives in Ayla repo (not bot-platform);
+   ask Alpha tech lead to invoke:
 
    ```bash
    # On Ayla side:
@@ -197,10 +276,49 @@ repairs bot-platform-side observability.
 
    This re-sends every `payment.*` event in the window through the
    normal HMAC-signed POST to bot-platform's
-   `/api/v1/internal/events/ingest`. The consumer's idempotency
-   short-circuit (`Conversation.last_payment_event_id`) is what
-   makes replay safe — events that DID land update no further;
-   events that missed update Conversation rows for the first time.
+   `/api/v1/internal/events/ingest`.
+
+   **Phase-0 dependency:** `replay_outbox_to_consumer` is referenced
+   here as a planned Alpha deliverable. If it is NOT shipped by the
+   2026-07-15 pilot, Path B degrades to manual SQL replay against
+   Ayla's `eventbus_outbox` rows + an ad-hoc HMAC-signed POST loop —
+   escalate as a pre-pilot blocker to Alpha tech lead. Cross-track
+   in Ayla's Phase-0 sprint plan.
+
+   **Why replay is safe — three layers of idempotency** on the
+   bot-platform consumer side:
+
+   1. **Dispatcher-level (primary)** — `IngestDedupe` PK on
+      `event_id` (`apps/eventbus/ingest_dispatcher.py:217-228`).
+      Duplicate `event_id` short-circuits with outcome=DUPLICATE
+      BEFORE the handler runs. No side effects, no Conversation
+      read.
+   2. **Handler-level (defence in depth)** —
+      `Conversation.last_payment_event_id` check inside the
+      `select_for_update` lock
+      (`apps/eventbus/consumers/payment.py:209`). Protects against
+      the category-2 risk that the dispatcher dedupe is disabled
+      or bypassed.
+   3. **Terminal-state dedupe** — `PaymentTerminalDedupe` on
+      `(tenant_id, payment_id, terminal_state)` (`apps/eventbus/
+      models.py`). Blocks double loyalty fan-out for
+      `payment.captured` / `payment.refunded` even when Ayla
+      regenerates the `event_id` for the same payment.
+
+   So replay behaviour:
+
+   - **Previously landed events** trigger layer 1 → DUPLICATE → no
+     side effects (operator inspecting `IngestDedupe` for the
+     event_id will see the row present; the dispatcher
+     short-circuits BEFORE the handler invocation).
+   - **Previously failed events** (handler exception → rolled back
+     → no IngestDedupe row) execute cleanly on replay — this is
+     the first successful handler run.
+   - **Previously landed under DIFFERENT event_id** (Ayla outbox
+     re-mint, edge case) trigger layer 3 for captured/refunded
+     only. `payment.authorized` + `payment.failed` rely on layers
+     1+2 (intentional — see consumer docstring at
+     `apps/eventbus/consumers/payment.py:30-37`).
 4. **Verify bot-platform's catch-up.** Query the
    `eventbus_ingestdedupe` table for the divergence window:
 
@@ -274,3 +392,23 @@ of outcome.
   #736 closeout, F4 follow-up from Round-1 adversarial on #739,
   agent `a0e15c3aba9de55c6`). PRE_PILOT delivery for 2026-07-15
   pilot. Tabletop dry-run planned pre-pilot.
+- _2026-05-26_ — Gamma stream — Round-1 friendly review (#806,
+  agent `a91aabacbd8ae4f3f`) closeout: M1 corrected Path A step 4
+  to `migrate --fake orders 0001_initial` (running the actual
+  reverse SQL would CRASH with `relation already exists` because
+  pg_restore already recreated tables in step 3 + Django's
+  DeleteModel reverse issues plain CREATE TABLE); M2 corrected
+  Path A step 7 to use YooKassa Cabinet's per-payment resend as
+  canonical source of missed events (the 410 mini-app's audit
+  log is sampled per-IP and under-counts); M3 added Phase-0
+  dependency callout for Ayla's `replay_outbox_to_consumer`
+  command + rewrote Path B step 3 with the actual 3-layer
+  idempotency model (IngestDedupe primary, last_payment_event_id
+  secondary, PaymentTerminalDedupe terminal-state); M4 corrected
+  Path A step 5 to pin via `gh pr list` + image tag instead of
+  ambiguous «commit immediately before cb030c1»; S1 added
+  pg_restore `-l` sanity check + `--format=c` + `--single-
+  transaction`; S2 replaced unrealistic 30-min target with
+  honest 30-60 min per-step budget; S3 corrected off-by-one
+  («after step 5» not «after step 4») + added alert-muting
+  guidance; S4 clarified step 6 as verify-not-flip.
