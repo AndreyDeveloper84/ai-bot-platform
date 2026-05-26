@@ -36,7 +36,7 @@ there.
 | Q1 | Spec source = memory + task instruction | `docs/design/policies/solo-provider-ux.md` pending Tau PR — no committed authoritative doc yet |
 | Q2-A | `CatalogMaster` direct-create (no invite) | Self-employed master IS the inviter — `invite_token=None`, `invite_status=ACCEPTED` |
 | Q3 (neg-int) | `external_id = -((bot_user.id.int % 2^31) + 1)` | `_MirrorBase.external_id` is IntegerField NOT NULL. Negative space is collision-free vs mysite positive IDs |
-| Q4-B | Idempotency via `select_for_update` on `Tenant` row | Deterministic solo slug + row lock serializes concurrent first-time calls |
+| Q4-Opt1 | Idempotency via `pg_advisory_xact_lock` keyed on identity hash | `select_for_update` on empty result does NOT lock in Postgres — race condition. Advisory lock holds even with no row. Released at txn commit/rollback. |
 | Q5 | `is_solo_provider` per Tau §3.1 (distinct count) | Veha 3 scope — `/api/v1/me` extension |
 | Q6 | §H.3 BORDERLINE | Mandatory adversarial review pre-merge |
 | Q7 | D + B-signature | Dedicated solo bot + kwargs signature with channel/channel_user_id/display_name/phone/chat_id/tenant_name |
@@ -86,11 +86,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import struct
 from dataclasses import dataclass
 from typing import Optional
 from uuid import UUID
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
@@ -122,12 +123,22 @@ class SoloOnboardingError(Exception):
 
 
 class SoloOnboardingPartialStateError(SoloOnboardingError):
-    """Existing rows for this identity are inconsistent (e.g. tenant
-    + bot_user present but missing TenantStaff or CatalogMaster).
+    """Raised when partial seeding state is observed on retry.
 
-    Not auto-recovered. Surfaces a forensic decision to ops queue:
-    was there a manual ops touch? a partial seed from a previous bug?
-    Manual inspection required before retrying.
+    Should NEVER happen if `@transaction.atomic` works correctly and the
+    advisory lock is held — all 5 rows commit together or none do.
+
+    If raised:
+      1. Investigate atomic boundary integrity (was the decorator removed?
+         was the lock skipped on the failing call?).
+      2. Check for direct DB manipulation outside the service (manual
+         management-shell rows that pre-date the seed).
+      3. Manual cleanup may be required (drop the partial rows, then retry).
+
+    Auto-complete intentionally NOT implemented per tech-lead direction
+    2026-05-26: masking an underlying invariant violation is worse than
+    graceful recovery (memory `feedback_severity_discipline_rubric` —
+    data-integrity issues fail loud).
     """
 
 
@@ -181,12 +192,38 @@ def _slug_hash(channel: str, channel_user_id: str) -> str:
 
 
 def _solo_tenant_slug(channel: str, channel_user_id: str) -> str:
-    """Solo tenant slug shape: `solo-{channel}-{8-hex}`.
+    """Solo tenant slug shape: `solo-{channel-trimmed}-{8-hex}`.
 
     Deterministic per identity → enables idempotent lookup-by-slug.
-    Bounded length (≤ ~20 chars) fits within `SlugField(max_length=50)`.
+    The 8-hex SHA-256 suffix carries identity uniqueness; the `channel`
+    component is informational. Channel is trimmed to fit within
+    `SlugField(max_length=50)` even when the channel string itself is
+    unusually long (worst case: `solo-` 5 + channel ≤ 36 + `-` 1 +
+    8 hex = 50). Production channels are short (`max`, `telegram`,
+    `whatsapp`, `web`) so trimming is defensive, not expected.
     """
-    return f"solo-{channel}-{_slug_hash(channel, channel_user_id)}"
+    # 50 (slug max) − 5 (`solo-`) − 1 (`-`) − 8 (hex) = 36 chars for channel
+    channel_trimmed = channel[:36]
+    return f"solo-{channel_trimmed}-{_slug_hash(channel, channel_user_id)}"
+
+
+def _advisory_lock_key(channel: str, channel_user_id: str) -> int:
+    """Deterministic signed 64-bit key for `pg_advisory_xact_lock`.
+
+    Postgres advisory locks take a single bigint. We derive it from
+    SHA-256(channel:channel_user_id) — first 8 bytes → signed int64.
+
+    Per Q4-Option-1 verdict 2026-05-25: `select_for_update` on an
+    empty result set does NOT lock anything in Postgres — two
+    concurrent first-time `create_solo_provider` calls could race
+    and produce duplicate-key `IntegrityError` on `Tenant.slug`.
+    Advisory locks solve this — the lock is held even when no row
+    exists to lock, and `pg_advisory_xact_lock` is released
+    automatically at transaction commit/rollback.
+    """
+    digest = hashlib.sha256(f"{channel}:{channel_user_id}".encode("utf-8")).digest()
+    # `>q` = big-endian signed int64. PG advisory locks accept signed.
+    return struct.unpack(">q", digest[:8])[0]
 
 
 def _solo_external_id(bot_user_id: UUID) -> int:
@@ -232,10 +269,12 @@ def create_solo_provider(
     back. Per ADR-0011-style atomicity invariant: there is no partial
     seed observable to subsequent reads.
 
-    Idempotency: deterministic solo slug + `select_for_update` row lock
-    on `Tenant`. Two concurrent first-time calls for the same identity
-    serialize through the lock; the second call observes the first
-    call's tenant and returns the existing rows with `created=False`.
+    Idempotency: Postgres advisory transaction lock keyed on identity
+    hash (`pg_advisory_xact_lock`). Two concurrent first-time calls for
+    the same identity serialize through the lock; the second call
+    observes the first call's committed tenant and returns the existing
+    rows with `created=False`. SQLite has no advisory locks — single-
+    threaded test workflows don't race anyway. Production is Postgres.
 
     Args:
         channel: Channel slug — `"max"`, `"telegram"`, etc.
@@ -264,10 +303,21 @@ def create_solo_provider(
 
     target_slug = _solo_tenant_slug(channel, channel_user_id)
 
-    # Idempotency lock — select_for_update on the deterministic slug.
-    # If a row exists, this serializes concurrent calls; if not, the
-    # lock is a no-op and we fall through to the create path.
-    existing_tenant = Tenant.objects.select_for_update().filter(slug=target_slug).first()
+    # Idempotency lock — Postgres advisory transaction lock keyed on the
+    # identity hash. Released automatically at transaction commit/rollback.
+    # Postgres-only; SQLite has no equivalent — single-threaded test
+    # workflows don't race anyway. The lock guarantees that two concurrent
+    # first-time calls for the same identity serialize: the second caller
+    # waits for the first commit, then sees the new Tenant in the lookup
+    # below and returns the idempotent path.
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                [_advisory_lock_key(channel, channel_user_id)],
+            )
+
+    existing_tenant = Tenant.objects.filter(slug=target_slug).first()
 
     if existing_tenant is not None:
         # Solo tenant already exists — verify the 4 related rows are

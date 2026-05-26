@@ -310,3 +310,228 @@ class TestPartialState:
 
         with pytest.raises(SoloOnboardingPartialStateError, match="admin=False"):
             create_solo_provider(**channel_identity)
+
+
+# ─── Веха 2 — race conditions + edge cases ──────────────────────────────
+
+
+class TestConcurrentSerialization:
+    """Веха 2 — concurrent first-time calls serialize via advisory lock.
+
+    Requires `transaction=True` for real commits (default django_db wraps
+    each test in a rolled-back transaction → savepoint, where advisory
+    locks behave subtly differently and threads can't observe each
+    other's «commits»).
+
+    Postgres-only — advisory locks are PG-specific. SQLite skipped.
+    """
+
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.skipif(
+        __import__("django.db", fromlist=["connection"]).connection.vendor != "postgresql",
+        reason="pg_advisory_xact_lock is Postgres-only.",
+    )
+    def test_two_concurrent_first_time_calls_serialize(self):
+        """Two threads, same identity, fresh DB — one wins (created=True),
+        the other returns idempotent (created=False). No IntegrityError
+        on Tenant.slug unique constraint."""
+        import concurrent.futures
+        import threading
+        from django.db import connections
+
+        # Seed bootstrap tenant (transaction=True doesn't auto-load fixtures).
+        Tenant.objects.create(
+            slug=BOOTSTRAP_TENANT_SLUG,
+            name="Ayla Solo — Registration",
+        )
+
+        identity = {
+            "channel": "max",
+            "channel_user_id": f"max-{uuid.uuid4().hex[:8]}",
+            "display_name": "Concurrent Ольга",
+        }
+
+        results: list[SoloOnboardingResult] = []
+        errors: list[Exception] = []
+        barrier = threading.Barrier(2)
+
+        def worker():
+            # Each thread MUST close inherited connection so it opens its
+            # own — otherwise both threads share one PG session and lock
+            # acquisition is trivially satisfied (not real contention).
+            connections.close_all()
+            barrier.wait()  # release both threads simultaneously
+            try:
+                return create_solo_provider(**identity)
+            finally:
+                connections.close_all()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            futures = [ex.submit(worker) for _ in range(2)]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(f.result())
+                except Exception as e:
+                    errors.append(e)
+
+        assert errors == [], f"Concurrent calls raised: {errors}"
+        assert len(results) == 2
+
+        # Both results point at the SAME tenant (serialized via lock).
+        assert results[0].tenant.pk == results[1].tenant.pk
+        assert results[0].bot_user.pk == results[1].bot_user.pk
+
+        # Exactly one `created=True`, one `created=False`.
+        created_flags = sorted(r.created for r in results)
+        assert created_flags == [False, True], (
+            f"Expected exactly one created+one idempotent, got: {created_flags}. "
+            "Advisory lock did NOT serialize — race condition still live."
+        )
+
+        # Verify single set of rows in DB (no duplicates from race).
+        target_slug = _solo_tenant_slug(identity["channel"], identity["channel_user_id"])
+        tenant = Tenant.objects.get(slug=target_slug)
+        assert BotUser.all_tenants.filter(tenant=tenant).count() == 1
+        assert TenantStaff.all_tenants.filter(tenant=tenant).count() == 2
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
+
+        # Cleanup so subsequent transaction=True tests start clean.
+        # (Django TRUNCATEs identity_botuser etc between tests; tenancy
+        # also TRUNCATEd. No manual teardown needed.)
+
+
+# ─── TestBotUserAnchorMigration — same identity in two tenants OK ──────
+
+
+class TestBotUserAnchorMigration:
+    """Веха 2 — bootstrap-tenant BotUser and solo-tenant BotUser coexist.
+
+    Per-tenant `unique_together=(tenant, channel, channel_user_id)` allows
+    the same (channel, channel_user_id) to anchor TWO BotUsers — one in
+    bootstrap, one in solo. The bootstrap row is historical entry; the
+    solo row is the canonical workspace identity.
+
+    `create_solo_provider` creates the solo-tenant BotUser fresh; the
+    bootstrap row is left untouched.
+    """
+
+    def test_bootstrap_bot_user_unchanged_when_solo_seeded(
+        self, bootstrap_tenant, channel_identity
+    ):
+        # Pre-create the bootstrap-tenant BotUser as if the channel
+        # adapter resolved this identity through the solo bot.
+        boot_bu = BotUser.all_tenants.create(
+            tenant=bootstrap_tenant,
+            channel=channel_identity["channel"],
+            channel_user_id=channel_identity["channel_user_id"],
+            display_name="Bootstrap entry",
+        )
+        boot_bu_id = boot_bu.id
+        boot_display = boot_bu.display_name
+
+        # Trigger solo onboarding for the same identity.
+        result = create_solo_provider(**channel_identity)
+
+        # Solo bot_user is a SEPARATE row, NOT the bootstrap one.
+        assert result.bot_user.id != boot_bu_id
+        assert result.bot_user.tenant_id == result.tenant.id
+        assert result.bot_user.tenant_id != bootstrap_tenant.id
+
+        # Bootstrap row exists, unchanged.
+        boot_bu.refresh_from_db()
+        assert boot_bu.id == boot_bu_id
+        assert boot_bu.display_name == boot_display
+        assert boot_bu.tenant_id == bootstrap_tenant.id
+
+        # Two BotUser rows coexist for this (channel, channel_user_id) —
+        # legal per per-tenant unique_together.
+        rows = BotUser.all_tenants.filter(
+            channel=channel_identity["channel"],
+            channel_user_id=channel_identity["channel_user_id"],
+        )
+        assert rows.count() == 2
+        assert {r.tenant_id for r in rows} == {bootstrap_tenant.id, result.tenant.id}
+
+
+# ─── TestSlugBoundary — slug always fits within max_length=50 ──────────
+
+
+class TestSlugBoundary:
+    """Веха 2 — `_solo_tenant_slug` never overflows `SlugField(max_length=50)`."""
+
+    def test_short_channel_well_within_50(self):
+        slug = _solo_tenant_slug("max", "12345")
+        assert len(slug) <= 50
+        # Expected exact shape: solo-{3}-{8} = 5+3+1+8 = 17
+        assert len(slug) == 17
+
+    def test_longest_realistic_channel_fits(self):
+        # Longest production channel — `whatsapp` = 8 chars. Slug = 5+8+1+8=22.
+        slug = _solo_tenant_slug("whatsapp", "12345678901234567890")
+        assert len(slug) <= 50
+        assert slug.startswith("solo-whatsapp-")
+
+    def test_overlong_channel_is_trimmed_to_fit(self):
+        """Defensive: even a 60-char channel produces a slug ≤ 50 chars."""
+        long_channel = "a" * 60
+        slug = _solo_tenant_slug(long_channel, "12345")
+        assert len(slug) <= 50, f"Slug overflowed max_length=50: {len(slug)} chars"
+        assert slug.startswith("solo-")
+        # Hash suffix preserved (last 8 chars)
+        from apps.identity.services.solo_onboarding import _slug_hash
+
+        assert slug.endswith(_slug_hash(long_channel, "12345"))
+
+
+# ─── TestNonAsciiChannelUserId — Unicode safety ─────────────────────────
+
+
+class TestNonAsciiChannelUserId:
+    """Веха 2 — channel_user_id with Cyrillic / emoji / etc works end-to-end.
+
+    Russian market: Telegram allows Unicode usernames; MAX may forward
+    Unicode display names through channel_user_id in custom auth flows.
+    """
+
+    def test_cyrillic_channel_user_id_succeeds(self, bootstrap_tenant):
+        result = create_solo_provider(
+            channel="max",
+            channel_user_id="иванов_2024",
+            display_name="Иван",
+        )
+        assert result.created is True
+        assert result.bot_user.channel_user_id == "иванов_2024"
+        # Slug is ASCII (hash is hex) — safe for URLs / headers
+        assert result.tenant.slug.isascii()
+        assert result.tenant.slug.startswith("solo-max-")
+
+    def test_emoji_channel_user_id_succeeds(self, bootstrap_tenant):
+        result = create_solo_provider(
+            channel="max",
+            channel_user_id="user🦄123",
+            display_name="Unicorn Master",
+        )
+        assert result.created is True
+        assert result.bot_user.channel_user_id == "user🦄123"
+        assert result.tenant.slug.isascii()
+
+    def test_cyrillic_idempotency_works(self, bootstrap_tenant):
+        """Second call for same Unicode identity returns existing rows."""
+        first = create_solo_provider(
+            channel="max", channel_user_id="мария_2024", display_name="Мария"
+        )
+        second = create_solo_provider(
+            channel="max", channel_user_id="мария_2024", display_name="Мария"
+        )
+        assert first.created is True
+        assert second.created is False
+        assert first.tenant.pk == second.tenant.pk
+
+
+# ─── TestPartialStateExtras — Веха 1's partial-state covers все 3 кейса ─
+#
+# Веха 1 уже покрыл 3 partial-state scenarios. Веха 2 verdict Fork 2
+# подтвердил: NO auto-recovery, raise PartialStateError. The existing 3
+# tests are the regression set; no new tests needed here, but
+# PartialStateError docstring updated per tech-lead sample 2026-05-26
+# (see service file).
