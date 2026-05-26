@@ -104,6 +104,12 @@ def me_view(request: HttpRequest) -> HttpResponse:
     # remains stable per user.
     name = bot_user.client_name or bot_user.display_name or f"@{bot_user.channel_user_id}"
 
+    # `is_solo_provider` — Tau policy §3.1 «1 distinct person = solo».
+    # Local import to avoid an apps.identity.views ↔ apps.identity.services
+    # circular at module-load time (services may import view helpers
+    # later); the per-request cost of import resolution is negligible.
+    from apps.identity.services.solo_onboarding import is_solo_provider
+
     return JsonResponse(
         {
             "user": {
@@ -123,6 +129,11 @@ def me_view(request: HttpRequest) -> HttpResponse:
             "is_receptionist": role_ctx.is_receptionist,
             "is_admin": role_ctx.is_admin,
             "is_owner": role_ctx.is_owner,
+            # Universal UI smart-default flag per memory
+            # `project_solo_provider_universal_ui` — mini-app hides team/
+            # admin-only chrome for self-employed solo providers (1 distinct
+            # person = staff ∪ master_link is a single user).
+            "is_solo_provider": is_solo_provider(tenant),
             "master_id": str(role_ctx.master_id) if role_ctx.master_id else None,
             "landing_path": role_ctx.landing_path,
         }

@@ -290,3 +290,74 @@ class TestMeCrossTenantIsolation:
         assert data["role"] == "customer"
         assert data["is_owner"] is False
         assert data["tenant"]["slug"] == "me-test"
+
+
+class TestMeIsSoloProvider:
+    """Веха 3 — `is_solo_provider` field per Tau policy §3.1.
+
+    Mini-app reads this flag to gate Universal UI smart defaults
+    (hide team chrome for solo providers; show full features for teams).
+    """
+
+    def test_customer_tenant_reports_false(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Caller is a customer of a tenant with no other people →
+        empty staff + empty masters → 0 distinct → False.
+
+        Bootstrap-like state — customer-only tenant is NOT solo-provider.
+        """
+        resp = client.get(
+            _url(),
+            HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+        )
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["is_solo_provider"] is False
+
+    def test_solo_owner_master_reports_true(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Same bot_user as Owner + Admin + Master → 1 distinct → True."""
+        TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=bot_user, role=TenantStaff.Role.OWNER
+        )
+        TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=bot_user, role=TenantStaff.Role.ADMIN
+        )
+        _make_master(tenant, bot_user)
+
+        resp = client.get(
+            _url(),
+            HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+        )
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["is_solo_provider"] is True
+        # Role-detection still resolves normally
+        assert data["is_owner"] is True
+        assert data["is_master"] is True
+
+    def test_team_tenant_reports_false(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Two distinct people in staff (owner + admin) → False."""
+        other = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="55502",
+            display_name="Admin Vova",
+        )
+        TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=bot_user, role=TenantStaff.Role.OWNER
+        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=other, role=TenantStaff.Role.ADMIN)
+
+        resp = client.get(
+            _url(),
+            HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+        )
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["is_solo_provider"] is False
+        assert data["is_owner"] is True  # caller is still owner
