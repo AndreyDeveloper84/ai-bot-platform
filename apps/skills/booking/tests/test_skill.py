@@ -24,7 +24,13 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
-from apps.llm.protocol import CompletionResult, ToolCall
+from apps.llm.protocol import (
+    CompletionResult,
+    LLMProviderUnavailable,
+    LLMTransportError,
+    ToolCall,
+    UnknownTenantError,
+)
 from apps.llm.router import reset_router_cache
 from apps.orchestrator.intent_router import IntentDecision
 from apps.skills.base import SkillContext, SkillResult
@@ -766,6 +772,97 @@ class TestHandoffPaths:
                 result = BookingSkill().handle(context)
         assert result.should_handoff is True
         assert result.handoff_reason == "booking_provider_failure"
+
+
+# ---------------------------------------------------------------------------
+# LLM Y3 envelope expansion (#473)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMY3EnvelopeExpansion:
+    """Per-skill coverage for issue #473.
+
+    Each LLMError variant raised from ``provider.complete`` (or its
+    transitive callees like ``cost_tracker.enforce_caps``) MUST be
+    caught by the booking skill envelope and converted to a friendly
+    handoff with ``reason="llm_error"``. Pre-#473 these would
+    propagate as 500s because the envelope only wrapped router lookup,
+    not completion.
+    """
+
+    def test_unknown_tenant_error_at_first_complete_returns_friendly_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The headline #473 scenario — a stale UUID reaches
+        ``enforce_caps`` via the provider.complete call site, which
+        raises ``UnknownTenantError(LLMError)``. The skill envelope
+        MUST catch + handoff cleanly.
+        """
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        with (
+            _patch_yclients(client),
+            _patch_provider_complete([UnknownTenantError("stale tenant uuid")]),
+        ):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "llm_error"
+
+    def test_llm_provider_unavailable_at_first_complete_returns_friendly_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """LLMProviderUnavailable (e.g. missing API key) at the first
+        completion MUST surface as ``llm_error`` handoff, not 500.
+        """
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        with (
+            _patch_yclients(client),
+            _patch_provider_complete([LLMProviderUnavailable("OPENAI_API_KEY not set")]),
+        ):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "llm_error"
+
+    def test_transport_error_at_second_complete_returns_friendly_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """LLMTransportError raised on the SECOND completion (after
+        tool dispatch) — distinct from the first-call path. Asserts
+        the envelope catches at both wrap sites in the booking flow.
+
+        Uses ``confirm_booking`` tool which DOES reach Phase 3 (the
+        second LLM call) — ``show_masters`` would short-circuit at
+        master-card render before the second call ever fires.
+        """
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        tc = ToolCall(
+            id="c1",
+            name="confirm_booking",
+            arguments={
+                "master_id": 11,
+                "service_id": 22,
+                "slot_datetime": "2026-05-20T14:00:00",
+            },
+        )
+        completions: list[Any] = [
+            _completion(tool_calls=[tc]),
+            LLMTransportError("vendor 5xx timeout"),
+        ]
+        with _patch_yclients(client), _patch_provider_complete(completions):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "llm_error"
 
 
 # ---------------------------------------------------------------------------

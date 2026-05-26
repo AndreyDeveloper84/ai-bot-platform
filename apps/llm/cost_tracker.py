@@ -697,35 +697,27 @@ def _pct(used: int | Decimal, cap: int | Decimal) -> Decimal:
 def _read_tenant_caps(tenant_id: str) -> tuple[int, Decimal]:
     """Look up ``daily_token_cap`` + ``daily_cost_cap_usd`` for a tenant.
 
-    Returns sane defaults when the tenant doesn't exist (or fields are
-    NULL for some reason) — the surrounding gate still rejects on cap
-    exhaustion, but we don't want a row lookup failure to mask the
-    actual cap value.
+    LLM retro Y3 (PR #473) — Phase 1 fix landed: this now raises
+    :class:`apps.llm.protocol.UnknownTenantError` when ``tenant_id``
+    doesn't correspond to a real row. The Phase 0 bridge (loud-log +
+    soft-fail with «generous defaults») let typo'd ids run against a
+    fictitious budget; the typed raise is caught by the skill envelope
+    (``apps/skills/{booking,faq}/skill.py``) and converted to a
+    friendly handoff with reason ``llm_error``.
     """
+    from apps.llm.protocol import UnknownTenantError
     from apps.tenancy.models import Tenant
 
-    # LLM retro Y3: pre-fix used logger.warning + generous defaults —
-    # the typo'd tenant_id silently ran against a fictitious budget,
-    # «mystery» costs accumulating against a tenant that no longer
-    # existed. The original retro recommended raising; an in-PR
-    # reviewer pointed out that ``enforce_caps`` runs INSIDE
-    # ``provider.complete()`` (not at router lookup), so raising
-    # would 500 the customer until every skill grows an outer
-    # LLM-completion try/except (out of scope for this PR).
-    #
-    # Compromise: keep the soft-fail return-defaults behavior so the
-    # customer flow never breaks, but UPGRADE the log level to ERROR
-    # (Sentry-visible) and stamp the offending id so ops can triage.
-    # Proper typed ``UnknownTenantError(LLMError)`` + skill envelope
-    # is filed as the follow-up.
     try:
         row = Tenant.all_objects.values("daily_token_cap", "daily_cost_cap_usd").get(id=tenant_id)
-    except Tenant.DoesNotExist:
+    except Tenant.DoesNotExist as exc:
         logger.error(
-            "cost_tracker.tenant_not_found tenant=%s falling_back_to_defaults",
+            "cost_tracker.tenant_not_found tenant=%s raising_unknown_tenant_error",
             tenant_id,
         )
-        return (1_000_000, Decimal("50.00"))
+        raise UnknownTenantError(
+            f"tenant_id={tenant_id} not found in Tenant table; cost-tracker cap lookup failed"
+        ) from exc
 
     token_cap = int(row.get("daily_token_cap") or 0)
     cost_cap = row.get("daily_cost_cap_usd")
@@ -741,21 +733,27 @@ def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
 
     Separate from :func:`_read_tenant_caps` so the hot enforce-caps
     path doesn't pay for ``manager_chat_id`` it never uses.
+
+    Same Y3 contract as :func:`_read_tenant_caps`: raises
+    :class:`UnknownTenantError` on missing tenant, propagating to the
+    skill envelope.
     """
+    from apps.llm.protocol import UnknownTenantError
     from apps.tenancy.models import Tenant
 
-    # See ``_read_tenant_caps`` for the Y3 rationale: loud log,
-    # soft-fail defaults (proper typed exception deferred).
     try:
         row = Tenant.all_objects.values(
             "daily_token_cap", "daily_cost_cap_usd", "manager_chat_id"
         ).get(id=tenant_id)
-    except Tenant.DoesNotExist:
+    except Tenant.DoesNotExist as exc:
         logger.error(
-            "cost_tracker.alert_context.tenant_not_found tenant=%s falling_back_to_defaults",
+            "cost_tracker.alert_context.tenant_not_found tenant=%s raising_unknown_tenant_error",
             tenant_id,
         )
-        return (1_000_000, Decimal("50.00"), "")
+        raise UnknownTenantError(
+            f"tenant_id={tenant_id} not found in Tenant table; "
+            "cost-tracker alert-context lookup failed"
+        ) from exc
 
     token_cap = int(row.get("daily_token_cap") or 0)
     cost_cap = row.get("daily_cost_cap_usd") or Decimal("0")
