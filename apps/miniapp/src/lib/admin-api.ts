@@ -105,6 +105,17 @@ export interface MeResponse {
   is_owner: boolean;
   master_id: string | null;
   landing_path: string;
+  /**
+   * Solo provider hint — true when the tenant has exactly one distinct
+   * active person (the `len(active_staff_user_ids ∪
+   * active_master_user_ids) == 1` rule per Tau §3.1). Powered by
+   * `is_solo_provider(tenant)` on the backend (W4 PR #760). Frontend
+   * uses this to skip the admin/master chooser and render the 8-tab
+   * unified solo surface per Tau §5. Optional in the TS type to keep
+   * graceful fallback if an older backend ship omits the field —
+   * App.tsx treats absence as `false`.
+   */
+  is_solo_provider?: boolean;
 }
 
 export const getMe = (): Promise<MeResponse> =>
