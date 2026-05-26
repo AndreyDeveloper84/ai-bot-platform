@@ -14,9 +14,12 @@ Behaviour we assert:
 5. Ayla failure → handoff slug emitted, audit row written.
 6. Audit row 'booking.certificate_checkout_requested' on success.
 7. Audit row 'booking.certificate_checkout_failed' on failure.
-8. Regression — bot-platform writes NO Order row (ADR-0009 §Hard rule #1).
-9. Recipient_name + buyer_email forwarded to the Ayla request body.
-10. Audit payload does not leak the Ayla bearer token.
+8. Recipient_name + buyer_email forwarded to the Ayla request body.
+9. Audit payload does not leak the Ayla bearer token.
+
+(Original test 8 «bot-platform writes NO Order row» retired in
+#427+#428 — the Order model was deleted entirely; the assertion
+became trivially true.)
 """
 
 from __future__ import annotations
@@ -34,7 +37,6 @@ from apps.integrations.ayla_payments import (
     CreatePaymentResult,
     reset_ayla_payments_client,
 )
-from apps.orders.models import Order
 from apps.skills.booking.tools import (
     CERTIFICATE_AMOUNT_MAX,
     CERTIFICATE_AMOUNT_MIN,
@@ -248,46 +250,12 @@ class TestProviderFailure:
         assert "booking.certificate_checkout_failed" in _audit_actions()
 
 
-class TestNoCanonicalStateWrite:
-    """Regression — bot-platform must NOT write any Order row.
-
-    Per ADR-0009 §Hard rule #1, Ayla owns the canonical Payment row.
-    bot-platform's prior shape wrote an Order row mirroring Ayla's
-    state; this PR removes that write. A future test added when a
-    consumer is wired in (#443 payment.* consumer) verifies the
-    converse — that Ayla → bot-platform events drive any
-    bot-platform-side projection.
-    """
-
-    def test_happy_path_writes_no_order_row(
-        self,
-        tenant: Tenant,
-        bot_user: BotUser,
-    ) -> None:
-        with tenant_scope(tenant):
-            buy_certificate(
-                tenant=tenant,
-                bot_user=bot_user,
-                arguments={"amount_rub": 2000},
-            )
-        assert Order.all_tenants.count() == 0
-
-    def test_provider_failure_writes_no_order_row(
-        self,
-        tenant: Tenant,
-        bot_user: BotUser,
-    ) -> None:
-        with patch(
-            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
-            side_effect=AylaPaymentsUnavailableError("down"),
-        ):
-            with tenant_scope(tenant):
-                buy_certificate(
-                    tenant=tenant,
-                    bot_user=bot_user,
-                    arguments={"amount_rub": 2000},
-                )
-        assert Order.all_tenants.count() == 0
+# TestNoCanonicalStateWrite retired in #427+#428 — the Order model
+# was deleted entirely (apps/orders.models.Order no longer exists).
+# The class's regression intent («bot-platform writes NO canonical
+# Payment state») now lives at the schema level: there is no table
+# to write to. ADR-0009 §Hard rule #1 (no duplicate canonical state)
+# is enforced structurally, not by a count() == 0 assertion.
 
 
 class TestNoTokenLeakInAudit:

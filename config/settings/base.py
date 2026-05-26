@@ -70,10 +70,13 @@ LOCAL_APPS = [
     # Owns the Promotion model + promo-validation service; the
     # ``calc_price`` tool wiring lives in apps.skills.booking.
     "apps.promotions",
-    # Phase 1 / B7 (DRF-843) — orders (certificates today, extensible).
-    # Owns the Order + PaymentEvent models. The YooKassa client +
-    # webhook live in apps.integrations.yookassa; the buy_certificate
-    # LLM tool wiring lives in apps.skills.booking.
+    # #427+#428 stub — Order + PaymentEvent tables retired in
+    # migration 0002. App entry stays in INSTALLED_APPS so Django's
+    # migration history applies cleanly on deploy; a future cleanup
+    # PR removes this entry + the directory. Payment lifecycle now
+    # lives in Ayla djangoproject per ADR-0009 §Domain ownership.
+    # The bot-facing ``buy_certificate`` LLM tool talks to Ayla via
+    # apps.integrations.ayla_payments.
     "apps.orders",
     # Customer Mini App Phase 0a — master schedule + slot resolver.
     "apps.scheduling",
@@ -458,30 +461,16 @@ YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.co
 # + 200 (still no retries from YClients) until ops configures the slug.
 YCLIENTS_WEBHOOK_TENANT_SLUG = os.environ.get("YCLIENTS_WEBHOOK_TENANT_SLUG", "")
 
-# Phase 1 / B7 (DRF-843) — YooKassa hosted-checkout integration.
-# Powers the ``buy_certificate`` LLM tool. Empty defaults keep the
-# integration dormant until ops configures it; ``YOOKASSA_TEST_MODE``
-# defaults to True so any accidental call returns a stubbed checkout
-# URL and never hits api.yookassa.ru. Production deployments MUST set
-# ``YOOKASSA_TEST_MODE=false`` AND populate the shop id + secret key
-# AND override ``YOOKASSA_RETURN_URL`` to the public post-checkout
-# landing page.
-#
-# SECURITY: ``YOOKASSA_SECRET_KEY`` is a payments credential — never
-# log it, never include it in audit / event payloads, never include
-# it in any breaker-alert / observability path.
-YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
-YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
-YOOKASSA_RETURN_URL = os.environ.get(
-    "YOOKASSA_RETURN_URL",
-    "https://example.com/payment/return",
-)
-YOOKASSA_TEST_MODE = os.environ.get("YOOKASSA_TEST_MODE", "true").lower() in (
-    "true",
-    "1",
-    "yes",
-    "on",
-)
+# #428 (Bucket 6) — YooKassa settings RETIRED. Per ADR-0009 §Domain
+# ownership matrix, YooKassa payment lifecycle (create, capture,
+# refund, webhook) lives in Ayla djangoproject only. The four settings
+# previously defined here — ``YOOKASSA_SHOP_ID``, ``YOOKASSA_SECRET_KEY``,
+# ``YOOKASSA_RETURN_URL``, ``YOOKASSA_TEST_MODE`` — are deleted to
+# eliminate the dead-credential surface (no code reads them after this
+# PR, but they would otherwise persist in .env files, secret manager,
+# CI vaults and Sentry context). SRE: sunset these env vars from all
+# deployment environments in the same window as this deploy. The
+# matching Ayla-side settings live in ayla-djangoproject/config/settings.
 
 # Sprint 2 / E2 — admin chat for breaker state-transition alerts.
 # Empty (default) → telegram_alert is a no-op. Set to the operator's
@@ -732,16 +721,11 @@ CELERY_BEAT_SCHEDULE = {
         # worker pool isn't slammed by both sweeps simultaneously.
         "schedule": crontab(hour="4", minute="0"),
     },
-    # Phase 1 / PI1 (DRF-851) — PaymentEvent dedup-ledger retention.
-    # Daily 04:30 UTC — slotted between the 04:00 replay sweep and the
-    # 05:00 shadow-delta compute so no two sweeps fire simultaneously
-    # against the same worker pool. PaymentEvent is a small table in
-    # Phase 1 (1 tenant, low webhook volume) but accumulates fast
-    # under YooKassa redelivery — daily hard-delete keeps it bounded.
-    "cleanup_old_payment_events": {
-        "task": "apps.orders.tasks.cleanup_old_payment_events",
-        "schedule": crontab(hour="4", minute="30"),
-    },
+    # #427+#428 — `cleanup_old_payment_events` beat entry RETIRED.
+    # apps/orders/tasks.py was deleted; YooKassa webhook lifecycle
+    # moved to Ayla djangoproject per ADR-0009 §Domain ownership.
+    # The Ayla side runs its own equivalent retention sweep on its
+    # PaymentEvent ledger.
     "recompute_profiles_daily": {
         "task": "apps.identity.tasks.recompute_profiles_daily",
         # Daily 03:30 UTC — between the 03:00 audit cleanup and the
