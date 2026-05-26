@@ -51,6 +51,12 @@ operator MUST verify each timestamp is later than the previous.
   flipped from ``<bot-platform>/api/v1/yookassa/webhook/`` to the
   Ayla endpoint. ``T1 > T0`` (don't flip the cabinet before Ayla
   endpoint exists). Sign-off: ops, with screenshot of cabinet config.
+  **Single-shop assumption (#741).** This T1 step describes ONE
+  Cabinet URL flip — current deployment is single-shop (one
+  ``YOOKASSA_SHOP_ID``). If a future retirement is performed against
+  a multi-shop fleet, replace T1 with a per-shop loop and adjust T2
+  to soak per-shop traffic (otherwise shop A flipped at T1a + shop
+  B flipped at T1b leaves the T2 24h window measuring only shop A).
 * **T2 — 24-hour zero-traffic soak.** Measure inbound traffic on
   bot-platform ``/api/v1/yookassa/webhook/`` for 24 contiguous hours
   AFTER T1. ``T2_start > T1`` is mandatory — if measured between T0
