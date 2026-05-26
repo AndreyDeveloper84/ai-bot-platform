@@ -245,10 +245,15 @@ def _parse_bot_started(payload: dict[str, Any]) -> CanonicalEvent:
 
     timestamp = _parse_ms_ts(payload.get("timestamp"))
 
-    # The deeplink ``payload`` (e.g. ``ref=campaign-name``) may carry an
-    # acquisition signal we want to preserve for attribution. Stash it
-    # in ``raw`` so a downstream skill can read ``event.raw["payload"]``
-    # without us changing the cross-channel DTO shape.
+    # The deeplink ``payload`` (e.g. ``ref_user_12345`` / ``qr_42_window``
+    # / ``ig_post_99``) carries acquisition + multi-tenant context. Fold
+    # it into the synthetic ``/start`` text so the welcome skill can
+    # detect S1 multi-tenant variant без changing SkillContext shape
+    # (cross-cutting refactor). Empty payload → text="/start" verbatim
+    # (backward compat with attribution-only flows и existing tests).
+    # Also stash on ``raw`` для downstream attribution skill access.
+    deeplink_payload = payload.get("payload") or ""
+    synthetic_text = f"/start {deeplink_payload}".strip() if deeplink_payload else "/start"
     return CanonicalEvent(
         channel="max",
         channel_user_id=str(user["user_id"]),
@@ -257,7 +262,7 @@ def _parse_bot_started(payload: dict[str, Any]) -> CanonicalEvent:
         # with a real message mid.
         channel_message_id=f"bot_started:{user['user_id']}:{payload.get('timestamp', '')}",
         chat_id=str(chat_id),
-        text="/start",
+        text=synthetic_text,
         attachments=[],
         timestamp=timestamp,
         raw=payload,

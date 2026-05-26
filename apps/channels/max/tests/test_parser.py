@@ -282,6 +282,27 @@ class TestParseMaxWebhookBotStarted:
         ev = parse_max_webhook(_bot_started_payload(payload="ref=ig-aug-2026"))
         assert ev.raw["payload"] == "ref=ig-aug-2026"
 
+    def test_deeplink_payload_folded_into_synthetic_text(self):
+        """Task #85 part 4 (PR 3) — multi-tenant S1 variant detection.
+
+        Bot adapter folds the ``payload`` into the synthetic ``/start``
+        text suffix so welcome skill can branch on ``ref_/qr_/ig_post_``
+        prefixes без changing SkillContext shape. Backward compat: empty
+        payload still yields ``/start`` verbatim (test_synthesises_slash_start_text)."""
+
+        ev = parse_max_webhook(_bot_started_payload(payload="ref_user_42"))
+        assert ev.text == "/start ref_user_42"
+        # Raw still preserves payload too — attribution skills don't lose access.
+        assert ev.raw["payload"] == "ref_user_42"
+
+    def test_empty_deeplink_payload_yields_bare_start(self):
+        """Defensive: empty-string payload (e.g. legacy MAX builds, broken
+        deeplinks) MUST NOT produce ``/start `` (trailing space) — that'd
+        be a different match pattern from baseline. Strip + fall through."""
+
+        ev = parse_max_webhook(_bot_started_payload(payload=""))
+        assert ev.text == "/start"
+
     def test_missing_user_raises(self):
         with pytest.raises(ParseError, match="user.user_id"):
             parse_max_webhook(_bot_started_payload(user={}))

@@ -82,6 +82,17 @@ anketa pair) — KEY MOMENT, выбор первого experience с Ayla. Six
 buttons: 4 Mini-App primary actions + anketa (bot skill) + «Просто
 посмотреть» exit valve. Combined-bubble S3+S5 preserves «no user
 action between bubbles» intent without multi-message infrastructure.
+
+### S1 multi-tenant variant — task #85 part 4, 2026-05-26
+
+When customer arrives via referral / QR / IG share-link, MAX delivers
+``bot_started`` event с deeplink payload. Parser folds payload into
+``/start <payload>`` synthetic text (apps/channels/max/parser.py).
+Welcome skill detects ``ref_*`` / ``qr_*_*`` / ``ig_post_*`` prefixes
+и renders Tau §4 multi-tenant variant («Помогу с записью в {salon}»)
+instead of standard WELCOME_TEXT. Baseline ``/start`` (no payload) +
+unparseable payloads fall through to standard text — strictly additive,
+no regression risk.
 """
 
 from __future__ import annotations
@@ -105,6 +116,25 @@ WELCOME_TEXT = (
     "А ещё умею вести дневник еды и воды.\n\n"
     "Выберите раздел:"
 )
+
+# S1 multi-tenant variant (Tau §4) — rendered when bot_started arrives
+# с deeplink payload ``ref_<user_id>`` / ``qr_<salon_id>_<placement>``
+# / ``ig_post_<id>``. Frames Ayla с salon context (third-party reference
+# per tenant-as-provider-model), so user knows этот entry point came
+# from somewhere specific — referral / QR / IG link.
+#
+# ``{salon_name}`` placeholder filled from ``bot_user.tenant.name`` at
+# render time. Pilot = single salon «Формула тела»; multi-tenant pattern
+# generalises к post-pilot when bot serves multiple tenants.
+S1_MULTITENANT_TEXT_TEMPLATE = (
+    "Привет, я Ayla. Помогу с записью в {salon_name} "
+    "и с уходом за собой каждый день — еда, вода, отдых.\n\n"
+    "Начнём?"
+)
+
+# Recognised start_param prefixes per Tau §4. Tuple для order-independent
+# membership test + future-proofing если добавятся patterns.
+_S1_MULTITENANT_PREFIXES = ("ref_", "qr_", "ig_post_")
 
 # S2 privacy consent (152-ФЗ) — Tau's customer-onboarding-flow.md §5
 # verbatim. Brand-Guardian-approved (9.5/10), gender-neutral
@@ -176,7 +206,11 @@ class WelcomeSkill:
 
     def matches(self, context: SkillContext) -> bool:
         text = context.message_text.strip()
-        if text == "/start":
+        # ``/start`` baseline + ``/start <deeplink_payload>`` variant
+        # (multi-tenant referral / QR / IG entry, Tau §4). Parser folds
+        # ``bot_started.payload`` into text — see _parse_bot_started в
+        # apps/channels/max/parser.py.
+        if text == "/start" or text.startswith("/start "):
             return True
         if text.startswith("cb:welcome:"):
             return True
@@ -281,6 +315,26 @@ class WelcomeSkill:
                     getattr(bot_user, "id", None),
                     exc,
                 )
+        # S1 multi-tenant variant detection (Tau §4). Folded deeplink
+        # payload sits в text suffix after «/start ». Recognised prefixes
+        # = ref_ / qr_ / ig_post_. На match → render multi-tenant text
+        # с salon name из current tenant. Unparseable / empty → standard
+        # WELCOME_TEXT, no behavior change.
+        start_param = _extract_start_param(text)
+        if start_param and start_param.startswith(_S1_MULTITENANT_PREFIXES):
+            salon_name = _resolve_salon_name(bot_user)
+            return SkillResult(
+                reply_text=S1_MULTITENANT_TEXT_TEMPLATE.format(salon_name=salon_name),
+                action_type="welcome_menu",
+                action_data={
+                    "buttons": _welcome_buttons(),
+                    "button_columns": 1,
+                },
+                meta={
+                    "reply_kind": "welcome_s1_multitenant",
+                    "start_param": start_param,
+                },
+            )
         return SkillResult(
             reply_text=WELCOME_TEXT,
             action_type="welcome_menu",
@@ -338,6 +392,42 @@ class WelcomeSkill:
                 "s3_shown": show_s3,
             },
         )
+
+
+def _extract_start_param(text: str) -> str:
+    """Pull deeplink payload out of folded ``/start <payload>`` text.
+
+    Returns empty string на baseline ``/start`` (no payload), the raw
+    stripped suffix otherwise. Caller decides if suffix matches
+    recognised patterns (Tau §4 multi-tenant prefixes) vs noise.
+    """
+    if not text.startswith("/start "):
+        return ""
+    return text[len("/start ") :].strip()
+
+
+def _resolve_salon_name(bot_user) -> str:
+    """Return salon (tenant) display name for S1 multi-tenant render.
+
+    Pilot = single tenant «Формула тела», so this typically returns that
+    name from ``bot_user.tenant.name``. Generalises post-pilot when bot
+    serves multiple tenants — salon resolution then depends на the
+    ``qr_<salon_id>_<placement>`` slot semantics (W1 follow-up scope).
+
+    Defensive fallback «нашем салоне» — covers edge cases когда tenant
+    attribute missing / DB error / unresolved cross-tenant invisible
+    relationship at first-contact. Better to render generic phrasing
+    than 500 or expose internal slug.
+    """
+    try:
+        tenant = getattr(bot_user, "tenant", None)
+        if tenant is not None:
+            name = getattr(tenant, "name", "") or ""
+            if name:
+                return name
+    except Exception:  # noqa: BLE001
+        pass
+    return "нашем салоне"
 
 
 def _welcome_buttons() -> list[dict[str, str]]:
