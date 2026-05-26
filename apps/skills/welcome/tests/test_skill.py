@@ -66,14 +66,15 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # No salon buttons; 4 wellness/FAQ buttons (food, water, anketa, ask).
-        assert len(buttons) == 4
+        # No salon buttons; 4 wellness/FAQ + 1 S1 «Начать» = 5.
+        assert len(buttons) == 5
         callbacks = [b["callback"] for b in buttons]
         assert callbacks == [
             "cb:welcome:food",
             "cb:welcome:water",
             "cb:anketa:start",
             "cb:welcome:ask",
+            "cb:welcome:start_s2",
         ]
 
     def test_web_app_config_emits_open_app_buttons(self, settings):
@@ -81,8 +82,8 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 3 salon nav + 4 wellness/FAQ = 7 total.
-        assert len(buttons) == 7
+        # 3 salon nav + 4 wellness/FAQ + 1 S1 «Начать» = 8 total.
+        assert len(buttons) == 8
         nav = buttons[:3]
         # Flat slug payloads — MAX rejects open_app payloads with `=`
         # (HTTP 400 proto.payload). Mini App's parseStartRoute resolves
@@ -91,7 +92,7 @@ class TestHandleStart:
         for btn, expected in zip(nav, expected_payloads):
             assert btn["web_app"] == "id583_bot"
             assert btn["callback"] == expected
-        # Wellness + FAQ row: never carries web_app.
+        # Wellness + FAQ + S1 row: never carries web_app.
         for btn in buttons[3:]:
             assert "web_app" not in btn
             assert btn["callback"].startswith("cb:")
@@ -105,7 +106,8 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 7
+        # 3 salon nav + 4 wellness/FAQ + 1 S1 «Начать» = 8 total.
+        assert len(buttons) == 8
         urls = [b.get("url") for b in buttons[:3]]
         assert urls == [
             "https://miniapp-dev.example/catalog",
@@ -168,3 +170,162 @@ class TestHandleCallback:
         result = WelcomeSkill().handle(_ctx("cb:welcome:book"))
         assert result.reply_text == WELCOME_TEXT
         assert result.action_type == "welcome_menu"
+
+
+# ───────────────────────────────────────────────────────────────────────
+# S1 onboarding auto-trigger (task #85, 2026-05-26)
+# ───────────────────────────────────────────────────────────────────────
+
+
+import pytest  # noqa: E402
+
+from apps.skills.welcome.skill import START_S2_PLACEHOLDER_TEXT  # noqa: E402
+
+
+@pytest.fixture
+def unwelcomed_bot_user(db):
+    """Real BotUser с ``welcomed_at=None`` — для testing S1 auto-trigger
+    path. Existing tests используют MagicMock (truthy attr) и поэтому
+    не попадают в auto-trigger branch."""
+    from apps.identity.models import BotUser
+    from apps.tenancy.models import Tenant
+
+    tenant = Tenant.objects.create(slug="welcome-s1-test", name="S1 Test")
+    return BotUser.all_tenants.create(
+        tenant=tenant,
+        channel="max",
+        channel_user_id="s1-user-1",
+        chat_id="max-s1-1",
+        welcomed_at=None,
+    )
+
+
+@pytest.fixture
+def welcomed_bot_user(db):
+    """Real BotUser с ``welcomed_at`` set — auto-trigger ВЫКЛЮЧЕН."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.identity.models import BotUser
+    from apps.tenancy.models import Tenant
+
+    tenant = Tenant.objects.create(slug="welcome-returning-test", name="Returning")
+    return BotUser.all_tenants.create(
+        tenant=tenant,
+        channel="max",
+        channel_user_id="s1-user-2",
+        chat_id="max-s1-2",
+        welcomed_at=timezone.now() - timedelta(days=1),
+    )
+
+
+def _ctx_with_botuser(text: str, bot_user) -> SkillContext:
+    """Build SkillContext с REAL bot_user (не MagicMock)."""
+    return SkillContext(
+        conversation=MagicMock(),
+        bot_user=bot_user,
+        message_text=text,
+    )
+
+
+class TestS1AutoTrigger:
+    """S1 spec (tech-lead inline 2026-05-26):
+    - First message от unwelcomed bot_user → welcome triggered
+    - BotUser.welcomed_at stamped after first trigger
+    - Subsequent messages — welcome НЕ re-fires
+    """
+
+    @pytest.mark.django_db
+    def test_any_text_matches_when_welcomed_at_is_null(self, unwelcomed_bot_user):
+        """Любой текст (включая «Привет», «болит спина», noise) → welcome
+        matches when bot_user.welcomed_at IS NULL."""
+        skill = WelcomeSkill()
+        assert skill.matches(_ctx_with_botuser("Привет", unwelcomed_bot_user)) is True
+        assert skill.matches(_ctx_with_botuser("болит спина", unwelcomed_bot_user)) is True
+        assert skill.matches(_ctx_with_botuser("12345", unwelcomed_bot_user)) is True
+
+    @pytest.mark.django_db
+    def test_any_text_does_not_match_when_welcomed_at_set(self, welcomed_bot_user):
+        """Returning user — welcome НЕ activates, dispatcher идёт дальше."""
+        skill = WelcomeSkill()
+        assert skill.matches(_ctx_with_botuser("Привет", welcomed_bot_user)) is False
+        assert skill.matches(_ctx_with_botuser("болит спина", welcomed_bot_user)) is False
+
+    @pytest.mark.django_db
+    def test_handle_stamps_welcomed_at(self, unwelcomed_bot_user):
+        """First welcome delivery → welcomed_at установлен в DB."""
+        skill = WelcomeSkill()
+        assert unwelcomed_bot_user.welcomed_at is None
+
+        result = skill.handle(_ctx_with_botuser("Привет", unwelcomed_bot_user))
+        assert result.reply_text == WELCOME_TEXT
+        unwelcomed_bot_user.refresh_from_db()
+        assert unwelcomed_bot_user.welcomed_at is not None
+
+    @pytest.mark.django_db
+    def test_second_message_does_not_re_trigger(self, unwelcomed_bot_user):
+        """End-to-end idempotency: first message → welcome. Refresh user
+        → second message → matches() returns False (auto-trigger off).
+        /start всё ещё matches — отдельный branch."""
+        skill = WelcomeSkill()
+        skill.handle(_ctx_with_botuser("Привет", unwelcomed_bot_user))
+        unwelcomed_bot_user.refresh_from_db()
+
+        assert skill.matches(_ctx_with_botuser("ещё вопрос", unwelcomed_bot_user)) is False
+
+    @pytest.mark.django_db
+    def test_start_still_matches_after_welcomed(self, welcomed_bot_user):
+        """``/start`` — explicit reset gesture, должен всегда matches."""
+        skill = WelcomeSkill()
+        assert skill.matches(_ctx_with_botuser("/start", welcomed_bot_user)) is True
+
+    @pytest.mark.django_db
+    def test_start_s2_callback_returns_placeholder(self, unwelcomed_bot_user):
+        """[▶️ Начать] tap → cb:welcome:start_s2 → placeholder text +
+        re-show menu. Final S2 (privacy consent) lands в Tau's PR."""
+        skill = WelcomeSkill()
+        skill.handle(_ctx_with_botuser("/start", unwelcomed_bot_user))
+        unwelcomed_bot_user.refresh_from_db()
+
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:start_s2", unwelcomed_bot_user),
+        )
+        assert result.reply_text == START_S2_PLACEHOLDER_TEXT
+        assert result.meta["reply_kind"] == "welcome_start_s2_placeholder"
+
+    @pytest.mark.django_db
+    def test_save_failure_does_not_block_welcome(
+        self,
+        unwelcomed_bot_user,
+        monkeypatch,
+        caplog,
+    ):
+        """Если bot_user.save() throws (DB connection drop, etc.), welcome
+        всё равно доставляется. Худший случай: welcome re-fires на
+        следующем msg. ERROR log для systematic detection."""
+        import logging as _logging
+
+        def _explode(*args, **kwargs):
+            raise RuntimeError("DB write fail")
+
+        monkeypatch.setattr(unwelcomed_bot_user, "save", _explode)
+        skill = WelcomeSkill()
+        with caplog.at_level(_logging.ERROR, logger="apps.skills.welcome.skill"):
+            result = skill.handle(_ctx_with_botuser("Привет", unwelcomed_bot_user))
+
+        assert result.reply_text == WELCOME_TEXT
+        assert any("welcomed_at_save_failed" in r.message for r in caplog.records)
+
+
+class TestS1Buttons:
+    """«Начать» button добавлена в keyboard (task #85)."""
+
+    def test_start_button_added(self):
+        """Welcome menu теперь содержит [▶️ Начать] callback."""
+        result = WelcomeSkill().handle(_ctx("/start"))
+        buttons = result.action_data["buttons"]
+        labels = [b["label"] for b in buttons]
+        callbacks = [b.get("callback") for b in buttons]
+        assert "▶️ Начать" in labels
+        assert "cb:welcome:start_s2" in callbacks
