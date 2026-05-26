@@ -118,9 +118,13 @@ def validate_intent(payload: Any) -> dict[str, Any]:
                 f"pending_booking_intent.{field} must be {expected_type!r}, "
                 f"got {type(value).__name__}"
             )
-        if field == "note" and len(value) > _MAX_NOTE_LEN:
+        if field == "note" and isinstance(value, str) and len(value) > _MAX_NOTE_LEN:
             value = value[:_MAX_NOTE_LEN]
-        if field == "price_quoted" and not (0 <= value <= _MAX_PRICE):
+        if (
+            field == "price_quoted"
+            and isinstance(value, (int, float))
+            and not (0 <= value <= _MAX_PRICE)
+        ):
             raise PendingIntentInvalid(
                 f"pending_booking_intent.price_quoted out of range [0, {_MAX_PRICE}]: {value}"
             )
