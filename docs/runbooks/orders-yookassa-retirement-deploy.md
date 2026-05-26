@@ -98,11 +98,37 @@ Decision:
    references this dump for the within-24h rollback path.
 3. Deploy #739 merge via standard rolling restart (`docs/runbooks/
    server-deployment.md`). **`server-deployment.md` ships new code
-   but does NOT auto-run migrations** — steps 4-5 below explicitly
+   but does NOT auto-run migrations** — steps 5-6 below explicitly
    apply `0002_drop_orders_tables` after the rolling restart
    completes. If your deploy pipeline auto-migrates, halt at the
-   pre-migrate hook and continue from step 4 manually.
-4. Inspect the migration plan **before** applying:
+   pre-migrate hook and continue from step 5 manually.
+4. **Relabel legacy AuditLog targets (#730).** Pre-DROP forensic
+   preservation — rewrites `AuditLog.target="orders.tasks"` →
+   `"legacy_orders.tasks_archived"` and
+   `target="yookassa.webhook"` → `"legacy_yookassa.webhook_archived"`
+   so audit rows referencing the now-deleted modules retain
+   readable narrative for the 90-day retention window. Idempotent
+   + cross-tenant — safe to re-run.
+
+   ```bash
+   # Optional dry-run first to see the volume:
+   sudo -u ai-bot-platform uv run python manage.py \
+     relabel_legacy_orders_targets --dry-run
+
+   # Apply:
+   sudo -u ai-bot-platform uv run python manage.py \
+     relabel_legacy_orders_targets
+   ```
+
+   Expected output ends with `#730 complete: relabeled N rows
+   total.` (N = 0 is a valid outcome on a fresh deploy or after
+   a prior run).
+
+   The rewrite touches only the `target` string column. `target_id`
+   UUIDs (which point at soon-to-be-dropped `orders_order` rows)
+   are preserved as orphan references per Round-1 F-1 acceptance
+   on #739 — forensic UUID survives even when the row is gone.
+5. Inspect the migration plan **before** applying:
 
    ```bash
    ssh prod
@@ -118,7 +144,7 @@ Decision:
 
    (Single PENDING line. If you see anything else, escalate — the
    #739 deploy may not have landed.)
-5. Apply migration (use the **full migration name** so a future
+6. Apply migration (use the **full migration name** so a future
    `0003_*` migration doesn't make the prefix ambiguous):
 
    ```bash
@@ -313,3 +339,4 @@ procedure invocation.
 ## Changelog
 
 - _2026-05-26_ — Gamma stream — initial complete version (issue #731 closeout, PRE_PILOT for 2026-07-15 pilot). Round-1 friendly review (#782) closeout: corrected audit table name `audit_log` → `audit_auditlog`, full migration name in `migrate` + `migrate --fake` commands, added §«Required environment + access» with DSN+superuser guidance, added step-3 deploy ambiguity callout, added recovery escalation branch + partial-state decision branch.
+- _2026-05-26_ — Gamma stream — added step 4 «Relabel legacy AuditLog targets» (#730 closeout). New management command `relabel_legacy_orders_targets` rewrites historical `target="orders.tasks"` + `target="yookassa.webhook"` rows to `legacy_*_archived` form before the DROP TABLE, preserving the 90-day audit retention's forensic narrative. Step numbers shifted: old step 4 (inspect plan) → 5, old step 5 (apply migration) → 6.
