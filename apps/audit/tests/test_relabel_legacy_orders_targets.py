@@ -121,7 +121,9 @@ class TestDryRun:
         assert AuditLog.all_tenants.filter(target="orders.tasks").count() == 1
         assert AuditLog.all_tenants.filter(target="yookassa.webhook").count() == 1
         assert AuditLog.all_tenants.filter(target="legacy_orders.tasks_archived").count() == 0
-        assert "would relabel 1 rows" in out.getvalue()
+        # Round-1 friendly S1 — singular grammar for n=1.
+        assert "would relabel 1 row:" in out.getvalue()
+        assert "would relabel 1 rows" not in out.getvalue()
 
 
 class TestCrossTenant:
@@ -141,6 +143,28 @@ class TestCrossTenant:
         assert relabeled.count() == 3
         tenant_ids = {row.tenant_id for row in relabeled}
         assert tenant_ids == {tenant_a.id, tenant_b.id, None}
+
+
+class TestArchivedRows:
+    """Round-1 friendly N3 — `is_archived=True` rows are still in the
+    90-day retention window and their target label still matters
+    forensically. The cross-tenant `all_tenants` manager (raw
+    `models.Manager()`) includes archived rows; pin this so a future
+    refactor to `objects` (which would skip them) gets caught."""
+
+    def test_archived_rows_also_relabeled(self, tenants: tuple[Tenant, Tenant]) -> None:
+        tenant_a, _ = tenants
+        row = _make_row(tenant=tenant_a, target="orders.tasks", action="cert.fulfilled")
+        # Flip to archived via raw manager so the manager-default filter
+        # doesn't mask it.
+        AuditLog.all_tenants.filter(pk=row.pk).update(is_archived=True)
+
+        call_command("relabel_legacy_orders_targets", stdout=StringIO())
+
+        row.refresh_from_db()
+        assert row.target == "legacy_orders.tasks_archived"
+        # Still archived — the relabel does not flip is_archived.
+        assert row.is_archived is True
 
 
 class TestUntouchedTargets:
