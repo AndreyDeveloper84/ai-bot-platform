@@ -310,32 +310,37 @@ class TestPaymentFailed:
         conversation.refresh_from_db()
         assert conversation.consecutive_payment_failures == 3
 
-    def test_below_threshold_does_not_emit_skill_event(
+    def test_below_threshold_does_not_dispatch_skill(
         self, tenant: Tenant, conversation: Conversation, settings
     ) -> None:
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
             env = _envelope(event_name="payment.failed", data=_failed_data())
             handle_payment_failed(env)
-        mock_emit.assert_not_called()
+        mock_skill.assert_not_called()
 
-    def test_at_threshold_emits_skill_event(
+    def test_at_threshold_dispatches_skill_with_phase1_payload(
         self, tenant: Tenant, conversation: Conversation, settings
     ) -> None:
-        """Three failures → threshold tripped → emit fires on the 3rd."""
+        """Three failures → threshold tripped → skill called on the 3rd.
+
+        #738 founder verdict 2026-05-26 — Phase 1 (Option C minimum)
+        replaces the previous ``emit_internal_event(\"payment_failed_
+        skill_triggered\", ...)`` fan-out with a direct in-process call
+        to :func:`apps.skills.payment_failed.skill.on_payment_failed_event`.
+        """
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
         conversation.consecutive_payment_failures = 2  # next failure = 3
         conversation.save(update_fields=["consecutive_payment_failures"])
 
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
             env = _envelope(event_name="payment.failed", data=_failed_data())
             handle_payment_failed(env)
 
-        mock_emit.assert_called_once()
-        assert mock_emit.call_args[0][0] == "payment_failed_skill_triggered"
-        props = mock_emit.call_args[1]["properties"]
-        assert props["consecutive_failures"] == 3
-        assert props["failure_code"] == FailureCode.CARD_DECLINED
+        mock_skill.assert_called_once()
+        payload = mock_skill.call_args[0][0]
+        assert payload["consecutive_failures"] == 3
+        assert payload["failure_code"] == FailureCode.CARD_DECLINED
 
     def test_unknown_failure_reason_maps_to_other(
         self, tenant: Tenant, conversation: Conversation
@@ -484,15 +489,15 @@ class TestIdempotencyReplay3x:
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
         env = _envelope(event_name="payment.failed", data=_failed_data())
 
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
             for _ in range(3):
                 handle_payment_failed(env)
 
         conversation.refresh_from_db()
         # Counter == 1 (not 3) — replays short-circuited.
         assert conversation.consecutive_payment_failures == 1
-        # No skill emit (would have fired if counter == 3).
-        mock_emit.assert_not_called()
+        # No skill dispatch (would have fired if counter == 3).
+        mock_skill.assert_not_called()
 
     def test_payment_refunded_replay_3x_emits_reverse_once(
         self, tenant: Tenant, conversation: Conversation
@@ -691,18 +696,18 @@ class TestResolveConversationDeterministic:
 
 
 class TestThresholdStrictEquality:
-    """BLOCKER-2 fix: emit ``payment_failed_skill_triggered`` ONLY on
-    the threshold crossing (==), not on subsequent failures above it.
-    Otherwise every failure above the threshold would spam a fresh
-    handoff task."""
+    """BLOCKER-2 fix: dispatch ``on_payment_failed_event`` skill ONLY
+    on the threshold crossing (==), not on subsequent failures above
+    it. Otherwise every failure above the threshold would spam a fresh
+    handoff (in #738 — a fresh customer DM)."""
 
-    def test_emit_only_on_exact_threshold_crossing(
+    def test_skill_dispatched_only_on_exact_threshold_crossing(
         self, tenant: Tenant, conversation: Conversation, settings
     ) -> None:
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
 
         # Five distinct failures.
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
             for i in range(5):
                 env = _envelope(
                     event_name="payment.failed",
@@ -711,14 +716,199 @@ class TestThresholdStrictEquality:
                 )
                 handle_payment_failed(env)
 
-        # Counter ended at 5, but emit fired exactly once — on the
+        # Counter ended at 5, but skill fired exactly once — on the
         # crossing (count == 3).
-        assert mock_emit.call_count == 1
-        emitted_count = mock_emit.call_args[1]["properties"]["consecutive_failures"]
-        assert emitted_count == 3
+        assert mock_skill.call_count == 1
+        dispatched_count = mock_skill.call_args[0][0]["consecutive_failures"]
+        assert dispatched_count == 3
 
         conversation.refresh_from_db()
         assert conversation.consecutive_payment_failures == 5
+
+
+# ─── #738 Phase 1 payload contract ─────────────────────────────────────────
+
+
+class TestSkillHandoffPayloadPhase1:
+    """#738 founder verdict 2026-05-26 — Phase 1 (Option C minimum).
+
+    Consumer enriches payload from envelope + Conversation context
+    ONLY (no Appointment lookup per ADR-0009 §Hard rule #2, no Ayla
+    REST call per founder rejection of Option B). Skill's α-mode
+    graceful-degrades unset fields. Phase 2 (task #93, post-pilot)
+    extends Ayla envelope to event_version=2 with master_name /
+    service_name / amount / currency / appointment_date.
+    """
+
+    def _trip_threshold(
+        self, *, env: IngestEnvelope, settings, conversation: Conversation
+    ) -> dict[str, Any]:
+        """Helper: seed the counter at N-1 so the next event trips the
+        threshold; capture and return the payload the skill received.
+        """
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
+            handle_payment_failed(env)
+        assert mock_skill.call_count == 1
+        return dict(mock_skill.call_args[0][0])
+
+    def test_payload_contains_all_required_phase1_fields(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+
+        # Required Phase 1 keys per memory `project_payment_failed_
+        # enrichment_pattern` / founder verdict 2026-05-26.
+        required = {
+            "payment_id",
+            "appointment_id",
+            "client_user_id",
+            "tenant_id",
+            "failure_code",
+            "consecutive_failures",
+            "failed_at",
+            "payment_event_id",
+            "client_name",
+        }
+        assert required.issubset(payload.keys())
+
+    def test_payload_identity_fields_from_envelope(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+
+        assert payload["payment_id"] == PAYMENT_ID
+        assert payload["appointment_id"] == APPOINTMENT_ID
+        assert payload["client_user_id"] == AYLA_USER_ID
+        assert payload["tenant_id"] == TENANT_ID
+        assert payload["payment_event_id"] == env.event_id
+        assert payload["failed_at"] == "2026-05-21T14:48:02.503Z"
+
+    def test_payload_failure_code_is_mapped_not_raw(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """PII rule §7 — provider free-text MUST NOT propagate to the
+        skill. Mapped closed-enum value flows instead. Founder pseudocode
+        used raw ``envelope.data["reason"]``; consumer overrides to the
+        mapped value (same as ``Conversation.last_payment_failure_code``).
+        """
+        env = _envelope(
+            event_name="payment.failed",
+            data=_failed_data(reason="Card 4242****4242 declined by issuer"),
+        )
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        # Leaky free-text mapped to OTHER (closed enum).
+        assert payload["failure_code"] == FailureCode.OTHER
+        # And literally not the raw string.
+        assert "4242" not in payload["failure_code"]
+
+    def test_payload_client_name_from_bot_user_when_set(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        conversation: Conversation,
+        settings,
+    ) -> None:
+        bot_user.client_name = "Анна"
+        bot_user.save(update_fields=["client_name"])
+
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        assert payload["client_name"] == "Анна"
+
+    def test_payload_client_name_none_when_blank(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Empty ``client_name`` on BotUser → None in payload (NOT empty
+        string). Skill's α-mode template uses ``or "—"`` fallback which
+        works on both falsy values, but None is the contract-canonical
+        absent marker."""
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        assert payload["client_name"] is None
+
+    def test_payload_does_not_carry_phase2_fields(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Phase 1 explicitly excludes master_user_id / master_name /
+        service_name / amount / currency / appointment_date (envelope
+        v1 doesn't carry them and we don't query Ayla per ADR-0009 §2).
+
+        If a future change starts populating them inadvertently, the
+        Phase 2 cutover plan (task #93 — event_version=1 → 2 branch)
+        becomes ambiguous. Pin the absence explicitly.
+        """
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        phase2_only = {
+            "master_user_id",
+            "master_name",
+            "service_name",
+            "amount",
+            "currency",
+            "appointment_date",
+        }
+        assert phase2_only.isdisjoint(payload.keys())
+
+
+class TestSkillHandoffPostCommit:
+    """The skill dispatch MUST run AFTER the Conversation row update
+    commits. Otherwise the skill (which may issue DMs, write audit
+    rows, read fresh Conversation state) could observe stale data or
+    race with the row lock.
+    """
+
+    def test_skill_observes_committed_counter_value(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+
+        observed_counter: list[int] = []
+
+        def _spy(payload: dict[str, Any]) -> None:
+            # Re-read from DB at skill invocation time — the row update
+            # MUST be visible here (transaction committed).
+            row = Conversation.all_tenants.get(pk=conversation.pk)
+            observed_counter.append(row.consecutive_payment_failures)
+
+        with patch(
+            "apps.skills.payment_failed.skill.on_payment_failed_event",
+            side_effect=_spy,
+        ):
+            env = _envelope(event_name="payment.failed", data=_failed_data())
+            handle_payment_failed(env)
+
+        assert observed_counter == [3]
+
+    def test_skill_exception_does_not_break_consumer(
+        self, tenant: Tenant, conversation: Conversation, settings, caplog
+    ) -> None:
+        """Skill MUST NOT break the consumer loop. State commits even
+        if the skill explodes; forensic log is the only trail. The
+        dedupe row prevents a retry from double-firing the skill."""
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+
+        with patch(
+            "apps.skills.payment_failed.skill.on_payment_failed_event",
+            side_effect=RuntimeError("synthetic skill failure"),
+        ):
+            env = _envelope(event_name="payment.failed", data=_failed_data())
+            # Must NOT raise — consumer swallows skill failure.
+            handle_payment_failed(env)
+
+        # Counter still incremented and committed.
+        conversation.refresh_from_db()
+        assert conversation.consecutive_payment_failures == 3
+        # Forensic log written.
+        assert any("skill_handoff_failed" in rec.getMessage() for rec in caplog.records)
 
 
 # ─── Cross-tenant isolation (Round-1 NTH-1 / Round-2 NEW-8) ────────────────

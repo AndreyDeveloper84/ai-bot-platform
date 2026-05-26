@@ -8,8 +8,9 @@ for the payment lifecycle:
   reset consecutive_payment_failures counter, emit internal
   ``loyalty_bonus_eligible``.
 * ``payment.failed`` — set failed timestamp + enum-mapped failure_code,
-  increment consecutive_payment_failures, conditionally emit
-  ``payment_failed_skill_triggered`` once the threshold trips.
+  increment consecutive_payment_failures, conditionally invoke
+  :func:`apps.skills.payment_failed.skill.on_payment_failed_event`
+  once the threshold trips (#738, founder verdict 2026-05-26).
 * ``payment.refunded`` — set refunded timestamp, emit internal
   ``loyalty_refund_reverse``.
 
@@ -341,16 +342,27 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
     # Round-1 BLOCKER-2: counter + threshold under row lock. F() +
     # refresh_from_db left a TOCTOU window where two concurrent
     # ``payment.failed`` events on the same Conversation could both
-    # observe the threshold crossing → double ``payment_failed_skill_
-    # triggered`` emit → double handoff task. Wrap read-modify-write +
-    # threshold compare in select_for_update so the second worker
-    # blocks until the first commits.
+    # observe the threshold crossing → double skill handoff invocation
+    # → double DM to the customer. Wrap read-modify-write + threshold
+    # compare in select_for_update so the second worker blocks until
+    # the first commits.
     #
     # Also Round-1 idempotency short-circuit moved INSIDE the locked
     # block to defeat the race between «check last_payment_event_id»
     # and «UPDATE» that the lock-free version had.
+    #
+    # #738 (founder verdict 2026-05-26) — select_related("bot_user")
+    # pre-fetches client_name into the locked row so the enriched
+    # payload built post-commit doesn't issue a second query (and
+    # doesn't risk the bot_user being mutated between commit and
+    # skill dispatch).
     with transaction.atomic():
-        locked = Conversation.all_tenants.select_for_update().filter(pk=conversation.pk).first()
+        locked = (
+            Conversation.all_tenants.select_for_update()
+            .select_related("bot_user")
+            .filter(pk=conversation.pk)
+            .first()
+        )
         if locked is None:
             # Race: conversation deleted between resolve and lock. Bail.
             return
@@ -372,27 +384,66 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
         )
 
         # Round-1 BLOCKER-2: strict equality (== threshold), not >=.
-        # Emit exactly once on the crossing, never on subsequent
-        # failures above the threshold (would otherwise spam handoff
-        # tasks every failure once a user is over the line).
+        # Hand off to the payment_failed skill exactly once on the
+        # crossing — never on subsequent failures above the threshold
+        # (would otherwise spam DMs every failure once a user is over
+        # the line).
         threshold = settings.PAYMENT_FAILED_HANDOFF_THRESHOLD
-        should_emit = new_count == threshold
-        emit_payload = {
-            "user_id": envelope.user_id,
-            "tenant_id": envelope.tenant_id,
+        should_dispatch = new_count == threshold
+
+        # #738 Phase 1 (Option C minimum) — payload enrichment from
+        # envelope + Conversation context ONLY. Per ADR-0009 §Hard rule
+        # #2 we MUST NOT query Ayla's Appointment row (cross-repo DB
+        # access forbidden); per founder verdict 2026-05-26 we also
+        # MUST NOT call Ayla REST per event (hot-path latency). Phase 2
+        # post-pilot extends envelope to event_version=2 with enriched
+        # fields — task #93. Until then, missing fields (master_name,
+        # service_name, amount, currency, appointment_date) are
+        # gracefully degraded by the skill's α-mode fallbacks (see
+        # apps/skills/payment_failed/skill.py:36-48).
+        #
+        # ``failure_code`` is the MAPPED value, not raw envelope.data
+        # ["reason"], per PII rule §7 — provider free-text may carry
+        # card-tail digits. Same value as Conversation.last_payment_
+        # failure_code persisted above for trace consistency.
+        bot_user_client_name = (
+            (locked.bot_user.client_name or None) if locked.bot_user is not None else None
+        )
+        skill_payload = {
             "payment_id": str(payment_id),
             "appointment_id": str(appointment_id),
+            "client_user_id": envelope.user_id,
+            "tenant_id": envelope.tenant_id,
             "failure_code": failure_code,
             "consecutive_failures": new_count,
+            "failed_at": data.get("failed_at"),
+            "payment_event_id": envelope.event_id,
+            "client_name": bot_user_client_name,
         }
 
-    # Emit AFTER the transaction commits so any downstream subscriber
-    # observes a state consistent with the row lock's release.
-    if should_emit:
-        emit_internal_event(
-            "payment_failed_skill_triggered",
-            properties=emit_payload,
-        )
+    # Dispatch AFTER the transaction commits so the skill (which may
+    # send DMs, write audit rows, call channel outbound) observes a
+    # state consistent with the row lock's release. Lazy import keeps
+    # apps.skills out of the consumer module's import graph at boot
+    # (avoids potential circular imports through the skills registry).
+    if should_dispatch:
+        from apps.skills.payment_failed.skill import on_payment_failed_event
+
+        try:
+            on_payment_failed_event(skill_payload)
+        except Exception as exc:  # noqa: BLE001
+            # Skill MUST NOT break the consumer loop. The Conversation
+            # state is already committed; a skill failure is a UX
+            # degradation (no DM) but not a data-integrity issue. The
+            # dedupe row prevents a retry from double-firing the skill;
+            # forensic log here is the only trail.
+            logger.exception(
+                "eventbus.consumer.payment.failed.skill_handoff_failed "
+                "event_id=%s payment_id=%s err=%s",
+                envelope.event_id,
+                payment_id,
+                exc,
+            )
 
 
 def handle_payment_refunded(envelope: IngestEnvelope) -> None:
