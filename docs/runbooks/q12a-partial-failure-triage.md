@@ -53,7 +53,9 @@ close-out).
 ### Option B — raw SQL (use when admin UI is down OR for batch export)
 
 ```sql
--- Postgres @> containment (efficient with GIN index on payload)
+-- Postgres @> containment (uses the GIN index on payload added by
+-- migration audit/0003 — auditlog_payload_gin, USING gin (payload)
+-- with default jsonb_ops opclass; indexes BOTH `?` and `@>`).
 SELECT
     id,
     created_at,
