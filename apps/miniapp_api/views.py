@@ -230,10 +230,65 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
     non-sensitive fields; PII like phone is NOT returned here even if
     the BotUser has it on file (the profile endpoint, Phase 3, is the
     authorized surface for that).
+
+    # pending_booking_intent (P0 PRE_PILOT, anonymous-gate restoration)
+
+    Per memory `project_booking_flow_implementation_cut` founder cut #6:
+    the Mini App may pass an optional `pending_booking_intent` object in
+    the POST body to preserve the draft booking the user was assembling
+    when the OAuth gate fired. Backend caches it (Redis, 10min TTL,
+    keyed by BotUser.id) and echoes the current value in the response so
+    the frontend can restore the booking flow state post-OAuth.
+
+    Request body (optional):
+      ```
+      {
+        "pending_booking_intent": {
+          "master_id": "...uuid...",
+          "service_id": "...uuid...",
+          "slot_iso": "2026-07-15T14:00:00+03:00",
+          "price_quoted": 1800,
+          "note": "массаж лица",
+          "loyalty_apply": true
+        }
+      }
+      ```
+
+    Response always includes `pending_booking_intent` (the current
+    cached value OR null if nothing cached / expired).
     """
+    import json
+
+    from apps.miniapp_api.pending_intent import (
+        PendingIntentInvalid,
+        get_intent,
+        store_intent,
+        validate_intent,
+    )
 
     verified: VerifiedInitData = request.verified_init_data  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # Optional body — Mini App may call /auth/verify without any pending
+    # intent on first launch. Only attempt JSON parse when the caller
+    # explicitly declares `Content-Type: application/json`; multipart /
+    # form / empty bodies are treated as «no intent» without error.
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type == "application/json" and request.body:
+        try:
+            body = json.loads(request.body)
+        except ValueError:
+            return _error("malformed", "body is not valid JSON", 400)
+        if not isinstance(body, dict):
+            return _error("malformed", "body must be a JSON object", 400)
+        if "pending_booking_intent" in body:
+            try:
+                sanitised = validate_intent(body["pending_booking_intent"])
+            except PendingIntentInvalid as exc:
+                return _error("invalid_intent", str(exc), 400)
+            store_intent(bot_user.id, sanitised)
+
+    cached_intent = get_intent(bot_user.id)
 
     return JsonResponse(
         {
@@ -248,6 +303,7 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
                 "name": bot_user.tenant.name,
                 "timezone": bot_user.tenant.timezone,
             },
+            "pending_booking_intent": cached_intent,
         }
     )
 
