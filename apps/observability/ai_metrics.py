@@ -184,12 +184,19 @@ BOOKING_CORRELATION_WINDOW = timedelta(minutes=60)
 
 
 def _percentile(sorted_values: list[int], pct: float) -> int:
-    """Nearest-rank percentile on a pre-sorted list. Returns 0 on empty input."""
+    """Nearest-rank percentile on a pre-sorted list. Returns 0 on empty input.
+
+    Round-1 adversarial F-5 fix: use `math.ceil` to match the docstring's
+    «1-indexed position = ceil(p/100 * N)» contract. Previous code used
+    `int(round(...))` which is Python's banker's rounding, producing
+    off-by-one drift vs numpy/pandas conventions on edge sizes.
+    """
     if not sorted_values:
         return 0
-    # Nearest-rank method: 1-indexed position = ceil(p/100 * N)
+    import math
+
     n = len(sorted_values)
-    k = max(0, min(n - 1, int(round(pct / 100.0 * n)) - 1))
+    k = max(0, min(n - 1, math.ceil(pct / 100.0 * n) - 1))
     return sorted_values[k]
 
 
