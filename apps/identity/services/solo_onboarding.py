@@ -292,6 +292,24 @@ def create_solo_provider(
         SoloOnboardingPartialStateError: existing solo tenant has missing
             related rows (owner / admin / master). Manual ops inspection.
     """
+    # Pre-flight: validate identity inputs.
+    # Round-1 adversarial F-A (PRE_MERGE Cat 3+4): without this guard,
+    # `create_solo_provider(channel="max", channel_user_id="", ...)` would
+    # hash to a deterministic slug shared across all empty-ID callers,
+    # producing a cross-user identity hijack via the idempotent return
+    # branch (second caller observes first caller's tenant + bot_user
+    # and is logged in as them). The caller (channel adapter / onboarding
+    # skill) SHOULD never pass empty values, but the service is the
+    # boundary — validate at the boundary, not at the caller.
+    if not channel or not channel_user_id:
+        raise ValueError(
+            "create_solo_provider requires non-empty channel and "
+            f"channel_user_id; got channel={channel!r}, "
+            f"channel_user_id={channel_user_id!r}. Empty inputs would "
+            "produce a deterministic slug shared across callers — "
+            "identity-hijack risk via idempotency path."
+        )
+
     # Pre-flight: bootstrap tenant must exist (ops setup gate).
     if not Tenant.objects.filter(slug=BOOTSTRAP_TENANT_SLUG).exists():
         raise BootstrapTenantMissing(

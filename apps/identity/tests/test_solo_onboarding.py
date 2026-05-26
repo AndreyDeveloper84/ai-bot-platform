@@ -108,6 +108,33 @@ class TestBootstrapGate:
             create_solo_provider(**channel_identity)
 
 
+class TestInputValidation:
+    """Round-1 adversarial F-A regression — empty identity inputs MUST raise
+    BEFORE the advisory lock / slug derivation runs.
+
+    Without input validation, `channel_user_id=""` would hash to a
+    deterministic slug shared across all empty-ID callers. The second
+    caller would observe the first caller's tenant + bot_user via the
+    idempotency path and be logged in as them — cross-user identity
+    hijack. Cat 3 + Cat 4 PRE_MERGE.
+
+    Caller (channel adapter / onboarding skill) should never pass empty
+    values, but the service is the trust boundary — validate here.
+    """
+
+    def test_empty_channel_user_id_raises(self, bootstrap_tenant):
+        with pytest.raises(ValueError, match="non-empty"):
+            create_solo_provider(channel="max", channel_user_id="")
+
+    def test_empty_channel_raises(self, bootstrap_tenant):
+        with pytest.raises(ValueError, match="non-empty"):
+            create_solo_provider(channel="", channel_user_id="anything")
+
+    def test_both_empty_raises(self, bootstrap_tenant):
+        with pytest.raises(ValueError, match="non-empty"):
+            create_solo_provider(channel="", channel_user_id="")
+
+
 # ─── TestFreshOnboarding — happy path: all 5 rows created ───────────────
 
 
