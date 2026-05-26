@@ -180,10 +180,12 @@ class TestHandleCallback:
 import pytest  # noqa: E402
 
 from apps.skills.welcome.skill import (  # noqa: E402
-    CONSENT_GRANTED_PLACEHOLDER_TEXT,
     S2_CONSENT_TEXT,
     S2_REFUSED_TEXT,
     S2A_DETAILS_TEXT,
+    S3_POSITIONING_TEXT,
+    S5_FOLLOWUP_TEXT,
+    S5_PROMPT_TEXT,
 )
 
 
@@ -368,11 +370,18 @@ class TestS2ConsentFlow:
         assert result.action_type == "welcome_consent_details"
         assert result.meta["reply_kind"] == "welcome_s2a_details"
         callbacks = [b["callback"] for b in result.action_data["buttons"]]
-        assert callbacks == ["cb:welcome:consent_yes", "cb:welcome:consent_refuse"]
+        # «Понятно, продолжим» использует distinct callback (PR 2 / Tau §6
+        # S3-skip conditional): consent_yes_via_s2a flag's «user уже видел
+        # scope disclosure → skip S3 repositioning».
+        assert callbacks == [
+            "cb:welcome:consent_yes_via_s2a",
+            "cb:welcome:consent_refuse",
+        ]
 
     @pytest.mark.django_db
     def test_consent_yes_stamps_consent_at(self, unwelcomed_bot_user):
-        """«Да, продолжим» → BotUser.consent_at установлен в DB."""
+        """«Да, продолжим» → BotUser.consent_at установлен в DB + bot
+        renders S3 + S5 combined bubble (direct path, S3 shown)."""
         skill = WelcomeSkill()
         assert unwelcomed_bot_user.consent_at is None
 
@@ -381,8 +390,10 @@ class TestS2ConsentFlow:
         )
         unwelcomed_bot_user.refresh_from_db()
         assert unwelcomed_bot_user.consent_at is not None
-        assert result.reply_text == CONSENT_GRANTED_PLACEHOLDER_TEXT
-        assert result.meta["reply_kind"] == "welcome_consent_granted"
+        assert result.meta["reply_kind"] == "welcome_s5_first_action"
+        assert result.meta["s3_shown"] is True
+        assert S3_POSITIONING_TEXT in result.reply_text
+        assert S5_PROMPT_TEXT in result.reply_text
 
     @pytest.mark.django_db
     def test_consent_yes_idempotent_does_not_overwrite(self, unwelcomed_bot_user):
@@ -440,5 +451,131 @@ class TestS2ConsentFlow:
             result = skill.handle(
                 _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
             )
-        assert result.reply_text == CONSENT_GRANTED_PLACEHOLDER_TEXT
+        # S5 grid still rendered — flow continues despite DB write fail.
+        assert S5_PROMPT_TEXT in result.reply_text
         assert any("consent_at_save_failed" in r.message for r in caplog.records)
+
+
+# ───────────────────────────────────────────────────────────────────────
+# S3 positioning + S5 first-action grid — task #85 part 3, 2026-05-26
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestS3S5Flow:
+    """S3 conditional positioning + S5 6-button grid (Tau §6 + §8)."""
+
+    @pytest.mark.django_db
+    def test_direct_consent_path_shows_s3(self, unwelcomed_bot_user):
+        """Direct S1→S2→S3 path: consent_yes → S3 positioning prepended
+        к S5 prompt. Tau §6: SHOW S3 когда positioning ещё не была."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        assert result.meta["s3_shown"] is True
+        assert result.reply_text.startswith(S3_POSITIONING_TEXT)
+        assert S5_PROMPT_TEXT in result.reply_text
+        assert S5_FOLLOWUP_TEXT in result.reply_text
+
+    @pytest.mark.django_db
+    def test_s2a_path_skips_s3(self, unwelcomed_bot_user):
+        """S2a fold path: consent_yes_via_s2a → S5 only, S3 SKIPPED.
+        Tau §6 conditional: S2a уже disclosed scope, repositioning
+        would feel repetitive."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
+        )
+        assert result.meta["s3_shown"] is False
+        assert S3_POSITIONING_TEXT not in result.reply_text
+        assert result.reply_text.startswith(S5_PROMPT_TEXT)
+        assert S5_FOLLOWUP_TEXT in result.reply_text
+
+    @pytest.mark.django_db
+    def test_s2a_path_also_stamps_consent_at(self, unwelcomed_bot_user):
+        """Same idempotent stamping helper для обоих consent paths."""
+        skill = WelcomeSkill()
+        assert unwelcomed_bot_user.consent_at is None
+        skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
+        )
+        unwelcomed_bot_user.refresh_from_db()
+        assert unwelcomed_bot_user.consent_at is not None
+
+    @pytest.mark.django_db
+    def test_s5_grid_zero_config_ships_anketa_only(self, unwelcomed_bot_user, settings):
+        """Zero-config (no Mini App): только anketa ship'ится — это
+        единственная кнопка которая работает без Mini App config.
+        «Просто посмотреть» drops (Dashboard = Mini App only)."""
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = ""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        buttons = result.action_data["buttons"]
+        callbacks = [b.get("callback") for b in buttons]
+        assert callbacks == ["cb:anketa:start"]
+
+    @pytest.mark.django_db
+    def test_s5_grid_web_app_emits_6_open_app_buttons(self, unwelcomed_bot_user, settings):
+        """Mini App configured: 6 кнопок — 4 primary actions
+        (open_food_scan / open_water_add_250 / open_goal_select /
+        open_catalog) + anketa (bot skill) + open_home («Просто
+        посмотреть»). Tau §8 routing table."""
+        settings.MAX_BOT_WEB_APP = "id583_bot"
+        settings.MAX_MINIAPP_URL = ""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        buttons = result.action_data["buttons"]
+        assert len(buttons) == 6
+        callbacks = [b["callback"] for b in buttons]
+        assert callbacks == [
+            "open_food_scan",
+            "open_water_add_250",
+            "open_goal_select",
+            "open_catalog",
+            "cb:anketa:start",
+            "open_home",
+        ]
+        # Mini App buttons carry web_app payload; anketa stays bot-only.
+        for btn in buttons:
+            if btn["callback"].startswith("open_"):
+                assert btn["web_app"] == "id583_bot"
+            else:
+                assert "web_app" not in btn
+
+    @pytest.mark.django_db
+    def test_s5_grid_uses_2_column_layout(self, unwelcomed_bot_user, settings):
+        """Tau §8 Variant A = Grid 2×2 + anketa pair → button_columns=2."""
+        settings.MAX_BOT_WEB_APP = "id583_bot"
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        assert result.action_data["button_columns"] == 2
+
+    @pytest.mark.django_db
+    def test_s5_grid_miniapp_url_fallback_emits_link_buttons(self, unwelcomed_bot_user, settings):
+        """No MAX_BOT_WEB_APP but MAX_MINIAPP_URL set → link buttons
+        for the 4 primary actions + «Просто посмотреть» exit. Anketa
+        callback unaffected."""
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        buttons = result.action_data["buttons"]
+        # 4 primary URL + anketa callback + просто посмотреть URL = 6
+        assert len(buttons) == 6
+        urls = [b.get("url") for b in buttons if "url" in b]
+        assert urls == [
+            "https://miniapp-dev.example/food_scan",
+            "https://miniapp-dev.example/water_add_250",
+            "https://miniapp-dev.example/goal_select",
+            "https://miniapp-dev.example/catalog",
+            "https://miniapp-dev.example/home",
+        ]

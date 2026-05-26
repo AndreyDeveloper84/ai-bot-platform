@@ -65,15 +65,23 @@ dispatcher flow.
 «Начать» button (callback ``cb:welcome:start_s2``) routes к real S2
 privacy consent prompt (Tau's customer-onboarding-flow.md §5):
 
-* ``cb:welcome:consent_yes`` — stamps ``BotUser.consent_at`` idempotently
-  (existing timestamp NOT overwritten на double-tap из S2 + S2a flows).
-  Renders transitional placeholder + welcome menu pending S3 PR.
-* ``cb:welcome:consent_details`` — S2a expanded fold disclosing scope
-  («что именно запоминаю»).
-* ``cb:welcome:consent_refuse`` — State 3 graceful exit. No keyboard;
-  conversation ends. ``consent_at`` remains NULL.
+* ``cb:welcome:consent_yes`` — DIRECT path («Да, продолжим» из S2).
+  Funnels к ``_render_consent_granted(show_s3=True)`` — stamps
+  consent_at idempotently + renders S3 + S5 combined bubble.
+* ``cb:welcome:consent_yes_via_s2a`` — S2a path («Понятно, продолжим»
+  из S2a fold). Same handler but ``show_s3=False`` per Tau §6
+  conditional rule (user already saw scope disclosure → S3
+  repositioning would feel repetitive).
+* ``cb:welcome:consent_details`` — S2a expanded fold disclosing scope.
+* ``cb:welcome:consent_refuse`` — State 3 graceful exit. No keyboard.
 
-S3 positioning + S5 first-action grid lands в PR 2 task #85.
+### S3 positioning + S5 first-action grid — task #85 part 3, 2026-05-26
+
+After consent, customer lands на S5 (Tau §8 Variant A: Grid 2×2 +
+anketa pair) — KEY MOMENT, выбор первого experience с Ayla. Six
+buttons: 4 Mini-App primary actions + anketa (bot skill) + «Просто
+посмотреть» exit valve. Combined-bubble S3+S5 preserves «no user
+action between bubbles» intent without multi-message infrastructure.
 """
 
 from __future__ import annotations
@@ -123,12 +131,25 @@ S2A_DETAILS_TEXT = (
 # conversation ends here; user может вернуться писать когда захочет.
 S2_REFUSED_TEXT = "Поняла. Когда захочешь — пиши, я тут."
 
-# S2 → S3 transition placeholder. Real S3 (positioning «Кто такая
-# Ayla») lands в PR 2 task #85. Current text — soft ack of consent
-# + re-show welcome menu чтобы flow не повис до S3 PR.
-CONSENT_GRANTED_PLACEHOLDER_TEXT = (
-    "Спасибо. Сейчас покажу что я умею — выбирай раздел или просто напиши вопрос."
+# S3 positioning text (Tau §6 verbatim). Brand-Guardian-approved
+# «anti-positioning без being defensive». Conditional: rendered ONLY
+# on direct S1→S2→S3 path. Skipped когда user уже видел S1 «Узнать
+# подробнее» fold ИЛИ S2a expanded — repositioning would feel
+# repetitive. «Без оценок» — psychological anchor repeats core promise.
+S3_POSITIONING_TEXT = (
+    "Если коротко — я не календарь и не ещё одна программа правильного "
+    "питания. Я помогу разобраться с собой каждый день — еда, вода, "
+    "ближайшая запись, самочувствие. Без оценок."
 )
+
+# S5 prompt (Tau §8 verbatim). KEY MOMENT — customer выбирает первый
+# experience с Ayla. Anketa de-duplicated per Brand Guardian fix
+# (5 шагов framing replaces «Или сначала анкета» double-surfacing).
+S5_PROMPT_TEXT = "С чего хочешь начать? Можно прямо сейчас:"
+
+# S5 follow-up framing for anketa + exit valve (Tau §8). Separator
+# между 4 primary actions и anketa-or-skip choice.
+S5_FOLLOWUP_TEXT = "Или расскажи о себе — 5 шагов, буду точнее советовать:"
 
 ASK_PROMPT = (
     "Спросите о чём угодно — про услуги, цены, противопоказания, "
@@ -213,35 +234,14 @@ class WelcomeSkill:
                 meta={"reply_kind": "welcome_s2a_details"},
             )
         if text == "cb:welcome:consent_yes":
-            # 152-ФЗ consent. Stamp consent_at idempotently — second tap
-            # из-за double-click либо S2 → S2a → consent_yes flow не
-            # должен overwrite original timestamp (audit-trail integrity).
-            bot_user = context.bot_user
-            if getattr(bot_user, "consent_at", None) is None:
-                try:
-                    bot_user.consent_at = timezone.now()
-                    bot_user.save(update_fields=["consent_at"])
-                except Exception as exc:  # noqa: BLE001
-                    # Mirror welcomed_at pattern: log + continue. Worst
-                    # case — consent re-asked on next entry to S2; not
-                    # data-loss since the user IS giving consent right
-                    # now (we just failed to record it).
-                    logger.error(
-                        "welcome.consent_at_save_failed bot_user_id=%s err=%s",
-                        getattr(bot_user, "id", None),
-                        exc,
-                    )
-            # S2 → S3 transition. Real S3 lands в PR 2; current placeholder
-            # = re-show welcome menu so user has a forward path.
-            return SkillResult(
-                reply_text=CONSENT_GRANTED_PLACEHOLDER_TEXT,
-                action_type="welcome_menu",
-                action_data={
-                    "buttons": _welcome_buttons(),
-                    "button_columns": 1,
-                },
-                meta={"reply_kind": "welcome_consent_granted"},
-            )
+            # Direct S1 → S2 → S3 → S5 path. SHOW S3 positioning.
+            return self._render_consent_granted(context, show_s3=True)
+        if text == "cb:welcome:consent_yes_via_s2a":
+            # User came through S2a expanded fold — already disclosed
+            # «что именно запоминаю». Tau §6 conditional rule: SKIP S3
+            # — repositioning would feel repetitive. Route straight к
+            # S5 first-action grid.
+            return self._render_consent_granted(context, show_s3=False)
         if text == "cb:welcome:consent_refuse":
             # State 3 (Tau §11). Graceful exit — no keyboard, no menu.
             # consent_at remains NULL → если user пишет снова, welcome
@@ -289,6 +289,54 @@ class WelcomeSkill:
                 "button_columns": 1,
             },
             meta={"reply_kind": "welcome"},
+        )
+
+    def _render_consent_granted(self, context: SkillContext, *, show_s3: bool) -> SkillResult:
+        """Stamp consent_at + render S5 first-action grid.
+
+        Both consent_yes callbacks (direct + via_s2a) funnel here for
+        single-source idempotent consent stamping. ``show_s3`` toggles
+        S3 positioning prepend per Tau §6 conditional rule.
+
+        Combined-bubble interpretation: Tau §6 specs «sequential — S5
+        message arrives next without user action», but the SkillResult
+        contract is one outgoing reply per turn. Combined-bubble (S3
+        text prepended к S5 prompt) preserves user-facing intent («no
+        user action between S3 and S5») without requiring multi-message
+        infrastructure. Strict two-bubble может revisit post-pilot.
+        """
+        bot_user = context.bot_user
+        if getattr(bot_user, "consent_at", None) is None:
+            try:
+                bot_user.consent_at = timezone.now()
+                bot_user.save(update_fields=["consent_at"])
+            except Exception as exc:  # noqa: BLE001
+                # Mirror welcomed_at pattern: log + continue. Worst case
+                # — consent re-asked on next entry to S2; not data-loss
+                # since user IS giving consent right now.
+                logger.error(
+                    "welcome.consent_at_save_failed bot_user_id=%s err=%s",
+                    getattr(bot_user, "id", None),
+                    exc,
+                )
+        body_parts: list[str] = []
+        if show_s3:
+            body_parts.append(S3_POSITIONING_TEXT)
+        body_parts.append(S5_PROMPT_TEXT)
+        body_parts.append(S5_FOLLOWUP_TEXT)
+        return SkillResult(
+            reply_text="\n\n".join(body_parts),
+            action_type="welcome_s5_first_action",
+            action_data={
+                "buttons": _s5_first_action_buttons(),
+                # Grid 2×2 per Tau §8 Variant A — primary 4 buttons +
+                # anketa-or-skip pair, всё в 2-col layout.
+                "button_columns": 2,
+            },
+            meta={
+                "reply_kind": "welcome_s5_first_action",
+                "s3_shown": show_s3,
+            },
         )
 
 
@@ -366,14 +414,77 @@ def _s2a_details_buttons() -> list[dict[str, str]]:
     """S2a expanded keyboard (Tau §5).
 
     Two options:
-      * «Понятно, продолжим» → ``cb:welcome:consent_yes`` (same handler
-        что и из S2 — single source of truth для consent stamping).
+      * «Понятно, продолжим» → ``cb:welcome:consent_yes_via_s2a``.
+        Distinct callback from S2 direct «Да, продолжим» — funnels к
+        same idempotent consent-stamp helper, но flag's S3 SKIP per
+        Tau §6 (user already disclosed enough в S2a fold).
       * «Не сейчас» → ``cb:welcome:consent_refuse``.
     """
     return [
-        {"label": "Понятно, продолжим", "callback": "cb:welcome:consent_yes"},
+        {"label": "Понятно, продолжим", "callback": "cb:welcome:consent_yes_via_s2a"},
         {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
     ]
+
+
+def _s5_first_action_buttons() -> list[dict[str, str]]:
+    """S5 first-action grid (Tau §8 Variant A — Grid 2×2 + anketa pair).
+
+    Six buttons total. Most route к Mini App start_params; anketa
+    triggers `nutrition_anketa` skill в bot DM (S6).
+
+    Mini App ladder (mirrors ``_welcome_buttons()``):
+      * ``MAX_BOT_WEB_APP`` set → ``open_app`` buttons with flat-slug
+        callback payloads (no `=`, `&` — MAX HTTP 400 on those).
+      * ``MAX_MINIAPP_URL`` only → ``link`` buttons.
+      * Neither → drop Mini-App-dependent buttons. Anketa still ships
+        (bot skill); «Просто посмотреть» drops too (Dashboard exists
+        only as Mini App). Zero-config mode = 1 button: anketa.
+
+    Routing per Tau §8:
+      * ``open_food_scan`` → Food Scanner F1 Capture
+      * ``open_water_add_250`` → Dashboard with +250ml auto-logged
+      * ``open_goal_select`` → Goal selector
+      * ``open_catalog`` → Услуги tab
+      * ``cb:anketa:start`` → S6 bot-DM anketa FSM
+      * ``open_home`` → Dashboard empty state
+    """
+    web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
+    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
+
+    primary_actions: list[dict[str, str]] = []
+    just_browse: list[dict[str, str]] = []
+    if web_app:
+        primary_actions = [
+            {
+                "label": "📸 Сфотографировать еду",
+                "callback": "open_food_scan",
+                "web_app": web_app,
+            },
+            {
+                "label": "💧 + стакан воды",
+                "callback": "open_water_add_250",
+                "web_app": web_app,
+            },
+            {"label": "🎯 Выбрать цель", "callback": "open_goal_select", "web_app": web_app},
+            {"label": "📅 Найти услугу", "callback": "open_catalog", "web_app": web_app},
+        ]
+        just_browse = [
+            {"label": "Просто посмотреть", "callback": "open_home", "web_app": web_app},
+        ]
+    elif miniapp_url:
+        primary_actions = [
+            {"label": "📸 Сфотографировать еду", "url": _join(miniapp_url, "food_scan")},
+            {"label": "💧 + стакан воды", "url": _join(miniapp_url, "water_add_250")},
+            {"label": "🎯 Выбрать цель", "url": _join(miniapp_url, "goal_select")},
+            {"label": "📅 Найти услугу", "url": _join(miniapp_url, "catalog")},
+        ]
+        just_browse = [
+            {"label": "Просто посмотреть", "url": _join(miniapp_url, "home")},
+        ]
+    # Else: zero-config — only anketa ships (bot skill, no Mini App required).
+
+    anketa = [{"label": "📝 Начать анкету", "callback": "cb:anketa:start"}]
+    return primary_actions + anketa + just_browse
 
 
 def _join(base: str, route: str) -> str:
