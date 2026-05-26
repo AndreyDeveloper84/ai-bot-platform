@@ -54,7 +54,7 @@ Per `anonymous-to-registered-gate.md` §4.1 — anonymous browsing OK через
 2. **REASONING TEXT REQUIRED** для каждого «Ayla подобрала» item
 3. **TRUST FILTER applied silently** — poor-quality salons НЕ в «Ayla подобрала», только scrollable в «Исследовать новое» если customer explicitly searches
 4. **LOYALTY RESPECT** — loyal customers get softer recommendations
-5. **MAX 3-5 ITEMS PER SECTION** — NOT endless feed
+5. **MAX 3 ITEMS PER SECTION для pilot** — NOT endless feed (post-pilot variant: 3-5 with A/B)
 
 ### 2.2 Anti-patterns (NEVER)
 
@@ -90,7 +90,22 @@ Salons с poor signals (high cancellations, low retention rate, repeated custome
 - НЕ скрываются полностью (transparency preserved)
 - Customer never sees «quality score» — это backend signal только
 
-**Full quality scoring formula = SEPARATE post-pilot project.** Этот doc references «trust filter applied», не explains formula. Pilot ships с simple ranking (distance + rating + cadence match).
+### Trust filter MVP cut (per implementation cut #7)
+
+**For pilot** — trust filter = **simple eligibility check**:
+- ✅ Tenant has active profile (not deactivated)
+- ✅ Has available slots (not fully booked)
+- ✅ Not in SUSPENDED tenant state
+- ✅ No active complaint flag (per `customer-refund-dispute-ux` HIGH/CRITICAL tier)
+- ✅ Acceptable rating/activity threshold (e.g., ≥3.5 stars OR <3 cancellations last 30 days)
+
+**Full quality scoring formula = SEPARATE post-pilot project.** Этот doc references «trust filter applied» as MVP eligibility check, NOT complex quality scoring. Post-pilot project will add:
+- Customer retention rate weighted
+- Persona violation analytics
+- Mass cancellation pattern detection
+- ML-driven quality model
+
+Pilot ships с simple ranking (distance + rating + cadence match + eligibility filter).
 
 ### 2.5 Loyalty-aware variation
 
@@ -102,9 +117,9 @@ if customer.has_favorite_master AND visit_count >= 5 AND no_recent_complaints:
     - Discovery suggestions only on explicit "Найти другое"
 else:
     "Ayla подобрала" = STANDARD mode
-    - 3-5 items
-    - Mix of: 1 familiar, 1 best by goal, 1 closest, 1 premium quality
-    - Reasoning text per item
+    - **3 items для pilot** (post-pilot expand to 3-5 с A/B test)
+    - Mix of: 1 familiar, 1 best by goal, 1 closest
+    - Reasoning text per item — backend generates
 ```
 
 ---
@@ -140,7 +155,7 @@ else:
 │                                               │
 │  ─────────────────────────────────────       │
 │                                               │
-│  ── ✨ Ayla подобрала ──                       │  Layer 2 (max 3-5)
+│  ── ✨ Ayla подобрала ──                       │  Layer 2 (max 3 pilot)
 │                                               │  Trust filter applied
 │                                               │
 │  ┌──────────────────────────────────────┐   │
@@ -356,9 +371,17 @@ else:
 │                                               │
 │  Маникюр гель-лак · 90 мин                    │
 │                                               │
-│  ── ✨ Похоже подойдёт ──                      │  Smart suggestions
+│  ── ✨ {{state_dependent_header}} ──             │  Smart suggestions
 │                                               │  per Layer 5
 │  ┌──────────────────────────────────────┐   │  Behavioral
+│                                               │
+│  State-dependent header copy (per cut #4):    │
+│  - Anonymous/new: «Ближайшие свободные»       │
+│  - Registered with behavior: «Похоже подойдёт»│
+│  - Loyal (5+ visits с мастером): «Твоё        │
+│    обычное время»                              │
+│  Rationale: не имитировать персонализацию      │
+│  там где её нет
 │  │  Четверг 16:00                         │   │
 │  │  Твоё обычное время — вечер четверга   │   │  REASONING
 │  │  [ Выбрать ]                           │   │
@@ -457,14 +480,15 @@ Per `booking-conflict-resolution-ux.md §6.6b` — substitution voice. Both opti
 │  │  ~1 800 ₽                              │   │
 │  └──────────────────────────────────────┘   │
 │                                               │
-│  ── Заметка мастеру (опц.) ──                 │
-│  ┌──────────────────────────────────────┐   │
-│  │                                        │   │
-│  └──────────────────────────────────────┘   │
+│  [ + Добавить заметку мастеру ]               │  Collapsed default
+│                                               │  per implementation
+│                                               │  cut #3 — main action
+│                                               │  = «Записаться», notes
+│                                               │  не отвлекают
 │                                               │
 │  ── Если что ──                               │
 │                                               │
-│  Cancel за 12+ часов — без штрафа.            │  Inline policy
+│  Отмена за 12+ часов — без штрафа.            │  Inline policy
 │  Меньше 12 часов — 50% удержание.             │  preview (Q-BF-7)
 │                                               │
 │  ── Loyalty ──                                │
@@ -512,6 +536,20 @@ Per `booking-conflict-resolution-ux.md §6.6b` — substitution voice. Both opti
 
 После MAX OAuth completion → returns к F4 standard layout с booking context preserved → final tap «Записаться» → F5.
 
+**🔴 P0 ACCEPTANCE CRITERION (per implementation cut #6):**
+
+После MAX OAuth registration successful — **full booking context MUST be preserved**:
+- ✅ Master selected (Анна)
+- ✅ Service selected (Маникюр гель-лак)
+- ✅ Slot selected (четверг 16:00)
+- ✅ Price displayed (1 800 ₽)
+- ✅ Customer notes (если customer заполнила до gate trigger)
+- ✅ Loyalty choice (если customer выбрала apply points)
+
+**Если any context lost после registration = P0 BUG.** Customer должна continue exactly где остановилась, NOT restart booking flow.
+
+Implementation requirement: backend must accept registration callback с `pending_booking_intent` payload containing все вышеуказанные fields. Frontend stores intent в session storage before redirect к MAX OAuth, restores after redirect back.
+
 ### 6.3 States
 
 - Loading: skeleton brief
@@ -539,8 +577,11 @@ Per `booking-conflict-resolution-ux.md §6.6b` — substitution voice. Both opti
 │                                               │
 │  ── Что дальше ──                             │
 │                                               │
-│  За день до визита я напомню. За 2 часа       │  Expectation set
-│  ещё раз — и в это же утро.                   │
+│  Я напомню перед визитом, чтобы ты не         │  Expectation set
+│  пропустила.                                  │  Softer per cut #5
+│                                               │  (backend may not
+│                                               │  deliver exact 3
+│                                               │  reminders)
 │                                               │
 │  Если вопрос про подготовку или забыла        │  «Написать по
 │  спросить — можешь написать по записи.        │  записи»
@@ -604,7 +645,7 @@ All copy через ayla-identity-and-brand voice rules. Examples per surface:
 | Surface | Voice |
 |---------|-------|
 | Section header | «Время к Анне» (master-first) |
-| Smart suggestions | «✨ Похоже подойдёт» (NOT «Рекомендуемое время») |
+| Smart suggestions | State-dependent: Anonymous/new «Ближайшие свободные» / Registered «Похоже подойдёт» / Loyal «Твоё обычное время» (per implementation cut #4 — не имитировать персонализацию) |
 | Reasoning | «Твоё обычное время — вечер четверга» / «Свободно раньше» |
 | Substitution | «Карина — твой вариант если хочешь раньше» |
 
@@ -614,7 +655,7 @@ All copy через ayla-identity-and-brand voice rules. Examples per surface:
 |---------|-------|
 | Header | «Подтверди запись» (action verb) |
 | Sections | «Что:» / «Когда:» / «Сколько:» (minimal labels) |
-| Cancellation policy | «Если что — Cancel за 12+ часов без штрафа.» |
+| Cancellation policy | «Если что — Отмена за 12+ часов без штрафа.» |
 | Loyalty inline | «💚 234 балла на счёте. Можешь применить — будет ~1 700 ₽» |
 | Primary CTA | «✓ Записаться» (NOT «Подтвердить» — sterile) |
 
@@ -623,7 +664,7 @@ All copy через ayla-identity-and-brand voice rules. Examples per surface:
 | Surface | Voice |
 |---------|-------|
 | Confirmation | «Записала тебя на четверг 16:00 — у Анны в Beauty Place» |
-| What's next | «За день до визита я напомню. За 2 часа ещё раз — и в это же утро.» |
+| What's next | «Я напомню перед визитом, чтобы ты не пропустила.» (softer per cut #5 — backend may not deliver exact 3-reminder schedule) |
 | «Написать по записи» discovery | «Если вопрос про подготовку или забыла спросить — можешь написать по записи.» |
 
 ### Anti-patterns (NEVER)
@@ -713,7 +754,7 @@ def get_catalog_recommendations(customer, filters=None) -> CatalogResponse:
     if customer.has_favorite_master_with_recent_visits():
         layer_2_size = 1-2  # softer mode
     else:
-        layer_2_size = 3-5  # standard mode
+        layer_2_size = 3  # pilot. Post-pilot: 3-5 with A/B test
 
     layer_2 = rank_by_signals(candidates, customer, max=layer_2_size)
     # Signals: distance, rating, cadence_match, goal_match, quality_score
@@ -804,7 +845,7 @@ Per ranking philosophy + ayla-identity-and-brand voice rules:
 - ❌ «Спонсировано» / «Партнёр Ayla» / «Реклама» — never
 - ❌ «Рекомендуем салон X» — marketplace language
 - ❌ «Лучший выбор» / «Топ-1 в городе» — manipulative
-- ❌ Endless feed без curation — 3-5 per section discipline
+- ❌ Endless feed без curation — 3 per section pilot discipline (post-pilot 3-5)
 - ❌ Hide quality-poor salons entirely — breaks transparency
 - ❌ Auto-preselect slot — customer must affirm choice
 - ❌ Loading delays > 1.5 sec без skeleton — anxiety
@@ -856,7 +897,7 @@ All Q-BF-1..10 resolved per founder verdict 2026-05-26:
 1. **3-layer hierarchy rendering** — order locked: Layer 1 → 2 → 3. Sections collapsible if any empty (Layer 1 empty for anonymous = skip section entirely, not «Empty» state)
 2. **Trust filter integration** — server returns pre-filtered list, frontend never sees quality scores
 3. **Reasoning text styling** — muted, 2nd line under card title, max 1 line truncated с ellipsis if too long
-4. **«Ayla подобрала» max 3-5 cards** — never paginate, never load more (anti endless feed)
+4. **«Ayla подобрала» max 3 cards для pilot** (post-pilot 3-5 А/В) — never paginate, never load more (anti endless feed)
 5. **Layer 3 «Исследовать»** — collapsible by default, expanded if customer scrolls to it OR clicks category
 6. **Loyalty mode detection** — frontend reads boolean from `/api/v1/me` (`is_loyal_with_master`), backend computes
 7. **Smart suggestions ✨ marker** — accompanied by text «обычное время» per a11y
@@ -866,7 +907,7 @@ All Q-BF-1..10 resolved per founder verdict 2026-05-26:
 11. **F2 master photo lazy load** — placeholder skeleton до image load
 12. **Date picker locale** — Russian day names («Четверг 29 мая»), 24-hour time («16:00» not «4:00 PM»)
 13. **Loyalty inline math** — backend returns «applied_amount», «remaining_amount», frontend renders «100 баллов = 100 ₽ скидка»
-14. **F5 reminders expectation** — text «За день / За 2 часа / в утро» — matches actual backend reminder schedule (B5-B7 templates in legacy handoff)
+14. **F5 reminders expectation** — soft generic text «Я напомню перед визитом» per cut #5. Verify actual backend reminder schedule (B5-B7 templates) before promising specific times. If backend confirms 3-reminder schedule, can expand copy post-pilot.
 
 ---
 
@@ -905,7 +946,81 @@ All Q-BF-1..10 resolved per founder verdict 2026-05-26:
 
 ---
 
-## 16. Sign-off
+## 16. Implementation cuts appendix (per founder review 2026-05-26)
+
+Memory ref: `project_booking_flow_implementation_cut`. 7 founder cuts applied throughout this doc; consolidated W1/W2 implementation tiers below.
+
+### W1 frontend tier system
+
+**Tier 1 (Must-have for pilot):**
+- F1 3-layer rendering (Layer 1 / Layer 2 max 3 / Layer 3 categories)
+- F2 master detail
+- F3 slots с state-dependent header (anonymous / registered / loyal)
+- F4 confirmation
+- F5 success
+- Anonymous gate с full context preservation (P0 acceptance criterion §6.2)
+- Slot race handling (substitution per §6.3)
+- Basic master substitution (inline per §5.3)
+- Reasoning text rendering (received from backend, not generated frontend)
+
+**Tier 2 (Simplified for pilot):**
+- Layer 2 max 3 items (NOT 5)
+- Trust filter applied backend-side (frontend just receives filtered list)
+- Loyalty block ONLY если backend returns balance в response
+- Smart suggestions simple — backend provides `is_suggested` boolean
+- Notes collapsed by default («+ Добавить заметку мастеру» button)
+- F5 reminders generic «Я напомню перед визитом» (NOT promise 3 specific times)
+
+**Tier 3 (Post-pilot expansion):**
+- Full quality scoring + complex trust filter
+- Complex loyalty-aware variation (multiple thresholds)
+- Advanced behavioral ranking (Layer 5 deep analytics)
+- A/B tests on Layer 2 size (3 vs 5)
+- Voice booking integration
+- Cross-tenant recommendation diversity tuning
+
+### W2 backend tier system
+
+**Tier 1 (Must-have endpoints):**
+- `GET /api/v1/catalog/recommendations` — 3-layer structure с reasoning_text
+- `GET /api/v1/catalog/masters/{id}` — master detail
+- `GET /api/v1/catalog/masters/{id}/slots?days=14` — slots
+- `POST /api/v1/bookings/create` — booking creation
+- Anonymous context preservation endpoint (registration callback с pending_booking_intent)
+
+**Response fields required:**
+- `reasoning_text` per Layer 2 item — backend generates per §10.3 rules
+- `is_suggested` boolean per F3 slot — backend marks based on Layer 5 Behavioral
+- `substitution_candidates` array — when original master unavailable
+- `is_loyal_with_master` boolean on `/api/v1/me` — frontend reads for layout variant
+
+**W2 simplified logic for pilot:**
+- Layer 1: existing active tenant relationships query
+- Layer 2: simple ranking — distance + rating + availability + active profile eligibility
+- Layer 3: category list with counts (existing)
+- Trust filter = simple eligibility check (NOT quality scoring formula yet)
+- Smart suggestions: 2-3 slots based on `booking_pattern_time` + `preferred_days` from Layer 5
+
+**Post-pilot Tier 3 W2:**
+- Quality scoring model integration
+- Complex behavioral signals
+- Cross-tenant recommendation diversity
+- A/B test infrastructure for ranking experiments
+
+### Acceptance criteria summary
+
+P0 acceptance criteria (must pass for pilot ship):
+1. ✅ Layer 2 max 3 items default (cut #1)
+2. ✅ «Cancel» → «Отмена» throughout RU copy (cut #2)
+3. ✅ F4 notes collapsed default (cut #3)
+4. ✅ F3 state-dependent smart suggestions header (cut #4)
+5. ✅ F5 reminders soft generic copy (cut #5)
+6. 🔴 Anonymous gate full booking context preservation (cut #6 — P0 BUG if violated)
+7. ✅ Trust filter = MVP eligibility check, not quality scoring (cut #7)
+
+---
+
+## 17. Sign-off
 
 | Role | Approval | Date |
 |---|---|---|
@@ -920,4 +1035,15 @@ All Q-BF-1..10 resolved per founder verdict 2026-05-26:
 | Accessibility Engineer (WCAG 2.2 AA pass per §11 + 3-layer screen reader test) | ☐ | (pending pilot) |
 
 ## Last verified
-2026-05-26 r1 — Founder ranking philosophy LOCKED (memory `project_ayla_ranking_philosophy`). All Q-BF-1..10 resolved. 3-layer hierarchy adoption critical для brand integrity на pilot launch. Full quality scoring deferred к separate post-pilot project.
+2026-05-26 r2 — Founder review applied 7 implementation cuts (memory `project_booking_flow_implementation_cut`):
+- Layer 2 max 3 (was 5)
+- «Cancel» → «Отмена»
+- F4 notes collapsed default
+- F3 state-dependent smart suggestions header
+- F5 reminders soft generic
+- Anonymous gate full context preservation P0 acceptance criterion
+- Trust filter MVP = simple eligibility (NOT quality scoring formula)
+
+Plus W1/W2 implementation tier appendix §16. All Q-BF-1..10 resolved.
+
+r1 (2026-05-26) — Founder ranking philosophy LOCKED (memory `project_ayla_ranking_philosophy`). 3-layer hierarchy adoption critical для brand integrity. Full quality scoring deferred к separate post-pilot project.
