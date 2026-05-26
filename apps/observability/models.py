@@ -1,12 +1,16 @@
-"""Observability persistence models (Sprint 8 / S3 / DRF-718).
+"""Observability persistence models.
 
-One model — :class:`ShadowDeltaSnapshot`. Stores per-day per-tenant
-agreement metrics so the dashboard (D1) + the strict-scope flip gate
-(F1) can read a stable history without recomputing.
+Two models:
 
-Phase 0 ships a single row per (tenant, date); Sprint 9 may need a
-finer grain (per-hour for canary diagnostics). Keep the constraint
-loose now and tighten when use cases emerge.
+  - :class:`ShadowDeltaSnapshot` (Sprint 8 / S3 / DRF-718) — per-day
+    per-tenant agreement metrics from shadow-mode A/B comparison.
+    Dashboard (D1) + strict-scope flip gate (F1) read history.
+
+  - :class:`AIRequestMetric` (Веха 1 of AI observability epic #769) —
+    per-AI-request metric row capturing intent / skill / latency /
+    tokens / cost / outcome. Source data for daily aggregation
+    (Веха 2 → :class:`AIDailyMetricSummary`) and dashboard
+    (Веха 3 → admin view).
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ from __future__ import annotations
 import uuid
 
 from django.db import models
+
+from apps.tenancy.managers import TenantScopedManager
 
 
 class ShadowDeltaSnapshot(models.Model):
@@ -96,3 +102,378 @@ class ShadowDeltaSnapshot(models.Model):
 
     def __str__(self) -> str:
         return f"ShadowDeltaSnapshot[{self.tenant_id} @ {self.snapshot_date}]"
+
+
+class AIRequestMetric(models.Model):
+    """Per-AI-request observability row (AI observability epic #769 / Веха 1).
+
+    One row per AI-handled inbound request (skill dispatch + LLM call +
+    fallback / clarification path). Records the input characteristics,
+    routing decision, performance, LLM economics, and outcome — enough
+    to compute the 5 pilot thresholds per memory
+    `project_ai_concierge_doc_extracts` Tier-A #1:
+
+      - Task Success Rate (heuristic) ≥ 80%
+      - Response Latency p95 < 3000ms
+      - Fallback Rate < 20%
+      - Cost per Request < $0.01
+      - Intent Accuracy ≥ 80% — DEFERRED post-pilot (#773)
+
+    Schema spec per tech-lead handoff 2026-05-26. Writes happen
+    synchronously from the AI request hot path via
+    `apps.observability.ai_metrics.record_ai_request()` — target <5ms
+    overhead on a request that already takes 1-3s end-to-end.
+
+    Tenant-scoped via :class:`TenantScopedManager` — standard pattern
+    consistent with `BotUser` / `TenantStaff` / `CatalogMaster`. The
+    `all_tenants` escape hatch exists for the daily-aggregation Celery
+    task which iterates tenants explicitly (Веха 2).
+
+    # W2 emission points (separate PR, not Веха 1 scope)
+
+    W2 stream owns the emission sites:
+      - `apps/orchestrator/` — intent classification + skill routing
+      - `apps/skills/<each>/` — post-execute() outcome recording
+      - `apps/llm/` client wrapper — token + cost capture
+
+    Веха 1 ships the schema + recorder API; W2 wires the call sites in
+    a parallel PR keyed on the documented kwargs of `record_ai_request()`.
+
+    # Task success correlation (Веха 2 — NOT Веха 1)
+
+    `booking_event_id` + `success_correlated_at` are populated by the
+    daily aggregation job's heuristic: when a booking event lands
+    within 60 min of the last AI message in the same conversation, the
+    job back-fills these fields on the originating `AIRequestMetric`
+    rows. Веха 1 leaves these NULL.
+    """
+
+    OUTCOME_SUCCESS = "success"
+    OUTCOME_ERROR = "error"
+    OUTCOME_FALLBACK = "fallback"
+    OUTCOME_ESCALATED = "escalated"
+    OUTCOME_CHOICES = [
+        (OUTCOME_SUCCESS, "Success — AI handled the request end-to-end"),
+        (OUTCOME_ERROR, "Error — exception during skill / LLM execution"),
+        (OUTCOME_FALLBACK, "Fallback — confidence < threshold, asked clarification"),
+        (OUTCOME_ESCALATED, "Escalated — handed off to human operator"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True,
+        help_text="When the AI request finished. Drives the daily aggregation "
+        "cursor (Веха 2) — rollup pulls rows for `date(created_at) == target_date`.",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="ai_request_metrics",
+        help_text="Owning tenant. PROTECT — metric history is forensic + "
+        "billing-adjacent data; dropping a tenant must not silently nuke it.",
+    )
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.PROTECT,
+        related_name="ai_request_metrics",
+        null=True,
+        blank=True,
+        help_text="The user whose message triggered the AI request. PROTECT "
+        "to preserve metric history; nullable for system-triggered AI calls "
+        "(e.g. proactive nudges, scheduled retention messages).",
+    )
+    conversation = models.ForeignKey(
+        "conversations.Conversation",
+        on_delete=models.SET_NULL,
+        related_name="ai_request_metrics",
+        null=True,
+        blank=True,
+        help_text="Owning conversation. SET_NULL — Conversation soft-deletes "
+        "are common (152-ФЗ forget-flow); metric row survives for billing/audit.",
+    )
+    request_id = models.UUIDField(
+        db_index=True,
+        help_text="Trace correlation ID — matches the orchestrator's trace_id_scope() "
+        "so a single user turn can be reconstructed across logs + Event rows + "
+        "this metric. Indexed for «show me everything for trace X» queries.",
+    )
+
+    # ─── Intent + skill ──────────────────────────────────────────────────
+    message_text_length = models.IntegerField(
+        help_text="Length of the inbound user message text in characters. "
+        "Stored separately from message body (which lives in Conversation "
+        "+ Message rows) so cost-vs-length analysis doesn't require joining.",
+    )
+    intent_classified = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="The intent label the classifier produced (e.g. 'book_service', "
+        "'ask_master_availability'). Empty when no classifier ran (e.g. early "
+        "fallback). Indexed for per-intent aggregation in Веха 2.",
+    )
+    intent_confidence = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="0..1 classifier confidence. NULL when no classifier ran. "
+        "Drives the fallback-trigger threshold (BeautyGo Tier-A #4 — confidence < 0.7).",
+    )
+    skill_selected = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="The skill registry name that handled the request (e.g. "
+        "'booking', 'faq', 'echo'). Empty on early fallback / error before dispatch.",
+    )
+    fallback_triggered = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True when the skill dispatcher chose clarification over execution "
+        "(confidence below threshold OR no skill matched). Drives the Fallback Rate "
+        "threshold metric (< 20% target).",
+    )
+
+    # ─── Performance ─────────────────────────────────────────────────────
+    latency_total_ms = models.IntegerField(
+        help_text="Total wall-clock time from request receipt to outbound dispatch, "
+        "in milliseconds. Drives the Latency p95 < 3000ms threshold.",
+    )
+    latency_llm_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="LLM API call duration in ms (subset of latency_total). NULL when "
+        "no LLM call (cached / non-LLM skill path).",
+    )
+    latency_skill_ms = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Skill execute() duration in ms (subset of latency_total). NULL on "
+        "early fallback / error before skill dispatch.",
+    )
+
+    # ─── LLM economics ───────────────────────────────────────────────────
+    llm_provider = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="LLM provider slug — 'openai', 'anthropic', 'yandex', etc. "
+        "Empty when no LLM call. Used for per-provider cost breakdown.",
+    )
+    llm_tokens_input = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Input tokens billed by the provider. NULL when no LLM call.",
+    )
+    llm_tokens_output = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Output tokens billed by the provider. NULL when no LLM call.",
+    )
+    llm_cost_usd = models.DecimalField(
+        max_digits=10,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        help_text="USD cost for this single LLM call (6 dp = 0.000001 = a fraction of "
+        "a cent). Drives the Cost per Request < $0.01 threshold. NULL when no LLM call.",
+    )
+
+    # ─── Outcome ─────────────────────────────────────────────────────────
+    outcome = models.CharField(
+        max_length=16,
+        choices=OUTCOME_CHOICES,
+        db_index=True,
+        help_text="Terminal state of the AI handling: success / error / fallback / "
+        "escalated. Drives the Task Success Rate heuristic via correlation with "
+        "downstream booking events (filled by Веха 2 aggregation job).",
+    )
+
+    # ─── Task success correlation (Веха 2 fills) ────────────────────────
+    booking_event_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="If a booking event landed within 60 min of this AI message in the "
+        "same conversation, the daily aggregation job (Веха 2) records the booking "
+        "event's id here. Drives Task Success Rate (heuristic). NULL until correlated.",
+    )
+    success_correlated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the aggregation job linked this row to a booking event. "
+        "NULL until correlated. Lets late-arriving aggregation distinguish "
+        "«not yet checked» from «checked, no correlation found».",
+    )
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "AI request metric"
+        verbose_name_plural = "AI request metrics"
+        ordering = ["-created_at"]
+        indexes = [
+            # Primary aggregation lookup — «rows for tenant X in date range».
+            models.Index(fields=["tenant", "-created_at"], name="airm_tenant_ts_idx"),
+            # Per-intent breakdown for daily rollup.
+            models.Index(
+                fields=["tenant", "intent_classified"],
+                name="airm_tenant_intent_idx",
+            ),
+            # Outcome distribution — success / error / fallback / escalated counts.
+            models.Index(
+                fields=["tenant", "outcome"],
+                name="airm_tenant_outcome_idx",
+            ),
+            # Fallback Rate metric — `WHERE fallback_triggered = true`.
+            models.Index(
+                fields=["tenant", "fallback_triggered"],
+                name="airm_tenant_fallback_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"AIRequestMetric[{self.id} tenant={self.tenant_id} "
+            f"intent={self.intent_classified or '-'} outcome={self.outcome}]"
+        )
+
+
+class AIDailyMetricSummary(models.Model):
+    """Per-tenant per-day rollup of `AIRequestMetric` rows (AI observability Веха 2 / #771).
+
+    Source: `aggregate_daily_metrics(target_date, tenant)` walks all
+    `AIRequestMetric` rows where `date(created_at) == target_date AND
+    tenant=tenant`, computes the 4 pilot threshold metrics + counts +
+    latency percentiles + cost aggregates, and writes one row here via
+    `update_or_create` keyed on `(tenant, snapshot_date)`.
+
+    Idempotent — re-running the Celery beat task for the same day yields
+    the same row, same payload. Late-arriving `AIRequestMetric` rows
+    (back-fills, replays) are picked up by the next aggregation pass.
+
+    The 4 thresholds evaluated:
+      - task_success_rate ≥ 0.80  (booking-correlation heuristic)
+      - latency_p95_ms < 3000
+      - fallback_rate < 0.20
+      - mean_cost_usd < $0.01
+
+    `threshold_status` JSONB stores per-metric verdict (`ok` / `breach`)
+    for dashboard rendering (Веха 3) + audit. Empty-day handling:
+    `total_requests == 0` → status = `{"no_data": true}`, no alerts fire.
+    """
+
+    THRESHOLD_OK = "ok"
+    THRESHOLD_BREACH = "breach"
+    THRESHOLD_NO_DATA = "no_data"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="ai_daily_metric_summaries",
+        help_text="Owning tenant. PROTECT — billing-adjacent rollup history.",
+    )
+    snapshot_date = models.DateField(
+        db_index=True,
+        help_text="UTC date the rollup covers. Beat schedules at 03:00 UTC and "
+        "reads yesterday's `AIRequestMetric` rows (mirrors Sprint 8 cadence).",
+    )
+
+    # ─── Counts ──────────────────────────────────────────────────────────
+    total_requests = models.PositiveIntegerField(
+        default=0,
+        help_text="Total AI requests handled this day. Drives all rate metrics.",
+    )
+    success_count = models.PositiveIntegerField(default=0)
+    error_count = models.PositiveIntegerField(default=0)
+    fallback_count = models.PositiveIntegerField(default=0)
+    escalated_count = models.PositiveIntegerField(default=0)
+
+    # ─── Latency ─────────────────────────────────────────────────────────
+    latency_p50_ms = models.PositiveIntegerField(
+        default=0,
+        help_text="Median latency. NULL semantics: stored as 0 when total_requests==0.",
+    )
+    latency_p95_ms = models.PositiveIntegerField(
+        default=0,
+        help_text="95th percentile latency in ms. Drives the < 3000ms threshold.",
+    )
+    latency_p99_ms = models.PositiveIntegerField(default=0)
+
+    # ─── Cost ────────────────────────────────────────────────────────────
+    total_tokens_input = models.PositiveBigIntegerField(default=0)
+    total_tokens_output = models.PositiveBigIntegerField(default=0)
+    total_cost_usd = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        default=0,
+        help_text="Sum of `llm_cost_usd` across the day. Drives mean_cost_usd.",
+    )
+    mean_cost_usd = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        default=0,
+        help_text="`total_cost_usd / total_requests`. Drives the < $0.01 threshold.",
+    )
+
+    # ─── Rate metrics ────────────────────────────────────────────────────
+    task_success_rate = models.FloatField(
+        default=0.0,
+        help_text="`(AIRequestMetric.success_correlated_at IS NOT NULL count) / "
+        "total_requests`. Drives the ≥ 0.80 threshold. Heuristic correlation "
+        "via Conversation.last_booking_at within 60min of AI message.",
+    )
+    fallback_rate = models.FloatField(
+        default=0.0,
+        help_text="`fallback_count / total_requests`. Drives the < 0.20 threshold.",
+    )
+
+    # ─── Per-intent breakdown ────────────────────────────────────────────
+    intent_distribution = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="`{intent_label: count}` for the day. Dashboard surfaces "
+        "the top-5 intents per tenant. Empty when total_requests==0.",
+    )
+
+    # ─── Threshold status ────────────────────────────────────────────────
+    threshold_status = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Per-metric verdict — `{metric: {value, threshold, op, status}}`. "
+        "`status` in `ok`/`breach`/`no_data`. Empty when total_requests==0 "
+        "(status becomes `{no_data: true}`). Dashboard reads this directly.",
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When the aggregation task wrote this row.",
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        help_text="When the aggregation task last refreshed this row. Idempotent "
+        "re-runs bump this without changing the payload.",
+    )
+
+    # Cross-tenant dashboard reads via `.filter(snapshot_date__gte=cutoff)` —
+    # opt-out same as ShadowDeltaSnapshot pattern (apps/observability/views.py).
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    class Meta:
+        verbose_name = "AI daily metric summary"
+        verbose_name_plural = "AI daily metric summaries"
+        ordering = ["-snapshot_date", "tenant"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "snapshot_date"],
+                name="ai_daily_metric_one_per_tenant_per_day",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "-snapshot_date"], name="aidm_tenant_date_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AIDailyMetricSummary[{self.tenant_id} @ {self.snapshot_date}]"
