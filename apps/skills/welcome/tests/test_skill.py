@@ -179,7 +179,12 @@ class TestHandleCallback:
 
 import pytest  # noqa: E402
 
-from apps.skills.welcome.skill import START_S2_PLACEHOLDER_TEXT  # noqa: E402
+from apps.skills.welcome.skill import (  # noqa: E402
+    CONSENT_GRANTED_PLACEHOLDER_TEXT,
+    S2_CONSENT_TEXT,
+    S2_REFUSED_TEXT,
+    S2A_DETAILS_TEXT,
+)
 
 
 @pytest.fixture
@@ -281,9 +286,10 @@ class TestS1AutoTrigger:
         assert skill.matches(_ctx_with_botuser("/start", welcomed_bot_user)) is True
 
     @pytest.mark.django_db
-    def test_start_s2_callback_returns_placeholder(self, unwelcomed_bot_user):
-        """[▶️ Начать] tap → cb:welcome:start_s2 → placeholder text +
-        re-show menu. Final S2 (privacy consent) lands в Tau's PR."""
+    def test_start_s2_callback_returns_consent_prompt(self, unwelcomed_bot_user):
+        """[▶️ Начать] tap → cb:welcome:start_s2 → S2 privacy consent
+        prompt с 3 buttons («Да, продолжим» / «Узнать что хранится» /
+        «Не сейчас»). Tau's customer-onboarding-flow.md §5 verbatim."""
         skill = WelcomeSkill()
         skill.handle(_ctx_with_botuser("/start", unwelcomed_bot_user))
         unwelcomed_bot_user.refresh_from_db()
@@ -291,8 +297,15 @@ class TestS1AutoTrigger:
         result = skill.handle(
             _ctx_with_botuser("cb:welcome:start_s2", unwelcomed_bot_user),
         )
-        assert result.reply_text == START_S2_PLACEHOLDER_TEXT
-        assert result.meta["reply_kind"] == "welcome_start_s2_placeholder"
+        assert result.reply_text == S2_CONSENT_TEXT
+        assert result.action_type == "welcome_consent_prompt"
+        assert result.meta["reply_kind"] == "welcome_s2_consent_prompt"
+        callbacks = [b["callback"] for b in result.action_data["buttons"]]
+        assert callbacks == [
+            "cb:welcome:consent_yes",
+            "cb:welcome:consent_details",
+            "cb:welcome:consent_refuse",
+        ]
 
     @pytest.mark.django_db
     def test_save_failure_does_not_block_welcome(
@@ -329,3 +342,95 @@ class TestS1Buttons:
         callbacks = [b.get("callback") for b in buttons]
         assert "▶️ Начать" in labels
         assert "cb:welcome:start_s2" in callbacks
+
+
+# ───────────────────────────────────────────────────────────────────────
+# S2 privacy consent (152-ФЗ) — task #85 part 2, 2026-05-26
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestS2ConsentFlow:
+    """S2 / S2a / refused consent flows (Tau customer-onboarding-flow.md
+    §5 + §11 State 3)."""
+
+    @pytest.mark.django_db
+    def test_consent_details_returns_s2a_expanded(self, unwelcomed_bot_user):
+        """«Узнать что хранится» → S2a fold disclosing scope.
+
+        Two buttons: «Понятно, продолжим» (=consent_yes) + «Не сейчас»
+        (=consent_refuse). Same outcomes as S2's first/third buttons —
+        single source of truth для consent stamping."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_details", unwelcomed_bot_user),
+        )
+        assert result.reply_text == S2A_DETAILS_TEXT
+        assert result.action_type == "welcome_consent_details"
+        assert result.meta["reply_kind"] == "welcome_s2a_details"
+        callbacks = [b["callback"] for b in result.action_data["buttons"]]
+        assert callbacks == ["cb:welcome:consent_yes", "cb:welcome:consent_refuse"]
+
+    @pytest.mark.django_db
+    def test_consent_yes_stamps_consent_at(self, unwelcomed_bot_user):
+        """«Да, продолжим» → BotUser.consent_at установлен в DB."""
+        skill = WelcomeSkill()
+        assert unwelcomed_bot_user.consent_at is None
+
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        unwelcomed_bot_user.refresh_from_db()
+        assert unwelcomed_bot_user.consent_at is not None
+        assert result.reply_text == CONSENT_GRANTED_PLACEHOLDER_TEXT
+        assert result.meta["reply_kind"] == "welcome_consent_granted"
+
+    @pytest.mark.django_db
+    def test_consent_yes_idempotent_does_not_overwrite(self, unwelcomed_bot_user):
+        """Double-tap (или S2 → S2a → consent_yes) НЕ overwrites
+        original consent_at timestamp. Audit-trail integrity:
+        «когда впервые согласилась» = source of truth."""
+        from django.utils import timezone
+
+        skill = WelcomeSkill()
+        original_consent_at = timezone.now() - __import__("datetime").timedelta(hours=1)
+        unwelcomed_bot_user.consent_at = original_consent_at
+        unwelcomed_bot_user.save(update_fields=["consent_at"])
+
+        skill.handle(_ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user))
+        unwelcomed_bot_user.refresh_from_db()
+        assert unwelcomed_bot_user.consent_at == original_consent_at
+
+    @pytest.mark.django_db
+    def test_consent_refuse_returns_goodbye_no_keyboard(self, unwelcomed_bot_user):
+        """«Не сейчас» → State 3 graceful exit. Tau §11: «six words,
+        dignity preserved, door open». consent_at остаётся NULL."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_refuse", unwelcomed_bot_user),
+        )
+        assert result.reply_text == S2_REFUSED_TEXT
+        assert result.action_data is None
+        assert result.meta["reply_kind"] == "welcome_consent_refused"
+        unwelcomed_bot_user.refresh_from_db()
+        assert unwelcomed_bot_user.consent_at is None
+
+    @pytest.mark.django_db
+    def test_consent_yes_save_failure_does_not_block_response(
+        self, unwelcomed_bot_user, monkeypatch, caplog
+    ):
+        """Mirror welcomed_at pattern: DB write fail → log ERROR +
+        deliver placeholder. Худший случай: consent re-asked на следующем
+        entry в S2; not data-loss since user IS giving consent right now."""
+        import logging as _logging
+
+        def _explode(*args, **kwargs):
+            raise RuntimeError("DB write fail")
+
+        monkeypatch.setattr(unwelcomed_bot_user, "save", _explode)
+        skill = WelcomeSkill()
+        with caplog.at_level(_logging.ERROR, logger="apps.skills.welcome.skill"):
+            result = skill.handle(
+                _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+            )
+        assert result.reply_text == CONSENT_GRANTED_PLACEHOLDER_TEXT
+        assert any("consent_at_save_failed" in r.message for r in caplog.records)
