@@ -162,6 +162,18 @@ class Command(BaseCommand):
                     "data": "{}",
                     "trace_id": f"d2-drill-{int(time.time())}-{i}",
                     "resolved_tenant_id": "",
+                    # Pre-flip blocker F2-companion (W3 backstop pass
+                    # 2026-05-26): tag entries as drill-origin so
+                    # downstream audit / baseline analysis can filter
+                    # them out of legitimate-traffic numbers. Matches
+                    # the parity established by
+                    # ``run_strict_flip_drill.py`` which also injects
+                    # ``_drill=1`` for the same reason. Without this
+                    # tag, on a shared-staging Postgres a drill run
+                    # would pollute the audit-baseline computation
+                    # (issue #500 §3) and look like legitimate traffic
+                    # to operator triage.
+                    "_drill": "1",
                 },
             )
         inject_elapsed = time.monotonic() - injected_at
