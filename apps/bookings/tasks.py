@@ -323,19 +323,30 @@ def send_due_reminders() -> dict[str, int]:
                 row.kind,
                 reason,
             )
-            write_audit(
-                action="bookings.reminder.stale_dropped",
-                target="BookingReminder",
-                target_id=row.pk,
-                payload={
-                    "kind": row.kind,
-                    "yclients_record_id": row.yclients_record_id,
-                    "reason": reason,
-                    "booking_request_id": (
-                        str(row.booking_request_id) if row.booking_request_id else None
-                    ),
-                },
-            )
+            # Audit is forensic best-effort here — row already CAS'd к
+            # STALE_DROPPED, status enum carries the signal. If audit
+            # raises (DB blip / payload-validation glitch), don't kill
+            # the batch loop. CR #851 suggestion #6 hardening.
+            try:
+                write_audit(
+                    action="bookings.reminder.stale_dropped",
+                    target="BookingReminder",
+                    target_id=row.pk,
+                    payload={
+                        "kind": row.kind,
+                        "yclients_record_id": row.yclients_record_id,
+                        "reason": reason,
+                        "booking_request_id": (
+                            str(row.booking_request_id) if row.booking_request_id else None
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "bookings.dispatch.stale_audit_failed pk=%s reason=%s",
+                    row.pk,
+                    reason,
+                )
             stale += 1
             continue
 

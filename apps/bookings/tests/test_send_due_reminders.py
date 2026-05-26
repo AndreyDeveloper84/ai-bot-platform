@@ -517,12 +517,14 @@ class TestSendTimeRecheck:
 class TestRecheckAdversarial:
     """Phase F adversarial — race conditions + state-change-during-tick."""
 
-    def test_concurrent_cancel_lost_race_on_stale_cas(
+    def test_row_already_stale_dropped_skipped_from_batch(
         self, tenant: Tenant, bot_user: BotUser
     ) -> None:
-        """Another worker dropped the row first (e.g. cancellation webhook
-        flipped к CANCELLED while we were in the for-loop). Our CAS
-        WHERE status=PENDING returns rowcount=0 → skipped, no double-audit."""
+        """Row was flipped к STALE_DROPPED by another worker / earlier
+        tick. Query filter (status=PENDING) excludes it от the batch;
+        no audit double-emit. CR #851 finding: renamed для accuracy —
+        true mid-loop CAS race needs threading; the inline-precedent
+        CAS pattern is well-tested elsewhere в this module."""
         from apps.audit.models import AuditLog
         from apps.booking.models import BookingRequest
 
