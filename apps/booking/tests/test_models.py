@@ -137,8 +137,12 @@ class TestBookingReminder:
             )
 
     def test_status_choices_locked(self) -> None:
-        # B2 locks the full reminder lifecycle vocabulary so B3 (skill
-        # tools + Celery dispatchers) lands without a schema migration.
+        # B2 locked the original lifecycle. ``stale_dropped`` added в
+        # migration 0013 для P0 PRE_PILOT send-time re-check invariant
+        # (founder pilot-scope sequence #2) — distinct from CANCELLED
+        # because CANCELLED means «B2 webhook said cancelled», whereas
+        # STALE_DROPPED means «dispatch noticed booking changed between
+        # schedule + send».
         assert set(BookingReminder.Status.values) == {
             "pending",
             "sent_no_reply",
@@ -148,4 +152,5 @@ class TestBookingReminder:
             "cancelled",
             "escalated",
             "failed",
+            "stale_dropped",
         }
