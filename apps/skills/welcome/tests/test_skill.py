@@ -682,3 +682,22 @@ class TestS1MultiTenantVariant:
         )
         assert result.reply_text == WELCOME_TEXT
         assert result.meta["reply_kind"] == "welcome"
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "weird_payload",
+        ["кириллица", "🎉_emoji_payload", "ref-hyphen-not-underscore", "Ref_capitalised"],
+    )
+    def test_non_ascii_or_malformed_payload_falls_through_safely(
+        self, unwelcomed_bot_user, weird_payload
+    ):
+        """Defensive audit (CR #810 nit #6): Cyrillic / emoji / hyphen-
+        instead-of-underscore / capitalised prefix payloads NEVER trigger
+        multi-tenant variant — case-sensitive ASCII prefix match. All
+        fall through к standard WELCOME_TEXT without 500 / panic."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser(f"/start {weird_payload}", unwelcomed_bot_user),
+        )
+        assert result.reply_text == WELCOME_TEXT
+        assert result.meta["reply_kind"] == "welcome"

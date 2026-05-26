@@ -425,8 +425,16 @@ def _resolve_salon_name(bot_user) -> str:
             name = getattr(tenant, "name", "") or ""
             if name:
                 return name
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Don't silent-fail на programming bugs (TypeError, broken
+        # tenant FK, DB error). WARNING level — operator must see the
+        # fallback was triggered, иначе regression hides за «нашем
+        # салоне». CR #810 follow-up #4.
+        logger.warning(
+            "welcome.salon_name_resolve_failed bot_user_id=%s err=%s",
+            getattr(bot_user, "id", None),
+            exc,
+        )
     return "нашем салоне"
 
 

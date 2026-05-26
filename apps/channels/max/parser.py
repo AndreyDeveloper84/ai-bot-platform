@@ -252,6 +252,12 @@ def _parse_bot_started(payload: dict[str, Any]) -> CanonicalEvent:
     # (cross-cutting refactor). Empty payload → text="/start" verbatim
     # (backward compat with attribution-only flows и existing tests).
     # Also stash on ``raw`` для downstream attribution skill access.
+    #
+    # Whitespace: only edge whitespace stripped via .strip(); internal
+    # whitespace в crafted deeplinks preserved through suffix, stripped
+    # again at extraction time. Prefix-match against ASCII-only Tau
+    # patterns (ref_/qr_/ig_post_) means Unicode / emoji payloads fall
+    # through to standard WELCOME_TEXT safely (CR #810 nits #6 + #7).
     deeplink_payload = payload.get("payload") or ""
     synthetic_text = f"/start {deeplink_payload}".strip() if deeplink_payload else "/start"
     return CanonicalEvent(
