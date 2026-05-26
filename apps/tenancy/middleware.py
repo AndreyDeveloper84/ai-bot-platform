@@ -77,6 +77,14 @@ STRICT_OPT_OUT_PREFIXES = (
     # follows the same pattern but is opted in to strict mode for
     # parity with PR 1 — left as-is to keep PR scope tight.)
     "/api/v1/admin/",
+    # #732 (PRE_PILOT) — temporary 410 Gone for retired YooKassa
+    # webhook. YooKassa has no X-Tenant header (external webhook).
+    # Without this opt-out the strict-mode flip (2026-05-28 per
+    # project_strict_tenant_refuse_soak) would return 400
+    # TENANT_REQUIRED before the 410 view runs, defeating the
+    # forensic-capture design. Removed by the cleanup PR alongside
+    # the apps.integrations.yookassa_retired package.
+    "/api/v1/yookassa/",
 )
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.
