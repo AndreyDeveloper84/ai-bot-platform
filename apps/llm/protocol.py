@@ -153,6 +153,26 @@ class LLMProviderUnavailable(LLMError):
     """
 
 
+class UnknownTenantError(LLMError):
+    """A ``tenant_id`` reached ``apps.llm.cost_tracker`` that does not
+    correspond to any row in :class:`apps.tenancy.models.Tenant`.
+
+    LLM retro Y3 (PR #473): before this exception, ``_read_tenant_caps``
+    / ``_read_tenant_alert_context`` soft-failed to «generous defaults»
+    (1M tokens, $50/day) with an ERROR log. The typo'd / stale tenant
+    id then ran against a fictitious budget — bounded by the daily cap
+    but invisible to the caller. The Phase 0 bridge (PR #409 squash
+    ``4961b8e``) accepted this on the basis that raising inside
+    ``provider.complete()`` would 500 customers because skill envelopes
+    only wrapped router lookup, not completion.
+
+    Phase 1 (#473) replaced the soft-fail with this typed raise. The
+    skill envelope in ``apps/skills/{booking,faq}/skill.py`` now catches
+    :class:`LLMError` (covers this + ``LLMProviderUnavailable`` + the
+    rest) and produces a friendly handoff with reason ``llm_error``.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------

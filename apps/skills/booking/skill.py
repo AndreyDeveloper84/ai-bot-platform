@@ -63,7 +63,7 @@ from apps.bookings.keyboards import (
 )
 from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
-from apps.llm.protocol import CompletionResult, ToolCall
+from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
@@ -326,13 +326,32 @@ class BookingSkill:
                 brand_voice=_DEFAULT_BRAND_VOICE,
                 query=query_text,
             )
-            first = asyncio.run(
-                provider.complete(
-                    first_messages,
-                    model=model,
-                    tools=BOOKING_TOOL_SPECS,
+            # #473 LLM Y3 envelope expansion: catch any LLMError (covers
+            # UnknownTenantError from cost_tracker, LLMProviderUnavailable,
+            # LLMTransportError, LLMQuotaError, LLMProviderQuotaExceeded)
+            # and convert to friendly handoff. Pre-#473 these would
+            # propagate as raw exceptions → 500 the customer.
+            try:
+                first = asyncio.run(
+                    provider.complete(
+                        first_messages,
+                        model=model,
+                        tools=BOOKING_TOOL_SPECS,
+                    )
                 )
-            )
+            except LLMError as exc:
+                logger.warning(
+                    "booking.llm.first_complete_failed tenant=%s err_type=%s err=%s",
+                    tenant_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                return _handoff(
+                    tool_calls_made=[],
+                    reason="llm_error",
+                    text=_FALLBACK_HANDOFF_TEXT,
+                    tenant_id=tenant_id,
+                )
 
         if not first.tool_calls:
             # Small talk / direct reply — no tool needed.
@@ -425,7 +444,24 @@ class BookingSkill:
             price=_price_payload(tool_result),
             certificate=_certificate_payload(tool_result),
         )
-        second = asyncio.run(provider.complete(second_messages, model=model))
+        # #473 LLM Y3 envelope expansion: same rationale as Phase 1
+        # call site — catch all LLMError variants and produce a
+        # friendly handoff instead of 500-ing the customer.
+        try:
+            second = asyncio.run(provider.complete(second_messages, model=model))
+        except LLMError as exc:
+            logger.warning(
+                "booking.llm.second_complete_failed tenant=%s err_type=%s err=%s",
+                tenant_id,
+                type(exc).__name__,
+                exc,
+            )
+            return _handoff(
+                tool_calls_made=tool_calls_made,
+                reason="llm_error",
+                text=tool_result.text or _FALLBACK_HANDOFF_TEXT,
+                tenant_id=tenant_id,
+            )
 
         # Fall back to deterministic text when the model returns empty.
         reply_text = second.text or tool_result.text or _FALLBACK_HANDOFF_TEXT

@@ -262,6 +262,74 @@ class TestHandoffPaths:
 
 
 # ---------------------------------------------------------------------------
+# LLM Y3 envelope expansion (#473)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMY3EnvelopeExpansion:
+    """Per-skill coverage for issue #473 — FAQ flow.
+
+    Any LLMError variant raised inside the FAQ flow (provider lookup,
+    first complete, embedding-provider lookup, embedding call, second
+    complete) MUST be caught by the single envelope wrapping the
+    LLM-touching body and converted to a friendly handoff with
+    ``reason="llm_error"``.
+    """
+
+    def test_unknown_tenant_error_at_first_complete_returns_friendly_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Headline #473 scenario — UnknownTenantError raised inside
+        ``provider.complete`` (via the cost_tracker.enforce_caps path)
+        propagates to the skill envelope as a clean LLM error → friendly
+        handoff."""
+
+        from apps.llm.protocol import UnknownTenantError
+
+        with _patch_provider_complete([UnknownTenantError("stale tenant uuid")]):
+            result = FAQSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "llm_error"
+
+    def test_llm_provider_unavailable_at_first_complete_returns_friendly_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """LLMProviderUnavailable (e.g. missing API key) at first
+        completion → handoff."""
+
+        from apps.llm.protocol import LLMProviderUnavailable
+
+        with _patch_provider_complete([LLMProviderUnavailable("OPENAI_API_KEY not set")]):
+            result = FAQSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "llm_error"
+
+    def test_transport_error_at_second_complete_returns_friendly_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """LLMTransportError raised on the SECOND completion (Phase 3
+        grounded answer) — distinct from first-call path. Asserts
+        single FAQ envelope catches at the wider try-block scope.
+        """
+
+        from apps.llm.protocol import LLMTransportError
+
+        _seed_chunks(tenant)
+        tc = ToolCall(id="c1", name="search_knowledge_base", arguments={"query": "x"})
+        completions: list[Any] = [
+            _completion(tool_calls=[tc]),
+            LLMTransportError("vendor 5xx timeout"),
+        ]
+        with (
+            _patch_provider_complete(completions),
+            _patch_provider_embedding([0.9] * 8),
+        ):
+            result = FAQSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "llm_error"
+
+
+# ---------------------------------------------------------------------------
 # Decision 15 — NO render_system_prompt import
 # ---------------------------------------------------------------------------
 

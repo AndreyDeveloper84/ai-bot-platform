@@ -290,21 +290,31 @@ async def _create_tenant_async(*, name: str) -> Tenant:
 
 
 class TestRetroY3UnknownTenantLogsLoudly:
-    """Pre-fix _read_tenant_caps used logger.WARNING + generous defaults
-    when tenant_id was unknown — a stale UUID silently ran against a
-    fictitious budget. Post-fix upgrades the log level to ERROR (Sentry-
-    visible) so the typo surfaces, while keeping the soft-fail return-
-    defaults so the customer flow never 500s. Proper typed
-    ``UnknownTenantError(LLMError)`` + skill envelope deferred.
+    """LLM retro Y3 evolved from «log loudly + soft-fail defaults»
+    (Phase 0 bridge in PR #409) to «log loudly + raise UnknownTenantError»
+    (Phase 1 in PR #473).
+
+    Pre-Phase-1: stale UUID silently ran against a fictitious budget
+    (1M tokens, $50) — bounded by the daily cap but invisible.
+    Post-Phase-1: stale UUID raises :class:`UnknownTenantError(LLMError)`
+    which is caught by the skill envelope in booking/faq and converted
+    to a friendly handoff. The ERROR-level log is still emitted before
+    raising so Sentry triage stays cheap.
     """
 
-    async def test_unknown_tenant_logs_error_and_returns_defaults(self, caplog) -> None:
+    async def test_unknown_tenant_logs_error_and_raises(self, caplog) -> None:
+        from apps.llm.protocol import UnknownTenantError
+
         bogus_id = str(uuid4())
         with caplog.at_level("ERROR", logger="apps.llm.cost_tracker"):
-            # enforce_caps doesn't raise — it falls through to the
-            # generous defaults so customer flow never 500s.
-            await enforce_caps(bogus_id)
-        # The offending id is in the ERROR-level log for Sentry triage.
+            with pytest.raises(UnknownTenantError) as exc_info:
+                await enforce_caps(bogus_id)
+
+        # The exception message embeds the offending id.
+        assert bogus_id in str(exc_info.value)
+
+        # ERROR-level log fires BEFORE the raise so Sentry sees it
+        # even if a future caller swallows the exception.
         matching = [
             rec
             for rec in caplog.records
@@ -313,18 +323,18 @@ class TestRetroY3UnknownTenantLogsLoudly:
         assert matching, "expected ERROR-level tenant_not_found log"
         assert bogus_id in matching[0].message
 
-    async def test_unknown_tenant_alert_ctx_also_logs_error(self, caplog) -> None:
+    async def test_unknown_tenant_alert_ctx_also_raises(self, caplog) -> None:
         from asgiref.sync import sync_to_async
 
         from apps.llm.cost_tracker import _read_tenant_alert_context
+        from apps.llm.protocol import UnknownTenantError
 
         bogus_id = str(uuid4())
         with caplog.at_level("ERROR", logger="apps.llm.cost_tracker"):
-            token_cap, cost_cap, mgr = await sync_to_async(_read_tenant_alert_context)(bogus_id)
-        # Soft-fail to defaults so accounting can keep going.
-        assert token_cap == 1_000_000
-        assert cost_cap == Decimal("50.00")
-        assert mgr == ""
+            with pytest.raises(UnknownTenantError) as exc_info:
+                await sync_to_async(_read_tenant_alert_context)(bogus_id)
+
+        assert bogus_id in str(exc_info.value)
         matching = [
             rec
             for rec in caplog.records
