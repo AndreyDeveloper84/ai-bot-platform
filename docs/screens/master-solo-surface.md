@@ -29,7 +29,7 @@ Per `solo-provider-ux.md §7.1`:
 
 ### Куда уходит
 
-- Customer initiates «Написать по записи» → Olga receives in inbox (§4.1 «Мой день» sticky-top section)
+- Customer initiates «Сообщить по записи» → Olga receives in inbox (§4.1 «Мой день» sticky-top section)
 - Customer cancels/reschedules → Ayla notifies Olga (manager-bot DM push)
 - Olga chats с Ayla (8th tab AI-помощник) — voice merges owner+master tones
 
@@ -791,7 +791,7 @@ Ayla: Анна написала «опаздывает на 10 минут».
 - Fields: customer_id, bot_user_id (Olga), timestamp, surface (где tap'нула — booking card / customer detail / etc.)
 - Retention: 7 years per `conversation-ownership-policy §5` sensitive actions
 
-### 6.3 «Написать по записи» inbox (Q-MSL-4)
+### 6.3 «Сообщить по записи» inbox (Q-MSL-4)
 
 Per `ayla-mediated-messaging.md §7`:
 - Customer initiates → Olga receives in inbox
@@ -911,7 +911,7 @@ Per master-conversational-templates §2 — master voice = functional Ayla regis
 
 Most endpoints exist in Bundle A or master-management handoff infrastructure. Solo flags work via existing `is_solo_provider` field on `/api/v1/me`.
 
-### 8.2 «Написать по записи» integration
+### 8.2 «Сообщить по записи» integration
 
 Per ayla-mediated-messaging.md §7 + §14:
 - New endpoint `GET /api/v1/me/master/messaging/inbox` — pending customer messages

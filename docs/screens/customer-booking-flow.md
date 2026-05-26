@@ -601,7 +601,7 @@ Implementation requirement: backend must accept registration callback с `pendin
 
 - Confirmation pattern «Записала тебя на {{day}} в {{time}} — у {{master}} в {{salon}}» (1:1 с Ayla voice per ayla-identity-and-brand §10.1)
 - Reminders expectation set (брief, no exact times — they vary per salon SLA)
-- «Написать по записи» mention natural per Q-BF-8 lean
+- «Сообщить по записи» mention natural per Q-BF-8 lean
 - Salon = third-party («у Анны в Beauty Place»)
 - NO upsell («заодно запишись на массаж?»)
 - NO «спасибо за выбор Ayla» (corporate)
@@ -665,7 +665,7 @@ All copy через ayla-identity-and-brand voice rules. Examples per surface:
 |---------|-------|
 | Confirmation | «Записала тебя на четверг 16:00 — у Анны в Beauty Place» |
 | What's next | «Я напомню перед визитом, чтобы ты не пропустила.» (softer per cut #5 — backend may not deliver exact 3-reminder schedule) |
-| «Написать по записи» discovery | «Если вопрос про подготовку или забыла спросить — можешь написать по записи.» |
+| «Сообщить по записи» discovery | «Если вопрос про подготовку или забыла спросить — можешь написать по записи.» |
 
 ### Anti-patterns (NEVER)
 
@@ -873,7 +873,7 @@ All Q-BF-1..10 resolved per founder verdict 2026-05-26:
 - Q-BF-5: (a) Inline loyalty points ✅
 - Q-BF-6: YES full voice refactor ✅
 - Q-BF-7: (a) Inline cancellation policy ✅
-- Q-BF-8: (b) «Написать по записи» mention natural ✅
+- Q-BF-8: (b) «Сообщить по записи» mention natural ✅
 - Q-BF-9: Records tab separate scope ✅
 - Q-BF-10: Solo provider = same flow ✅
 

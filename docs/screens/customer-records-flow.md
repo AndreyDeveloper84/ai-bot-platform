@@ -8,7 +8,7 @@
 | **Channel** | MAX webview Mini App, «Записи» tab from bottom nav |
 | **Stream** | Tau (UX/Design) |
 | **Date** | 2026-05-26 r1 |
-| **Foundation** | [`customer-main-wellness-dashboard.md`](./customer-main-wellness-dashboard.md) (bottom nav) · [`customer-booking-flow.md`](./customer-booking-flow.md) §3 (multi-tenant Variant C reuse) · [`customer-cancellation-reschedule-flow.md`](./customer-cancellation-reschedule-flow.md) (action flows) · [`ayla-mediated-messaging.md §3.1`](../design/policies/ayla-mediated-messaging.md) («Написать по записи») · [`information-architecture.md`](../design/policies/information-architecture.md) §4 |
+| **Foundation** | [`customer-main-wellness-dashboard.md`](./customer-main-wellness-dashboard.md) (bottom nav) · [`customer-booking-flow.md`](./customer-booking-flow.md) §3 (multi-tenant Variant C reuse) · [`customer-cancellation-reschedule-flow.md`](./customer-cancellation-reschedule-flow.md) (action flows) · [`ayla-mediated-messaging.md §3.1`](../design/policies/ayla-mediated-messaging.md) («Сообщить по записи») · [`information-architecture.md`](../design/policies/information-architecture.md) §4 |
 | **Severity** | P0 BLOCKER pilot — без Records tab customer не видит свою историю |
 
 ---
@@ -30,7 +30,7 @@ Records tab = bottom nav Surface 3 per `information-architecture.md` §4. Existi
 - 2 sections approach «Ближайшие» / «История» (NOT 4 heavy tabs)
 - R1 Main list + R2 Upcoming card + R3 Booking detail (THE main screen) + R4 Status vocabulary + R5 Empty states + R6 Repeat booking CTA
 - Multi-tenant Variant C reuse from booking-flow §8
-- Past bookings: limited actions (no Перенести / Отменить / Написать по записи per ayla-mediated-messaging §11.1)
+- Past bookings: limited actions (no Перенести / Отменить / Сообщить по записи per ayla-mediated-messaging §11.1)
 
 **Out of scope (per tech lead «не тащить в Records MVP»):**
 - Complex per-booking message history
@@ -102,7 +102,7 @@ Customer's all upcoming bookings (status `confirmed` или `rescheduled`):
 │  │  ~1 800 ₽                              │   │
 │  │                                        │   │
 │  │  [ Открыть запись ]                    │   │
-│  │  [ Написать по записи ]                │   │
+│  │  [ Сообщить по записи ]                │   │
 │  │  [ Маршрут ] [ Перенести ] [ Отмена ]  │   │  Full actions
 │  └──────────────────────────────────────┘   │  (nearest booking)
 │                                               │
@@ -114,7 +114,7 @@ Customer's all upcoming bookings (status `confirmed` или `rescheduled`):
 │  │  Массаж лимфодренаж · 60 мин           │   │
 │  │  Ирина · Beauty Place                  │   │
 │  │                                        │   │
-│  │  [ Открыть ] [ Написать по записи ]    │   │  Limited actions
+│  │  [ Открыть ] [ Сообщить по записи ]    │   │  Limited actions
 │  └──────────────────────────────────────┘   │
 │                                               │
 │  ── Через неделю ──                           │
@@ -125,7 +125,7 @@ Customer's all upcoming bookings (status `confirmed` или `rescheduled`):
 │  │  Маникюр + дизайн · 120 мин            │   │
 │  │  Анна · Beauty Place                   │   │
 │  │                                        │   │
-│  │  [ Открыть ] [ Написать по записи ]    │   │
+│  │  [ Открыть ] [ Сообщить по записи ]    │   │
 │  └──────────────────────────────────────┘   │
 │                                               │
 └──────────────────────────────────────────────┘
@@ -246,7 +246,7 @@ If «Ближайшие» tab имеет nearest booking <24h до визита 
 ┌──────────────────────────────────────────────┐
 │  ⏰ Запись через 3 часа · 16:00                │  Sticky banner
 │  Маникюр у Анны в Beauty Place                │
-│  [ Маршрут ]   [ Написать по записи ]          │
+│  [ Маршрут ]   [ Сообщить по записи ]          │
 └──────────────────────────────────────────────┘
 ```
 
@@ -268,12 +268,12 @@ NOT a card duplicate of nearest — just quick access bar.
 │  ~1 800 ₽                              │
 │                                        │
 │  [ Открыть запись ]                    │
-│  [ Написать по записи ]                │
+│  [ Сообщить по записи ]                │
 │  [ Маршрут ] [ Перенести ] [ Отмена ]  │
 └──────────────────────────────────────┘
 ```
 
-5 actions: Открыть запись (detail) / Написать по записи (per ayla-mediated) / Маршрут (maps deeplink) / Перенести (per cancel/reschedule) / Отмена (per cancel/reschedule).
+5 actions: Открыть запись (detail) / Сообщить по записи (per ayla-mediated) / Маршрут (maps deeplink) / Перенести (per cancel/reschedule) / Отмена (per cancel/reschedule).
 
 ### 4.2 Future booking (>24h, not nearest) — Limited actions
 
@@ -284,7 +284,7 @@ NOT a card duplicate of nearest — just quick access bar.
 │  Массаж лимфодренаж · 60 мин           │
 │  Ирина · Beauty Place                  │
 │                                        │
-│  [ Открыть ] [ Написать по записи ]    │
+│  [ Открыть ] [ Сообщить по записи ]    │
 └──────────────────────────────────────┘
 ```
 
@@ -303,7 +303,7 @@ NOT a card duplicate of nearest — just quick access bar.
 └──────────────────────────────────────┘
 ```
 
-Per Q-R-5 lean — «Записаться ещё» always + «Оставить отзыв» if pending. NO «Написать по записи» (closed per ayla-mediated-messaging §11.1).
+Per Q-R-5 lean — «Записаться ещё» always + «Оставить отзыв» if pending. NO «Сообщить по записи» (closed per ayla-mediated-messaging §11.1).
 
 ---
 
@@ -340,7 +340,7 @@ Per tech lead «Самый важный экран». Single tall scroll per Q-R
 │                                               │
 │  Действия                                     │  5. Actions
 │                                               │     (sticky или
-│  [ 💬 Написать по записи ]                    │      очень заметная
+│  [ 💬 Сообщить по записи ]                    │      очень заметная
 │  [ 🔄 Перенести ]                              │      для upcoming —
 │  [ ✕ Отменить запись ]                         │      per founder
 │                                               │      explicit order)
@@ -887,7 +887,7 @@ Patterns reuse from `customer-booking-flow.md §11`. Records-specific:
 - ❌ Hide cancelled bookings entirely (transparency loss)
 - ❌ Endless infinite scroll (use «Показать ещё» pagination)
 - ❌ Cross-tenant data leakage (one tenant's note visible to another) — privacy boundary
-- ❌ Past booking «Написать по записи» (per ayla-mediated-messaging §11.1 — closed bookings have no messaging)
+- ❌ Past booking «Сообщить по записи» (per ayla-mediated-messaging §11.1 — closed bookings have no messaging)
 
 ---
 

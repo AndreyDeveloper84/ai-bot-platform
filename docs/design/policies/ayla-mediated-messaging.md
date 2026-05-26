@@ -113,7 +113,7 @@ Single source for:
 
 5. **Emergency keywords route to Doc #3** — payment / refund / legal / serious complaint language detected → emergency fallback policy applies, not this messaging.
 
-6. **One-shot exchanges, no threads** — каждый «Написать по записи» tap = standalone exchange. No conversation history visible to customer per booking.
+6. **One-shot exchanges, no threads** — каждый «Сообщить по записи» tap = standalone exchange. No conversation history visible to customer per booking.
 
 ### 2.2 Visual placement
 
@@ -131,7 +131,7 @@ Single source for:
 │   │            │         │ THIS DOC              │  │ (Doc #3)    │ │
 │   └────────────┘         └──────────────────────┘  └─────────────┘ │
 │   Customer asks,         Customer initiates:        System detects: │
-│   Ayla answers           «Написать по записи»       payment_dispute │
+│   Ayla answers           «Сообщить по записи»       payment_dispute │
 │                          → quick reason             booking_conflict│
 │                          → context routed           integration_err │
 │                          to master/admin            legally_sensitive│
@@ -148,7 +148,7 @@ Single source for:
 
 ## 3. Entry points
 
-Customer может trigger «Написать по записи» из 3 surface:
+Customer может trigger «Сообщить по записи» из 3 surface:
 
 ### 3.1 Dashboard booking card (compact CTA)
 
@@ -189,13 +189,13 @@ Button label compact form: `Написать` (booking card horizontal space tig
 │                                       │
 │  ─────────────────────────────       │
 │                                       │
-│  [ 💬 Написать по записи ]             │  ← Full CTA
+│  [ 💬 Сообщить по записи ]             │  ← Full CTA
 │  [ Перенести ] [ Отменить запись ]     │
 │  [ Маршрут до салона ]                 │
 └──────────────────────────────────────┘
 ```
 
-Full label `💬 Написать по записи` — more space, prefix emoji for clarity.
+Full label `💬 Сообщить по записи` — more space, prefix emoji for clarity.
 
 ### 3.3 Bot DM trigger detection
 
@@ -311,7 +311,7 @@ For master side response (§7), each reason has predefined chips:
 
 ## 5. UX flow — happy path
 
-### 5.1 Tap «Написать по записи»
+### 5.1 Tap «Сообщить по записи»
 
 Customer taps from dashboard booking card OR Records tab booking detail → opens quick reasons modal.
 
@@ -319,7 +319,7 @@ Customer taps from dashboard booking card OR Records tab booking detail → open
 
 ```
 ┌──────────────────────────────────────┐
-│  Написать по записи                   │
+│  Сообщить по записи                   │
 │                                       │
 │  16:00 · массаж · у Ирины             │
 │  Формула тела                          │
@@ -629,7 +629,7 @@ Customer sees response через standard quote format: `Ирина подтв�
 
 Ольга = self-employed. Per `solo-provider-ux.md` — her surface = solo unified, не split admin/master.
 
-For Ольга, «Написать по записи» from customer arrives в her master mobile inbox same way. Olga's surface shows:
+For Ольга, «Сообщить по записи» from customer arrives в her master mobile inbox same way. Olga's surface shows:
 
 ```
 [Olga's master mobile — solo dashboard]
@@ -881,7 +881,7 @@ Per §4.4 mapping. All chips use first-person или action-direct:
 ### 10.1 No threads, fresh exchange per tap
 
 Per Q-AMM-6 + founder spec:
-- Каждый «Написать по записи» tap = standalone exchange с fresh booking context
+- Каждый «Сообщить по записи» tap = standalone exchange с fresh booking context
 - No conversation history visible to customer per booking
 - Master sees latest message с «по 16:00 записи» context, не history
 - If customer wants to update («теперь опаздываю на 20 минут вместо 10») — new tap, new exchange
@@ -914,7 +914,7 @@ Post-MVP threading evaluation после первых 50 customers' usage patter
 ### 11.1 Closed bookings have no «Написать»
 
 Once booking `status = COMPLETED` (visit happened) OR `status = CANCELLED` (closed before visit):
-- Records tab «Прошедшие» booking detail — **no** «Написать по записи» button
+- Records tab «Прошедшие» booking detail — **no** «Сообщить по записи» button
 - Booking card UI hides messaging CTA
 
 ### 11.2 Why excluded
@@ -940,7 +940,7 @@ For MVP — no formal past-booking messaging surface.
 
 Per Q-AMM-10 + emergency policy detection (per `ayla-emergency-fallback-policy.md` §3.1-3.4):
 
-If customer's free text message contains language matching emergency fallback patterns, route to Doc #3, not «Написать по записи»:
+If customer's free text message contains language matching emergency fallback patterns, route to Doc #3, not «Сообщить по записи»:
 
 | Pattern | Routes to (Doc #3 tier) |
 |---------|------------------------|
@@ -953,7 +953,7 @@ If customer's free text message contains language matching emergency fallback pa
 
 Detection happens **server-side** при customer's free text submission. If matched → flow rerouted to emergency fallback policy: Ayla acknowledges differently, admin starts work in admin UI invisibly.
 
-### 12.2 What stays в «Написать по записи»
+### 12.2 What stays в «Сообщить по записи»
 
 Operational queries не emergency:
 - Опаздываю
@@ -966,7 +966,7 @@ Operational queries не emergency:
 
 ### 12.3 Smooth transition language
 
-If customer started «Написать по записи» free text but message matched emergency → Ayla quietly switches voice:
+If customer started «Сообщить по записи» free text but message matched emergency → Ayla quietly switches voice:
 
 ```
 Customer types: «верните деньги за вчера»
@@ -999,7 +999,7 @@ NO customer-visible mode switch / loading. Just different Ayla message tone (eme
 ### 13.3 Past-booking messaging
 
 ❌ Don't:
-- Show «Написать по записи» на closed bookings
+- Show «Сообщить по записи» на closed bookings
 - Allow «спасибо за вчерашний визит» surface (use review flow instead)
 
 ### 13.4 Master proactive customer-first
@@ -1024,7 +1024,7 @@ NO customer-visible mode switch / loading. Just different Ayla message tone (eme
 ### 13.7 Threading / history
 
 ❌ Don't (MVP scope):
-- Customer sees previous «Написать по записи» exchanges for this booking
+- Customer sees previous «Сообщить по записи» exchanges for this booking
 - Master sees customer's other bookings via this message
 - Provide «conversation history per provider» surface
 
@@ -1177,7 +1177,7 @@ All 10 Phase B questions (Q-AMM-1 … Q-AMM-10) resolved by founder/tech lead 20
 - [`../../screens/customer-main-wellness-dashboard.md`](../../screens/customer-main-wellness-dashboard.md) — booking card adds «Написать» CTA per §3.1
 - [`../../screens/customer-onboarding-flow.md`](../../screens/customer-onboarding-flow.md) — minor: NO onboarding mention per Q-AMM-8 discovery contextual
 - [`../handoffs/2026-05-18-master-mobile-handoff.md`](../handoffs/2026-05-18-master-mobile-handoff.md) — master mobile inbox extension per §7
-- [`information-architecture.md`](./information-architecture.md) — Records tab booking detail section gets «Написать по записи» entry
+- [`information-architecture.md`](./information-architecture.md) — Records tab booking detail section gets «Сообщить по записи» entry
 
 ### Consumed by (downstream implementers)
 - **W1** — Booking card refresh с «Написать» CTA + multi-tenant grouping Variant C (§8) — both dashboard compact + Records tab full + Quick reasons modal Mini App component + Master response display formatting
