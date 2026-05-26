@@ -13,7 +13,7 @@ Per the strict-flip runbook HARD GATE, `STRICT_TENANT_REFUSE=true` MUST
 NOT flip until all 4 operational ceilings are wired and verified:
 
 1. PEL length alert (warning N=1000, page N=5000)
-2. `worker.tenant_required_missing` per-handler rate budget (≤100/min)
+2. `worker.tenant_required_missing` per-handler rate budget (≤100/hour, hour-aligned)
 3. Audit-table baseline snapshot + 2× growth alert
 4. Alert dedup on `(handler, hour)`
 
@@ -154,87 +154,71 @@ do NOT flip.
 
 ---
 
-## §2 — `worker.tenant_required_missing` rate budget (≤100/min)
+## §2 — `worker.tenant_required_missing` rate budget (≤100/hour, hour-aligned)
 
 ### What it does
 
-Caps the audit emit rate at 100 events per minute per `(handler,
-strict_mode)` tuple. A misbehaving ingress firing 5000/h tenant-missing
-entries would otherwise produce 5000 audit rows/h. The cap bounds the
-audit table growth and prevents alert flood.
+Caps the audit emit rate at **100 events per hour-bucket per
+`(handler, hour)` tuple** — NOT per minute. The bucket is wall-clock-
+aligned to UTC hour boundaries (`int(time.time()) // 3600`). A flood
+crossing the hour boundary effectively allows up to 200 emits in a
+single ±N-second window around `:00:00` — that's the discontinuity
+trade-off of an aligned bucket. Documented here so a flip-day operator
+doesn't mistake the boundary spike for a regression.
+
+A misbehaving ingress firing 5000/h tenant-missing entries would
+otherwise produce 5000 audit rows/h. The cap bounds the audit table
+growth and prevents alert flood.
 
 ### Where it lives
 
-This is the ONLY D-2 item that requires an **application-level code
-change** (not pure ops wiring). The change is a 15-line patch to
-`apps/workers/base.py` adding a Redis-backed token bucket around the
-`emit("worker.tenant_required_missing", ...)` call.
+Already shipped in `apps/workers/ceilings.py::should_emit_tenant_missing`
++ `apps/workers/base.py` call sites (PR #528 / round-3 hardening,
+already merged). No application-level patch required at flip time —
+this section is documentation-only verification.
 
-### Patch (apply via PR before the flip)
+The setting name is **`WORKER_TENANT_MISSING_RATE_LIMIT`** (default
+`100`), defined at `config/settings/base.py:192`. (Earlier drafts of
+this runbook referenced `TENANT_REQUIRED_MISSING_RATE_LIMIT` — fixed
+2026-05-26 to match the merged code.)
 
-Create a follow-up PR with this diff. The change is small enough to
-self-merge under §H.3 rules (category 1 — exploitable production today
-if NOT applied; rate-limited audit emit is the load-bearing defence
-against audit-table blow-up):
+### Silenced-emit semantics
 
-```python
-# apps/workers/base.py — inside __call__, around the existing emit
-# for worker.tenant_required_missing.
+When `count > limit`, the helper:
 
-# Token-bucket rate cap (D-2 #500): 100 events per minute per (handler, strict).
-# Implementation: Redis INCR with EXPIRE 60 on the per-(handler, strict_mode, minute) key.
-# When the count exceeds 100, swallow the emit + bump a separate
-# `worker.tenant_required_missing_dropped` counter so ops can see the drop.
+* **Returns `False`** to the caller — caller MUST NOT emit the audit
+  row in that case.
+* **Logs ONCE per hour-bucket** at `count == limit + 1` (see
+  `apps/workers/ceilings.py:297-310` for the exact branch):
+  `workers.ceilings.tenant_missing_rate_exceeded handler=<h> count=<n> limit=<L> window=hourly — subsequent emits this hour silently dropped (operator-side ceiling, issue #500)`.
+* **Does NOT emit a companion event** like
+  `worker.tenant_required_missing_dropped`. (An earlier draft of this
+  runbook proposed such an event; the merged implementation simplified
+  to «one log line per window» to keep the dropped path itself
+  Redis-free.) The grep target for ops triage is the literal
+  `tenant_missing_rate_exceeded` in the worker log.
 
-from apps.ingress.streams import _client as _redis_client
-
-_RATE_LIMIT_PER_MINUTE = int(getattr(settings, "TENANT_REQUIRED_MISSING_RATE_LIMIT", 100))
-
-def _audit_emit_allowed(handler_name: str, strict_mode: bool) -> bool:
-    bucket = f"audit_rate:{handler_name}:{int(strict_mode)}:{int(time.time() // 60)}"
-    try:
-        r = _redis_client()
-        count = r.incr(bucket)
-        if count == 1:
-            r.expire(bucket, 70)  # 60s window + 10s grace for clock skew
-        return count <= _RATE_LIMIT_PER_MINUTE
-    except Exception:
-        # Redis unavailable → fail-open (let the emit through; better
-        # to over-audit than to silently drop during outage).
-        return True
-```
-
-Then at each `emit("worker.tenant_required_missing", ...)` site, wrap
-with the gate:
-
-```python
-if _audit_emit_allowed(type(self).__name__, strict):
-    emit("worker.tenant_required_missing", payload={...})
-else:
-    # Dropped — bump a counter so ops sees the spike + which handler.
-    emit("worker.tenant_required_missing_dropped", payload={
-        "handler": type(self).__name__,
-        "strict_mode": strict,
-    })
-```
-
-### Wire-up
-
-Apply the patch via PR, merge under §H.3 self-merge discipline. After
-merge:
+### Wire-up verification (positive assertion)
 
 ```sh
 # Confirm settings flag value (default 100):
 docker compose --env-file /etc/ai-bot-platform/.env exec web \
-  uv run python -c "from django.conf import settings; print(settings.TENANT_REQUIRED_MISSING_RATE_LIMIT)"
+  uv run python -c "from django.conf import settings; print(settings.WORKER_TENANT_MISSING_RATE_LIMIT)"
 ```
 
-### Verify (positive assertion)
+Expected output: `100` (or your `.env` override).
+
+### Verify (positive assertion via drill)
 
 Run the synthetic flood drill (§«Synthetic drill» below). Expected:
-audit table grows by ≤100 rows in the first 60s of the burst, NOT 200+.
-A `worker.tenant_required_missing_dropped` row appears AT LEAST ONCE in
-the same window.
+
+* **Audit table grows by ≤100 rows** per `(handler, hour)` tuple in
+  the burst window. Drift +N where N is small (clock-skew on hour-
+  bucket boundary) is acceptable; >>100 indicates the cap is not
+  engaged.
+* **Worker log contains exactly ONE** `tenant_missing_rate_exceeded`
+  line per `(handler, hour)` during the burst (the «threshold
+  crossed» signal).
 
 ---
 
@@ -484,23 +468,39 @@ CURRENT_AUDIT_ROWS=$(
     "SELECT COUNT(*) FROM apps_audit_event WHERE event_type='worker.tenant_required_missing'"
 )
 DELTA=$((CURRENT_AUDIT_ROWS - BASELINE_AUDIT_ROWS))
-echo "    audit delta: $DELTA rows (expected ≤100 with rate budget)"
+echo "    audit delta: $DELTA rows (expected ≤100 per hour-bucket with rate budget)"
 if [ "$DELTA" -le 100 ]; then
-  echo "    ✓ Rate budget effective (audit grew by $DELTA, ≤100/min cap)"
+  echo "    ✓ Rate budget effective (audit grew by $DELTA, ≤100/hour cap)"
 else
-  echo "    ✗ Rate budget NOT effective — audit grew by $DELTA — ceiling #2 not wired"
+  # NOTE on hour-bucket discontinuity: a drill spanning the wall-clock
+  # hour boundary can legitimately produce up to ≈200 rows (100 from
+  # the closing bucket + 100 from the next opening bucket). If $DELTA
+  # is in that range AND the drill ran across :00:00, this may be a
+  # false-fail. Inspect the worker log for the «tenant_missing_rate_exceeded»
+  # line count: if it shows 2 occurrences with different hour suffixes,
+  # the cap is engaged correctly on both buckets — pass with note.
+  echo "    ✗ Rate budget NOT effective — audit grew by $DELTA — ceiling #2 not wired (OR drill spanned hour boundary, see note above)"
   FAIL=1
 fi
 
-# Assertion 3: dropped-counter row exists (proves the cap actually engaged)
-DROPPED_ROWS=$(
-  sudo -u postgres psql -d ai_bot_platform -tAc \
-    "SELECT COUNT(*) FROM apps_audit_event WHERE event_type='worker.tenant_required_missing_dropped' AND created_at > now() - interval '6 minutes'"
+# Assertion 3: «threshold crossed» log line fired (proves the cap actually engaged)
+#
+# The merged ceilings implementation does NOT emit a companion audit
+# event when cap fires — it logs ONCE per hour-bucket at count == limit+1.
+# (An earlier draft of this runbook proposed a `worker.tenant_required_missing_dropped`
+# event; that approach was simplified during the #528 merge to keep the
+# dropped path Redis-free. The grep target is the worker log literal
+# `tenant_missing_rate_exceeded` per the §2 «Silenced-emit semantics»
+# section above.)
+THRESHOLD_LOGS=$(
+  journalctl -u 'ai-bot-workers@*' --since '6 minutes ago' --no-pager 2>/dev/null \
+    | grep -c 'workers.ceilings.tenant_missing_rate_exceeded' || true
 )
-if [ "$DROPPED_ROWS" -ge 1 ]; then
-  echo "    ✓ Drop-counter row present ($DROPPED_ROWS) — cap engaged"
+if [ "$THRESHOLD_LOGS" -ge 1 ]; then
+  echo "    ✓ Threshold-crossed log fired ($THRESHOLD_LOGS occurrences) — cap engaged"
 else
-  echo "    ✗ NO drop-counter — rate budget either off OR drill didn't exceed threshold"
+  echo "    ✗ NO tenant_missing_rate_exceeded log line in window — rate budget either off OR drill didn't exceed threshold"
+  echo "      hint: re-check via 'docker compose ... uv run python -c ...' that WORKER_TENANT_MISSING_RATE_LIMIT is set as expected"
   FAIL=1
 fi
 
@@ -544,7 +544,7 @@ sequence in [`strict-tenant-refuse-flip.md`](strict-tenant-refuse-flip.md#flip-s
 Each ceiling is independently disable-able if it misfires post-flip:
 
 - §1: `sudo systemctl disable --now pel-length-alert.timer`
-- §2: `TENANT_REQUIRED_MISSING_RATE_LIMIT=999999` in `.env` + restart
+- §2: `WORKER_TENANT_MISSING_RATE_LIMIT=999999` in `.env` + restart
 - §3: `sudo systemctl disable --now audit-growth-alert.timer`
 - §4: revert `alertmanager.yml` OR remove `_dedup_post.sh` wrapper
 

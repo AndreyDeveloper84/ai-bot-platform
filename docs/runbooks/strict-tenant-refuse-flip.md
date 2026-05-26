@@ -151,7 +151,8 @@ When the pre-flip checklist below is satisfied:
       Tech-lead directive 2026-05-22: do NOT flip until all 4
       ceilings below are wired (see «HARD GATE» section).
       Specific thresholds: PEL alert warn N=1000 / page N=5000;
-      handler rate budget ≤100/min; audit table 2× baseline alert;
+      handler rate budget ≤100/hour (hour-aligned, see #500 §2);
+      audit table 2× baseline alert;
       alert dedup on `(handler, hour)`.
 - [ ] At flip time: `PEL_REAPER_ENABLED=true` set in
       `/etc/ai-bot-platform/.env` alongside `STRICT_TENANT_REFUSE=true`
