@@ -147,6 +147,97 @@ def _target_status(kind: str) -> str:
     return BookingReminder.Status.SENT
 
 
+# ── Send-time booking-state re-check (P0 PRE_PILOT, founder sequence #2) ──
+#
+# Between the moment a reminder is scheduled (T-24h or T-2h before visit)
+# and the moment the beat dispatcher claims it, the underlying booking
+# may have flipped state — customer cancelled via B5, admin rescheduled,
+# visit already happened. Sending in those states = «Ayla напомнила о
+# записи которую я отменила» = trust break.
+#
+# This helper re-fetches the linked ``BookingRequest`` mirror at dispatch
+# time and classifies the action к take:
+#
+#   * **send** — booking still CONFIRMED + not completed; proceed normally.
+#   * **drop** — booking moved к a terminal-invalid state. Reminder
+#                transitions к ``STALE_DROPPED`` (audit trail), no send.
+#   * **defer** — booking is in an interim reversible state
+#                 (CANCEL_REQUESTED / RESCHEDULE_REQUESTED within undo
+#                 window). Skip THIS tick без CAS; next 15-min tick
+#                 re-checks. Avoids the «user un-cancels but reminder
+#                 already dropped» edge case.
+#
+# Action constants live as plain strings (no Enum) — minimum surface for a
+# 3-state classifier; callers branch on equality directly.
+_ACTION_SEND = "send"
+_ACTION_DROP = "drop"
+_ACTION_DEFER = "defer"
+
+
+def _recheck_booking_state(reminder: BookingReminder) -> tuple[str, str]:
+    """Classify the dispatch action for ``reminder`` based on current
+    booking state. See module-level rationale block above for verbatim
+    state-mapping table.
+
+    Returns:
+      A ``(action, reason)`` pair. ``reason`` is a stable slug suitable
+      для audit payload / log line correlation. Caller chooses what к
+      do based on ``action``.
+
+    ### NULL FK / Ayla-path handling
+
+    ``BookingReminder.booking_request`` may be NULL для:
+
+      * Legacy rows pre-B5 (B5 introduced ``BookingRequest.status``
+        enum and the FK on the reminder).
+      * Ayla-path rows that link via ``ayla_appointment_id`` instead.
+
+    Both cases return ``(send, "null_fk_legacy_or_ayla_path")`` — known
+    Phase 0 gap. Ayla-path stale detection lands в Phase 1 (Ayla emits
+    ``appointment.cancelled`` event → bot-platform consumer pre-emptively
+    drops the reminder). Documented prominently в PR description.
+    """
+    booking_request = reminder.booking_request
+    if booking_request is None:
+        # NULL FK = legacy row OR Ayla-path. Pilot-scope gap.
+        return (_ACTION_SEND, "null_fk_legacy_or_ayla_path")
+
+    # Completed visit — T-2h reminder for already-happened appointment
+    # is absurd; T-24h race window technically impossible (visit_at < 24h
+    # away can't be completed yet) but defensive check costs nothing.
+    if booking_request.completed_at is not None:
+        return (_ACTION_DROP, "booking_completed")
+
+    # Import locally to avoid module-import cycle с apps.booking.models
+    # (which may reach back into bookings via signals).
+    from apps.booking.models import BookingRequest
+
+    status = booking_request.status
+    if status in (
+        BookingRequest.Status.CANCELLED,
+        BookingRequest.Status.RESCHEDULED,
+    ):
+        return (_ACTION_DROP, f"booking_status_{status}")
+
+    if status in (
+        BookingRequest.Status.CANCEL_REQUESTED,
+        BookingRequest.Status.RESCHEDULE_REQUESTED,
+    ):
+        # Interim reversible state (~5s undo window per booking spec).
+        # Defer без CAS so user can revert and still receive reminder.
+        return (_ACTION_DEFER, f"booking_status_{status}")
+
+    if status == BookingRequest.Status.CONFIRMED:
+        return (_ACTION_SEND, "booking_confirmed")
+
+    # Unknown / future status (mirror may receive new Ayla state slugs
+    # before this code learns about them — e.g. ``provider_cancelled``,
+    # ``no_show``, ``dispute`` arrive в Phase 1). Conservative default:
+    # defer + log. Better к miss a few reminders one tick than send for
+    # a state we don't understand.
+    return (_ACTION_DEFER, f"booking_status_unknown_{status}")
+
+
 @shared_task(name="bookings.send_due_reminders")
 def send_due_reminders() -> dict[str, int]:
     """Dispatch every reminder whose ``scheduled_at`` has passed.
@@ -169,8 +260,15 @@ def send_due_reminders() -> dict[str, int]:
     5. On send failure: catch, flip to FAILED, audit. Don't requeue —
        see module docstring.
 
-    Returns a dict ``{"sent": int, "failed": int, "skipped": int}``
+    Returns a dict
+    ``{"sent": int, "failed": int, "skipped": int, "stale": int, "deferred": int}``
     for telemetry / test visibility.
+
+    ``stale`` counts reminders dropped at dispatch because the underlying
+    booking changed state (P0 PRE_PILOT send-time re-check invariant).
+    ``deferred`` counts rows left PENDING because booking is in an
+    interim reversible state (CANCEL_REQUESTED / RESCHEDULE_REQUESTED) —
+    the next 15-min tick re-checks.
     """
     now = timezone.now()
     due_qs = (
@@ -178,14 +276,70 @@ def send_due_reminders() -> dict[str, int]:
             status=BookingReminder.Status.PENDING,
             scheduled_at__lte=now,
         )
-        .select_related("tenant", "bot_user")
+        .select_related("tenant", "bot_user", "booking_request")
         .order_by("scheduled_at")[:BATCH_LIMIT]
     )
 
     sent = 0
     failed = 0
     skipped = 0
+    stale = 0
+    deferred = 0
     for row in due_qs:
+        # Send-time re-check invariant (P0 PRE_PILOT). See
+        # ``_recheck_booking_state`` docstring + module-level rationale
+        # block above the helper для full state-mapping table.
+        action, reason = _recheck_booking_state(row)
+        if action == _ACTION_DEFER:
+            # Interim reversible state OR unknown status. Don't touch
+            # the row — leave PENDING for next 15-min tick. No CAS, no
+            # send, no audit (defer is normal flow, not a finding).
+            logger.info(
+                "bookings.dispatch.deferred pk=%s kind=%s reason=%s",
+                row.pk,
+                row.kind,
+                reason,
+            )
+            deferred += 1
+            continue
+        if action == _ACTION_DROP:
+            # Booking became invalid между schedule + dispatch. CAS PENDING
+            # → STALE_DROPPED. Loser of the race silently skips.
+            rowcount = BookingReminder.all_tenants.filter(
+                pk=row.pk,
+                status=BookingReminder.Status.PENDING,
+            ).update(status=BookingReminder.Status.STALE_DROPPED)
+            if rowcount == 0:
+                logger.info(
+                    "bookings.dispatch.race_lost_on_stale pk=%s kind=%s",
+                    row.pk,
+                    row.kind,
+                )
+                skipped += 1
+                continue
+            logger.info(
+                "bookings.dispatch.stale_dropped pk=%s kind=%s reason=%s",
+                row.pk,
+                row.kind,
+                reason,
+            )
+            write_audit(
+                action="bookings.reminder.stale_dropped",
+                target="BookingReminder",
+                target_id=row.pk,
+                payload={
+                    "kind": row.kind,
+                    "yclients_record_id": row.yclients_record_id,
+                    "reason": reason,
+                    "booking_request_id": (
+                        str(row.booking_request_id) if row.booking_request_id else None
+                    ),
+                },
+            )
+            stale += 1
+            continue
+
+        # action == _ACTION_SEND — normal dispatch path.
         target_status = _target_status(row.kind)
         # Compare-and-set: only proceed if we are the first to claim
         # this row. .update() returns the affected rowcount; 0 means
@@ -271,14 +425,22 @@ def send_due_reminders() -> dict[str, int]:
         )
         sent += 1
 
-    if sent or failed or skipped:
+    if sent or failed or skipped or stale or deferred:
         logger.info(
-            "bookings.dispatch.summary sent=%d failed=%d skipped=%d",
+            "bookings.dispatch.summary sent=%d failed=%d skipped=%d stale=%d deferred=%d",
             sent,
             failed,
             skipped,
+            stale,
+            deferred,
         )
-    return {"sent": sent, "failed": failed, "skipped": skipped}
+    return {
+        "sent": sent,
+        "failed": failed,
+        "skipped": skipped,
+        "stale": stale,
+        "deferred": deferred,
+    }
 
 
 # ─── booking.completed producer ───────────────────────────────────────────

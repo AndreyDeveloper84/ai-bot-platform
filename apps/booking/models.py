@@ -508,6 +508,14 @@ class BookingReminder(models.Model):
         CANCELLED = "cancelled", "Client / admin cancelled"
         ESCALATED = "escalated", "Escalated to human operator"
         FAILED = "failed", "Send error"
+        # P0 PRE_PILOT — send-time booking-state re-check invariant.
+        # Distinct from CANCELLED (which means «B2 webhook said cancelled»).
+        # STALE_DROPPED means «при dispatch обнаружили что underlying
+        # BookingRequest изменилось (cancelled / rescheduled / completed)
+        # ИЛИ became invalid между schedule + dispatch». Auditable как
+        # отдельный signal для post-pilot analytics (stale-rate spike
+        # detection per master / service / time-of-day).
+        STALE_DROPPED = "stale_dropped", "Dropped at dispatch (booking changed)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(
