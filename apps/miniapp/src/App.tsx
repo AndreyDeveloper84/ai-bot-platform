@@ -37,7 +37,7 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
@@ -488,6 +488,158 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
   );
 }
 
+/**
+ * Solo provider unified surface — Tau §5 MVP.
+ *
+ * Activated only when `me.is_solo_provider === true` (W4 PR #760 added
+ * the field to `/api/v1/me`; the helper rule is `len(active_staff_user_ids
+ * ∪ active_master_user_ids) == 1` per Tau §3.1). For these tenants the
+ * chooser used by `UnifiedAdminMasterRoutes` is overkill — Ольга is the
+ * only person in her tenant, so we collapse everything to a single 8-tab
+ * shell and skip the «Салон vs Мой профиль мастера» pick.
+ *
+ * Memory ref: `project_solo_provider_universal_ui` (founder 2026-05-25).
+ *
+ * Tab → screen mapping (decided here; documented in PR body):
+ *   📋 Мой день   → MasterDashboardScreen  (today agenda; reuse)
+ *   📅 Записи     → MasterScheduleScreen   (booking calendar; reuse)
+ *   👥 Клиенты    → SoonScreen (no screen built — placeholder)
+ *   💼 Услуги     → SoonScreen (AdminServicesMatrixScreen exists but is
+ *                   team-tenant overkill for 1-master — separate solo
+ *                   screen tracked post-pilot)
+ *   ⏰ Расписание → MasterScheduleScreen   (same screen as Записи; the
+ *                   separate working-hours editor is not built yet)
+ *   💰 Доходы     → SoonScreen
+ *   ⭐ Отзывы     → SoonScreen (per pilot runbook 3.2.3 — N/A reviews
+ *                   not built)
+ *   🤖 AI         → MasterConversationsScreen (M5 list w/ AI drafts —
+ *                   most pragmatic «chat с Ayla» surface today)
+ *
+ * Legacy `/admin/*` + `/master/*` routes are also mounted inside this
+ * shell so deep-links from bot DMs / bookmarks keep working — Ольга
+ * who has the URL to `/admin/services` still gets there. The bottom nav
+ * just doesn't surface those paths anymore.
+ */
+const SOLO_TABS: ReadonlyArray<{
+  path: string;
+  label: string;
+  icon: string;
+  ariaLabel: string;
+}> = [
+  { path: "/solo/my-day", label: "День", icon: "📋", ariaLabel: "Мой день" },
+  { path: "/solo/bookings", label: "Записи", icon: "📅", ariaLabel: "Записи" },
+  { path: "/solo/clients", label: "Клиенты", icon: "👥", ariaLabel: "Клиенты" },
+  { path: "/solo/services", label: "Услуги", icon: "💼", ariaLabel: "Услуги и цены" },
+  { path: "/solo/schedule", label: "Расп.", icon: "⏰", ariaLabel: "Расписание" },
+  { path: "/solo/earnings", label: "Доходы", icon: "💰", ariaLabel: "Доходы" },
+  { path: "/solo/reviews", label: "Отзывы", icon: "⭐", ariaLabel: "Отзывы" },
+  { path: "/solo/ai", label: "AI", icon: "🤖", ariaLabel: "AI-помощник" },
+];
+
+function SoloBottomNav() {
+  const location = useLocation();
+  return (
+    <nav className="solo-tabbar" aria-label="Основная навигация">
+      {SOLO_TABS.map((t) => {
+        const isActive = location.pathname.startsWith(t.path);
+        return (
+          <Link
+            key={t.path}
+            to={t.path}
+            className={`solo-tabbar__tab${isActive ? " solo-tabbar__tab--active" : ""}`}
+            aria-current={isActive ? "page" : undefined}
+            aria-label={t.ariaLabel}
+          >
+            <span className="solo-tabbar__icon" aria-hidden="true">
+              {t.icon}
+            </span>
+            <span className="solo-tabbar__label">{t.label}</span>
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
+/**
+ * Empty-state «скоро» placeholder for the four solo tabs whose
+ * underlying screens haven't shipped (Клиенты / Услуги / Доходы /
+ * Отзывы). Voice follows Tau §5.4 — frame as a promise, not as
+ * «functionality is broken». Tracking issues filed separately
+ * post-PR; the slug is rendered as a small debug breadcrumb so QA
+ * can repro from a screenshot.
+ */
+function SoonScreen({ tab, slug }: { tab: string; slug: string }) {
+  return (
+    <div className="screen soon-screen">
+      <span className="soon-screen__icon" aria-hidden="true">
+        🌿
+      </span>
+      <h1 className="soon-screen__title">«{tab}» — скоро</h1>
+      <p className="soon-screen__body">
+        Этот раздел появится в следующих обновлениях. Пока работаю над тем,
+        что уже есть — день, записи, расписание.
+      </p>
+      <p
+        className="soon-screen__body"
+        style={{ fontSize: "var(--font-size-100)", opacity: 0.6 }}
+      >
+        {slug}
+      </p>
+    </div>
+  );
+}
+
+function UnifiedSoloSurface({ me }: { me: MeResponse }) {
+  return (
+    <div className="solo-surface">
+      <Routes>
+        {/* Default landing — Tau §5.1 specifies «Мой день» as solo home. */}
+        <Route path="/" element={<Navigate to="/solo/my-day" replace />} />
+
+        {/* Tabs with real screens — reuse existing master surface. */}
+        <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
+        <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
+        {/* Schedule shares the master schedule screen for now — separate
+         * working-hours editor lives in MM3 backlog (not built). */}
+        <Route path="/solo/schedule" element={<MasterScheduleScreen />} />
+        <Route path="/solo/ai" element={<MasterConversationsScreen />} />
+
+        {/* Tabs whose screens haven't been built yet — placeholder. */}
+        <Route
+          path="/solo/clients"
+          element={<SoonScreen tab="Клиенты" slug="solo-clients-screen" />}
+        />
+        <Route
+          path="/solo/services"
+          element={
+            <SoonScreen tab="Услуги и цены" slug="solo-services-screen" />
+          }
+        />
+        <Route
+          path="/solo/earnings"
+          element={<SoonScreen tab="Доходы" slug="solo-earnings-screen" />}
+        />
+        <Route
+          path="/solo/reviews"
+          element={<SoonScreen tab="Отзывы" slug="solo-reviews-screen" />}
+        />
+
+        {/* Legacy admin/master routes still accessible via deep link.
+         * The bot DM might link directly to `/admin/services` or
+         * `/master/conversations/:id` — those must keep working even
+         * though the solo bottom nav doesn't surface them. */}
+        {adminRouteElements(me)}
+        {masterRouteElements()}
+
+        {/* Catch-all → land on solo home. */}
+        <Route path="*" element={<CatchAllRedirect to="/solo/my-day" />} />
+      </Routes>
+      <SoloBottomNav />
+    </div>
+  );
+}
+
 /** Routes for the customer role (Phase 0c / Phase 4 surface). */
 function CustomerRoutes() {
   return (
@@ -580,16 +732,25 @@ export function App() {
   }, [loadMe]);
 
   // Round-1 FOLLOW_UP cleanup (#79): when the resolved role pattern is
-  // single (admin-only OR master-only OR customer-only), drop any stale
+  // single (admin-only OR master-only OR customer-only) OR solo (Tau §5
+  // unified surface — chooser bypassed), drop any stale
   // unified-last-surface key. Prevents a dead key from lingering after
   // a role revocation (e.g. owner who was demoted to master-only and
-  // had previously chosen the admin surface).
+  // had previously chosen the admin surface) OR a team → solo
+  // transition (Tau §9.4 — tenant shrinks to 1 person, chooser no
+  // longer renders). Without this, a team-mode visit that wrote
+  // `master:unified_last_surface=admin` would leak through to a
+  // post-shrink solo session as an orphan key.
   useEffect(() => {
     if (boot.status !== "ready" || !boot.me) return;
     const hasAdmin =
       boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist;
     const hasMaster = boot.me.is_master;
-    if (!(hasAdmin && hasMaster)) {
+    const isSolo = boot.me.is_solo_provider === true;
+    // The chooser is rendered only when `hasAdmin && hasMaster && !isSolo`.
+    // Any other resolved shape => the persisted key is dead weight.
+    const choosing = hasAdmin && hasMaster && !isSolo;
+    if (!choosing) {
       if (typeof window === "undefined" || !window.localStorage) return;
       try {
         window.localStorage.removeItem(UNIFIED_LAST_SURFACE_KEY);
@@ -608,11 +769,38 @@ export function App() {
     const me = boot.me;
     const hasAdmin = me.is_owner || me.is_admin || me.is_receptionist;
     const hasMaster = me.is_master;
-    // Inclusive routing — issue #79 (memory:
-    // project_solo_provider_universal_ui). Solo provider Olga (owner +
-    // admin + master in one tenant) and dual-role team members get
-    // access to BOTH /admin/* and /master/* via a unified surface; the
-    // previous exclusive cascade locked them out of /master/*.
+    // Solo provider hint from W4 (`is_solo_provider(tenant)`) per Tau
+    // §3.1 — true only when the tenant has exactly one distinct active
+    // person. Missing field → false (graceful fallback for older
+    // backends that haven't shipped #760 yet).
+    const isSolo = me.is_solo_provider === true;
+    // Routing cascade — Tau §5 + memory project_solo_provider_universal_ui.
+    //
+    //   1. Solo provider WITH master link → 8-tab unified solo surface.
+    //      Skips the chooser entirely; Olga lands on /solo/my-day.
+    //      Covers her full triple-role (owner+admin+master) — the solo
+    //      surface reuses master-flavored screens (My day / Bookings /
+    //      Schedule / AI all read /master/* endpoints), so a master
+    //      link is required for the surface to be functional.
+    //
+    //      Round-1 amendment (adversarial Code Reviewer): edge case —
+    //      a newly bootstrapped solo tenant where the owner created
+    //      themselves but hasn't been added as a master yet (solo=true,
+    //      admin=true, master=false). Mounting `UnifiedSoloSurface` for
+    //      that user would paint a 8-tab nav whose master-screen tabs
+    //      can't load any data. We narrow the guard to require
+    //      `hasMaster` so that case falls through to the existing
+    //      `hasAdmin → AdminRoutes` branch — they get the admin team
+    //      screen and can add themselves as a master to bootstrap.
+    //
+    //   2. Team dual-role (NOT solo, has both admin AND master) →
+    //      existing chooser surface from PR #753. Татьяна owner+master
+    //      with junior masters under her keeps the «Салон»/«Мой
+    //      профиль мастера» split.
+    //   3-5. Single-role cascade unchanged.
+    if (isSolo && hasMaster) {
+      return <UnifiedSoloSurface me={me} />;
+    }
     if (hasAdmin && hasMaster) {
       return <UnifiedAdminMasterRoutes me={me} />;
     }

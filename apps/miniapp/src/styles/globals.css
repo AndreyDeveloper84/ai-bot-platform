@@ -1035,6 +1035,103 @@ a {
   border: 1.5px solid var(--c-surface-1);
 }
 
+/* ---- Solo provider 8-tab bottom nav (Tau §5.1) ---- */
+
+/*
+ * 8 tabs on a 360–414dp viewport = ~45–52px per tab — tight but workable
+ * with single-word truncated labels («День» / «Записи» / «Клиенты» /
+ * «Услуги» / «Расп.» / «Доходы» / «Отзывы» / «AI»).  Per Tau §5.2,
+ * fallback when content doesn't fit = horizontal scroll, NOT a 5-tab
+ * squeeze. We use `overflow-x: auto` + `flex` rather than the 4-column
+ * grid the master tab bar uses, so labels never clip on the narrow
+ * iPhone SE (375dp) and Android Go (360dp) classes.
+ */
+.solo-tabbar {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  display: flex;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
+  z-index: 100;
+  scrollbar-width: none;
+}
+
+.solo-tabbar::-webkit-scrollbar {
+  display: none;
+}
+
+.solo-tabbar__tab {
+  flex: 1 0 auto;
+  min-width: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: var(--s-1) var(--s-1);
+  min-height: 48px;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+  background: none;
+  border: 0;
+  font: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.solo-tabbar__tab--active {
+  color: var(--c-accent);
+}
+
+.solo-tabbar__icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.solo-tabbar__label {
+  font-size: var(--font-size-100);
+  font-weight: 500;
+}
+
+/* Pad bottom of every solo screen so the fixed tabbar doesn't cover
+ * content (Tau §5.1). Matches the master tabbar offset pattern. */
+.solo-surface .screen {
+  padding-bottom: calc(72px + var(--safe-bottom));
+}
+
+/* ---- Solo «Скоро» placeholder screen (Tau §5.4 empty-state voice) ---- */
+
+.soon-screen {
+  padding: var(--s-5) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--s-3);
+  min-height: 50vh;
+  justify-content: center;
+}
+
+.soon-screen__icon {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.soon-screen__title {
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  margin: 0;
+}
+
+.soon-screen__body {
+  color: var(--c-text-secondary);
+  max-width: 32ch;
+  margin: 0;
+}
+
 /* ===========================================================================
    Master M3 schedule (master-mobile §M3) + M5 conversations (§M5).
    =========================================================================== */
