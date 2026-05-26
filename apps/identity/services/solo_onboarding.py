@@ -433,3 +433,48 @@ def create_solo_provider(
         master=master,
         created=True,
     )
+
+
+# ─── is_solo_provider — Веха 3 (/api/v1/me extension) ──────────────────
+
+
+def is_solo_provider(tenant: Tenant) -> bool:
+    """Return True if `tenant` is a single-person solo-provider workspace.
+
+    Per Tau policy §3.1 (pragmatic «1 distinct person = solo»):
+
+      distinct_people = active_staff_user_ids ∪ active_master_user_ids
+      return len(distinct_people) == 1
+
+    Active = `TenantStaff.deactivated_at IS NULL` and
+    `CatalogMaster.archived_at IS NULL`. Master rows without a
+    `linked_bot_user` (mysite-synced legacy rows or pre-bridge state)
+    are EXCLUDED from the count — they don't correspond to a real
+    BotUser identity.
+
+    Edge cases (accepted per Tau §3.1 «pragmatic»):
+      - 1 staff row, 0 master rows → True (single distinct person)
+      - 0 staff rows, 1 master row → True
+      - Same person in both staff AND master → True (deduped via set)
+      - Empty tenant (e.g. bootstrap) → False (0 distinct people)
+      - 2+ distinct people → False
+
+    Used by `/api/v1/me` to surface the «is this user a self-employed
+    solo provider?» flag to the mini-app UI (Universal UI smart-default
+    routing per memory `project_solo_provider_universal_ui`).
+    """
+    active_staff_ids: set = set(
+        TenantStaff.all_tenants.filter(
+            tenant=tenant,
+            deactivated_at__isnull=True,
+        ).values_list("bot_user_id", flat=True)
+    )
+    active_master_ids: set = set(
+        CatalogMaster.all_tenants.filter(
+            tenant=tenant,
+            linked_bot_user__isnull=False,
+            archived_at__isnull=True,
+        ).values_list("linked_bot_user_id", flat=True)
+    )
+    distinct_people = active_staff_ids | active_master_ids
+    return len(distinct_people) == 1

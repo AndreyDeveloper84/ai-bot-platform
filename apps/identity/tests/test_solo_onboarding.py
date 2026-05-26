@@ -26,6 +26,7 @@ from apps.identity.services.solo_onboarding import (
     _solo_external_id,
     _solo_tenant_slug,
     create_solo_provider,
+    is_solo_provider,
 )
 from apps.tenancy.models import Tenant, TenantStaff
 
@@ -535,3 +536,160 @@ class TestNonAsciiChannelUserId:
 # tests are the regression set; no new tests needed here, but
 # PartialStateError docstring updated per tech-lead sample 2026-05-26
 # (see service file).
+
+
+# ─── Веха 3 — is_solo_provider() helper (Tau §3.1 distinct-count) ──────
+
+
+class TestIsSoloProviderHelper:
+    """Веха 3 — `is_solo_provider(tenant)` per Tau policy §3.1.
+
+    Formula: `len(active_staff_user_ids ∪ active_master_user_ids) == 1`.
+    Pragmatic edge cases accepted (1 staff with 0 masters still counts
+    as solo per Tau).
+    """
+
+    def test_after_create_solo_provider_returns_true(self, bootstrap_tenant, channel_identity):
+        result = create_solo_provider(**channel_identity)
+        assert is_solo_provider(result.tenant) is True
+
+    def test_bootstrap_tenant_returns_false(self, bootstrap_tenant):
+        """Bootstrap tenant has no staff + no masters → 0 distinct → False.
+
+        Important — bootstrap is NOT itself a solo workspace; it's a
+        landing pad for new registrations.
+        """
+        assert is_solo_provider(bootstrap_tenant) is False
+
+    def test_team_tenant_returns_false(self, bootstrap_tenant):
+        """2 distinct people (owner + admin = different users) → False."""
+        team_tenant = Tenant.objects.create(slug="team-tn", name="Team Salon")
+        owner_bu = BotUser.all_tenants.create(
+            tenant=team_tenant, channel="max", channel_user_id="owner-1"
+        )
+        admin_bu = BotUser.all_tenants.create(
+            tenant=team_tenant, channel="max", channel_user_id="admin-1"
+        )
+        TenantStaff.all_tenants.create(
+            tenant=team_tenant, bot_user=owner_bu, role=TenantStaff.Role.OWNER
+        )
+        TenantStaff.all_tenants.create(
+            tenant=team_tenant, bot_user=admin_bu, role=TenantStaff.Role.ADMIN
+        )
+        assert is_solo_provider(team_tenant) is False
+
+    def test_single_staff_no_masters_returns_true(self, bootstrap_tenant):
+        """Edge: 1 staff row, 0 master rows → 1 distinct person → True.
+
+        Per Tau §3.1 pragmatic — even without an explicit CatalogMaster,
+        a tenant with one staff person is functionally solo.
+        """
+        tenant = Tenant.objects.create(slug="staff-only", name="Staff Only")
+        bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="staff-only-1"
+        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=bu, role=TenantStaff.Role.OWNER)
+        assert is_solo_provider(tenant) is True
+
+    def test_single_master_no_staff_returns_true(self, bootstrap_tenant):
+        """Edge: 0 staff, 1 master with linked_bot_user → 1 distinct → True."""
+        tenant = Tenant.objects.create(slug="master-only", name="Master Only")
+        bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="master-only-1"
+        )
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=_solo_external_id(bu.id),
+            external_updated_at=timezone.now(),
+            name="Solo",
+            linked_bot_user=bu,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+        assert is_solo_provider(tenant) is True
+
+    def test_same_person_in_both_staff_and_master_returns_true(self, bootstrap_tenant):
+        """Set union dedupes — same bot_user as staff AND master → True."""
+        tenant = Tenant.objects.create(slug="solo-dup", name="Solo Dup")
+        bu = BotUser.all_tenants.create(tenant=tenant, channel="max", channel_user_id="dup-1")
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=bu, role=TenantStaff.Role.OWNER)
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=bu, role=TenantStaff.Role.ADMIN)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=_solo_external_id(bu.id),
+            external_updated_at=timezone.now(),
+            name="X",
+            linked_bot_user=bu,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+        assert is_solo_provider(tenant) is True
+
+    def test_deactivated_staff_excluded(self, bootstrap_tenant):
+        """`deactivated_at IS NOT NULL` staff rows are NOT counted.
+
+        Scenario: tenant had a team, masters left, only owner-admin active
+        + 0 active masters → 1 distinct → solo.
+        """
+        tenant = Tenant.objects.create(slug="post-team", name="Post Team")
+        active_bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="active-1"
+        )
+        ex_bu = BotUser.all_tenants.create(tenant=tenant, channel="max", channel_user_id="ex-1")
+        TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=active_bu, role=TenantStaff.Role.OWNER
+        )
+        # Deactivated row — should NOT count
+        TenantStaff.all_tenants.create(
+            tenant=tenant,
+            bot_user=ex_bu,
+            role=TenantStaff.Role.ADMIN,
+            deactivated_at=timezone.now(),
+        )
+        assert is_solo_provider(tenant) is True
+
+    def test_archived_master_excluded(self, bootstrap_tenant):
+        """`archived_at IS NOT NULL` masters are NOT counted."""
+        tenant = Tenant.objects.create(slug="archived-mtn", name="Archived")
+        bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="archived-mtn-1"
+        )
+        ex_bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="ex-master-1"
+        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=bu, role=TenantStaff.Role.OWNER)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=_solo_external_id(bu.id),
+            external_updated_at=timezone.now(),
+            name="Active master",
+            linked_bot_user=bu,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+        # Archived — NOT counted toward distinct
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=_solo_external_id(ex_bu.id),
+            external_updated_at=timezone.now(),
+            name="Ex-master",
+            linked_bot_user=ex_bu,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            archived_at=timezone.now(),
+        )
+        assert is_solo_provider(tenant) is True
+
+    def test_master_without_linked_bot_user_excluded(self, bootstrap_tenant):
+        """Mysite-synced legacy masters (`linked_bot_user IS NULL`) excluded.
+
+        Otherwise an empty tenant with one legacy mirror row would
+        report solo=True incorrectly (NULL ID would dedupe with itself
+        and count as 1 — semantically wrong).
+        """
+        tenant = Tenant.objects.create(slug="legacy-master", name="Legacy")
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=42,  # positive — mysite-synced
+            external_updated_at=timezone.now(),
+            name="Legacy Master",
+            linked_bot_user=None,  # NOT bridged yet
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+        assert is_solo_provider(tenant) is False
