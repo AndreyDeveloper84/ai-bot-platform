@@ -1,0 +1,163 @@
+/**
+ * F2 — Master detail screen, service-scoped.
+ *
+ * Spec: `docs/screens/customer-booking-flow.md` §4 (§4.1 voice / §4.2
+ * states).
+ *
+ * Voice (Tau §8 F2):
+ *   - «Что она делает» (not «Услуги мастера»)
+ *   - «Цены» (not «Стоимость»)
+ *   - «Ближайшие слоты» (not «Доступное время для записи»)
+ *   - «Сообщить по записи» CTA (founder F1 unification — NEVER
+ *     «Чат с мастером» / «Написать мастеру»).
+ *   - Primary CTA: «Выбрать время» → F3.
+ *
+ * Master substitution edge per Tau §4.2 row 3 («out of slots next 14
+ * days») is handled in F3 (the slots screen) — F2 just navigates.
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { ScreenLayout } from "../components/ScreenLayout";
+import { StickyCta } from "../components/StickyCta";
+import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
+import { StateError } from "../components/StateError";
+import { useBackButton } from "../hooks/useBackButton";
+import {
+  getCustomerMaster,
+  type CustomerMaster,
+} from "../lib/customer-booking";
+import { setMaster, setService, useBookingDraft } from "../state/booking";
+
+type State =
+  | { kind: "loading" }
+  | { kind: "ok"; master: CustomerMaster }
+  | { kind: "error"; err: unknown };
+
+export function CustomerMasterDetailScreen() {
+  const navigate = useNavigate();
+  const { masterId } = useParams<{ masterId: string }>();
+  const [params] = useSearchParams();
+  const serviceId = params.get("service");
+  const draft = useBookingDraft();
+  const [state, setState] = useState<State>({ kind: "loading" });
+
+  useBackButton({ onBack: () => navigate(-1) });
+
+  const load = useCallback(() => {
+    if (!masterId) return;
+    setState({ kind: "loading" });
+    let cancelled = false;
+    getCustomerMaster(masterId)
+      .then(({ master }) => {
+        if (!cancelled) setState({ kind: "ok", master });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setState({ kind: "error", err });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [masterId]);
+
+  useEffect(() => load(), [load]);
+
+  function onChooseTime() {
+    if (state.kind !== "ok" || !masterId) return;
+    setMaster(masterId, state.master.name);
+    // Pre-fill service in draft if URL param available — keeps the
+    // F3 → F4 chain consistent.
+    if (serviceId && !draft.serviceId) {
+      // Service name unknown here; the draft only needs the id for
+      // the slots query. F4 will fetch service name from the booking
+      // response if necessary.
+      setService(serviceId, "");
+    }
+    navigate(`/customer/masters/${masterId}/slots`);
+  }
+
+  if (state.kind === "loading") {
+    return (
+      <ScreenLayout title="Мастер">
+        <DelayedSkeleton loading>
+          <MasterCardSkeleton />
+          <MasterCardSkeleton />
+        </DelayedSkeleton>
+      </ScreenLayout>
+    );
+  }
+
+  if (state.kind === "error") {
+    return (
+      <ScreenLayout title="Мастер">
+        <StateError err={state.err} onRetry={load} screenId="customer-master-detail" />
+      </ScreenLayout>
+    );
+  }
+
+  const m = state.master;
+  const rating = m.rating ? Number(m.rating).toFixed(1) : null;
+
+  return (
+    <ScreenLayout
+      title={m.name}
+      cta={
+        <StickyCta onClick={onChooseTime}>
+          Выбрать время
+        </StickyCta>
+      }
+    >
+      <section className="customer-master__intro">
+        <div className="customer-master__identity">
+          <div className="customer-master__name">{m.name}</div>
+          {rating && (
+            <div
+              className="customer-master__rating"
+              aria-label={`Рейтинг ${rating}`}
+            >
+              <span aria-hidden="true">⭐ </span>
+              {rating}
+            </div>
+          )}
+          {m.specialization && (
+            <div className="customer-master__spec">{m.specialization}</div>
+          )}
+          {m.experience && (
+            <div className="customer-master__exp">{m.experience}</div>
+          )}
+        </div>
+      </section>
+
+      {m.bio && (
+        <section aria-labelledby="master-bio-title">
+          <h2 id="master-bio-title" className="customer-master__section-title">
+            Что она делает
+          </h2>
+          <p className="customer-master__bio">{m.bio}</p>
+        </section>
+      )}
+
+      <section aria-labelledby="master-slots-title">
+        <h2 id="master-slots-title" className="customer-master__section-title">
+          Ближайшие слоты
+        </h2>
+        <p style={{ color: "var(--c-text-secondary)", margin: 0 }}>
+          Выбери удобное время — покажу свободные.
+        </p>
+      </section>
+
+      <div className="customer-master__actions">
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() =>
+            navigate(`/customer/masters/${masterId}/message`)
+          }
+          aria-label="Сообщить по записи"
+        >
+          Сообщить по записи
+        </button>
+      </div>
+    </ScreenLayout>
+  );
+}

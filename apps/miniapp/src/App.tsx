@@ -54,6 +54,11 @@ import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
 import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
+import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
+import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
+import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
+import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
+import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
@@ -898,6 +903,32 @@ function CustomerRoutes() {
       <Route path="/book/when" element={<BookingWhenScreen />} />
       <Route path="/book/confirm" element={<BookingConfirmScreen />} />
       <Route path="/book/success/:bookingId" element={<BookingSuccessScreen />} />
+      {/*
+        Customer booking flow F1-F5 — Tier 1 Priority 3 Phase B
+        (Ayla-first reskin per docs/screens/customer-booking-flow.md).
+        Runs alongside the legacy /catalog + /book/* routes; F1
+        surfaces 3-layer trust hierarchy (against stub until Alpha
+        ships /catalog/recommendations per TL Q1). The legacy routes
+        stay reachable for deep-links from bot DMs and reschedule
+        flows.
+      */}
+      <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
+      <Route
+        path="/customer/masters/:masterId"
+        element={<CustomerMasterDetailScreen />}
+      />
+      <Route
+        path="/customer/masters/:masterId/slots"
+        element={<CustomerSlotsScreen />}
+      />
+      <Route
+        path="/customer/booking/confirm"
+        element={<CustomerBookingConfirmScreen />}
+      />
+      <Route
+        path="/customer/booking/success/:bookingId"
+        element={<CustomerBookingSuccessScreen />}
+      />
       <Route path="/my-visits" element={<MyVisitsScreen />} />
       <Route path="/my-visits/:bookingId" element={<MyVisitDetailScreen />} />
       <Route
