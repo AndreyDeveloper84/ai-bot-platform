@@ -35,6 +35,7 @@
  * 1 single-tenant install where some users haven't DM'd the bot yet).
  */
 
+import type React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
@@ -123,44 +124,71 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-/** Routes for admin / owner / receptionist roles. */
-function AdminRoutes({ me }: { me: MeResponse }) {
+/**
+ * Shared admin route elements — single source of truth consumed by both
+ * `AdminRoutes` (single-role admin user) and `UnifiedAdminMasterRoutes`
+ * (solo provider / dual-role). PRE_PILOT fix for issue #79: prevents
+ * route-list drift where a future PR adding an admin route to one
+ * component would silently deny access to the other class of users.
+ *
+ * React Router v6 supports `<Route>` elements wrapped in a Fragment as
+ * children of `<Routes>` — the Routes component flattens nested
+ * fragments before matching.
+ *
+ * `surfaceTracker` is optional — when provided, it is rendered alongside
+ * each element to record the user's current top-level surface for the
+ * unified-landing redirect heuristic.
+ */
+function adminRouteElements(
+  me: MeResponse,
+  surfaceTracker?: React.ReactNode,
+): React.ReactNode {
+  const wrap = (el: React.ReactNode): React.ReactNode =>
+    surfaceTracker ? (
+      <>
+        {surfaceTracker}
+        {el}
+      </>
+    ) : (
+      el
+    );
   return (
-    <Routes>
-      <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
+    <>
+      <Route path="/admin/team" element={wrap(<AdminTeamScreen me={me} />)} />
       <Route
         path="/admin/team/invite"
-        element={<AdminInviteMasterScreen me={me} />}
+        element={wrap(<AdminInviteMasterScreen me={me} />)}
       />
       <Route
         path="/admin/team/:masterId/deactivate"
-        element={<AdminDeactivationFlowScreen me={me} />}
+        element={wrap(<AdminDeactivationFlowScreen me={me} />)}
       />
       <Route
         path="/admin/team/:masterId"
-        element={<AdminMasterDetailScreen me={me} />}
+        element={wrap(<AdminMasterDetailScreen me={me} />)}
       />
       <Route
         path="/admin/services"
-        element={<AdminServicesMatrixScreen me={me} />}
+        element={wrap(<AdminServicesMatrixScreen me={me} />)}
       />
       <Route
         path="/admin/availability-requests"
-        element={<AdminAvailabilityRequestsScreen me={me} />}
+        element={wrap(<AdminAvailabilityRequestsScreen me={me} />)}
       />
       {/* Master ↔ admin internal chat — admin queue ("Чаты с мастерами"). */}
       <Route
         path="/admin/internal-chat"
-        element={<AdminInternalChatListScreen me={me} />}
+        element={wrap(<AdminInternalChatListScreen me={me} />)}
       />
       <Route
         path="/admin/internal-chat/threads/:threadId"
-        element={<AdminInternalChatThreadScreen me={me} />}
+        element={wrap(<AdminInternalChatThreadScreen me={me} />)}
       />
       {/*
         Legacy /admin/chats path (used by AdminTabBar) → redirect to the
         live internal-chat surface. Keeps deep-links from older bot DMs
-        working.
+        working. The redirect does NOT get a surface tracker (it never
+        actually mounts a surface).
       */}
       <Route
         path="/admin/chats"
@@ -168,8 +196,78 @@ function AdminRoutes({ me }: { me: MeResponse }) {
       />
       <Route
         path="/admin/settings"
-        element={<AdminSettingsPlaceholderScreen />}
+        element={wrap(<AdminSettingsPlaceholderScreen />)}
       />
+    </>
+  );
+}
+
+/**
+ * Shared master route elements — single source of truth consumed by
+ * both `MasterRoutes` (single-role master user) and
+ * `UnifiedAdminMasterRoutes` (solo provider / dual-role). See
+ * `adminRouteElements` for the rationale and wrapping semantics.
+ */
+function masterRouteElements(
+  surfaceTracker?: React.ReactNode,
+): React.ReactNode {
+  const wrap = (el: React.ReactNode): React.ReactNode =>
+    surfaceTracker ? (
+      <>
+        {surfaceTracker}
+        {el}
+      </>
+    ) : (
+      el
+    );
+  return (
+    <>
+      <Route
+        path="/onboarding/master"
+        element={wrap(<MasterOnboardingScreen />)}
+      />
+      <Route
+        path="/master/dashboard"
+        element={wrap(<MasterDashboardScreen />)}
+      />
+      <Route
+        path="/master/schedule"
+        element={wrap(<MasterScheduleScreen />)}
+      />
+      <Route
+        path="/master/conversations"
+        element={wrap(<MasterConversationsScreen />)}
+      />
+      <Route
+        path="/master/conversations/:id"
+        element={wrap(<MasterConversationDetailScreen />)}
+      />
+      <Route path="/master/profile" element={wrap(<MasterProfileScreen />)} />
+      {/* M7 notification settings (Bundle B / item 3) */}
+      <Route
+        path="/master/settings/notifications"
+        element={wrap(<MasterNotificationSettingsScreen />)}
+      />
+      {/* M8 minimal — logout-only (full M8 deferred post-pilot) */}
+      <Route path="/master/settings" element={wrap(<MasterSettingsScreen />)} />
+      {/* Internal chat «Со студией» (master-admin internal-chat handoff §3) */}
+      <Route
+        path="/master/internal-chat"
+        element={wrap(<MasterInternalChatListScreen />)}
+      />
+      <Route
+        path="/master/internal-chat/threads/:threadId"
+        element={wrap(<MasterInternalChatThreadScreen />)}
+      />
+    </>
+  );
+}
+
+/** Routes for admin / owner / receptionist roles. */
+function AdminRoutes({ me }: { me: MeResponse }) {
+  return (
+    <Routes>
+      {adminRouteElements(me)}
       {/* Default + unknown — land on team. */}
       <Route path="*" element={<Navigate to="/admin/team" replace />} />
     </Routes>
@@ -180,34 +278,7 @@ function AdminRoutes({ me }: { me: MeResponse }) {
 function MasterRoutes() {
   return (
     <Routes>
-      <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />
-      <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
-      <Route path="/master/schedule" element={<MasterScheduleScreen />} />
-      <Route path="/master/conversations" element={<MasterConversationsScreen />} />
-      <Route
-        path="/master/conversations/:id"
-        element={<MasterConversationDetailScreen />}
-      />
-      <Route path="/master/profile" element={<MasterProfileScreen />} />
-      {/* M7 notification settings (Bundle B / item 3) */}
-      <Route
-        path="/master/settings/notifications"
-        element={<MasterNotificationSettingsScreen />}
-      />
-      {/* M8 minimal — logout-only (full M8 deferred post-pilot) */}
-      <Route
-        path="/master/settings"
-        element={<MasterSettingsScreen />}
-      />
-      {/* Internal chat «Со студией» (master-admin internal-chat handoff §3) */}
-      <Route
-        path="/master/internal-chat"
-        element={<MasterInternalChatListScreen />}
-      />
-      <Route
-        path="/master/internal-chat/threads/:threadId"
-        element={<MasterInternalChatThreadScreen />}
-      />
+      {masterRouteElements()}
       {/* Default + unknown — land on dashboard. */}
       <Route path="*" element={<Navigate to="/master/dashboard" replace />} />
     </Routes>
@@ -393,185 +464,18 @@ function UnifiedLandingOrRedirect({ me }: { me: MeResponse }) {
 }
 
 function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
+  // Reuse the single-role route definitions verbatim — same screen
+  // components, same paths — and bolt on a per-surface tracker that
+  // records the user's current top-level surface for the next open.
+  // PRE_PILOT round-1 fix for #79: single source of truth prevents
+  // route-list drift between AdminRoutes / MasterRoutes and the unified
+  // surface.
   return (
     <Routes>
       {/* --- Admin surface ---------------------------------------- */}
-      <Route
-        path="/admin/team"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminTeamScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/team/invite"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminInviteMasterScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/team/:masterId/deactivate"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminDeactivationFlowScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/team/:masterId"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminMasterDetailScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/services"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminServicesMatrixScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/availability-requests"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminAvailabilityRequestsScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/internal-chat"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminInternalChatListScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/internal-chat/threads/:threadId"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminInternalChatThreadScreen me={me} />
-          </>
-        }
-      />
-      <Route
-        path="/admin/chats"
-        element={<Navigate to="/admin/internal-chat" replace />}
-      />
-      <Route
-        path="/admin/settings"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="admin" />
-            <AdminSettingsPlaceholderScreen />
-          </>
-        }
-      />
+      {adminRouteElements(me, <UnifiedSurfaceTracker surface="admin" />)}
       {/* --- Master surface --------------------------------------- */}
-      <Route
-        path="/onboarding/master"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterOnboardingScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/dashboard"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterDashboardScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/schedule"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterScheduleScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/conversations"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterConversationsScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/conversations/:id"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterConversationDetailScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/profile"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterProfileScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/settings/notifications"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterNotificationSettingsScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/settings"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterSettingsScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/internal-chat"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterInternalChatListScreen />
-          </>
-        }
-      />
-      <Route
-        path="/master/internal-chat/threads/:threadId"
-        element={
-          <>
-            <UnifiedSurfaceTracker surface="master" />
-            <MasterInternalChatThreadScreen />
-          </>
-        }
-      />
+      {masterRouteElements(<UnifiedSurfaceTracker surface="master" />)}
       {/* --- Landing / fallback ----------------------------------- */}
       <Route path="/" element={<UnifiedLandingOrRedirect me={me} />} />
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -669,6 +573,26 @@ export function App() {
   useEffect(() => {
     void loadMe();
   }, [loadMe]);
+
+  // Round-1 FOLLOW_UP cleanup (#79): when the resolved role pattern is
+  // single (admin-only OR master-only OR customer-only), drop any stale
+  // unified-last-surface key. Prevents a dead key from lingering after
+  // a role revocation (e.g. owner who was demoted to master-only and
+  // had previously chosen the admin surface).
+  useEffect(() => {
+    if (boot.status !== "ready" || !boot.me) return;
+    const hasAdmin =
+      boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist;
+    const hasMaster = boot.me.is_master;
+    if (!(hasAdmin && hasMaster)) {
+      if (typeof window === "undefined" || !window.localStorage) return;
+      try {
+        window.localStorage.removeItem(UNIFIED_LAST_SURFACE_KEY);
+      } catch {
+        /* SSR / private mode / quota — best effort */
+      }
+    }
+  }, [boot.status, boot.me]);
 
   if (boot.status === "loading") return <SplashScreen />;
   if (boot.status === "no_role") {
