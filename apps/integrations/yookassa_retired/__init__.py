@@ -59,8 +59,10 @@ will:
 * Remove the URL mount in ``config/urls.py``.
 * Remove ``"/api/v1/yookassa/"`` from
   ``apps.tenancy.middleware.STRICT_OPT_OUT_PREFIXES``.
-* Remove ``should_audit_yookassa_retired`` from
-  ``apps.eventbus.ingest_rate_audit_sampler``.
+* Remove BOTH ``should_audit_yookassa_retired_410`` AND
+  ``should_audit_yookassa_retired_429`` from
+  ``apps.eventbus.ingest_rate_audit_sampler``. (Two functions, one
+  per action slug — see N-R2-3 from Round-2 adversarial on PR #768.)
 * Delete this directory entirely.
 
 (No ``INSTALLED_APPS`` entry to remove — this package is NOT
