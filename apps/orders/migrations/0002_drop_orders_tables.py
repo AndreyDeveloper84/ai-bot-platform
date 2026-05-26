@@ -57,9 +57,23 @@ operator MUST verify each timestamp is later than the previous.
   and T1, zero traffic is structurally guaranteed (cabinet still
   points here, but Ayla endpoint is just newly-live elsewhere); the
   check has zero detection value. Sign-off: W2 monitoring.
-* **T3 — Production data audit.** Run on Ayla-djangoproject's prod
-  replica: ``COUNT(*) FROM orders_order`` and ``COUNT(*) FROM
-  orders_paymentevent WHERE created_at > NOW() - INTERVAL '30 days'``.
+* **T3 — Production data audit.** Run on **bot-platform's** prod
+  replica (these are bot-platform tables being dropped — running on
+  Ayla's replica either errors with ``relation "orders_order" does
+  not exist`` and gets misread as «zero rows», or hits an unrelated
+  Ayla table of coincidentally similar name). Use raw SQL, NOT
+  Django shell, to bypass ``TenantScopedManager`` (the default
+  manager filters by current tenant scope and would silently return
+  0 outside ``tenant_scope(...)``):
+
+  .. code-block:: bash
+
+     psql "$BOT_PLATFORM_REPLICA_DSN" -c \
+       "SELECT count(*) FROM orders_order;"
+     psql "$BOT_PLATFORM_REPLICA_DSN" -c \
+       "SELECT count(*) FROM orders_paymentevent \
+        WHERE created_at > NOW() - INTERVAL '30 days';"
+
   Both zero OR only ``paymentevent`` non-zero → proceed. ``orders_order``
   > 0 → STOP, escalate (data not migrated to Ayla yet). ``T3 > T2``.
 * **T4 — Deploy this PR.** ``T4 > T3``. DROP TABLE runs as part of
