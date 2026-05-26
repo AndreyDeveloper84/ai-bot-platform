@@ -151,6 +151,13 @@ export async function getCatalogRecommendations(): Promise<CatalogRecommendation
 type StubVariant = "standard" | "anonymous" | "loyal";
 
 function pickStubVariant(): StubVariant {
+  // Stub variants are dev-only QA hooks. In production, ALL customers
+  // see the «standard» stub (which swaps to the real Alpha endpoint
+  // per TL Q1 once /catalog/recommendations ships). Reading the
+  // `?stub=` query in production was a phishing vector: a crafted URL
+  // (`?stub=loyal`) would surface fake tenant ids + made-up recos to
+  // any user (round-1 PRE_MERGE blocker #2).
+  if (!import.meta.env.DEV) return "standard";
   if (typeof window === "undefined") return "standard";
   try {
     const sp = new URLSearchParams(window.location.search);
@@ -162,116 +169,137 @@ function pickStubVariant(): StubVariant {
   return "standard";
 }
 
-const STUB_DATA: Record<StubVariant, CatalogRecommendations> = {
-  standard: {
-    layer_1_your_places: [
-      {
-        id: "tenant-formula-tela",
-        title: "Формула тела",
-        last_visit_date: "2026-05-06",
-        services_summary: "массаж, спа",
-      },
-      {
-        id: "tenant-studio-natali",
-        title: "Студия Натали",
-        last_visit_date: "2026-04-15",
-        services_summary: "маникюр, педикюр",
-      },
-    ],
-    layer_2_ayla_picks: [
-      {
-        id: "tenant-beauty-place",
-        title: "Beauty Place",
-        // Voice: verbatim from Tau §2.3 allowed-list.
-        reasoning_text: "20 минут от тебя, рейтинг 4.9",
-        starting_price: 1800,
-        next_available_slot: "сегодня 18:00",
-        rating: 4.9,
-      },
-      {
-        id: "tenant-studio-lotus",
-        title: "Студия Лотос",
-        reasoning_text: "Свободно раньше всех остальных",
-        starting_price: 1600,
-        next_available_slot: "сегодня 16:00",
-        rating: 4.7,
-      },
-      {
-        id: "tenant-casa-bella",
-        title: "Casa Bella",
-        reasoning_text: "Подходит под твою цель — снижение стресса",
-        starting_price: 2800,
-        next_available_slot: "завтра 11:00",
-        rating: 4.8,
-      },
-    ],
-    layer_3_explore: [
-      { category: "Ногти", count: 24 },
-      { category: "Массаж", count: 18 },
-      { category: "Ресницы", count: 12 },
-      { category: "Косметология", count: 15 },
-    ],
-  },
-  anonymous: {
-    // Anonymous: Layer 1 empty (skipped). Layer 2 prominent. Layer 3.
-    layer_1_your_places: [],
-    layer_2_ayla_picks: [
-      {
-        id: "tenant-beauty-place",
-        title: "Beauty Place",
-        reasoning_text: "20 минут от тебя, рейтинг 4.9",
-        starting_price: 1800,
-        next_available_slot: "сегодня 18:00",
-        rating: 4.9,
-      },
-      {
-        id: "tenant-studio-lotus",
-        title: "Студия Лотос",
-        reasoning_text: "Свободно сегодня в 18:00",
-        starting_price: 1600,
-        next_available_slot: "сегодня 18:00",
-        rating: 4.7,
-      },
-    ],
-    layer_3_explore: [
-      { category: "Ногти", count: 24 },
-      { category: "Массаж", count: 18 },
-      { category: "Ресницы", count: 12 },
-      { category: "Косметология", count: 15 },
-    ],
-  },
-  loyal: {
-    // Loyal: Layer 1 prominent, Layer 2 softer (1-2 items).
-    layer_1_your_places: [
-      {
-        id: "tenant-formula-tela",
-        title: "Формула тела",
-        last_visit_date: "2026-05-20",
-        services_summary: "Анна свободна — четверг 16:00, твоё обычное время",
-      },
-      {
-        id: "tenant-studio-natali",
-        title: "Студия Натали",
-        last_visit_date: "2026-04-15",
-        services_summary: "Карина свободна — пятница 12:00",
-      },
-    ],
-    layer_2_ayla_picks: [
-      {
-        id: "tenant-beauty-place",
-        title: "Beauty Place",
-        reasoning_text: "20 минут от тебя, рейтинг 4.9",
-        starting_price: 1800,
-        next_available_slot: "сегодня 18:00",
-        rating: 4.9,
-      },
-    ],
-    layer_3_explore: [
-      { category: "Ногти", count: 24 },
-      { category: "Массаж", count: 18 },
-    ],
-  },
+/**
+ * Production bundle ships ONLY the `standard` stub variant. Dev
+ * bundle ships all three for local QA. The dev-only variants are
+ * resolved at module init behind `import.meta.env.DEV`, which Vite's
+ * define-replacement statically resolves to `false` for production
+ * builds — letting the `anonymous` + `loyal` blobs (and their
+ * fake-tenant strings) tree-shake out of the prod bundle.
+ */
+const STANDARD_STUB: CatalogRecommendations = {
+  layer_1_your_places: [
+    {
+      id: "tenant-formula-tela",
+      title: "Формула тела",
+      last_visit_date: "2026-05-06",
+      services_summary: "массаж, спа",
+    },
+    {
+      id: "tenant-studio-natali",
+      title: "Студия Натали",
+      last_visit_date: "2026-04-15",
+      services_summary: "маникюр, педикюр",
+    },
+  ],
+  layer_2_ayla_picks: [
+    {
+      id: "tenant-beauty-place",
+      title: "Beauty Place",
+      // Voice: verbatim from Tau §2.3 allowed-list.
+      reasoning_text: "20 минут от тебя, рейтинг 4.9",
+      starting_price: 1800,
+      next_available_slot: "сегодня 18:00",
+      rating: 4.9,
+    },
+    {
+      id: "tenant-studio-lotus",
+      title: "Студия Лотос",
+      reasoning_text: "Свободно раньше всех остальных",
+      starting_price: 1600,
+      next_available_slot: "сегодня 16:00",
+      rating: 4.7,
+    },
+    {
+      id: "tenant-casa-bella",
+      title: "Casa Bella",
+      reasoning_text: "Подходит под твою цель — снижение стресса",
+      starting_price: 2800,
+      next_available_slot: "завтра 11:00",
+      rating: 4.8,
+    },
+  ],
+  layer_3_explore: [
+    { category: "Ногти", count: 24 },
+    { category: "Массаж", count: 18 },
+    { category: "Ресницы", count: 12 },
+    { category: "Косметология", count: 15 },
+  ],
 };
+
+const STUB_DATA: Record<StubVariant, CatalogRecommendations> = import.meta.env.DEV
+  ? {
+      standard: STANDARD_STUB,
+      anonymous: {
+        // Anonymous: Layer 1 empty (skipped). Layer 2 prominent.
+        layer_1_your_places: [],
+        layer_2_ayla_picks: [
+          {
+            id: "tenant-beauty-place",
+            title: "Beauty Place",
+            reasoning_text: "20 минут от тебя, рейтинг 4.9",
+            starting_price: 1800,
+            next_available_slot: "сегодня 18:00",
+            rating: 4.9,
+          },
+          {
+            id: "tenant-studio-lotus",
+            title: "Студия Лотос",
+            reasoning_text: "Свободно сегодня в 18:00",
+            starting_price: 1600,
+            next_available_slot: "сегодня 18:00",
+            rating: 4.7,
+          },
+        ],
+        layer_3_explore: [
+          { category: "Ногти", count: 24 },
+          { category: "Массаж", count: 18 },
+          { category: "Ресницы", count: 12 },
+          { category: "Косметология", count: 15 },
+        ],
+      },
+      loyal: {
+        // Loyal: Layer 1 prominent, Layer 2 softer (1-2 items).
+        layer_1_your_places: [
+          {
+            id: "tenant-formula-tela",
+            title: "Формула тела",
+            last_visit_date: "2026-05-20",
+            services_summary:
+              "Анна свободна — четверг 16:00, твоё обычное время",
+          },
+          {
+            id: "tenant-studio-natali",
+            title: "Студия Натали",
+            last_visit_date: "2026-04-15",
+            services_summary: "Карина свободна — пятница 12:00",
+          },
+        ],
+        layer_2_ayla_picks: [
+          {
+            id: "tenant-beauty-place",
+            title: "Beauty Place",
+            reasoning_text: "20 минут от тебя, рейтинг 4.9",
+            starting_price: 1800,
+            next_available_slot: "сегодня 18:00",
+            rating: 4.9,
+          },
+        ],
+        layer_3_explore: [
+          { category: "Ногти", count: 24 },
+          { category: "Массаж", count: 18 },
+        ],
+      },
+    }
+  : {
+      // Production bundle: only the standard variant. anonymous + loyal
+      // alias to STANDARD_STUB so pickStubVariant() (which can only
+      // return "standard" in prod) never has a missing key, while Vite
+      // still tree-shakes the dev-only fake-tenant strings above.
+      standard: STANDARD_STUB,
+      anonymous: STANDARD_STUB,
+      loyal: STANDARD_STUB,
+    };
 
 export const getCustomerMaster = (masterId: string): Promise<{ master: CustomerMaster }> =>
   fetchMaster(masterId);

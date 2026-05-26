@@ -30,11 +30,17 @@ export interface PendingBookingIntent {
   service_id: string;
   /** ISO 8601 with offset (matches createBooking `visit_at`). */
   slot_iso: string;
-  price_rub: number;
+  /**
+   * Optional. Only set when a real price is known (e.g. backend
+   * exposes price on service detail). Round-1 amendment: NEVER ship
+   * `0` as a sentinel — that violated the P0 «price preserved as
+   * known» contract. Absence = price not yet known.
+   */
+  price_rub?: number;
   /** Optional customer-typed note to the master. */
   note?: string;
-  /** Optional loyalty choice (e.g. "apply_100") if customer set it. */
-  loyalty_choice?: string;
+  /** Optional loyalty choice (boolean: apply available bonuses). */
+  loyalty_choice?: boolean;
   /** Auxiliary display fields preserved for context restoration. */
   service_name?: string;
   master_name?: string;
@@ -113,12 +119,33 @@ export function clearPendingIntent(): void {
 function isValidIntent(v: unknown): v is PendingBookingIntent {
   if (!v || typeof v !== "object") return false;
   const o = v as Record<string, unknown>;
-  return (
-    typeof o.master_id === "string" &&
-    typeof o.service_id === "string" &&
-    typeof o.slot_iso === "string" &&
-    typeof o.price_rub === "number"
-  );
+  // master_id non-empty string
+  if (typeof o.master_id !== "string" || !o.master_id.trim()) return false;
+  // service_id non-empty string
+  if (typeof o.service_id !== "string" || !o.service_id.trim()) return false;
+  // slot_iso non-empty + roughly ISO8601 (YYYY-MM-DDTHH:MM…)
+  if (typeof o.slot_iso !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(o.slot_iso))
+    return false;
+  // price_rub optional + finite non-negative when present
+  if (o.price_rub !== undefined) {
+    if (
+      typeof o.price_rub !== "number" ||
+      !Number.isFinite(o.price_rub) ||
+      o.price_rub < 0
+    )
+      return false;
+  }
+  // note optional + string when present
+  if (o.note !== undefined && typeof o.note !== "string") return false;
+  // loyalty_choice optional + boolean when present
+  if (o.loyalty_choice !== undefined && typeof o.loyalty_choice !== "boolean")
+    return false;
+  // service_name / master_name optional strings
+  if (o.service_name !== undefined && typeof o.service_name !== "string")
+    return false;
+  if (o.master_name !== undefined && typeof o.master_name !== "string")
+    return false;
+  return true;
 }
 
 export const _PENDING_INTENT_STORAGE_KEY = STORAGE_KEY;

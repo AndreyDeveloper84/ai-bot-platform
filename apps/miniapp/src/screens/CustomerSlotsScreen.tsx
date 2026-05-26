@@ -40,6 +40,7 @@ import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { getCustomerSlots } from "../lib/customer-booking";
 import { formatDateLabel, formatSlotTime } from "../lib/format";
+import { getInitData } from "../lib/max-sdk";
 import { setVisitAt, useBookingDraft } from "../state/booking";
 
 interface SlotRow {
@@ -73,14 +74,24 @@ function suggestionsHeader(mode: CustomerMode): string {
 }
 
 /**
- * Best-effort mode detection from the booking draft + sessionStorage.
- * Until the `/me` response surfaces `is_loyal_with_master` / similar,
- * we default to «registered» when a name is known and «anonymous»
- * otherwise. Hooked in such a way that backend can plumb a real
- * signal later without changing this component's signature.
+ * Best-effort mode detection. Anonymous detection mirrors F4
+ * (CustomerBookingConfirmScreen) — empty `initData` from MAX SDK =
+ * anonymous user. Until the `/me` response surfaces
+ * `is_loyal_with_master` / similar, we default registered users
+ * to «registered» (no «loyal» fast path yet). Hooked so backend
+ * can plumb a real signal later without changing this component.
+ *
+ * Round-1 fix: the prior heuristic («masterName set ⇒ registered»)
+ * incorrectly tagged anonymous browsers (who DO have masterName from
+ * the deeplink) as «registered», surfacing «Похоже подойдёт» — wrong
+ * tone for first-time visitors. Now we consult MAX initData first.
  */
-function detectCustomerMode(masterName: string | null): CustomerMode {
-  if (!masterName) return "anonymous";
+function isAnonymousCustomer(): boolean {
+  return getInitData() === "";
+}
+
+function detectCustomerMode(): CustomerMode {
+  if (isAnonymousCustomer()) return "anonymous";
   return "registered";
 }
 
@@ -196,7 +207,7 @@ export function CustomerSlotsScreen() {
     );
   }
 
-  const mode = detectCustomerMode(draft.masterName);
+  const mode = detectCustomerMode();
   const sugHeader = suggestionsHeader(mode);
   const dates = Array.from(slotsByDate.keys());
 

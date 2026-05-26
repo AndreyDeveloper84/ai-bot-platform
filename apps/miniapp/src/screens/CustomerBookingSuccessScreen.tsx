@@ -103,23 +103,12 @@ export function CustomerBookingSuccessScreen() {
         </dl>
       </div>
 
-      {/* Secondary CTA — Ayla-mediated messaging (§7.1 + policy doc).
-          Sits ABOVE the sticky bar so users can choose between
-          opening the visit detail vs starting a conversation. */}
-      <div className="customer-success__secondary">
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() =>
-            bookingId
-              ? navigate(`/my-visits/${bookingId}`)
-              : navigate("/customer/catalog")
-          }
-          aria-label="Сообщить по записи"
-        >
-          Сообщить по записи
-        </button>
-      </div>
+      {/* Secondary CTA «Сообщить по записи» — hidden in round-1 until
+          the messaging route ships. The prior implementation routed
+          to the same `/my-visits/{id}` as the primary CTA (two CTAs,
+          same destination, no messaging surface) — a UX dead-end.
+          Will route to /customer/masters/{masterId}/message per
+          ayla-mediated-messaging.md when messaging UI lands. */}
     </ScreenLayout>
   );
 }

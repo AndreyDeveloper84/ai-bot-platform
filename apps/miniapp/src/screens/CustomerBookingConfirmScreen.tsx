@@ -172,22 +172,24 @@ export function CustomerBookingConfirmScreen() {
       master_id: draft.masterId,
       service_id: draft.serviceId,
       slot_iso: draft.visitAt,
-      // Stub price — real price arrives via service detail when
-      // F1 surfaces a price field per Alpha endpoint. Until then,
-      // 0 sentinel keeps the contract honest (parse-validated by
-      // the restore path).
-      price_rub: 0,
+      // price_rub is optional now (post-round-1) — real price will
+      // arrive via service detail once F1 surfaces a price field per
+      // Alpha endpoint. We omit it rather than ship a 0 sentinel,
+      // which violated the P0 contract («price preserved as known»).
       note: note || undefined,
       service_name: draft.serviceName ?? undefined,
       master_name: draft.masterName ?? undefined,
     });
     // OAuth deep-link — bot DM redirect. Real MAX OAuth URL TBD by
     // backend; until then we open the bot DM (matches existing
-    // «Доступ не настроен» screen).
-    // eslint-disable-next-line no-console
-    console.info(
-      "[customer-booking-confirm] saved intent + entering OAuth flow",
-    );
+    // «Доступ не настроен» screen). Gate the console.info behind
+    // import.meta.env.DEV to avoid leaking flow telemetry in prod.
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.info(
+        "[customer-booking-confirm] saved intent + entering OAuth flow",
+      );
+    }
     // Best-effort: open bot DM to drive registration. Will be
     // replaced with the canonical MAX OAuth endpoint when W4 ships.
     navigate("/", { replace: true });
@@ -195,6 +197,33 @@ export function CustomerBookingConfirmScreen() {
 
   // ── Anonymous gate branch (§6.2) ─────────────────────────────────────
   if (anonymous) {
+    // VITE_MAX_OAUTH_ENABLED gates the *functional* registration CTA.
+    // Until W4 ships /auth/verify + the canonical MAX OAuth URL, the
+    // «Зарегистрироваться» button strands a sessionStorage intent + a
+    // navigate("/") — a UX dead-end (round-1 PRE_MERGE blocker #1).
+    // Acceptable degradation: render an «OAuth pending» placeholder
+    // that lets the user keep exploring the catalog. Flip the env
+    // flag when W4 lands.
+    const oauthEnabled = import.meta.env.VITE_MAX_OAUTH_ENABLED === "true";
+    if (!oauthEnabled) {
+      return (
+        <ScreenLayout title="Чтобы записаться">
+          <section className="customer-confirm__oauth-pending">
+            <p className="customer-confirm__oauth-soon">
+              Регистрация через MAX скоро будет доступна. Сейчас можно
+              посмотреть мастеров и услуги.
+            </p>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/customer/catalog")}
+            >
+              Посмотреть мастеров
+            </button>
+          </section>
+        </ScreenLayout>
+      );
+    }
     return (
       <ScreenLayout
         title="Чтобы записаться"

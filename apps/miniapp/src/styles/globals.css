@@ -3667,6 +3667,23 @@ a {
   text-align: center;
 }
 
+/* F4 anonymous-gate OAuth pending placeholder (round-1) — shown
+   when VITE_MAX_OAUTH_ENABLED !== "true". Replaces the prior
+   dead-end «Зарегистрироваться» CTA with a soft «coming soon»
+   message + a fallback nav back to catalog. */
+.customer-confirm__oauth-pending {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s-3);
+  padding: var(--s-3) 0;
+}
+.customer-confirm__oauth-soon {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--c-text-secondary);
+}
+
 /* F5 — Success. */
 .customer-success__headline {
   font-size: var(--font-size-500);

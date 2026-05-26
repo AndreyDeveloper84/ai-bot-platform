@@ -146,18 +146,11 @@ export function CustomerMasterDetailScreen() {
         </p>
       </section>
 
-      <div className="customer-master__actions">
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() =>
-            navigate(`/customer/masters/${masterId}/message`)
-          }
-          aria-label="Сообщить по записи"
-        >
-          Сообщить по записи
-        </button>
-      </div>
+      {/* Secondary CTA «Сообщить по записи» — hidden in round-1 until
+          the messaging route ships. `/customer/masters/{id}/message`
+          has NO route registered → 404. Will be re-enabled with a
+          real route per docs/design/policies/ayla-mediated-messaging.md
+          when messaging UI lands. */}
     </ScreenLayout>
   );
 }
