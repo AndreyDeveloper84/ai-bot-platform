@@ -161,6 +161,27 @@ class BotUser(models.Model):
         help_text="Timestamp первого успешного welcome (S1 onboarding) "
         "delivery. NULL для BotUsers до task #85 deploy.",
     )
+
+    # S2 privacy consent (152-ФЗ) — task #85 part 2 / 5, 2026-05-26.
+    # Set by welcome skill when user taps «Да, продолжим» or «Понятно,
+    # продолжим» (S2a fold). NULL = never consented (либо refused
+    # «Не сейчас», либо ещё не дошёл до S2). Distinguish via combination
+    # с welcomed_at: welcomed=True + consent=NULL → likely refused or
+    # exited mid-flow. Used by returning-user query (Tau's §11 State 4):
+    # ``last_interaction_at < now - 30d AND consent_at IS NOT NULL`` →
+    # soft re-welcome, skip onboarding.
+    consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "152-ФЗ consent timestamp. NULL = not yet consented, "
+            "не ходит дальше welcome S1. Set when user actions S2 "
+            "consent CTA («Да, продолжим» или «Понятно, продолжим» "
+            "из S2a fold). Used to gate downstream actions + "
+            "distinguish returning-user states (per Tau's "
+            "customer-onboarding-flow.md §11)."
+        ),
+    )
     context = models.JSONField(
         default=dict,
         blank=True,

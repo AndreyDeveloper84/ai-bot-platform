@@ -60,11 +60,20 @@ on first delivery. ``matches()`` short-circuits the auto-trigger path
 when ``welcomed_at`` is non-NULL — subsequent messages route к normal
 dispatcher flow.
 
-A «Начать» button advances к S2 (privacy consent) via callback
-``cb:welcome:start_s2``. S2 implementation pending Tau's follow-up
-PR for ``customer-onboarding-flow.md`` rebase; current handler echoes
-a placeholder so the chain is wireable now and switchable later
-without rebuilding S1.
+### S2 privacy consent (152-ФЗ) — task #85 part 2, 2026-05-26
+
+«Начать» button (callback ``cb:welcome:start_s2``) routes к real S2
+privacy consent prompt (Tau's customer-onboarding-flow.md §5):
+
+* ``cb:welcome:consent_yes`` — stamps ``BotUser.consent_at`` idempotently
+  (existing timestamp NOT overwritten на double-tap из S2 + S2a flows).
+  Renders transitional placeholder + welcome menu pending S3 PR.
+* ``cb:welcome:consent_details`` — S2a expanded fold disclosing scope
+  («что именно запоминаю»).
+* ``cb:welcome:consent_refuse`` — State 3 graceful exit. No keyboard;
+  conversation ends. ``consent_at`` remains NULL.
+
+S3 positioning + S5 first-action grid lands в PR 2 task #85.
 """
 
 from __future__ import annotations
@@ -89,12 +98,36 @@ WELCOME_TEXT = (
     "Выберите раздел:"
 )
 
-# S1 → S2 transition placeholder. Real S2 (privacy consent prompt with
-# 152-ФЗ legal text + Принять / Подробнее buttons) lands в Tau's
-# customer-onboarding-flow.md follow-up PR. Current text — soft ack
-# + return к main menu чтобы flow не упирался в dead-end.
-START_S2_PLACEHOLDER_TEXT = (
-    "Здорово! Сейчас покажу что я умею. Выбирайте раздел или напишите свой вопрос — отвечу."
+# S2 privacy consent (152-ФЗ) — Tau's customer-onboarding-flow.md §5
+# verbatim. Brand-Guardian-approved (9.5/10), gender-neutral
+# «Продолжим?» (не misgender ~10-20% male users в pilot cohort).
+S2_CONSENT_TEXT = (
+    "Прежде чем начать — короткое слово.\n"
+    "Я буду помнить о тебе только то, что поможет рекомендовать точнее. "
+    "Хранится безопасно. Удалить можно в любой момент.\n\n"
+    "Продолжим?"
+)
+
+# S2a expanded fold (Tau §5). Active-voice «Запоминаю» (Brand Guardian
+# fix; was passive). Surface scope explicitly so user знает что
+# именно accumulates → 152-ФЗ informed-consent doctrine.
+S2A_DETAILS_TEXT = (
+    "Запоминаю: твои сообщения мне, выбранные цели, питание и вода "
+    "если решишь логировать, записи к мастерам. Не делюсь с салонами "
+    "без твоего разрешения. Подробнее в Профиле → «Данные обо мне» "
+    "когда зайдёшь."
+)
+
+# State 3 (Tau §11) — refused consent graceful exit. Brand-Guardian
+# rated «six words, dignity preserved, door open». No keyboard ships —
+# conversation ends here; user может вернуться писать когда захочет.
+S2_REFUSED_TEXT = "Поняла. Когда захочешь — пиши, я тут."
+
+# S2 → S3 transition placeholder. Real S3 (positioning «Кто такая
+# Ayla») lands в PR 2 task #85. Current text — soft ack of consent
+# + re-show welcome menu чтобы flow не повис до S3 PR.
+CONSENT_GRANTED_PLACEHOLDER_TEXT = (
+    "Спасибо. Сейчас покажу что я умею — выбирай раздел или просто напиши вопрос."
 )
 
 ASK_PROMPT = (
@@ -154,18 +187,78 @@ class WelcomeSkill:
                 meta={"reply_kind": "welcome_water_prompt"},
             )
         if text == "cb:welcome:start_s2":
-            # S1 → S2 transition. Placeholder text; final S2 (privacy
-            # consent screen) lands в Tau's customer-onboarding-flow.md
-            # follow-up PR. Until then re-show menu so user has a path
-            # forward.
+            # S1 → S2 privacy consent prompt (Tau §5 verbatim). Three
+            # buttons: «Да, продолжим» (consent), «Узнать что хранится»
+            # (S2a fold), «Не сейчас» (refuse → goodbye).
             return SkillResult(
-                reply_text=START_S2_PLACEHOLDER_TEXT,
+                reply_text=S2_CONSENT_TEXT,
+                action_type="welcome_consent_prompt",
+                action_data={
+                    "buttons": _s2_consent_buttons(),
+                    "button_columns": 1,
+                },
+                meta={"reply_kind": "welcome_s2_consent_prompt"},
+            )
+        if text == "cb:welcome:consent_details":
+            # S2a expanded fold (Tau §5). Two buttons: «Понятно,
+            # продолжим» (=consent_yes — same outcome as «Да,
+            # продолжим»), «Не сейчас» (=consent_refuse).
+            return SkillResult(
+                reply_text=S2A_DETAILS_TEXT,
+                action_type="welcome_consent_details",
+                action_data={
+                    "buttons": _s2a_details_buttons(),
+                    "button_columns": 1,
+                },
+                meta={"reply_kind": "welcome_s2a_details"},
+            )
+        if text == "cb:welcome:consent_yes":
+            # 152-ФЗ consent. Stamp consent_at idempotently — second tap
+            # из-за double-click либо S2 → S2a → consent_yes flow не
+            # должен overwrite original timestamp (audit-trail integrity).
+            bot_user = context.bot_user
+            if getattr(bot_user, "consent_at", None) is None:
+                try:
+                    bot_user.consent_at = timezone.now()
+                    bot_user.save(update_fields=["consent_at"])
+                except Exception as exc:  # noqa: BLE001
+                    # Mirror welcomed_at pattern: log + continue. Worst
+                    # case — consent re-asked on next entry to S2; not
+                    # data-loss since the user IS giving consent right
+                    # now (we just failed to record it).
+                    logger.error(
+                        "welcome.consent_at_save_failed bot_user_id=%s err=%s",
+                        getattr(bot_user, "id", None),
+                        exc,
+                    )
+            # S2 → S3 transition. Real S3 lands в PR 2; current placeholder
+            # = re-show welcome menu so user has a forward path.
+            return SkillResult(
+                reply_text=CONSENT_GRANTED_PLACEHOLDER_TEXT,
                 action_type="welcome_menu",
                 action_data={
                     "buttons": _welcome_buttons(),
                     "button_columns": 1,
                 },
-                meta={"reply_kind": "welcome_start_s2_placeholder"},
+                meta={"reply_kind": "welcome_consent_granted"},
+            )
+        if text == "cb:welcome:consent_refuse":
+            # State 3 (Tau §11). Graceful exit — no keyboard, no menu.
+            # consent_at remains NULL → если user пишет снова, welcome
+            # auto-trigger ne fires (welcomed_at is set), но downstream
+            # gates можно использовать consent_at IS NULL для re-prompt.
+            #
+            # Audit log: 152-ФЗ refusal IS a regulator-relevant event
+            # (pre-pilot fix Y3 из CR на PR #776). INFO level, не ERROR
+            # — это user-initiated normal flow, не failure.
+            logger.info(
+                "welcome.consent_refused bot_user_id=%s channel=%s",
+                getattr(context.bot_user, "id", None),
+                getattr(context.bot_user, "channel", None),
+            )
+            return SkillResult(
+                reply_text=S2_REFUSED_TEXT,
+                meta={"reply_kind": "welcome_consent_refused"},
             )
         # /start OR S1 auto-trigger OR Mini-App-opening callback that we
         # don't need to respond to with a message. Re-show the menu so
@@ -248,6 +341,39 @@ def _welcome_buttons() -> list[dict[str, str]]:
         {"label": "▶️ Начать", "callback": "cb:welcome:start_s2"},
     ]
     return salon_buttons + wellness_buttons + start_buttons
+
+
+def _s2_consent_buttons() -> list[dict[str, str]]:
+    """S2 privacy consent keyboard (Tau §5).
+
+    Three options:
+      * «Да, продолжим» → ``cb:welcome:consent_yes`` (stamps consent_at).
+      * «Узнать что хранится» → ``cb:welcome:consent_details`` (S2a fold).
+      * «Не сейчас» → ``cb:welcome:consent_refuse`` (goodbye, no menu).
+
+    Single-column layout matches the rest of the welcome flow (legacy
+    maxbot established 1-col convention since 2026-04) — easier на
+    mobile, less visual noise vs. 3-col grid.
+    """
+    return [
+        {"label": "Да, продолжим", "callback": "cb:welcome:consent_yes"},
+        {"label": "Узнать что хранится", "callback": "cb:welcome:consent_details"},
+        {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
+
+
+def _s2a_details_buttons() -> list[dict[str, str]]:
+    """S2a expanded keyboard (Tau §5).
+
+    Two options:
+      * «Понятно, продолжим» → ``cb:welcome:consent_yes`` (same handler
+        что и из S2 — single source of truth для consent stamping).
+      * «Не сейчас» → ``cb:welcome:consent_refuse``.
+    """
+    return [
+        {"label": "Понятно, продолжим", "callback": "cb:welcome:consent_yes"},
+        {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
 
 
 def _join(base: str, route: str) -> str:
