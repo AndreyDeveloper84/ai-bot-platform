@@ -148,6 +148,19 @@ class BotUser(models.Model):
     )
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
+
+    # S1 onboarding idempotency (task #85, W2/Epsilon, 2026-05-26).
+    # Set by :class:`apps.skills.welcome.skill.WelcomeSkill` at first
+    # successful welcome delivery. NULL until set; never reset.
+    # WelcomeSkill.matches() short-circuits the auto-trigger path when
+    # this is non-NULL (otherwise welcome would re-fire on every message).
+    welcomed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Timestamp первого успешного welcome (S1 onboarding) "
+        "delivery. NULL для BotUsers до task #85 deploy.",
+    )
     context = models.JSONField(
         default=dict,
         blank=True,

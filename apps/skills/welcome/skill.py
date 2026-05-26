@@ -46,16 +46,39 @@ Echo still owns the catch-all path. Welcome registers BEFORE echo so
 ``/start`` lands here first. The callback prefix ``cb:welcome:`` also
 routes here so the welcome-keyboard taps get a helpful prompt rather
 than verbatim echo of the callback payload.
+
+### S1 auto-trigger (task #85, W2/Epsilon, 2026-05-26)
+
+In addition to ``/start`` + ``cb:welcome:*``, welcome **also** triggers
+on the **first message from any BotUser with ``welcomed_at IS NULL``**.
+Per Tau's customer-onboarding-flow.md S1 step: customer who texts the
+bot для первой раз (даже без явного ``/start``) должен получить welcome,
+а не уйти в echo / generic Q&A fallback.
+
+Idempotency: ``handle()`` sets ``bot_user.welcomed_at = timezone.now()``
+on first delivery. ``matches()`` short-circuits the auto-trigger path
+when ``welcomed_at`` is non-NULL — subsequent messages route к normal
+dispatcher flow.
+
+A «Начать» button advances к S2 (privacy consent) via callback
+``cb:welcome:start_s2``. S2 implementation pending Tau's follow-up
+PR for ``customer-onboarding-flow.md`` rebase; current handler echoes
+a placeholder so the chain is wireable now and switchable later
+without rebuilding S1.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 from django.conf import settings
+from django.utils import timezone
 
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.registry import register
+
+logger = logging.getLogger(__name__)
 
 
 WELCOME_TEXT = (
@@ -64,6 +87,14 @@ WELCOME_TEXT = (
     "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n"
     "А ещё умею вести дневник еды и воды.\n\n"
     "Выберите раздел:"
+)
+
+# S1 → S2 transition placeholder. Real S2 (privacy consent prompt with
+# 152-ФЗ legal text + Принять / Подробнее buttons) lands в Tau's
+# customer-onboarding-flow.md follow-up PR. Current text — soft ack
+# + return к main menu чтобы flow не упирался в dead-end.
+START_S2_PLACEHOLDER_TEXT = (
+    "Здорово! Сейчас покажу что я умею. Выбирайте раздел или напишите свой вопрос — отвечу."
 )
 
 ASK_PROMPT = (
@@ -93,7 +124,16 @@ class WelcomeSkill:
         text = context.message_text.strip()
         if text == "/start":
             return True
-        return text.startswith("cb:welcome:")
+        if text.startswith("cb:welcome:"):
+            return True
+        # S1 auto-trigger (task #85). Any text from an unwelcomed BotUser
+        # routes here BEFORE other skills — first impression wins. After
+        # ``handle()`` marks ``welcomed_at``, subsequent matches() calls
+        # return False (this branch), and the normal dispatcher walks
+        # other skills for the user's actual intent.
+        if getattr(context.bot_user, "welcomed_at", None) is None:
+            return True
+        return False
 
     def handle(self, context: SkillContext) -> SkillResult:
         text = context.message_text.strip()
@@ -113,10 +153,41 @@ class WelcomeSkill:
                 reply_text=WATER_PROMPT,
                 meta={"reply_kind": "welcome_water_prompt"},
             )
-        # Either /start OR a Mini-App-opening callback that we don't need
-        # to respond to with a message (the user already left for the Mini
-        # App). Re-show the menu so they have a way back if the Mini App
-        # rejected the deeplink.
+        if text == "cb:welcome:start_s2":
+            # S1 → S2 transition. Placeholder text; final S2 (privacy
+            # consent screen) lands в Tau's customer-onboarding-flow.md
+            # follow-up PR. Until then re-show menu so user has a path
+            # forward.
+            return SkillResult(
+                reply_text=START_S2_PLACEHOLDER_TEXT,
+                action_type="welcome_menu",
+                action_data={
+                    "buttons": _welcome_buttons(),
+                    "button_columns": 1,
+                },
+                meta={"reply_kind": "welcome_start_s2_placeholder"},
+            )
+        # /start OR S1 auto-trigger OR Mini-App-opening callback that we
+        # don't need to respond to with a message. Re-show the menu so
+        # they have a way back if the Mini App rejected the deeplink.
+        #
+        # S1 idempotency: stamp welcomed_at so subsequent inbound
+        # messages bypass the auto-trigger branch in matches().
+        bot_user = context.bot_user
+        if getattr(bot_user, "welcomed_at", None) is None:
+            try:
+                bot_user.welcomed_at = timezone.now()
+                bot_user.save(update_fields=["welcomed_at"])
+            except Exception as exc:  # noqa: BLE001
+                # Не блокируем welcome delivery если DB write fail —
+                # худший случай: welcome re-fires на следующем msg.
+                # ERROR log: оператор увидит pattern если это
+                # систематически воспроизводится.
+                logger.error(
+                    "welcome.welcomed_at_save_failed bot_user_id=%s err=%s",
+                    getattr(bot_user, "id", None),
+                    exc,
+                )
         return SkillResult(
             reply_text=WELCOME_TEXT,
             action_type="welcome_menu",
@@ -170,7 +241,13 @@ def _welcome_buttons() -> list[dict[str, str]]:
         {"label": "📊 Анкета", "callback": "cb:anketa:start"},
         {"label": "❓ Задать вопрос", "callback": "cb:welcome:ask"},
     ]
-    return salon_buttons + wellness_buttons
+    # S1 → S2 ack button (task #85). Sits под основными разделами —
+    # «Начать» = ack «я готов(а)» → bot route к S2 privacy consent.
+    # S2 = placeholder сейчас, реальный flow в Tau's PR.
+    start_buttons = [
+        {"label": "▶️ Начать", "callback": "cb:welcome:start_s2"},
+    ]
+    return salon_buttons + wellness_buttons + start_buttons
 
 
 def _join(base: str, route: str) -> str:
