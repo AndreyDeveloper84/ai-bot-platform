@@ -135,60 +135,50 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
  * children of `<Routes>` — the Routes component flattens nested
  * fragments before matching.
  *
- * `surfaceTracker` is optional — when provided, it is rendered alongside
- * each element to record the user's current top-level surface for the
- * unified-landing redirect heuristic.
+ * Surface tracking (persisting last-chosen `admin` vs `master` for the
+ * unified-landing redirect heuristic) is now done at the top of
+ * `UnifiedAdminMasterRoutes` via a single `useLocation()` listener
+ * keyed off the pathname prefix — see #746. The previous per-route
+ * `<UnifiedSurfaceTracker>` mount pattern re-wrote on every SPA
+ * back/forward route mount (cheap but redundant) and added JSX noise.
  */
-function adminRouteElements(
-  me: MeResponse,
-  surfaceTracker?: React.ReactNode,
-): React.ReactNode {
-  const wrap = (el: React.ReactNode): React.ReactNode =>
-    surfaceTracker ? (
-      <>
-        {surfaceTracker}
-        {el}
-      </>
-    ) : (
-      el
-    );
+function adminRouteElements(me: MeResponse): React.ReactNode {
   return (
     <>
-      <Route path="/admin/team" element={wrap(<AdminTeamScreen me={me} />)} />
+      <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
       <Route
         path="/admin/team/invite"
-        element={wrap(<AdminInviteMasterScreen me={me} />)}
+        element={<AdminInviteMasterScreen me={me} />}
       />
       <Route
         path="/admin/team/:masterId/deactivate"
-        element={wrap(<AdminDeactivationFlowScreen me={me} />)}
+        element={<AdminDeactivationFlowScreen me={me} />}
       />
       <Route
         path="/admin/team/:masterId"
-        element={wrap(<AdminMasterDetailScreen me={me} />)}
+        element={<AdminMasterDetailScreen me={me} />}
       />
       <Route
         path="/admin/services"
-        element={wrap(<AdminServicesMatrixScreen me={me} />)}
+        element={<AdminServicesMatrixScreen me={me} />}
       />
       <Route
         path="/admin/availability-requests"
-        element={wrap(<AdminAvailabilityRequestsScreen me={me} />)}
+        element={<AdminAvailabilityRequestsScreen me={me} />}
       />
       {/* Master ↔ admin internal chat — admin queue ("Чаты с мастерами"). */}
       <Route
         path="/admin/internal-chat"
-        element={wrap(<AdminInternalChatListScreen me={me} />)}
+        element={<AdminInternalChatListScreen me={me} />}
       />
       <Route
         path="/admin/internal-chat/threads/:threadId"
-        element={wrap(<AdminInternalChatThreadScreen me={me} />)}
+        element={<AdminInternalChatThreadScreen me={me} />}
       />
       {/*
         Legacy /admin/chats path (used by AdminTabBar) → redirect to the
         live internal-chat surface. Keeps deep-links from older bot DMs
-        working. The redirect does NOT get a surface tracker (it never
-        actually mounts a surface).
+        working.
       */}
       <Route
         path="/admin/chats"
@@ -196,7 +186,7 @@ function adminRouteElements(
       />
       <Route
         path="/admin/settings"
-        element={wrap(<AdminSettingsPlaceholderScreen />)}
+        element={<AdminSettingsPlaceholderScreen />}
       />
     </>
   );
@@ -206,61 +196,76 @@ function adminRouteElements(
  * Shared master route elements — single source of truth consumed by
  * both `MasterRoutes` (single-role master user) and
  * `UnifiedAdminMasterRoutes` (solo provider / dual-role). See
- * `adminRouteElements` for the rationale and wrapping semantics.
+ * `adminRouteElements` for the rationale.
  */
-function masterRouteElements(
-  surfaceTracker?: React.ReactNode,
-): React.ReactNode {
-  const wrap = (el: React.ReactNode): React.ReactNode =>
-    surfaceTracker ? (
-      <>
-        {surfaceTracker}
-        {el}
-      </>
-    ) : (
-      el
-    );
+function masterRouteElements(): React.ReactNode {
   return (
     <>
       <Route
         path="/onboarding/master"
-        element={wrap(<MasterOnboardingScreen />)}
+        element={<MasterOnboardingScreen />}
       />
-      <Route
-        path="/master/dashboard"
-        element={wrap(<MasterDashboardScreen />)}
-      />
-      <Route
-        path="/master/schedule"
-        element={wrap(<MasterScheduleScreen />)}
-      />
+      <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
+      <Route path="/master/schedule" element={<MasterScheduleScreen />} />
       <Route
         path="/master/conversations"
-        element={wrap(<MasterConversationsScreen />)}
+        element={<MasterConversationsScreen />}
       />
       <Route
         path="/master/conversations/:id"
-        element={wrap(<MasterConversationDetailScreen />)}
+        element={<MasterConversationDetailScreen />}
       />
-      <Route path="/master/profile" element={wrap(<MasterProfileScreen />)} />
+      <Route path="/master/profile" element={<MasterProfileScreen />} />
       {/* M7 notification settings (Bundle B / item 3) */}
       <Route
         path="/master/settings/notifications"
-        element={wrap(<MasterNotificationSettingsScreen />)}
+        element={<MasterNotificationSettingsScreen />}
       />
       {/* M8 minimal — logout-only (full M8 deferred post-pilot) */}
-      <Route path="/master/settings" element={wrap(<MasterSettingsScreen />)} />
+      <Route path="/master/settings" element={<MasterSettingsScreen />} />
       {/* Internal chat «Со студией» (master-admin internal-chat handoff §3) */}
       <Route
         path="/master/internal-chat"
-        element={wrap(<MasterInternalChatListScreen />)}
+        element={<MasterInternalChatListScreen />}
       />
       <Route
         path="/master/internal-chat/threads/:threadId"
-        element={wrap(<MasterInternalChatThreadScreen />)}
+        element={<MasterInternalChatThreadScreen />}
       />
     </>
   );
+}
+
+/**
+ * Catch-all route redirect with developer-mode logging — issue #748.
+ *
+ * Previously the catch-all routes (`<Route path="*" element={<Navigate
+ * to="/foo" replace />} />`) silently redirected typos / stale deep
+ * links with no feedback. A user who pasted `/admin/teem` would land
+ * silently on `/admin/team` (or, in the unified surface, possibly on
+ * the master dashboard via the auto-restore heuristic) and have no
+ * idea why their URL didn't go where they expected.
+ *
+ * We surface this in dev with a `console.warn` (so future agents
+ * notice when they typo a path during testing). In prod we still
+ * redirect silently — Mini Apps don't really expose a URL bar to end
+ * users, so a transient toast was rejected as unnecessary noise (no
+ * imperative-API Snackbar in the codebase; the existing controlled
+ * Snackbar requires lifting state into the route component, which is
+ * overkill for the redirect-on-mount flow). If users start manually
+ * editing URLs in future channels (web sidebar, etc.) we can revisit.
+ */
+function CatchAllRedirect({ to }: { to: string }) {
+  const location = useLocation();
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[App] Unknown route ${location.pathname} — redirecting to ${to}`,
+      );
+    }
+  }, [location.pathname, to]);
+  return <Navigate to={to} replace />;
 }
 
 /** Routes for admin / owner / receptionist roles. */
@@ -269,7 +274,7 @@ function AdminRoutes({ me }: { me: MeResponse }) {
     <Routes>
       {adminRouteElements(me)}
       {/* Default + unknown — land on team. */}
-      <Route path="*" element={<Navigate to="/admin/team" replace />} />
+      <Route path="*" element={<CatchAllRedirect to="/admin/team" />} />
     </Routes>
   );
 }
@@ -280,7 +285,7 @@ function MasterRoutes() {
     <Routes>
       {masterRouteElements()}
       {/* Default + unknown — land on dashboard. */}
-      <Route path="*" element={<Navigate to="/master/dashboard" replace />} />
+      <Route path="*" element={<CatchAllRedirect to="/master/dashboard" />} />
     </Routes>
   );
 }
@@ -426,9 +431,11 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
  * that respects the persisted last-surface choice.
  *
  * Side-effect: every navigation into /admin/* or /master/* updates the
- * persisted last-surface flag (via UnifiedSurfaceTracker mounted on
- * the route element). On re-open, the chooser auto-redirects to the
- * last-chosen surface if one is recorded.
+ * persisted last-surface flag via a single top-level `useLocation()`
+ * listener (see #746 — replaces the previous per-route
+ * `UnifiedSurfaceTracker` mount, which re-wrote on every SPA
+ * back/forward and added JSX noise to every route declaration). The
+ * chooser reads this on next open to auto-redirect.
  *
  * Implementation note: we deliberately do NOT delegate to the existing
  * AdminRoutes / MasterRoutes components (which each define their own
@@ -440,16 +447,6 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
  * screens are introduced), so the route map stays in sync with the
  * single-role surfaces by sharing the underlying screens.
  */
-function UnifiedSurfaceTracker({ surface }: { surface: UnifiedSurface }) {
-  // Run once on mount of a route element — records that the user is
-  // currently inside this surface. The chooser reads this on next
-  // open to auto-redirect.
-  useEffect(() => {
-    writeLastSurface(surface);
-  }, [surface]);
-  return null;
-}
-
 function UnifiedLandingOrRedirect({ me }: { me: MeResponse }) {
   // If we have a persisted last-surface, jump directly into it. Otherwise
   // show the chooser. We do this with a <Navigate> on mount.
@@ -464,21 +461,29 @@ function UnifiedLandingOrRedirect({ me }: { me: MeResponse }) {
 }
 
 function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
-  // Reuse the single-role route definitions verbatim — same screen
-  // components, same paths — and bolt on a per-surface tracker that
-  // records the user's current top-level surface for the next open.
-  // PRE_PILOT round-1 fix for #79: single source of truth prevents
-  // route-list drift between AdminRoutes / MasterRoutes and the unified
-  // surface.
+  // Top-level surface tracker (#746) — single listener keyed off the
+  // pathname prefix. Fires once on each real navigation (vs the
+  // previous per-route mount which re-wrote on every back/forward).
+  // The landing `/` route deliberately does NOT write — the user
+  // hasn't picked a surface yet at that point.
+  const location = useLocation();
+  useEffect(() => {
+    if (location.pathname.startsWith("/admin/")) {
+      writeLastSurface("admin");
+    } else if (location.pathname.startsWith("/master/")) {
+      writeLastSurface("master");
+    }
+  }, [location.pathname]);
+
   return (
     <Routes>
       {/* --- Admin surface ---------------------------------------- */}
-      {adminRouteElements(me, <UnifiedSurfaceTracker surface="admin" />)}
+      {adminRouteElements(me)}
       {/* --- Master surface --------------------------------------- */}
-      {masterRouteElements(<UnifiedSurfaceTracker surface="master" />)}
+      {masterRouteElements()}
       {/* --- Landing / fallback ----------------------------------- */}
       <Route path="/" element={<UnifiedLandingOrRedirect me={me} />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<CatchAllRedirect to="/" />} />
     </Routes>
   );
 }

@@ -403,11 +403,50 @@ Alternative: Django admin UI на `/django-admin/tenancy/tenantuserrelationship/
 
 ---
 
+### Шаг 3.2.8 — Receptionist+master role combination (unified surface gating)
+
+> FOLLOW_UP из PR #753 / issue #747. Sanity check that the inclusive
+> routing wrapper (`UnifiedAdminMasterRoutes`) does NOT leak
+> owner-only actions to a dual-role receptionist+master user. The
+> `me` prop threads through `adminRouteElements(me)` to each admin
+> screen, so the same `me.is_owner` gating that fires in
+> `AdminRoutes` should fire identically inside the unified wrapper —
+> this test verifies that empirically.
+
+**Действия:**
+
+1. Test user provisioned с `TenantStaff.role = receptionist` AND linked `CatalogMaster` (i.e. dual-role: receptionist+master, NOT owner, NOT admin).
+2. Open Mini App → boot cascade hits `hasAdmin && hasMaster` → UnifiedLanding chooser visible (или auto-redirect to last-chosen surface если localStorage уже содержит выбор).
+3. Tap «🏢 Салон» → land on `/admin/team`.
+4. Open any master detail screen (`/admin/team/:masterId`) → verify owner-only action buttons (Деактивировать, Реактивировать, и т.п.) показывают `disabled` state + `title` tooltip «Только владелец может деактивировать» / «Только владелец может восстановить» (см. `AdminMasterDetailScreen.tsx` lines 949-961).
+5. На `/admin/team` (list view) — tap «Деактивировать»/«Восстановить» возле любого мастера → buttons disabled с tooltip «Только владелец, скоро» (см. `AdminTeamScreen.tsx` lines 540-551).
+6. Switch surface — back to `/`, tap «👤 Мой профиль мастера» → land on `/master/dashboard`. Verify master surface работает: schedule, conversations, profile все доступны.
+7. Defence-in-depth: если получится bypass UI (e.g. via direct API call) — backend должен return 403 with `not_authorized` slug.
+
+**Ожидаемый вывод:**
+
+- Padlock-style disabled buttons visible on owner-only actions on BOTH `/admin/team` list view AND `/admin/team/:masterId` detail view.
+- Tooltip «Только владелец…» shows on hover/tap of disabled buttons.
+- Master surface (`/master/*`) fully accessible — receptionist can see her own schedule / conversations / profile.
+- localStorage key `max:unified_last_surface` updates когда user navigates into admin or master subtree (single top-level listener in `UnifiedAdminMasterRoutes` — see #746).
+- Backend POST attempts to owner-only endpoints (e.g. `POST /api/v1/admin/masters/{id}/deactivate`) return `403 not_authorized` if invoked by receptionist (defence in depth).
+
+**Если не сработало:**
+
+- Если padlock missing / button enabled: UI permission gate bug — `me.is_owner` check либо hardcoded ожидающий `true`, либо `me` prop не дошёл до screen через unified wrapper. Проверить `adminRouteElements(me)` сигнатуру.
+- Если backend 200 (NOT 403) on owner-only action invoked by receptionist: критическая security проблема — escalate P0 immediately.
+- Если switching surfaces ломает state (e.g. master surface не загружается после захода в admin): inspect `useLocation` listener в `UnifiedAdminMasterRoutes` — pathname prefix matching должен корректно различать `/admin/` vs `/master/`.
+
+---
+
 ## Verification (overall)
 
 Pilot готов declare «live» если все mandatory tests прошли:
 - 3.1.1 ✓ 3.1.2 ✓ 3.1.3 ✓ 3.1.4 ✓
 - 3.2.1 ✓ 3.2.2 ✓ 3.2.6 ✓ 3.2.7 ✓
+
+Шаг 3.2.8 — mandatory IF pilot has any receptionist+master users provisioned;
+N/A otherwise (single-role staff only).
 
 Если 3.2.3 / 3.2.4 / 3.2.5 marked N/A — acceptable (documented above; deferred features).
 
