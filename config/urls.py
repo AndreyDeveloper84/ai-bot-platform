@@ -31,9 +31,21 @@ urlpatterns = [
     # #428 (Bucket 6) — YooKassa webhook RETIRED. Per ADR-0009 §Domain
     # ownership matrix, YooKassa payment lifecycle (create, capture,
     # refund, webhook) lives in Ayla djangoproject only. YooKassa
-    # Personal Cabinet webhook URL was switched to Ayla before this
-    # PR merged (see PR body Q3 preconditions). bot-platform no
-    # longer terminates YooKassa traffic.
+    # Personal Cabinet webhook URL was switched to Ayla before #739
+    # merged. bot-platform no longer terminates YooKassa traffic.
+    #
+    # #732 (PRE_PILOT) — temporary 410 Gone endpoint at the original
+    # ``/api/v1/yookassa/webhook/`` path catches any in-flight
+    # YooKassa retries from Cabinets that haven't been flipped yet,
+    # so they don't fall through to Django's default 404 (which
+    # YooKassa treats as «do not retry, payment event lost forever»).
+    # 30-day soak window post-#739 deploy, then deleted by the
+    # cleanup PR. See ``apps/integrations/yookassa_retired/__init__.py``
+    # for the lifecycle contract.
+    path(
+        "api/v1/yookassa/",
+        include("apps.integrations.yookassa_retired.urls", namespace="yookassa_retired"),
+    ),
     # Phase 0 / #432 (ADR-0009 §Mandatory event contract) — internal
     # events ingest channel from Ayla djangoproject. Stub today
     # (501 Not Implemented); full per-event dispatch arrives with
