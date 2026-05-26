@@ -7,11 +7,8 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        (
-            "conversations",
-            "0013_rename_conv_aidraft_tnt_mst_stat_idx_conversatio_tenant__776ff2_idx_and_more",
-        ),
-        ("identity", "0011_alter_userpreferences_managers_and_more"),
+        ("conversations", "0012_conversation_last_payment_event_id"),
+        ("identity", "0011_botuser_consent_at"),
         ("observability", "0001_initial"),
         ("tenancy", "0009_tenantstaff"),
     ]
