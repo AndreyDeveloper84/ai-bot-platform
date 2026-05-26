@@ -401,18 +401,26 @@ class TestS2ConsentFlow:
         assert unwelcomed_bot_user.consent_at == original_consent_at
 
     @pytest.mark.django_db
-    def test_consent_refuse_returns_goodbye_no_keyboard(self, unwelcomed_bot_user):
+    def test_consent_refuse_returns_goodbye_no_keyboard(self, unwelcomed_bot_user, caplog):
         """«Не сейчас» → State 3 graceful exit. Tau §11: «six words,
-        dignity preserved, door open». consent_at остаётся NULL."""
+        dignity preserved, door open». consent_at остаётся NULL.
+
+        152-ФЗ refusal audit-logged (CR Y3 fix on #776). INFO level —
+        normal user flow, not failure.
+        """
+        import logging as _logging
+
         skill = WelcomeSkill()
-        result = skill.handle(
-            _ctx_with_botuser("cb:welcome:consent_refuse", unwelcomed_bot_user),
-        )
+        with caplog.at_level(_logging.INFO, logger="apps.skills.welcome.skill"):
+            result = skill.handle(
+                _ctx_with_botuser("cb:welcome:consent_refuse", unwelcomed_bot_user),
+            )
         assert result.reply_text == S2_REFUSED_TEXT
         assert result.action_data is None
         assert result.meta["reply_kind"] == "welcome_consent_refused"
         unwelcomed_bot_user.refresh_from_db()
         assert unwelcomed_bot_user.consent_at is None
+        assert any("welcome.consent_refused" in r.message for r in caplog.records)
 
     @pytest.mark.django_db
     def test_consent_yes_save_failure_does_not_block_response(

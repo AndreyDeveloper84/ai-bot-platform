@@ -130,12 +130,6 @@ CONSENT_GRANTED_PLACEHOLDER_TEXT = (
     "Спасибо. Сейчас покажу что я умею — выбирай раздел или просто напиши вопрос."
 )
 
-# Backwards-compat alias. ``START_S2_PLACEHOLDER_TEXT`` ссылался на
-# soft ack в #754; теперь «start S2» = real S2 prompt, поэтому alias
-# = S2_CONSENT_TEXT. Will be удалён в PR 2 когда S3 wired-up + tests
-# обновлены ссылаться на новые constants directly.
-START_S2_PLACEHOLDER_TEXT = S2_CONSENT_TEXT
-
 ASK_PROMPT = (
     "Спросите о чём угодно — про услуги, цены, противопоказания, "
     "адрес или режим работы. Я постараюсь ответить."
@@ -253,6 +247,15 @@ class WelcomeSkill:
             # consent_at remains NULL → если user пишет снова, welcome
             # auto-trigger ne fires (welcomed_at is set), но downstream
             # gates можно использовать consent_at IS NULL для re-prompt.
+            #
+            # Audit log: 152-ФЗ refusal IS a regulator-relevant event
+            # (pre-pilot fix Y3 из CR на PR #776). INFO level, не ERROR
+            # — это user-initiated normal flow, не failure.
+            logger.info(
+                "welcome.consent_refused bot_user_id=%s channel=%s",
+                getattr(context.bot_user, "id", None),
+                getattr(context.bot_user, "channel", None),
+            )
             return SkillResult(
                 reply_text=S2_REFUSED_TEXT,
                 meta={"reply_kind": "welcome_consent_refused"},
