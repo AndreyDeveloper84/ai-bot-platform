@@ -87,6 +87,7 @@ from django.utils import timezone as dj_timezone
 from apps.audit.services import write_audit
 from apps.booking.models import BookingRequest, PendingBookingAction
 from apps.booking.services.attribution import (
+    CommercialIdentitySnapshot,
     build_customer_attribution_metadata,
     build_live_commercial_identity,
     compute_assist_score,
@@ -1895,7 +1896,7 @@ def execute_reschedule(
             # legacy chain (consistent with q12a-billing-founder-gate).
             # #618 follow-up: shape lives in
             # ``attribution.build_live_commercial_identity``.
-            live_commercial_identity: dict | None = (
+            live_commercial_identity: CommercialIdentitySnapshot | None = (
                 build_live_commercial_identity(booking.service)
                 if booking.service is not None
                 else None
@@ -1915,7 +1916,7 @@ def execute_reschedule(
             # services/reschedule.py for full rationale). FOOT-GUN:
             # do NOT add ``.select_related(...)`` here — would expand
             # FOR UPDATE scope to joined tables on Postgres.
-            carry_snapshot: dict | None = None
+            carry_snapshot: CommercialIdentitySnapshot | None = None
             if is_continuation and chain_root_id is not None:
                 try:
                     root = BookingRequest.all_tenants.select_for_update().get(id=chain_root_id)

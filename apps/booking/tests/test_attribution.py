@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from apps.booking.models import BookingRequest
 from apps.booking.services.attribution import (
+    CommercialIdentitySnapshot,
     build_customer_attribution_metadata,
     compute_assist_score,
     compute_billable,
@@ -902,7 +903,11 @@ class TestCommercialIdentitySnapshot:
         sticker_price_amount="1500.00",
         currency="RUB",
         duration_minutes=60,
-    ) -> dict:
+    ) -> CommercialIdentitySnapshot:
+        # Q12-α #642 follow-up: return type tightened from ``dict`` to
+        # ``CommercialIdentitySnapshot`` so callers passing this into
+        # ``compute_reschedule_continuation(new_commercial_identity=...)``
+        # satisfy the typed kwarg signature.
         return {
             "service_id": service_id,
             "service_name": service_name,

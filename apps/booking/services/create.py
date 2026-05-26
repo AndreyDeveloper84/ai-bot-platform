@@ -48,6 +48,7 @@ from django.utils import timezone
 
 from apps.booking.models import BookingRequest
 from apps.booking.services.attribution import (
+    CommercialIdentitySnapshot,
     build_customer_attribution_metadata,
     build_live_commercial_identity,
     compute_assist_score,
@@ -157,7 +158,7 @@ def create_customer_booking(
     *,
     inp: CreateBookingInput,
     correlation_id: str | None = None,
-    _commercial_identity_snapshot: dict | None = None,
+    _commercial_identity_snapshot: CommercialIdentitySnapshot | None = None,
 ) -> BookingRequest:
     """Atomic customer booking creation. Returns the created
     :class:`BookingRequest` or raises :class:`BookingCreateError`.
