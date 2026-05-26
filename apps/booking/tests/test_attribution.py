@@ -134,6 +134,75 @@ class TestComputeBillable:
         # Q12-α #533 D6: exact match — the literal is finance-greppable.
         assert reason == "reschedule_chain_broken: missing_continuation_signal"
 
+    def test_q12a_561_missing_signal_emits_warning_log(self, caplog) -> None:
+        """Q12-α #561 (FOLLOW_UP — Variant B): safe-default branch emits
+        a structured WARN log so ops can detect the «caller forgot to
+        compute continuation» regression via log aggregator grep, even
+        before a Prometheus counter is wired (the log is the cheap
+        always-on signal; the counter is a future infra add).
+
+        The literal ``billing.q12a.missing_continuation_signal`` is
+        load-bearing — it's the grep token in
+        ``docs/runbooks/q12a-partial-failure-triage.md``. Any future
+        rename MUST update the runbook + memory pin.
+        """
+
+        with caplog.at_level("WARNING", logger="apps.booking.services.attribution"):
+            compute_billable(
+                booking_source="ai_direct",
+                status="confirmed",
+                created_by="execute_reschedule",
+                # NOT passing is_reschedule_continuation — hits the
+                # safe-default branch that #561 instruments.
+            )
+
+        # Exactly one WARN with the load-bearing literal.
+        warns = [
+            r
+            for r in caplog.records
+            if r.levelname == "WARNING" and "billing.q12a.missing_continuation_signal" in r.message
+        ]
+        assert len(warns) == 1, (
+            f"Expected exactly 1 WARN with the missing-continuation-signal "
+            f"literal; got {len(warns)}. All records: {caplog.records}"
+        )
+        # Belt-and-braces: assert all 5 structured fields are present in
+        # the log message (friendly-review NICE_TO_HAVE). A future
+        # refactor that drops fields would still emit the literal but
+        # lose the diagnostic context — this catches that drift.
+        msg = warns[0].message
+        assert "booking_source=ai_direct" in msg
+        assert "status=confirmed" in msg
+        assert "created_by=execute_reschedule" in msg
+        assert "is_reschedule_continuation=False" in msg
+        assert "chain_break_reason=None" in msg
+
+    def test_q12a_561_explicit_chain_break_reason_does_not_log(self, caplog) -> None:
+        """Q12-α #561: the WARN signal MUST fire ONLY on the safe-default
+        path («caller forgot to compute continuation»). When the caller
+        explicitly passes ``chain_break_reason="over_90d"`` (or similar
+        legitimate break), no WARN — that's a normal chain-break event,
+        not a caller bug. Distinguishes ops triage signal-vs-noise.
+        """
+
+        with caplog.at_level("WARNING", logger="apps.booking.services.attribution"):
+            compute_billable(
+                booking_source="ai_direct",
+                status="confirmed",
+                created_by="execute_reschedule",
+                is_reschedule_continuation=False,
+                chain_break_reason="over_90d",  # Legitimate caller signal.
+            )
+
+        warns = [
+            r for r in caplog.records if "billing.q12a.missing_continuation_signal" in r.message
+        ]
+        assert warns == [], (
+            "Explicit chain_break_reason MUST NOT emit the "
+            "missing_continuation_signal WARN — that signal is reserved "
+            "for the «caller forgot continuation flag» regression."
+        )
+
 
 class TestComputeAssistScore:
     def test_ai_direct_one(self) -> None:
