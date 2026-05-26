@@ -731,10 +731,10 @@ Per tech lead Phase E priority emphasis:
 
 | Endpoint | Method | Description | Owner |
 |----------|--------|-------------|-------|
-| `GET /api/v1/catalog/recommendations` | GET | Layer 1 + Layer 2 + Layer 3 hierarchy with trust filter applied | W4 |
-| `GET /api/v1/catalog/masters/{master_id}` | GET | Master detail для F2 | W4 |
-| `GET /api/v1/catalog/masters/{master_id}/slots?days=14` | GET | Available slots для F3 (chronological + smart suggestions) | W4 |
-| `POST /api/v1/bookings/create` | POST | Booking commit (F4 → F5). Triggers registration gate if anonymous | W4 |
+| `GET /api/v1/customer/recommendations` | GET | Layer 1 + Layer 2 + Layer 3 hierarchy with trust filter applied. bot-platform proxy для Mini App; backing Ayla canonical = `GET /api/v1/internal/me/catalog/recommendations/` (bot-only Bearer + X-External-User-ID) | W4 |
+| `GET /api/v1/customer/masters/{master_id}` | GET | Master detail для F2 | W4 |
+| `GET /api/v1/customer/slots?master_id={id}&days=14` | GET | Available slots для F3 (chronological + smart suggestions) | W4 |
+| `POST /api/v1/customer/bookings` | POST | Booking commit (F4 → F5). Triggers registration gate if anonymous | W4 |
 | `GET /api/v1/me/loyalty` | GET | Loyalty balance для F4 inline display | Existing |
 | `POST /api/v1/bookings/{id}/apply_loyalty` | POST | Apply points to booking | Existing |
 
@@ -982,10 +982,10 @@ Memory ref: `project_booking_flow_implementation_cut`. 7 founder cuts applied th
 ### W2 backend tier system
 
 **Tier 1 (Must-have endpoints):**
-- `GET /api/v1/catalog/recommendations` — 3-layer structure с reasoning_text
-- `GET /api/v1/catalog/masters/{id}` — master detail
-- `GET /api/v1/catalog/masters/{id}/slots?days=14` — slots
-- `POST /api/v1/bookings/create` — booking creation
+- `GET /api/v1/customer/recommendations` — 3-layer structure с reasoning_text (bot-platform proxy to Ayla canonical `/internal/me/catalog/recommendations/`)
+- `GET /api/v1/customer/masters/{id}` — master detail
+- `GET /api/v1/customer/slots?master_id={id}&days=14` — slots
+- `POST /api/v1/customer/bookings` — booking creation
 - Anonymous context preservation endpoint (registration callback с pending_booking_intent)
 
 **Response fields required:**

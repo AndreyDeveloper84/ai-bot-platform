@@ -705,11 +705,11 @@ Per tech lead 5 spec variants + 2 founder-relevant. ASCII inline mocks comparing
 
 | Endpoint | Method | Description | Owner |
 |----------|--------|-------------|-------|
-| `POST /api/v1/bookings/{id}/cancel` | POST | Customer-initiated cancellation. Returns refund_info + chain_terminated flag | W4 |
-| `POST /api/v1/bookings/{id}/reschedule` | POST | Customer-initiated reschedule. Returns chain_status (same/new/partial_failure) | W4 |
-| `GET /api/v1/bookings/{id}/cancel_policy_preview` | GET | Returns expected_penalty + applicable_refund + hours_to_visit | W4 |
-| `GET /api/v1/bookings/{id}/reschedule_options?date=...` | GET | Returns slots + substitution candidates if original master unavailable | W4 |
-| `POST /api/v1/notifications/salon_side_cancel/{booking_id}/respond` | POST | Customer responds to no-fault cascade (accept substitute / pick another date / cancel with refund) | W4 |
+| `POST /api/v1/customer/bookings/{id}/cancel` | POST | Customer-initiated cancellation. Returns refund_info + chain_terminated flag | W4 |
+| `POST /api/v1/customer/bookings/{id}/reschedule` | POST | Customer-initiated reschedule. Returns chain_status (same/new/partial_failure) | W4 |
+| `GET /api/v1/customer/bookings/{id}/cancel_policy_preview` | GET | Returns expected_penalty + applicable_refund + hours_to_visit | W4 |
+| `GET /api/v1/customer/bookings/{id}/reschedule_options?date=...` | GET | Returns slots + substitution candidates if original master unavailable | W4 |
+| `POST /api/v1/customer/notifications/salon_side_cancel/{booking_id}/respond` | POST | Customer responds to no-fault cascade (accept substitute / pick another date / cancel with refund) | W4 |
 
 ### 9.2 Response fields critical
 
