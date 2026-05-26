@@ -338,3 +338,142 @@ class AIRequestMetric(models.Model):
             f"AIRequestMetric[{self.id} tenant={self.tenant_id} "
             f"intent={self.intent_classified or '-'} outcome={self.outcome}]"
         )
+
+
+class AIDailyMetricSummary(models.Model):
+    """Per-tenant per-day rollup of `AIRequestMetric` rows (AI observability Веха 2 / #771).
+
+    Source: `aggregate_daily_metrics(target_date, tenant)` walks all
+    `AIRequestMetric` rows where `date(created_at) == target_date AND
+    tenant=tenant`, computes the 4 pilot threshold metrics + counts +
+    latency percentiles + cost aggregates, and writes one row here via
+    `update_or_create` keyed on `(tenant, snapshot_date)`.
+
+    Idempotent — re-running the Celery beat task for the same day yields
+    the same row, same payload. Late-arriving `AIRequestMetric` rows
+    (back-fills, replays) are picked up by the next aggregation pass.
+
+    The 4 thresholds evaluated:
+      - task_success_rate ≥ 0.80  (booking-correlation heuristic)
+      - latency_p95_ms < 3000
+      - fallback_rate < 0.20
+      - mean_cost_usd < $0.01
+
+    `threshold_status` JSONB stores per-metric verdict (`ok` / `breach`)
+    for dashboard rendering (Веха 3) + audit. Empty-day handling:
+    `total_requests == 0` → status = `{"no_data": true}`, no alerts fire.
+    """
+
+    THRESHOLD_OK = "ok"
+    THRESHOLD_BREACH = "breach"
+    THRESHOLD_NO_DATA = "no_data"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="ai_daily_metric_summaries",
+        help_text="Owning tenant. PROTECT — billing-adjacent rollup history.",
+    )
+    snapshot_date = models.DateField(
+        db_index=True,
+        help_text="UTC date the rollup covers. Beat schedules at 03:00 UTC and "
+        "reads yesterday's `AIRequestMetric` rows (mirrors Sprint 8 cadence).",
+    )
+
+    # ─── Counts ──────────────────────────────────────────────────────────
+    total_requests = models.PositiveIntegerField(
+        default=0,
+        help_text="Total AI requests handled this day. Drives all rate metrics.",
+    )
+    success_count = models.PositiveIntegerField(default=0)
+    error_count = models.PositiveIntegerField(default=0)
+    fallback_count = models.PositiveIntegerField(default=0)
+    escalated_count = models.PositiveIntegerField(default=0)
+
+    # ─── Latency ─────────────────────────────────────────────────────────
+    latency_p50_ms = models.PositiveIntegerField(
+        default=0,
+        help_text="Median latency. NULL semantics: stored as 0 when total_requests==0.",
+    )
+    latency_p95_ms = models.PositiveIntegerField(
+        default=0,
+        help_text="95th percentile latency in ms. Drives the < 3000ms threshold.",
+    )
+    latency_p99_ms = models.PositiveIntegerField(default=0)
+
+    # ─── Cost ────────────────────────────────────────────────────────────
+    total_tokens_input = models.PositiveBigIntegerField(default=0)
+    total_tokens_output = models.PositiveBigIntegerField(default=0)
+    total_cost_usd = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        default=0,
+        help_text="Sum of `llm_cost_usd` across the day. Drives mean_cost_usd.",
+    )
+    mean_cost_usd = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        default=0,
+        help_text="`total_cost_usd / total_requests`. Drives the < $0.01 threshold.",
+    )
+
+    # ─── Rate metrics ────────────────────────────────────────────────────
+    task_success_rate = models.FloatField(
+        default=0.0,
+        help_text="`(AIRequestMetric.success_correlated_at IS NOT NULL count) / "
+        "total_requests`. Drives the ≥ 0.80 threshold. Heuristic correlation "
+        "via Conversation.last_booking_at within 60min of AI message.",
+    )
+    fallback_rate = models.FloatField(
+        default=0.0,
+        help_text="`fallback_count / total_requests`. Drives the < 0.20 threshold.",
+    )
+
+    # ─── Per-intent breakdown ────────────────────────────────────────────
+    intent_distribution = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="`{intent_label: count}` for the day. Dashboard surfaces "
+        "the top-5 intents per tenant. Empty when total_requests==0.",
+    )
+
+    # ─── Threshold status ────────────────────────────────────────────────
+    threshold_status = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Per-metric verdict — `{metric: {value, threshold, op, status}}`. "
+        "`status` in `ok`/`breach`/`no_data`. Empty when total_requests==0 "
+        "(status becomes `{no_data: true}`). Dashboard reads this directly.",
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When the aggregation task wrote this row.",
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        help_text="When the aggregation task last refreshed this row. Idempotent "
+        "re-runs bump this without changing the payload.",
+    )
+
+    # Cross-tenant dashboard reads via `.filter(snapshot_date__gte=cutoff)` —
+    # opt-out same as ShadowDeltaSnapshot pattern (apps/observability/views.py).
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    class Meta:
+        verbose_name = "AI daily metric summary"
+        verbose_name_plural = "AI daily metric summaries"
+        ordering = ["-snapshot_date", "tenant"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "snapshot_date"],
+                name="ai_daily_metric_one_per_tenant_per_day",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "-snapshot_date"], name="aidm_tenant_date_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AIDailyMetricSummary[{self.tenant_id} @ {self.snapshot_date}]"

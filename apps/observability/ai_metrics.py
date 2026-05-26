@@ -153,3 +153,292 @@ def record_ai_request(
         llm_cost_usd=llm_cost_usd,
         outcome=outcome,
     )
+
+
+# ─── Daily aggregation (Веха 2 / #771) ──────────────────────────────────
+
+
+from collections import Counter  # noqa: E402
+from datetime import (  # noqa: E402
+    date as _date,
+    datetime as _dt,
+    time as _time,
+    timedelta,
+    timezone as _stdlib_tz,
+)
+
+from django.db import transaction  # noqa: E402
+from django.utils import timezone as _django_tz  # noqa: E402
+
+from apps.observability.models import AIDailyMetricSummary  # noqa: E402
+
+# Pilot thresholds per memory `project_ai_concierge_doc_extracts` Tier-A #1.
+# Adversarial focus Веха 2: boundary semantics — explicit ≥ / < per metric.
+TASK_SUCCESS_RATE_THRESHOLD = 0.80  # ≥ 0.80 → ok
+LATENCY_P95_THRESHOLD_MS = 3000  # < 3000ms → ok
+FALLBACK_RATE_THRESHOLD = 0.20  # < 0.20 → ok
+MEAN_COST_USD_THRESHOLD = Decimal("0.01")  # < $0.01 → ok
+
+# Booking correlation lookback window (heuristic).
+BOOKING_CORRELATION_WINDOW = timedelta(minutes=60)
+
+
+def _percentile(sorted_values: list[int], pct: float) -> int:
+    """Nearest-rank percentile on a pre-sorted list. Returns 0 on empty input."""
+    if not sorted_values:
+        return 0
+    # Nearest-rank method: 1-indexed position = ceil(p/100 * N)
+    n = len(sorted_values)
+    k = max(0, min(n - 1, int(round(pct / 100.0 * n)) - 1))
+    return sorted_values[k]
+
+
+def _correlate_task_success(target_date: _date, tenant) -> int:
+    """Walk uncorrelated success metrics + match to Conversation.last_booking_at.
+
+    Per Q1 verdict 2026-05-26: Conversation.last_booking_at is the
+    canonical correlation source (populated by Gamma's #442 booking
+    consumer from `booking.confirmed` events per event-contract.md §3.1.4).
+
+    Match rule: `metric.created_at <= conv.last_booking_at
+    <= metric.created_at + 60min` → metric is a «task success»
+    (heuristic per Q4 verdict 2026-05-25).
+
+    Returns count of newly-correlated rows for the day.
+    """
+    # Date-range filter on created_at — naive comparison against UTC date.
+    day_start = _dt.combine(target_date, _time.min, tzinfo=_stdlib_tz.utc)
+    day_end = day_start + timedelta(days=1)
+
+    candidate_metrics = (
+        AIRequestMetric.all_tenants.filter(
+            tenant=tenant,
+            created_at__gte=day_start,
+            created_at__lt=day_end,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            success_correlated_at__isnull=True,
+            conversation__isnull=False,
+        )
+        .select_related("conversation")
+        .only(
+            "id",
+            "created_at",
+            "conversation__id",
+            "conversation__last_booking_at",
+        )
+    )
+
+    correlated = 0
+    now = _django_tz.now()
+    for metric in candidate_metrics:
+        booking_at = metric.conversation.last_booking_at  # type: ignore[union-attr]
+        if booking_at is None:
+            continue
+        gap = booking_at - metric.created_at
+        if timedelta(0) <= gap <= BOOKING_CORRELATION_WINDOW:
+            AIRequestMetric.all_tenants.filter(pk=metric.pk).update(
+                success_correlated_at=now,
+                # Conversation.id used as correlation reference until Ayla
+                # exposes a stable booking event UUID via event consumer.
+                # When booking.confirmed event store wires up, switch to
+                # the canonical event id.
+                booking_event_id=metric.conversation_id,  # type: ignore[arg-type]
+            )
+            correlated += 1
+    return correlated
+
+
+def _evaluate_thresholds(
+    *,
+    total_requests: int,
+    task_success_rate: float,
+    latency_p95_ms: int,
+    fallback_rate: float,
+    mean_cost_usd: Decimal,
+) -> dict[str, dict]:
+    """Per-metric threshold verdict for dashboard + alerting.
+
+    Boundary semantics (adversarial focus Веха 4):
+      - task_success_rate ≥ 0.80 → ok  (≥ inclusive on the success side)
+      - latency_p95_ms      < 3000 → ok  (< exclusive on the latency side)
+      - fallback_rate       < 0.20 → ok  (< exclusive — exactly 20% = breach)
+      - mean_cost_usd       < 0.01 → ok  (< exclusive — exactly $0.01 = breach)
+
+    Empty-day handling: `total_requests == 0` → `{"no_data": True}` —
+    no alerts fire, dashboard renders «no traffic» badge.
+    """
+    if total_requests == 0:
+        return {"no_data": True}
+
+    return {
+        "task_success_rate": {
+            "value": task_success_rate,
+            "threshold": TASK_SUCCESS_RATE_THRESHOLD,
+            "op": ">=",
+            "status": (
+                AIDailyMetricSummary.THRESHOLD_OK
+                if task_success_rate >= TASK_SUCCESS_RATE_THRESHOLD
+                else AIDailyMetricSummary.THRESHOLD_BREACH
+            ),
+        },
+        "latency_p95_ms": {
+            "value": latency_p95_ms,
+            "threshold": LATENCY_P95_THRESHOLD_MS,
+            "op": "<",
+            "status": (
+                AIDailyMetricSummary.THRESHOLD_OK
+                if latency_p95_ms < LATENCY_P95_THRESHOLD_MS
+                else AIDailyMetricSummary.THRESHOLD_BREACH
+            ),
+        },
+        "fallback_rate": {
+            "value": fallback_rate,
+            "threshold": FALLBACK_RATE_THRESHOLD,
+            "op": "<",
+            "status": (
+                AIDailyMetricSummary.THRESHOLD_OK
+                if fallback_rate < FALLBACK_RATE_THRESHOLD
+                else AIDailyMetricSummary.THRESHOLD_BREACH
+            ),
+        },
+        "mean_cost_usd": {
+            "value": float(mean_cost_usd),
+            "threshold": float(MEAN_COST_USD_THRESHOLD),
+            "op": "<",
+            "status": (
+                AIDailyMetricSummary.THRESHOLD_OK
+                if mean_cost_usd < MEAN_COST_USD_THRESHOLD
+                else AIDailyMetricSummary.THRESHOLD_BREACH
+            ),
+        },
+    }
+
+
+def aggregate_daily_metrics(target_date: _date, tenant) -> AIDailyMetricSummary:
+    """Compute one `AIDailyMetricSummary` row for `(tenant, target_date)`.
+
+    Steps (single transaction):
+      1. Correlate uncorrelated success metrics with `Conversation.last_booking_at`
+         (back-fills `success_correlated_at` + `booking_event_id` on matching rows).
+      2. Aggregate counts, percentiles, sums for the day.
+      3. Evaluate the 4 pilot thresholds → JSONB verdict.
+      4. `update_or_create` keyed on `(tenant, snapshot_date)` — idempotent.
+
+    Returns the persisted summary row. Caller decides whether to alert
+    (the Celery beat task fires `page()` on breaches).
+    """
+    day_start = _dt.combine(target_date, _time.min, tzinfo=_stdlib_tz.utc)
+    day_end = day_start + timedelta(days=1)
+
+    with transaction.atomic():
+        # Step 1: correlate before counting.
+        _correlate_task_success(target_date, tenant)
+
+        # Step 2: aggregate counts + percentiles.
+        rows = list(
+            AIRequestMetric.all_tenants.filter(
+                tenant=tenant,
+                created_at__gte=day_start,
+                created_at__lt=day_end,
+            ).values(
+                "outcome",
+                "intent_classified",
+                "latency_total_ms",
+                "llm_tokens_input",
+                "llm_tokens_output",
+                "llm_cost_usd",
+                "fallback_triggered",
+                "success_correlated_at",
+            )
+        )
+
+        total = len(rows)
+        outcome_counter: Counter[str] = Counter(r["outcome"] for r in rows)
+        intent_counter: Counter[str] = Counter((r["intent_classified"] or "(none)") for r in rows)
+        fallback_count = sum(1 for r in rows if r["fallback_triggered"])
+        correlated_count = sum(1 for r in rows if r["success_correlated_at"] is not None)
+
+        latencies = sorted(r["latency_total_ms"] for r in rows)
+        p50 = _percentile(latencies, 50)
+        p95 = _percentile(latencies, 95)
+        p99 = _percentile(latencies, 99)
+
+        tokens_in = sum(r["llm_tokens_input"] or 0 for r in rows)
+        tokens_out = sum(r["llm_tokens_output"] or 0 for r in rows)
+        total_cost = sum((r["llm_cost_usd"] or Decimal("0")) for r in rows)
+        mean_cost = (total_cost / total) if total else Decimal("0")
+
+        success_rate = (correlated_count / total) if total else 0.0
+        fb_rate = (fallback_count / total) if total else 0.0
+
+        threshold_status = _evaluate_thresholds(
+            total_requests=total,
+            task_success_rate=success_rate,
+            latency_p95_ms=p95,
+            fallback_rate=fb_rate,
+            mean_cost_usd=mean_cost,
+        )
+
+        summary, _ = AIDailyMetricSummary.objects.update_or_create(
+            tenant=tenant,
+            snapshot_date=target_date,
+            defaults={
+                "total_requests": total,
+                "success_count": outcome_counter.get(AIRequestMetric.OUTCOME_SUCCESS, 0),
+                "error_count": outcome_counter.get(AIRequestMetric.OUTCOME_ERROR, 0),
+                "fallback_count": fallback_count,
+                "escalated_count": outcome_counter.get(AIRequestMetric.OUTCOME_ESCALATED, 0),
+                "latency_p50_ms": p50,
+                "latency_p95_ms": p95,
+                "latency_p99_ms": p99,
+                "total_tokens_input": tokens_in,
+                "total_tokens_output": tokens_out,
+                "total_cost_usd": total_cost,
+                "mean_cost_usd": mean_cost,
+                "task_success_rate": success_rate,
+                "fallback_rate": fb_rate,
+                "intent_distribution": dict(intent_counter),
+                "threshold_status": threshold_status,
+            },
+        )
+
+    return summary
+
+
+def _alert_breaches(summary: AIDailyMetricSummary) -> int:
+    """Fire alerts for any threshold breach in this summary. Returns alert count.
+
+    Reuses `apps.observability.alerting.page()` per Q2 verdict 2026-05-26.
+    Severity = `warning` for single-day breaches; rolling-pattern alerts
+    are post-pilot work.
+
+    Empty-day summaries (`no_data`) skip — no alert noise on quiet days.
+    """
+    from apps.observability.alerting import page
+
+    if summary.threshold_status.get("no_data"):
+        return 0
+
+    fired = 0
+    for metric_name, status in summary.threshold_status.items():
+        if not isinstance(status, dict):
+            continue
+        if status.get("status") != AIDailyMetricSummary.THRESHOLD_BREACH:
+            continue
+        title = (
+            f"AI quality threshold breach: {metric_name} "
+            f"tenant={summary.tenant.slug} date={summary.snapshot_date}"
+        )
+        body = (
+            f"Metric: {metric_name}\n"
+            f"Observed: {status['value']}\n"
+            f"Threshold: {status['op']} {status['threshold']}\n"
+            f"Status: {status['status']}\n"
+            f"\nTotal requests today: {summary.total_requests}\n"
+            f"Tenant: {summary.tenant.slug}\n"
+            f"Date: {summary.snapshot_date}"
+        )
+        dedup_key = f"ai_quality:{summary.tenant_id}:{summary.snapshot_date}:{metric_name}"
+        if page("warning", title, body, dedup_key=dedup_key):
+            fired += 1
+    return fired
