@@ -157,7 +157,7 @@ Customer taps **`Отменить`** action button. Modal opens (per Q-CR-4 verd
 │  900 ₽).                              │  (Q-CR-6 lean)
 │                                       │
 │  Если правда не получается — пиши     │  Compassionate
-│  Ирине через «Написать по записи».    │  alternative
+│  Ирине через «Сообщить по записи».    │  alternative
 │                                       │  (cross-link to
 │  ─────────────────────────────       │  ayla-mediated)
 │                                       │
