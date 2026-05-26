@@ -33,7 +33,16 @@ import {
 const COPY = {
   title: "Услуги и цены",
   catalogNote: "Каталог Студии Ольги · видят клиенты при записи",
-  empty: "Здесь будет твой каталог услуг. Карина настроит вместе с тобой.",
+  // Round-1 amendment (adversarial Code Reviewer): the original copy
+  // hardcoded an individual operator name («Карина настроит вместе с
+  // тобой») which leaks per-tenant identity into shared frontend
+  // copy. Generic phrasing keeps the Tau §5.4 «promise, not broken»
+  // voice without naming a specific person. We deliberately chose the
+  // generic form (option B) over a salon-name parameter (option A)
+  // because some salon names (e.g. «Студия Карины») would still leak
+  // an individual identity.
+  empty:
+    "Мы настроим каталог вместе с тобой. Открой обсуждение, если нужна помощь.",
   errorTitle: "Не получилось загрузить услуги",
   retry: "Попробовать снова",
   lockedEditNote:

@@ -36,7 +36,7 @@
  */
 
 import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "./lib/api";
@@ -633,9 +633,17 @@ function SoloBottomNav({
  * bottom edge; tap-outside dismisses, Escape dismisses. Each item is a
  * full-width row; tapping navigates AND auto-dismisses per Tau spec.
  *
- * Accessibility: role=dialog + aria-modal so SR users get the modal
- * semantic. Focus is trapped via a no-op — keyboard users tab through
- * items naturally. The trigger button manages aria-expanded itself.
+ * Accessibility (round-1 adversarial Code Reviewer amendment):
+ *   - role=dialog + aria-modal so SR users get the modal semantic.
+ *   - Focus moves to the first item on open (was previously left on the
+ *     «Ещё» trigger, which is outside the modal — SR users had no
+ *     anchor inside the sheet).
+ *   - Tab / Shift+Tab is trapped within the panel so keyboard users
+ *     can't tab out of the modal into the backgrounded surface.
+ *   - On close, focus is restored to whatever element opened the sheet
+ *     (snapshot of document.activeElement at mount). This handles the
+ *     bottom-bar trigger case AND the deep-link case (where there is
+ *     no opening trigger — restoreFocus is a no-op then).
  */
 function SoloMoreSheet({
   open,
@@ -645,6 +653,8 @@ function SoloMoreSheet({
   onClose: () => void;
 }) {
   const navigate = useNavigate();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   // Escape-key dismiss for keyboard users.
   useEffect(() => {
@@ -655,6 +665,60 @@ function SoloMoreSheet({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // Focus management — round-1 amendment. Snapshot the previously
+  // focused element on open, move focus into the panel, trap Tab/
+  // Shift+Tab within the panel, restore focus on close.
+  useEffect(() => {
+    if (!open) return;
+    // Snapshot the element that had focus when the sheet opened — we
+    // restore to it on close (typically the «Ещё» bottom-tab button).
+    if (typeof document !== "undefined") {
+      const active = document.activeElement;
+      restoreFocusRef.current =
+        active instanceof HTMLElement ? active : null;
+    }
+    const panel = panelRef.current;
+    if (!panel) return;
+
+    // Move focus to the first focusable item on open so SR users land
+    // inside the dialog instead of staying on the trigger.
+    const firstItem = panel.querySelector<HTMLElement>(
+      '[role="menuitem"], button',
+    );
+    firstItem?.focus();
+
+    // Trap Tab/Shift+Tab within the panel.
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Tab") return;
+      if (!panel) return;
+      const focusable = panel.querySelectorAll<HTMLElement>(
+        'button, [tabindex="0"], a[href]',
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      // Restore focus on close — guard against the trigger being
+      // unmounted (deep-link → /solo/more redirect case).
+      const target = restoreFocusRef.current;
+      if (target && typeof document !== "undefined" && document.contains(target)) {
+        target.focus();
+      }
+      restoreFocusRef.current = null;
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -673,6 +737,7 @@ function SoloMoreSheet({
         onClick={onClose}
       />
       <div
+        ref={panelRef}
         className="solo-more-sheet__panel"
         role="dialog"
         aria-modal="true"
@@ -734,21 +799,45 @@ function SoonScreen({ tab, slug }: { tab: string; slug: string }) {
 }
 
 /**
- * Lands the user on /solo/my-day AND opens the «Ещё» sheet. Used for
- * deep-link hits to /solo/more so a stale URL still surfaces the menu
- * (the sheet would otherwise close on every full-page reload).
+ * Lands the user on /solo/my-day for deep-link hits to /solo/more.
+ *
+ * Round-1 amendment (adversarial Code Reviewer): previously this
+ * component called `onOpenSheet()` in a `useEffect` AND returned
+ * `<Navigate to="/solo/my-day" replace />` in the same render. That
+ * effect-then-Navigate ordering relied on React running the effect
+ * before unmount on Navigate — which works in practice but is timing-
+ * fragile and `<StrictMode>`-sensitive. We've moved the sheet-open
+ * decision into `UnifiedSoloSurface`'s initial state (read from
+ * `location.pathname === "/solo/more"` on mount) so this component
+ * now just redirects synchronously.
  */
-function SoloMoreLanding({ onOpenSheet }: { onOpenSheet: () => void }) {
-  useEffect(() => {
-    onOpenSheet();
-  }, [onOpenSheet]);
+function SoloMoreLanding() {
   return <Navigate to="/solo/my-day" replace />;
 }
 
 function UnifiedSoloSurface({ me }: { me: MeResponse }) {
-  const [moreOpen, setMoreOpen] = useState(false);
+  const location = useLocation();
+  // Round-1 amendment: read deep-link sheet-open state from the URL
+  // on mount. If the user pasted `/solo/more` (e.g. stale bot DM
+  // bookmark), the parent renders with `moreOpen=true` immediately —
+  // no effect-then-Navigate race in SoloMoreLanding. The Navigate
+  // away to /solo/my-day still fires from the route element below;
+  // sheet state is already captured here.
+  const [moreOpen, setMoreOpen] = useState<boolean>(
+    () => location.pathname === "/solo/more",
+  );
   const openSheet = useCallback(() => setMoreOpen(true), []);
   const closeSheet = useCallback(() => setMoreOpen(false), []);
+
+  // Defensive sync — if the user navigates TO /solo/more after mount
+  // (e.g. via browser back to a stale URL), re-open the sheet. Initial
+  // state already covers the mount case; this is a belt-and-braces
+  // guard for in-session URL changes.
+  useEffect(() => {
+    if (location.pathname === "/solo/more") {
+      setMoreOpen(true);
+    }
+  }, [location.pathname]);
 
   return (
     <div className="solo-surface">
@@ -761,13 +850,12 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
         <Route path="/solo/customers" element={<MasterCustomersScreen />} />
         <Route path="/solo/services" element={<MasterServicesScreen />} />
-        {/* /solo/more — deep-link only; renders nothing and opens the
-         * sheet on mount before redirecting to /solo/my-day. The bottom
+        {/* /solo/more — deep-link only; redirects synchronously to
+         * /solo/my-day. The parent (`UnifiedSoloSurface`) reads the URL
+         * on mount and initialises `moreOpen=true` for this path, so
+         * the sheet appears without an effect-ordering race. The bottom
          * bar tap path uses the click handler instead (no navigation). */}
-        <Route
-          path="/solo/more"
-          element={<SoloMoreLanding onOpenSheet={openSheet} />}
-        />
+        <Route path="/solo/more" element={<SoloMoreLanding />} />
 
         {/* «Ещё» sheet destinations. */}
         <Route path="/solo/schedule" element={<MasterScheduleScreen />} />

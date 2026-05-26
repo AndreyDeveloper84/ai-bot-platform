@@ -1120,11 +1120,24 @@ a {
   position: relative;
   width: 100%;
   max-width: 540px;
-  max-height: 60vh;
+  /* Round-1 amendment (adversarial Code Reviewer): the previous
+   * `max-height: 60vh` would clip the bottom of the sheet in landscape
+   * (~360pt-tall viewport × 60% = ~216pt — only 3 of 6 sheet items fit
+   * comfortably with no scroll affordance). `100dvh` (dynamic viewport
+   * height) accounts for the mobile URL bar; subtracting 96px reserves
+   * space for the bottom tabbar above the safe-area. `min(70vh, ...)`
+   * caps the panel on tall portrait viewports so the sheet never feels
+   * like a full-screen takeover. */
+  max-height: min(70vh, calc(100dvh - 96px));
   background: var(--c-surface-1);
   border-radius: var(--r-lg) var(--r-lg) 0 0;
   padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--safe-bottom));
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.15);
+  /* Round-1 amendment: inner shadow at the bottom edge hints «more
+   * content below» when the sheet is scrollable. Cheap visual
+   * affordance — no JS required. */
+  box-shadow:
+    0 -8px 24px rgba(0, 0, 0, 0.15),
+    inset 0 -16px 8px -8px rgba(0, 0, 0, 0.08);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
