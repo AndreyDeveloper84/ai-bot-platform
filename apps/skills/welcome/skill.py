@@ -482,6 +482,11 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
             {"label": "Просто посмотреть", "url": _join(miniapp_url, "home")},
         ]
     # Else: zero-config — only anketa ships (bot skill, no Mini App required).
+    # NOTE: Pilot deployment assumes MAX_BOT_WEB_APP IS configured (production-
+    # validated MAX stack). Zero-config branch = degraded dev / test mode;
+    # S5 surface shows ~3 paragraphs + single anketa button. Acceptable for
+    # pilot, but если zero-config попадёт в prod это значит config drift —
+    # alert на operator side, не silent UX regression.
 
     anketa = [{"label": "📝 Начать анкету", "callback": "cb:anketa:start"}]
     return primary_actions + anketa + just_browse

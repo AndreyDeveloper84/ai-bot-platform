@@ -503,6 +503,28 @@ class TestS3S5Flow:
         assert unwelcomed_bot_user.consent_at is not None
 
     @pytest.mark.django_db
+    def test_consent_yes_via_s2a_idempotent_does_not_overwrite(self, unwelcomed_bot_user):
+        """Stale-keyboard scenario (S2 direct → later S2a tap): second
+        consent helper invocation MUST NOT overwrite original timestamp.
+        Mirrors test_consent_yes_idempotent_does_not_overwrite from
+        direct path — both callbacks share idempotency guard (CR #789
+        follow-up #1)."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        skill = WelcomeSkill()
+        original_consent_at = timezone.now() - timedelta(hours=1)
+        unwelcomed_bot_user.consent_at = original_consent_at
+        unwelcomed_bot_user.save(update_fields=["consent_at"])
+
+        skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
+        )
+        unwelcomed_bot_user.refresh_from_db()
+        assert unwelcomed_bot_user.consent_at == original_consent_at
+
+    @pytest.mark.django_db
     def test_s5_grid_zero_config_ships_anketa_only(self, unwelcomed_bot_user, settings):
         """Zero-config (no Mini App): только anketa ship'ится — это
         единственная кнопка которая работает без Mini App config.
