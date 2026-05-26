@@ -28,11 +28,12 @@ urlpatterns = [
         "api/v1/yclients/",
         include("apps.integrations.yclients.urls", namespace="yclients"),
     ),
-    # Phase 1 / B7 (DRF-843) — YooKassa hosted-checkout webhook receiver.
-    path(
-        "api/v1/yookassa/",
-        include("apps.integrations.yookassa.urls", namespace="yookassa"),
-    ),
+    # #428 (Bucket 6) — YooKassa webhook RETIRED. Per ADR-0009 §Domain
+    # ownership matrix, YooKassa payment lifecycle (create, capture,
+    # refund, webhook) lives in Ayla djangoproject only. YooKassa
+    # Personal Cabinet webhook URL was switched to Ayla before this
+    # PR merged (see PR body Q3 preconditions). bot-platform no
+    # longer terminates YooKassa traffic.
     # Phase 0 / #432 (ADR-0009 §Mandatory event contract) — internal
     # events ingest channel from Ayla djangoproject. Stub today
     # (501 Not Implemented); full per-event dispatch arrives with

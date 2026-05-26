@@ -1,16 +1,21 @@
-"""Orders app — payment artefacts (DRF-843 / Phase 1 / B7).
+"""Orders app — RETIRED in #427+#428 (Phase 0 / Bucket 6).
 
-Houses the :class:`Order` model (today: gift certificate sales; tomorrow:
-deposits, package deals) and the :class:`PaymentEvent` idempotency
-ledger for inbound payment webhooks.
+The app shipped in DRF-843 / Phase 1 with two models:
+* ``Order`` — money intent / receipt for certificate sales.
+* ``PaymentEvent`` — idempotency ledger for YooKassa webhooks.
 
-The orders app is intentionally separate from :mod:`apps.booking` —
-bookings are appointment artefacts (a reserved slot on a calendar);
-orders are payment artefacts (money intent / receipt). The two
-intersect when a booking is paid upfront, but the lifecycle, audit
-needs, and analytics use cases are distinct.
+Both tables were dropped in migration ``0002_drop_orders_tables.py``
+when YooKassa payment lifecycle (create, capture, refund, webhook)
+moved to Ayla djangoproject per ADR-0009 §Domain ownership matrix.
 
-Integration point with YooKassa lives in
-:mod:`apps.integrations.yookassa`; the bot-facing ``buy_certificate``
-LLM tool lives in :mod:`apps.skills.booking.tools`.
+The bot-platform side now uses :mod:`apps.integrations.ayla_payments`
+to request checkout links from Ayla, and consumes
+``payment.{authorized,captured,failed,refunded}`` events to keep
+:class:`apps.conversations.models.Conversation` payment-context
+fields fresh (see #443 consumer family).
+
+This stub package + migrations dir remain in tree so Django's
+migration history stays consistent after the deploy that runs
+``0002_drop_orders_tables.py``. A future cleanup PR removes the
+``apps.orders`` ``INSTALLED_APPS`` entry + this directory entirely.
 """

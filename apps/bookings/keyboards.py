@@ -158,8 +158,13 @@ def url_button(label: str, url: str) -> list[dict[str, str]]:
     Args:
       label: button label rendered in the inline keyboard. e.g.
              ``"💳 Оплатить"`` for the buy_certificate flow.
-      url: external URL the button opens. For YooKassa checkout this
-             is :attr:`apps.orders.models.Order.checkout_url`.
+      url: external URL the button opens. For payment checkout this
+             is the ``checkout_url`` returned by Ayla
+             ``POST /api/v1/payments/create`` (see
+             :class:`apps.integrations.ayla_payments.client.PaymentCreateResponse`).
+             Pre-#427: was ``apps.orders.models.Order.checkout_url`` —
+             that table was retired when YooKassa lifecycle moved to
+             Ayla per ADR-0009 §Domain ownership.
 
     Returns:
       A one-element list with a ``{label, url}`` dict. The channel
