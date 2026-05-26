@@ -2,104 +2,234 @@
 
 Single view: any POST to ``/api/v1/yookassa/webhook/`` (the old
 bot-platform URL still configured in YooKassa Personal Cabinets that
-haven't been flipped to Ayla yet) returns HTTP 410 Gone, writes an
-audit row, and logs a WARNING.
+haven't been flipped to Ayla yet) returns HTTP 410 Gone, writes a
+sampled audit row, and logs a WARNING.
 
-### Status-code semantics
+### Status-code semantics — truthful retry behavior
 
-``410 Gone`` is the only HTTP code that says «permanently moved, do
-not retry» without losing the forensic trail. YooKassa's retry policy
-treats all 4xx as «do not retry» (good — avoids retry storms) and
-410 is semantically correct for «this endpoint is intentionally
-gone». A 404 would convey the same retry behavior but no operational
-signal — 410 is louder.
+Per YooKassa public documentation
+(https://yookassa.ru/developers/using-api/webhooks +
+/developers/using-api/response-handling/http-codes), **ANY** non-200
+response — including 410 Gone — triggers retry for 24 hours from the
+original event (first retry at 1 min, then up to 5 retries at 5-30
+min intervals). YooKassa does NOT distinguish 4xx from 5xx in its
+retry policy — only HTTP 200 stops retries.
 
-### PII discipline
+So why 410 and not 404? Two reasons:
 
-We capture ONLY:
+1. **Operational loudness.** 410 Gone is the only HTTP code that
+   semantically says «permanently moved» — easier to dashboard +
+   grep than the generic 404 noise.
+2. **Eventual conformance.** RFC 9110 §15.5.11 says 410 SHOULD NOT
+   be retried; if YooKassa changes its retry policy to honor the
+   spec, 410 will gracefully stop the retry storm. Until then, this
+   is a forensic-capture endpoint, NOT a retry-stopper.
 
-* ``body_bytes`` — payload size (no parsing of YooKassa fields —
-  card-tail digits can appear in failure messages).
-* ``remote_ip`` — proxy-aware (X-Forwarded-For chain → REMOTE_ADDR).
-* ``user_agent_truncated`` — first 120 chars (UA strings can be
-  arbitrarily long).
+Operational implication: real audit-row volume is
+``events × ~6 retry attempts``, NOT 1 row per event. Rate-limit +
+audit sampling (mirrors sibling
+``apps/eventbus/views.py::InternalEventsIngestView``) bound the
+AuditLog table writes under both legitimate retry volume AND scanner
+DoS (Round-1 adversarial P1 on PR #768).
 
-NEVER write request body content. Forensic question is «who is
-still hitting us?», not «what payment failed?» — payment details
-live on Ayla now.
+### PII discipline (§7) + adversarial hardening
+
+Captures ONLY:
+
+* ``body_bytes`` — payload size. NEVER body content; YooKassa
+  webhook bodies can carry card-tail digits in failure messages.
+* ``remote_ip`` — proxy-aware via :func:`apps.eventbus.ingest_ip.
+  get_remote_ip` (trusted XFF chain depth + ``X-Real-IP`` gating),
+  then **validated** as a parseable IP via
+  :mod:`ipaddress`. Header sources are attacker-controlled; without
+  validation an attacker could inject card-tail digits / log-
+  injection payloads / arbitrary strings into the audit row.
+  Round-1 adversarial P2+P3 on PR #768.
+* ``user_agent_truncated`` — first 120 chars, with ASCII control
+  characters (incl. ``\\r\\n`` log-injection + ``\\x00`` DB-mangling
+  + escape sequences) stripped. Round-1 adversarial F3 / P3.
+
+### Strict-mode opt-out
+
+YooKassa has no concept of ``X-Tenant`` (external webhook). The
+URL prefix ``/api/v1/yookassa/`` is opted out of strict-tenant
+enforcement in :mod:`apps.tenancy.middleware` — without that, the
+2026-05-28 strict-mode flip would return 400 ``TENANT_REQUIRED``
+before this view runs, defeating the design. Round-1 adversarial
+M1 on PR #768.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 from typing import Final
 
+from django.conf import settings
 from django.http import HttpRequest, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
+from django_ratelimit.decorators import ratelimit  # type: ignore[import-untyped]
+
 from apps.audit.services import write_audit
+from apps.eventbus.ingest_ip import get_remote_ip
+from apps.eventbus.ingest_rate_audit_sampler import (
+    should_audit_yookassa_retired_410,
+    should_audit_yookassa_retired_429,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 AUDIT_ACTION: Final[str] = "yookassa.webhook_received_after_retirement"
+AUDIT_RATE_LIMITED_ACTION: Final[str] = "yookassa.webhook_received_after_retirement.rate_limited"
 
-# Truncate UA at this length when writing the audit payload. YooKassa's
-# real UA is ~50 chars; budget room for forks but cap the row size.
+# UA cap — YooKassa's real UA is ~50 chars; budget room for forks
+# but cap the audit-row size.
 _UA_MAX_LEN: Final[int] = 120
 
+# Control characters: ASCII 0-31 (incl. \r\n which would otherwise
+# enable log-injection through the formatted WARNING message) + DEL
+# (127). High control bytes also matter for downstream JSON / DB
+# encoders that may reject them. Replace with '?' so the audit field
+# is still grep-able for forensic triage.
+_UA_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
-def _client_ip(request: HttpRequest) -> str:
-    """Best-effort source IP — proxy-aware.
+# Rate-limit ceiling — reuse ``EVENT_INGEST_RATE_LIMIT`` because the
+# operational profile is identical (unauthenticated external POST;
+# expected steady-state events/sec; scanner DoS surface). The same
+# setting being absent in old YOOKASSA_ envs is fine because the
+# default 100/m is well above any pre-flip leftover Cabinet's
+# ``events × 6 retries`` volume.
+_RATE_LIMIT_DEFAULT: Final[str] = "100/m"
 
-    Walks the X-Forwarded-For chain (left-most non-proxy entry) and
-    falls back to REMOTE_ADDR. Returns empty string if neither is
-    populated (treat as «unknown»). This is a forensic capture only;
-    we don't gate on it.
+
+def _rate_limit_key(group, request) -> str:
+    """Proxy-aware rate-limit key — mirror eventbus pattern."""
+    return get_remote_ip(request) or "_unknown_"
+
+
+def _sanitize_ip(raw: str) -> str:
+    """Validate ``raw`` as a parseable IP; return canonical form or ''.
+
+    Header sources (``X-Real-IP`` / ``X-Forwarded-For``) are
+    attacker-controlled. An attacker can stuff ``X-Forwarded-For:
+    4242424242424242`` and that string would otherwise land in the
+    audit row's ``remote_ip`` slot, violating the «no PII in audit»
+    contract. Strict IP parsing closes the surface.
     """
-    xff = request.META.get("HTTP_X_FORWARDED_FOR", "") or ""
-    if xff:
-        # First entry is the originator per RFC 7239 conventions.
-        first = xff.split(",", 1)[0].strip()
-        if first:
-            return first
-    return request.META.get("REMOTE_ADDR", "") or ""
+    if not raw:
+        return ""
+    try:
+        return str(ipaddress.ip_address(raw.strip()))
+    except (ValueError, TypeError):
+        return ""
 
 
-@csrf_exempt
-@require_POST
-def gone_410(request: HttpRequest) -> JsonResponse:
-    """Returns ``410 Gone`` + writes a forensic audit row.
+def _sanitize_ua(raw: str) -> str:
+    """Strip ASCII control characters + truncate."""
+    if not raw:
+        return ""
+    cleaned = _UA_CONTROL_RE.sub("?", raw)
+    return cleaned[:_UA_MAX_LEN]
 
-    Always returns 410 — there is no condition under which we'd want
-    YooKassa to retry. Audit row + WARNING log are the operational
-    signal that a Cabinet still points here.
 
-    The ``@require_POST`` decorator returns ``405 Method Not Allowed``
-    on GET/PUT/etc. — those aren't YooKassa traffic and we want the
-    distinction in monitoring (curl probes / scanners look different
-    from real retries).
+def _write_sampled_audit(
+    *,
+    action: str,
+    sampler,
+    body_bytes: int,
+    remote_ip: str,
+    user_agent: str,
+) -> None:
+    """Write an audit row only if the per-slug sampler admits the IP.
+
+    Mirrors the sibling
+    ``apps.eventbus.views.InternalEventsIngestView`` pattern: per-IP
+    +60s windows bound a single source from flooding the audit table
+    while preserving the forensic signal. ``sampler`` is one of the
+    slug-distinct samplers
+    (:func:`should_audit_yookassa_retired_410`,
+    :func:`should_audit_yookassa_retired_429`) so the 410 + 429
+    streams stay separable per dashboard.
     """
-    body = request.body or b""
-    remote_ip = _client_ip(request)
-    user_agent = (request.META.get("HTTP_USER_AGENT", "") or "")[:_UA_MAX_LEN]
-
+    if not sampler(remote_ip or "_unknown_"):
+        return
     write_audit(
-        action=AUDIT_ACTION,
+        action=action,
         target="yookassa.retired",
         payload={
-            "body_bytes": len(body),
+            "body_bytes": body_bytes,
             "remote_ip": remote_ip,
             "user_agent_truncated": user_agent,
         },
     )
 
+
+@csrf_exempt
+@require_POST
+@ratelimit(
+    key=_rate_limit_key,
+    rate=lambda group, request: getattr(settings, "EVENT_INGEST_RATE_LIMIT", _RATE_LIMIT_DEFAULT),
+    method="POST",
+    block=False,
+)
+def gone_410(request: HttpRequest) -> JsonResponse:
+    """Returns ``410 Gone`` + writes a sampled forensic audit row.
+
+    Status code matrix:
+
+    | Outcome                            | Status | Audit       |
+    |------------------------------------|--------|-------------|
+    | Rate-limit exceeded (per-IP)       | 429    | SAMPLED     |
+    | All other POSTs                    | 410    | SAMPLED     |
+    | GET / PUT / etc. (require_POST)    | 405    | NONE        |
+    """
+    body = request.body or b""
+    remote_ip = _sanitize_ip(get_remote_ip(request))
+    user_agent = _sanitize_ua(request.META.get("HTTP_USER_AGENT", "") or "")
+    body_bytes = len(body)
+
+    # Rate-limit gate — django-ratelimit sets ``limited=True`` when
+    # the per-IP bucket is exhausted (block=False form). 429 + sampled
+    # audit + distinct action slug so 429 + 410 forensic streams stay
+    # separable in dashboards.
+    if getattr(request, "limited", False):
+        _write_sampled_audit(
+            action=AUDIT_RATE_LIMITED_ACTION,
+            sampler=should_audit_yookassa_retired_429,
+            body_bytes=body_bytes,
+            remote_ip=remote_ip,
+            user_agent=user_agent,
+        )
+        logger.warning(
+            "yookassa.webhook_received_after_retirement.rate_limited "
+            "remote_ip=%s body_bytes=%d ua=%s",
+            remote_ip,
+            body_bytes,
+            user_agent,
+        )
+        return JsonResponse(
+            {"status": "rate_limited", "reason": "rate_limit_exceeded"},
+            status=429,
+        )
+
+    _write_sampled_audit(
+        action=AUDIT_ACTION,
+        sampler=should_audit_yookassa_retired_410,
+        body_bytes=body_bytes,
+        remote_ip=remote_ip,
+        user_agent=user_agent,
+    )
+
     logger.warning(
-        "yookassa.webhook_received_after_retirement remote_ip=%s body_bytes=%d",
+        "yookassa.webhook_received_after_retirement remote_ip=%s body_bytes=%d ua=%s",
         remote_ip,
-        len(body),
+        body_bytes,
+        user_agent,
     )
 
     return JsonResponse(

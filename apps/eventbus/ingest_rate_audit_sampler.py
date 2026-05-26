@@ -121,6 +121,35 @@ def should_audit_saturated(remote_ip: str) -> bool:
     return _should_audit("saturated", remote_ip)
 
 
+def should_audit_yookassa_retired_410(remote_ip: str) -> bool:
+    """#732 — slug='yookassa_retired_410'.
+
+    Sampler for the 410 path on the temporary YooKassa-retired
+    endpoint (``apps.integrations.yookassa_retired.views.gone_410``).
+    Per YooKassa retry policy, real volume is ``events × ~6 attempts
+    in 24h`` — without sampling, even a single Cabinet that wasn't
+    flipped pre-deploy could write thousands of audit rows. Same DoS
+    amplifier shape as the ingest 429 path; same defense.
+
+    Distinct slug from ``should_audit_yookassa_retired_429`` so the
+    410 + 429 forensic streams stay separable in dashboards (one
+    audit row per IP per slug per 60s).
+    """
+    return _should_audit("yookassa_retired_410", remote_ip)
+
+
+def should_audit_yookassa_retired_429(remote_ip: str) -> bool:
+    """#732 — slug='yookassa_retired_429'.
+
+    Sampler for the rate-limited path on the temporary YooKassa-
+    retired endpoint. Distinct slug from
+    ``should_audit_yookassa_retired_410`` so a sample row written on
+    the 410 path doesn't suppress the 429 forensic capture for the
+    same IP in the same window.
+    """
+    return _should_audit("yookassa_retired_429", remote_ip)
+
+
 # Round-4 R3-2 — threshold-emit ladder. The previous round-3 "sampled
 # at 1/min/composite" defeated the forensic purpose: emit happened on
 # call #1 with count_in_window=1, the next 999 calls only incremented
