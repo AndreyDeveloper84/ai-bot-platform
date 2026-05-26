@@ -76,4 +76,15 @@ class SkillsConfig(AppConfig):
         # keyboard UX that mysite's MAX SDK shipped pre-platform-cutover.
         from apps.skills.welcome import skill as _welcome  # noqa: F401
 
+        # #738 (Round-2 P-1) — payment_failed skill owns ``cb:payment:
+        # retry:<payment_id>`` button taps shipped by the threshold-
+        # gated DM (``apps/eventbus/consumers/payment.py::handle_payment_
+        # failed`` → ``on_payment_failed_event`` direct call). The
+        # eventbus consumer lazy-imports the entry-point function, so
+        # WITHOUT this eager import here the ``@register`` decorator
+        # never fires on workers that haven't tripped a threshold
+        # themselves — leaving the inline button dead (echo-claimed).
+        # Registered BEFORE echo because echo always matches.
+        from apps.skills.payment_failed import skill as _payment_failed  # noqa: F401
+
         from apps.skills.echo import skill as _echo  # noqa: F401

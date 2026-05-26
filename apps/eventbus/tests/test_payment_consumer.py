@@ -30,6 +30,8 @@ from uuid import UUID
 
 import pytest
 
+from django.test import TestCase
+
 from apps.conversations.models import Conversation
 from apps.eventbus.consumers.payment import (
     FailureCode,
@@ -42,6 +44,17 @@ from apps.eventbus.consumers.payment import (
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+
+
+# Round-2 P-2 — #738 consumer uses ``transaction.on_commit(...)`` to
+# dispatch the payment-failed skill. Under ``pytest.mark.django_db``
+# (default TestCase-style wrap) the test transaction is ROLLED BACK at
+# teardown, so on_commit hooks registered inside the test would NEVER
+# fire — leaving any ``mock_skill.assert_called_once()`` permanently
+# failing. ``TestCase.captureOnCommitCallbacks(execute=True)`` collects
+# hooks registered inside the context and runs them on exit, simulating
+# the real outer-commit semantics deterministically.
+_capture_commit = TestCase.captureOnCommitCallbacks
 
 
 pytestmark = pytest.mark.django_db
@@ -310,32 +323,38 @@ class TestPaymentFailed:
         conversation.refresh_from_db()
         assert conversation.consecutive_payment_failures == 3
 
-    def test_below_threshold_does_not_emit_skill_event(
+    def test_below_threshold_does_not_dispatch_skill(
         self, tenant: Tenant, conversation: Conversation, settings
     ) -> None:
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
             env = _envelope(event_name="payment.failed", data=_failed_data())
             handle_payment_failed(env)
-        mock_emit.assert_not_called()
+        mock_skill.assert_not_called()
 
-    def test_at_threshold_emits_skill_event(
+    def test_at_threshold_dispatches_skill_with_phase1_payload(
         self, tenant: Tenant, conversation: Conversation, settings
     ) -> None:
-        """Three failures → threshold tripped → emit fires on the 3rd."""
+        """Three failures → threshold tripped → skill called on the 3rd.
+
+        #738 founder verdict 2026-05-26 — Phase 1 (Option C minimum)
+        replaces the previous ``emit_internal_event(\"payment_failed_
+        skill_triggered\", ...)`` fan-out with a direct in-process call
+        to :func:`apps.skills.payment_failed.skill.on_payment_failed_event`.
+        """
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
         conversation.consecutive_payment_failures = 2  # next failure = 3
         conversation.save(update_fields=["consecutive_payment_failures"])
 
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
-            env = _envelope(event_name="payment.failed", data=_failed_data())
-            handle_payment_failed(env)
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
+            with _capture_commit(execute=True):
+                env = _envelope(event_name="payment.failed", data=_failed_data())
+                handle_payment_failed(env)
 
-        mock_emit.assert_called_once()
-        assert mock_emit.call_args[0][0] == "payment_failed_skill_triggered"
-        props = mock_emit.call_args[1]["properties"]
-        assert props["consecutive_failures"] == 3
-        assert props["failure_code"] == FailureCode.CARD_DECLINED
+        mock_skill.assert_called_once()
+        payload = mock_skill.call_args[0][0]
+        assert payload["consecutive_failures"] == 3
+        assert payload["failure_code"] == FailureCode.CARD_DECLINED
 
     def test_unknown_failure_reason_maps_to_other(
         self, tenant: Tenant, conversation: Conversation
@@ -484,15 +503,15 @@ class TestIdempotencyReplay3x:
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
         env = _envelope(event_name="payment.failed", data=_failed_data())
 
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
             for _ in range(3):
                 handle_payment_failed(env)
 
         conversation.refresh_from_db()
         # Counter == 1 (not 3) — replays short-circuited.
         assert conversation.consecutive_payment_failures == 1
-        # No skill emit (would have fired if counter == 3).
-        mock_emit.assert_not_called()
+        # No skill dispatch (would have fired if counter == 3).
+        mock_skill.assert_not_called()
 
     def test_payment_refunded_replay_3x_emits_reverse_once(
         self, tenant: Tenant, conversation: Conversation
@@ -691,34 +710,345 @@ class TestResolveConversationDeterministic:
 
 
 class TestThresholdStrictEquality:
-    """BLOCKER-2 fix: emit ``payment_failed_skill_triggered`` ONLY on
-    the threshold crossing (==), not on subsequent failures above it.
-    Otherwise every failure above the threshold would spam a fresh
-    handoff task."""
+    """BLOCKER-2 fix: dispatch ``on_payment_failed_event`` skill ONLY
+    on the threshold crossing (==), not on subsequent failures above
+    it. Otherwise every failure above the threshold would spam a fresh
+    handoff (in #738 — a fresh customer DM)."""
 
-    def test_emit_only_on_exact_threshold_crossing(
+    def test_skill_dispatched_only_on_exact_threshold_crossing(
         self, tenant: Tenant, conversation: Conversation, settings
     ) -> None:
         settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
 
         # Five distinct failures.
-        with patch("apps.eventbus.consumers.payment.emit_internal_event") as mock_emit:
-            for i in range(5):
-                env = _envelope(
-                    event_name="payment.failed",
-                    data=_failed_data(),
-                    event_id=f"01J9F{i:0>20}ZZ",  # pragma: allowlist secret
-                )
-                handle_payment_failed(env)
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
+            with _capture_commit(execute=True):
+                for i in range(5):
+                    env = _envelope(
+                        event_name="payment.failed",
+                        data=_failed_data(),
+                        event_id=f"01J9F{i:0>20}ZZ",  # pragma: allowlist secret
+                    )
+                    handle_payment_failed(env)
 
-        # Counter ended at 5, but emit fired exactly once — on the
+        # Counter ended at 5, but skill fired exactly once — on the
         # crossing (count == 3).
-        assert mock_emit.call_count == 1
-        emitted_count = mock_emit.call_args[1]["properties"]["consecutive_failures"]
-        assert emitted_count == 3
+        assert mock_skill.call_count == 1
+        dispatched_count = mock_skill.call_args[0][0]["consecutive_failures"]
+        assert dispatched_count == 3
 
         conversation.refresh_from_db()
         assert conversation.consecutive_payment_failures == 5
+
+
+# ─── #738 Phase 1 payload contract ─────────────────────────────────────────
+
+
+class TestSkillHandoffPayloadPhase1:
+    """#738 founder verdict 2026-05-26 — Phase 1 (Option C minimum).
+
+    Consumer enriches payload from envelope + Conversation context
+    ONLY (no Appointment lookup per ADR-0009 §Hard rule #2, no Ayla
+    REST call per founder rejection of Option B). Skill's α-mode
+    graceful-degrades unset fields. Phase 2 (task #93, post-pilot)
+    extends Ayla envelope to event_version=2 with master_name /
+    service_name / amount / currency / appointment_date.
+    """
+
+    def _trip_threshold(
+        self, *, env: IngestEnvelope, settings, conversation: Conversation
+    ) -> dict[str, Any]:
+        """Helper: seed the counter at N-1 so the next event trips the
+        threshold; capture and return the payload the skill received.
+        """
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
+            with _capture_commit(execute=True):
+                handle_payment_failed(env)
+        assert mock_skill.call_count == 1
+        return dict(mock_skill.call_args[0][0])
+
+    def test_payload_contains_all_required_phase1_fields(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+
+        # Required Phase 1 keys per memory `project_payment_failed_
+        # enrichment_pattern` / founder verdict 2026-05-26.
+        required = {
+            "payment_id",
+            "appointment_id",
+            "client_user_id",
+            "tenant_id",
+            "failure_code",
+            "consecutive_failures",
+            "failed_at",
+            "payment_event_id",
+            "client_name",
+        }
+        assert required.issubset(payload.keys())
+
+    def test_payload_identity_fields_from_envelope(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+
+        assert payload["payment_id"] == PAYMENT_ID
+        assert payload["appointment_id"] == APPOINTMENT_ID
+        assert payload["client_user_id"] == AYLA_USER_ID
+        assert payload["tenant_id"] == TENANT_ID
+        assert payload["payment_event_id"] == env.event_id
+        assert payload["failed_at"] == "2026-05-21T14:48:02.503Z"
+
+    def test_payload_failure_code_is_mapped_not_raw(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """PII rule §7 — provider free-text MUST NOT propagate to the
+        skill. Mapped closed-enum value flows instead. Founder pseudocode
+        used raw ``envelope.data["reason"]``; consumer overrides to the
+        mapped value (same as ``Conversation.last_payment_failure_code``).
+        """
+        env = _envelope(
+            event_name="payment.failed",
+            data=_failed_data(reason="Card 4242****4242 declined by issuer"),
+        )
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        # Leaky free-text mapped to OTHER (closed enum).
+        assert payload["failure_code"] == FailureCode.OTHER
+        # And literally not the raw string.
+        assert "4242" not in payload["failure_code"]
+
+    def test_payload_client_name_from_bot_user_when_set(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        conversation: Conversation,
+        settings,
+    ) -> None:
+        bot_user.client_name = "Анна"
+        bot_user.save(update_fields=["client_name"])
+
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        assert payload["client_name"] == "Анна"
+
+    def test_payload_client_name_none_when_blank(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Empty ``client_name`` on BotUser → None in payload (NOT empty
+        string). Skill's α-mode template uses ``or "—"`` fallback which
+        works on both falsy values, but None is the contract-canonical
+        absent marker."""
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        assert payload["client_name"] is None
+
+    def test_payload_does_not_carry_phase2_fields(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Phase 1 explicitly excludes master_user_id / master_name /
+        service_name / amount / currency / appointment_date (envelope
+        v1 doesn't carry them and we don't query Ayla per ADR-0009 §2).
+
+        If a future change starts populating them inadvertently, the
+        Phase 2 cutover plan (task #93 — event_version=1 → 2 branch)
+        becomes ambiguous. Pin the absence explicitly. Round-1 N3 —
+        the assertion is on the set intersection, not isdisjoint, so a
+        failure message names which Phase 2 fields leaked.
+        """
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        phase2_only = {
+            "master_user_id",
+            "master_name",
+            "service_name",
+            "amount",
+            "currency",
+            "appointment_date",
+        }
+        unexpected = phase2_only & payload.keys()
+        assert not unexpected, (
+            f"Phase 1 payload unexpectedly carries Phase 2 fields: {sorted(unexpected)}"
+        )
+
+    def test_payload_failed_at_falls_back_to_none_when_missing(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Round-1 N4 — envelope may omit ``failed_at`` (publisher bug
+        or partial event). Consumer uses ``data.get("failed_at")`` so
+        the payload key is always present; value is ``None`` when
+        missing. Skill's α-mode template uses ``or "—"`` fallback."""
+        data = _failed_data()
+        del data["failed_at"]
+        env = _envelope(event_name="payment.failed", data=data)
+        payload = self._trip_threshold(env=env, settings=settings, conversation=conversation)
+        assert "failed_at" in payload
+        assert payload["failed_at"] is None
+
+
+class TestPaymentFailedSkillRegisteredOnBoot:
+    """Round-2 P-1 regression-pin — ``PaymentRetryCallbackSkill`` MUST
+    be registered globally at Django boot, NOT lazily on first
+    threshold trip. The consumer's lazy import of
+    ``on_payment_failed_event`` ALSO triggers the ``@register``
+    decorator on ``PaymentRetryCallbackSkill`` (defined in the same
+    module), but only on the worker that fires the threshold first —
+    leaving the inline ``cb:payment:retry:<payment_id>`` button dead
+    on every other worker.
+
+    Fix: ``apps/skills/apps.py::SkillsConfig.ready()`` eagerly imports
+    ``apps.skills.payment_failed.skill`` BEFORE ``echo`` so the
+    callback handler is in every worker's registry at boot.
+    """
+
+    def test_payment_retry_callback_skill_registered_in_global_registry(self) -> None:
+        # Triggering app readiness implicitly happens during Django
+        # setup; importing the registry module reads the populated
+        # _skills list. The eager import in SkillsConfig.ready() is
+        # what guarantees the skill class is present here.
+        from apps.skills.payment_failed.skill import PaymentRetryCallbackSkill
+        from apps.skills.registry import _skills
+
+        registered_types = [type(s) for s in _skills]
+        assert PaymentRetryCallbackSkill in registered_types, (
+            "PaymentRetryCallbackSkill missing from global registry — "
+            "apps/skills/apps.py::SkillsConfig.ready() must eagerly "
+            "import apps.skills.payment_failed.skill before echo"
+        )
+
+    def test_payment_retry_callback_skill_registered_before_echo(self) -> None:
+        """Order matters — echo always matches. If payment_retry sits
+        AFTER echo in ``_skills``, echo claims the button payload
+        first and the retry handler never runs."""
+        from apps.skills.echo.skill import EchoSkill
+        from apps.skills.payment_failed.skill import PaymentRetryCallbackSkill
+        from apps.skills.registry import _skills
+
+        types_in_order = [type(s) for s in _skills]
+        assert PaymentRetryCallbackSkill in types_in_order
+        assert EchoSkill in types_in_order
+        assert types_in_order.index(PaymentRetryCallbackSkill) < types_in_order.index(EchoSkill), (
+            "PaymentRetryCallbackSkill must register BEFORE EchoSkill"
+        )
+
+
+class TestSkillHandoffPostCommit:
+    """The skill dispatch MUST run AFTER the Conversation row update
+    commits durably (NOT just after the savepoint releases).
+
+    Round-2 P-2 / friendly M1 — the dispatcher wraps the entire handler
+    call in its own ``transaction.atomic()`` (see
+    ``apps/eventbus/ingest_dispatcher.py:208``). The handler's inner
+    ``with transaction.atomic()`` is therefore a SAVEPOINT, not a
+    top-level transaction. To get true post-commit semantics, the skill
+    dispatch is scheduled via ``transaction.on_commit(...)`` registered
+    INSIDE the locked block — Django fires the hook only when the
+    OUTER transaction commits durably.
+
+    In tests where the handler is called directly (no outer dispatcher
+    atomic), the inner ``transaction.atomic`` IS the top-level — so
+    ``on_commit`` still fires when the inner block exits cleanly.
+    """
+
+    def test_skill_observes_counter_value_visible_after_commit(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Skill sees the committed counter at dispatch time.
+
+        When ``handle_payment_failed`` is called directly in this test
+        (no outer dispatcher atomic), the on_commit hook fires when the
+        handler's atomic block exits. The skill observes the new
+        counter value durably.
+        """
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+
+        observed_counter: list[int] = []
+
+        def _spy(payload: dict[str, Any]) -> None:
+            row = Conversation.all_tenants.get(pk=conversation.pk)
+            observed_counter.append(row.consecutive_payment_failures)
+
+        with patch(
+            "apps.skills.payment_failed.skill.on_payment_failed_event",
+            side_effect=_spy,
+        ):
+            with _capture_commit(execute=True):
+                env = _envelope(event_name="payment.failed", data=_failed_data())
+                handle_payment_failed(env)
+
+        assert observed_counter == [3]
+
+    def test_skill_not_dispatched_when_outer_transaction_rolls_back(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Round-2 P-2 regression-pin — the load-bearing reason we use
+        ``transaction.on_commit``.
+
+        Simulate the dispatcher's outer ``transaction.atomic`` and force
+        a rollback AFTER the handler returns (mimicking a transient
+        ``OperationalError`` on ``dedupe_row.save`` post-handler). The
+        skill MUST NOT fire — otherwise the customer's DM would go out
+        for a counter value that the rollback discarded.
+        """
+        from django.db import transaction as _txn
+
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
+            try:
+                with _txn.atomic():
+                    env = _envelope(event_name="payment.failed", data=_failed_data())
+                    handle_payment_failed(env)
+                    # Force-rollback the outer transaction AFTER the
+                    # handler returns — exactly the failure mode P-2
+                    # protects against.
+                    raise RuntimeError("simulated dispatcher post-handler rollback")
+            except RuntimeError:
+                pass
+
+        # Skill MUST NOT have fired: on_commit hook discarded with the
+        # rollback. Counter mutation rolled back too — verify.
+        mock_skill.assert_not_called()
+        conversation.refresh_from_db()
+        assert conversation.consecutive_payment_failures == 2
+
+    def test_skill_exception_does_not_break_consumer(
+        self, tenant: Tenant, conversation: Conversation, settings, caplog
+    ) -> None:
+        """Skill MUST NOT break the consumer loop. State commits even
+        if the skill explodes; forensic log is the only trail. The
+        dedupe row prevents a retry from double-firing the skill."""
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+
+        with patch(
+            "apps.skills.payment_failed.skill.on_payment_failed_event",
+            side_effect=RuntimeError("synthetic skill failure"),
+        ):
+            with _capture_commit(execute=True):
+                env = _envelope(event_name="payment.failed", data=_failed_data())
+                # Must NOT raise — on_commit callback swallows skill failure.
+                handle_payment_failed(env)
+
+        # Counter still incremented and committed.
+        conversation.refresh_from_db()
+        assert conversation.consecutive_payment_failures == 3
+        # Forensic log written (N5: includes tenant_id for grep).
+        skill_failure_logs = [
+            rec for rec in caplog.records if "skill_handoff_failed" in rec.getMessage()
+        ]
+        assert skill_failure_logs, "expected skill_handoff_failed forensic log"
+        # N5 — tenant_id propagated into the formatted message.
+        assert any(TENANT_ID in rec.getMessage() for rec in skill_failure_logs)
 
 
 # ─── Cross-tenant isolation (Round-1 NTH-1 / Round-2 NEW-8) ────────────────

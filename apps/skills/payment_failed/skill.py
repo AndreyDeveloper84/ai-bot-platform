@@ -154,22 +154,44 @@ def on_payment_failed_event(data: dict[str, Any]) -> None:
 
     Args:
       data: D3 consumer-enriched dict (НЕ raw envelope per event-contract
-            §3.7 — consumer обогащает через Appointment lookup перед
-            вызовом). Ожидаемые поля:
+            §3.7 — consumer обогащает перед вызовом).
+
+            **Phase 1 (Option C minimum, current — founder verdict
+            2026-05-26):** consumer derives payload from envelope +
+            Conversation context only (no cross-repo DB lookup per
+            ADR-0009 §Hard rule #2). Phase 2 (task #93, post-pilot)
+            extends Ayla envelope to event_version=2 with the enriched
+            fields. Skill α-mode graceful-degrades any missing field.
+
+            Phase 1 fields (always populated):
 
                 * ``payment_id`` (UUID str) — Ayla Payment row id;
                 * ``appointment_id`` (UUID str) — Ayla Appointment id;
                 * ``client_user_id`` (UUID str) — Ayla User id клиента;
+                * ``tenant_id`` (UUID str) — tenant scope of the event;
+                * ``failure_code`` (str) — MAPPED closed-enum value
+                  (PII §7 — raw provider free-text NEVER reaches the
+                  skill); same value as ``Conversation.last_payment_
+                  failure_code``. (#738 N7 — was previously documented
+                  as ``reason``; that was the pre-merge plan, but the
+                  consumer maps it before dispatch.)
+                * ``consecutive_failures`` (int) — counter value at the
+                  threshold-crossing moment;
+                * ``failed_at`` (str ISO8601, may be None) —
+                  pass-through from envelope.data;
+                * ``payment_event_id`` (UUID str) — envelope.event_id;
+                  needed for audit traceability;
+                * ``client_name`` (str | None) — from BotUser.client_name.
+
+            Phase 2 fields (currently None, populated post-task-#93):
+
                 * ``master_user_id`` (UUID str) — Ayla User id мастера;
                 * ``amount`` (Decimal/float/str) — рубли;
                 * ``service_name`` (str) — название услуги;
                 * ``appointment_date`` (str) — для отображения;
                 * ``master_name`` (str) — display name мастера;
-                * ``client_name`` (str) — display name клиента;
-                * ``reason`` (str, опционально) — pass-through из envelope;
-                * ``failed_at`` (str ISO8601, опционально) — pass-through;
-                * ``payment_event_id`` (UUID str, опционально) —
-                  envelope.event_id; нужен для audit traceability.
+                * ``reason`` (str) — pass-through raw envelope field
+                  (Phase 2 only; skip in Phase 1 — see ``failure_code``).
 
     Поведение (α-mode):
 
