@@ -98,6 +98,67 @@ in `apps/audit/tests/test_admin_filters.py`).
   Cross-reference with `apps.events.services` event-emit error logs
   for the same window.
 
+## Safe-default signal triage (#561)
+
+Independent of partial-failure (which is a YClients-side / DB-write
+half-failure), Q12-α has a second ops-relevant signal: the
+**«caller forgot to compute continuation» safe-default WARN**.
+
+When `compute_billable` is invoked with `created_by="execute_reschedule"`
+but WITHOUT `is_reschedule_continuation`, the code defaults to
+«billable=True, reason=`reschedule_chain_broken: missing_continuation_signal`»
+to protect revenue (better over-charge once than silently undercharge
+salons). This branch fires a structured WARN log so ops can detect a
+regression where a caller starts systematically forgetting the
+continuation flag.
+
+### Detection
+
+Log grep (any aggregator — journalctl, Loki, ELK):
+
+```sh
+# Last hour, prod log aggregator. NOTE: ai-bot-platform-web is an
+# example unit name — adapt to your deploy (see
+# docs/runbooks/server-deployment.md for actual systemd units).
+journalctl -u ai-bot-platform-web --since "1 hour ago" \
+  | grep "billing.q12a.missing_continuation_signal"
+```
+
+Or structured JSON-log query (Loki/Grafana example):
+
+```logql
+{job="ai-bot-platform"} |~ "billing.q12a.missing_continuation_signal"
+```
+
+### Decision branches
+
+> **Numeric thresholds below are TENTATIVE** — calibrate against
+> actual pilot data after the first 30 days. Pre-pilot we have no
+> baseline; the safe rule is «any sustained non-zero rate warrants a
+> look at the most recent reschedule-path PRs».
+
+- **Zero events in 24h window** → healthy. Every reschedule caller
+  remembers to pass the continuation flag.
+- **Low sustained rate (~1-10/day, tentative)** → likely an admin
+  shell / migration script bypassing the normal call path; verify
+  with `git log` + caller stack in the log message. Not customer-
+  affecting unless the path also writes a billing event.
+- **Spike or sustained higher rate (>10/hour, tentative)** →
+  regression. Cross-reference recent PRs touching
+  `apps/skills/booking/tools.py` or
+  `apps/booking/services/reschedule.py`. The customer-facing impact:
+  each event is one over-billed reschedule for a salon. File a
+  rollback decision if rate is sustained.
+
+### Future: Prometheus counter
+
+Issue #561 tracks the upgrade to a Prometheus counter
+(`billing_q12a_missing_signal_total`) + alert rule for sustained
+non-zero rate. Today the log is the cheap always-on signal. When the
+counter is wired (depends on `apps/observability/` getting a
+`MeterProvider` / `prometheus_client` integration), this section
+will gain a Grafana panel link + alert routing detail.
+
 ## Out of scope
 
 - The Q12-α billing semantics — closed in PR #526; the audit row's
@@ -105,14 +166,18 @@ in `apps/audit/tests/test_admin_filters.py`).
   and any subsequent booking by this customer is billable as a fresh
   sale.
 - Proactive alerting — tracked in #561 (Prometheus
-  `billing_q12a_missing_signal_total` counter + alert rule).
+  `billing_q12a_missing_signal_total` counter + alert rule, deferred
+  until observability infra mature).
 
 ## Related
 
-- Issue #530 (this runbook + admin filter)
+- Issue #530 (admin filter + this runbook seed)
+- Issue #561 (safe-default WARN log + future Prometheus counter)
 - Issue #478 (Q12-α founder ACK)
 - PR #526 (Q12-α core implementation)
 - `apps/skills/booking/tools.py::execute_reschedule` (partial-failure
   emit site, ~line 1818)
+- `apps/booking/services/attribution.py::compute_billable`
+  (safe-default WARN emit site)
 - `apps/audit/admin.py::Q12aChainTerminatorFilter` (Django Admin
   filter)

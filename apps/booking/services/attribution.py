@@ -114,6 +114,45 @@ def compute_billable(
         # Default to «new sale» (billable=True) so we never silently
         # undercharge. Tag the reason so finance can grep.
         reason_tag = chain_break_reason or "missing_continuation_signal"
+        # Q12-α #561 (FOLLOW_UP): structured WARN signal when the
+        # safe-default «caller forgot to compute continuation» branch
+        # fires. Without this log, a regression where a caller starts
+        # systematically forgetting the continuation flag would silently
+        # overbill customers — visible only to finance during reconciliation.
+        #
+        # JSON-log shape (matches the project's structured logger):
+        #   logger=apps.booking.services.attribution
+        #   level=WARNING
+        #   msg=billing.q12a.missing_continuation_signal
+        #
+        # Today: ops greps the log aggregator for the literal
+        # ``billing.q12a.missing_continuation_signal``. See
+        # ``docs/runbooks/q12a-partial-failure-triage.md`` §«Safe-default
+        # signal triage».
+        #
+        # Future: when a MeterProvider (OTel metrics) or prometheus_client
+        # is wired in apps/observability/, add a ``Counter.inc()`` call
+        # adjacent to this log so a Prometheus alert rule can fire on
+        # sustained non-zero rate. The log line stays as the structured
+        # complement (debug-grade context the counter doesn't carry).
+        #
+        # **Counter name (LOCKED)** — when wiring this metric, use
+        # ``billing_q12a_missing_signal_total`` to match the runbook
+        # (``docs/runbooks/q12a-partial-failure-triage.md`` §«Future:
+        # Prometheus counter») and the original #561 acceptance spec.
+        # Any alternative name will silently break the runbook's grep
+        # / alert-routing references.
+        if reason_tag == "missing_continuation_signal":
+            logger.warning(
+                "billing.q12a.missing_continuation_signal "
+                "booking_source=%s status=%s created_by=%s "
+                "is_reschedule_continuation=%s chain_break_reason=%s",
+                booking_source,
+                status,
+                created_by,
+                is_reschedule_continuation,
+                chain_break_reason,
+            )
         return (True, f"reschedule_chain_broken: {reason_tag}")
     return (True, "ai_direct + confirmed: customer-initiated via execute_confirm")
 
