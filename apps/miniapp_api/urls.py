@@ -57,4 +57,11 @@ urlpatterns = [
         views.submit_feedback,
         name="submit_feedback",
     ),
+    # Catalog recommendations — proxy onto Ayla per identity-bridging
+    # contract. Unblocks the Mini App's stub→real swap (W1).
+    path(
+        "recommendations",
+        views.customer_recommendations,
+        name="customer_recommendations",
+    ),
 ]
