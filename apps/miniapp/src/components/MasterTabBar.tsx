@@ -83,6 +83,23 @@ export function MasterTabBar({
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Solo unified surface (Tau §5) owns its own bottom nav (`SoloBottomNav`
+  // in App.tsx). The solo surface deliberately reuses several master
+  // screens — MasterDashboardScreen, MasterScheduleScreen,
+  // MasterConversationsScreen — which historically rendered this
+  // MasterTabBar. Without an early-return here, those reused screens
+  // would paint a second fixed-position tab bar on top of the solo bar,
+  // both at z-index 100, fighting for the same pixels.
+  //
+  // Gate on the URL prefix rather than threading a prop through every
+  // master-screen consumer — single-file change with the same effect.
+  // `/master/*` paths still render the master tab bar unchanged (the
+  // prefix check is exclusive — `/master/dashboard` does NOT start with
+  // `/solo/`). Adversarial Code Reviewer round-1 catch.
+  if (location.pathname.startsWith("/solo/")) {
+    return null;
+  }
+
   const tabs: TabSpec[] = [
     {
       key: "home",

@@ -776,16 +776,29 @@ export function App() {
     const isSolo = me.is_solo_provider === true;
     // Routing cascade — Tau §5 + memory project_solo_provider_universal_ui.
     //
-    //   1. Solo provider with ANY admin/master role → 8-tab unified
-    //      solo surface. Skips the chooser entirely; Olga lands on
-    //      /solo/my-day. Covers her dual roles (owner+admin+master)
-    //      without forcing «Салон vs Мой профиль» pick.
+    //   1. Solo provider WITH master link → 8-tab unified solo surface.
+    //      Skips the chooser entirely; Olga lands on /solo/my-day.
+    //      Covers her full triple-role (owner+admin+master) — the solo
+    //      surface reuses master-flavored screens (My day / Bookings /
+    //      Schedule / AI all read /master/* endpoints), so a master
+    //      link is required for the surface to be functional.
+    //
+    //      Round-1 amendment (adversarial Code Reviewer): edge case —
+    //      a newly bootstrapped solo tenant where the owner created
+    //      themselves but hasn't been added as a master yet (solo=true,
+    //      admin=true, master=false). Mounting `UnifiedSoloSurface` for
+    //      that user would paint a 8-tab nav whose master-screen tabs
+    //      can't load any data. We narrow the guard to require
+    //      `hasMaster` so that case falls through to the existing
+    //      `hasAdmin → AdminRoutes` branch — they get the admin team
+    //      screen and can add themselves as a master to bootstrap.
+    //
     //   2. Team dual-role (NOT solo, has both admin AND master) →
     //      existing chooser surface from PR #753. Татьяна owner+master
     //      with junior masters under her keeps the «Салон»/«Мой
     //      профиль мастера» split.
     //   3-5. Single-role cascade unchanged.
-    if (isSolo && (hasAdmin || hasMaster)) {
+    if (isSolo && hasMaster) {
       return <UnifiedSoloSurface me={me} />;
     }
     if (hasAdmin && hasMaster) {
