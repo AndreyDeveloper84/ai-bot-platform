@@ -180,6 +180,7 @@ class TestHandleCallback:
 import pytest  # noqa: E402
 
 from apps.skills.welcome.skill import (  # noqa: E402
+    S1_MULTITENANT_TEXT_TEMPLATE,
     S2_CONSENT_TEXT,
     S2_REFUSED_TEXT,
     S2A_DETAILS_TEXT,
@@ -601,3 +602,102 @@ class TestS3S5Flow:
             "https://miniapp-dev.example/catalog",
             "https://miniapp-dev.example/home",
         ]
+
+
+# ───────────────────────────────────────────────────────────────────────
+# S1 multi-tenant variant — task #85 part 4, 2026-05-26
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestS1MultiTenantVariant:
+    """S1 multi-tenant detection (Tau §4): folded ``/start <payload>``
+    text. Recognised prefixes ref_/qr_/ig_post_ → multi-tenant render
+    с salon name. Standard /start + unparseable payloads → fall through
+    to existing WELCOME_TEXT (strictly additive, no regression)."""
+
+    def test_matches_start_with_payload(self):
+        """``matches()`` accepts /start with deeplink suffix (PR 3)."""
+        skill = WelcomeSkill()
+        assert skill.matches(_ctx("/start ref_user_42")) is True
+        assert skill.matches(_ctx("/start qr_99_window")) is True
+        assert skill.matches(_ctx("/start ig_post_123")) is True
+
+    def test_matches_baseline_start_unchanged(self):
+        """Baseline ``/start`` still matches — backward compat with
+        empty-payload bot_started events + Mini App entry points."""
+        skill = WelcomeSkill()
+        assert skill.matches(_ctx("/start")) is True
+
+    @pytest.mark.django_db
+    def test_ref_payload_renders_multitenant_text_with_salon_name(self, unwelcomed_bot_user):
+        """``ref_<user_id>`` → multi-tenant text c salon name из tenant.
+        Test fixture's tenant.name = «S1 Test» (fixture name)."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("/start ref_user_42", unwelcomed_bot_user),
+        )
+        assert result.meta["reply_kind"] == "welcome_s1_multitenant"
+        assert result.meta["start_param"] == "ref_user_42"
+        # Tenant name substituted into template.
+        expected_text = S1_MULTITENANT_TEXT_TEMPLATE.format(
+            salon_name=unwelcomed_bot_user.tenant.name
+        )
+        assert result.reply_text == expected_text
+
+    @pytest.mark.django_db
+    def test_qr_payload_recognised_as_multitenant(self, unwelcomed_bot_user):
+        """``qr_<salon_id>_<placement>`` → multi-tenant variant."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("/start qr_99_window", unwelcomed_bot_user),
+        )
+        assert result.meta["reply_kind"] == "welcome_s1_multitenant"
+        assert result.meta["start_param"] == "qr_99_window"
+
+    @pytest.mark.django_db
+    def test_ig_post_payload_recognised_as_multitenant(self, unwelcomed_bot_user):
+        """``ig_post_<id>`` → multi-tenant variant."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("/start ig_post_123", unwelcomed_bot_user),
+        )
+        assert result.meta["reply_kind"] == "welcome_s1_multitenant"
+
+    @pytest.mark.django_db
+    def test_baseline_start_renders_standard_welcome(self, unwelcomed_bot_user):
+        """No payload → existing WELCOME_TEXT. Strict backward compat."""
+        skill = WelcomeSkill()
+        result = skill.handle(_ctx_with_botuser("/start", unwelcomed_bot_user))
+        assert result.reply_text == WELCOME_TEXT
+        assert result.meta["reply_kind"] == "welcome"
+
+    @pytest.mark.django_db
+    def test_unparseable_payload_falls_through_to_standard_welcome(self, unwelcomed_bot_user):
+        """Unknown prefix (e.g. ``utm_campaign``, ``promo_xyz``) is NOT
+        a multi-tenant variant — falls through к standard WELCOME_TEXT
+        rather than 500 или rendering empty {salon_name}."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser("/start utm_summer2026", unwelcomed_bot_user),
+        )
+        assert result.reply_text == WELCOME_TEXT
+        assert result.meta["reply_kind"] == "welcome"
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "weird_payload",
+        ["кириллица", "🎉_emoji_payload", "ref-hyphen-not-underscore", "Ref_capitalised"],
+    )
+    def test_non_ascii_or_malformed_payload_falls_through_safely(
+        self, unwelcomed_bot_user, weird_payload
+    ):
+        """Defensive audit (CR #810 nit #6): Cyrillic / emoji / hyphen-
+        instead-of-underscore / capitalised prefix payloads NEVER trigger
+        multi-tenant variant — case-sensitive ASCII prefix match. All
+        fall through к standard WELCOME_TEXT without 500 / panic."""
+        skill = WelcomeSkill()
+        result = skill.handle(
+            _ctx_with_botuser(f"/start {weird_payload}", unwelcomed_bot_user),
+        )
+        assert result.reply_text == WELCOME_TEXT
+        assert result.meta["reply_kind"] == "welcome"
