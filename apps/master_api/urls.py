@@ -76,4 +76,7 @@ urlpatterns = [
         views.notification_prefs,
         name="notification_prefs",
     ),
+    # Tier 2 Phase 1 read-only roster + catalog (master-solo-surface §4.3 + §4.4)
+    path("customers", views.customers_list, name="customers_list"),
+    path("catalog", views.catalog_list, name="catalog_list"),
 ]
