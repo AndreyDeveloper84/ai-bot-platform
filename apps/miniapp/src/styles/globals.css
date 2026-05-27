@@ -4168,3 +4168,682 @@ a {
 .wellness-dash__nav-label {
   font-size: var(--font-size-100);
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * Customer records (Tier 1 Priority 5 Phase B) — Tau R1-R6
+ * Spec: docs/screens/customer-records-flow.md
+ *
+ * WCAG 2.2 AA addressed inline (Tau §13 — 8 BLOCKERS):
+ *   1.4.1 — icon+label paired in StatusBadge (records-status-badge)
+ *   2.5.8 — buttons ≥44dp via min-height + padding
+ *   1.4.3 — muted text uses --c-text-secondary (≥4.5:1 vs bg)
+ *   1.3.1 — h2/h3 tenant + time group headers; role=tablist on tabs
+ *   2.4.3 — focus rings on all interactive elements
+ *   2.4.1 — skip link records-screen__skip-link
+ *   1.4.4 — cards stack vertical @ small viewports
+ *   2.3.3 — skeleton via .skeleton (respects prefers-reduced-motion)
+ * ────────────────────────────────────────────────────────────────── */
+
+/* ── shared status badge ───────────────────────────────────────── */
+.records-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  line-height: 1;
+}
+.records-status-badge--sage {
+  color: var(--c-success);
+}
+.records-status-badge--muted {
+  color: var(--c-text-secondary);
+}
+.records-status-badge--warning {
+  color: var(--c-warning);
+}
+.records-status-badge__label {
+  line-height: var(--leading-tight);
+}
+
+/* ── tenant + time group headers ───────────────────────────────── */
+.records-tenant-header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: var(--s-4) 0 var(--s-2);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.records-tenant-header__dash {
+  color: var(--c-divider);
+  letter-spacing: 0.1em;
+  flex: 0 0 auto;
+}
+.records-tenant-header__name {
+  flex: 0 0 auto;
+}
+.records-time-header {
+  margin: var(--s-3) 0 var(--s-2);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+/* ── records screen shell ──────────────────────────────────────── */
+.records-screen {
+  min-height: 100vh;
+  background: var(--c-bg);
+  padding-bottom: calc(56px + var(--safe-bottom) + var(--s-3));
+  color: var(--c-text-primary);
+}
+.records-screen__skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+}
+.records-screen__skip-link:focus {
+  position: fixed;
+  left: var(--s-2);
+  top: var(--s-2);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  z-index: 1000;
+}
+.records-screen__header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  height: 56px;
+  padding: 0 var(--s-3);
+  border-bottom: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+}
+.records-screen__back {
+  background: transparent;
+  border: none;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-400);
+  cursor: pointer;
+  color: var(--c-text-primary);
+}
+.records-screen__back:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.records-screen__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+.records-screen__offline-banner {
+  background: var(--c-warning);
+  color: var(--c-text-on-accent);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-200);
+  text-align: center;
+}
+.records-screen__tabs {
+  display: flex;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-3) 0;
+  border-bottom: 1px solid var(--c-divider);
+}
+.records-screen__tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  min-height: 44px;
+  padding: var(--s-2) var(--s-2);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.records-screen__tab:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.records-screen__tab--active {
+  color: var(--c-accent);
+  border-bottom-color: var(--c-accent);
+  font-weight: 600;
+}
+.records-screen__main {
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.records-screen__filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin-bottom: var(--s-2);
+}
+.records-screen__chip {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-pill);
+  padding: var(--s-1) var(--s-3);
+  min-height: 36px;
+  font-size: var(--font-size-100);
+  color: var(--c-text-primary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.records-screen__chip:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.records-screen__chip--active {
+  background: var(--c-accent-subtle);
+  border-color: var(--c-accent);
+  font-weight: 600;
+}
+.records-screen__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.records-screen__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.records-screen__time-bucket {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.records-screen__items {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.records-screen__error,
+.records-screen__filter-empty {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.records-screen__error p,
+.records-screen__filter-empty p {
+  margin: 0;
+}
+.records-screen__load-more {
+  align-self: center;
+  margin-top: var(--s-2);
+}
+.records-screen__toast {
+  position: fixed;
+  bottom: calc(56px + var(--safe-bottom) + var(--s-3));
+  left: var(--s-3);
+  right: var(--s-3);
+  background: var(--c-text-primary);
+  color: var(--c-surface-1);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  font-size: var(--font-size-200);
+  z-index: 20;
+  text-align: center;
+}
+
+/* ── empty state ───────────────────────────────────────────────── */
+.records-empty {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.records-empty__text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  line-height: var(--leading-base);
+}
+.records-empty__ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.records-empty__cta-primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+
+/* ── booking card (3 variants) ─────────────────────────────────── */
+.records-card {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-left-width: 3px;
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.records-card--nearest {
+  /* Slightly stronger emphasis for the next booking. */
+  box-shadow: 0 1px 4px rgb(20 12 6 / 0.05);
+}
+.records-card--skeleton {
+  gap: var(--s-2);
+}
+.records-card__status-row {
+  margin-bottom: var(--s-1);
+}
+.records-card__when {
+  font-weight: 600;
+  font-size: var(--font-size-200);
+}
+.records-card__what {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.records-card__duration {
+  color: var(--c-text-secondary);
+  font-weight: 400;
+}
+.records-card__who {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.records-card__price {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.records-card__review-hint {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-success);
+}
+.records-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+.records-card__action {
+  min-height: 44px;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-200);
+}
+.records-card__action--primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+.records-card__action--danger {
+  color: var(--c-danger);
+}
+@media (max-width: 320px) {
+  /* WCAG 1.4.4 — at small viewport / 200% zoom, actions stack. */
+  .records-card__actions {
+    flex-direction: column;
+  }
+  .records-card__action {
+    width: 100%;
+  }
+}
+
+/* ── booking detail screen ─────────────────────────────────────── */
+.records-detail {
+  min-height: 100vh;
+  background: var(--c-bg);
+  color: var(--c-text-primary);
+  display: flex;
+  flex-direction: column;
+}
+.records-detail__header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  height: 56px;
+  padding: 0 var(--s-3);
+  border-bottom: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+}
+.records-detail__back {
+  background: transparent;
+  border: none;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-400);
+  cursor: pointer;
+  color: var(--c-text-primary);
+}
+.records-detail__back:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.records-detail__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+.records-detail__main {
+  flex: 1;
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  /* Default — no sticky CTA padding. Past statuses use this branch. */
+  padding-bottom: calc(var(--safe-bottom) + var(--s-4));
+}
+.records-detail__main--with-sticky {
+  /* When the sticky CTA is rendered for upcoming bookings, reserve
+   * enough bottom padding so the last section isn't covered. The
+   * sticky CTA itself is ~136px tall (2 rows + grip + safe area). */
+  padding-bottom: calc(160px + var(--safe-bottom));
+}
+.records-detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.records-detail__section-title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+.records-detail__status {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+}
+.records-detail__rescheduled-from {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.records-detail__recap {
+  gap: var(--s-1);
+}
+.records-detail__service {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.records-detail__duration {
+  font-weight: 400;
+  color: var(--c-text-secondary);
+}
+.records-detail__master,
+.records-detail__tenant,
+.records-detail__address,
+.records-detail__when,
+.records-detail__price,
+.records-detail__refund,
+.records-detail__penalty,
+.records-detail__policy,
+.records-detail__note,
+.records-detail__context-text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  line-height: var(--leading-base);
+}
+.records-detail__master {
+  color: var(--c-text-secondary);
+}
+.records-detail__tenant {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+.records-detail__when {
+  font-weight: 600;
+  font-size: var(--font-size-300);
+}
+.records-detail__address {
+  color: var(--c-text-secondary);
+}
+.records-detail__route-btn {
+  align-self: flex-start;
+  margin-top: var(--s-2);
+}
+.records-detail__note--empty {
+  color: var(--c-text-secondary);
+  font-style: italic;
+}
+.records-detail__policy {
+  color: var(--c-text-secondary);
+}
+.records-detail__refund {
+  color: var(--c-success);
+}
+.records-detail__penalty {
+  color: var(--c-text-secondary);
+}
+.records-detail__past-context {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+}
+.records-detail__past-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.records-detail__primary-cta {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+  flex: 1 1 auto;
+}
+.records-detail__deleted,
+.records-detail__error {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.records-detail__deleted p,
+.records-detail__error p {
+  margin: 0;
+}
+
+/* Sticky CTA — UPCOMING only. iOS-safe via env(safe-area-inset-bottom). */
+.records-detail__sticky-cta {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  padding: var(--s-3);
+  padding-bottom: calc(var(--s-3) + var(--safe-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  z-index: 10;
+}
+.records-detail__sticky-cta-msg {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+  min-height: 48px;
+}
+.records-detail__sticky-cta-row {
+  display: flex;
+  gap: var(--s-2);
+}
+.records-detail__sticky-cta-row > * {
+  flex: 1;
+  min-height: 44px;
+}
+
+/* ── AMM modal ─────────────────────────────────────────────────── */
+.records-msg-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+}
+.records-msg-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--c-overlay);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.records-msg-modal__panel {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--c-surface-1);
+  border-top-left-radius: var(--r-lg);
+  border-top-right-radius: var(--r-lg);
+  padding: var(--s-3);
+  padding-bottom: calc(var(--s-3) + var(--safe-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.records-msg-modal__grip {
+  align-self: center;
+  width: 36px;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--c-divider);
+}
+.records-msg-modal__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+.records-msg-modal__booking-context {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.records-msg-modal__prompt {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 500;
+}
+.records-msg-modal__reasons {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.records-msg-modal__reason-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  min-height: 56px;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-200);
+  text-align: left;
+  cursor: pointer;
+  color: var(--c-text-primary);
+  font-family: var(--font-sans);
+}
+.records-msg-modal__reason-chip:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.records-msg-modal__reason-emoji {
+  font-size: var(--font-size-300);
+  line-height: 1;
+}
+.records-msg-modal__reason-label {
+  font-weight: 500;
+}
+.records-msg-modal__cancel {
+  align-self: stretch;
+  margin-top: var(--s-1);
+}
+.records-msg-modal__text-label {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.records-msg-modal__textarea {
+  width: 100%;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-200);
+  font-family: var(--font-sans);
+  color: var(--c-text-primary);
+  resize: vertical;
+  min-height: 96px;
+}
+.records-msg-modal__textarea:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.records-msg-modal__action-row {
+  display: flex;
+  gap: var(--s-2);
+}
+.records-msg-modal__action-row > * {
+  flex: 1;
+  min-height: 44px;
+}
+.records-msg-modal__send {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+.records-msg-modal__send:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.records-msg-modal__sending,
+.records-msg-modal__sent,
+.records-msg-modal__error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-items: center;
+  text-align: center;
+  font-size: var(--font-size-200);
+  padding: var(--s-3) 0;
+}
+.records-msg-modal__sent p,
+.records-msg-modal__error p {
+  margin: 0;
+}

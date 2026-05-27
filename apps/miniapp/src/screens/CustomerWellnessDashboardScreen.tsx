@@ -642,7 +642,9 @@ export function CustomerWellnessDashboardScreen() {
               data={activity.data}
               onOpen={() =>
                 activity.data.next_booking &&
-                navigate(`/my-visits/${activity.data.next_booking.booking_id}`)
+                navigate(
+                  `/customer/records/${activity.data.next_booking.booking_id}`,
+                )
               }
               onReschedule={() =>
                 activity.data.next_booking &&
@@ -650,7 +652,7 @@ export function CustomerWellnessDashboardScreen() {
                   `/my-visits/${activity.data.next_booking.booking_id}/reschedule`,
                 )
               }
-              onAll={() => navigate("/my-visits")}
+              onAll={() => navigate("/customer/records")}
             />
           )}
         </section>
@@ -744,7 +746,7 @@ export function CustomerWellnessDashboardScreen() {
           type="button"
           className="wellness-dash__nav-tab"
           aria-label="Записи"
-          onClick={() => navigate("/my-visits")}
+          onClick={() => navigate("/customer/records")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             📅

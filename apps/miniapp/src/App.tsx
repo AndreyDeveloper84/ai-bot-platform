@@ -55,9 +55,11 @@ import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
+import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScreen";
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
+import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
 import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
@@ -936,6 +938,14 @@ function CustomerRoutes() {
       <Route
         path="/customer/booking/success/:bookingId"
         element={<CustomerBookingSuccessScreen />}
+      />
+      {/* Tier 1 Priority 5 Phase B — customer records (Tau R1-R6).
+          New canonical routes. Legacy /my-visits stays mounted for
+          deep links from bot DMs + reschedule flows. */}
+      <Route path="/customer/records" element={<CustomerRecordsScreen />} />
+      <Route
+        path="/customer/records/:bookingId"
+        element={<CustomerBookingDetailScreen />}
       />
       <Route path="/my-visits" element={<MyVisitsScreen />} />
       <Route path="/my-visits/:bookingId" element={<MyVisitDetailScreen />} />
