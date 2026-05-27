@@ -104,6 +104,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from celery import shared_task  # type: ignore[import-untyped]
+from django.conf import settings
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -117,6 +118,105 @@ logger = logging.getLogger(__name__)
 BATCH_LIMIT = 500
 MSK_TZ = ZoneInfo("Europe/Moscow")
 CONTEXT_KEY = "last_followup_sent_at"
+
+
+# ── B11 conservative blockers (P0 PRE_PILOT, founder sequence #3) ──────────
+#
+# Per Tau spec §4.1 + founder pilot_scope_discipline verdict 2026-05-26
+# (pilot-scope CUT): block B11 if ANY of these conditions hold. Conservative
+# semantics — false positive (lost review opportunity) acceptable; false
+# negative (sent inappropriately) is trust-break.
+#
+# 4 pilot blockers implementable со существующей моделью:
+#
+#   1. ``booking.completed_at IS NULL`` — visit never registered. Without
+#      proof of visit, не имеем right to ask «как прошёл».
+#   2. ``booking.status IN {CANCELLED, RESCHEDULED}`` — booking is in a
+#      terminal state where review prompt makes no sense. NOTE: CANCELLED
+#      bundles «customer cancelled with refund» case (Tau §4.1) because
+#      bot-platform mirror cannot today distinguish refund-cancellation
+#      from regular cancellation — Phase 1 follow-up adds the distinction
+#      via Ayla event integration.
+#   3. ``BotUser.proactive_messages_opt_out IS True`` — customer
+#      explicitly opted out of proactive messages.
+#   4. ``Conversation.consecutive_payment_failures >= threshold`` — active
+#      payment-failure cascade (per project_payment_failed_dm_threshold).
+#      Reviewing a visit while customer is in payment dispute = poor UX.
+#      Threshold от ``settings.PAYMENT_FAILED_HANDOFF_THRESHOLD`` (default 3).
+#
+# **Phase 1 follow-up (7 additional Tau §4.1 blocker states)** требует Ayla
+# event integration: refund_pending / refund_completed / partial_refund /
+# payment_disputed / chargeback_pending / chargeback / provider_cancelled /
+# no_fault_* / active_dispute states. Mirror doesn't have them yet;
+# don't add fields just для B11 without the upstream signal source.
+_B11_BLOCKED_STATUSES_FROZEN_AT_PR_TIME = ("cancelled", "rescheduled")
+
+
+def _should_send_b11(
+    reminder: BookingReminder,
+    bot_user: Any,
+) -> tuple[bool, str | None]:
+    """Return ``(send, reason)`` для B11 followup gate.
+
+    ``send=True`` → all 4 pilot blockers pass.
+    ``send=False`` + reason slug → at least one blocker triggered;
+    caller logs + audit emit с the reason для analytics.
+
+    Reads BookingRequest via ``reminder.booking_request`` (FK). NULL
+    FK = legacy / Ayla-path; can't check completed_at + booking.status
+    blockers, but ``proactive_messages_opt_out`` + payment-failure
+    gates still apply. Phase 1 Ayla event integration tightens this.
+    """
+    if bot_user.proactive_messages_opt_out:
+        return (False, "opt_out")
+
+    payment_blocker = _payment_failures_blocker(bot_user)
+    if payment_blocker:
+        return (False, payment_blocker)
+
+    booking_request = reminder.booking_request
+    if booking_request is None:
+        # NULL FK — legacy row OR Ayla-path. opt_out + payment_failures
+        # gates already cleared above; send. Phase 1 closes this gap.
+        return (True, None)
+
+    if booking_request.completed_at is None:
+        return (False, "completed_at_null")
+
+    if booking_request.status in _B11_BLOCKED_STATUSES_FROZEN_AT_PR_TIME:
+        return (False, f"booking_status_{booking_request.status}")
+
+    return (True, None)
+
+
+def _payment_failures_blocker(bot_user: Any) -> str | None:
+    """Check whether the bot_user has an active payment-failure cascade.
+
+    Queries the bot_user's most-recent active Conversation row; if its
+    ``consecutive_payment_failures`` >= threshold, return blocker reason.
+
+    Returns reason slug когда blocked, или None when threshold not
+    breached / no Conversation row found.
+    """
+    threshold = int(getattr(settings, "PAYMENT_FAILED_HANDOFF_THRESHOLD", 3))
+    # Local import to avoid module-level cycle (conversations may pull
+    # identity, identity pulls bookings indirectly via signals).
+    from apps.conversations.models import Conversation
+
+    # Latest conversation для this BotUser — payment counter is
+    # conversation-scoped per ``project_payment_failed_dm_threshold``
+    # memory + Conversation.consecutive_payment_failures help_text.
+    conv = (
+        Conversation.all_tenants.filter(bot_user=bot_user)
+        .order_by("-id")
+        .only("consecutive_payment_failures")
+        .first()
+    )
+    if conv is None:
+        return None
+    if conv.consecutive_payment_failures >= threshold:
+        return f"payment_failures_threshold_{threshold}"
+    return None
 
 
 def _moscow_day_window(now_utc: datetime) -> tuple[datetime, datetime, date]:
@@ -206,7 +306,7 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
             visit_at__lt=window_end,
         )
         .exclude(status=BookingReminder.Status.CANCELLED)
-        .select_related("tenant", "bot_user")
+        .select_related("tenant", "bot_user", "booking_request")
         .order_by("visit_at", "pk")[:BATCH_LIMIT]
     )
 
@@ -232,8 +332,12 @@ def send_post_visit_followups() -> dict[str, int]:
           today's MSK ISO date, write audit row.
 
     Returns ``{"sent": int, "skipped_already_sent": int,
-    "skipped_no_chat_id": int, "send_failed": int}`` for telemetry / test
-    visibility.
+    "skipped_no_chat_id": int, "skipped_blocked": int, "send_failed": int}``
+    for telemetry / test visibility.
+
+    ``skipped_blocked`` counts B11 conservative blocker hits — opt_out,
+    completed_at NULL, terminal booking status, payment-failure threshold
+    (per ``_should_send_b11``).
     """
     now = timezone.now()
     window_start, window_end, today_msk = _moscow_day_window(now)
@@ -242,6 +346,7 @@ def send_post_visit_followups() -> dict[str, int]:
     sent = 0
     skipped_already_sent = 0
     skipped_no_chat_id = 0
+    skipped_blocked = 0
     send_failed = 0
 
     seen_bot_user_ids: set[Any] = set()
@@ -277,6 +382,43 @@ def send_post_visit_followups() -> dict[str, int]:
                 today_iso,
             )
             skipped_already_sent += 1
+            continue
+
+        # B11 conservative blockers gate (P0 PRE_PILOT). 4 pilot blockers —
+        # if any triggers, log + audit + skip the send. Phase 1 extends к
+        # full Tau §4.1 list when Ayla event integration ships.
+        should_send, block_reason = _should_send_b11(reminder, bu)
+        if not should_send:
+            logger.info(
+                "bookings.followup.blocked bot_user=%s reason=%s",
+                bu.pk,
+                block_reason,
+            )
+            # Best-effort audit для post-pilot analytics («which blocker
+            # fires most» / «opt-out adoption rate»). Не failing the
+            # batch loop if audit raises.
+            try:
+                write_audit(
+                    action="bookings.followup.blocked",
+                    target="BotUser",
+                    target_id=bu.pk,
+                    payload={
+                        "reminder_id": str(reminder.pk),
+                        "reason": block_reason,
+                        "booking_request_id": (
+                            str(reminder.booking_request_id)
+                            if reminder.booking_request_id
+                            else None
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "bookings.followup.block_audit_failed bot_user=%s reason=%s",
+                    bu.pk,
+                    block_reason,
+                )
+            skipped_blocked += 1
             continue
 
         text = _format_followup_text(reminder)
@@ -342,18 +484,20 @@ def send_post_visit_followups() -> dict[str, int]:
         )
         sent += 1
 
-    if sent or skipped_already_sent or skipped_no_chat_id or send_failed:
+    if sent or skipped_already_sent or skipped_no_chat_id or skipped_blocked or send_failed:
         logger.info(
             "bookings.followup.summary sent=%d skipped_already_sent=%d "
-            "skipped_no_chat_id=%d send_failed=%d",
+            "skipped_no_chat_id=%d skipped_blocked=%d send_failed=%d",
             sent,
             skipped_already_sent,
             skipped_no_chat_id,
+            skipped_blocked,
             send_failed,
         )
     return {
         "sent": sent,
         "skipped_already_sent": skipped_already_sent,
         "skipped_no_chat_id": skipped_no_chat_id,
+        "skipped_blocked": skipped_blocked,
         "send_failed": send_failed,
     }
