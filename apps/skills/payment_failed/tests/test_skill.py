@@ -1,33 +1,33 @@
-"""Tests for payment_failed skill (α-mode, W2/Epsilon pre-flip).
+"""Tests для payment_failed skill (Sequence #4 master DM wire-up, 2026-05-27).
 
 Контракт pin-ится:
 
 * ``on_payment_failed_event`` принимает D3 consumer-enriched dict
-  (НЕ envelope). Шлёт client DM с retry-кнопкой + пишет audit row для
-  master DM skip (α-mode: bridge ``CatalogMaster.ayla_user_id``
-  отсутствует — wire-up в follow-up PR после W1).
+  (НЕ envelope). Шлёт client DM с retry-кнопкой + master DM via
+  full lookup chain (RemoteBookingProxy → CatalogMaster.ayla_user_id
+  → linked_bot_user → BotUser.chat_id).
+* All edge cases в lookup chain → graceful skip + audit row (no batch
+  break per defensive #851/#874 pattern).
 * ``PaymentRetryCallbackSkill`` обрабатывает ``cb:payment:retry:<id>``:
   matches/handle, auth-fail для unbridged BotUser, malformed callbacks,
   graceful stub ответа пока Alpha task #66 не закрыт.
 
 Mocking strategy:
 
-* ``apps.channels.max.outbound.send_message`` → spy через monkeypatch.
+* ``apps.channels.max.outbound.send_message`` → spy via monkeypatch.
 * ``apps.audit.services.write_audit`` → spy для audit-row assertions.
-* ``BotUser.all_tenants`` — реальный ORM через ``django_db`` fixture.
+* All mirror models (BotUser, RemoteBookingProxy, CatalogMaster,
+  CatalogService) → real ORM через ``django_db`` fixture.
 
-Audit row schema (tech-lead 2026-05-25):
+Audit row schemas:
 
-    {
-        "event": "payment_failed.master_dm_skipped_no_bridge",
-        "payment_event_id": <uuid|null>,
-        "payment_id": <uuid>,
-        "master_user_id": <ayla_uuid>,
-        "tenant_id": <uuid|null>,
-        "yclients_staff_id": <int|null>,
-        "timestamp": <iso>,
-        "reason": "catalogmaster_ayla_user_id_missing",
-    }
+* Success: ``payment_failed.master_dm_sent`` — emit on dispatch.
+* Skip:    ``payment_failed.master_dm_skipped`` с reason slug:
+  - ``remote_booking_proxy_missing``
+  - ``proxy_no_specialist_id``
+  - ``catalog_master_missing``
+  - ``master_not_onboarded``
+  - ``master_no_chat_id``
 """
 
 from __future__ import annotations
@@ -120,26 +120,122 @@ TENANT_ID = "55555555-5555-5555-5555-555555555555"
 EVENT_ID = "66666666-6666-6666-6666-666666666666"
 
 
-def _enriched_data(**override):
-    """D3 consumer-enriched dict (НЕ envelope — это уже data после consumer)."""
+def _enriched_data(*, tenant_id_override=None, **override):
+    """Phase 1 Option C consumer-enriched dict (Sequence #4).
+
+    Reflects ACTUAL payload Gamma's consumer ships per
+    ``apps/eventbus/consumers/payment.py`` lines 427-437:
+
+        payment_id, appointment_id, client_user_id, tenant_id,
+        failure_code, consecutive_failures, failed_at,
+        payment_event_id, client_name
+
+    Master DM enrichment comes from local mirror tables; nothing
+    в the payload identifies the master. ``tenant_id_override`` lets
+    test cases swap in a per-test tenant UUID so lookup chain
+    queries match the actual fixture-created tenant.
+    """
     base = {
         "payment_id": PAYMENT_ID,
         "appointment_id": APPT_ID,
         "client_user_id": str(CLIENT_AYLA),
-        "master_user_id": str(MASTER_AYLA),
-        "amount": 1500,
-        "service_name": "Маникюр",
-        "appointment_date": "15 мая 14:00",
-        "master_name": "Таня",
-        "client_name": "Анна",
-        "reason": "card_declined",
+        "tenant_id": tenant_id_override or TENANT_ID,
+        "failure_code": "card_declined",
+        "consecutive_failures": 3,
         "failed_at": "2026-05-25T10:00:00+03:00",
         "payment_event_id": EVENT_ID,
-        "tenant_id": TENANT_ID,
-        "yclients_staff_id": None,  # α-mode: bridge через yclients_staff_id отсутствует в D3 dict
+        "client_name": "Анна",
     }
     base.update(override)
     return base
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Lookup-chain fixtures
+# ───────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def make_remote_proxy(tenant):
+    """Factory — creates RemoteBookingProxy mirror row."""
+    from datetime import datetime, timezone
+
+    from apps.booking.models import RemoteBookingProxy
+
+    def _factory(
+        *,
+        appointment_id=APPT_ID,
+        specialist_id=MASTER_AYLA,
+        service_id=None,
+        start_at=None,
+    ):
+        return RemoteBookingProxy.all_tenants.create(
+            appointment_id=appointment_id,
+            tenant=tenant,
+            specialist_id=specialist_id,
+            service_id=service_id,
+            start_at=start_at or datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc),
+            end_at=datetime(2026, 5, 15, 15, 0, tzinfo=timezone.utc),
+            status=RemoteBookingProxy.Status.CONFIRMED,
+        )
+
+    return _factory
+
+
+@pytest.fixture
+def make_master(tenant, make_bot_user):
+    """Factory — creates CatalogMaster с optional linked BotUser."""
+    from apps.catalog.models import CatalogMaster
+
+    def _factory(
+        *,
+        ayla_user_id=MASTER_AYLA,
+        linked=True,
+        chat_id="max-master",
+        name="Таня",
+    ):
+        from datetime import datetime, timezone as dt_tz
+
+        master_bot_user = None
+        if linked:
+            master_bot_user = make_bot_user(
+                ayla_user_id=ayla_user_id,
+                chat_id=chat_id,
+                display_name=name,
+            )
+        return CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=hash(str(ayla_user_id)) & 0xFFFFFFFF,
+            external_updated_at=datetime.now(dt_tz.utc),
+            name=name,
+            ayla_user_id=ayla_user_id,
+            linked_bot_user=master_bot_user,
+            is_active=True,
+        )
+
+    return _factory
+
+
+@pytest.fixture
+def make_service(tenant):
+    """Factory — creates CatalogService mirror."""
+    from apps.catalog.models import CatalogService
+
+    def _factory(*, ayla_service_id, name="Маникюр"):
+        from datetime import datetime, timezone as dt_tz
+
+        return CatalogService.all_tenants.create(
+            tenant=tenant,
+            slug=f"svc-{ayla_service_id}",
+            external_id=hash(str(ayla_service_id)) & 0xFFFFFFFF,
+            external_updated_at=datetime.now(dt_tz.utc),
+            name=name,
+            ayla_service_id=ayla_service_id,
+            is_active=True,
+            duration_min=60,
+        )
+
+    return _factory
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -148,99 +244,6 @@ def _enriched_data(**override):
 
 
 class TestOnPaymentFailedEvent:
-    def test_client_dm_with_retry_button(self, make_bot_user, sent_dms, written_audits):
-        """Happy path α: client BotUser существует → DM с inline-кнопкой
-        [Оплатить]. Master DM skip-ается с audit row (α-mode: no bridge)."""
-        from apps.skills.payment_failed import on_payment_failed_event
-
-        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
-        # Master BotUser не нужен в α-mode (master DM всегда skip).
-
-        on_payment_failed_event(_enriched_data())
-
-        # Один DM — клиенту.
-        assert len(sent_dms) == 1
-        client_dm = sent_dms[0]
-        assert client_dm["chat_id"] == "max-client"
-        assert "не прошёл" in client_dm["text"]
-        # Inline-кнопка [Оплатить] с deterministic callback.
-        buttons = client_dm["attachments"][0]["payload"]["buttons"]
-        assert buttons == [
-            {
-                "label": "Оплатить",
-                "callback": f"cb:payment:retry:{PAYMENT_ID}",
-            }
-        ]
-
-        # Audit row для master DM skip присутствует.
-        audit_rows = [
-            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped_no_bridge"
-        ]
-        assert len(audit_rows) == 1
-
-    def test_master_dm_audit_row_schema(self, make_bot_user, sent_dms, written_audits):
-        """α-mode: audit row для master DM skip следует exact schema
-        от tech-lead 2026-05-25 — позволяет backfill walker найти
-        пропущенные нотификации когда W1 bridge merge-нут."""
-        from apps.skills.payment_failed import on_payment_failed_event
-
-        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
-        on_payment_failed_event(_enriched_data(yclients_staff_id=42))
-
-        master_skip = next(
-            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped_no_bridge"
-        )
-        payload = master_skip["payload"]
-        # Все обязательные поля schema присутствуют.
-        assert payload["event"] == "payment_failed.master_dm_skipped_no_bridge"
-        assert payload["payment_event_id"] == EVENT_ID
-        assert payload["payment_id"] == PAYMENT_ID
-        assert payload["appointment_id"] == APPT_ID
-        assert payload["master_user_id"] == str(MASTER_AYLA)
-        assert payload["tenant_id"] == TENANT_ID
-        assert payload["yclients_staff_id"] == 42  # null или int — оба OK
-        assert payload["reason"] == "catalogmaster_ayla_user_id_missing"
-        # timestamp — ISO 8601 string.
-        assert "T" in payload["timestamp"]
-
-    def test_master_skip_audit_skipped_when_no_master_user_id(
-        self,
-        make_bot_user,
-        sent_dms,
-        written_audits,
-    ):
-        """Edge: если в payload нет master_user_id (consumer enrichment fail),
-        audit-row тоже не пишется — нечем backfill-ить."""
-        from apps.skills.payment_failed import on_payment_failed_event
-
-        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
-        on_payment_failed_event(_enriched_data(master_user_id=None))
-
-        master_skip = [
-            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped_no_bridge"
-        ]
-        assert master_skip == []
-
-    def test_client_dm_skipped_when_bot_user_missing(
-        self,
-        sent_dms,
-        written_audits,
-    ):
-        """Клиент никогда не писал в бот → BotUser отсутствует.
-        Skill graceful skip без raise. Audit row для master DM всё равно
-        пишется (backfill replay будет полезен)."""
-        from apps.skills.payment_failed import on_payment_failed_event
-
-        # Никаких BotUser-ов.
-        on_payment_failed_event(_enriched_data())
-
-        assert sent_dms == []
-        # Master skip audit row всё равно пишется.
-        master_skip = [
-            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped_no_bridge"
-        ]
-        assert len(master_skip) == 1
-
     def test_no_payment_id_logs_warning_and_returns(self, sent_dms, written_audits, caplog):
         """data без payment_id → ничего не делаем + WARNING."""
         from apps.skills.payment_failed import on_payment_failed_event
@@ -252,28 +255,287 @@ class TestOnPaymentFailedEvent:
         assert written_audits == []
         assert any("payload_missing_payment_id" in r.message for r in caplog.records)
 
-    def test_does_not_raise_on_send_failure(
+
+class TestMasterDMDispatch:
+    """Sequence #4 active master DM dispatch (replaces α-mode skip).
+
+    Phase D scenarios (per founder handoff 2026-05-26):
+    1. Happy path full envelope → master DM sent
+    2. Amount absent → line dropped, DM still sent
+    3. RemoteBookingProxy missing → graceful skip + audit
+    4. CatalogMaster missing → graceful skip + audit
+    5. CatalogMaster.linked_bot_user NULL → graceful skip + audit
+    6. send_message raises → caught, no batch break
+    7. Existing client DM still works (no regression)
+
+    Phase F adversarial:
+    8. Cross-tenant lookup attempt → blocked by tenant scope
+    """
+
+    def test_happy_path_full_chain_dispatches_master_dm(
         self,
+        tenant,
         make_bot_user,
-        monkeypatch,
+        make_remote_proxy,
+        make_master,
+        make_service,
+        sent_dms,
         written_audits,
-        caplog,
     ):
-        """Если MAX API throw-ит (5xx, timeout) — skill log-ает но не raise.
-        Иначе Gamma's consumer fail-нул бы dedupe и event переобрабатывался
-        бы на каждом retry с лишним audit row."""
+        """Full chain: appointment_id → RemoteBookingProxy →
+        CatalogMaster.ayla_user_id → linked_bot_user → BotUser.chat_id.
+        Plus CatalogService enrichment for service_name."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        # Client side
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        # Master side
+        service_id = uuid.uuid4()
+        make_service(ayla_service_id=service_id, name="Маникюр")
+        make_remote_proxy(specialist_id=MASTER_AYLA, service_id=service_id)
+        make_master(ayla_user_id=MASTER_AYLA, chat_id="max-master")
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
+
+        # Two DMs — client + master.
+        chat_ids = sorted(d["chat_id"] for d in sent_dms)
+        assert chat_ids == ["max-client", "max-master"]
+
+        master_dm = next(d for d in sent_dms if d["chat_id"] == "max-master")
+        assert "⚠ Платёж не прошёл" in master_dm["text"]
+        assert "Клиент: Анна" in master_dm["text"]
+        assert "Маникюр" in master_dm["text"]
+        # Counter line (N=3 default).
+        assert "3-я попытка оплаты подряд" in master_dm["text"]
+        assert master_dm["attachments"] is None  # info-only, no buttons
+
+        # Forensic audit for successful dispatch.
+        sent_audits = [a for a in written_audits if a["action"] == "payment_failed.master_dm_sent"]
+        assert len(sent_audits) == 1
+
+    def test_amount_line_dropped_when_missing(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        make_master,
+        sent_dms,
+    ):
+        """Q3 verdict: Phase 1 envelope has no amount field, line dropped
+        entirely (cleaner than rendering «—»)."""
         from apps.skills.payment_failed import on_payment_failed_event
 
         make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        make_remote_proxy(specialist_id=MASTER_AYLA)
+        make_master(ayla_user_id=MASTER_AYLA, chat_id="max-master")
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
+
+        master_dm = next(d for d in sent_dms if d["chat_id"] == "max-master")
+        # No «Сумма» line at all when amount missing.
+        assert "Сумма:" not in master_dm["text"]
+        # But the rest of the template is intact.
+        assert "Клиент:" in master_dm["text"]
+        assert "Услуга:" in master_dm["text"]
+        assert "попытка оплаты подряд" in master_dm["text"]
+
+    def test_skip_when_remote_booking_proxy_missing(
+        self,
+        tenant,
+        make_bot_user,
+        sent_dms,
+        written_audits,
+    ):
+        """Mirror lag race: payment.failed arrived before booking.confirmed.
+        No RemoteBookingProxy row → graceful skip + audit."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        # Client side OK; no proxy / master fixtures.
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
+
+        # Only client DM fires.
+        chat_ids = [d["chat_id"] for d in sent_dms]
+        assert chat_ids == ["max-client"]
+
+        skip_audits = [
+            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped"
+        ]
+        assert len(skip_audits) == 1
+        assert skip_audits[0]["payload"]["reason"] == "remote_booking_proxy_missing"
+
+    def test_skip_when_catalog_master_missing(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        sent_dms,
+        written_audits,
+    ):
+        """RemoteBookingProxy.specialist_id points к Ayla Master,
+        но local CatalogMaster mirror hasn't synced yet (mirror lag)."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        make_remote_proxy(specialist_id=MASTER_AYLA)
+        # No CatalogMaster fixture.
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
+
+        skip_audits = [
+            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped"
+        ]
+        assert len(skip_audits) == 1
+        assert skip_audits[0]["payload"]["reason"] == "catalog_master_missing"
+
+    def test_skip_when_linked_bot_user_null(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        make_master,
+        sent_dms,
+        written_audits,
+    ):
+        """Master существует в catalog но не onboarded к bot — no MAX DM
+        possible. Graceful skip + audit."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        make_remote_proxy(specialist_id=MASTER_AYLA)
+        # linked=False → no linked_bot_user on master row.
+        make_master(ayla_user_id=MASTER_AYLA, linked=False)
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
+
+        skip_audits = [
+            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped"
+        ]
+        assert len(skip_audits) == 1
+        assert skip_audits[0]["payload"]["reason"] == "master_not_onboarded"
+
+    def test_send_message_raise_caught_no_batch_break(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        make_master,
+        monkeypatch,
+        caplog,
+    ):
+        """MAX API throws (5xx, timeout) — skill logs but не raises.
+        Иначе Gamma's consumer fail-нул бы dedupe + переобработал."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        make_remote_proxy(specialist_id=MASTER_AYLA)
+        make_master(ayla_user_id=MASTER_AYLA, chat_id="max-master")
 
         def _throws(**_kwargs):
             raise RuntimeError("MAX 503")
 
         monkeypatch.setattr("apps.channels.max.outbound.send_message", _throws)
         with caplog.at_level(logging.ERROR, logger="apps.skills.payment_failed.skill"):
-            on_payment_failed_event(_enriched_data())  # не должен raise
+            on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
 
+        # Both DMs attempted, both failed, neither raised.
         assert any("dm_send_failed" in r.message for r in caplog.records)
+
+    def test_client_dm_still_sent_when_master_lookup_fails(
+        self,
+        tenant,
+        make_bot_user,
+        sent_dms,
+    ):
+        """Regression guard: master DM skip MUST NOT block client DM.
+        Independent code paths."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        # Only client side; nothing for master lookup chain.
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
+
+        # Client DM с inline button still arrives.
+        assert len(sent_dms) == 1
+        client_dm = sent_dms[0]
+        assert client_dm["chat_id"] == "max-client"
+        buttons = client_dm["attachments"][0]["payload"]["buttons"]
+        assert buttons[0]["callback"] == f"cb:payment:retry:{PAYMENT_ID}"
+
+    def test_non_numeric_consecutive_failures_does_not_break_dispatch(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        make_master,
+        sent_dms,
+        caplog,
+    ):
+        """CR #881 M1 regression guard: string-shaped or garbage value
+        в ``consecutive_failures`` must NOT raise + escape skill (would
+        break Gamma's consumer batch). Defensive int-coerce с sane
+        default = threshold (3)."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        make_remote_proxy(specialist_id=MASTER_AYLA)
+        make_master(ayla_user_id=MASTER_AYLA, chat_id="max-master")
+
+        # Garbage non-numeric value — would raise ValueError pre-fix.
+        with caplog.at_level(logging.WARNING, logger="apps.skills.payment_failed.skill"):
+            on_payment_failed_event(
+                _enriched_data(
+                    tenant_id_override=str(tenant.pk),
+                    consecutive_failures="not_a_number",
+                )
+            )
+
+        # No raise — master DM still fires.
+        master_dm = next(d for d in sent_dms if d["chat_id"] == "max-master")
+        # Falls back to default 3 in template.
+        assert "Это 3-я попытка оплаты подряд" in master_dm["text"]
+        # Defensive warn logged.
+        assert any("bad_consecutive_failures" in r.message for r in caplog.records)
+
+    def test_cross_tenant_lookup_blocked_by_tenant_scope(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        make_master,
+        sent_dms,
+        written_audits,
+    ):
+        """Adversarial: RemoteBookingProxy + CatalogMaster в tenant A;
+        payment event arrives с tenant_id of tenant B. Query MUST NOT
+        return tenant A's rows. Phase F #1 защита."""
+        from apps.tenancy.models import Tenant
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        # Tenant A — has full chain fixtures.
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        make_remote_proxy(specialist_id=MASTER_AYLA)
+        make_master(ayla_user_id=MASTER_AYLA, chat_id="max-master")
+
+        # Tenant B — separate; payload references it though APPT_ID
+        # «belongs» к tenant A's proxy. With tenant-scoping, query
+        # finds nothing.
+        tenant_b = Tenant.objects.create(slug="other", name="Other Salon")
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant_b.pk)))
+
+        # Master DM MUST NOT fire — cross-tenant query blocked.
+        chat_ids = [d["chat_id"] for d in sent_dms]
+        assert "max-master" not in chat_ids
+        skip_audits = [
+            a for a in written_audits if a["action"] == "payment_failed.master_dm_skipped"
+        ]
+        # Skip с reason=remote_booking_proxy_missing (query failed
+        # cross-tenant predicate). Crucially: NOT sent.
+        assert len(skip_audits) == 1
+        assert skip_audits[0]["payload"]["reason"] == "remote_booking_proxy_missing"
 
 
 # ───────────────────────────────────────────────────────────────────────

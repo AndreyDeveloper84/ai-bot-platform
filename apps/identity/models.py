@@ -182,6 +182,19 @@ class BotUser(models.Model):
             "customer-onboarding-flow.md §11)."
         ),
     )
+    # B11 conservative blockers (P0 PRE_PILOT, founder pilot_scope_discipline
+    # sequence #3). When True, customer opted out of all proactive bot-
+    # initiated messages — post-visit follow-ups, review prompts, marketing
+    # nudges, etc. Reminders themselves (B5 T-24h / B6 T-2h) still fire
+    # because those are contract-required dispatch ahead of confirmed
+    # bookings, not «proactive» в the marketing-engagement sense. Default
+    # False — existing users continue receiving B11 nudges until they
+    # explicitly opt out via UI / chat command (UI surface lands в Phase 1).
+    proactive_messages_opt_out = models.BooleanField(
+        default=False,
+        help_text="Customer-level opt-out of proactive bot-initiated "
+        "messages (B11 post-visit follow-up etc.). False = receive.",
+    )
     context = models.JSONField(
         default=dict,
         blank=True,

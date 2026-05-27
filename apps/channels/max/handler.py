@@ -70,6 +70,13 @@ from apps.channels.max.outbound import (
     send_message,
 )
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
+from apps.channels.max.photo import (
+    PhotoDownloadError,
+    PhotoTooLargeError,
+    download_photo,
+    extract_first_photo_url,
+    safe_hostname,
+)
 from apps.conversations.models import Conversation
 from apps.conversations.services import record_message, resolve_active_conversation
 from apps.events.services import emit
@@ -290,6 +297,43 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         role="user",
         content=event.text,
     )
+
+    # Photo bytes path — Веха 2 of the photo adapter port.
+    #
+    # The food_scanner skill consumes `conversation.last_photo_bytes`
+    # (set as a runtime Python attribute, NOT a DB field — see ADR-0011
+    # + skill docstring). Channel-adapter contract: if the inbound
+    # message carries an IMAGE attachment, we stream the bytes from
+    # MAX CDN here and stash them on the conversation instance for the
+    # skill to pick up via getattr.
+    #
+    # On any failure (oversize, timeout, network, 4xx/5xx) we set the
+    # attribute to None — food_scanner already handles the None case
+    # gracefully (PHOTO_NO_BYTES reply). Photo download MUST NOT raise
+    # through the dispatcher; the customer should always get a reply,
+    # even if it's «не получилось скачать фото».
+    if event.attachments:
+        photo_url = extract_first_photo_url(event.attachments)
+        if photo_url is not None:
+            try:
+                conversation.last_photo_bytes = download_photo(photo_url)  # type: ignore[attr-defined]
+            except PhotoTooLargeError:
+                # Log hostname only — MAX CDN URLs commonly include
+                # signed bearer tokens in the querystring (PR #893 B2).
+                logger.warning(
+                    "channels.max.handler.photo_too_large conversation=%s host=%s",
+                    conversation.id,
+                    safe_hostname(photo_url),
+                )
+                conversation.last_photo_bytes = None  # type: ignore[attr-defined]
+            except PhotoDownloadError as exc:
+                logger.warning(
+                    "channels.max.handler.photo_download_failed conversation=%s host=%s exc=%s",
+                    conversation.id,
+                    safe_hostname(photo_url),
+                    exc,
+                )
+                conversation.last_photo_bytes = None  # type: ignore[attr-defined]
 
     # Sprint 3 / D1 — dispatch through the skill registry. Lazy import
     # of skills.registry breaks the echo-skill ↔ handler.py module-load

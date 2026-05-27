@@ -133,9 +133,23 @@ class TestAttachmentOnly:
     """
 
     def test_attachment_only_routes_to_food_scanner(
-        self, tenant_a, mock_send, fake_redis, settings
+        self, tenant_a, mock_send, fake_redis, settings, monkeypatch
     ):
         settings.STRICT_TENANT_SCOPE = "strict"
+
+        # Веха 2 of photo adapter port now wires the download — mock it
+        # to raise so this test continues to exercise the «no bytes
+        # stashed» graceful path the food_scanner skill handles. The
+        # dedicated photo-download integration tests live in
+        # test_handler_photo.py.
+        from apps.channels.max import handler as _h
+        from apps.channels.max.photo import PhotoDownloadError
+
+        def _raise_download(_url):
+            raise PhotoDownloadError("mocked — bytes deliberately absent")
+
+        monkeypatch.setattr(_h, "download_photo", _raise_download)
+
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
             max_handler.handle_max_event(
                 _payload(
@@ -143,10 +157,9 @@ class TestAttachmentOnly:
                     attachments=[{"type": "image", "payload": {"url": "x"}}],
                 )
             )
-        # Photo-bytes path: channel adapter didn't stash bytes (web
-        # adapter convention not yet wired for MAX), so food_scanner
-        # returns the graceful "не получилось скачать" prompt rather
-        # than crashing on a None scan.
+        # Photo-bytes path: download mocked to raise, so adapter sets
+        # `conversation.last_photo_bytes = None` and food_scanner
+        # returns the graceful "не получилось скачать" prompt.
         from apps.skills.food_scanner.skill import PHOTO_NO_BYTES
 
         assert mock_send[0]["text"] == PHOTO_NO_BYTES

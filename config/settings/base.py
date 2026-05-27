@@ -269,6 +269,34 @@ PAYMENT_EVENT_RETENTION_DAYS = int(os.environ.get("PAYMENT_EVENT_RETENTION_DAYS"
 # event re-evaluates against the new threshold.
 PAYMENT_FAILED_HANDOFF_THRESHOLD = int(os.environ.get("PAYMENT_FAILED_HANDOFF_THRESHOLD", "3"))
 
+# Tier-A #4 (P1 PRE_PILOT, founder pilot_scope_discipline sequence #5).
+#
+# AI safety formalization: skills что compute а ``confidence`` score
+# (FAQ on RAG retrieval, future LLM-driven flows) trigger handoff к
+# human operator when confidence falls below a threshold. Pipeline
+# step 10.5 enforces this as **defense-in-depth** — even if the skill
+# forgot к set ``should_handoff=True``, the pipeline catches low
+# confidence и transitions к handoff automatically.
+#
+# Global default (``AI_CONFIDENCE_HANDOFF_THRESHOLD``) applies к any
+# skill that doesn't have a per-skill override. Per-skill dict
+# (``SKILL_CONFIDENCE_HANDOFF_THRESHOLD``) lets ops tune individual
+# skills без code change — analogous to ``SKILL_LLM_PROVIDER`` pattern.
+# Set к ``None`` per skill (or omit) → disable enforcement for that
+# skill (skill remains owning the decision via ``should_handoff``).
+#
+# Skill confidence semantics (locked in ``apps.skills.base.SkillResult``
+# docstring 2026-05-27): scale ``[0.0, 1.0]``; ``None`` = skill didn't
+# compute (Sprint 3 deterministic skills); ``1.0`` = full confidence
+# (tool success); ``< threshold`` → pipeline auto-handoffs.
+AI_CONFIDENCE_HANDOFF_THRESHOLD = float(os.environ.get("AI_CONFIDENCE_HANDOFF_THRESHOLD", "0.5"))
+# Per-skill override dict. Key = skill ``name`` attribute (e.g. ``"faq"``,
+# ``"booking"``). Value = threshold float OR ``None`` к disable. Skills
+# не listed here fall back к ``AI_CONFIDENCE_HANDOFF_THRESHOLD``.
+# Env-driven not supported для dict; set in deployment-specific
+# settings module if per-skill tuning needed.
+SKILL_CONFIDENCE_HANDOFF_THRESHOLD: dict[str, float | None] = {}
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a
