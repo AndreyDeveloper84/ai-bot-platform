@@ -54,7 +54,7 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError } from "../lib/api";
+import { ApiError, authVerify } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { useBackButton } from "../hooks/useBackButton";
@@ -105,15 +105,73 @@ export function CustomerBookingConfirmScreen() {
   useClosingConfirmation(true);
 
   // Restore pending intent on mount — post-OAuth callback case.
-  // sessionStorage primary path per TL Q4 (P0).
+  //
+  // Two-path restore (TL Q4 P0 + W4 #844 round-trip):
+  //   1. PRIMARY: sessionStorage `restorePendingIntent()` — same-device
+  //      same-browser-session (the normal OAuth round-trip path).
+  //   2. DEFENCE-IN-DEPTH: `POST /auth/verify` returns any
+  //      `pending_booking_intent` the server cached (W4 #844, 10min TTL
+  //      keyed by BotUser.id). Covers multi-device + private-mode +
+  //      sessionStorage-evicted cases.
+  //
+  // Merge policy when both surface a draft:
+  //   - sessionStorage wins for fields it has (it's freshest — set
+  //     immediately before the OAuth redirect on this device).
+  //   - Server intent supplies fields sessionStorage is missing (e.g.
+  //     the multi-device case where sessionStorage on the new device
+  //     is empty).
+  //
+  // Field-name normalisation: backend ships `price_quoted` /
+  // `loyalty_apply`; sessionStorage uses `price_rub` / `loyalty_choice`.
+  // Both shapes carry the same identifying triplet
+  // `master_id` + `service_id` + `slot_iso`, which is all the screen
+  // needs to rehydrate; the secondary fields (note, names) are best-effort
+  // and the screen tolerates absence.
   useEffect(() => {
-    const intent = restorePendingIntent();
-    if (!intent) return;
-    setMaster(intent.master_id, intent.master_name ?? "");
-    setService(intent.service_id, intent.service_name ?? "");
-    setVisitAt(intent.slot_iso);
-    if (intent.note) setNote(intent.note);
-    // No haptic — user may not be aware OAuth redirect happened.
+    let cancelled = false;
+
+    async function restore() {
+      const local = restorePendingIntent();
+
+      // Server-side round-trip is supplementary — only call /auth/verify
+      // when sessionStorage was empty OR we're missing display strings
+      // (name/note) that the server might still hold.
+      let server: Awaited<ReturnType<typeof authVerify>>["pending_booking_intent"] = null;
+      try {
+        const verifyResp = await authVerify({ readCached: true });
+        server = verifyResp.pending_booking_intent ?? null;
+      } catch {
+        // /auth/verify failure is non-fatal — fall back to sessionStorage
+        // alone. The booking screen still functions; we just lose the
+        // multi-device safety net.
+      }
+
+      if (cancelled) return;
+
+      // Conflict resolution: prefer sessionStorage when both present
+      // (it's freshest on this device). When only server intent exists
+      // (cross-device case), restore from server.
+      const intent = local ?? null;
+      if (intent) {
+        setMaster(intent.master_id, intent.master_name ?? "");
+        setService(intent.service_id, intent.service_name ?? "");
+        setVisitAt(intent.slot_iso);
+        if (intent.note) setNote(intent.note);
+        return;
+      }
+      if (server) {
+        setMaster(server.master_id, "");
+        setService(server.service_id, "");
+        setVisitAt(server.slot_iso);
+        if (server.note) setNote(server.note);
+      }
+      // No haptic — user may not be aware OAuth redirect happened.
+    }
+
+    void restore();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Missing prerequisites — bounce back to catalog (founder cut #1
@@ -179,6 +237,29 @@ export function CustomerBookingConfirmScreen() {
       note: note || undefined,
       service_name: draft.serviceName ?? undefined,
       master_name: draft.masterName ?? undefined,
+    });
+    // W4 #844 defence-in-depth — also push the intent to the server
+    // cache. Survives sessionStorage eviction + multi-device flows.
+    // Best-effort: failure is non-fatal (sessionStorage stays primary).
+    //
+    // Field-name conversion: backend uses `price_quoted` (not
+    // `price_rub`) and does NOT accept the display-only `service_name`
+    // / `master_name` strings — `_ALLOWED_FIELDS` whitelist drops them
+    // silently. We only send the identifying triplet + optional note.
+    //
+    // Anonymous users have no BotUser.id yet (the cache key) — the
+    // backend handles this by treating the request as «no body»; the
+    // call is safe to issue regardless of auth state.
+    void authVerify({
+      intent: {
+        master_id: draft.masterId,
+        service_id: draft.serviceId,
+        slot_iso: draft.visitAt,
+        ...(note ? { note } : {}),
+      },
+    }).catch(() => {
+      // Swallow — server-side caching is supplementary. sessionStorage
+      // already has the draft.
     });
     // OAuth deep-link — bot DM redirect. Real MAX OAuth URL TBD by
     // backend; until then we open the bot DM (matches existing

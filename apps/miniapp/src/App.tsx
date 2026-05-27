@@ -59,6 +59,7 @@ import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessSc
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
+import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
@@ -912,6 +913,13 @@ function CustomerRoutes() {
         stay reachable for deep-links from bot DMs and reschedule
         flows.
       */}
+      {/* Tier 1 Priority 2 Phase B — wellness dashboard (ACTIVE_REGULAR
+          Home per founder pivot 2026-05-25). Stub-mode against W4
+          backend; canonical route is /customer/main. */}
+      <Route
+        path="/customer/main"
+        element={<CustomerWellnessDashboardScreen />}
+      />
       <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
       <Route
         path="/customer/masters/:masterId"
