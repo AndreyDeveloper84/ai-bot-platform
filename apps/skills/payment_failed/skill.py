@@ -33,19 +33,27 @@ lookup (или join) перед вызовом ``on_payment_failed_event(...)``.
 Ожидаемая dict-форма зафиксирована в docstring :func:`on_payment_failed_event`
 — это consumer-side контракт, НЕ event-contract.md surface.
 
-### α-mode (current, 2026-05-25)
+### Master DM dispatch (Sequence #4 wire-up, 2026-05-27)
 
-Master DM сейчас **всегда пропускается** с audit-row, потому что:
+Master DM **actively fires** via local mirror lookup chain:
 
-1. CatalogMaster не имеет ``ayla_user_id`` bridge (apps/catalog/ —
-   W1 territory, добавление в отдельном W1 PR).
-2. ``yclients_staff_id`` отсутствует в D3 consumer-enriched dict
-   (нет fallback path).
+  envelope.appointment_id
+    → RemoteBookingProxy.appointment_id (PK)
+    → .specialist_id (Ayla Master UUID)
+    → CatalogMaster.ayla_user_id == specialist_id
+    → .linked_bot_user (OneToOne к BotUser)
+    → BotUser.chat_id → send_message
 
-Когда W1 откроет bridge → отдельный мелкий PR (W2 follow-up) wire-up
-``_master_wants_personal_messages`` через lookup
-``CatalogMaster.ayla_user_id`` + revisit master DM. См. follow-up
-issue после ship α.
+All hops are bot-platform mirror tables — no cross-repo DB / REST call
+per ADR-0009 §Hard rule #2. Mirror staleness gap (Ayla canonical may be
+~30s ahead) is accepted SLO — Phase 1 follow-up tightens via event-
+driven sync invalidation. See ``_try_send_master_dm`` for the full
+flow + edge case handling.
+
+The earlier α-mode skip behaviour (before 2026-05-27) was based on a
+stale docstring assumption that W1's CatalogMaster.ayla_user_id +
+linked_bot_user fields hadn't shipped yet. They have; α-mode is
+removed.
 
 ### Retry endpoint — pending Alpha task #66
 
@@ -96,13 +104,20 @@ CALLBACK_PAYMENT_RETRY_PREFIX = "cb:payment:retry:"
 # Text templates
 # ---------------------------------------------------------------------------
 
-_MASTER_DM_TEMPLATE = (
-    "⚠ Платёж не прошёл\n"
-    "Клиент: {client_name}\n"
-    "Услуга: {service_name}, {appointment_date}\n"
-    "Сумма: {amount} ₽\n"
-    "Статус брони: ожидает оплаты"
-)
+# Master DM template — built dynamically by ``_format_master_dm_text``
+# because the «Сумма» line is dropped entirely if amount is unavailable
+# (per tech-lead Q3 verdict 2026-05-26 — cleaner than rendering «—»).
+# Order of lines locked: header → identity → context → counter → status.
+_MASTER_DM_HEADER = "⚠ Платёж не прошёл"
+_MASTER_DM_CLIENT_LINE = "Клиент: {client_name}"
+_MASTER_DM_SERVICE_LINE = "Услуга: {service_name}, {appointment_date}"
+_MASTER_DM_AMOUNT_LINE = "Сумма: {amount} ₽"
+# Counter context line — added per Q5 verdict 2026-05-26. Critical for
+# master understanding (cascade pattern, not one-off transient fail).
+# Parametric N — derives from skill payload, robust к threshold env changes
+# (default 3, configurable via PAYMENT_FAILED_HANDOFF_THRESHOLD).
+_MASTER_DM_COUNTER_LINE = "Это {n}-я попытка оплаты подряд — клиент не смог завершить бронирование."
+_MASTER_DM_STATUS_LINE = "Статус брони: ожидает оплаты"
 
 _CLIENT_DM_TEMPLATE = (
     "❌ Платёж за {service_name} не прошёл\n"
@@ -222,84 +237,303 @@ def on_payment_failed_event(data: dict[str, Any]) -> None:
         properties={"payment_id": payment_id},
     )
 
-    # Master DM — α-mode skip с audit row для будущего backfill.
-    _record_master_dm_skip(data, payment_id)
+    # Master DM (active dispatch — α-mode skip removed 2026-05-27 per
+    # founder pilot sequence #4). W1's CatalogMaster bridge fields
+    # (``ayla_user_id`` + ``linked_bot_user``) are shipped + local
+    # RemoteBookingProxy mirror provides specialist_id, so we can
+    # resolve master from envelope.appointment_id without cross-repo
+    # calls per ADR-0009.
+    _try_send_master_dm(data, payment_id)
 
     # Client DM (with retry button).
     _try_send_client_dm(data, payment_id)
 
 
-def _record_master_dm_skip(data: dict[str, Any], payment_id: str) -> None:
-    """α-mode: master DM пропускается с audit-row для будущего backfill.
+def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
+    """Master notification — active dispatch (Sequence #4, 2026-05-27).
 
-    После W1 добавит ``CatalogMaster.ayla_user_id`` — отдельный follow-up
-    PR делает запрос-backfill (опционально, founder/W2 решают) который
-    проходит по этим audit rows и шлёт ретро-нотификации мастерам,
-    если оператор хочет.
+    Lookup chain (all local mirror, no cross-repo per ADR-0009):
 
-    Tech-lead-fixed audit row schema (2026-05-25):
+      envelope.appointment_id
+        → RemoteBookingProxy.appointment_id (PK, exact match)
+        → .specialist_id (Ayla Master UUID)
+        → CatalogMaster.ayla_user_id == specialist_id
+        → .linked_bot_user (OneToOne к BotUser, lazy-onboarded)
+        → BotUser.chat_id → send_message(chat_id, text)
 
-      {
-        "event": "payment_failed.master_dm_skipped_no_bridge",
-        "payment_event_id": <uuid>,
-        "master_user_id": <ayla_uuid>,
-        "tenant_id": <uuid>,
-        "yclients_staff_id": <int|null>,
-        "timestamp": <iso>,
-        "reason": "catalogmaster_ayla_user_id_missing",
-      }
+    Enrichment fields from local mirror (Phase 1 envelope is Option C
+    minimum — only payment/appointment/client ids + counter):
+
+    * service_name ← CatalogService(ayla_service_id=proxy.service_id).name
+    * appointment_date ← format(proxy.start_at) в МСК
+    * client_name ← already в payload (from BotUser.client_name)
+    * amount ← NOT в Phase 1 payload, NOT в local mirror; line is
+      dropped entirely from rendered DM if absent (per Q3 verdict)
+    * consecutive_failures ← already в payload (counter value
+      at threshold-crossing — exactly N=3 default unless threshold
+      env-tuned)
+
+    **NO MasterNotificationPrefs gate** per Q1 verdict — payment
+    cascade = «urgent» class (CheckConstraint-forced ON в the prefs
+    model). N=3 threshold already filtered spam; no per-master opt-out.
+
+    **Quiet hours ignored** per Q2 verdict (Phase 1 follow-up).
+
+    **Edge cases (Q4 verdict — defensive consistent с #851/#874):**
+
+    * RemoteBookingProxy missing (mirror lag race, или Ayla booking
+      arrived after payment.failed) → audit skip + log
+    * CatalogMaster missing (mirror lag, или specialist_id orphan)
+      → audit skip + log
+    * CatalogMaster.linked_bot_user IS NULL (master не onboarded к
+      bot yet) → audit skip + log
+    * MasterNotificationPrefs row не existing → defaults applied
+      (urgent=True forced) — no special handling needed since we
+      don't gate on prefs anyway
+    * send_message raises → caught in :func:`_send_dm`, не breaks
+      consumer batch
     """
-    from datetime import datetime, timezone
-
-    from django.db import IntegrityError
-
-    master_ayla_user_id = data.get("master_user_id")
-    if not master_ayla_user_id:
-        # Без master_user_id audit row тоже теряет ценность (нечем
-        # ретро-нотифицировать). Логируем, не пишем audit.
+    appointment_id = data.get("appointment_id")
+    if not appointment_id:
+        # Defensive — Gamma's consumer envelope always populates this,
+        # но guard against future schema drift.
         logger.info(
-            "payment_failed.master_dm.skip reason=no_master_user_id payment_id=%s",
+            "payment_failed.master_dm.skip reason=no_appointment_id payment_id=%s",
             payment_id,
         )
         return
 
+    tenant_id = data.get("tenant_id")
+    if not tenant_id:
+        logger.info(
+            "payment_failed.master_dm.skip reason=no_tenant_id payment_id=%s",
+            payment_id,
+        )
+        return
+
+    # Step 1: resolve RemoteBookingProxy mirror.
+    proxy = _resolve_remote_booking_proxy(appointment_id, tenant_id)
+    if proxy is None:
+        _audit_master_dm_skip(data, payment_id, "remote_booking_proxy_missing")
+        return
+
+    # Step 2: resolve CatalogMaster from proxy.specialist_id.
+    if not proxy.specialist_id:
+        _audit_master_dm_skip(data, payment_id, "proxy_no_specialist_id")
+        return
+
+    master = _resolve_catalog_master(proxy.specialist_id, tenant_id)
+    if master is None:
+        _audit_master_dm_skip(data, payment_id, "catalog_master_missing")
+        return
+
+    # Step 3: confirm master is onboarded to bot.
+    if master.linked_bot_user_id is None:
+        _audit_master_dm_skip(data, payment_id, "master_not_onboarded")
+        return
+
+    master_bot_user = master.linked_bot_user
+    chat_id = (master_bot_user.chat_id or "").strip()
+    if not chat_id:
+        _audit_master_dm_skip(data, payment_id, "master_no_chat_id")
+        return
+
+    # Step 4: enrichment from mirror.
+    service_name = _resolve_service_name(proxy.service_id, tenant_id) or "услугу"
+    appointment_date = _format_appointment_date(proxy.start_at)
+
+    text = _format_master_dm_text(
+        client_name=data.get("client_name") or "—",
+        service_name=service_name,
+        appointment_date=appointment_date,
+        amount=data.get("amount"),
+        consecutive_failures=data.get("consecutive_failures") or 3,
+    )
+
+    _send_dm(
+        chat_id=chat_id,
+        text=text,
+        attachments=None,  # info-only, no buttons per Variant C scope
+        log_context={
+            "side": "master",
+            "payment_id": payment_id,
+            "master_id": str(master.pk),
+            "tenant_id": str(tenant_id),
+        },
+    )
+
+    # Forensic audit on successful dispatch — symmetric с skip path.
+    _audit_master_dm_dispatch(data, payment_id, master_id=str(master.pk))
+
+
+def _resolve_remote_booking_proxy(appointment_id: Any, tenant_id: Any) -> Any:
+    """Fetch the local RemoteBookingProxy by appointment_id, scoped к tenant.
+
+    ``all_tenants`` manager because consumer-side flow may not have
+    tenant context active. Strict ``tenant_id`` filter prevents cross-
+    tenant lookup (Phase F adversarial concern #1).
+    """
+    from apps.booking.models import RemoteBookingProxy
+
+    return (
+        RemoteBookingProxy.all_tenants.filter(
+            appointment_id=appointment_id,
+            tenant_id=tenant_id,
+        )
+        .only("appointment_id", "specialist_id", "service_id", "start_at", "tenant_id")
+        .first()
+    )
+
+
+def _resolve_catalog_master(specialist_id: Any, tenant_id: Any) -> Any:
+    """Fetch CatalogMaster by ayla_user_id == specialist_id, tenant-scoped.
+
+    ``select_related("linked_bot_user")`` pre-fetches the BotUser ref
+    so chat_id lookup doesn't issue a second query. Tenant scoping
+    same as proxy lookup — adversarial defence against cross-tenant
+    enumeration.
+    """
+    from apps.catalog.models import CatalogMaster
+
+    return (
+        CatalogMaster.all_tenants.filter(
+            ayla_user_id=specialist_id,
+            tenant_id=tenant_id,
+        )
+        .select_related("linked_bot_user")
+        .first()
+    )
+
+
+def _resolve_service_name(service_id: Any, tenant_id: Any) -> str | None:
+    """Fetch CatalogService.name by ayla_service_id, tenant-scoped.
+
+    Returns None when service_id is None (event update without
+    service ref) or no matching service row exists in mirror —
+    caller falls back to generic «услугу».
+    """
+    if not service_id:
+        return None
+    from apps.catalog.models import CatalogService
+
+    service = (
+        CatalogService.all_tenants.filter(
+            ayla_service_id=service_id,
+            tenant_id=tenant_id,
+        )
+        .only("name")
+        .first()
+    )
+    if service is None:
+        return None
+    return service.name or None
+
+
+def _format_appointment_date(start_at: Any) -> str:
+    """Render appointment start в MSK timezone for the master DM.
+
+    Format: ``DD.MM в HH:MM`` (same convention as
+    ``apps/bookings/tasks.py::_format_day_before_text``). MSK because
+    the master operates on salon-local time, not UTC.
+    """
+    if start_at is None:
+        return "—"
+    from zoneinfo import ZoneInfo
+
+    msk = start_at.astimezone(ZoneInfo("Europe/Moscow"))
+    return msk.strftime("%d.%m в %H:%M")
+
+
+def _format_master_dm_text(
+    *,
+    client_name: str,
+    service_name: str,
+    appointment_date: str,
+    amount: Any,
+    consecutive_failures: int,
+) -> str:
+    """Compose master DM with conditional amount line.
+
+    Per Q3 verdict — drop «Сумма» line entirely if amount missing
+    (cleaner than rendering «—»). Counter line is always present (skill
+    fires only at threshold-crossing so consecutive_failures ≥ N=3).
+    """
+    lines = [
+        _MASTER_DM_HEADER,
+        _MASTER_DM_CLIENT_LINE.format(client_name=client_name),
+        _MASTER_DM_SERVICE_LINE.format(
+            service_name=service_name,
+            appointment_date=appointment_date,
+        ),
+    ]
+    amount_str = _format_amount(amount) if amount is not None else None
+    if amount_str and amount_str != "—":
+        lines.append(_MASTER_DM_AMOUNT_LINE.format(amount=amount_str))
+    lines.append(_MASTER_DM_COUNTER_LINE.format(n=int(consecutive_failures)))
+    lines.append(_MASTER_DM_STATUS_LINE)
+    return "\n".join(lines)
+
+
+def _audit_master_dm_skip(data: dict[str, Any], payment_id: str, reason: str) -> None:
+    """Forensic audit row for skip paths — preserves operator visibility
+    on why master DM didn't fire. Best-effort try/except per #851 pattern."""
+    from datetime import datetime, timezone
+
     payload = {
-        "event": "payment_failed.master_dm_skipped_no_bridge",
+        "event": "payment_failed.master_dm_skipped",
         "payment_event_id": data.get("payment_event_id"),
         "payment_id": payment_id,
-        # appointment_id зафиксирован для backfill walker — без него
-        # retro-notification не сможет показать «какой именно приём»
-        # мастеру (только payment_id мало для контекста).
         "appointment_id": data.get("appointment_id"),
-        "master_user_id": str(master_ayla_user_id),
         "tenant_id": str(data.get("tenant_id")) if data.get("tenant_id") else None,
-        # Tech-lead schema требует yclients_staff_id slot даже если null —
-        # backfill replay walker может искать по нему когда bridge активен.
-        "yclients_staff_id": data.get("yclients_staff_id"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "reason": "catalogmaster_ayla_user_id_missing",
+        "reason": reason,
     }
-
     try:
         from apps.audit.services import write_audit
 
-        write_audit(
-            action="payment_failed.master_dm_skipped_no_bridge",
-            payload=payload,
-        )
-    except (IntegrityError, Exception) as exc:  # noqa: BLE001
-        # Если audit недоступен — не валим flow. Дублируем в log с тем
-        # же payload-ом чтобы grep по reason work-ал.
+        write_audit(action="payment_failed.master_dm_skipped", payload=payload)
+    except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "payment_failed.master_dm.audit_failed err=%s payload=%s",
+            "payment_failed.master_dm.audit_failed reason=%s err=%s payload=%s",
+            reason,
             exc,
             payload,
         )
-    else:
-        logger.info(
-            "payment_failed.master_dm.skipped_no_bridge master=%s payment_id=%s",
-            master_ayla_user_id,
-            payment_id,
+    logger.info(
+        "payment_failed.master_dm.skipped reason=%s payment_id=%s",
+        reason,
+        payment_id,
+    )
+
+
+def _audit_master_dm_dispatch(
+    data: dict[str, Any],
+    payment_id: str,
+    *,
+    master_id: str,
+) -> None:
+    """Forensic audit row для successful master DM dispatch. Best-effort."""
+    from datetime import datetime, timezone
+
+    payload = {
+        "event": "payment_failed.master_dm_sent",
+        "payment_event_id": data.get("payment_event_id"),
+        "payment_id": payment_id,
+        "appointment_id": data.get("appointment_id"),
+        "tenant_id": str(data.get("tenant_id")) if data.get("tenant_id") else None,
+        "master_id": master_id,
+        "consecutive_failures": data.get("consecutive_failures"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        from apps.audit.services import write_audit
+
+        write_audit(action="payment_failed.master_dm_sent", payload=payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "payment_failed.master_dm.audit_failed_on_dispatch err=%s payload=%s",
+            exc,
+            payload,
         )
 
 
