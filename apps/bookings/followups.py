@@ -149,7 +149,18 @@ CONTEXT_KEY = "last_followup_sent_at"
 # payment_disputed / chargeback_pending / chargeback / provider_cancelled /
 # no_fault_* / active_dispute states. Mirror doesn't have them yet;
 # don't add fields just для B11 without the upstream signal source.
-_B11_BLOCKED_STATUSES_FROZEN_AT_PR_TIME = ("cancelled", "rescheduled")
+# Use enum .value rather than literal strings — single source of truth
+# matches PR #874 CR B3 follow-up. Frozen-at-PR-time naming convention
+# retained для explicit drift-risk acknowledgement on future enum changes.
+def _b11_blocked_statuses_frozen_at_pr_time() -> tuple[str, ...]:
+    """Return the booking statuses that block B11 (lazily resolved через
+    enum для drift-safety per CR #874 follow-up B3)."""
+    from apps.booking.models import BookingRequest
+
+    return (
+        BookingRequest.Status.CANCELLED.value,
+        BookingRequest.Status.RESCHEDULED.value,
+    )
 
 
 def _should_send_b11(
@@ -170,7 +181,9 @@ def _should_send_b11(
     if bot_user.proactive_messages_opt_out:
         return (False, "opt_out")
 
-    payment_blocker = _payment_failures_blocker(bot_user)
+    # Payment-failure check is tenant-scoped via reminder.tenant —
+    # cascade в salon A must NOT block followup в salon B (CR #874 B2).
+    payment_blocker = _payment_failures_blocker(bot_user, reminder.tenant)
     if payment_blocker:
         return (False, payment_blocker)
 
@@ -183,32 +196,46 @@ def _should_send_b11(
     if booking_request.completed_at is None:
         return (False, "completed_at_null")
 
-    if booking_request.status in _B11_BLOCKED_STATUSES_FROZEN_AT_PR_TIME:
+    if booking_request.status in _b11_blocked_statuses_frozen_at_pr_time():
         return (False, f"booking_status_{booking_request.status}")
 
     return (True, None)
 
 
-def _payment_failures_blocker(bot_user: Any) -> str | None:
-    """Check whether the bot_user has an active payment-failure cascade.
+def _payment_failures_blocker(bot_user: Any, tenant: Any) -> str | None:
+    """Check whether the bot_user has an active payment-failure cascade
+    в the **specific tenant** the reminder belongs to.
 
-    Queries the bot_user's most-recent active Conversation row; if its
-    ``consecutive_payment_failures`` >= threshold, return blocker reason.
+    Per CR #874 findings B1 + B2:
+
+      * **B1 (stale/shadow Conversation)**: filter к
+        ``is_active=True, is_shadow=False, deleted_at__isnull=True``
+        чтобы исключить shadow-observability rows (counter meaningless)
+        и soft-deleted closed conversations (counter stale).
+      * **B2 (cross-tenant aggregation)**: scope query к ``tenant=...``
+        of the current reminder. BotUser CAN bridge multiple tenants
+        per ``project_cross_tenant_invisible_relationship``; payment
+        cascade в salon A must not be checked against B11 for salon B.
+
+    Orders by ``-last_message_at`` (recency) — primary active conversation
+    is the one most recently interacted with.
 
     Returns reason slug когда blocked, или None when threshold not
-    breached / no Conversation row found.
+    breached / no eligible Conversation row found.
     """
     threshold = int(getattr(settings, "PAYMENT_FAILED_HANDOFF_THRESHOLD", 3))
-    # Local import to avoid module-level cycle (conversations may pull
-    # identity, identity pulls bookings indirectly via signals).
+    # Local import to avoid module-level cycle.
     from apps.conversations.models import Conversation
 
-    # Latest conversation для this BotUser — payment counter is
-    # conversation-scoped per ``project_payment_failed_dm_threshold``
-    # memory + Conversation.consecutive_payment_failures help_text.
     conv = (
-        Conversation.all_tenants.filter(bot_user=bot_user)
-        .order_by("-id")
+        Conversation.all_tenants.filter(
+            bot_user=bot_user,
+            tenant=tenant,
+            is_active=True,
+            is_shadow=False,
+            deleted_at__isnull=True,
+        )
+        .order_by("-last_message_at", "-id")
         .only("consecutive_payment_failures")
         .first()
     )

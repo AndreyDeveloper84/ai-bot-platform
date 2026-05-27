@@ -821,6 +821,8 @@ class TestB11ConservativeBlockers:
             tenant=tenant,
             bot_user=bot_user,
             consecutive_payment_failures=3,
+            is_active=True,
+            is_shadow=False,
         )
         _make_reminder(
             tenant=tenant,
@@ -843,6 +845,8 @@ class TestB11ConservativeBlockers:
             tenant=tenant,
             bot_user=bot_user,
             consecutive_payment_failures=2,
+            is_active=True,
+            is_shadow=False,
         )
         _make_reminder(
             tenant=tenant,
@@ -957,3 +961,72 @@ class TestB11ConservativeBlockers:
         with patch("apps.bookings.followups.send_message") as mock_send:
             send_post_visit_followups()
         mock_send.assert_called_once()
+
+    def test_shadow_conversation_does_not_mask_payment_cascade(
+        self, tenant: Tenant, bot_user: BotUser, settings
+    ) -> None:
+        """CR #874 B1: shadow conversations carry meaningless counters
+        (observability artefacts). Active primary conversation с real
+        failures must NOT be hidden by a later-inserted shadow row."""
+        from apps.conversations.models import Conversation
+
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        # Primary active conversation с real payment cascade.
+        Conversation.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=5,  # over threshold
+            is_active=True,
+            is_shadow=False,
+            last_message_at=NOW_UTC - timedelta(hours=2),
+        )
+        # Later-inserted shadow row с zero failures — must be ignored.
+        Conversation.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=0,
+            is_active=True,
+            is_shadow=True,
+            last_message_at=NOW_UTC - timedelta(minutes=10),
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        # Cascade detected via primary conv, shadow ignored → block.
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+
+    def test_payment_cascade_in_other_tenant_does_not_block(
+        self, tenant: Tenant, bot_user: BotUser, settings
+    ) -> None:
+        """CR #874 B2: BotUser bridges tenants per cross-tenant invisible
+        relationship. Cascade в salon A must NOT block followup для salon
+        B's visit."""
+        from apps.conversations.models import Conversation
+
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        # Another tenant where the same BotUser had a payment cascade.
+        other_tenant = Tenant.objects.create(slug="other-salon", name="Other")
+        Conversation.all_tenants.create(
+            tenant=other_tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=10,  # cascade в OTHER tenant
+            is_active=True,
+            is_shadow=False,
+            last_message_at=NOW_UTC,
+        )
+        # Reminder for our tenant — should NOT see other tenant's cascade.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        # No conversation в the reminder's tenant → no blocker → send.
+        mock_send.assert_called_once()
+        assert result["sent"] == 1
