@@ -111,8 +111,33 @@ class SkillResult:
                        skills (privacy/handoff/echo).
       confidence: skill's self-reported confidence in [0.0, 1.0]. Used
                   by O2 step 10.5 to gate auto-handoff thresholds.
-                  ``None`` = skill didn't compute a score (default for
-                  Sprint 3 skills that always reply deterministically).
+
+                  **Semantics locked Tier-A #4 (P1 PRE_PILOT, 2026-05-27):**
+
+                  * Scale ``[0.0, 1.0]``. Loose interpretation как
+                    «P(answer correct)» — a heuristic floor, не a
+                    calibrated probability.
+                  * ``None`` = skill didn't compute a score. Pipeline
+                    skips confidence enforcement; skill owns handoff
+                    decision via ``should_handoff``. Default для
+                    Sprint 3 deterministic skills (privacy / handoff /
+                    echo) и для error-path branches in tool-using
+                    skills (booking).
+                  * ``1.0`` = full confidence (deterministic tool
+                    success, no uncertainty).
+                  * ``< threshold`` = pipeline auto-handoffs (step
+                    10.5 enforcement, settings
+                    ``AI_CONFIDENCE_HANDOFF_THRESHOLD`` /
+                    ``SKILL_CONFIDENCE_HANDOFF_THRESHOLD``). AdminTask
+                    reason carries diagnostic
+                    ``pipeline_confidence_floor(confidence=X, threshold=Y)``
+                    appended к the skill's own reason если any.
+
+                  Different skills MAY compute confidence differently
+                  (RAG chunk-score average для FAQ; LLM logprob для
+                  future LLM-driven skills). The contract is the scale
+                  and the threshold interpretation; the derivation is
+                  skill-specific.
     """
 
     reply_text: str = ""

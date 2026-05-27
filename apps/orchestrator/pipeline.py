@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 
 from apps.orchestrator.composer import ComposedReply, compose
 from apps.orchestrator.intent_router import IntentDecision, classify
@@ -149,6 +150,63 @@ _FALLBACK_CLARIFY = (
 )
 _FALLBACK_HANDOFF = "Передаю менеджеру — ответят в течение 30 минут."
 _FALLBACK_ERROR = "Извините, что-то пошло не так. Попробуйте позже или напишите «оператор»."
+
+
+def _confidence_floor_reason(skill_result: Any) -> str:
+    """Return a diagnostic reason slug when skill's confidence is below
+    the configured threshold; empty string otherwise.
+
+    Tier-A #4 (P1 PRE_PILOT, 2026-05-27 — founder
+    pilot_scope_discipline #5). Pipeline-level defense-in-depth: if
+    skill returned a numeric confidence < threshold AND didn't set
+    ``should_handoff=True`` itself, step 10.5 escalates к human
+    operator automatically.
+
+    Per-skill threshold via ``settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD``
+    dict (``{"faq": 0.5, ...}``); falls back к global
+    ``settings.AI_CONFIDENCE_HANDOFF_THRESHOLD`` when skill not listed.
+    Explicit ``None`` value в the dict disables enforcement для that
+    skill (skill remains owning the decision).
+
+    ``confidence=None`` на result (Sprint 3 deterministic skills /
+    error-path branches) → no enforcement, return "".
+
+    Skill name is extracted from ``meta["skill"]`` (preferred — FAQ
+    sets this explicitly) или fallback к ``action_type`` так дispatcher
+    doesn't expose the skill instance. Empty name → only global default
+    applies.
+
+    Diagnostic format (per tech-lead verdict 2026-05-27, Q4 trace
+    preservation): ``pipeline_confidence_floor(confidence=0.32, threshold=0.50)``.
+    AdminTask.reason concatenates this с skill's own reason если
+    ``should_handoff=True`` already.
+    """
+    confidence = getattr(skill_result, "confidence", None)
+    if confidence is None:
+        return ""
+
+    meta = getattr(skill_result, "meta", {}) or {}
+    skill_name = meta.get("skill") or getattr(skill_result, "action_type", "") or ""
+
+    per_skill = getattr(settings, "SKILL_CONFIDENCE_HANDOFF_THRESHOLD", {}) or {}
+    if skill_name in per_skill:
+        threshold = per_skill[skill_name]
+        if threshold is None:
+            # Explicit disable для this skill.
+            return ""
+    else:
+        threshold = getattr(settings, "AI_CONFIDENCE_HANDOFF_THRESHOLD", 0.5)
+
+    try:
+        threshold_f = float(threshold)
+    except (TypeError, ValueError):
+        return ""
+
+    if confidence >= threshold_f:
+        return ""
+
+    return f"pipeline_confidence_floor(confidence={confidence:.2f}, threshold={threshold_f:.2f})"
+
 
 # Phase 1 / PI9 (DRF-860) — daily LLM cost-cap exhausted. Static Russian
 # fallback served when apps.llm.cost_tracker.TenantQuotaExceeded bubbles
@@ -489,8 +547,27 @@ async def _run_under_tenant(
         # The skill MAY have set its own ``reply_text`` (a softer
         # "переключаю на менеджера…" line); we honour it when non-empty
         # and fall back to the canned _FALLBACK_HANDOFF when blank.
-        if skill_result.should_handoff:
-            reason = skill_result.handoff_reason or "skill_requested_handoff"
+        #
+        # Tier-A #4 (P1 PRE_PILOT, 2026-05-27): defense-in-depth
+        # confidence-floor enforcement. Even if a skill forgot
+        # к set ``should_handoff=True``, fall through to handoff когда
+        # ``confidence < threshold`` (per-skill override or global
+        # default). AdminTask reason carries diagnostic
+        # ``pipeline_confidence_floor(confidence=X, threshold=Y)``
+        # appended to the skill's own reason если any.
+        confidence_floor_reason = _confidence_floor_reason(skill_result)
+        if skill_result.should_handoff or confidence_floor_reason:
+            skill_reason = skill_result.handoff_reason or (
+                "skill_requested_handoff" if skill_result.should_handoff else ""
+            )
+            if confidence_floor_reason:
+                reason = (
+                    f"{skill_reason} | {confidence_floor_reason}"
+                    if skill_reason
+                    else confidence_floor_reason
+                )
+            else:
+                reason = skill_reason
             await sync_to_async(_create_handoff)(conversation, reason=reason)
             handoff_text = skill_result.reply_text or _FALLBACK_HANDOFF
             reply = await sync_to_async(_canned_reply)(handoff_text)

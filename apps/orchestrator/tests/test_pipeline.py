@@ -280,6 +280,146 @@ class TestPostSkillHandoff:
         assert "менеджер" in result.reply.text.lower()
 
 
+class TestConfidenceFloor:
+    """Tier-A #4 (P1 PRE_PILOT, 2026-05-27, founder pilot_scope_discipline #5).
+
+    Pipeline-level defense-in-depth: pipeline step 10.5 enforces
+    ``confidence < threshold`` even when skill forgets to set
+    ``should_handoff=True``. AdminTask reason carries the diagnostic
+    trace ``pipeline_confidence_floor(confidence=X, threshold=Y)``.
+    """
+
+    async def _patched_dispatch_with_confidence(
+        self,
+        *,
+        confidence: float | None,
+        should_handoff: bool = False,
+        handoff_reason: str = "",
+        meta: dict | None = None,
+        reply_text: str = "fake reply",
+    ):
+        from apps.skills.base import SkillResult
+
+        result = SkillResult(
+            reply_text=reply_text,
+            confidence=confidence,
+            should_handoff=should_handoff,
+            handoff_reason=handoff_reason,
+            meta=meta or {"skill": "faq"},
+        )
+        return patch("apps.skills.registry.dispatch", return_value=result)
+
+    async def test_low_confidence_triggers_handoff_even_without_flag(self, tenant, settings):
+        """Skill returned ``confidence=0.3`` but did NOT set
+        ``should_handoff=True``. Pipeline catches it and escalates."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.5
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {}
+
+        with await self._patched_dispatch_with_confidence(confidence=0.3):
+            result = await turn(_message(text="что-то непонятное"))
+        assert result.short_circuited_at_step == 10.5
+
+        from apps.handoff.models import AdminTask
+
+        rows = await sync_to_async(lambda: list(AdminTask.all_tenants.all()))()
+        assert any("pipeline_confidence_floor" in (r.reason or "") for r in rows)
+
+    async def test_low_confidence_diagnostic_format(self, tenant, settings):
+        """AdminTask.reason carries ``confidence=X, threshold=Y`` trace."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.5
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {}
+
+        with await self._patched_dispatch_with_confidence(confidence=0.32):
+            await turn(_message(text="?"))
+
+        from apps.handoff.models import AdminTask
+
+        rows = await sync_to_async(lambda: list(AdminTask.all_tenants.all()))()
+        match = next(
+            (r for r in rows if "pipeline_confidence_floor" in (r.reason or "")),
+            None,
+        )
+        assert match is not None
+        assert "confidence=0.32" in match.reason
+        assert "threshold=0.50" in match.reason
+
+    async def test_high_confidence_does_not_trigger(self, tenant, settings):
+        """``confidence=0.8`` ≥ threshold → no handoff."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.5
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {}
+
+        with await self._patched_dispatch_with_confidence(confidence=0.8):
+            result = await turn(_message(text="вопрос"))
+        # Pipeline runs к completion (no short-circuit at 10.5).
+        assert result.short_circuited_at_step != 10.5
+
+    async def test_none_confidence_does_not_trigger(self, tenant, settings):
+        """Skills с ``confidence=None`` (Sprint 3 deterministic) — no
+        enforcement. Skill retains decision via ``should_handoff``."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.5
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {}
+
+        with await self._patched_dispatch_with_confidence(confidence=None):
+            result = await turn(_message(text="вопрос"))
+        assert result.short_circuited_at_step != 10.5
+
+    async def test_per_skill_threshold_overrides_global(self, tenant, settings):
+        """Per-skill dict wins over global default."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.9  # strict global
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {"faq": 0.3}  # lax FAQ
+
+        with await self._patched_dispatch_with_confidence(confidence=0.5):
+            result = await turn(_message(text="?"))
+        # 0.5 < 0.9 (global) would trigger, BUT 0.5 ≥ 0.3 (per-skill) → no trigger.
+        assert result.short_circuited_at_step != 10.5
+
+    async def test_per_skill_none_disables_enforcement(self, tenant, settings):
+        """Setting threshold к ``None`` for a skill disables enforcement
+        even when confidence is below global."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.5
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {"faq": None}
+
+        with await self._patched_dispatch_with_confidence(confidence=0.1):
+            result = await turn(_message(text="?"))
+        # Disabled per-skill → no handoff даже at very low confidence.
+        assert result.short_circuited_at_step != 10.5
+
+    async def test_skill_should_handoff_plus_low_confidence_concatenates(self, tenant, settings):
+        """Skill explicitly handoffs с reason 'faq_low_confidence' AND
+        confidence is below threshold → AdminTask reason includes BOTH
+        the skill reason AND the diagnostic trace."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.5
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {}
+
+        with await self._patched_dispatch_with_confidence(
+            confidence=0.3,
+            should_handoff=True,
+            handoff_reason="faq_low_confidence",
+        ):
+            await turn(_message(text="?"))
+
+        from apps.handoff.models import AdminTask
+
+        rows = await sync_to_async(lambda: list(AdminTask.all_tenants.all()))()
+        match = next(
+            (r for r in rows if "pipeline_confidence_floor" in (r.reason or "")),
+            None,
+        )
+        assert match is not None
+        # Tech-lead Q4 trace preservation: skill reason | pipeline reason.
+        assert "faq_low_confidence" in match.reason
+        assert "pipeline_confidence_floor" in match.reason
+
+    async def test_boundary_confidence_equal_threshold_does_not_trigger(self, tenant, settings):
+        """``confidence == threshold`` → does NOT trigger (strict <)."""
+        settings.AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.5
+        settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD = {}
+
+        with await self._patched_dispatch_with_confidence(confidence=0.5):
+            result = await turn(_message(text="?"))
+        assert result.short_circuited_at_step != 10.5
+
+
 class TestErrorPath:
     async def test_unhandled_exception_returns_fallback(self, tenant):
         # Patch the intent classifier to raise mid-pipeline.
