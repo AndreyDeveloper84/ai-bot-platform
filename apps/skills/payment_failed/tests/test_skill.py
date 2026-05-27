@@ -464,6 +464,41 @@ class TestMasterDMDispatch:
         buttons = client_dm["attachments"][0]["payload"]["buttons"]
         assert buttons[0]["callback"] == f"cb:payment:retry:{PAYMENT_ID}"
 
+    def test_non_numeric_consecutive_failures_does_not_break_dispatch(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        make_master,
+        sent_dms,
+        caplog,
+    ):
+        """CR #881 M1 regression guard: string-shaped or garbage value
+        в ``consecutive_failures`` must NOT raise + escape skill (would
+        break Gamma's consumer batch). Defensive int-coerce с sane
+        default = threshold (3)."""
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        make_remote_proxy(specialist_id=MASTER_AYLA)
+        make_master(ayla_user_id=MASTER_AYLA, chat_id="max-master")
+
+        # Garbage non-numeric value — would raise ValueError pre-fix.
+        with caplog.at_level(logging.WARNING, logger="apps.skills.payment_failed.skill"):
+            on_payment_failed_event(
+                _enriched_data(
+                    tenant_id_override=str(tenant.pk),
+                    consecutive_failures="not_a_number",
+                )
+            )
+
+        # No raise — master DM still fires.
+        master_dm = next(d for d in sent_dms if d["chat_id"] == "max-master")
+        # Falls back to default 3 in template.
+        assert "Это 3-я попытка оплаты подряд" in master_dm["text"]
+        # Defensive warn logged.
+        assert any("bad_consecutive_failures" in r.message for r in caplog.records)
+
     def test_cross_tenant_lookup_blocked_by_tenant_scope(
         self,
         tenant,

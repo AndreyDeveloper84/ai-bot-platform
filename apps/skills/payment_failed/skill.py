@@ -342,12 +342,28 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
     service_name = _resolve_service_name(proxy.service_id, tenant_id) or "услугу"
     appointment_date = _format_appointment_date(proxy.start_at)
 
+    # CR #881 M1: coerce consecutive_failures defensively before passing
+    # к _format_master_dm_text. Raw payload value comes from JSON / event
+    # stream — string-shaped values (e.g. event_version drift, Redis
+    # round-trip) would raise ValueError inside int() и escape skill,
+    # breaking the consumer batch. Sane default = 3 (the pilot threshold).
+    raw_counter = data.get("consecutive_failures")
+    try:
+        consecutive_failures = int(raw_counter) if raw_counter is not None else 3
+    except (TypeError, ValueError):
+        logger.warning(
+            "payment_failed.master_dm.bad_consecutive_failures value=%r payment_id=%s",
+            raw_counter,
+            payment_id,
+        )
+        consecutive_failures = 3
+
     text = _format_master_dm_text(
         client_name=data.get("client_name") or "—",
         service_name=service_name,
         appointment_date=appointment_date,
         amount=data.get("amount"),
-        consecutive_failures=data.get("consecutive_failures") or 3,
+        consecutive_failures=consecutive_failures,
     )
 
     _send_dm(
@@ -435,9 +451,17 @@ def _format_appointment_date(start_at: Any) -> str:
     Format: ``DD.MM в HH:MM`` (same convention as
     ``apps/bookings/tasks.py::_format_day_before_text``). MSK because
     the master operates on salon-local time, not UTC.
+
+    **Invariant:** ``RemoteBookingProxy.start_at`` is ``db_index=True``
+    + non-nullable (``apps/booking/models.py``). Callers always pass a
+    non-None value via the mirror lookup chain. CR #881 P1: defensive
+    None-check dropped — would mask a real model invariant violation
+    if it ever fires.
+
+    TODO Phase 2 multi-region: hardcoded MSK works для pilot (Penza =
+    MSK); future tenants в other timezones would read ``tenant.timezone``
+    field (CR #881 F1).
     """
-    if start_at is None:
-        return "—"
     from zoneinfo import ZoneInfo
 
     msk = start_at.astimezone(ZoneInfo("Europe/Moscow"))
@@ -469,7 +493,9 @@ def _format_master_dm_text(
     amount_str = _format_amount(amount) if amount is not None else None
     if amount_str and amount_str != "—":
         lines.append(_MASTER_DM_AMOUNT_LINE.format(amount=amount_str))
-    lines.append(_MASTER_DM_COUNTER_LINE.format(n=int(consecutive_failures)))
+    # `consecutive_failures` is already int-coerced at the
+    # `_try_send_master_dm` boundary (CR #881 M1 defensive guard).
+    lines.append(_MASTER_DM_COUNTER_LINE.format(n=consecutive_failures))
     lines.append(_MASTER_DM_STATUS_LINE)
     return "\n".join(lines)
 
@@ -512,7 +538,17 @@ def _audit_master_dm_dispatch(
     *,
     master_id: str,
 ) -> None:
-    """Forensic audit row для successful master DM dispatch. Best-effort."""
+    """Forensic audit row для successful master DM dispatch. Best-effort.
+
+    CR #881 F3: also log INFO для grep-parity с the skip path. Operators
+    grepping «payment_failed.master_dm.sent» now see both audit + log
+    signals (skip path emits both via logger.info + write_audit).
+    """
+    logger.info(
+        "payment_failed.master_dm.sent master=%s payment_id=%s",
+        master_id,
+        payment_id,
+    )
     from datetime import datetime, timezone
 
     payload = {
