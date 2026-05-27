@@ -3703,3 +3703,468 @@ a {
   justify-content: center;
   margin-top: var(--s-3);
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * Customer wellness dashboard — Tier 1 Priority 2 Phase B
+ * Spec: docs/screens/customer-main-wellness-dashboard.md §3 Variant B
+ *
+ * WCAG 2.2 AA notes (Tau §8 BLOCKERS addressed):
+ *   - All tap targets ≥44×44dp (icon buttons use padding to reach the
+ *     hit area without enlarging the visible glyph).
+ *   - Progress bar track + borders use existing `--c-divider` token
+ *     which is verified ≥3:1 against `--c-surface-1` per tokens.css.
+ *   - Body text uses `--c-text-primary` (#1f1812 / #f3ece4) — well
+ *     above 4.5:1 against bg.
+ *   - Skeleton shimmer is via the existing `.skeleton` class which
+ *     respects `prefers-reduced-motion` (handled there).
+ * ────────────────────────────────────────────────────────────────── */
+.wellness-dash {
+  min-height: 100vh;
+  background: var(--c-bg);
+  padding-bottom: calc(56px + var(--safe-bottom) + var(--s-3));
+  color: var(--c-text-primary);
+}
+.wellness-dash__skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+}
+.wellness-dash__skip-link:focus {
+  position: fixed;
+  left: var(--s-2);
+  top: var(--s-2);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  z-index: 1000;
+}
+.wellness-dash__header {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  height: 56px;
+  padding: 0 var(--s-3);
+  border-bottom: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+}
+.wellness-dash__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+.wellness-dash__wordmark {
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.wellness-dash__ask {
+  flex: 1;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  min-height: 44px;
+  padding: 0 var(--s-2);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 4px;
+}
+.wellness-dash__ask:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.wellness-dash__header-icons {
+  display: flex;
+  gap: var(--s-1);
+}
+.wellness-dash__icon-btn {
+  background: transparent;
+  border: none;
+  font-size: var(--font-size-300);
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--c-text-primary);
+}
+.wellness-dash__icon-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.wellness-dash__offline-banner {
+  background: var(--c-warning);
+  color: var(--c-text-on-accent);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-200);
+  text-align: center;
+}
+.wellness-dash__main {
+  padding: var(--s-3) var(--s-3) var(--s-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+}
+.wellness-dash__greeting {
+  margin-bottom: 0;
+}
+.wellness-dash__greeting-title {
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  margin: 0 0 var(--s-2);
+  line-height: var(--leading-tight);
+}
+.wellness-dash__one-liner {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+}
+.wellness-dash__onboarding {
+  background: var(--c-accent-subtle);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-divider);
+}
+.wellness-dash__onboarding-body {
+  padding: var(--s-3);
+  position: relative;
+}
+.wellness-dash__onboarding-title {
+  margin: 0 0 var(--s-1);
+  font-weight: 600;
+}
+.wellness-dash__onboarding-text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  padding-right: 44px;
+}
+.wellness-dash__onboarding-dismiss {
+  position: absolute;
+  top: var(--s-1);
+  right: var(--s-1);
+  background: transparent;
+  border: none;
+  font-size: var(--font-size-400);
+  line-height: 1;
+  min-width: 44px;
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--c-text-secondary);
+}
+.wellness-dash__onboarding-dismiss:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.wellness-dash__pulse-card {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__pulse-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.wellness-dash__pulse-head {
+  font-weight: 600;
+  font-size: var(--font-size-200);
+}
+.wellness-dash__pulse-numbers {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__pulse-pfc {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__pulse-divider {
+  border: 0;
+  border-top: 1px solid var(--c-divider);
+  margin: 0;
+}
+.wellness-dash__progress {
+  height: 8px;
+  background: var(--c-surface-2);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  border: 1px solid var(--c-divider);
+}
+.wellness-dash__progress-fill {
+  height: 100%;
+  background: var(--c-accent);
+  transition: width var(--dur-base) var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .wellness-dash__progress-fill {
+    transition: none;
+  }
+}
+.wellness-dash__water-dots {
+  letter-spacing: 0.15em;
+  color: var(--c-accent);
+  font-size: var(--font-size-200);
+}
+.wellness-dash__section-header {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  margin: 0 0 var(--s-2);
+  color: var(--c-text-primary);
+}
+.wellness-dash__quick-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__qa-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-2);
+}
+@media (max-width: 320px) {
+  /* WCAG 1.4.10 reflow @ small viewports — stack single column. */
+  .wellness-dash__qa-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.wellness-dash__qa-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  min-height: 88px;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: left;
+  cursor: pointer;
+  color: var(--c-text-primary);
+  font-family: var(--font-sans);
+}
+.wellness-dash__qa-btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.wellness-dash__qa-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.wellness-dash__qa-icon {
+  font-size: var(--font-size-400);
+  line-height: 1;
+}
+.wellness-dash__qa-label {
+  font-size: var(--font-size-200);
+  font-weight: 500;
+}
+.wellness-dash__qa-hint {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__queue-indicator {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__toast {
+  background: var(--c-text-primary);
+  color: var(--c-surface-1);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  font-size: var(--font-size-200);
+  align-self: flex-start;
+}
+.wellness-dash__today-goals,
+.wellness-dash__booking,
+.wellness-dash__weekly,
+.wellness-dash__recos {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__goal-list,
+.wellness-dash__weekly-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__goal-item {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.wellness-dash__booking-card {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.wellness-dash__booking-when {
+  font-weight: 600;
+}
+.wellness-dash__booking-what,
+.wellness-dash__booking-who,
+.wellness-dash__booking-where {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__booking-more {
+  margin-top: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.wellness-dash__booking-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+}
+.wellness-dash__booking-primary {
+  flex: 1 1 auto;
+}
+.wellness-dash__booking-all {
+  background: transparent;
+  border: none;
+  color: var(--c-accent);
+  padding: var(--s-2) var(--s-3);
+  min-height: 44px;
+  text-align: left;
+  font-size: var(--font-size-200);
+  cursor: pointer;
+}
+.wellness-dash__booking-all:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.wellness-dash__booking-empty {
+  margin: 0 0 var(--s-2);
+  color: var(--c-text-primary);
+}
+.wellness-dash__weekly-list li {
+  font-size: var(--font-size-200);
+}
+.wellness-dash__weekly-more {
+  align-self: flex-start;
+}
+.wellness-dash__reco-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__reco-card {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+.wellness-dash__reco-btn {
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: var(--s-3);
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  color: var(--c-text-primary);
+  font-family: var(--font-sans);
+}
+.wellness-dash__reco-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+  border-radius: var(--r-md);
+}
+.wellness-dash__reco-title {
+  font-weight: 600;
+  font-size: var(--font-size-200);
+}
+.wellness-dash__reco-reasoning {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__reco-meta {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__block-error {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__block-error p {
+  margin: 0;
+  color: var(--c-text-primary);
+}
+.wellness-dash__skel-line {
+  border-radius: var(--r-sm);
+  width: 100%;
+}
+.wellness-dash__nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  height: calc(56px + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  z-index: 10;
+}
+.wellness-dash__nav-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  background: transparent;
+  border: none;
+  min-height: 44px;
+  padding: var(--s-1);
+  cursor: pointer;
+  color: var(--c-text-secondary);
+  font-family: var(--font-sans);
+}
+.wellness-dash__nav-tab:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.wellness-dash__nav-tab--active {
+  color: var(--c-accent);
+  font-weight: 600;
+  /* Color-only meaning fix (WCAG 1.4.1) — non-color marker as well. */
+  border-bottom: 2px solid var(--c-accent);
+}
+.wellness-dash__nav-icon {
+  font-size: var(--font-size-300);
+  line-height: 1;
+}
+.wellness-dash__nav-label {
+  font-size: var(--font-size-100);
+}

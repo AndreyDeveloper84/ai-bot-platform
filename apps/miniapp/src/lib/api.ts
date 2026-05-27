@@ -37,12 +37,78 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 // --- auth ---
+
+/**
+ * Server-cached pending booking intent — W4 #844 extension to
+ * `/auth/verify`. Backend field names per
+ * `apps/miniapp_api/pending_intent.py::_ALLOWED_FIELDS`:
+ *
+ *   - `master_id`     : str
+ *   - `service_id`    : str
+ *   - `slot_iso`      : str  (ISO 8601 with offset)
+ *   - `price_quoted`  : int | float  (NOTE: not `price_rub`)
+ *   - `note`          : str  (truncated to 500 chars server-side)
+ *   - `loyalty_apply` : bool (NOTE: not `loyalty_choice`)
+ *
+ * Field-name mismatch with the frontend sessionStorage shape
+ * (`PendingBookingIntent` in `pending-booking-intent.ts`) is by
+ * design — the backend cache schema is the source of truth and the
+ * sessionStorage fallback was specced earlier; the booking-confirm
+ * screen normalises both shapes when restoring.
+ */
+export interface ServerPendingBookingIntent {
+  master_id: string;
+  service_id: string;
+  slot_iso: string;
+  price_quoted?: number;
+  note?: string;
+  loyalty_apply?: boolean;
+}
+
 export interface AuthVerifyResponse {
   user: { id: string; channel_user_id: string; display_name: string; client_name: string };
   tenant: { slug: string; name: string; timezone: string };
+  /**
+   * W4 #844 — server-side cached `pending_booking_intent`. Present
+   * (or `null`) on every `/auth/verify` response per backend
+   * `views.py::auth_verify`. Used by CustomerBookingConfirmScreen to
+   * restore draft across the OAuth round-trip (defence-in-depth
+   * multi-device — sessionStorage stays the PRIMARY restore path).
+   */
+  pending_booking_intent?: ServerPendingBookingIntent | null;
 }
-export const authVerify = (): Promise<AuthVerifyResponse> =>
-  request("/auth/verify", { method: "POST" });
+
+/**
+ * POST /auth/verify with an optional body. Per the backend contract
+ * (`pending_intent.py` docstring), passing `pending_booking_intent`
+ * caches it server-side keyed by `BotUser.id` (10min TTL); passing
+ * `null` or omitting the body returns the current cached value
+ * without mutation.
+ *
+ * Frontend callers:
+ *   - HelloScreen / boot — `authVerify()` (no body) just reads.
+ *   - CustomerBookingConfirmScreen (anonymous-gate restore) —
+ *     `authVerify({ readCached: true })` triggers the same read path
+ *     but the helper makes intent explicit at the call site.
+ */
+export function authVerify(
+  opts?: { intent?: ServerPendingBookingIntent | null; readCached?: boolean },
+): Promise<AuthVerifyResponse> {
+  if (opts && (opts.intent !== undefined || opts.readCached)) {
+    // Send a JSON body. The backend only reads it when content-type
+    // is application/json — request() sets that header automatically
+    // when `body` is non-empty (api.ts §line ~23).
+    const body: Record<string, unknown> = {};
+    if (opts.intent !== undefined) {
+      body.pending_booking_intent = opts.intent;
+    }
+    return request("/auth/verify", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+  return request("/auth/verify", { method: "POST" });
+}
 
 // --- catalog: services ---
 export interface Service {
