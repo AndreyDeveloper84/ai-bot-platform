@@ -40,6 +40,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { BookingMessageModal } from "../components/BookingMessageModal";
 import { StatusBadge } from "../components/StatusBadge";
 import { ApiError } from "../lib/api";
+import { sectionFor, type CustomerVisibleStatus } from "../lib/booking-status";
 import {
   BookingNotFoundError,
   getBookingDetail,
@@ -218,22 +219,13 @@ export function CustomerBookingDetailScreen() {
 
   // OK branch.
   const d = slice.data;
-  const { rendering } = renderStatus(d.status);
-  // Status section classifier — drives sticky CTA visibility.
-  const isUpcoming = rendering.icon === "check" || rendering.icon === "calendar-arrow";
-  const isPastCompleted = rendering.icon === "check-double";
-  const isCancelled = rendering.icon === "x";
-  const isProviderCancelled = rendering.icon === "alert";
-  const isNoShow = rendering.icon === "minus";
-  const isRefundPending = rendering.icon === "clock";
-  const isRefundCompleted = rendering.icon === "money-check";
-  const isPast =
-    isPastCompleted ||
-    isCancelled ||
-    isProviderCancelled ||
-    isNoShow ||
-    isRefundPending ||
-    isRefundCompleted;
+  const { status: mapped, rendering } = renderStatus(d.status);
+  // Status section classifier — drives sticky CTA visibility. Round-1
+  // refactor: derive section from typed CustomerVisibleStatus via
+  // `sectionFor` (single source of truth, BACKEND_ALIAS_MAP-aware).
+  const section = sectionFor(mapped);
+  const isUpcoming = section === "upcoming";
+  const isPast = section === "history" && mapped !== "unknown";
 
   const formatPrice = (v: number) => `${v.toLocaleString("ru-RU")} ₽`;
   const formattedRescheduledOrigin = formatRescheduledOrigin(
@@ -295,7 +287,7 @@ export function CustomerBookingDetailScreen() {
         {isPast && (
           <section className="records-detail__section records-detail__past-context">
             <h2 className="records-detail__section-title">Что произошло</h2>
-            <PastContext detail={d} />
+            <PastContext detail={d} mapped={mapped} />
           </section>
         )}
 
@@ -455,10 +447,22 @@ function DetailHeader({ onBack }: { onBack: () => void }) {
   );
 }
 
-function PastContext({ detail }: { detail: BookingDetail }) {
+function PastContext({
+  detail,
+  mapped,
+}: {
+  detail: BookingDetail;
+  mapped: CustomerVisibleStatus | "unknown";
+}) {
+  // Round-1 refactor: drive PastContext from typed CustomerVisibleStatus
+  // (not raw backend string). Aliases like `cancel_requested`, `noshow`,
+  // `chargeback`, `refunded`, `finished` are now handled via
+  // BACKEND_ALIAS_MAP in booking-status.ts — PastContext just consumes
+  // the 8-bucket vocabulary. `cancellation_context` retained for the
+  // «Отменена вами» vs «Отменена салоном» disambiguation dimension.
   const ctx = detail.cancellation_context;
-  const status = detail.status.toLowerCase();
-  if (status === "completed") {
+
+  if (mapped === "completed") {
     return (
       <p className="records-detail__context-text">
         Визит прошёл{" "}
@@ -469,7 +473,9 @@ function PastContext({ detail }: { detail: BookingDetail }) {
       </p>
     );
   }
-  if (ctx === "by_customer" || status === "cancelled" || status === "cancelled_customer") {
+  // «Отменена вами» — customer-initiated cancellation. Disambiguation
+  // via cancellation_context preserved.
+  if (mapped === "cancelled_customer" || ctx === "by_customer") {
     return (
       <>
         <p className="records-detail__context-text">
@@ -487,7 +493,7 @@ function PastContext({ detail }: { detail: BookingDetail }) {
       </>
     );
   }
-  if (ctx === "by_provider" || status === "provider_cancelled") {
+  if (mapped === "provider_cancelled" || ctx === "by_provider") {
     return (
       <>
         <p className="records-detail__context-text">
@@ -506,21 +512,29 @@ function PastContext({ detail }: { detail: BookingDetail }) {
       </>
     );
   }
-  if (ctx === "by_system_no_show" || status === "no_show") {
+  if (mapped === "no_show" || ctx === "by_system_no_show") {
+    // Round-1 fix: penalty copy gated on actual non-zero penalty.
+    // Force-majeure / grace-period flows ship no_show without retention;
+    // unconditional «удержал часть оплаты» would lie. Also grammar:
+    // «Запись отмечена как «Не пришла»» (feminine subject + quoted
+    // brand status label).
+    const hasPenalty =
+      typeof detail.no_show_penalty === "number" && detail.no_show_penalty > 0;
     return (
       <p className="records-detail__context-text">
-        Визит отмечен как не пришла. По условиям отмены салон удержал часть оплаты.
+        Запись отмечена как «Не пришла».
+        {hasPenalty && " По условиям отмены салон удержал часть оплаты."}
       </p>
     );
   }
-  if (status === "refund_pending") {
+  if (mapped === "refund_pending") {
     return (
       <p className="records-detail__context-text">
         Возврат ушёл в банк — обычно приходит в течение 3 дней.
       </p>
     );
   }
-  if (status === "refund_completed") {
+  if (mapped === "refund_completed") {
     return (
       <p className="records-detail__context-text">
         Возврат завершён. Деньги вернулись на карту.

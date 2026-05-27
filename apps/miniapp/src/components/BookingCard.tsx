@@ -1,14 +1,19 @@
 /**
  * Booking card — 3 variants per Tau §4.
  *
- *   §4.1 «nearest» (is_nearest=true)        — full actions (5 buttons:
- *                                              open / message / route /
+ *   §4.1 «nearest» (is_nearest=true)        — full actions (4 buttons:
+ *                                              open / message /
  *                                              reschedule / cancel)
  *   §4.2 «future»  (upcoming non-nearest)   — limited actions
  *                                              (open / message)
  *   §4.3 «past»    (history)                — repeat + optional review
  *
  * Spec: `docs/screens/customer-records-flow.md` §4.
+ *
+ * NOTE: «Маршрут» button dropped from list card (round-1 amendment
+ * 2026-05-27) — drift class same as PR #834 / #892. Real route deeplink
+ * lives on detail screen («Маршрут до салона» button under address
+ * section). Tapping «Открыть» → detail surfaces the real maps link.
  *
  * WCAG 2.5.8 — every action button ≥44dp via padding (handled in CSS).
  * WCAG 1.4.1 — status icon paired with text (StatusBadge).
@@ -32,7 +37,6 @@ interface Props {
   variant: BookingCardVariant;
   onOpen: () => void;
   onMessage?: () => void;
-  onRoute?: () => void;
   onReschedule?: () => void;
   onCancel?: () => void;
   onRepeat?: () => void;
@@ -46,7 +50,6 @@ export function BookingCard({
   variant,
   onOpen,
   onMessage,
-  onRoute,
   onReschedule,
   onCancel,
   onRepeat,
@@ -131,17 +134,8 @@ export function BookingCard({
             </button>
           )}
 
-        {/* Nearest-only — route / reschedule / cancel. */}
-        {variant === "nearest" && actions.has("route") && onRoute && (
-          <button
-            type="button"
-            className="btn-secondary records-card__action"
-            onClick={onRoute}
-            aria-label="Маршрут до салона"
-          >
-            Маршрут
-          </button>
-        )}
+        {/* Nearest-only — reschedule / cancel. Маршрут lives on detail
+            screen — see file header note. */}
         {variant === "nearest" &&
           actions.has("reschedule") &&
           onReschedule && (

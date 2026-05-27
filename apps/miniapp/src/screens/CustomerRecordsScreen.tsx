@@ -228,13 +228,9 @@ export function CustomerRecordsScreen() {
     setMessageBooking(b);
   }, []);
 
-  const handleRoute = useCallback((b: BookingListItem) => {
-    // Route deeplink lives on the detail payload; for list-card route
-    // we route to detail and rely on the detail screen's Маршрут CTA.
-    // Defence-in-depth: if the list ever carries the deeplink directly,
-    // open it here.
-    navigate(`/customer/records/${b.booking_id}`);
-  }, [navigate]);
+  // handleRoute dropped (round-1 amendment 2026-05-27) — «Маршрут»
+  // button removed from list card to fix lying CTA. Real route deeplink
+  // lives on detail screen.
 
   const handleReschedule = useCallback(
     (b: BookingListItem) => {
@@ -467,7 +463,6 @@ export function CustomerRecordsScreen() {
                     isMultiTenant,
                     onOpen: handleOpenBooking,
                     onMessage: handleMessage,
-                    onRoute: handleRoute,
                     onReschedule: handleReschedule,
                     onCancel: handleCancel,
                     onRepeat: (b) => void handleRepeat(b),
@@ -587,7 +582,6 @@ interface BucketProps {
   isMultiTenant: boolean;
   onOpen: (b: BookingListItem) => void;
   onMessage: (b: BookingListItem) => void;
-  onRoute: (b: BookingListItem) => void;
   onReschedule: (b: BookingListItem) => void;
   onCancel: (b: BookingListItem) => void;
   onRepeat: (b: BookingListItem) => void;
@@ -601,7 +595,6 @@ function renderTimeBuckets(props: BucketProps) {
     isMultiTenant,
     onOpen,
     onMessage,
-    onRoute,
     onReschedule,
     onCancel,
     onRepeat,
@@ -639,7 +632,6 @@ function renderTimeBuckets(props: BucketProps) {
                 variant={variant}
                 onOpen={() => onOpen(b)}
                 onMessage={() => onMessage(b)}
-                onRoute={() => onRoute(b)}
                 onReschedule={() => onReschedule(b)}
                 onCancel={() => onCancel(b)}
                 onRepeat={() => onRepeat(b)}

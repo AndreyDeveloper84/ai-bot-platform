@@ -117,15 +117,33 @@ export function BookingMessageModal({ open, booking, onClose, onSent }: Props) {
     setText("");
   }, [open]);
 
+  // Round-1 amendment 2026-05-27 — data-loss guard: when user has typed
+  // non-empty text in compose step, an errant backdrop tap or Escape
+  // press shouldn't silently discard the message. Gate both paths on
+  // `!(step.kind === "compose" && text.trim() !== "")`. FOLLOW_UP:
+  // post-pilot wire confirm dialog «Закрыть и потерять текст?».
+  const safeClose = useCallback(() => {
+    if (step.kind === "compose" && text.trim() !== "") {
+      if (import.meta.env.DEV) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[BookingMessageModal] backdrop/Escape ignored — compose text non-empty (data-loss guard).",
+        );
+      }
+      return;
+    }
+    onClose();
+  }, [onClose, step, text]);
+
   // Escape dismiss.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") safeClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, safeClose]);
 
   // Focus management — snapshot on open, restore on close, trap Tab.
   useEffect(() => {
@@ -254,7 +272,7 @@ export function BookingMessageModal({ open, booking, onClose, onSent }: Props) {
         type="button"
         className="records-msg-modal__backdrop"
         aria-label="Закрыть"
-        onClick={onClose}
+        onClick={safeClose}
       />
       <div
         ref={panelRef}
