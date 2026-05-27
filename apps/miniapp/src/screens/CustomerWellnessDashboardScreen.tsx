@@ -268,7 +268,7 @@ export function CustomerWellnessDashboardScreen() {
       const len = enqueueWaterLog(250);
       setWaterQueueLen(len);
       setWaterToast(
-        `+1 стакан · ${len} ${len === 1 ? "ждёт" : "ждут"} синхронизации`,
+        `+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`,
       );
       return;
     }
@@ -565,7 +565,8 @@ export function CustomerWellnessDashboardScreen() {
               role="status"
               aria-live="polite"
             >
-              +{waterQueueLen} стакан ждёт синхронизации
+              +{waterQueueLen} {ruPluralWater(waterQueueLen)}{" "}
+              {ruPluralWaterWaits(waterQueueLen)} синхронизации
             </p>
           )}
           {/* Transient toasts. */}
@@ -1088,6 +1089,17 @@ function ruPluralWater(n: number): string {
   if (mod10 === 1) return "стакан";
   if (mod10 >= 2 && mod10 <= 4) return "стакана";
   return "стаканов";
+}
+
+// Verb agreement for "стакан(а/ов) ждёт/ждут синхронизации".
+// Singular forms (1, 21, 31, ...) take "ждёт"; rest take "ждут".
+// Excludes the 11-14 teen-irregular range.
+function ruPluralWaterWaits(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 14) return "ждут";
+  if (mod10 === 1) return "ждёт";
+  return "ждут";
 }
 
 function ruPluralBooking(n: number): string {

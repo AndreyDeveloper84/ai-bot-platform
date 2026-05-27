@@ -104,22 +104,20 @@ export function CustomerBookingConfirmScreen() {
   useBackButton({ onBack: () => navigate(-1) });
   useClosingConfirmation(true);
 
-  // Restore pending intent on mount — post-OAuth callback case.
+  // W4 #844 anonymous gate round-trip restore.
   //
-  // Two-path restore (TL Q4 P0 + W4 #844 round-trip):
-  //   1. PRIMARY: sessionStorage `restorePendingIntent()` — same-device
-  //      same-browser-session (the normal OAuth round-trip path).
-  //   2. DEFENCE-IN-DEPTH: `POST /auth/verify` returns any
-  //      `pending_booking_intent` the server cached (W4 #844, 10min TTL
-  //      keyed by BotUser.id). Covers multi-device + private-mode +
-  //      sessionStorage-evicted cases.
+  // Two-source intent resolution:
+  //   1. sessionStorage (PRIMARY) — set by savePendingIntent() before MAX
+  //      OAuth redirect. Same-device, same-session.
+  //   2. Server cache (FALLBACK) — only consulted when sessionStorage is
+  //      empty. Defense-in-depth for multi-device case (e.g. user starts
+  //      on phone, session expires, returns on different device with no
+  //      sessionStorage). 10min TTL keyed by BotUser.id.
   //
-  // Merge policy when both surface a draft:
-  //   - sessionStorage wins for fields it has (it's freshest — set
-  //     immediately before the OAuth redirect on this device).
-  //   - Server intent supplies fields sessionStorage is missing (e.g.
-  //     the multi-device case where sessionStorage on the new device
-  //     is empty).
+  // Resolution: whole-object preference, not field-level merge.
+  // sessionStorage wins if present at all; server only fills when
+  // sessionStorage absent. Rationale: customer's local intent is more
+  // recent / more trusted than server-cached payload.
   //
   // Field-name normalisation: backend ships `price_quoted` /
   // `loyalty_apply`; sessionStorage uses `price_rub` / `loyalty_choice`.
