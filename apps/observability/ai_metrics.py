@@ -255,6 +255,217 @@ def _correlate_task_success(target_date: _date, tenant) -> int:
     return correlated
 
 
+# ─── Implicit feedback signal detection (Tier-A #3, sequence #6) ────────
+#
+# Per founder pilot_scope_discipline 2026-05-27. Walk AIRequestMetric
+# rows + detect 3 deterministic behavioral signals. Inserts dedup'd
+# `ImplicitFeedbackSignal` rows (DB unique constraint on
+# `(ai_request_metric, signal_type)` makes re-runs idempotent).
+#
+# Tunables:
+#   - CANCELLATION_DETECTION_WINDOW: how long after a metric к look
+#     for a booking.cancelled event (24h per founder verdict).
+#   - ABANDONED_TOPIC_THRESHOLD: idle window after metric к flag as
+#     abandoned (24h per Tau spec — same as cancellation window for
+#     consistency).
+#   - REPEAT_INTERACTION_WINDOW: same-skill N+1 lookup window
+#     (24h, matches conversation session pattern).
+
+CANCELLATION_DETECTION_WINDOW = timedelta(hours=24)
+ABANDONED_TOPIC_THRESHOLD = timedelta(hours=24)
+REPEAT_INTERACTION_WINDOW = timedelta(hours=24)
+
+
+def _detect_implicit_signals(target_date: _date, tenant) -> dict[str, int]:
+    """Walk AIRequestMetric rows + insert ImplicitFeedbackSignal rows.
+
+    Per Tier-A #3 (founder sequence #6, 2026-05-27). Runs inside the
+    daily aggregation transaction, BEFORE the count rollup так counts
+    pick up newly-inserted signals.
+
+    Returns ``{signal_type: inserted_count}`` для telemetry / tests.
+
+    Idempotent: DB unique constraint on (ai_request_metric, signal_type)
+    means re-running the same day no-ops on already-detected signals.
+    """
+    from apps.observability.models import ImplicitFeedbackSignal
+
+    day_start = _dt.combine(target_date, _time.min, tzinfo=_stdlib_tz.utc)
+    day_end = day_start + timedelta(days=1)
+
+    counts: dict[str, int] = {
+        ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION: 0,
+        ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC: 0,
+        ImplicitFeedbackSignal.SIGNAL_REPEAT_INTERACTION: 0,
+    }
+
+    # Source rows для signal detection. Only consider metrics с linked
+    # conversation (signals need conversation context). All outcomes
+    # qualify — even error outcomes can lead к abandoned/repeat patterns.
+    candidate_metrics = list(
+        AIRequestMetric.all_tenants.filter(
+            tenant=tenant,
+            created_at__gte=day_start,
+            created_at__lt=day_end,
+            conversation__isnull=False,
+        )
+        .select_related("conversation")
+        .only(
+            "id",
+            "created_at",
+            "skill_selected",
+            "bot_user_id",
+            "conversation__id",
+            "conversation__last_booking_at",
+            "conversation__last_message_at",
+        )
+    )
+
+    now = _django_tz.now()
+
+    # ─── Signal 1: cancellation_after_suggestion ───────────────────────
+    # Detection: metric → conversation.last_booking_at within 24h AND
+    # booking subsequently cancelled (Conversation.is_active=False OR
+    # booking RemoteBookingProxy.status=cancelled within 24h of booking).
+    #
+    # Pilot heuristic — Conversation is the canonical signal source per
+    # ADR-0009 + W4 _correlate_task_success pattern. If conversation
+    # was soft-deleted (deleted_at NOT NULL) within 24h of booking,
+    # treat as «cancelled after suggestion» — user invoked forget-flow
+    # or admin closed the conversation, both indicate dissatisfaction.
+    #
+    # Phase 1 follow-up: when RemoteBookingProxy.cancelled_at lands
+    # как proper signal, extend к use that instead of Conversation
+    # soft-delete heuristic.
+    from apps.conversations.models import Conversation as ConvModel
+
+    for metric in candidate_metrics:
+        conv = metric.conversation
+        if conv is None or conv.last_booking_at is None:
+            continue
+        gap_to_booking = conv.last_booking_at - metric.created_at
+        if not (timedelta(0) <= gap_to_booking <= CANCELLATION_DETECTION_WINDOW):
+            continue
+        # Booking happened in-window. Now check cancellation indicator —
+        # re-fetch conversation для current deleted_at + is_active state
+        # (read after correlation step bumps `last_booking_at`).
+        fresh = (
+            ConvModel.all_tenants.filter(pk=conv.pk)
+            .only("deleted_at", "is_active", "last_booking_at")
+            .first()
+        )
+        if fresh is None:
+            continue
+        # Cancellation signal: conversation went inactive / soft-deleted
+        # within 24h of the booking moment.
+        if fresh.deleted_at is None and fresh.is_active:
+            continue
+        cancellation_at = fresh.deleted_at or now
+        gap_to_cancel = cancellation_at - conv.last_booking_at
+        if not (timedelta(0) <= gap_to_cancel <= CANCELLATION_DETECTION_WINDOW):
+            continue
+        _, created = ImplicitFeedbackSignal.all_tenants.get_or_create(
+            ai_request_metric_id=metric.id,
+            signal_type=ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION,
+            defaults={
+                "tenant": tenant,
+                "conversation_id": conv.id,
+                "payload": {
+                    "booked_at": conv.last_booking_at.isoformat(),
+                    "cancelled_at": cancellation_at.isoformat(),
+                    "gap_to_booking_seconds": int(gap_to_booking.total_seconds()),
+                    "gap_to_cancel_seconds": int(gap_to_cancel.total_seconds()),
+                },
+            },
+        )
+        if created:
+            counts[ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION] += 1
+
+    # ─── Signal 2: abandoned_topic ───────────────────────────────────
+    # Detection: metric created_at + 24h < now AND no booking AND
+    # conversation.last_message_at unchanged from before metric.created_at
+    # (no further engagement after the AI message).
+    #
+    # Heuristic — if `last_message_at >= metric.created_at` (any new
+    # message after the AI nudge), user engaged → NOT abandoned. If
+    # equal или strictly less, и idle window passed, abandoned.
+    for metric in candidate_metrics:
+        conv = metric.conversation
+        if conv is None:
+            continue
+        if conv.last_booking_at is not None:
+            # Booking exists → topic не abandoned (may be cancellation
+            # signal, handled above).
+            continue
+        if (now - metric.created_at) < ABANDONED_TOPIC_THRESHOLD:
+            # Idle window not yet elapsed — re-check on next daily run.
+            continue
+        last_msg_at = getattr(conv, "last_message_at", None)
+        # Engagement check: any message landed AFTER the metric.
+        if last_msg_at is not None and last_msg_at > metric.created_at:
+            continue
+        _, created = ImplicitFeedbackSignal.all_tenants.get_or_create(
+            ai_request_metric_id=metric.id,
+            signal_type=ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC,
+            defaults={
+                "tenant": tenant,
+                "conversation_id": conv.id,
+                "payload": {
+                    "idle_seconds": int((now - metric.created_at).total_seconds()),
+                    "last_message_at": (last_msg_at.isoformat() if last_msg_at else None),
+                },
+            },
+        )
+        if created:
+            counts[ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC] += 1
+
+    # ─── Signal 3: repeat_interaction ───────────────────────────────
+    # Detection: same (bot_user, skill_selected) appears N+1 times
+    # within 24h. The 2nd+ occurrence gets the signal — the first one
+    # is the «baseline» (we don't know yet it'll repeat).
+    #
+    # Index lookup: group by (bot_user_id, skill_selected), find rows
+    # с >=2 occurrences within 24h, mark all-but-first.
+    seen_pairs: dict[tuple[Any, str], list[Any]] = {}
+    for metric in candidate_metrics:
+        if not metric.skill_selected:
+            continue
+        if metric.bot_user_id is None:
+            continue
+        key = (metric.bot_user_id, metric.skill_selected)
+        seen_pairs.setdefault(key, []).append(metric)
+    for key, metrics_for_key in seen_pairs.items():
+        if len(metrics_for_key) < 2:
+            continue
+        # Sort by created_at ascending — first is baseline, 2nd+ are
+        # repeats. Window check: each repeat must be within 24h of
+        # the immediately-preceding interaction (chain semantics).
+        metrics_sorted = sorted(metrics_for_key, key=lambda m: m.created_at)
+        prev = metrics_sorted[0]
+        for current in metrics_sorted[1:]:
+            if (current.created_at - prev.created_at) > REPEAT_INTERACTION_WINDOW:
+                prev = current
+                continue
+            _, created = ImplicitFeedbackSignal.all_tenants.get_or_create(
+                ai_request_metric_id=current.id,
+                signal_type=ImplicitFeedbackSignal.SIGNAL_REPEAT_INTERACTION,
+                defaults={
+                    "tenant": tenant,
+                    "conversation_id": current.conversation_id,
+                    "payload": {
+                        "skill": current.skill_selected,
+                        "prev_metric_id": str(prev.id),
+                        "gap_seconds": int((current.created_at - prev.created_at).total_seconds()),
+                    },
+                },
+            )
+            if created:
+                counts[ImplicitFeedbackSignal.SIGNAL_REPEAT_INTERACTION] += 1
+            prev = current
+
+    return counts
+
+
 def _evaluate_thresholds(
     *,
     total_requests: int,
@@ -341,6 +552,15 @@ def aggregate_daily_metrics(target_date: _date, tenant) -> AIDailyMetricSummary:
         # Step 1: correlate before counting.
         _correlate_task_success(target_date, tenant)
 
+        # Step 1.5: detect implicit feedback signals (Tier-A #3, founder
+        # sequence #6, 2026-05-27). Same scan reuses the metric+
+        # conversation join for cancellation/abandoned/repeat detection.
+        # Return value is per-signal inserted counts; we don't use it
+        # here (summary rollup below re-queries from the DB to capture
+        # ALL signals for the day including prior-run rows), but the
+        # detector's side-effect (inserting signal rows) is the point.
+        _detect_implicit_signals(target_date, tenant)
+
         # Step 2: aggregate counts + percentiles.
         rows = list(
             AIRequestMetric.all_tenants.filter(
@@ -386,6 +606,21 @@ def aggregate_daily_metrics(target_date: _date, tenant) -> AIDailyMetricSummary:
             mean_cost_usd=mean_cost,
         )
 
+        # Signal counts for the day — read from ImplicitFeedbackSignal
+        # filtered by SOURCE METRIC's created_at (NOT signal's
+        # recorded_at — re-runs / backfills could detect signals days
+        # later, but the signal belongs to the target_date that the
+        # source metric landed on). The DB unique constraint makes
+        # re-runs safe.
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        signal_rollup_qs = ImplicitFeedbackSignal.all_tenants.filter(
+            tenant=tenant,
+            ai_request_metric__created_at__gte=day_start,
+            ai_request_metric__created_at__lt=day_end,
+        ).values_list("signal_type", flat=True)
+        signal_type_counter: Counter[str] = Counter(signal_rollup_qs)
+
         summary, _ = AIDailyMetricSummary.objects.update_or_create(
             tenant=tenant,
             snapshot_date=target_date,
@@ -406,6 +641,16 @@ def aggregate_daily_metrics(target_date: _date, tenant) -> AIDailyMetricSummary:
                 "fallback_rate": fb_rate,
                 "intent_distribution": dict(intent_counter),
                 "threshold_status": threshold_status,
+                # Tier-A #3 signal counts (founder sequence #6).
+                "cancelled_after_suggestion_count": signal_type_counter.get(
+                    ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION, 0
+                ),
+                "abandoned_topic_count": signal_type_counter.get(
+                    ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC, 0
+                ),
+                "repeat_interaction_count": signal_type_counter.get(
+                    ImplicitFeedbackSignal.SIGNAL_REPEAT_INTERACTION, 0
+                ),
             },
         )
 
