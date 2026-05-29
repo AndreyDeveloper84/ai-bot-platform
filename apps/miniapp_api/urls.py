@@ -64,4 +64,16 @@ urlpatterns = [
         views.customer_recommendations,
         name="customer_recommendations",
     ),
+    # Wellness dashboard — composition of Ayla nutrition reads.
+    path(
+        "wellness/today",
+        views.customer_wellness_today,
+        name="customer_wellness_today",
+    ),
+    # Dashboard rollup — next booking + this-week count (bookings-only).
+    path(
+        "recent-activity",
+        views.customer_recent_activity,
+        name="customer_recent_activity",
+    ),
 ]
