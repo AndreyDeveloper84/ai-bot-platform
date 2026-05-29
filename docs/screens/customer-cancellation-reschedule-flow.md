@@ -4,7 +4,7 @@
 |---|---|
 | **Audience** | customer initiating cancel/reschedule OR receiving salon-side notification (master sick, admin cancels) |
 | **Phase** | P0 BLOCKER pilot 15 July 2026 — full booking lifecycle completeness |
-| **Status** | draft — Phase A–G done, awaiting tech lead final sign-off + frontend handoff |
+| **Status** | Canonical — updated for Ayla auto-reschedule workflow (Tau-consolidated 2026-05-29), awaiting tech lead final sign-off + frontend handoff |
 | **Channel** | MAX webview Mini App + bot DM |
 | **Stream** | Tau (UX/Design) |
 | **Date** | 2026-05-26 r1 |
@@ -28,6 +28,39 @@ Per founder strategic plan 2026-05-26 — closing full booking lifecycle:
 > 7. 🟡 Customer sees history (Records — separate scope)
 
 Без этих flows customers WILL cancel/reschedule вручную (через chat с Ayla / звонок в салон). Without smooth UX → support load + trust damage.
+
+
+### Ayla auto-reschedule principle
+
+A customer reschedule request is not just a message.
+
+If the customer asks Ayla to reschedule and all policy checks pass, Ayla should complete the workflow itself through Booking Engine:
+
+```text
+customer asks to reschedule
+→ Ayla resolves active booking
+→ Ayla checks cancellation/reschedule policy
+→ Ayla fetches available slots
+→ customer selects a new slot
+→ backend atomically reschedules booking
+→ customer receives confirmation
+→ provider receives post-action notification
+```
+
+Provider approval is not required for a normal eligible reschedule.
+
+Provider receives:
+
+```text
+Запись перенесена через Ayla
+Было: 16:00
+Стало: 18:00
+```
+
+If any rule fails, Ayla escalates to admin/provider.
+
+This keeps Ayla as an operational agent, not just a chat relay.
+
 
 ### Voice critical — «Ayla on customer's side»
 
@@ -94,6 +127,8 @@ Per memory `project_q12a_billing_founder_gate` + 2026-05-23 commercial identity 
 
 ### Bot DM intent resolution
 
+Bot DM reschedule intent should prefer automatic Booking Engine workflow when eligible.
+
 Per spec policy §3.2 + ayla-mediated-messaging Q-AMM-10 pattern:
 
 ```
@@ -109,6 +144,34 @@ Logic:
 ```
 
 ---
+
+
+### Bot DM reschedule execution
+
+When customer has one active booking and confirms context:
+
+```text
+Customer:
+Перенеси запись на вечер.
+
+Ayla:
+Нашла варианты:
+• Сегодня 18:00
+• Сегодня 18:30
+• Завтра 17:00
+
+Customer:
+Сегодня 18:00
+
+Ayla:
+Готово, перенесла запись на сегодня 18:00.
+Ольга получит обновление.
+```
+
+Provider/admin receives a post-action notification only after successful backend transaction.
+
+If there are no eligible slots or policy blocks auto-reschedule, Ayla creates provider/admin task.
+
 
 ## 4. Cancellation flow (4 screens + states)
 
@@ -277,9 +340,50 @@ Per Q-CR-1 verdict — **optional с «Пропустить»** chip.
 
 ## 5. Reschedule flow (5 screens + states)
 
+
+### 5.0 Auto-reschedule eligibility
+
+Ayla may automatically execute reschedule only when all conditions are true:
+
+```text
+booking belongs to the authenticated customer
+booking is active
+reschedule policy allows it
+new slot is returned by backend availability
+customer explicitly confirms new slot
+backend reserves new slot and releases old slot atomically
+Q12-α billing chain checks pass
+no payment dispute / refund lock / manual admin lock exists
+no no-fault cascade requires human decision
+```
+
+Ayla must escalate to admin/provider when:
+
+```text
+visit is already started or too close to start
+late policy requires human decision
+payment/refund state is unclear
+customer wants different service
+customer wants different master and substitution policy requires approval
+no slots are available
+booking is unlinked/manual-only
+salon has admin_approval_required
+medical/safety reason affects the decision
+```
+
+Important:
+
+```text
+Ayla may not promise a new time in plain text.
+Ayla may only confirm after backend transaction succeeds.
+```
+
+
 ### 5.1 Entry from booking card / Records tab
 
 Customer taps **`Перенести`** action button. Per Q-CR-2 verdict — single-tap to R1 date+time picker (no intent re-confirmation).
+
+If customer starts from Bot DM, Ayla resolves active booking first, then opens the same R1 date+time picker or sends slot chips in DM.
 
 ### 5.2 R1 — Date+time picker (similar к booking flow F3)
 
@@ -480,6 +584,8 @@ Per Q-CR-3 verdict — **inline в R1 date+time picker** (NOT separate screen).
 │  Пятница 31 мая · 14:00               │  New booking
 │  у Ирины · Beauty Place               │
 │                                       │
+│  Мастер получит обновление.
+│                                       │
 │  Я напомню перед визитом — всё на     │  Reminder
 │  месте.                               │  (soft per cut #5
 │                                       │  + warmth beat per
@@ -499,6 +605,7 @@ Per Q-CR-3 verdict — **inline в R1 date+time picker** (NOT separate screen).
 | State | Trigger | UX |
 |-------|---------|-----|
 | Loading | Submit reschedule | «Переношу...» spinner ≤2s |
+| Auto-reschedule success | Customer confirmed slot in DM or Mini App and backend transaction succeeded | «Готово, перенесла запись. Мастер получит обновление.» |
 | Slot taken (race) | Customer's chosen slot taken by another booking | «Это время только что заняли. Карина свободна 14:30 — подойдёт?» + substitution inline |
 | Master deactivated mid-flow | Master removed from tenant between R1 and confirmation | «Ирина больше не работает в Beauty Place. Карина продолжает в том же стиле: пятница 14:00. Подойдёт?» |
 | Partial failure (Q12-α edge case #4) | Backend transaction broke — old cancelled, new not created | «Что-то пошло не так. Старая запись отменилась, новая не создалась. Уже разбираюсь. Возврат за старую запись приедет.» + admin queue ticket |
@@ -706,7 +813,7 @@ Per tech lead 5 spec variants + 2 founder-relevant. ASCII inline mocks comparing
 | Endpoint | Method | Description | Owner |
 |----------|--------|-------------|-------|
 | `POST /api/v1/customer/bookings/{id}/cancel` | POST | Customer-initiated cancellation. Returns refund_info + chain_terminated flag | W4 |
-| `POST /api/v1/customer/bookings/{id}/reschedule` | POST | Customer-initiated reschedule. Returns chain_status (same/new/partial_failure) | W4 |
+| `POST /api/v1/customer/bookings/{id}/reschedule` | POST | Customer-initiated or Ayla-executed reschedule. Returns chain_status (same/new/partial_failure) and provider_notification event | W4 |
 | `GET /api/v1/customer/bookings/{id}/cancel_policy_preview` | GET | Returns expected_penalty + applicable_refund + hours_to_visit | W4 |
 | `GET /api/v1/customer/bookings/{id}/reschedule_options?date=...` | GET | Returns slots + substitution candidates if original master unavailable | W4 |
 | `POST /api/v1/customer/notifications/salon_side_cancel/{booking_id}/respond` | POST | Customer responds to no-fault cascade (accept substitute / pick another date / cancel with refund) | W4 |
@@ -733,7 +840,12 @@ Per tech lead 5 spec variants + 2 founder-relevant. ASCII inline mocks comparing
   "new_booking_id": "uuid_new",
   "chain_status": "same|new|partial_failure",
   "billing_impact": "none|will_recalculate",
-  "user_message_key": "same_chain|service_swap|over_90_days|partial_failure"
+  "user_message_key": "same_chain|service_swap|over_90_days|partial_failure",
+  "provider_notification": {
+    "event_type": "booking.rescheduled_by_ayla",
+    "old_starts_at": "2026-05-30T16:00:00+03:00",
+    "new_starts_at": "2026-05-31T14:00:00+03:00"
+  }
 }
 ```
 
@@ -745,6 +857,7 @@ Per memory `project_q12a_billing_founder_gate`:
 - W3 (Zeta stream) уже implemented chain mechanics
 - This UX consumes existing backend logic, не дублирует
 - Backend MUST return `chain_status` + `billing_impact` in reschedule response
+- Backend MUST emit provider-side notification event after successful Ayla auto-reschedule
 - Frontend uses these to choose correct voice copy
 
 ### 9.4 No-fault refund cascade backend
@@ -797,6 +910,8 @@ Patterns reuse from `customer-booking-flow.md §11`. Cancel/reschedule specific:
 - ❌ Force reason input для cancellation (interrogation feel)
 - ❌ Hide policy preview before customer commits
 - ❌ Lock customer in flow без escape («Отменить вместо переноса» NOT available)
+- ❌ Treat eligible reschedule as a raw chat message that waits for provider approval
+- ❌ Promise new time without backend slot check and atomic transaction
 
 ---
 
@@ -807,6 +922,7 @@ Patterns reuse from `customer-booking-flow.md §11`. Cancel/reschedule specific:
 All Q-CR-1..10 resolved per founder verdict 2026-05-26:
 - Q-CR-1: (b) Optional reason с «Пропустить» ✅
 - Q-CR-2: (a) Single-tap reschedule entry ✅
+- Q-CR-2b: Ayla auto-reschedule through Booking Engine when eligible ✅
 - Q-CR-3: (a) Inline master substitution ✅
 - Q-CR-4: (a) Modal cancel confirmation ✅
 - Q-CR-5: (b) Slightly warm success tone ✅
@@ -834,6 +950,7 @@ All Q-CR-1..10 resolved per founder verdict 2026-05-26:
 1. **Cancel modal** focus trap, escape key returns to booking card
 2. **Late cancel penalty amount** received from backend `cancel_policy_preview` endpoint
 3. **Reschedule R1 picker** reuse F3 booking flow component с state-dependent header
+3b. **Bot DM auto-reschedule** use same availability + confirmation contract as Mini App
 4. **Master substitution inline** receive `substitution_candidates` field from backend
 5. **Q12-α messaging** use `user_message_key` from backend to map exact copy
 6. **No-fault cascade DM** received via existing Ayla DM channel
@@ -873,7 +990,7 @@ All Q-CR-1..10 resolved per founder verdict 2026-05-26:
 
 **Following streams to engage after sign-off:**
 - W1 — ~20-25 hrs frontend (10 screens + modal patterns + R1 picker reuse + master substitution inline + Q12-α messaging mapping + no-fault cascade UI)
-- W4 — ~3-5 hrs backend (cancel_policy_preview endpoint + reschedule_options endpoint + cascade response handler — existing booking endpoints extended)
+- W4 — ~4-6 hrs backend (cancel_policy_preview endpoint + reschedule_options endpoint + cascade response handler + provider notification event for Ayla auto-reschedule — existing booking endpoints extended)
 - W3 (billing chain Q12-α) уже implemented — no new scope here
 
 ---
@@ -893,4 +1010,6 @@ All Q-CR-1..10 resolved per founder verdict 2026-05-26:
 | Accessibility Engineer (WCAG 2.2 AA pass per §10) | ☐ | (pending pilot) |
 
 ## Last verified
-2026-05-26 r1 — Founder strategic plan + 10 Q-CR verdicts + 5 Q12-α edge cases + no-fault Q2 verdict applied. All cut baseline disciplines from booking-flow refresh integrated. Brand Guardian voice review pending — high-trust moment criticality.
+2026-05-29 r3 — Tau-consolidated from Codex `customer-cancellation-reschedule-flow.updated.md`. Ayla auto-reschedule workflow added (§3 principle, §4 bot DM execution, §5.0 eligibility): eligible customer reschedule handled by Booking Engine atomically, provider receives post-action `booking.rescheduled_by_ayla` notification, NO provider approval bottleneck. Aligns customer doc with provider surfaces (`provider-booking-detail-flow.md` Q-PBD-7, `provider-messages-flow.md` Q-PMSG-4). Founder-locked content PRESERVED intact: Q12-α 5 edge cases (§2), «Ayla on customer's side» voice table (§1), 7 implementation cuts baseline, no-fault refund cascade (Q2 verdict). Auto-reschedule eligibility gated on full Q12-α billing chain + no payment dispute/refund lock/admin lock/no-fault/medical. Ayla may NOT promise new time in plain text — only confirm after backend transaction. Endpoint namespace `/api/v1/customer/bookings/*` per PR #867. Brand Guardian voice review pending.
+
+2026-05-26 r1 — Founder strategic plan + 10 Q-CR verdicts + 5 Q12-α edge cases + no-fault Q2 verdict applied. All cut baseline disciplines from booking-flow refresh integrated.
