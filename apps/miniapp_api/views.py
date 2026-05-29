@@ -1305,3 +1305,272 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
         return _error("ayla_unavailable", "ayla recommendations unavailable", 502)
 
     return JsonResponse(ayla_body)
+
+
+# --- /customer/wellness/today — nutrition composition ----------------------
+
+# Standard glass = 250 ml. The Ayla water endpoint reports millilitres;
+# the Mini App dashboard (Tau §6 Block 5) renders glasses. Conversion
+# lives here so the frontend stays unit-agnostic.
+_WATER_GLASS_ML = 250
+# Cold-start default when the customer skipped the nutrition anketa and
+# Ayla reports norm_ml=0. Matches the frontend stub default (Tau §11.1).
+_WATER_GLASSES_TARGET_DEFAULT = 8
+
+
+def _ml_to_glasses(ml: float) -> int:
+    """Round millilitres to whole glasses (250 ml each). Never negative."""
+    if ml <= 0:
+        return 0
+    return round(ml / _WATER_GLASS_ML)
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_wellness_today(request: HttpRequest) -> HttpResponse:
+    """Compose the customer's today-snapshot for the Wellness dashboard.
+
+    Wraps two Ayla nutrition reads — ``daily_summary`` (calories + PFC)
+    and ``get_water_today`` (hydration) — into the ``WellnessToday``
+    shape the Mini App expects (see
+    ``apps/miniapp/src/lib/customer-wellness.ts``).
+
+    Identity bridging: the NutritionClient sends
+    ``X-External-User-ID: bot:{channel}:{channel_user_id}`` +
+    ``X-Service-Token``; the customer's initData HMAC never leaves
+    bot-platform.
+
+    ## Graceful degradation
+
+    The two Ayla calls run concurrently and degrade INDEPENDENTLY: if
+    `daily_summary` fails, calories/PFC zero out but hydration still
+    renders, and vice-versa. The endpoint returns 200 with whatever
+    succeeded — a dashboard that renders partial data beats a blank
+    error screen. Zeros are a valid «no logs today» state per the
+    frontend contract, so a degraded response is indistinguishable from
+    a genuinely empty day; that's an accepted trade for resilience.
+
+    ## Fields without an Ayla source (documented gaps)
+
+    * ``active_goals`` — the Layer-2 Goals system has no REST endpoint
+      yet; returned as ``[]`` so the frontend shows the «Выбери цель»
+      CTA (Tau §11.2). Wire when the goals endpoint ships.
+    * ``pfc.protein_target_g`` + ``day_pattern_hint`` — omitted (no
+      clean source). Frontend treats both as optional.
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    async def _fetch() -> tuple[Any, Any]:
+        client = get_nutrition_client()
+        return await asyncio.gather(
+            client.daily_summary(external_user_id=external_id),
+            client.get_water_today(external_user_id=external_id),
+            return_exceptions=True,
+        )
+
+    summary_res, water_res = asyncio.run(_fetch())
+
+    nutrition_errors = (NutritionUnavailableError, NutritionAPIError)
+
+    # ── calories + PFC (from daily_summary) ─────────────────────────────
+    calories_eaten = 0
+    calories_target = 0
+    pfc: dict[str, Any] | None = None
+    if isinstance(summary_res, nutrition_errors):
+        logger.warning("wellness_today.summary_unavailable ext=%s err=%s", external_id, summary_res)
+    elif isinstance(summary_res, Exception):
+        # Unexpected exception type — log + degrade, never 500 the dashboard.
+        logger.warning(
+            "wellness_today.summary_unexpected ext=%s err=%s",
+            external_id,
+            type(summary_res).__name__,
+        )
+    else:
+        calories_eaten = round(summary_res.calories_total)
+        calories_target = int(summary_res.calories_goal)
+        pfc = {
+            "protein_g": round(summary_res.protein_g),
+            "fat_g": round(summary_res.fat_g),
+            "carbs_g": round(summary_res.carbs_g),
+        }
+
+    # ── hydration (from get_water_today) ────────────────────────────────
+    water_glasses_eaten = 0
+    water_glasses_target = _WATER_GLASSES_TARGET_DEFAULT
+    if isinstance(water_res, nutrition_errors):
+        logger.warning("wellness_today.water_unavailable ext=%s err=%s", external_id, water_res)
+    elif isinstance(water_res, Exception):
+        logger.warning(
+            "wellness_today.water_unexpected ext=%s err=%s",
+            external_id,
+            type(water_res).__name__,
+        )
+    else:
+        water_glasses_eaten = _ml_to_glasses(water_res.total_ml)
+        target = _ml_to_glasses(water_res.norm_ml)
+        water_glasses_target = target or _WATER_GLASSES_TARGET_DEFAULT
+
+    payload: dict[str, Any] = {
+        "calories_eaten": calories_eaten,
+        "calories_target": calories_target,
+        "water_glasses_eaten": water_glasses_eaten,
+        "water_glasses_target": water_glasses_target,
+        # No Goals-system endpoint yet — empty array drives the «Выбери
+        # цель» CTA. See docstring.
+        "active_goals": [],
+        "display_name": bot_user.client_name or bot_user.display_name or "",
+    }
+    if pfc is not None:
+        payload["pfc"] = pfc
+
+    return JsonResponse(payload)
+
+
+# --- /customer/recent-activity — dashboard rollup --------------------------
+
+# Russian short weekday names (Mon=0 … Sun=6) for the date_human label.
+_RU_WEEKDAY_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+# Russian month names in genitive case («3 июня») for non-relative dates.
+_RU_MONTH_GENITIVE = [
+    "",
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+]
+
+
+def _format_visit_human(visit_at, tz: ZoneInfo, *, now=None) -> str:
+    """Render a booking's visit time as «Завтра · пт · 16:00» (customer TZ).
+
+    Relative-day prefix: «Сегодня» / «Завтра» for delta 0/1, else the
+    «{day} {month_genitive}» date. Always followed by the short weekday
+    + 24h time. Server-rendered so the frontend prints verbatim.
+    """
+    local = visit_at.astimezone(tz)
+    moment = (now or timezone.now()).astimezone(tz)
+    day_delta = (local.date() - moment.date()).days
+
+    if day_delta == 0:
+        prefix = "Сегодня"
+    elif day_delta == 1:
+        prefix = "Завтра"
+    else:
+        prefix = f"{local.day} {_RU_MONTH_GENITIVE[local.month]}"
+
+    weekday = _RU_WEEKDAY_SHORT[local.weekday()]
+    return f"{prefix} · {weekday} · {local:%H:%M}"
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_recent_activity(request: HttpRequest) -> HttpResponse:
+    """Dashboard rollup — next booking + this-week count (bookings-only).
+
+    Backs the Mini App Wellness dashboard Block 5/6 (see
+    ``apps/miniapp/src/lib/customer-wellness.ts:RecentActivity``).
+
+    ## Scope: bookings-only pilot
+
+    Per tech-lead verdict 2026-05-29 + memory `project_pilot_scope_discipline`:
+    Ayla has no meals-list / timeline endpoint (only single-day
+    `daily_summary` + aggregate `weekly_deficits`), so the nutrition
+    rollup is deferred to a «meals layer» Phase-1 expansion that wires
+    when Alpha ships a meals-list endpoint. `weekly_progress` therefore
+    returns zeros — Block 6 (Прогресс недели) is gated on
+    `active_days_count >= 3` (Tau §11.4 cold-start) so it stays hidden
+    gracefully rather than showing misleading data.
+
+    ## Data source
+
+    `next_booking` + `this_week_booking_count` read the local
+    `BookingRequest` mirror (populated by the Ayla booking-event
+    consumer per ADR-0009 — a read of cached canonical state, not
+    ownership). No Ayla round-trip on this path.
+
+    ## Fields without a source (documented gaps)
+
+    * `next_booking.address` — bot-platform's `Tenant` has no address
+      field; returned as `""`. Frontend renders empty until the address
+      lands (Ayla salon profile OR a tenant config field).
+    """
+    from datetime import timedelta
+
+    from apps.booking.models import BookingRequest
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    tenant = bot_user.tenant
+    try:
+        tz = ZoneInfo(tenant.timezone or "Europe/Moscow")
+    except Exception:  # noqa: BLE001 — bad tz config must not 500 the dashboard
+        tz = ZoneInfo("Europe/Moscow")
+
+    now = timezone.now()
+
+    # ── next upcoming CONFIRMED booking ─────────────────────────────────
+    next_qs = BookingRequest.all_tenants.filter(
+        tenant=tenant,
+        bot_user=bot_user,
+        status=BookingRequest.Status.CONFIRMED,
+        visit_at__gte=now,
+    ).order_by("visit_at")
+    next_row = next_qs.first()
+
+    next_booking: dict[str, Any] | None = None
+    if next_row is not None and next_row.visit_at is not None:
+        next_booking = {
+            "date_human": _format_visit_human(next_row.visit_at, tz, now=now),
+            "service_name": next_row.service_name,
+            "duration_min": next_row.duration_min or 0,
+            "master_name": next_row.master_name,
+            "salon_name": tenant.name,
+            # No address field on Tenant — graceful empty per docstring.
+            "address": "",
+            "booking_id": str(next_row.id),
+        }
+
+    # ── this-week CONFIRMED count (Mon 00:00 … next Mon, customer TZ) ────
+    local_now = now.astimezone(tz)
+    week_start_local = (local_now - timedelta(days=local_now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    week_end_local = week_start_local + timedelta(days=7)
+    this_week_count = BookingRequest.all_tenants.filter(
+        tenant=tenant,
+        bot_user=bot_user,
+        status=BookingRequest.Status.CONFIRMED,
+        visit_at__gte=week_start_local,
+        visit_at__lt=week_end_local,
+    ).count()
+
+    payload: dict[str, Any] = {
+        "this_week_booking_count": this_week_count,
+        # Nutrition rollup deferred — see docstring. Zeros keep Block 6
+        # hidden (gated on active_days_count >= 3).
+        "weekly_progress": {
+            "water_days_logged": 0,
+            "food_days_logged": 0,
+            "active_days_count": 0,
+        },
+    }
+    if next_booking is not None:
+        payload["next_booking"] = next_booking
+
+    return JsonResponse(payload)
