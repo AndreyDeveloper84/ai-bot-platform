@@ -554,7 +554,7 @@ Attention cards should be actionable, not scary.
 Good:
 
 ```text
-Есть пересечение по времени. Открой, чтобы выбрать действие.
+Есть пересечение по времени. Откройте, чтобы выбрать действие.
 ```
 
 Bad:
@@ -1015,7 +1015,7 @@ CTA:
 If slot was free when user opened screen but became busy before saving:
 
 ```text
-Это время уже занято. Выбери другое свободное окно.
+Это время уже занято. Выберите другое свободное окно.
 ```
 
 Server must reject stale booking creation.
@@ -1044,7 +1044,7 @@ Do not allow by default.
 Copy:
 
 ```text
-Это время занято записью. Сначала открой запись и выбери действие.
+Это время занято записью. Сначала откройте запись и выберите действие.
 ```
 
 ---
@@ -1068,7 +1068,7 @@ If external calendar/YClients changes schedule:
 ```text
 Расписание обновилось из внешней системы.
 
-Проверь изменения перед новыми записями.
+Проверьте изменения перед новыми записями.
 ```
 
 MVP can show read-only conflict banner if integration conflict handling is not ready.
@@ -1588,4 +1588,6 @@ Recommended sequence:
 
 ## Last verified
 
-2026-05-29 — Canonicalized by Tau from Codex `provider-calendar-schedule-flow.smart-landing-updated.md`. Voice/canon verified: sage-green + Manrope + Lucide per `design-tokens.md`; «ты» register; manual booking attribution `human_direct` per `attribution-extensible-model`; slot freshness re-checked server-side (frontend availability is preview only); sick-day/day-off never reveal reason to customer (neutral Ayla framing); impacted-bookings queue instead of instant mass-cancel; Smart Landing / template schedule prefill requires review before go-live.
+2026-05-29 — Canonicalized by Tau from Codex `provider-calendar-schedule-flow.smart-landing-updated.md`. Voice/canon verified: sage-green + Manrope + Lucide per `design-tokens.md`; **two-axis register (founder verdict 2026-05-29): provider-facing UI copy = «вы», customer-facing Ayla quotes = «ты»**; manual booking attribution `human_direct` per `attribution-extensible-model`; slot freshness re-checked server-side (frontend availability is preview only); sick-day/day-off never reveal reason to customer (neutral Ayla framing); impacted-bookings queue instead of instant mass-cancel; Smart Landing / template schedule prefill requires review before go-live.
+
+Register sweep 2026-05-29: provider attention/error copy → «вы» («Откройте, чтобы выбрать действие» / «Выберите другое свободное окно» / «Проверьте изменения»).
