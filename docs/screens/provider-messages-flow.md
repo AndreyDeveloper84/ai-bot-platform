@@ -209,7 +209,7 @@ Provider-side видит сообщение и может быстро отве�
 Customer-facing ответ от Ayla:
 
 ```text
-Анна, вход со стороны парковки. Я передала уточнение, вас ждут.
+Анна, вход со стороны парковки. Я передала уточнение, тебя ждут.
 ```
 
 ---
@@ -678,7 +678,7 @@ UI label:
 Ayla preview:
 
 ```text
-Анна, вас ждут. Если задержка будет больше 10 минут, я помогу подобрать другое время.
+Анна, тебя ждут. Если задержка будет больше 10 минут, я помогу подобрать другое время.
 ```
 
 Провайдер нажимает:
@@ -710,7 +710,7 @@ Ayla preview:
 #### Клиент опаздывает
 
 ```text
-Спасибо, передала. Вас ждут.
+Спасибо, передала. Тебя ждут.
 ```
 
 #### Как найти вход
@@ -796,7 +796,7 @@ Ayla preview:
 ### Customer-facing copy
 
 ```text
-Анна, спасибо, я передала. Вас ждут.
+Анна, спасибо, я передала. Тебя ждут.
 ```
 
 ---
@@ -1275,7 +1275,7 @@ Low-risk:
 клиент опаздывает
 как найти вход
 простая подготовка
-“да, вас ждут”
+“да, тебя ждут”
 ```
 
 Передавать администратору:
@@ -1375,7 +1375,7 @@ Post-MVP можно добавить полный inbox/history.
 Ayla может упоминать мастера/салон внутри текста, если это полезно:
 
 ```text
-Ольга вас ждёт.
+Ольга тебя ждёт.
 В салоне знают, что вы задерживаетесь.
 ```
 
@@ -1671,4 +1671,6 @@ docs/runbooks/solo-provider-bootstrap.md
 
 ## Last verified
 
-2026-05-29 — Canonicalized by Tau from Codex `provider-messages-flow.md`. Voice/canon verified: Ayla-mediated messaging (клиент → Ayla → провайдер, NEVER прямой чат) per `ayla-mediated-messaging.md`; message vs Booking Engine workflow split (eligible reschedule = lifecycle event, NOT approval bottleneck); Ayla = sender identity, master mentioned within text NOT as «Ольга:» (per `ayla-personal-ai` brand co-presence); anti-medical safety gate (no «массаж поможет/лечит», recommend specialist consult); Q12-α billing chain checks before auto-reschedule; sage-green + Manrope + Lucide.
+2026-05-29 — Canonicalized by Tau from Codex `provider-messages-flow.md`. Voice/canon verified: Ayla-mediated messaging (клиент → Ayla → провайдер, NEVER прямой чат) per `ayla-mediated-messaging.md`; message vs Booking Engine workflow split (eligible reschedule = lifecycle event, NOT approval bottleneck); Ayla = sender identity, master mentioned within text NOT as «Ольга:» (per `ayla-personal-ai` brand co-presence); anti-medical safety gate (no «массаж поможет/лечит», recommend specialist consult); Q12-α billing chain checks before auto-reschedule; sage-green + Manrope + Lucide. **Two-axis register (founder verdict 2026-05-29): provider-facing UI copy = «вы», customer-facing Ayla quotes = «ты».**
+
+Register sweep 2026-05-29: customer-facing Ayla reply examples «вас ждут» → «тебя ждут» (6 quotes) to enforce customer «ты» canon; provider-facing copy already «вы».

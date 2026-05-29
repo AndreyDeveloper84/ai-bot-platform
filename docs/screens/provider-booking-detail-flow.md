@@ -872,7 +872,7 @@ No blank screen.
 ```text
 Запись не найдена.
 
-Возможно, она была удалена или у тебя нет доступа.
+Возможно, она была удалена или у вас нет доступа.
 ```
 
 CTA:
@@ -932,7 +932,7 @@ Actions must update after refetch.
 ```text
 Не получилось обновить запись.
 
-Попробуй ещё раз или передай администратору.
+Попробуйте ещё раз или передайте администратору.
 ```
 
 CTA:
@@ -1321,7 +1321,7 @@ POST /api/v1/provider/bookings/{booking_id}/reveal-phone
 
 ```json
 {
-  "message": "Анна, спасибо, я учту задержку. Жду вас.",
+  "message": "Анна, спасибо, я учту задержку. Жду тебя.",
   "source": "provider_composed",
   "booking_id": "uuid"
 }
@@ -1519,4 +1519,6 @@ Recommended sequence:
 
 ## Last verified
 
-2026-05-29 — Canonicalized by Tau from Codex `provider-booking-detail-flow.updated.md`. Voice/canon verified: sage-green + Manrope + Lucide per `design-tokens.md`; «ты» register; Ayla-mediated messaging (NOT direct chat); status vocabulary aligned with `customer-records-flow.md` («Не состоялась» / «Отменена салоном» / «Оплата не подтверждена»); B11 review-prompt eligibility chain + blockers respected; solo-provider one-BotUser model per ADR-0008. Ayla auto-reschedule = booking lifecycle event, not approval request (Q-PBD-7 LOCKED).
+2026-05-29 — Canonicalized by Tau from Codex `provider-booking-detail-flow.updated.md`. Voice/canon verified: sage-green + Manrope + Lucide per `design-tokens.md`; **two-axis register (founder verdict 2026-05-29): provider-facing UI copy = «вы», customer-facing Ayla quotes = «ты»**; Ayla-mediated messaging (NOT direct chat); status vocabulary aligned with `customer-records-flow.md` («Не состоялась» / «Отменена салоном» / «Оплата не подтверждена»); B11 review-prompt eligibility chain + blockers respected; solo-provider one-BotUser model per ADR-0008. Ayla auto-reschedule = booking lifecycle event, not approval request (Q-PBD-7 LOCKED).
+
+Register sweep 2026-05-29: provider error/empty-state copy → «вы» (S2 «у вас нет доступа», S6 «Попробуйте… передайте»); customer-facing reply example «Жду тебя» → «ты» per customer canon.
