@@ -196,3 +196,75 @@ class TestEmissionExactlyOnce:
 
         metrics = await sync_to_async(_metrics_for)(result.trace_id)
         assert len(metrics) == 1
+
+
+class TestEmissionTraceIdFallback:
+    """Tier-A #3 adversarial CR CRIT-2 (2026-05-31) — non-UUID trace_id
+    correlation."""
+
+    async def test_non_uuid_trace_id_uses_deterministic_uuid5(self, tenant):
+        # Channels MAY set arbitrary trace_id strings (legacy adapters,
+        # test fixtures with custom IDs). The helper MUST NOT fabricate
+        # a random uuid4 — same trace_id string MUST always produce the
+        # same UUID so log↔metric correlation works.
+        import uuid as _uuid
+
+        non_uuid_trace = "max-update-123-456"
+        msg = ChannelMessage(
+            tenant_slug="qmetric-test",
+            channel="max",
+            channel_user_id="qm-uid-fb",
+            chat_id="qm-chat-fb",
+            text="посоветуйте ибупрофен",  # BLOCK path → emits
+            trace_id=non_uuid_trace,
+        )
+        result = await turn(msg)
+        assert result.short_circuited_at_step == 8
+
+        # Compute the expected deterministic UUID the helper should produce.
+        expected_uuid = _uuid.uuid5(_uuid.NAMESPACE_DNS, non_uuid_trace)
+        from apps.observability.models import AIRequestMetric as _ARM
+
+        metrics = await sync_to_async(
+            lambda: list(_ARM.all_tenants.filter(request_id=expected_uuid))
+        )()
+        assert len(metrics) == 1
+        assert str(metrics[0].request_id) == str(expected_uuid)
+
+    async def test_same_non_uuid_trace_yields_same_uuid_twice(self, tenant):
+        # Determinism check: two turns with the same non-UUID trace_id
+        # produce metrics whose request_id matches across runs (modulo
+        # the unique constraint preventing one trace_id from having
+        # multiple AIRequestMetric rows is NOT enforced — only by
+        # business invariant «one metric per turn». So we verify the
+        # UUIDs match, not the row count.
+        import uuid as _uuid
+
+        non_uuid_trace = "telegram-abc-xyz"
+        msg_a = ChannelMessage(
+            tenant_slug="qmetric-test",
+            channel="max",
+            channel_user_id="qm-fb2-a",
+            chat_id="qm-fb2-a",
+            text="посоветуйте парацетамол",
+            trace_id=non_uuid_trace,
+        )
+        msg_b = ChannelMessage(
+            tenant_slug="qmetric-test",
+            channel="max",
+            channel_user_id="qm-fb2-b",
+            chat_id="qm-fb2-b",
+            text="посоветуйте парацетамол",
+            trace_id=non_uuid_trace,
+        )
+        await turn(msg_a)
+        await turn(msg_b)
+
+        expected_uuid = _uuid.uuid5(_uuid.NAMESPACE_DNS, non_uuid_trace)
+        from apps.observability.models import AIRequestMetric as _ARM
+
+        count = await sync_to_async(
+            lambda: _ARM.all_tenants.filter(request_id=expected_uuid).count()
+        )()
+        # Both turns map к the same deterministic UUID — two rows expected.
+        assert count == 2

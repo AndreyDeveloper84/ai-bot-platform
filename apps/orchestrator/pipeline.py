@@ -244,7 +244,32 @@ def _safe_emit_ai_request_metric(
         try:
             request_uuid = uuid.UUID(trace_id)
         except (ValueError, TypeError, AttributeError):
-            request_uuid = uuid.uuid4()
+            # Tier-A #3 adversarial CRIT-2 (2026-05-31) — preserve
+            # correlation between log lines (which carry the raw
+            # ``trace_id`` string) and the ``AIRequestMetric.request_id``
+            # column (UUID). A random ``uuid4()`` would silently
+            # disconnect ops grep paths: searching logs for trace_id X
+            # would find the WARN line but no metric row.
+            #
+            # Use ``uuid5(NAMESPACE_DNS, trace_id)`` so the same string
+            # trace_id always hashes to the same UUID. The fallback is
+            # deterministic and reversible enough that ops can derive
+            # the metric UUID from the trace_id string when forensic-
+            # tracing an incident.
+            #
+            # WARN loudly — any non-UUID trace_id is an upstream channel-
+            # adapter contract violation that should be fixed at the
+            # ingress (apps/channels/<channel>/inbound.py) by setting a
+            # proper UUID7 / UUID4 string.
+            logger.warning(
+                "pipeline.ai_metric_trace_id_not_uuid trace_id=%r outcome=%s — "
+                "using deterministic uuid5 fallback (fix upstream channel adapter)",
+                trace_id,
+                outcome,
+            )
+            request_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, str(trace_id) if trace_id else "pipeline-no-trace"
+            )
 
         intent_label = ""
         intent_confidence: float | None = None

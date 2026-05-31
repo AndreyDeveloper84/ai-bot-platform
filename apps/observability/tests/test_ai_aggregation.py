@@ -488,16 +488,27 @@ class TestImplicitFeedbackSignals:
     def test_abandoned_topic_NOT_detected_when_engagement_after(
         self, tenant, bot_user, conversation
     ):
-        """If user sent any message AFTER the AI metric, topic не abandoned."""
+        """If user sent any Message AFTER the AI metric, topic не abandoned.
+
+        H1 fix (PR #924 adversarial) — detector now checks actual
+        ``Message`` rows (role="user") instead of the stale
+        ``Conversation.last_message_at`` field which the orchestrator
+        pipeline never bumps.
+        """
+        from apps.conversations.models import Message
         from apps.observability.models import ImplicitFeedbackSignal
 
         old_when = datetime.now(timezone.utc) - timedelta(hours=48)
         _metric(tenant, bot_user, conversation, created_at=old_when)
-        # User engaged 1h after AI metric.
-        Conversation.all_tenants.filter(pk=conversation.pk).update(
-            last_message_at=old_when + timedelta(hours=1),
-            last_booking_at=None,
+        # User engaged 1h after AI metric — create a real Message row.
+        msg = Message.all_tenants.create(
+            tenant=tenant,
+            conversation=conversation,
+            role="user",
+            content="follow-up",
         )
+        Message.all_tenants.filter(pk=msg.pk).update(created_at=old_when + timedelta(hours=1))
+
         aggregate_daily_metrics(old_when.date(), tenant)
         signals = ImplicitFeedbackSignal.all_tenants.filter(
             signal_type=ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC
@@ -578,9 +589,17 @@ class TestImplicitFeedbackSignals:
         )
         # No signals в tenant B: metric had engagement + no booking.
         m_other = _metric(tenant_other, other_bu, other_conv)
-        # Force last_message_at AFTER metric to avoid abandoned signal.
-        Conversation.all_tenants.filter(pk=other_conv.pk).update(
-            last_message_at=m_other.created_at + timedelta(minutes=5),
+        # H1 fix: engagement is now ground-truthed against Message rows.
+        from apps.conversations.models import Message
+
+        engage_msg = Message.all_tenants.create(
+            tenant=tenant_other,
+            conversation=other_conv,
+            role="user",
+            content="engaged",
+        )
+        Message.all_tenants.filter(pk=engage_msg.pk).update(
+            created_at=m_other.created_at + timedelta(minutes=5),
         )
 
         s_a = aggregate_daily_metrics(YESTERDAY, tenant)
@@ -605,3 +624,65 @@ class TestImplicitFeedbackSignals:
         )
         aggregate_daily_metrics(YESTERDAY, tenant)
         assert ImplicitFeedbackSignal.all_tenants.filter(tenant=tenant).count() == 0
+
+    # ─── H1 + H2 regression tests (PR #924 adversarial) ─────────────────
+
+    def test_abandoned_topic_uses_message_rows_not_last_message_at(
+        self, tenant, bot_user, conversation
+    ):
+        """H1 regression — orchestrator pipeline never bumps
+        ``Conversation.last_message_at``, but writes real Message rows.
+        Setting ``last_message_at`` AFTER metric MUST NOT suppress the
+        signal — only a real Message row after metric does.
+
+        Pre-fix bug: this test would have FAILED (signal suppressed by
+        stale last_message_at value). Post-fix: signal still fires
+        because no Message row exists past metric.created_at.
+        """
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        old_when = datetime.now(timezone.utc) - timedelta(hours=48)
+        _metric(tenant, bot_user, conversation, created_at=old_when)
+        # Set last_message_at AFTER metric to simulate the bug condition.
+        # H1 says: this MUST be ignored — engagement is Message-row truth.
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_message_at=old_when + timedelta(hours=1),
+            last_booking_at=None,
+        )
+        # No Message rows created → user did NOT engage in reality.
+        aggregate_daily_metrics(old_when.date(), tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC
+        )
+        assert signals.count() == 1, (
+            "H1 regression: signal MUST fire because no real Message row "
+            "exists past metric.created_at, regardless of stale last_message_at."
+        )
+
+    def test_cancellation_NOT_detected_on_idle_close_without_deleted_at(
+        self, tenant, bot_user, conversation
+    ):
+        """H2 regression — admin / idle-cleanup close flips
+        ``is_active=False`` WITHOUT setting ``deleted_at``. Pre-fix this
+        triggered a false-positive cancellation signal. Post-fix the
+        signal MUST NOT fire — only ``deleted_at IS NOT NULL`` (real
+        soft-delete via ``mark_deleted``) qualifies during pilot.
+        """
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        metric = _metric(tenant, bot_user, conversation)
+        booking_at = metric.created_at + timedelta(hours=1)
+        # Simulate admin idle-cleanup: is_active=False but deleted_at=None.
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_booking_at=booking_at,
+            is_active=False,
+            deleted_at=None,
+        )
+        aggregate_daily_metrics(YESTERDAY, tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION
+        )
+        assert signals.count() == 0, (
+            "H2 regression: idle-close (deleted_at=None) MUST NOT fire "
+            "cancellation signal — only user-initiated soft-delete qualifies."
+        )

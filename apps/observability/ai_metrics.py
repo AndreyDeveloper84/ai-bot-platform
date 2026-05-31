@@ -167,7 +167,7 @@ from datetime import (  # noqa: E402
     timezone as _stdlib_tz,
 )
 
-from django.db import transaction  # noqa: E402
+from django.db import IntegrityError, transaction  # noqa: E402
 from django.utils import timezone as _django_tz  # noqa: E402
 
 from apps.observability.models import AIDailyMetricSummary  # noqa: E402
@@ -276,6 +276,31 @@ ABANDONED_TOPIC_THRESHOLD = timedelta(hours=24)
 REPEAT_INTERACTION_WINDOW = timedelta(hours=24)
 
 
+def _idempotent_signal_get_or_create(*, defaults: dict, **lookup) -> tuple[Any, bool]:
+    """H3 fix (PR #924 adversarial) — `get_or_create` wrapped in a nested
+    savepoint так IntegrityError from a concurrent inserter (parallel
+    Celery beat / DAG misconfigure) does NOT poison the surrounding
+    ``aggregate_daily_metrics`` ``transaction.atomic()``.
+
+    Django's plain ``Model.objects.get_or_create`` catches IntegrityError
+    internally and re-SELECTs, but the catch happens AFTER the outer txn
+    is marked aborted in PostgreSQL. Wrapping the call in a nested
+    ``transaction.atomic()`` opens a savepoint that can be rolled back
+    independently — the outer txn survives, we re-fetch via lookup, and
+    the duplicate row is the one the parallel worker just wrote.
+    """
+    from apps.observability.models import ImplicitFeedbackSignal
+
+    try:
+        with transaction.atomic():
+            return ImplicitFeedbackSignal.all_tenants.get_or_create(defaults=defaults, **lookup)
+    except IntegrityError:
+        # Concurrent inserter won the race — re-SELECT and report
+        # `created=False` so callers do not double-count.
+        existing = ImplicitFeedbackSignal.all_tenants.filter(**lookup).first()
+        return existing, False
+
+
 def _detect_implicit_signals(target_date: _date, tenant) -> dict[str, int]:
     """Walk AIRequestMetric rows + insert ImplicitFeedbackSignal rows.
 
@@ -346,29 +371,49 @@ def _detect_implicit_signals(target_date: _date, tenant) -> dict[str, int]:
         gap_to_booking = conv.last_booking_at - metric.created_at
         if not (timedelta(0) <= gap_to_booking <= CANCELLATION_DETECTION_WINDOW):
             continue
-        # Booking happened in-window. Now check cancellation indicator —
-        # re-fetch conversation для current deleted_at + is_active state
-        # (read after correlation step bumps `last_booking_at`).
+        # Booking happened in-window. Re-fetch conversation для current
+        # deleted_at state (read after correlation step bumps `last_booking_at`).
         fresh = (
-            ConvModel.all_tenants.filter(pk=conv.pk)
-            .only("deleted_at", "is_active", "last_booking_at")
-            .first()
+            ConvModel.all_tenants.filter(pk=conv.pk).only("deleted_at", "last_booking_at").first()
         )
         if fresh is None:
             continue
-        # Cancellation signal: conversation went inactive / soft-deleted
-        # within 24h of the booking moment.
-        if fresh.deleted_at is None and fresh.is_active:
+        # H2 fix (PR #924 adversarial) — require ``deleted_at IS NOT NULL``
+        # as the pilot heuristic. The earlier `is_active=False OR deleted_at`
+        # gate fired false positives for any conversation that became
+        # inactive (admin close / idle-cleanup sweep / explicit
+        # close_conversation), conflating «user cancelled after AI
+        # suggestion» with «conversation simply closed for any reason».
+        #
+        # `Conversation.mark_deleted()` sets BOTH `is_active=False` AND
+        # `deleted_at=now()`. Conversely, the idle-cleanup sweep and
+        # `close_conversation()` only flip `is_active=False` without
+        # touching `deleted_at`. So gating strictly on `deleted_at IS
+        # NOT NULL` selects user-initiated soft-delete (the forget-flow
+        # signal proxy we want) and ignores ops-side housekeeping.
+        #
+        # Post-pilot upgrade: switch to `RemoteBookingProxy.cancelled_at`
+        # как proper cancellation signal once Gamma's booking event
+        # consumer wires it up. Documented в ADR-0011 §9.2.
+        if fresh.deleted_at is None:
             continue
-        cancellation_at = fresh.deleted_at or now
+        cancellation_at = fresh.deleted_at
         gap_to_cancel = cancellation_at - conv.last_booking_at
         if not (timedelta(0) <= gap_to_cancel <= CANCELLATION_DETECTION_WINDOW):
             continue
-        _, created = ImplicitFeedbackSignal.all_tenants.get_or_create(
+        # Tier-A #3 adversarial CR MED-14 (2026-05-31) — ``tenant`` lives
+        # in the LOOKUP kwargs (not ``defaults``) so a misconfigured row
+        # with the wrong tenant cannot satisfy this get-side and silently
+        # claim ``created=False``. The DB unique constraint is on
+        # ``(ai_request_metric, signal_type)``; including tenant in lookup
+        # makes the SELECT specific so cross-tenant inconsistency surfaces
+        # as IntegrityError → savepoint rollback → re-SELECT returns None,
+        # which the caller treats as «no-op».
+        _, created = _idempotent_signal_get_or_create(
             ai_request_metric_id=metric.id,
             signal_type=ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION,
+            tenant=tenant,
             defaults={
-                "tenant": tenant,
                 "conversation_id": conv.id,
                 "payload": {
                     "booked_at": conv.last_booking_at.isoformat(),
@@ -382,13 +427,28 @@ def _detect_implicit_signals(target_date: _date, tenant) -> dict[str, int]:
             counts[ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION] += 1
 
     # ─── Signal 2: abandoned_topic ───────────────────────────────────
-    # Detection: metric created_at + 24h < now AND no booking AND
-    # conversation.last_message_at unchanged from before metric.created_at
-    # (no further engagement after the AI message).
+    # Detection: metric.created_at + 24h has passed AND no booking AND
+    # NO user-side `Message` row exists with created_at > metric.created_at.
     #
-    # Heuristic — if `last_message_at >= metric.created_at` (any new
-    # message after the AI nudge), user engaged → NOT abandoned. If
-    # equal или strictly less, и idle window passed, abandoned.
+    # H1 fix (PR #924 adversarial) — the previous implementation relied
+    # on `Conversation.last_message_at`, but the orchestrator pipeline
+    # path (`apps/orchestrator/pipeline.py::_save_user_message` /
+    # `_save_assistant`) writes Message rows directly с `.objects.create()`
+    # and never bumps `Conversation.last_message_at`. That field is only
+    # maintained by `apps/conversations/services.py::record_message`,
+    # which the orchestrator does NOT call. Result: every pipeline-served
+    # conversation had `last_message_at=None` indefinitely, so the
+    # «engagement happened after metric» short-circuit could never fire
+    # — every metric for a booking-less conversation got flagged abandoned.
+    #
+    # Now: query `Message.all_tenants.filter(conversation=conv,
+    # created_at__gt=metric.created_at, role="user").exists()`. This
+    # reads ground-truth from the canonical Message rows, regardless of
+    # which writer path put them there. `role="user"` scopes к user-side
+    # engagement only — assistant follow-ups cannot count as engagement
+    # by themselves.
+    from apps.conversations.models import Message  # noqa: PLC0415 — late import avoids cycle at module load
+
     for metric in candidate_metrics:
         conv = metric.conversation
         if conv is None:
@@ -400,19 +460,23 @@ def _detect_implicit_signals(target_date: _date, tenant) -> dict[str, int]:
         if (now - metric.created_at) < ABANDONED_TOPIC_THRESHOLD:
             # Idle window not yet elapsed — re-check on next daily run.
             continue
-        last_msg_at = getattr(conv, "last_message_at", None)
-        # Engagement check: any message landed AFTER the metric.
-        if last_msg_at is not None and last_msg_at > metric.created_at:
+        # H1: ground-truth engagement check against actual Message rows.
+        user_engaged_after = Message.all_tenants.filter(
+            conversation_id=conv.id,
+            created_at__gt=metric.created_at,
+            role="user",
+        ).exists()
+        if user_engaged_after:
             continue
-        _, created = ImplicitFeedbackSignal.all_tenants.get_or_create(
+        # MED-14: tenant in LOOKUP (see signal 1 comment above).
+        _, created = _idempotent_signal_get_or_create(
             ai_request_metric_id=metric.id,
             signal_type=ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC,
+            tenant=tenant,
             defaults={
-                "tenant": tenant,
                 "conversation_id": conv.id,
                 "payload": {
                     "idle_seconds": int((now - metric.created_at).total_seconds()),
-                    "last_message_at": (last_msg_at.isoformat() if last_msg_at else None),
                 },
             },
         )
@@ -446,11 +510,12 @@ def _detect_implicit_signals(target_date: _date, tenant) -> dict[str, int]:
             if (current.created_at - prev.created_at) > REPEAT_INTERACTION_WINDOW:
                 prev = current
                 continue
-            _, created = ImplicitFeedbackSignal.all_tenants.get_or_create(
+            # MED-14: tenant in LOOKUP (see signal 1 comment above).
+            _, created = _idempotent_signal_get_or_create(
                 ai_request_metric_id=current.id,
                 signal_type=ImplicitFeedbackSignal.SIGNAL_REPEAT_INTERACTION,
+                tenant=tenant,
                 defaults={
-                    "tenant": tenant,
                     "conversation_id": current.conversation_id,
                     "payload": {
                         "skill": current.skill_selected,
