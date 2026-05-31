@@ -248,6 +248,29 @@ Concretely: `apps/identity/services/red_zone_reader.py::RedZoneReader.read()` MU
 
 This carve-out ships in `#230`'s scope per §13.9.
 
+### 9.2 Operational analytics carve-out — `AIRequestMetric` + `ImplicitFeedbackSignal`
+
+The AI observability layer (`apps/observability/`) records two row types that are **outside the green / yellow / red zone classification of this ADR**: `AIRequestMetric` (one row per pipeline turn, captured at every terminal return per Tier-A #4 + #3 bundle) and `ImplicitFeedbackSignal` (one row per detected behaviour pattern — cancellation_after_suggestion, abandoned_topic, repeat_interaction).
+
+Both row types are **operational analytics**, not User Personal Context (UPC) memory. They do not store user-stated facts, personal preferences, or inferred personal context. The fields captured are restricted to:
+
+| Field family | Examples |
+|---|---|
+| Taxonomies / labels | `intent_classified` ("faq"), `skill_selected` ("booking"), `outcome` ("success"/"error"/"fallback"/"escalated"), `signal_type` ("abandoned_topic") |
+| Counts / sizes | `message_text_length` (int — character count, NOT the text), `llm_tokens_input`/`llm_tokens_output` |
+| Wall-clock + timestamps | `latency_total_ms`, `recorded_at`, `created_at`, `last_booking_at`, `last_message_at` |
+| Floats | `intent_confidence` (0..1), `llm_cost_usd` |
+| Booleans | `fallback_triggered` |
+| Foreign keys | `tenant`, `bot_user`, `conversation`, `ai_request_metric` (PROTECT) |
+
+**Raw user text is NEVER written.** The pipeline emission helper `_safe_emit_ai_request_metric` (`apps/orchestrator/pipeline.py`) and the signal detector `_detect_implicit_signals` (`apps/observability/ai_metrics.py`) only read taxonomies + timestamps + counts off `IntentDecision` / `SkillResult` / `Conversation`. Neither path dereferences `Message.text`, `Message.body`, or any other content-carrying field.
+
+**Why this matters for §9:** operational analytics rows are per-tenant by FK (`tenant` PROTECT) and never traverse a tenant boundary. The §9 boundary rules for green / yellow / red zones do not apply because the rows are not UPC entries. The §10 minor-protection rules also do not apply for the same reason — no fact is stored that could disclose anything about the user beyond «one AI turn happened, classified as X intent, took Y ms».
+
+**Retention:** AI observability rows follow operational retention (90 days for `AIRequestMetric` raw rows, indefinite for `AIDailyMetricSummary` aggregate counts) defined in the W4 #816 epic — not the §5 per-zone schedule. If retention needs ever diverge from this operational baseline (e.g. a regulator requires a shorter ceiling) that change lands as an amendment to W4's epic, not to this ADR.
+
+**Privacy compliance restatement (152-ФЗ):** because no PII / no special-category data is recorded, processing basis is «service-contract» (analogous to green-zone basis in §4.1) and `consent_at` is N/A. The carve-out is consistent with the [Federal Law 152-ФЗ §6.1.5 «legitimate interest of the operator»] rationale for operational telemetry.
+
 ---
 
 ## 10. Minor protections (users <18)
