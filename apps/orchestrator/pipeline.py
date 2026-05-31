@@ -51,6 +51,7 @@ sub-budget — covered by G4 latency SLO test (DRF-553).
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -59,6 +60,8 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
+from apps.observability.ai_metrics import record_ai_request
+from apps.observability.models import AIRequestMetric
 from apps.orchestrator.composer import ComposedReply, compose
 from apps.orchestrator.intent_router import IntentDecision, classify
 from apps.orchestrator.memory.coordinator import MemorySnapshot, load_snapshot
@@ -208,6 +211,103 @@ def _confidence_floor_reason(skill_result: Any) -> str:
     return f"pipeline_confidence_floor(confidence={confidence:.2f}, threshold={threshold_f:.2f})"
 
 
+def _safe_emit_ai_request_metric(
+    *,
+    tenant: Tenant,
+    trace_id: str,
+    t_start: float,
+    message_text_length: int,
+    outcome: str,
+    bot_user: Any = None,
+    conversation: Any = None,
+    intent_decision: Any = None,
+    skill_result: Any = None,
+    fallback_triggered: bool = False,
+) -> None:
+    """Tier-A #3 Q6 BUNDLE (founder + tech-lead 2026-05-29) — emit one
+    ``AIRequestMetric`` row per pipeline turn at every terminal return.
+
+    Wraps :func:`record_ai_request` in a broad ``try/except``: observability
+    emission MUST NOT crash the user-facing pipeline. A failure here logs
+    WARN with ``trace_id`` + ``outcome`` so ops can correlate later.
+
+    ``intent_decision`` and ``skill_result`` are best-effort enrichment:
+    callers at early returns (BLOCK / CLARIFY / pre-skill HANDOFF) pass
+    only ``intent_decision``; post-skill paths pass both so ``skill_selected``
+    prefers ``skill_result.meta['skill']`` over the classifier's hint.
+
+    All keyword-only so call sites self-document at the 8+ terminal returns.
+    """
+    try:
+        latency_total_ms = int((time.monotonic() - t_start) * 1000)
+
+        try:
+            request_uuid = uuid.UUID(trace_id)
+        except (ValueError, TypeError, AttributeError):
+            # Tier-A #3 adversarial CRIT-2 (2026-05-31) — preserve
+            # correlation between log lines (which carry the raw
+            # ``trace_id`` string) and the ``AIRequestMetric.request_id``
+            # column (UUID). A random ``uuid4()`` would silently
+            # disconnect ops grep paths: searching logs for trace_id X
+            # would find the WARN line but no metric row.
+            #
+            # Use ``uuid5(NAMESPACE_DNS, trace_id)`` so the same string
+            # trace_id always hashes to the same UUID. The fallback is
+            # deterministic and reversible enough that ops can derive
+            # the metric UUID from the trace_id string when forensic-
+            # tracing an incident.
+            #
+            # WARN loudly — any non-UUID trace_id is an upstream channel-
+            # adapter contract violation that should be fixed at the
+            # ingress (apps/channels/<channel>/inbound.py) by setting a
+            # proper UUID7 / UUID4 string.
+            logger.warning(
+                "pipeline.ai_metric_trace_id_not_uuid trace_id=%r outcome=%s — "
+                "using deterministic uuid5 fallback (fix upstream channel adapter)",
+                trace_id,
+                outcome,
+            )
+            request_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, str(trace_id) if trace_id else "pipeline-no-trace"
+            )
+
+        intent_label = ""
+        intent_confidence: float | None = None
+        skill_label = ""
+        if intent_decision is not None:
+            intent_label = getattr(intent_decision, "intent", "") or ""
+            raw_conf = getattr(intent_decision, "confidence", None)
+            if isinstance(raw_conf, (int, float)):
+                intent_confidence = float(raw_conf)
+            skill_label = getattr(intent_decision, "skill", "") or ""
+        if skill_result is not None:
+            meta = getattr(skill_result, "meta", {}) or {}
+            skill_label = (
+                meta.get("skill") or getattr(skill_result, "action_type", "") or skill_label
+            )
+
+        record_ai_request(
+            tenant=tenant,
+            bot_user=bot_user,
+            conversation=conversation,
+            request_id=request_uuid,
+            message_text_length=message_text_length,
+            intent_classified=intent_label,
+            intent_confidence=intent_confidence,
+            skill_selected=skill_label,
+            fallback_triggered=fallback_triggered,
+            latency_total_ms=latency_total_ms,
+            outcome=outcome,
+        )
+    except Exception as emit_exc:  # noqa: BLE001 — observability never crashes the turn
+        logger.warning(
+            "pipeline.ai_metric_emit_failed trace_id=%s outcome=%s err=%s",
+            trace_id,
+            outcome,
+            emit_exc,
+        )
+
+
 # Phase 1 / PI9 (DRF-860) — daily LLM cost-cap exhausted. Static Russian
 # fallback served when apps.llm.cost_tracker.TenantQuotaExceeded bubbles
 # up from any LLM call site inside the turn. The audit row pinpoints
@@ -316,6 +416,16 @@ async def turn(message: ChannelMessage) -> TurnResult:
     """
 
     trace_id = message.trace_id or str(uuid.uuid4())
+    # Tier-A #3 Q6 BUNDLE — wall-clock start captured ONCE at the outermost
+    # turn() entry so every terminal return (8+ short-circuit branches +
+    # outer LLM fallbacks + unhandled-except) reports a coherent
+    # ``latency_total_ms`` against the same baseline.
+    t_start = time.monotonic()
+    message_text_length = len(message.text or "")
+    # Declared up-front so the outer ``except`` can guard ``tenant is not None``
+    # before emitting (a failure in ``_resolve_tenant`` itself would otherwise
+    # leave the name unbound).
+    tenant: Tenant | None = None
 
     with _root_span(message, trace_id) as span:
         try:
@@ -325,6 +435,8 @@ async def turn(message: ChannelMessage) -> TurnResult:
             if tenant is None:
                 if span is not None:
                     span.set_attribute("short_circuit_step", 1)
+                # Cannot emit AIRequestMetric — tenant FK is PROTECT and
+                # unknown_tenant means there is no tenant row to attribute to.
                 return _error_result(trace_id, "unknown_tenant", step=1)
 
             if span is not None:
@@ -335,7 +447,14 @@ async def turn(message: ChannelMessage) -> TurnResult:
             from apps.llm.retry import RetriableLLMError
 
             try:
-                return await _run_under_tenant(message, tenant, trace_id, span=span)
+                return await _run_under_tenant(
+                    message,
+                    tenant,
+                    trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    span=span,
+                )
             except TenantQuotaExceeded as quota_exc:
                 # Phase 1 / PI9 (DRF-860) — graceful fallback when the
                 # per-tenant daily token or cost cap is exhausted. Any
@@ -358,6 +477,14 @@ async def turn(message: ChannelMessage) -> TurnResult:
                     span.set_attribute("tenant_quota_cap", str(getattr(quota_exc, "which_cap", "")))
                 await sync_to_async(_write_quota_fallback_audit, thread_sensitive=False)(
                     trace_id=trace_id, quota_exc=quota_exc
+                )
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                    fallback_triggered=True,
                 )
                 return TurnResult(
                     ok=True,
@@ -392,6 +519,13 @@ async def turn(message: ChannelMessage) -> TurnResult:
                 await sync_to_async(_send_retry_exhausted_alert, thread_sensitive=False)(
                     tenant=tenant, retry_exc=retry_exc
                 )
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    outcome=AIRequestMetric.OUTCOME_ERROR,
+                )
                 return TurnResult(
                     ok=True,
                     trace_id=trace_id,
@@ -412,6 +546,14 @@ async def turn(message: ChannelMessage) -> TurnResult:
             # tenant resolution might have succeeded.
             _sentry_capture_pipeline_error(exc, trace_id, message)
             await sync_to_async(_emit_pipeline_error, thread_sensitive=False)(trace_id, str(exc))
+            if tenant is not None:
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    outcome=AIRequestMetric.OUTCOME_ERROR,
+                )
             return _error_result(trace_id, f"unhandled: {exc}", step=0)
 
 
@@ -420,9 +562,17 @@ async def _run_under_tenant(
     tenant: Tenant,
     trace_id: str,
     *,
+    t_start: float,
+    message_text_length: int,
     span: Any = None,
 ) -> TurnResult:
-    """Steps 2-19. Entered after tenant_scope is established."""
+    """Steps 2-19. Entered after tenant_scope is established.
+
+    ``t_start`` and ``message_text_length`` are threaded in от outermost
+    ``turn()`` so each terminal return calls
+    :func:`_safe_emit_ai_request_metric` against a single coherent timing
+    baseline (Tier-A #3 Q6 BUNDLE).
+    """
 
     # Sprint 8 / S2 (DRF-717) — shadow-mode early decision. Per-message
     # `is_shadow` (from the X-Shadow edge header, N2) OR the per-tenant
@@ -476,6 +626,16 @@ async def _run_under_tenant(
         if pre_result.verdict == SafetyVerdict.BLOCK:
             reply = await sync_to_async(_canned_reply)(_FALLBACK_BLOCK)
             await sync_to_async(_save_assistant)(conversation, reply.text, "block", trace_id)
+            await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                tenant=tenant,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                t_start=t_start,
+                message_text_length=message_text_length,
+                intent_decision=intent_decision,
+                outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            )
             return TurnResult(
                 ok=True,
                 trace_id=trace_id,
@@ -488,6 +648,17 @@ async def _run_under_tenant(
         if pre_result.verdict == SafetyVerdict.CLARIFY:
             reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
             await sync_to_async(_save_assistant)(conversation, reply.text, "clarify", trace_id)
+            await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                tenant=tenant,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                t_start=t_start,
+                message_text_length=message_text_length,
+                intent_decision=intent_decision,
+                outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                fallback_triggered=True,
+            )
             return TurnResult(
                 ok=True,
                 trace_id=trace_id,
@@ -504,6 +675,16 @@ async def _run_under_tenant(
             )
             reply = await sync_to_async(_canned_reply)(_FALLBACK_HANDOFF)
             await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
+            await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                tenant=tenant,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                t_start=t_start,
+                message_text_length=message_text_length,
+                intent_decision=intent_decision,
+                outcome=AIRequestMetric.OUTCOME_ESCALATED,
+            )
             return TurnResult(
                 ok=True,
                 trace_id=trace_id,
@@ -526,6 +707,17 @@ async def _run_under_tenant(
             # No skill matched + no echo fallback hit — pipeline fallback.
             reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
             await sync_to_async(_save_assistant)(conversation, reply.text, "no_skill", trace_id)
+            await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                tenant=tenant,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                t_start=t_start,
+                message_text_length=message_text_length,
+                intent_decision=intent_decision,
+                outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                fallback_triggered=True,
+            )
             return TurnResult(
                 ok=False,
                 trace_id=trace_id,
@@ -572,6 +764,17 @@ async def _run_under_tenant(
             handoff_text = skill_result.reply_text or _FALLBACK_HANDOFF
             reply = await sync_to_async(_canned_reply)(handoff_text)
             await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
+            await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                tenant=tenant,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                t_start=t_start,
+                message_text_length=message_text_length,
+                intent_decision=intent_decision,
+                skill_result=skill_result,
+                outcome=AIRequestMetric.OUTCOME_ESCALATED,
+            )
             return TurnResult(
                 ok=True,
                 trace_id=trace_id,
@@ -650,6 +853,17 @@ async def _run_under_tenant(
             if span is not None:
                 span.set_attribute("outbound_ok", True)
                 span.set_attribute("shadow_dropped_outbound", True)
+            await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                tenant=tenant,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                t_start=t_start,
+                message_text_length=message_text_length,
+                intent_decision=intent_decision,
+                skill_result=skill_result,
+                outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            )
             return TurnResult(
                 ok=True,
                 trace_id=trace_id,
@@ -667,6 +881,19 @@ async def _run_under_tenant(
             if span is not None:
                 span.set_attribute("outbound_ok", bool(outbound_ok))
 
+        await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+            tenant=tenant,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            t_start=t_start,
+            message_text_length=message_text_length,
+            intent_decision=intent_decision,
+            skill_result=skill_result,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS
+            if outbound_ok
+            else AIRequestMetric.OUTCOME_ERROR,
+        )
         return TurnResult(
             ok=outbound_ok,
             trace_id=trace_id,

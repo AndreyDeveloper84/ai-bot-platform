@@ -1,6 +1,6 @@
 """Observability persistence models.
 
-Two models:
+Models:
 
   - :class:`ShadowDeltaSnapshot` (Sprint 8 / S3 / DRF-718) — per-day
     per-tenant agreement metrics from shadow-mode A/B comparison.
@@ -11,6 +11,13 @@ Two models:
     tokens / cost / outcome. Source data for daily aggregation
     (Веха 2 → :class:`AIDailyMetricSummary`) and dashboard
     (Веха 3 → admin view).
+
+  - :class:`ImplicitFeedbackSignal` (Tier-A #3, founder
+    pilot_scope_discipline sequence #6, 2026-05-27) — per-event
+    behavioral signal captured при daily aggregation walk. 3 pilot
+    signals: cancellation_after_suggestion, abandoned_topic,
+    repeat_interaction. NLU-requiring signals (skipped_suggestion,
+    pursued_alternative) deferred к Phase 1.
 """
 
 from __future__ import annotations
@@ -430,6 +437,30 @@ class AIDailyMetricSummary(models.Model):
         help_text="`fallback_count / total_requests`. Drives the < 0.20 threshold.",
     )
 
+    # ─── Implicit feedback signal counts (Tier-A #3, sequence #6) ────────
+    # Per-signal daily counts derived by the aggregation job, sourced
+    # from :class:`ImplicitFeedbackSignal` rows where
+    # ``recorded_at::date == snapshot_date``. Surfaced via dashboard
+    # для quality-trend analysis (founder pilot validation reference).
+    # All default 0 — backward-compat with pre-Tier-A-#3 rows.
+    cancelled_after_suggestion_count = models.IntegerField(
+        default=0,
+        help_text="Count of cancellation_after_suggestion signals — "
+        "bookings created after AI recommendation but cancelled within "
+        "24h. Trend down = AI quality up.",
+    )
+    abandoned_topic_count = models.IntegerField(
+        default=0,
+        help_text="Count of abandoned_topic signals — conversations "
+        "idle >24h after AI message без booking. Trend down = AI "
+        "engagement up.",
+    )
+    repeat_interaction_count = models.IntegerField(
+        default=0,
+        help_text="Count of repeat_interaction signals — same skill "
+        "invoked N+1 within session. Trend up = positive engagement.",
+    )
+
     # ─── Per-intent breakdown ────────────────────────────────────────────
     intent_distribution = models.JSONField(
         default=dict,
@@ -477,3 +508,154 @@ class AIDailyMetricSummary(models.Model):
 
     def __str__(self) -> str:
         return f"AIDailyMetricSummary[{self.tenant_id} @ {self.snapshot_date}]"
+
+
+class ImplicitFeedbackSignal(models.Model):
+    """Per-event behavioral feedback signal (Tier-A #3, sequence #6).
+
+    Captures user-side behavioral patterns that indicate AI quality —
+    «did the suggestion stick» / «did the customer engage». Per memory
+    ``project_ai_concierge_doc_extracts`` Tier-A #3 source list, scoped
+    к 3 deterministic signals для pilot:
+
+    * ``cancellation_after_suggestion`` — booking created after AI
+      recommendation but cancelled within 24h. Tracks recommendation
+      quality.
+    * ``abandoned_topic`` — conversation idle >24h after AI message,
+      no booking created. Signal that recommendation didn't resonate.
+    * ``repeat_interaction`` — same skill invoked N+1 times within a
+      session (per-conversation, time-windowed). Positive signal:
+      customer engaged enough к ask again.
+
+    Plus ``completed_booking_reused`` — explicitly NOT stored as new
+    signal; W4's ``AIRequestMetric.success_correlated_at`` already
+    captures it. The choices list includes it только для documentation
+    completeness (the value will never be inserted by current code).
+
+    NLU-requiring signals (``skipped_suggestion``, ``pursued_alternative``)
+    are Phase 1 follow-up.
+
+    ### Detection
+
+    Daily aggregation beat (`apps.observability.ai_metrics`) extends
+    its existing :func:`_correlate_task_success` walk to ALSO detect
+    these signals from the same AIRequestMetric scan. Single ops
+    surface; one audit row; one failure point.
+
+    ### Privacy compliance
+
+    Signals use METADATA only — booking event timestamps, skill names,
+    conversation timing. NEVER raw user text. PII tokenizer
+    (``apps/llm/pii_protected_provider.py``) wraps OpenAI/Anthropic
+    calls only — orthogonal к signal capture. 152-ФЗ compliant
+    by design per ADR-0011 §9 (analytics data, not PII).
+
+    ### Aggregation
+
+    Per-signal counts roll up daily to :class:`AIDailyMetricSummary`
+    new fields (``cancelled_after_suggestion_count`` etc.). Dashboard
+    consumes those counts; raw rows preserved для drill-down forensics.
+    """
+
+    # Pilot taxonomy. Order locked: deterministic-only signals first;
+    # NLU signals reserved для Phase 1 enum extension.
+    SIGNAL_CANCELLATION_AFTER_SUGGESTION = "cancellation_after_suggestion"
+    SIGNAL_ABANDONED_TOPIC = "abandoned_topic"
+    SIGNAL_REPEAT_INTERACTION = "repeat_interaction"
+    # ``completed_booking_reused`` is a documentation pointer only —
+    # W4's success_correlated_at is the canonical source. Listed in
+    # choices so dashboard queries can union without breaking schema
+    # if W4 chooses to backfill later.
+    SIGNAL_COMPLETED_BOOKING_REUSED = "completed_booking_reused"
+
+    SIGNAL_CHOICES = [
+        (
+            SIGNAL_CANCELLATION_AFTER_SUGGESTION,
+            "Booking created → cancelled within 24h after AI suggestion",
+        ),
+        (SIGNAL_ABANDONED_TOPIC, "Conversation idle >24h after AI message, no booking"),
+        (SIGNAL_REPEAT_INTERACTION, "Same skill invoked N+1 within session"),
+        (
+            SIGNAL_COMPLETED_BOOKING_REUSED,
+            "Mirror of W4 success_correlated_at — reserved, not written",
+        ),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="implicit_feedback_signals",
+        help_text="Owning tenant. PROTECT — signal history is forensic + "
+        "analytics-adjacent; dropping a tenant must not silently nuke it.",
+    )
+    ai_request_metric = models.ForeignKey(
+        "observability.AIRequestMetric",
+        on_delete=models.CASCADE,
+        related_name="implicit_signals",
+        help_text="Source AIRequestMetric row that triggered this signal "
+        "(e.g. the AI recommendation that was later abandoned). CASCADE: if "
+        "the source metric is purged (rare — metrics are forensic), the "
+        "signal goes too — orphan signals have no audit context.",
+    )
+    conversation = models.ForeignKey(
+        "conversations.Conversation",
+        on_delete=models.SET_NULL,
+        related_name="implicit_feedback_signals",
+        null=True,
+        blank=True,
+        help_text="Owning conversation. SET_NULL — same rationale as "
+        "AIRequestMetric.conversation: 152-ФЗ forget-flow may purge the "
+        "Conversation; the signal survives for analytics.",
+    )
+    signal_type = models.CharField(
+        max_length=48,
+        choices=SIGNAL_CHOICES,
+        db_index=True,
+        help_text="Behavioral signal kind. Drives aggregation buckets on "
+        ":class:`AIDailyMetricSummary`.",
+    )
+    payload = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Signal-specific metadata (e.g. cancellation booking "
+        "event id, idle duration ms, repeat count). MUST NOT contain "
+        "raw user text per ADR-0011 §9 (analytics ≠ PII).",
+    )
+    recorded_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True,
+        help_text="When the daily aggregator detected this signal. "
+        "Drives «signals detected last 7 days» dashboard query.",
+    )
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Implicit feedback signal"
+        verbose_name_plural = "Implicit feedback signals"
+        ordering = ["-recorded_at"]
+        indexes = [
+            # Per-tenant timeline query («signals в last 7 days»).
+            models.Index(fields=["tenant", "-recorded_at"], name="ifs_tenant_ts_idx"),
+            # Per-signal-type aggregation в daily rollup.
+            models.Index(fields=["tenant", "signal_type"], name="ifs_tenant_type_idx"),
+            # Idempotency lookup: avoid duplicate signal на same metric.
+            models.Index(
+                fields=["ai_request_metric", "signal_type"],
+                name="ifs_metric_type_idx",
+            ),
+        ]
+        constraints = [
+            # Idempotency invariant: one signal-type instance per
+            # source metric. Re-running the daily aggregator MUST NOT
+            # double-insert — uniqueness enforces this at DB level.
+            models.UniqueConstraint(
+                fields=["ai_request_metric", "signal_type"],
+                name="ifs_metric_type_unique",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"ImplicitFeedbackSignal[{self.signal_type} @ {self.recorded_at}]"

@@ -434,3 +434,255 @@ class TestPerTenantIsolation:
         assert s_a.latency_p95_ms in (500, 500)  # within bound
         assert s_b.total_requests == 1
         assert s_b.latency_p95_ms in (2000, 2000)
+
+
+# ─── TestImplicitFeedbackSignals (Tier-A #3, sequence #6) ───────────────
+
+
+class TestImplicitFeedbackSignals:
+    """3 pilot signals + idempotency + tenant isolation + summary rollup."""
+
+    def test_cancellation_after_suggestion_detected(self, tenant, bot_user, conversation):
+        """Booking landed within 24h of AI metric + conversation soft-
+        deleted within 24h of booking → cancellation_after_suggestion."""
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        metric = _metric(tenant, bot_user, conversation)
+        # Booking 1h after metric.
+        booking_at = metric.created_at + timedelta(hours=1)
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_booking_at=booking_at,
+            is_active=False,
+            deleted_at=booking_at + timedelta(hours=2),  # cancelled 2h after book
+        )
+        aggregate_daily_metrics(YESTERDAY, tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION
+        )
+        assert signals.count() == 1
+        signal = signals.first()
+        assert signal.tenant_id == tenant.id
+        assert signal.payload["gap_to_booking_seconds"] == 3600
+        assert signal.payload["gap_to_cancel_seconds"] == 7200
+
+    def test_abandoned_topic_detected(self, tenant, bot_user, conversation):
+        """Metric created_at + 24h < now AND no booking AND no message
+        engagement after metric → abandoned_topic."""
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        # Metric 48h ago — idle window passed.
+        old_when = datetime.now(timezone.utc) - timedelta(hours=48)
+        _metric(tenant, bot_user, conversation, created_at=old_when)
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_message_at=old_when - timedelta(hours=1),  # pre-metric only
+            last_booking_at=None,
+        )
+        target_date = old_when.date()
+        aggregate_daily_metrics(target_date, tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC
+        )
+        assert signals.count() == 1
+        assert signals.first().payload["idle_seconds"] >= 24 * 3600
+
+    def test_abandoned_topic_NOT_detected_when_engagement_after(
+        self, tenant, bot_user, conversation
+    ):
+        """If user sent any Message AFTER the AI metric, topic не abandoned.
+
+        H1 fix (PR #924 adversarial) — detector now checks actual
+        ``Message`` rows (role="user") instead of the stale
+        ``Conversation.last_message_at`` field which the orchestrator
+        pipeline never bumps.
+        """
+        from apps.conversations.models import Message
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        old_when = datetime.now(timezone.utc) - timedelta(hours=48)
+        _metric(tenant, bot_user, conversation, created_at=old_when)
+        # User engaged 1h after AI metric — create a real Message row.
+        msg = Message.all_tenants.create(
+            tenant=tenant,
+            conversation=conversation,
+            role="user",
+            content="follow-up",
+        )
+        Message.all_tenants.filter(pk=msg.pk).update(created_at=old_when + timedelta(hours=1))
+
+        aggregate_daily_metrics(old_when.date(), tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC
+        )
+        assert signals.count() == 0
+
+    def test_repeat_interaction_detected(self, tenant, bot_user, conversation):
+        """Same (bot_user, skill_selected) N+1 within 24h → repeat for
+        each subsequent invocation."""
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        base = YESTERDAY_NOON_UTC
+        # 3 invocations of «booking» skill within 2h window.
+        for i in range(3):
+            m = _metric(
+                tenant,
+                bot_user,
+                conversation,
+                created_at=base + timedelta(minutes=30 * i),
+            )
+            # _metric defaults skill_selected="" — patch it.
+            AIRequestMetric.all_tenants.filter(pk=m.pk).update(skill_selected="booking")
+        aggregate_daily_metrics(YESTERDAY, tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_REPEAT_INTERACTION
+        )
+        # 3 invocations → 2 repeats (the 2nd + 3rd).
+        assert signals.count() == 2
+
+    def test_signal_idempotency_re_run_no_duplicate(self, tenant, bot_user, conversation):
+        """Re-running aggregator на same day MUST NOT double-insert
+        signals — DB unique constraint enforces."""
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        metric = _metric(tenant, bot_user, conversation)
+        booking_at = metric.created_at + timedelta(hours=1)
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_booking_at=booking_at,
+            is_active=False,
+            deleted_at=booking_at + timedelta(hours=2),
+        )
+        aggregate_daily_metrics(YESTERDAY, tenant)
+        aggregate_daily_metrics(YESTERDAY, tenant)  # second run
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION
+        )
+        assert signals.count() == 1
+
+    def test_signal_counts_rolled_into_summary(self, tenant, bot_user, conversation):
+        """AIDailyMetricSummary picks up signal counts from the day."""
+        old_when = datetime.now(timezone.utc) - timedelta(hours=48)
+        _metric(tenant, bot_user, conversation, created_at=old_when)
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_message_at=old_when - timedelta(hours=1),
+        )
+        summary = aggregate_daily_metrics(old_when.date(), tenant)
+        assert summary.abandoned_topic_count == 1
+        assert summary.cancelled_after_suggestion_count == 0
+        assert summary.repeat_interaction_count == 0
+
+    def test_cross_tenant_signal_isolation(self, tenant, tenant_other, bot_user, conversation):
+        """Tenant A's signals MUST NOT leak в Tenant B's summary."""
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        # Build identical fixtures для tenant_other.
+        other_bu = BotUser.all_tenants.create(
+            tenant=tenant_other, channel="max", channel_user_id="other-1"
+        )
+        other_conv = Conversation.all_tenants.create(tenant=tenant_other, bot_user=other_bu)
+
+        # Cancellation signal в tenant A.
+        metric_a = _metric(tenant, bot_user, conversation)
+        booking_at = metric_a.created_at + timedelta(hours=1)
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_booking_at=booking_at,
+            is_active=False,
+            deleted_at=booking_at + timedelta(hours=2),
+        )
+        # No signals в tenant B: metric had engagement + no booking.
+        m_other = _metric(tenant_other, other_bu, other_conv)
+        # H1 fix: engagement is now ground-truthed against Message rows.
+        from apps.conversations.models import Message
+
+        engage_msg = Message.all_tenants.create(
+            tenant=tenant_other,
+            conversation=other_conv,
+            role="user",
+            content="engaged",
+        )
+        Message.all_tenants.filter(pk=engage_msg.pk).update(
+            created_at=m_other.created_at + timedelta(minutes=5),
+        )
+
+        s_a = aggregate_daily_metrics(YESTERDAY, tenant)
+        s_b = aggregate_daily_metrics(YESTERDAY, tenant_other)
+
+        assert s_a.cancelled_after_suggestion_count == 1
+        assert s_b.cancelled_after_suggestion_count == 0
+        # Verify direct query: ImplicitFeedbackSignal tenant FK scoped.
+        assert ImplicitFeedbackSignal.all_tenants.filter(tenant=tenant).count() == 1
+        assert ImplicitFeedbackSignal.all_tenants.filter(tenant=tenant_other).count() == 0
+
+    def test_no_signals_no_signal_rows_inserted(self, tenant, bot_user, conversation):
+        """Happy day — confirmed booking, no cancellation, no idle. Zero
+        signals expected."""
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        metric = _metric(tenant, bot_user, conversation)
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_booking_at=metric.created_at + timedelta(minutes=30),
+            last_message_at=metric.created_at + timedelta(minutes=30),
+            # Active conversation, never cancelled.
+        )
+        aggregate_daily_metrics(YESTERDAY, tenant)
+        assert ImplicitFeedbackSignal.all_tenants.filter(tenant=tenant).count() == 0
+
+    # ─── H1 + H2 regression tests (PR #924 adversarial) ─────────────────
+
+    def test_abandoned_topic_uses_message_rows_not_last_message_at(
+        self, tenant, bot_user, conversation
+    ):
+        """H1 regression — orchestrator pipeline never bumps
+        ``Conversation.last_message_at``, but writes real Message rows.
+        Setting ``last_message_at`` AFTER metric MUST NOT suppress the
+        signal — only a real Message row after metric does.
+
+        Pre-fix bug: this test would have FAILED (signal suppressed by
+        stale last_message_at value). Post-fix: signal still fires
+        because no Message row exists past metric.created_at.
+        """
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        old_when = datetime.now(timezone.utc) - timedelta(hours=48)
+        _metric(tenant, bot_user, conversation, created_at=old_when)
+        # Set last_message_at AFTER metric to simulate the bug condition.
+        # H1 says: this MUST be ignored — engagement is Message-row truth.
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_message_at=old_when + timedelta(hours=1),
+            last_booking_at=None,
+        )
+        # No Message rows created → user did NOT engage in reality.
+        aggregate_daily_metrics(old_when.date(), tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_ABANDONED_TOPIC
+        )
+        assert signals.count() == 1, (
+            "H1 regression: signal MUST fire because no real Message row "
+            "exists past metric.created_at, regardless of stale last_message_at."
+        )
+
+    def test_cancellation_NOT_detected_on_idle_close_without_deleted_at(
+        self, tenant, bot_user, conversation
+    ):
+        """H2 regression — admin / idle-cleanup close flips
+        ``is_active=False`` WITHOUT setting ``deleted_at``. Pre-fix this
+        triggered a false-positive cancellation signal. Post-fix the
+        signal MUST NOT fire — only ``deleted_at IS NOT NULL`` (real
+        soft-delete via ``mark_deleted``) qualifies during pilot.
+        """
+        from apps.observability.models import ImplicitFeedbackSignal
+
+        metric = _metric(tenant, bot_user, conversation)
+        booking_at = metric.created_at + timedelta(hours=1)
+        # Simulate admin idle-cleanup: is_active=False but deleted_at=None.
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            last_booking_at=booking_at,
+            is_active=False,
+            deleted_at=None,
+        )
+        aggregate_daily_metrics(YESTERDAY, tenant)
+        signals = ImplicitFeedbackSignal.all_tenants.filter(
+            signal_type=ImplicitFeedbackSignal.SIGNAL_CANCELLATION_AFTER_SUGGESTION
+        )
+        assert signals.count() == 0, (
+            "H2 regression: idle-close (deleted_at=None) MUST NOT fire "
+            "cancellation signal — only user-initiated soft-delete qualifies."
+        )
