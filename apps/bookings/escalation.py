@@ -94,6 +94,20 @@ from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder
 from apps.channels.max.outbound import MaxAPIError, send_message
 
+# E0 #6 — send-time booking-state recheck. The same helper governs
+# the T-24h / T-2h dispatch loop in `tasks.py`; reusing it here keeps
+# the canonical drop/defer rules aligned between dispatch and
+# escalation. Per founder verdict 2026-06-01 the escalation pipeline
+# was missing this recheck → a salon manager could receive "Клиент
+# не подтвердил" DMs for bookings the client had ALREADY cancelled
+# through Ayla. Especially relevant during pilot's A2 dual-source
+# state window (memory: adr_0009_yclients_webhook_shrink_post_pilot).
+from apps.bookings.tasks import (  # noqa: E501
+    _ACTION_DEFER,
+    _ACTION_DROP,
+    _recheck_booking_state,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -199,6 +213,53 @@ def escalate_stale_reminders() -> dict[str, int]:
     send_failed = 0
     skipped = 0
     for row in _stale_rows(now):
+        # E0 #6 — recheck booking state BEFORE the CAS claim. If the
+        # client cancelled their booking through Ayla after the T-24h
+        # reminder fired but before the 12h escalation window, the
+        # row's BookingReminder.status is still SENT_NO_REPLY (the
+        # cancellation never touched the reminder row) — without this
+        # gate the manager would be DM'd "Клиент не подтвердил" for
+        # a booking that no longer exists. The recheck reuses the
+        # dispatch-side helper so drop/defer semantics stay aligned
+        # between the two beats.
+        action, reason = _recheck_booking_state(row)
+        if action == _ACTION_DROP:
+            # Booking cancelled / rescheduled / completed — escalation
+            # is no longer appropriate. Mark the row terminal so the
+            # next beat tick does not re-evaluate; audit the skip so
+            # ops can verify the pipeline behaved correctly during
+            # the A2 pilot dual-source window.
+            BookingReminder.all_tenants.filter(
+                pk=row.pk,
+                status=BookingReminder.Status.SENT_NO_REPLY,
+            ).update(status=BookingReminder.Status.ESCALATED)
+            write_audit(
+                action="bookings.reminder.escalation_skipped",
+                target="BookingReminder",
+                target_id=row.pk,
+                payload={
+                    "kind": row.kind,
+                    "yclients_record_id": row.yclients_record_id,
+                    "reason": reason,
+                },
+            )
+            logger.info(
+                "bookings.escalate.skipped_dropped pk=%s reason=%s",
+                row.pk, reason,
+            )
+            skipped += 1
+            continue
+        if action == _ACTION_DEFER:
+            # Interim reversible state (cancel/reschedule requested ~5s
+            # undo window). Leave the row in SENT_NO_REPLY so the next
+            # hourly tick re-evaluates after the undo window closes.
+            logger.info(
+                "bookings.escalate.deferred pk=%s reason=%s",
+                row.pk, reason,
+            )
+            skipped += 1
+            continue
+
         # CAS: only proceed if we are the first to claim this row.
         rowcount = BookingReminder.all_tenants.filter(
             pk=row.pk,
