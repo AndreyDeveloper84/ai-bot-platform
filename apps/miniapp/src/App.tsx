@@ -59,6 +59,7 @@ import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScre
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
+import { CustomerProfileScreen } from "./screens/CustomerProfileScreen";
 import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
 import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
@@ -953,6 +954,10 @@ function CustomerRoutes() {
         path="/my-visits/:bookingId/reschedule"
         element={<RescheduleScreen />}
       />
+      {/* Tier 1 Priority 6 Phase B — customer profile tab (Tau R1-R6,
+          deferred Variant 3 per tech-lead 2026-06-01). New canonical
+          route. Legacy /me stays mounted for bot DM deeplinks. */}
+      <Route path="/customer/profile" element={<CustomerProfileScreen />} />
       <Route path="/me" element={<ProfileScreen />} />
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
       <Route path="*" element={<HelloScreen />} />

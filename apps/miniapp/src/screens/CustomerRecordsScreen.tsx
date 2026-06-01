@@ -560,7 +560,7 @@ export function CustomerRecordsScreen() {
           type="button"
           className="wellness-dash__nav-tab"
           aria-label="Я"
-          onClick={() => navigate("/me")}
+          onClick={() => navigate("/customer/profile")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             👤
