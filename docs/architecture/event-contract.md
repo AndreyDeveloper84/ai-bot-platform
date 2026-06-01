@@ -9,6 +9,20 @@
 
 ---
 
+## Pilot vocabulary addendum — 2026-06-01 (Block B-1)
+
+Per the finalized cross-service event vocabulary for the pilot (decision "Variant C" + `payment.failed` in pilot), based on an audit of what Ayla actually emits:
+
+- (a) `booking.confirmed` is **adopted** into the contract as a v1 event — it is the hold/confirmation signal Ayla emits on the payment-hold transition.
+- (b) `payment.authorized` is **DEFERRED post-pilot** — the hold is modeled as `booking.confirmed` for now.
+- (c) Ayla renames its emit `payment.confirmed` → `payment.captured` (Block B-1a); `payment.captured` is the confirmed canonical name.
+- (d) `payment.failed` is **added** for the pilot (Block B-1b); consumed by the bot `payment_failed` skill.
+- (e) `review.created`, `service.updated`, `master.schedule.updated`, `user.profile.updated` are **not emitted yet** (future slices); leave as planned/not-yet-emitted.
+
+> Note: external delivery for payment events stays OFF until Ayla emit + bot consumers for `payment.captured`/`failed` are green (avoid 422/DLQ).
+
+---
+
 ## 1. Purpose
 
 Per ADR-0009 (Variant A — split-domain architecture), Ayla djangoproject owns the canonical state of booking, payment, master schedule, services, reviews, and user profile. ai-bot-platform needs a faithful, near-real-time view of that state to:
