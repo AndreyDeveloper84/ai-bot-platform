@@ -115,15 +115,34 @@ dependencies = [
 #   the canonical state-of-record. The two bumps ship as a PAIR:
 #
 #     - bot-platform PR: edits this file + `uv.lock`.
-#     - Ayla djangoproject PR: edits `requirements.txt` к the same SHA.
-#     - Both PRs cross-reference each other в the description.
+#     - Ayla djangoproject PR: edits `requirements.txt` to the same SHA.
+#     - Both PRs cross-reference each other in the description.
 #     - Land-order: merge bot-platform first (this CI runs faster);
 #       Ayla merge follows immediately so production deploys converge.
 #
+#   ENFORCEMENT SCOPE (adversarial CR H3, 2026-06-01): only the
+#   INTRA-repo invariant is CI-gated. `tests/smoke/test_ayla_import.py
+#   ::test_package_sha_pinned` asserts this file's pin ↔ installed
+#   `direct_url.json` SHA. There is NO CI gate that fetches
+#   Ayla djangoproject's `requirements.txt` to verify cross-repo
+#   alignment from this side. Cross-repo SHA convergence is
+#   OPERATIONAL — ops grep both production container streams для
+#   `orchestrator.ayla_ai_core.boot` (this repo) and the analogous
+#   Ayla boot log to confirm. A proper cross-repo CI gate is a
+#   Phase-1 follow-up (founder discipline «stop expanding scope»).
+#
 #   The boot-time INFO log `orchestrator.ayla_ai_core.boot
 #   version=<X.Y.Z> source=<url>@<sha>` (apps/orchestrator/apps.py)
-#   surfaces the resolved SHA в container stdout — ops grep both log
-#   streams к confirm convergence без shelling into either runtime.
+#   surfaces the resolved SHA in container stdout — ops grep both
+#   log streams to confirm convergence without shelling into either
+#   runtime.
+#
+#   BUMP CHECKLIST UPDATE (when bumping ayla-ai-core):
+#     - Update the @<SHA> below.
+#     - Update `tests/smoke/test_ayla_import.py::test_package_version_pinned`
+#       assertion to the new version string.
+#     - `apps/orchestrator/tests/test_apps_boot_log.py::test_boot_log_emits_version`
+#       reads the live version via importlib.metadata — no manual edit needed.
 #
 # Current: v0.8.1 — additive only. Adds RELEASING.md + LTS_POLICY.md +
 # tests/test_public_api_surface.py drift gate. Zero behavioural changes;
