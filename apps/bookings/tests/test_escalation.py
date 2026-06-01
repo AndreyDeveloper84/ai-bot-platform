@@ -507,7 +507,9 @@ class TestStateRecheckBeforeSend:
     ``send_due_reminders`` so drop/defer semantics stay aligned."""
 
     def test_cancelled_booking_does_not_dm_manager(
-        self, tenant: Tenant, bot_user: BotUser,
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
     ) -> None:
         # Stale T-24h reminder linked to a booking the client just
         # cancelled through Ayla. Without E0 #6 the manager would
@@ -539,7 +541,9 @@ class TestStateRecheckBeforeSend:
         assert row.status == BookingReminder.Status.ESCALATED
 
     def test_completed_booking_does_not_dm_manager(
-        self, tenant: Tenant, bot_user: BotUser,
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
     ) -> None:
         # Booking was completed before the escalation window closed
         # (defensive — the 12h window normally bounds this out, but
@@ -564,7 +568,9 @@ class TestStateRecheckBeforeSend:
         assert result["skipped"] == 1
 
     def test_cancel_requested_defers_without_terminal_transition(
-        self, tenant: Tenant, bot_user: BotUser,
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
     ) -> None:
         # Interim reversible state — client tapped Cancel but is still
         # within the ~5s undo window. The escalation should defer so
@@ -591,7 +597,9 @@ class TestStateRecheckBeforeSend:
         assert row.status == BookingReminder.Status.SENT_NO_REPLY
 
     def test_confirmed_booking_still_escalates(
-        self, tenant: Tenant, bot_user: BotUser,
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
     ) -> None:
         # Sanity: a confirmed booking with no client reply on the
         # T-24h keyboard still escalates (the whole point of the
@@ -616,7 +624,9 @@ class TestStateRecheckBeforeSend:
         assert result["escalated"] == 1
 
     def test_null_booking_request_still_escalates(
-        self, tenant: Tenant, bot_user: BotUser,
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
     ) -> None:
         # NULL FK = legacy row OR Ayla-path (no BookingRequest mirror
         # yet). The helper returns SEND with reason

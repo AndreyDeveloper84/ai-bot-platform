@@ -245,7 +245,8 @@ def escalate_stale_reminders() -> dict[str, int]:
             )
             logger.info(
                 "bookings.escalate.skipped_dropped pk=%s reason=%s",
-                row.pk, reason,
+                row.pk,
+                reason,
             )
             skipped += 1
             continue
@@ -255,7 +256,8 @@ def escalate_stale_reminders() -> dict[str, int]:
             # hourly tick re-evaluates after the undo window closes.
             logger.info(
                 "bookings.escalate.deferred pk=%s reason=%s",
-                row.pk, reason,
+                row.pk,
+                reason,
             )
             skipped += 1
             continue
