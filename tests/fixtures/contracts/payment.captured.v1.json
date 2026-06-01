@@ -1,0 +1,17 @@
+{
+  "event_id": "01J9J2YK8Q4T9V3R8Q9P7D3F0E",
+  "event_name": "payment.captured",
+  "event_version": 1,
+  "occurred_at": "2026-05-22T16:31:14.205Z",
+  "tenant_id": "9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c",
+  "user_id": "f1a2b3c4-d5e6-4789-9abc-def012345678",
+  "actor": "system",
+  "correlation_id": "f7a8b9c0-d1e2-3456-7890-123456789abc",
+  "causation_id": "01J9J1XJ7P3T8V2R7Q7P5D1F8E",
+  "data": {
+    "payment_id": "5c8e2d1f-3b4a-4c6d-9e8f-1a2b3c4d5e6f",
+    "appointment_id": "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8",
+    "amount": "1800.00",
+    "captured_at": "2026-05-22T16:31:14.205Z"
+  }
+}
