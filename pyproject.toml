@@ -103,8 +103,27 @@ dependencies = [
 #   3. Replace the @<SHA> below.
 #   4. `uv lock --upgrade-package ayla-ai-core`
 #   5. Run `tests/smoke/test_ayla_import.py` — update the version
-#      assertion to match the new release.
+#      assertion to match the new release. The SHA-pin guard
+#      (`test_package_sha_pinned`) auto-reads this file и will fail
+#      if `uv.lock` drifts from `pyproject.toml`.
 #   6. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
+#
+# Cross-repo joint-bump (Block A9 — maintainability roadmap):
+#   ayla-ai-core has TWO consumer repos in production — this one
+#   (`ai-bot-platform`) and `Ayla/djangoproject`. They MUST pin the
+#   IDENTICAL SHA or behaviour diverges between the AI runtime and
+#   the canonical state-of-record. The two bumps ship as a PAIR:
+#
+#     - bot-platform PR: edits this file + `uv.lock`.
+#     - Ayla djangoproject PR: edits `requirements.txt` к the same SHA.
+#     - Both PRs cross-reference each other в the description.
+#     - Land-order: merge bot-platform first (this CI runs faster);
+#       Ayla merge follows immediately so production deploys converge.
+#
+#   The boot-time INFO log `orchestrator.ayla_ai_core.boot
+#   version=<X.Y.Z> source=<url>@<sha>` (apps/orchestrator/apps.py)
+#   surfaces the resolved SHA в container stdout — ops grep both log
+#   streams к confirm convergence без shelling into either runtime.
 #
 # Current: v0.8.1 — additive only. Adds RELEASING.md + LTS_POLICY.md +
 # tests/test_public_api_surface.py drift gate. Zero behavioural changes;

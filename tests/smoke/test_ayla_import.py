@@ -80,6 +80,63 @@ class TestAylaAllowList:
             "extra + uv.lock. Bump procedure in pyproject.toml header."
         )
 
+    def test_package_sha_pinned(self) -> None:
+        """A9 SHA-divergence guard (PR follow-up to maintainability roadmap
+        Block A9 — 2026-06-01): the SHA installed по `pip` / `uv resolve`
+        MUST match the SHA в `pyproject.toml`.
+
+        This guards against:
+        - Local `uv.lock` drift from `pyproject.toml` (e.g. ran
+          `uv lock --upgrade-package ayla-ai-core` without updating the
+          pyproject pin).
+        - Cross-repo coordination failures: Ayla djangoproject's
+          `requirements.txt` and bot-platform's `pyproject.toml` MUST
+          pin the SAME SHA in production. This test fails the local
+          repo if its own pin drifts; ops process documented in
+          pyproject.toml header keeps both repos aligned.
+
+        Implementation: read PEP 610 `direct_url.json` metadata which
+        captures the install-time @SHA suffix.
+        """
+        import json
+        import re
+        from importlib.metadata import distribution
+        from pathlib import Path
+
+        dist = distribution("ayla-ai-core")
+        payload = dist.read_text("direct_url.json")
+        if payload is None:
+            pytest.skip(
+                "ayla-ai-core was not installed from a direct URL — "
+                "PEP 610 metadata missing; cannot verify SHA pin."
+            )
+        installed_data = json.loads(payload)
+        installed_sha = (installed_data.get("vcs_info") or {}).get("commit_id", "")
+        assert installed_sha, (
+            "ayla-ai-core direct_url.json missing vcs_info.commit_id — "
+            "expected git install with resolved SHA."
+        )
+
+        # Parse the canonical SHA pin out of pyproject.toml so the
+        # assertion stays in sync с the actual dependency declaration.
+        repo_root = Path(__file__).resolve().parents[2]
+        pyproject_text = (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(
+            r"ayla-ai-core\[django\]\s*@\s*git\+https://[^@]+@([a-f0-9]{40})",
+            pyproject_text,
+        )
+        assert match, (
+            "Could not locate `ayla-ai-core[django] @ git+...@<SHA>` pin in "
+            "pyproject.toml. The A9 SHA guard depends on this exact shape."
+        )
+        pinned_sha = match.group(1)
+        assert installed_sha == pinned_sha, (
+            f"ayla-ai-core SHA drift: installed={installed_sha!r}, "
+            f"pyproject.toml pin={pinned_sha!r}. Re-run "
+            "`uv lock --upgrade-package ayla-ai-core` and `uv sync --frozen` "
+            "to converge. Bump procedure in pyproject.toml header."
+        )
+
     def test_render_system_prompt_escapes_braces_by_default(self) -> None:
         """B4 layer 2 (ayla v0.7.0) — protects consumers bypassing the adapter.
 
