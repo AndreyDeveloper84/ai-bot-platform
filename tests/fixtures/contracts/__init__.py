@@ -96,4 +96,6 @@ def _write_manifest() -> None:
         "# Both ai-bot-platform and Ayla assert their local copies match this.",
     ]
     lines += [f"{digest}  {name}" for name, digest in compute_manifest().items()]
-    MANIFEST_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline="\n" so regeneration is byte-deterministic on every OS
+    # (the fixtures are LF-pinned; the manifest should be too).
+    MANIFEST_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")

@@ -35,10 +35,41 @@ from tests.fixtures.contracts import (
     read_manifest,
 )
 
-# Canonical IDs baked into the fixtures (taxonomy §2.1 / §3.1).
-FIXTURE_TENANT_ID = "9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c"
-FIXTURE_USER_ID = "f1a2b3c4-d5e6-4789-9abc-def012345678"
-FIXTURE_APPOINTMENT_ID = "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8"
+# Canonical IDs — read from the fixture itself so the test and the bytes
+# it asserts on share one source of truth (no hand-kept duplicate).
+_BOOKING_CREATED = load_contract("booking.created.v1.json")
+FIXTURE_TENANT_ID = _BOOKING_CREATED["tenant_id"]
+FIXTURE_USER_ID = _BOOKING_CREATED["user_id"]
+FIXTURE_APPOINTMENT_ID = _BOOKING_CREATED["data"]["appointment_id"]
+
+# Expected `data` payload key set per event (event-contract.md
+# §3.1 / §3.6 / §3.7). parse_envelope validates the envelope but treats
+# `data` as an opaque dict — so the field-level contract, exactly where
+# the codex P0-1 drift lived, is pinned here instead.
+EVENT_DATA_KEYS = {
+    "booking.created.v1.json": {
+        "appointment_id",
+        "specialist_id",
+        "service_id",
+        "start_at",
+        "end_at",
+        "status",
+        "price_total",
+        "source",
+    },
+    "payment.captured.v1.json": {
+        "payment_id",
+        "appointment_id",
+        "amount",
+        "captured_at",
+    },
+    "payment.failed.v1.json": {
+        "payment_id",
+        "appointment_id",
+        "reason",
+        "failed_at",
+    },
+}
 
 
 class TestManifestIntegrity:
@@ -73,6 +104,17 @@ class TestEventFixturesParse:
         # All booking/payment events MUST carry a tenant (§2.2).
         assert load_contract(name)["tenant_id"] is not None
 
+    @pytest.mark.parametrize("name", EVENT_FIXTURES)
+    def test_event_fixture_data_matches_contract(self, name: str) -> None:
+        # parse_envelope never inspects `data`; this is the field-level
+        # guard. Catches a renamed key (captured_at -> confirmed_at) or a
+        # retyped value (amount as int) — the codex P0-1 drift class.
+        data = load_contract(name)["data"]
+        assert set(data) == EVENT_DATA_KEYS[name]
+        # Every §3 data value is a string: UUIDs, ISO8601 stamps, decimal
+        # strings, enums. A non-string value is a contract break.
+        assert all(isinstance(v, str) for v in data.values())
+
 
 class TestRecommendationsRequestShape:
     """The bot -> Ayla request body must stay within the fields Ayla's
@@ -87,9 +129,12 @@ class TestRecommendationsRequestShape:
 
     def test_types_match_serializer(self) -> None:
         body = load_contract("recommendations.request.json")
-        assert isinstance(body.get("lat"), (int, float))
-        assert isinstance(body.get("lon"), (int, float))
-        assert isinstance(body.get("goal"), str)
+        # Lock the canonical example to the full field set (subset alone
+        # would let an empty body pass).
+        assert set(body) == {"lat", "lon", "goal"}
+        assert isinstance(body["lat"], (int, float))
+        assert isinstance(body["lon"], (int, float))
+        assert isinstance(body["goal"], str)
 
 
 @pytest.mark.django_db
