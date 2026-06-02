@@ -159,3 +159,100 @@ class TestAntiHallucination:
         messages = build_booking_prompt(brand_voice=_voice(), query="x")
         body = messages[0]["content"]
         assert "Никогда не выдумывай ID" in body or "не выдумывай" in body
+
+
+class TestKnownMastersBlock:
+    """E0#1 Variant A — pre-injected tenant master roster + name
+    anti-hallucination rule (founder verdict 2026-06-02)."""
+
+    def test_roster_block_present_when_known_masters_passed(self) -> None:
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="запиши меня",
+            known_masters=[
+                {"name": "Ольга", "specialization": "массаж"},
+                {"name": "Анна", "specialization": "маникюр"},
+            ],
+        )
+        body = messages[0]["content"]
+        assert "ИЗВЕСТНЫЕ МАСТЕРА" in body
+        assert "Ольга" in body
+        assert "Анна" in body
+        # Names should carry their specialization for grounding.
+        assert "массаж" in body
+        assert "маникюр" in body
+
+    def test_roster_block_carries_anti_name_hallucination_rule(self) -> None:
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="x",
+            known_masters=[{"name": "Ольга", "specialization": "массаж"}],
+        )
+        body = messages[0]["content"]
+        # The closing rule MUST be in the system prompt — это сердцевина
+        # E0#1 защиты.
+        assert "не выдумывай имя" in body.lower() or "не выдумывай" in body
+        assert "которого НЕТ в этом списке" in body or "нет в ростере" in body
+
+    def test_roster_block_absent_when_known_masters_empty(self) -> None:
+        # Empty list → block skipped entirely (new tenant, no synced
+        # masters yet). The `show_masters` tool fallback remains.
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="x",
+            known_masters=[],
+        )
+        body = messages[0]["content"]
+        assert "ИЗВЕСТНЫЕ МАСТЕРА" not in body
+
+    def test_roster_block_absent_when_known_masters_none(self) -> None:
+        # Default behaviour — None means «caller didn't load roster»,
+        # block skipped. Critical for backwards-compat with callers
+        # that haven't been updated.
+        messages = build_booking_prompt(brand_voice=_voice(), query="x")
+        body = messages[0]["content"]
+        assert "ИЗВЕСТНЫЕ МАСТЕРА" not in body
+
+    def test_roster_renders_name_without_specialization(self) -> None:
+        # Master без specialization (legacy mysite-synced row that
+        # never had this field populated) should still render — just
+        # name, no «— spec» suffix.
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="x",
+            known_masters=[{"name": "Светлана", "specialization": ""}],
+        )
+        body = messages[0]["content"]
+        assert "Светлана" in body
+        # Sanity: the malformed dash form «Светлана — » must not appear.
+        assert "Светлана —" not in body
+
+    def test_roster_skips_entries_without_name(self) -> None:
+        # Defensive — partially-synced mirror row без name should NOT
+        # surface как «• — массаж» bullet (LLM-confusing noise).
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="x",
+            known_masters=[
+                {"name": "Ольга", "specialization": "массаж"},
+                {"name": "", "specialization": "маникюр"},  # malformed
+                {"name": "  ", "specialization": "косметология"},  # whitespace-only
+            ],
+        )
+        body = messages[0]["content"]
+        assert "Ольга" in body
+        # The malformed rows MUST NOT contribute bullets.
+        assert "• — маникюр" not in body
+        assert "косметология" not in body
+
+    def test_roster_does_not_break_existing_anti_id_rule(self) -> None:
+        # Defence-in-depth invariant: the new name-hallucination rule
+        # is ADDITIVE — must NOT remove the original ID rule which
+        # backs the per-tool validator.
+        messages = build_booking_prompt(
+            brand_voice=_voice(),
+            query="x",
+            known_masters=[{"name": "Ольга", "specialization": "массаж"}],
+        )
+        body = messages[0]["content"]
+        assert "Никогда не выдумывай ID" in body

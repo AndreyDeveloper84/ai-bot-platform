@@ -126,6 +126,14 @@ _DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет 
 # a 30-day window; trimming keeps the keyboard tappable on mobile.
 _MAX_DATE_BUTTONS = 14
 
+# E0#1 Variant A (founder verdict 2026-06-02) — cap on pre-injected
+# master roster size. Pilot salons have 5-15 masters; larger tenants
+# get top-N + ordered fallback so the system prompt token budget stays
+# bounded. The remaining masters are still reachable via the standard
+# `show_masters` tool call path — pre-injection is the first-line
+# anti-hallucination defence, not the only resolver.
+_KNOWN_MASTERS_ROSTER_CAP = 20
+
 
 # Audit / event slugs.
 EVENT_BOOKING_HANDLED = "booking.handled"
@@ -248,6 +256,12 @@ class BookingSkill:
         allowed_service_ids = {int(s.id) for s in services}
         service_lookup = build_service_lookup(services)
 
+        # E0#1 Variant A — pre-load the tenant master roster ONCE per
+        # turn (used by both LLM call sites below). Empty list when
+        # mirror is empty / lookup failed; prompt renderer silently
+        # omits the block, falling back to the `show_masters` flow.
+        known_masters = _load_tenant_master_roster(tenant)
+
         # ── Master-pick callback short-circuit ──────────────────────
         # User tapped a master-card button (cb:book:pick_master:<id>).
         # Fetch the master's available dates and render them as a date
@@ -325,6 +339,7 @@ class BookingSkill:
             first_messages = build_booking_prompt(
                 brand_voice=_DEFAULT_BRAND_VOICE,
                 query=query_text,
+                known_masters=known_masters,
             )
             # #473 LLM Y3 envelope expansion: catch any LLMError (covers
             # UnknownTenantError from cost_tracker, LLMProviderUnavailable,
@@ -436,6 +451,7 @@ class BookingSkill:
         second_messages = build_booking_prompt(
             brand_voice=_DEFAULT_BRAND_VOICE,
             query=context.message_text,
+            known_masters=known_masters,
             candidate_masters=_masters_payload(tool_result),
             available_slots=_slots_payload(tool_result),
             confirmation=_confirmation_payload(tool_result),
@@ -1066,6 +1082,64 @@ def _audit_handled(*, tenant_id: str, tool: str) -> None:
         target="BookingSkill",
         payload={"tenant_id": tenant_id, "tool": tool},
     )
+
+
+def _load_tenant_master_roster(tenant: Any) -> list[dict[str, str]]:
+    """E0#1 Variant A — load active CatalogMaster roster для prompt
+    pre-injection.
+
+    Per founder verdict 2026-06-02 + memory `pilot_scope_discipline`.
+    Read-only against the catalog mirror (per ADR-0009 §Hard rule #2 —
+    no cross-repo DB / REST call; mirror staleness ≤15-min is accepted
+    SLO). Strictly tenant-scoped via ``all_tenants.filter(tenant=...)``
+    — caller may not have a tenant_scope context active depending on
+    dispatch path, so the explicit filter is the safety belt.
+
+    Returns a stable-sorted (alphabetical by name) list of dicts with
+    keys ``name`` + ``specialization``. Caps the list at
+    :data:`_KNOWN_MASTERS_ROSTER_CAP` (default 20) — pilot salons fit
+    easily; larger tenants get the top-N alphabetical subset, with the
+    remaining masters still reachable via the regular ``show_masters``
+    tool call.
+
+    Failure mode: any unexpected DB / ORM exception is logged WARN and
+    surfaces as an EMPTY list. Pre-injection is defence-in-depth — the
+    booking flow still works через the original `show_masters` path
+    when the roster block is absent. Critical: this function MUST NOT
+    raise (would 500 the customer turn).
+    """
+    try:
+        from apps.catalog.models import CatalogMaster
+
+        rows = list(
+            CatalogMaster.all_tenants.filter(
+                tenant=tenant,
+                is_active=True,
+            )
+            .order_by("name")
+            .values("name", "specialization")[: _KNOWN_MASTERS_ROSTER_CAP + 1]
+        )
+    except Exception as exc:  # noqa: BLE001 — observability never crashes the turn
+        logger.warning(
+            "booking.known_masters.load_failed tenant=%s err=%s",
+            getattr(tenant, "id", "?"),
+            exc,
+        )
+        return []
+
+    if not rows:
+        return []
+
+    # Cap deterministically — top-N alphabetical. The +1 fetch above
+    # detects overflow without a separate `.count()` round-trip.
+    return [
+        {
+            "name": (row.get("name") or "").strip(),
+            "specialization": (row.get("specialization") or "").strip(),
+        }
+        for row in rows[:_KNOWN_MASTERS_ROSTER_CAP]
+        if (row.get("name") or "").strip()
+    ]
 
 
 # ---------------------------------------------------------------------------

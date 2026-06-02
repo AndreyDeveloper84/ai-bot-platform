@@ -52,6 +52,7 @@ def build_booking_prompt(
     *,
     brand_voice: BrandVoiceConfig,
     query: str,
+    known_masters: list[dict[str, Any]] | None = None,
     candidate_masters: list[dict[str, Any]] | None = None,
     available_slots: list[dict[str, Any]] | None = None,
     confirmation: dict[str, Any] | None = None,
@@ -65,6 +66,19 @@ def build_booking_prompt(
     Args:
       brand_voice: persona / tone / forbidden trio.
       query: the actual user message text.
+      known_masters: E0#1 Variant A pre-injected tenant master roster
+                     (founder verdict 2026-06-02, founder
+                     pilot_scope_discipline). Each dict carries ``name``
+                     + optional ``specialization``. Spliced into the
+                     system prompt as «ИЗВЕСТНЫЕ МАСТЕРА: …» with an
+                     anti-name-hallucination rule. Defends the booking
+                     turn-1 path against the LLM inventing master names
+                     not present in this tenant's roster (the existing
+                     anti-ID rule defends only `master_id` invention —
+                     the model could still write «запишу к Ольге» when
+                     Ольга doesn't exist). Per ADR-0009 caller passes a
+                     pre-loaded list from ``CatalogMaster`` mirror — no
+                     ORM access inside this pure rendering function.
       candidate_masters: when set, the list the LLM picked from a
                          prior :func:`show_masters` call. Spliced into
                          the system prompt so the second LLM call sees
@@ -85,6 +99,7 @@ def build_booking_prompt(
     """
     system_text = _render_system_prompt(
         brand_voice=brand_voice,
+        known_masters=known_masters,
         candidate_masters=candidate_masters,
         available_slots=available_slots,
         confirmation=confirmation,
@@ -102,6 +117,7 @@ def build_booking_prompt(
 def _render_system_prompt(
     *,
     brand_voice: BrandVoiceConfig,
+    known_masters: list[dict[str, Any]] | None,
     candidate_masters: list[dict[str, Any]] | None,
     available_slots: list[dict[str, Any]] | None,
     confirmation: dict[str, Any] | None,
@@ -150,6 +166,19 @@ def _render_system_prompt(
         "просит отменить или перенести запись и ID неизвестен — "
         "сначала вызови show_my_bookings."
     )
+
+    # E0#1 Variant A (founder verdict 2026-06-02) — pre-injected tenant
+    # master roster. Defends the turn-1 booking path against the LLM
+    # inventing master NAMES not present in this tenant's catalog. The
+    # existing «не выдумывай ID» rule above protects only numeric IDs;
+    # this rule + roster block protect free-text mentions like «запишу
+    # к Ольге» when Ольга doesn't exist в the salon's roster.
+    #
+    # Empty list (new tenant, no synced masters yet) → block skipped
+    # entirely; the per-tool `show_masters` fallback remains as the
+    # second-line defence.
+    if known_masters:
+        sections.append(_format_known_masters_block(known_masters))
 
     # Live-data rendering rule. The skill's two-call loop already
     # invoked a tool and is splicing the result into the prompt below
@@ -240,6 +269,41 @@ def _format_pending_block(pending: dict[str, Any]) -> str:
         f"• Текст: {pending.get('preview_text', '')}\n"
         "Перефразируй коротко, заверши вопросом 'Подтверждаете?'."
     )
+
+
+def _format_known_masters_block(known_masters: list[dict[str, Any]]) -> str:
+    """E0#1 Variant A pre-injected tenant master roster block.
+
+    Renders the full tenant roster (or top-N if capped by caller) as a
+    bulleted list followed by an anti-name-hallucination rule. The
+    caller (booking skill) controls roster source + cap; this helper
+    stays pure for testability.
+
+    Each entry shape: ``{"name": "Ольга", "specialization": "массаж"}``
+    (specialization optional). Name is required — entries without it
+    are filtered defensively so a partially-synced mirror row never
+    surfaces в the prompt.
+
+    The closing rule is intentionally specific: «если клиент называет
+    мастера, которого НЕТ в этом списке — скажи, что такого мастера
+    нет; НЕ выдумывай имя». Names ARE allowed in tool-call args (the
+    skill resolves name → id via the catalog mirror), but the model
+    MUST NOT fabricate a name that isn't on the list.
+    """
+    lines = ["ИЗВЕСТНЫЕ МАСТЕРА (полный ростер салона):"]
+    for m in known_masters:
+        name = (m.get("name") or "").strip()
+        if not name:
+            continue
+        spec = (m.get("specialization") or "").strip()
+        spec_part = f" — {spec}" if spec else ""
+        lines.append(f"• {name}{spec_part}")
+    lines.append(
+        "СТРОГО: если клиент называет мастера, которого НЕТ в этом списке — "
+        "ответь, что такого мастера у нас нет, и предложи показать список доступных. "
+        "НЕ выдумывай имя мастера, которого нет в ростере."
+    )
+    return "\n".join(lines)
 
 
 def _format_masters_block(masters: list[dict[str, Any]]) -> str:
