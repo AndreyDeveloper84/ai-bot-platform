@@ -23,6 +23,7 @@ Here we go through `orchestrator.pipeline.turn` → `_run_under_tenant`
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -51,7 +52,7 @@ def _enable_pii(settings: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture
-def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+def fake_redis(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeRedis]:
     fake = _FakeRedis()
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
     pii_tokenizer._invalidate_script_cache()
@@ -65,7 +66,7 @@ def tenant() -> Tenant:
 
 
 @pytest.fixture(autouse=True)
-def _stub_outbound() -> None:
+def _stub_outbound() -> Iterator[None]:
     with patch(
         "apps.channels.max.outbound.send_message",
         return_value={"ok": True},
