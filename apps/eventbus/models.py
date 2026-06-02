@@ -531,3 +531,82 @@ class ReviewProcessedDedupe(models.Model):
 
     def __str__(self) -> str:
         return f"ReviewProcessedDedupe[t={self.tenant_id} r={self.review_id}]"
+
+
+class NotificationDispatchDedupe(models.Model):
+    """Exactly-once guard for consumer→skill→channel notifications (#927).
+
+    A consumer (e.g. ``payment.failed``) dispatches a customer DM via an
+    in-process skill call. The consumer's ``event_id`` short-circuit
+    already blocks a same-``event_id`` re-run, but the channel send is
+    the FINAL, non-rollback-able side-effect: a Redis-Streams retry or a
+    future code change that weakens the short-circuit could fire a
+    DUPLICATE personalized notification. For ``payment.failed`` that is a
+    high-stress-context message and a 152-ФЗ-relevant repeated automated
+    contact (issue #927, baseline G6.2 / codex P0-4).
+
+    A row's existence == "this exact notification was already dispatched".
+    Claim it (create) BEFORE invoking the skill; an ``IntegrityError`` on
+    the unique key means a prior dispatch already won — skip.
+
+    Tenant-scoped key (mirrors ``PaymentTerminalDedupe`` Round-2 NEW-1):
+    without ``tenant_id`` in the key, a malicious tenant could pre-claim a
+    victim's ``(event_id, recipient, channel)`` and suppress the victim's
+    legitimate notification — a cross-tenant DoS. ``event_id`` is globally
+    unique in practice, but the tenant scoping makes the dedupe ledger
+    itself unweaponizable cross-tenant.
+
+    Pilot scope: eventbus-level guard (Gamma). A channel-side SETNX in
+    ``apps.channels.max.outbound`` (exactly-once for ALL notification
+    kinds) is the post-pilot target — see #927.
+
+    Retention: same sweep family as the other dedupe ledgers (follow-up).
+    """
+
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
+    id = models.BigAutoField(primary_key=True)
+    tenant_id = models.UUIDField(
+        help_text="Tenant scoping the dedupe row — blocks cross-tenant "
+        "pre-claim suppression of a victim's notification. UUIDField "
+        "(not FK): system-level ledger, cleaned by retention sweeps.",
+    )
+    event_id = models.CharField(
+        max_length=26,
+        help_text="ULID of the cross-service event that triggered the "
+        "notification. Part of the exactly-once key.",
+    )
+    recipient_id = models.UUIDField(
+        help_text="Canonical Ayla User.id the notification is sent to.",
+    )
+    channel = models.CharField(
+        max_length=32,
+        help_text="Delivery channel (e.g. ``max``). A given event may "
+        "legitimately notify the same user on different channels.",
+    )
+    kind = models.CharField(
+        max_length=64,
+        help_text="Notification kind (e.g. ``payment_failed``). Forensic "
+        "label — NOT part of the unique key (one event → one notification "
+        "per channel regardless of kind).",
+    )
+    dispatched_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Notification dispatch dedupe row"
+        verbose_name_plural = "Notification dispatch dedupe ledger"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant_id", "event_id", "recipient_id", "channel"],
+                name="evbus_notif_dispatch_unique",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["dispatched_at"], name="evbus_notif_disp_at_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"NotificationDispatchDedupe[t={self.tenant_id} e={self.event_id} "
+            f"r={self.recipient_id} {self.channel}/{self.kind}]"
+        )

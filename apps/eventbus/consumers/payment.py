@@ -64,7 +64,7 @@ from apps.events.services import emit as emit_internal_event
 from apps.eventbus.ingest_dispatcher import register
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.ingest_tenancy import assert_envelope_tenant_authorized
-from apps.eventbus.models import PaymentTerminalDedupe
+from apps.eventbus.models import NotificationDispatchDedupe, PaymentTerminalDedupe
 from apps.tenancy.models import Tenant
 
 
@@ -130,6 +130,40 @@ def _resolve_tenant(tenant_id: str | None) -> Tenant | None:
     if not tenant_id:
         return None
     return Tenant.objects.filter(id=tenant_id).first()
+
+
+def _claim_notification_dispatch(
+    *,
+    tenant_id: str | UUID,
+    event_id: str,
+    recipient_id: str,
+    channel: str,
+    kind: str,
+) -> bool:
+    """Claim the exactly-once slot for an outbound notification (#927).
+
+    Returns ``True`` if THIS call won the claim (caller dispatches the
+    DM), ``False`` if a prior dispatch already claimed it (caller skips).
+    The claim is the FINAL guard before the non-rollback-able channel
+    send — defence-in-depth on top of the consumer's ``event_id``
+    short-circuit. Tenant-scoped (see
+    :class:`apps.eventbus.models.NotificationDispatchDedupe`).
+    """
+    try:
+        # Wrap in a savepoint so the unique-violation IntegrityError
+        # rolls back ONLY this INSERT, not any surrounding transaction
+        # (Django marks the whole transaction broken otherwise).
+        with transaction.atomic():
+            NotificationDispatchDedupe.objects.create(
+                tenant_id=tenant_id,
+                event_id=event_id,
+                recipient_id=recipient_id,
+                channel=channel,
+                kind=kind,
+            )
+    except IntegrityError:
+        return False
+    return True
 
 
 def _resolve_conversation(
@@ -458,9 +492,41 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
         if should_dispatch:
             log_event_id = envelope.event_id
             log_payment_id = payment_id
-            log_tenant_id = envelope.tenant_id
+            # Use the RESOLVED tenant's id (guaranteed non-null past the
+            # ``tenant is None`` guard above), not ``envelope.tenant_id``
+            # (typed ``str | None``). This keys the dedup row on the same
+            # UUID the sibling ``PaymentTerminalDedupe`` writes use and
+            # satisfies the model field's ``str | UUID`` type.
+            log_tenant_id = tenant.id
+            # Recipient + channel for the #927 exactly-once dispatch
+            # claim. ``recipient`` is the Ayla user; ``channel`` is the
+            # recipient's bound channel (MAX in pilot) — derived, not
+            # hardcoded, so a future multi-channel user is keyed
+            # correctly. ``locked.bot_user`` is the select_related row.
+            dispatch_recipient_id = envelope.user_id
+            dispatch_channel = locked.bot_user.channel
 
             def _dispatch_skill() -> None:
+                # #927: exactly-once claim BEFORE the non-rollback-able
+                # channel send. A redelivery / weakened short-circuit
+                # that re-reaches this point must NOT fire a duplicate
+                # payment_failed DM (high-stress message, 152-ФЗ).
+                if not _claim_notification_dispatch(
+                    tenant_id=log_tenant_id,
+                    event_id=log_event_id,
+                    recipient_id=dispatch_recipient_id,
+                    channel=dispatch_channel,
+                    kind="payment_failed",
+                ):
+                    logger.info(
+                        "eventbus.consumer.payment.failed.dm_dedupe_skip "
+                        "event_id=%s recipient=%s tenant_id=%s",
+                        log_event_id,
+                        dispatch_recipient_id,
+                        log_tenant_id,
+                    )
+                    return
+
                 # Lazy import keeps apps.skills out of the consumer
                 # module's import graph at boot (faster app load +
                 # insulates against future skill modules introducing a
