@@ -191,12 +191,35 @@ class PIITokenizingProvider:
             op="complete",
         )
         detokenized_text = pii_tokenizer.detokenize(result.text, conversation_id)
-        # CompletionResult is frozen — rebuild с detokenized text.
-        # tool_calls / metadata fields pass through unchanged (Phase 0
-        # scope: tool args не tokenised, see module docstring).
+
+        # CompletionResult is frozen — rebuild с detokenized text +
+        # detokenized tool_calls.
+        #
+        # #842 W3 HIGH-1 (2026-06-02) — when the LLM receives a message
+        # with a `<PHONE_NONCE_INDEX>` token, it may helpfully echo the
+        # token into tool_call arguments (e.g. `confirm_booking(
+        # client_phone="<PHONE_abc12345_1>", ...)`). Without
+        # detokenization downstream Ayla REST calls receive the token
+        # literal as a phone number → 400 from Ayla AND the token
+        # would land в replay/audit as the canonical record, breaking
+        # forensic trace. Detokenize each string-valued arg before
+        # rebuilding the ToolCall so call sites see the original PII
+        # (or harmless non-PII strings unchanged).
+        from apps.llm.protocol import ToolCall
+
+        detokenized_tool_calls: list[ToolCall] = []
+        for tc in result.tool_calls or []:
+            new_args: dict[str, Any] = {}
+            for k, v in (tc.arguments or {}).items():
+                if isinstance(v, str):
+                    new_args[k] = pii_tokenizer.detokenize(v, conversation_id)
+                else:
+                    new_args[k] = v
+            detokenized_tool_calls.append(ToolCall(id=tc.id, name=tc.name, arguments=new_args))
+
         return CompletionResult(
             text=detokenized_text,
-            tool_calls=result.tool_calls,
+            tool_calls=detokenized_tool_calls,
             prompt_tokens=result.prompt_tokens,
             completion_tokens=result.completion_tokens,
             model=result.model,

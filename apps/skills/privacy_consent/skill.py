@@ -107,5 +107,11 @@ class PrivacyConsentSkill:
             )
 
         # Shouldn't reach here — matches() gated us. Defensive fallback.
-        logger.warning("privacy_consent.handle.no_intent text=%s", context.message_text[:80])
+        # #842 W3 CRIT-2 — `context.message_text` is raw user input.
+        # Log length-only proxy instead of text body to keep Loki /
+        # Datadog out of 152-ФЗ §6 scope.
+        logger.warning(
+            "privacy_consent.handle.no_intent text_len=%d",
+            len(context.message_text or ""),
+        )
         return SkillResult(reply_text="", should_send=False)

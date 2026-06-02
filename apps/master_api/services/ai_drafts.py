@@ -638,7 +638,20 @@ def generate_draft_for_conversation(
                 locked_conv.tenant, skill=SKILL_NAME, op="complete"
             )
             model = getattr(provider, "default_completion_model", "") or ""
-            result: CompletionResult = asyncio.run(provider.complete(prompt_messages, model=model))
+            # #842 W3 CRIT-1 (2026-06-02) — activate PII scope around the
+            # LLM call. This sync DRF / Celery path does NOT go through
+            # `orchestrator.pipeline._run_under_tenant`, so the pipeline-
+            # level `_pii_enter` does not cover it. Without this wrap,
+            # `PIITokenizingProvider.complete()` reads
+            # `current_conversation_id() is None`, logs WARN, and
+            # forwards the ENTIRE customer history (raw PII) to OpenAI.
+            # Caught by W3 adversarial security review pre-merge.
+            from apps.llm.pii_tokenizer import pii_context as _pii_context
+
+            with _pii_context(locked_conv.id):
+                result: CompletionResult = asyncio.run(
+                    provider.complete(prompt_messages, model=model)
+                )
         except LLMProviderUnavailable as exc:
             logger.warning(
                 "ai_drafts.generate.provider_unavailable conv=%s master=%s err=%s",

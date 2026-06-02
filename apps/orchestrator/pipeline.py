@@ -60,7 +60,10 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.conf import settings
 
-from apps.llm.pii_tokenizer import enter_scope as _pii_enter, exit_scope as _pii_exit
+from apps.llm.pii_tokenizer import (
+    _enter_scope_unsafe as _pii_enter,
+    _exit_scope_unsafe as _pii_exit,
+)
 from apps.observability.ai_metrics import record_ai_request
 from apps.observability.models import AIRequestMetric
 from apps.orchestrator.composer import ComposedReply, compose

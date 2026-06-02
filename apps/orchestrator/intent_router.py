@@ -155,7 +155,12 @@ async def classify(
             temperature=0.1,
         )
     except Exception as exc:  # noqa: BLE001 — router is safety boundary
-        logger.exception("intent_router.llm_failed text=%s err=%s", text[:80], exc)
+        # #842 W3 CRIT-2 — `text` is the RAW user message. The previous
+        # `text=%s ... text[:80]` log leaked PII to Loki/Datadog on
+        # every LLM error (152-ФЗ §6 violation against the log store).
+        # Length-only proxy preserves debugging utility (correlating
+        # error rate to message length) без the data.
+        logger.exception("intent_router.llm_failed text_len=%d err=%s", len(text or ""), exc)
         return _SAFE_FALLBACK
 
     if response.is_fallback:
