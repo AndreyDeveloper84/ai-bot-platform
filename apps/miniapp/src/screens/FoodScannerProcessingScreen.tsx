@@ -86,17 +86,22 @@ export function FoodScannerProcessingScreen() {
     abortRef.current = controller;
 
     cancelTimerRef.current = window.setTimeout(() => {
+      if (controller.signal.aborted) return;
       setPhase((p) => (p.kind === "scanning" ? { kind: "showCancel" } : p));
     }, SHOW_CANCEL_AFTER_MS);
 
     timeoutTimerRef.current = window.setTimeout(() => {
+      // Guard against setState-after-unmount: if effect cleanup
+      // already ran, the controller is aborted; bail before touching
+      // state (adversarial CR P7).
+      if (controller.signal.aborted) return;
       controller.abort();
       setPhase({ kind: "error", err: new NutritionUnavailableError() });
     }, TIMEOUT_MS);
 
     (async () => {
       try {
-        const result = await scanPhoto(photo);
+        const result = await scanPhoto(photo, { signal: controller.signal });
         if (controller.signal.aborted) return;
         navigate("/customer/food-scanner/result", {
           replace: true,
@@ -104,6 +109,14 @@ export function FoodScannerProcessingScreen() {
         });
       } catch (err) {
         if (controller.signal.aborted) return;
+        // AbortError surfaces through the same rejection path; treat
+        // as silent cancel rather than rendering an error screen.
+        if (
+          err instanceof DOMException &&
+          err.name === "AbortError"
+        ) {
+          return;
+        }
         setPhase({ kind: "error", err });
       }
     })();

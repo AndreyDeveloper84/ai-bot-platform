@@ -67,7 +67,15 @@ export function FoodScannerResultScreen() {
   const [editingName, setEditingName] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [edMode, setEdMode] = useState<boolean>(false);
+  // ED-mode initial = true (fail-safe per adversarial CR P1).
+  // Spec §10 Appendix mandates UI MUST hide numeric nutrition for
+  // customers with eating_disorder flag. Initializing to `false` and
+  // letting `fetchHealthFlags()` resolve asynchronously creates a race
+  // window where ED-customer sees calorie numbers before the flag
+  // arrives. We default to «hide», then `flagsResolved=true` flips ON
+  // ONLY if the customer is explicitly NOT in ED mode.
+  const [edMode, setEdMode] = useState<boolean>(true);
+  const [flagsResolved, setFlagsResolved] = useState<boolean>(false);
   const [clarifyOpen, setClarifyOpen] = useState(false);
   const [snack, setSnack] = useState<{ visible: boolean; message: string }>({
     visible: false,
@@ -77,15 +85,22 @@ export function FoodScannerResultScreen() {
   const portionRowRef = useRef<HTMLDivElement | null>(null);
 
   // Read health_flags once — ED mode also implied by null nutrition.
+  // Default is `edMode=true` (fail-safe); flip OFF only after the
+  // fetch confirms the customer is NOT in ED mode. If the fetch fails
+  // we stay in safe mode + keep numbers hidden — the cost is one
+  // user-visible «Примерно — записала.» instead of calories.
   useEffect(() => {
     let cancelled = false;
     fetchHealthFlags()
       .then((flags) => {
         if (cancelled) return;
         setEdMode(Boolean(flags.health_flags.eating_disorder));
+        setFlagsResolved(true);
       })
       .catch(() => {
-        /* fall back to nutrition-null check below */
+        if (cancelled) return;
+        // Keep edMode=true on failure (defence-in-depth).
+        setFlagsResolved(true);
       });
     return () => {
       cancelled = true;
@@ -101,7 +116,11 @@ export function FoodScannerResultScreen() {
 
   if (!result) return null;
 
-  const hideNumbers = edMode || result.nutrition === null;
+  // hideNumbers = true while flags are loading (fail-safe), then driven
+  // by either the explicit flag OR a null nutrition payload (Ayla omits
+  // numbers in ED mode by contract). Either condition suffices.
+  const hideNumbers =
+    !flagsResolved || edMode || result.nutrition === null;
   const portionGrams =
     result.portion_g != null
       ? Math.round(result.portion_g * portionMultiplier)
@@ -122,11 +141,20 @@ export function FoodScannerResultScreen() {
   const leadVerb = isLowConf ? "Похоже на" : "Узнала";
 
   const onSave = useCallback(async () => {
+    // Decide name override by comparing current input vs original
+    // result — NOT by the `editingName` sticky flag (adversarial CR P2).
+    // Previously: opening F3-Clarify > Rename and tapping save without
+    // actually editing dropped scan_id permanently, losing the
+    // recognition link in analytics. Compare strings → only drop
+    // scan_id when the customer really renamed the dish.
+    const trimmed = dishName.trim();
+    const renamed =
+      trimmed.length > 0 && trimmed !== result.dish_name;
     setBusy(true);
     try {
       await logMeal({
-        scan_id: editingName ? undefined : result.scan_id,
-        dish_name: editingName ? dishName : undefined,
+        scan_id: renamed ? undefined : result.scan_id,
+        dish_name: renamed ? trimmed : undefined,
         meal_type: mealType,
         portion_multiplier: portionMultiplier,
         note: note.trim() || undefined,
@@ -134,7 +162,7 @@ export function FoodScannerResultScreen() {
       navigate("/customer/food-scanner/saved", {
         replace: true,
         state: {
-          dishName: editingName ? dishName : result.dish_name,
+          dishName: renamed ? trimmed : result.dish_name,
           calories,
           edMode: hideNumbers,
         },
@@ -153,17 +181,20 @@ export function FoodScannerResultScreen() {
     portionMultiplier,
     note,
     dishName,
-    editingName,
     calories,
     hideNumbers,
     navigate,
   ]);
 
   const onReject = useCallback(() => {
+    // Disable all CTAs during the 1800ms toast → navigate window
+    // (adversarial CR P11 — without this, a fast «Записать» tap fires
+    // a real logMeal in parallel with the silent reject + navigate,
+    // leaving an unwanted diary entry).
+    setBusy(true);
     setSnack({
       visible: true,
-      message:
-        "Поняла, не записываю. Если хочешь — пришли ещё фото.",
+      message: "Поняла, не записываю. Если хочешь — пришли ещё фото.",
     });
     window.setTimeout(() => navigate("/customer/main"), 1800);
   }, [navigate]);
@@ -293,10 +324,15 @@ export function FoodScannerResultScreen() {
               >
                 −
               </button>
-              <span
-                className="food-scanner-result__portion-value"
-                aria-live="polite"
-              >
+              {/*
+                aria-live moved from this percent indicator to the
+                nutrition block below per spec §11.6 + adversarial CR
+                P8 — screen readers were announcing duplicate strings
+                («100%», then «Калории 480»). Composite announcement
+                lives on the metrics block so NVDA reads one coherent
+                sentence per portion change.
+               */}
+              <span className="food-scanner-result__portion-value">
                 {Math.round(portionMultiplier * 100)}%
               </span>
               <button
@@ -318,12 +354,16 @@ export function FoodScannerResultScreen() {
           {!hideNumbers && calories != null && (
             <div
               className="food-scanner-result__nutrition"
+              role="status"
               aria-live="polite"
+              aria-label={`Примерно ${
+                portionGrams ?? ""
+              } граммов, ${calories} килокалорий. Белки ${proteinG}, жиры ${fatG}, углеводы ${carbsG} граммов.`}
             >
-              <p className="food-scanner-result__calories">
+              <p className="food-scanner-result__calories" aria-hidden="true">
                 Калории: ~{calories} ккал
               </p>
-              <p className="food-scanner-result__macros">
+              <p className="food-scanner-result__macros" aria-hidden="true">
                 Б {proteinG} · Ж {fatG} · У {carbsG} г
               </p>
             </div>
@@ -331,6 +371,7 @@ export function FoodScannerResultScreen() {
           {hideNumbers && (
             <p
               className="food-scanner-result__ed-note"
+              role="status"
               aria-live="polite"
             >
               Примерно — записала.
@@ -391,30 +432,17 @@ export function FoodScannerResultScreen() {
           />
         </section>
 
-        {/* Beauty insights — null-safe, render only when present. */}
-        {result.beauty_insights && (
-          <section
-            className="food-scanner-result__beauty"
-            aria-labelledby="food-beauty-h3"
-          >
-            <h3
-              id="food-beauty-h3"
-              className="food-scanner-screen__section-heading"
-            >
-              Заметила
-            </h3>
-            {result.beauty_insights.beauty_impact && (
-              <p className="food-scanner-result__beauty-line">
-                {result.beauty_insights.beauty_impact}
-              </p>
-            )}
-            {result.beauty_insights.recommendation && (
-              <p className="food-scanner-result__beauty-line">
-                {result.beauty_insights.recommendation}
-              </p>
-            )}
-          </section>
-        )}
+        {/*
+          Beauty insights block intentionally NOT rendered for pilot.
+          Spec §6 + Q-BACK-4 verdict 2026-05-25 + memory
+          `project_cross_domain_insight_safety_gap` — cross-domain
+          insight cards REMOVED from MVP. Anti-medical safety filter is
+          not in production yet; sample rule («vit-D deficit 5d → argan
+          oil massage») is already medical-adjacent architecturally.
+          Re-introduce post-pilot after Alpha safety audit + content
+          gates. The `beauty_insights` field in the contract stays so
+          backend can pre-wire; frontend ignores it for now.
+         */}
 
         <div className="food-scanner-screen__cta-stack">
           <button

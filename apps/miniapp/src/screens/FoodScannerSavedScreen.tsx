@@ -25,6 +25,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { StateError } from "../components/StateError";
 import {
   fetchDailySummary,
+  fetchHealthFlags,
   type DailySummaryResponse,
 } from "../lib/food-scanner";
 
@@ -40,7 +41,13 @@ export function FoodScannerSavedScreen() {
   const state = (location.state ?? {}) as RouterState;
   const dishName = state.dishName ?? "Запись";
   const recapCalories = state.calories ?? null;
-  const edMode = Boolean(state.edMode);
+  // Default ED-mode TRUE — defence-in-depth for deep-link refresh
+  // (friendly CR #5). Router state is lost on refresh; if a customer
+  // with eating_disorder hits /saved fresh, we must NOT leak numbers
+  // until fetchHealthFlags confirms otherwise.
+  const [edMode, setEdMode] = useState<boolean>(
+    state.edMode === undefined ? true : Boolean(state.edMode),
+  );
 
   const [summary, setSummary] = useState<DailySummaryResponse | null>(null);
   const [err, setErr] = useState<unknown>(null);
@@ -48,8 +55,12 @@ export function FoodScannerSavedScreen() {
   const load = useCallback(async () => {
     setErr(null);
     try {
-      const s = await fetchDailySummary();
+      const [s, flags] = await Promise.all([
+        fetchDailySummary(),
+        fetchHealthFlags(),
+      ]);
       setSummary(s);
+      setEdMode(Boolean(flags.health_flags.eating_disorder));
     } catch (e) {
       setErr(e);
     }

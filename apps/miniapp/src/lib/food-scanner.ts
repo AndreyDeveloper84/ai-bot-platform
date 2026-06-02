@@ -325,15 +325,42 @@ function devWarn(msg: string): void {
 // Fetch wrappers — stubs in DEV; throw in prod until W4 wires.
 // ---------------------------------------------------------------------------
 
+export interface ScanPhotoOptions {
+  caption?: string;
+  /**
+   * AbortSignal plumbed from `AbortController` on F2 — friendly CR
+   * follow-up. On stub this controls only the simulated-latency
+   * setTimeout so QA can verify cancel UX; on swap-day W4 must wire
+   * the signal into the real `fetch`/`httpx` request so an inflight
+   * upload is cancelled when the customer taps «Отменить» or
+   * navigates away.
+   */
+  signal?: AbortSignal;
+}
+
 export async function scanPhoto(
   _photo: File,
-  _caption?: string,
+  opts?: ScanPhotoOptions,
 ): Promise<ScanResponse> {
   guardProd("POST /api/v1/customer/food/scan");
   devWarn("scanPhoto served from stub — W4 follow-up");
   const v = pickStubVariant();
   // Simulate network latency so the F2 loading card actually shows.
-  await new Promise<void>((resolve) => window.setTimeout(resolve, 1200));
+  // The signal aborts the wait early to mirror prod cancel behaviour.
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(resolve, 1200);
+    if (opts?.signal) {
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      if (opts.signal.aborted) {
+        onAbort();
+      } else {
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+  });
   if (v === "not_recognized") throw new FoodNotRecognizedError();
   if (v === "api_down") throw new NutritionUnavailableError();
   if (v === "photo_failed") throw new PhotoBytesMissingError();
