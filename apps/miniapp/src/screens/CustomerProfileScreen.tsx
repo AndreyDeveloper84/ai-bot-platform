@@ -125,46 +125,51 @@ export function CustomerProfileScreen() {
     };
   }, []);
 
-  const onMarketingToggle = useCallback(
-    async (next: boolean) => {
-      if (status.kind !== "ready") return;
-      setMarketingBusy(true);
-      try {
-        const updated = await setMarketingConsent(next);
-        setStatus({ ...status, consents: updated });
-        setToast({
-          visible: true,
-          message: next
-            ? "Хорошо, иногда буду показывать предложения от салонов."
-            : "Понятно, предложений от салонов больше не будет.",
-        });
-      } catch {
-        setToast({
-          visible: true,
-          message: "Не получилось сохранить. Попробуй ещё раз.",
-        });
-      } finally {
-        setMarketingBusy(false);
-      }
-    },
-    [status],
-  );
+  // Functional setState pattern (adversarial CR P4 — race protection).
+  // Stale-closure `setStatus({ ...status, ... })` could overwrite a
+  // sibling toggle update if both writes are in flight; functional
+  // form reads the freshest state at apply time.
+  const onMarketingToggle = useCallback(async (next: boolean) => {
+    setMarketingBusy(true);
+    try {
+      const updated = await setMarketingConsent(next);
+      setStatus((s) =>
+        s.kind === "ready" ? { ...s, consents: updated } : s,
+      );
+      setToast({
+        visible: true,
+        message: next
+          ? "Хорошо, иногда буду показывать предложения от салонов."
+          : "Понятно, предложений от салонов больше не будет.",
+      });
+    } catch {
+      setToast({
+        visible: true,
+        message: "Не получилось сохранить. Попробуй ещё раз.",
+      });
+    } finally {
+      setMarketingBusy(false);
+    }
+  }, []);
 
-  const onProactiveToggle = useCallback(
-    async (next: boolean) => {
-      if (status.kind !== "ready") return;
-      // Toggle ON = proactive enabled = opt_out false.
-      const optOut = !next;
-      setProactiveBusy(true);
-      try {
-        const updated = await setProactiveOptOut(optOut);
-        setStatus({ ...status, proactive: updated });
+  const onProactiveToggle = useCallback(async (next: boolean) => {
+    // Toggle ON = proactive enabled = opt_out false.
+    const optOut = !next;
+    setProactiveBusy(true);
+    try {
+      const updated = await setProactiveOptOut(optOut);
+      setStatus((s) =>
+        s.kind === "ready" ? { ...s, proactive: updated } : s,
+      );
         if (optOut) {
-          // Spec §8.3 explainer toast — minimum readable phrasing.
+          // Spec §8.3 verbatim (three sentences — adversarial CR P2:
+          // dropping the «не буду писать первой» line confuses the
+          // customer about whether transactional reminders still
+          // arrive).
           setToast({
             visible: true,
             message:
-              "Проактивные подсказки выключены. Подтверждения и напоминания по записям продолжат приходить.",
+              "Проактивные подсказки выключены. Я не буду писать первой с рекомендациями. Важные сообщения по записям всё равно будут приходить (подтверждения, переносы, отмены).",
           });
         } else {
           setToast({
@@ -172,23 +177,27 @@ export function CustomerProfileScreen() {
             message: "Подсказки от Ayla включены.",
           });
         }
-      } catch {
-        setToast({
-          visible: true,
-          message: "Не получилось сохранить. Попробуй ещё раз.",
-        });
-      } finally {
-        setProactiveBusy(false);
-      }
-    },
-    [status],
-  );
+    } catch {
+      setToast({
+        visible: true,
+        message: "Не получилось сохранить. Попробуй ещё раз.",
+      });
+    } finally {
+      setProactiveBusy(false);
+    }
+  }, []);
 
   return (
     <div className="profile-screen">
-      <a className="records-screen__skip-link" href="#profile-r2-anchor">
-        К управлению приватностью
-      </a>
+      {/* Skip-link renders only when R2 target is in the DOM (ready
+          state). During loading / error the anchor doesn't exist, so
+          activating the link is a no-op confusing keyboard users
+          (adversarial CR P5). */}
+      {status.kind === "ready" && (
+        <a className="records-screen__skip-link" href="#profile-r2-anchor">
+          К управлению приватностью
+        </a>
+      )}
 
       <header className="records-screen__header">
         <button
@@ -233,6 +242,7 @@ export function CustomerProfileScreen() {
               className="profile-section"
               aria-labelledby="profile-r2-h2"
               id="profile-r2-anchor"
+              tabIndex={-1}
             >
               <h2 id="profile-r2-h2" className="profile-section__heading">
                 Согласия и приватность
@@ -360,7 +370,7 @@ export function CustomerProfileScreen() {
             {/* R5 — Notifications */}
             <NotificationCard
               supportPreset={notificationsSheet}
-              onOpenSupport={() => setNotificationsSheet("export")}
+              onOpenSupport={() => setNotificationsSheet("notifications")}
               onCloseSupport={() => setNotificationsSheet(null)}
             />
           </>

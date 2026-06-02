@@ -35,7 +35,7 @@ import { useCallback, useEffect, useRef } from "react";
 
 import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 
-export type SupportPreset = "export" | "delete";
+export type SupportPreset = "export" | "delete" | "notifications";
 
 interface CopyBlock {
   headlineId: string;
@@ -59,6 +59,18 @@ const COPY: Record<SupportPreset, CopyBlock> = {
     body: [
       "Удаление пока оформляется через поддержку — так я уверена, что уберу данные во всех системах правильно. Напиши нам, и оператор всё сделает по закону.",
       "Часть данных по записям и оплатам может храниться дольше, если это требует закон.",
+    ],
+    primaryLabel: "Написать в поддержку",
+  },
+  // R5 entry — customer-facing notification-prefs UI doesn't exist for
+  // pilot (only MasterNotificationSettingsScreen). Per spec §7.1 we
+  // route to support to stay truthful (no in-app screen we can't
+  // open). FOLLOW_UP P-8 builds the real screen post-pilot.
+  notifications: {
+    headlineId: "profile-support-notifications-headline",
+    headline: "Изменить настройки уведомлений?",
+    body: [
+      "Пока этим занимается поддержка — мы соберём настройки вручную. Напиши нам, что хочешь поменять, и оператор всё настроит.",
     ],
     primaryLabel: "Написать в поддержку",
   },

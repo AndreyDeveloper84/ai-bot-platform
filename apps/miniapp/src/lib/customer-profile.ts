@@ -190,7 +190,42 @@ function devWarn(msg: string): void {
   }
 }
 
+/**
+ * Production guard — if this module ships to prod BEFORE W4 wires the
+ * real endpoints (per spec §12.2 + follow-up P-1), every customer
+ * would see «Анна Петрова» as their own profile, plus a hardcoded
+ * `data_storage_consent_at` they never gave, plus a marketing toggle
+ * that persists fake «saved» without a server record. That's a
+ * 152-ФЗ truthfulness violation against the founder-locked Variant 3
+ * rule («Profile NEVER promises an in-app action it cannot complete»).
+ *
+ * Until W4 swaps stub bodies to real `request(...)` calls, prod-mode
+ * fetch must surface an explicit error → `StateError` renders, NOT
+ * fake identity. Adversarial CR caught this as «M1 stub leak in
+ * production» (ship gate, addressed inline).
+ */
+class StubNotWiredError extends Error {
+  constructor() {
+    super(
+      "Профиль ещё не подключён. Загрузка временно недоступна. Попробуй позже.",
+    );
+    this.name = "StubNotWiredError";
+  }
+}
+
+function guardProd(endpoint: string): void {
+  if (!import.meta.env.DEV) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[customer-profile] ${endpoint} called in production with no W4 wire-up. ` +
+        "See docs/screens/customer-profile-flow.md §12.2 (P-1).",
+    );
+    throw new StubNotWiredError();
+  }
+}
+
 export async function fetchMe(): Promise<MeProfileResponse> {
+  guardProd("GET /api/v1/me");
   devWarn(
     "GET /api/v1/me served from stub — swap when W4 ships canonical proxy",
   );
@@ -199,6 +234,7 @@ export async function fetchMe(): Promise<MeProfileResponse> {
 }
 
 export async function fetchConsents(): Promise<ConsentsResponse> {
+  guardProd("GET /api/v1/me/consents");
   devWarn(
     "GET /api/v1/me/consents served from stub — W4 follow-up P-1",
   );
@@ -210,6 +246,7 @@ export async function fetchConsents(): Promise<ConsentsResponse> {
 export async function setMarketingConsent(
   next: boolean,
 ): Promise<ConsentsResponse> {
+  guardProd("POST /api/v1/me/consents/marketing");
   devWarn(
     "POST /api/v1/me/consents/marketing served from stub — W4 follow-up P-1",
   );
@@ -219,6 +256,7 @@ export async function setMarketingConsent(
 }
 
 export async function fetchProactivePrefs(): Promise<ProactivePrefsResponse> {
+  guardProd("GET /api/v1/me/proactive_opt_out");
   devWarn(
     "GET /api/v1/me/proactive_opt_out served from stub — W4 follow-up P-1",
   );
@@ -229,6 +267,7 @@ export async function fetchProactivePrefs(): Promise<ProactivePrefsResponse> {
 export async function setProactiveOptOut(
   optOut: boolean,
 ): Promise<ProactivePrefsResponse> {
+  guardProd("POST /api/v1/me/proactive_opt_out");
   devWarn(
     "POST /api/v1/me/proactive_opt_out served from stub — W4 follow-up P-1",
   );

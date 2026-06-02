@@ -382,7 +382,7 @@ export function CustomerWellnessDashboardScreen() {
             type="button"
             className="wellness-dash__icon-btn"
             aria-label="Профиль"
-            onClick={() => navigate("/me")}
+            onClick={() => navigate("/customer/profile")}
           >
             <span aria-hidden="true">👤</span>
           </button>
@@ -390,7 +390,7 @@ export function CustomerWellnessDashboardScreen() {
             type="button"
             className="wellness-dash__icon-btn"
             aria-label="Настройки"
-            onClick={() => navigate("/me")}
+            onClick={() => navigate("/customer/profile")}
           >
             <span aria-hidden="true">⚙</span>
           </button>

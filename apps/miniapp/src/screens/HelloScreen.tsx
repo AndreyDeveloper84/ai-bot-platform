@@ -177,7 +177,7 @@ export function HelloScreen() {
         <button type="button" className="btn-secondary" onClick={() => navigate("/my-visits")}>
           Мои записи
         </button>
-        <button type="button" className="btn-secondary" onClick={() => navigate("/me")}>
+        <button type="button" className="btn-secondary" onClick={() => navigate("/customer/profile")}>
           Профиль
         </button>
       </nav>
