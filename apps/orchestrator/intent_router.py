@@ -112,7 +112,39 @@ async def classify(
     """
 
     provider = provider or OpenAIProvider()
-    messages = _build_messages(text, memory_snapshot or {}, brand_voice or {})
+
+    # #842 — PII tokenization at intent_router boundary (152-ФЗ §6).
+    # ``apps.orchestrator.llm.openai_provider.OpenAIProvider`` is a
+    # Sprint-1 simpler provider returning ``LLMResponse``, NOT the
+    # production ``LLMProvider`` protocol that ``router._load_provider``
+    # auto-wraps in ``PIITokenizingProvider``. So the decorator never
+    # fires for intent classification — raw user text would otherwise
+    # cross the trust boundary к OpenAI verbatim.
+    #
+    # Tactical fix: tokenize ``text`` directly at this call site. The
+    # classifier returns structured JSON intent decisions (no user
+    # free-text echo), so detokenization on response is omitted — if
+    # the LLM ever leaks a token into the JSON, it would surface as
+    # the literal `<CAT_NONCE_INDEX>` string in `IntentDecision.intent`
+    # which downstream code treats as «unknown» and falls back safely.
+    #
+    # Audit row for transit pseudonymisation is NOT emitted at this
+    # call site — pipeline-level `record_ai_request` (W4 #816) covers
+    # observability. Follow-up: harmonise intent_router к use the
+    # production LLMProvider protocol so the decorator pattern applies
+    # uniformly.
+    from django.conf import settings as _settings
+
+    from apps.llm.pii_tokenizer import current_conversation_id as _pii_cid
+    from apps.llm.pii_tokenizer import tokenize as _pii_tokenize
+
+    classifier_text = text
+    if getattr(_settings, "PII_TOKENIZER_ENABLED", True):
+        _conv_id = _pii_cid()
+        if _conv_id is not None:
+            classifier_text = _pii_tokenize(text, _conv_id)
+
+    messages = _build_messages(classifier_text, memory_snapshot or {}, brand_voice or {})
 
     try:
         response = await provider.complete(
@@ -123,7 +155,12 @@ async def classify(
             temperature=0.1,
         )
     except Exception as exc:  # noqa: BLE001 — router is safety boundary
-        logger.exception("intent_router.llm_failed text=%s err=%s", text[:80], exc)
+        # #842 W3 CRIT-2 — `text` is the RAW user message. The previous
+        # `text=%s ... text[:80]` log leaked PII to Loki/Datadog on
+        # every LLM error (152-ФЗ §6 violation against the log store).
+        # Length-only proxy preserves debugging utility (correlating
+        # error rate to message length) без the data.
+        logger.exception("intent_router.llm_failed text_len=%d err=%s", len(text or ""), exc)
         return _SAFE_FALLBACK
 
     if response.is_fallback:

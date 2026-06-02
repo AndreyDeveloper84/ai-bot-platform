@@ -321,6 +321,22 @@ REPLAY_SAMPLE_RATE_TEST = float(os.environ.get("REPLAY_SAMPLE_RATE_TEST", "0.0")
 # 30 days per design §7.1 expires_at; A4 cleanup task evicts past-expiry rows.
 REPLAY_RETENTION_DAYS = int(os.environ.get("REPLAY_RETENTION_DAYS", "30"))
 
+# #842 PII tokenization at LLM exit boundary (Tier-A #1 P0 — 152-ФЗ §6).
+# Defaults to ENABLED. The `PIITokenizingProvider` decorator in
+# `apps/llm/pii_protected_provider.py` reads this; when False, it
+# bypasses tokenization entirely (raw text → vendor). Production MUST
+# leave this on; the gate exists to let CI tests run without a Redis
+# instance + to let internal smoke flows (without user PII) opt out
+# without monkey-patching the decorator.
+#
+# Test conftest sets this to False — explicit override per
+# `feedback_pre_post_flip_rubric` (test isolation > production default).
+PII_TOKENIZER_ENABLED = os.environ.get("PII_TOKENIZER_ENABLED", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+
 # Redaction allowlist — strings the regex layer should NOT replace. Useful for
 # brand / master / service names that look like phones or emails. Comma-
 # separated env var; B3 implements lookup.

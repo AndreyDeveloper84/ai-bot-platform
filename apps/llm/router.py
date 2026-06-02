@@ -56,7 +56,7 @@ the configured default in places it shouldn't be).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 
@@ -202,11 +202,11 @@ class LLMRouter:
             if name == "openai":
                 from apps.llm.providers.openai_provider import OpenAIProvider
 
-                provider: LLMProvider = OpenAIProvider()
+                raw_provider: Any = OpenAIProvider()
             elif name == "anthropic":
                 from apps.llm.providers.anthropic_provider import AnthropicProvider
 
-                provider = AnthropicProvider()
+                raw_provider = AnthropicProvider()
             else:  # pragma: no cover — guarded above
                 raise ValueError(f"unknown provider name: {name!r}")
         except LLMProviderUnavailable:
@@ -219,6 +219,14 @@ class LLMRouter:
             )
             raise LLMProviderUnavailable(f"provider {name!r} failed to initialise: {exc}") from exc
 
+        # PII tokenization wrap (Phase D / 152-ФЗ Tier-A). Single-point
+        # enforcement at the LLM-call boundary — every provider (OpenAI,
+        # Anthropic, future vendors) gets wrapped automatically. The
+        # decorator is a no-op when no PII scope is active, so internal
+        # background flows pay only a ContextVar.get() check.
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+
+        provider: LLMProvider = PIITokenizingProvider(raw_provider)
         self._providers[name] = provider
         return provider
 

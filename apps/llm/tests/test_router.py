@@ -6,8 +6,6 @@ import pytest
 
 from apps.audit.models import AuditLog
 from apps.llm.protocol import LLMProvider
-from apps.llm.providers.anthropic_provider import AnthropicProvider
-from apps.llm.providers.openai_provider import OpenAIProvider
 from apps.llm.router import (
     EVENT_PROVIDER_RESOLVED,
     LLMRouter,
@@ -47,7 +45,7 @@ class TestTenantFeature:
 
         router = LLMRouter()
         provider = router.get_provider(tenant, skill="faq")
-        assert isinstance(provider, AnthropicProvider)
+        assert provider.name == "anthropic"  # type: ignore[attr-defined]
 
     def test_invalid_tenant_value_falls_through(
         self, tenant: Tenant, settings: pytest.FixtureRequest
@@ -57,7 +55,7 @@ class TestTenantFeature:
         tenant.save()
         provider = LLMRouter().get_provider(tenant, skill="faq")
         # Falls through to org default.
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -75,19 +73,19 @@ class TestSkillDefault:
         tenant.save()
 
         provider = LLMRouter().get_provider(tenant, skill="intent")
-        assert isinstance(provider, AnthropicProvider)
+        assert provider.name == "anthropic"  # type: ignore[attr-defined]
 
     def test_missing_skill_falls_through_to_org(self, settings: pytest.FixtureRequest) -> None:
         settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
         settings.SKILL_LLM_PROVIDER = {"intent": "anthropic"}  # type: ignore[attr-defined]
         provider = LLMRouter().get_provider(skill="not_in_map")
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
     def test_invalid_skill_value_falls_through(self, settings: pytest.FixtureRequest) -> None:
         settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
         settings.SKILL_LLM_PROVIDER = {"faq": "weird"}  # type: ignore[attr-defined]
         provider = LLMRouter().get_provider(skill="faq")
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +97,12 @@ class TestOrgDefault:
     def test_no_tenant_no_skill(self, settings: pytest.FixtureRequest) -> None:
         settings.LLM_PROVIDER = "anthropic"  # type: ignore[attr-defined]
         provider = LLMRouter().get_provider()
-        assert isinstance(provider, AnthropicProvider)
+        assert provider.name == "anthropic"  # type: ignore[attr-defined]
 
     def test_bad_org_default_falls_back_to_openai(self, settings: pytest.FixtureRequest) -> None:
         settings.LLM_PROVIDER = "unknown_vendor"  # type: ignore[attr-defined]
         provider = LLMRouter().get_provider()
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -118,19 +116,19 @@ class TestEmbeddingFallback:
         tenant.save()
         provider = LLMRouter().get_provider(tenant, skill="faq", op="embedding")
         # Anthropic can't embed → router swaps to OpenAI.
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
     def test_openai_embedding_no_fallback(self, tenant: Tenant) -> None:
         provider = LLMRouter().get_provider(tenant, op="embedding")
         # OpenAI is the org default + supports embeddings → no fallback.
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
     def test_anthropic_complete_keeps_anthropic(self, tenant: Tenant) -> None:
         tenant.features = {"llm_provider": "anthropic"}
         tenant.save()
         provider = LLMRouter().get_provider(tenant, op="complete")
         # op != embedding → no fallback; Anthropic stands.
-        assert isinstance(provider, AnthropicProvider)
+        assert provider.name == "anthropic"  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -142,12 +140,12 @@ class TestQuotaFallback:
     def test_quota_fallback_swaps_provider(self) -> None:
         # Org default = openai. Caller asks for fallback away from openai.
         provider = LLMRouter().get_provider(prefer_fallback_from="openai")
-        assert isinstance(provider, AnthropicProvider)
+        assert provider.name == "anthropic"  # type: ignore[attr-defined]
 
     def test_quota_fallback_from_anthropic(self, settings: pytest.FixtureRequest) -> None:
         settings.LLM_PROVIDER = "anthropic"  # type: ignore[attr-defined]
         provider = LLMRouter().get_provider(prefer_fallback_from="anthropic")
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
     def test_quota_fallback_no_op_when_candidate_already_different(
         self, settings: pytest.FixtureRequest
@@ -156,7 +154,7 @@ class TestQuotaFallback:
         # prefer_fallback_from='anthropic' but candidate is already openai —
         # router doesn't swap (no point).
         provider = LLMRouter().get_provider(prefer_fallback_from="anthropic")
-        assert isinstance(provider, OpenAIProvider)
+        assert provider.name == "openai"  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

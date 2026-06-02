@@ -397,6 +397,121 @@ Withdrawal does **NOT** clear `consent_at` on a live row — that would violate 
 
 **The withdrawal UPDATE sets `deletion_reason = 'withdrawal'`** (round-3 A1) — this distinguishes withdrawals from outright deletions in subsequent audit queries («show me Q3 consent withdrawals» = `WHERE deletion_reason='withdrawal' AND delete_requested_at >= ...`). Forget-all sets `deletion_reason = 'forget_all'`; per-entry delete sets `'user_delete'`; TTL purge sets `'ttl_purge'`; minor-protection purge sets `'minor_protection'`.
 
+### 11.4 PII tokenization at LLM exit boundary (Tier-A pre-pilot)
+
+**Status:** Implemented 2026-05-26 per Tier-A #1
+(`apps/llm/pii_tokenizer.py` + `apps/llm/pii_protected_provider.py`).
+Code-level realisation of the 152-ФЗ §6 «transmission to external
+processor» pseudonymisation obligation.
+
+#### 11.4.1 Why this exists
+
+Sending raw user PII (phone, email, card number) к OpenAI / Anthropic
+is «processing» under 152-ФЗ §6. Vendor's own privacy stance is
+out-of-scope for our legal posture — the regulator looks at what
+**we** transmit. The Tier-A pre-pilot mitigation pseudonymises PII
+before vendor dispatch and reverses the substitution on response so
+the customer-facing UX stays whole while no raw PII crosses the
+external trust boundary.
+
+This is **orthogonal** to the zone model (§4) — green/yellow/red is
+about storage classification, pseudonymisation is about transit. Both
+apply simultaneously: a phone number stored as a red-zone memory
+entry is also tokenised at every LLM call that quotes it.
+
+#### 11.4.2 Tokenizer contract (Phase 0 scope)
+
+* **5 categories** detected via regex reused from
+  `apps/replay/redactor.py`: PHONE, EMAIL, CC, OTP, URL_TOKEN.
+* **Names skipped** — regex-only detection inadequate для Russian
+  morphology; natasha NER deferred к Phase 1 per §1 stance.
+  Documented known gap; legal-audit awareness required.
+* **Token format:** `<{CATEGORY}_{NONCE}_{INDEX}>` (e.g.
+  `<PHONE_a8f2c1d4_1>`). Per-conversation random 8-hex-char NONCE
+  defends against user-supplied literal-shape collision attacks (an
+  attacker typing `<PHONE_5>` cannot match the rev-map без guessing
+  NONCE). Sentinel-escape approach was tried and rejected — LLMs
+  normalise sentinels away on output; NONCE in the token format
+  itself is the only robust defence.
+* **Storage:** single Redis HASH per `conversation_id` с TTL
+  (default `SHORT_TERM_MEMORY_TTL_SECONDS + 1h grace`, ~25h). Atomic
+  get-or-create + HSETNX nonce seed via Lua script (precedent from
+  `apps/workers/ceilings.py`). Token map NEVER persisted к Postgres,
+  audit log, или structured logs in raw form.
+* **Same-token-per-entity** within one conversation: normalised
+  lookup (Russian phone canonicalisation `+7 ≡ 8`, email lowercase)
+  preserves coreference («тот же человек упомянул») для LLM context.
+* **Reverse substitution** is exact-match + case-sensitive.
+  Hallucinated tokens (LLM emits a token not in the rev-map) leave
+  the string intact and emit `WARNING` log (operator surface для
+  model-misbehaviour detection). Mutated formats (whitespace,
+  lowercase) are NOT substituted.
+
+#### 11.4.3 Enforcement boundary
+
+The `PIITokenizingProvider` decorator wraps every concrete LLM
+provider inside `apps.llm.router.LLMRouter._load_provider`. Single-
+point enforcement: future provider additions (e.g. Yandex GPT,
+GigaChat) are auto-protected without code change. The conversation
+scope is set via `apps.llm.pii_tokenizer.pii_context(conversation_id)`
+context manager — skill code declares the boundary explicitly so
+reviewers can grep для activation points. Absence of an active scope
+при `complete()` call emits a WARNING log — operator signal для
+potentially-missed activation.
+
+#### 11.4.4 Audit row (`llm.call_completed`)
+
+Every LLM call routed через the decorator writes one audit row с:
+
+* `provider`, `model`, `op` (complete / embedding)
+* `conversation_id` (UUID, not PII)
+* `prompt_tokens`, `completion_tokens`, `finish_reason`
+* `pii_category_counts` — e.g. `{"PHONE": 2, "EMAIL": 1}`,
+  per-category occurrence counts in the tokenised message stream
+  sent к vendor.
+* `response_pii_category_counts` (when non-empty) — same counts on
+  the vendor's response side. Detects vendor-side PII surface
+  anomalies (e.g. training-data-leak echo of someone else's number —
+  hypothetical but regulator-relevant).
+
+**Raw user content NEVER reaches the audit log.** The test suite
+has a dedicated «scan payload JSON для any raw PII substring»
+regression guard (`test_audit_payload_never_contains_raw_pii`) — if
+a future caller adds a payload field carrying raw text, the test
+fails before merge.
+
+#### 11.4.5 Limitations + future work
+
+* **Names** — Phase 1 natasha NER work scoped в the existing §1
+  stance. Until then, names traverse к vendor in plaintext.
+  Pilot's 50-founder cohort accepts this tradeoff; legal-audit prep
+  calls out the gap explicitly.
+* **Addresses** — Russian-address regex precision too low для
+  Phase 0 scope; skipped. Phase 1 natasha NER catches some cases;
+  full address pseudonymisation requires a dedicated detector.
+* **Tool-call arguments** — `ToolCall.arguments` dict is NOT
+  tokenised в Phase 0. Tool args are typically structured
+  booking / master IDs, not free-form PII. Phase 1 review surfaces
+  tools that take free-form user strings (e.g. notes fields) и
+  extends tokenizer reach.
+* **Crypto-shred boundary** — tokenizer's Redis storage holds raw
+  PII by design (it must, to reverse-substitute). The 25h TTL +
+  explicit `clear_conversation()` на conversation close limit the
+  exposure window. A future Phase 1 follow-up may move map к
+  per-conversation symmetric-key encryption с key destruction on
+  conversation close.
+
+#### 11.4.6 Cross-references
+
+* Implementation: `apps/llm/pii_tokenizer.py`,
+  `apps/llm/pii_protected_provider.py`.
+* Existing redaction infrastructure reused:
+  `apps/replay/redactor.py` (regex patterns),
+  `apps/eventbus/ingest_redaction.py` (DLQ envelope-side scrub).
+* Audit event: `llm.call_completed` (single-source emit point per
+  the regression guard test in
+  `apps/llm/tests/test_pii_protected_provider.py::TestAuditEmit`).
+
 ---
 
 ## 12. Consequences
