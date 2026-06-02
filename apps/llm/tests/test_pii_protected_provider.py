@@ -21,6 +21,7 @@ double — no real Redis, no real OpenAI/Anthropic SDK.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 from uuid import uuid4
 
@@ -81,7 +82,7 @@ class _FakeProvider:
 
 
 @pytest.fixture
-def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+def fake_redis(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeRedis]:
     fake = _FakeRedis()
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
     pii_tokenizer._invalidate_script_cache()

@@ -134,6 +134,21 @@ class PIITokenizingProvider:
         max_tokens: int | None = None,
     ) -> CompletionResult:
         """Tokenize messages → wrapped.complete() → detokenize response."""
+        # Settings gate — allows tests / smoke flows to disable PII
+        # tokenization without monkey-patching the decorator. Defaults
+        # to True (152-ФЗ §6 compliance MUST be on by default;
+        # explicit opt-out is the only safe shape).
+        from django.conf import settings
+
+        if not getattr(settings, "PII_TOKENIZER_ENABLED", True):
+            return await self._wrapped.complete(
+                messages,
+                model=model,
+                temperature=temperature,
+                tools=tools,
+                max_tokens=max_tokens,
+            )
+
         conversation_id = pii_tokenizer.current_conversation_id()
         if conversation_id is None:
             # No active scope. Pass through unchanged. WARNING для operator
@@ -191,6 +206,10 @@ class PIITokenizingProvider:
 
     async def embedding(self, text: str, *, model: str | None = None) -> list[float]:
         """Tokenize text → wrapped.embedding(). No detokenize (vectors)."""
+        from django.conf import settings
+
+        if not getattr(settings, "PII_TOKENIZER_ENABLED", True):
+            return await self._wrapped.embedding(text, model=model)
         conversation_id = pii_tokenizer.current_conversation_id()
         if conversation_id is None:
             logger.warning(

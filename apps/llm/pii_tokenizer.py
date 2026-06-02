@@ -128,6 +128,34 @@ def pii_context(conversation_id: UUID | str | None) -> Iterator[None]:
         _pii_conversation_var.reset(token)
 
 
+def enter_scope(conversation_id: UUID | str | None) -> Any:
+    """Flat-API equivalent of :func:`pii_context` enter — returns the
+    contextvar token caller passes к :func:`exit_scope` later.
+
+    Use when a 270-line `with` block would force prohibitive indent
+    churn (e.g. wrapping the body of `apps/orchestrator/pipeline.py
+    ::_run_under_tenant` which already nests inside `tenant_scope`
+    + `_step_event`). Stack discipline is the caller's responsibility:
+    every ``enter_scope`` MUST be balanced by ``exit_scope(token)``
+    в a ``try/finally`` block.
+
+    Prefer :func:`pii_context` (``with``-style) when nesting depth
+    permits — explicit lexical scope reads cleaner. This helper exists
+    purely as a diff-minimization tool for the pipeline integration.
+    """
+    cid_str = str(conversation_id) if conversation_id is not None else None
+    return _pii_conversation_var.set(cid_str)
+
+
+def exit_scope(token: Any) -> None:
+    """Counterpart of :func:`enter_scope`. See its docstring.
+
+    Reset is unconditional — if ``token`` was already reset, contextvar
+    raises ``LookupError``; callers should NOT catch (indicates a bug).
+    """
+    _pii_conversation_var.reset(token)
+
+
 # --- Category configuration -------------------------------------------------
 
 

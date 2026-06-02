@@ -16,6 +16,7 @@ needed; tests pin contract behaviour rather than Redis itself.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from uuid import uuid4
 
 import pytest
@@ -94,7 +95,17 @@ class _FakeScript:
 
     def __call__(self, *, keys: list[str], args: list[str | int]) -> list[str]:
         key = keys[0]
-        category, normalised, original, ttl, candidate_nonce = args
+        # Mypy fix (#842 stall): explicit narrowing — Lua ABI accepts
+        # `str | int` (TTL int, others string-shaped from caller), but
+        # the test-side simulation needs concrete `str` для hash values.
+        # All `pii_tokenizer.tokenize()` call paths pass strings for
+        # category/normalised/original/candidate_nonce; ttl is the only
+        # int. Casting matches runtime reality.
+        category = str(args[0])
+        normalised = str(args[1])
+        original = str(args[2])
+        ttl = int(args[3])
+        candidate_nonce = str(args[4])
         # HSETNX simulation для nonce.
         h = self._fake.hashes.setdefault(key, {})
         if "nonce" not in h:
@@ -103,14 +114,14 @@ class _FakeScript:
         fwd_field = f"fwd:{category}:{normalised}"
         existing = self._fake.hget(key, fwd_field)
         if existing:
-            self._fake.expire(key, int(ttl))
+            self._fake.expire(key, ttl)
             return [existing, nonce]
         cnt_field = f"cnt:{category}"
         idx = self._fake.hincrby(key, cnt_field, 1)
         token = f"<{category}_{nonce}_{idx}>"
         self._fake.hset(key, fwd_field, token)
         self._fake.hset(key, f"rev:{token}", original)
-        self._fake.expire(key, int(ttl))
+        self._fake.expire(key, ttl)
         return [token, nonce]
 
 
@@ -120,7 +131,7 @@ class _FakeScript:
 
 
 @pytest.fixture
-def fake_redis(monkeypatch: pytest.MonkeyPatch) -> _FakeRedis:
+def fake_redis(monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeRedis]:
     fake = _FakeRedis()
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
     pii_tokenizer._invalidate_script_cache()

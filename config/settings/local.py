@@ -16,3 +16,9 @@ CACHES = {
         "LOCATION": "ai-bot-platform-local",
     },
 }
+
+# #842 — tests don't run Redis. Disable PII tokenization by default so
+# the pytest suite doesn't fail on `redis.ConnectionError`. Tests that
+# exercise the tokenizer explicitly (`test_pii_*`) use `fake_redis`
+# fixture + opt back in via settings override / explicit `pii_context`.
+PII_TOKENIZER_ENABLED = False
