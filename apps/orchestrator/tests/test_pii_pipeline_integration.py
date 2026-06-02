@@ -111,76 +111,126 @@ class TestPiiPipelineRoundTrip:
         self, tenant: Tenant, fake_redis: _FakeRedis
     ) -> None:
         """Raw user phone «+7 999 123-45-67» MUST NOT reach the wrapped
-        provider — only the tokenized form `<PHONE_NONCE_INDEX>` does."""
+        provider — only the tokenized form `<PHONE_NONCE_INDEX>` does.
+
+        #975 (2026-06-02): intent classification now uses the production
+        ``LLMProvider`` protocol resolved через `apps.llm.router.get_router()`.
+        Patch the router so the inner provider's `complete` is the
+        mock that captures messages. The decorator
+        ``PIITokenizingProvider`` still wraps the inner provider, so
+        messages it forwards downstream ARE tokenized — the assertion
+        below proves this.
+        """
+        from apps.llm.protocol import CompletionResult
+
         captured_messages: list[list[dict[str, str]]] = []
 
-        provider = AsyncMock()
+        inner_provider = AsyncMock()
+        inner_provider.name = "openai"
 
         async def _capture(messages, **_kw):
             captured_messages.append([{**m} for m in messages])
-            return _intent_decision_response()
+            return CompletionResult(
+                text=_intent_decision_response().content,
+                provider="openai",
+                finish_reason="stop",
+            )
 
-        provider.complete.side_effect = _capture
+        inner_provider.complete.side_effect = _capture
 
-        with patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=provider,
-        ):
+        # Wrap inner_provider в the real `PIITokenizingProvider` so
+        # the production-path tokenization runs against our mock.
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+
+        wrapped = PIITokenizingProvider(inner_provider)
+        router_stub = AsyncMock()
+        router_stub.get_provider = lambda *a, **kw: wrapped
+
+        with patch("apps.llm.router.get_router", return_value=router_stub):
             await turn(_message("позвони мне на +7 999 123-45-67"))
 
-        # The intent classifier was the first (and likely only) call
-        # хитнул мock provider. Capture проверяем any reached.
+        # The intent classifier was the first call to hit the mock
+        # provider. Subsequent skill calls (FAQ etc.) may carry messages
+        # NOT containing the original phone (e.g. FAQ's own default
+        # greeting), so the assertion below is global: raw phone forms
+        # MUST NEVER appear across all captured messages, AND at least
+        # one tokenized form MUST be present (proving tokenization
+        # happened for the phone-bearing user message).
         assert captured_messages, "intent classifier did not call the provider"
-        for msg_set in captured_messages:
-            for msg in msg_set:
-                content = msg.get("content", "")
-                # Raw phone forms MUST NOT appear.
-                assert "+7 999 123-45-67" not in content
-                assert "9991234567" not in content
-                assert "+79991234567" not in content
-                # If the user-role message landed in this set, it
-                # MUST carry the token shape instead.
-                if msg.get("role") == "user":
-                    assert "<PHONE_" in content, (
-                        f"user-role message lacks tokenized phone: {content!r}"
-                    )
+        all_content = "\n".join(
+            msg.get("content", "") for msg_set in captured_messages for msg in msg_set
+        )
+        # Raw phone forms MUST NOT appear anywhere.
+        assert "+7 999 123-45-67" not in all_content
+        assert "9991234567" not in all_content
+        assert "+79991234567" not in all_content
+        # At least one tokenized form MUST be present — proves the
+        # decorator tokenized the phone-bearing user message before
+        # the wrapped inner provider saw it.
+        assert "<PHONE_" in all_content, (
+            "expected at least one tokenized `<PHONE_...>` in captured "
+            f"messages, got: {all_content!r}"
+        )
+
+        # W3 LOW-1 (PR #987 follow-up) — load-bearing assertion для
+        # #975's acceptance criterion: `llm.call_completed` audit row
+        # MUST be emitted by the decorator for the intent classify
+        # call. Without this assertion, the audit-trail gap closure
+        # is unverifiable.
+        from apps.audit.models import AuditLog
+
+        def _count_audit_rows() -> int:
+            return AuditLog.all_tenants.filter(
+                action="llm.call_completed",
+            ).count()
+
+        audit_count = await sync_to_async(_count_audit_rows)()
+        assert audit_count >= 1, (
+            f"expected ≥1 `llm.call_completed` audit row (decorator "
+            f"emits one per `complete()` call); got {audit_count}. "
+            "The decorator either didn't tokenize OR `_emit_call_audit_async` "
+            "silently failed — audit-trail evidence для 152-ФЗ §6 is missing."
+        )
 
     async def test_response_token_is_detokenized_before_storage(
         self, tenant: Tenant, fake_redis: _FakeRedis
     ) -> None:
         """Vendor returns text containing the token; pipeline detokenises
-        before persisting to Conversation.Message."""
-        provider = AsyncMock()
+        before persisting to Conversation.Message.
+
+        Patches production router (post-#975 path) — same shape as
+        ``test_raw_phone_is_tokenized_before_reaching_provider``.
+        """
+        from apps.llm.pii_protected_provider import PIITokenizingProvider
+        from apps.llm.protocol import CompletionResult
+
+        inner_provider = AsyncMock()
+        inner_provider.name = "openai"
 
         async def _respond(messages, **_kw):
-            # First call (intent classifier) — return classifier JSON.
             if any(
                 "JSON" in m.get("content", "") or "intent" in m.get("content", "").lower()
                 for m in messages
             ):
-                return _intent_decision_response()
-            # Subsequent FAQ-skill call — echo back any phone token
-            # the message carries (simulating LLM that includes the
-            # tokenized value verbatim в reply).
+                return CompletionResult(
+                    text=_intent_decision_response().content,
+                    provider="openai",
+                    finish_reason="stop",
+                )
             phone_tokens: list[str] = []
             for m in messages:
                 content = m.get("content", "")
                 phone_tokens += [t for t in content.split() if t.startswith("<PHONE_")]
             reply = "Перезвоню на " + (phone_tokens[0] if phone_tokens else "—")
-            return LLMResponse(
-                content=reply,
-                model="gpt-4o-mini-mock",
-                is_fallback=False,
-                tokens_in=5,
-                tokens_out=10,
-            )
+            return CompletionResult(text=reply, provider="openai", finish_reason="stop")
 
-        provider.complete.side_effect = _respond
+        inner_provider.complete.side_effect = _respond
 
-        with patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=provider,
-        ):
+        wrapped = PIITokenizingProvider(inner_provider)
+        router_stub = AsyncMock()
+        router_stub.get_provider = lambda *a, **kw: wrapped
+
+        with patch("apps.llm.router.get_router", return_value=router_stub):
             result = await turn(_message("позвони на +7 999 123-45-67"))
 
         # The TurnResult.reply.text was rendered AFTER detokenization
