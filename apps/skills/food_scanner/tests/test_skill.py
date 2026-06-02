@@ -1,4 +1,4 @@
-"""FoodScannerSkill tests (DRF-818 / Sprint 9 / P1).
+"""FoodScannerSkill tests (DRF-818 / Sprint 9 / P1 + Веха 1 gates).
 
 Covers:
 
@@ -10,11 +10,16 @@ Covers:
 * Callback flow: to_diary writes log, clarify prompts, reject acks.
 * Registration order vs food_clarify (P1 owned callbacks must be
   distinguishable; sentinel test asserts both skills are present).
+* Веха 1 gates: NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED master
+  switches + per-user ``food_scanner_consent_at`` consent gate.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
+
+import pytest
 
 from apps.integrations.ayla import (
     FoodLogResponse,
@@ -26,11 +31,25 @@ from apps.skills.base import SkillContext
 from apps.skills.food_scanner.skill import (
     AYLA_DOWN_FALLBACK,
     CLARIFY_PROMPT,
+    CONSENT_REQUIRED_FALLBACK,
     NOT_RECOGNIZED_FALLBACK,
+    NUTRITION_OFF_FALLBACK,
     PHOTO_NO_BYTES,
+    PHOTO_SCAN_OFF_FALLBACK,
     REJECTED_ACK,
     FoodScannerSkill,
 )
+
+
+@pytest.fixture(autouse=True)
+def _enable_nutrition(settings):
+    """Default the Веха 1 gates ON so existing behavioural tests are
+    unaffected. The dedicated ``TestGates`` class flips them back to
+    pin the refusal paths.
+    """
+
+    settings.NUTRITION_ENABLED = True
+    settings.FOOD_PHOTO_SCAN_ENABLED = True
 
 
 def _context(
@@ -38,6 +57,7 @@ def _context(
     *,
     has_attachments: bool = False,
     photo_bytes: bytes | None = None,
+    consent_at: datetime | None = None,
 ) -> SkillContext:
     conversation = Mock(id="conv-1")
     if photo_bytes is not None:
@@ -48,6 +68,12 @@ def _context(
     bot_user = Mock()
     bot_user.channel = "max"
     bot_user.channel_user_id = "12345"
+    # Веха 1: default to a granted consent so the broad test suite
+    # exercises the post-gate code paths. The consent-missing case is
+    # asserted explicitly in TestGates.
+    bot_user.food_scanner_consent_at = (
+        consent_at if consent_at is not None else datetime.now(timezone.utc)
+    )
     return SkillContext(
         conversation=conversation,
         bot_user=bot_user,
@@ -273,6 +299,128 @@ class TestCallbackFlow:
         ):
             result = FoodScannerSkill().handle(ctx)
         assert result.reply_text == AYLA_DOWN_FALLBACK
+
+
+# ─── Веха 1 gates ─────────────────────────────────────────────────────────
+
+
+class TestGates:
+    """Two-flag + consent gating contract (founder verdict 2026-06-02)."""
+
+    def test_nutrition_off_short_circuits_photo(self, settings) -> None:
+        settings.NUTRITION_ENABLED = False
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("Ayla MUST NOT be called when nutrition off"),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == NUTRITION_OFF_FALLBACK
+        assert result.meta is not None
+        assert result.meta.get("reply_kind") == "food_scanner_nutrition_off"
+
+    def test_nutrition_off_short_circuits_callback(self, settings) -> None:
+        settings.NUTRITION_ENABLED = False
+        ctx = _context("cb:food:to_diary:scan-1")
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("Ayla MUST NOT be called when nutrition off"),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == NUTRITION_OFF_FALLBACK
+
+    def test_photo_scan_off_blocks_photo_keeps_callbacks(self, settings) -> None:
+        # Master switch ON, cross-border gate OFF — photo refused with
+        # manual-entry hint, but to_diary on an existing scan still
+        # flows (the photo was already taken before the gate flipped).
+        settings.NUTRITION_ENABLED = True
+        settings.FOOD_PHOTO_SCAN_ENABLED = False
+
+        ctx_photo = _context(has_attachments=True, photo_bytes=b"jpeg")
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("Ayla scan MUST NOT be called when photo gate off"),
+        ):
+            photo_result = FoodScannerSkill().handle(ctx_photo)
+        assert photo_result.reply_text == PHOTO_SCAN_OFF_FALLBACK
+        assert photo_result.meta.get("reply_kind") == "food_scanner_photo_scan_off"
+
+        # Existing-scan callback still flows.
+        ctx_cb = _context("cb:food:to_diary:scan-1")
+        client = Mock()
+
+        async def _log(**kwargs):
+            return _log_response()
+
+        client.log_meal = _log
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            return_value=client,
+        ):
+            cb_result = FoodScannerSkill().handle(ctx_cb)
+        assert cb_result.action_type == "food_logged"
+
+    def test_consent_missing_short_circuits_photo(self, settings) -> None:
+        ctx = _context(
+            has_attachments=True,
+            photo_bytes=b"jpeg",
+            consent_at=None,
+        )
+        # Mock returns a Mock for any unset attr; explicitly set to None
+        # since _context default is now() — override here.
+        ctx.bot_user.food_scanner_consent_at = None
+
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("Ayla MUST NOT be called without consent"),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == CONSENT_REQUIRED_FALLBACK
+        assert result.meta.get("reply_kind") == "food_scanner_consent_required"
+
+    def test_consent_missing_short_circuits_to_diary(self, settings) -> None:
+        ctx = _context("cb:food:to_diary:scan-1")
+        ctx.bot_user.food_scanner_consent_at = None
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("log_meal MUST NOT run without consent"),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == CONSENT_REQUIRED_FALLBACK
+
+    def test_reject_callback_works_even_without_consent(self, settings) -> None:
+        # ``reject`` is a no-op ack that never touches Ayla or any
+        # user data. Gating it just confuses the user.
+        ctx = _context("cb:food:reject:scan-1")
+        ctx.bot_user.food_scanner_consent_at = None
+        result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == REJECTED_ACK
+
+    def test_gate_order_nutrition_beats_consent(self, settings) -> None:
+        # Both off — the more informative «feature off» message wins.
+        settings.NUTRITION_ENABLED = False
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        ctx.bot_user.food_scanner_consent_at = None
+        result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == NUTRITION_OFF_FALLBACK
+
+    def test_mock_shaped_consent_does_not_silently_pass(self, settings) -> None:
+        # Адверсариальный обзор PRE_PILOT #2 — bare Mock() auto-generates
+        # a truthy Mock object on every attr access. Without the
+        # isinstance(datetime) guard the gate would silently pass and
+        # the skill would call Ayla using a Mock identity. Pin the
+        # guard so the refusal path fires whenever the attribute is
+        # something other than a real datetime.
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        # Default _context() sets a datetime — drop it back to a bare
+        # Mock-shaped attr to simulate a forgotten test fixture.
+        ctx.bot_user.food_scanner_consent_at = Mock()
+        with patch(
+            "apps.skills.food_scanner.skill.get_nutrition_client",
+            side_effect=AssertionError("Ayla MUST NOT be called for Mock-shaped consent"),
+        ):
+            result = FoodScannerSkill().handle(ctx)
+        assert result.reply_text == CONSENT_REQUIRED_FALLBACK
 
 
 # ─── registration ────────────────────────────────────────────────────────
