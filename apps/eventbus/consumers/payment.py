@@ -134,7 +134,7 @@ def _resolve_tenant(tenant_id: str | None) -> Tenant | None:
 
 def _claim_notification_dispatch(
     *,
-    tenant_id: str | None,
+    tenant_id: str | UUID,
     event_id: str,
     recipient_id: str,
     channel: str,
@@ -492,7 +492,12 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
         if should_dispatch:
             log_event_id = envelope.event_id
             log_payment_id = payment_id
-            log_tenant_id = envelope.tenant_id
+            # Use the RESOLVED tenant's id (guaranteed non-null past the
+            # ``tenant is None`` guard above), not ``envelope.tenant_id``
+            # (typed ``str | None``). This keys the dedup row on the same
+            # UUID the sibling ``PaymentTerminalDedupe`` writes use and
+            # satisfies the model field's ``str | UUID`` type.
+            log_tenant_id = tenant.id
             # Recipient + channel for the #927 exactly-once dispatch
             # claim. ``recipient`` is the Ayla user; ``channel`` is the
             # recipient's bound channel (MAX in pilot) — derived, not
