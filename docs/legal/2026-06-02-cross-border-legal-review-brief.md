@@ -1,5 +1,7 @@
 # Cross-Border + Retention — Legal Review Brief
 
+> **Decision: Path B (OpenAI lawful via mechanism).** Founder will ship on the compliance mechanism (explicit cross-border consent + RKN notification + minimization + OpenAI zero-retention + localize-first + honest disclosure). Legal review requested IN PARALLEL to confirm consent wording + RKN form sufficiency — NOT gating launch, but a finding of insufficiency triggers fallback to Yandex/off. Prioritize: (a) consent wording validity, (b) RKN form correctness, (c) sufficiency of this mechanism for lawful cross-border transfer of food photos to OpenAI (US).
+
 | Field | Value |
 |---|---|
 | **Date** | 2026-06-02 |
@@ -87,9 +89,9 @@ Pre-draft r2 (see §5) is the Tau starting point; please verify and mark up each
    - Question: does this match the actual provider Data Processing Agreement / our contract terms (Anthropic AND OpenAI)? If we have a zero-retention tier, this is honest; if we use default retention, this overpromises.
    - **MUST verify with each vendor contract (incl. OpenAI DPA zero-retention) before shipping.**
 
-4. **Food-photo cross-border transfer — lawful mechanism (Opt 2)**
+4. **Food-photo cross-border transfer — lawful mechanism (Path B)**
    - **Verified fact (code audit):** food photos are sent to **OpenAI (US)** by default — provider router default `openai`, fallback `yandex` (`FOOD_SCANNER_PRIMARY="openai"`, `nutrition/providers/openai_vision.py`). The prior r2 claim that photos «работает внутри российского контура» / are «не передаём … на Anthropic» (i.e. stay inside the Russian perimeter) is **FALSE and must NOT ship as-is**.
-   - **Decision (founder, Opt 2 — lawful OpenAI path):** keep OpenAI vision (needed for calorie/macro recognition; Yandex inadequate), and make the cross-border transfer **lawful** under 152-ФЗ. Yandex (`FOOD_SCANNER_PRIMARY` flip) is a **fallback only** if legal rules the consent path insufficient.
+   - **Decision (founder, Path B — OpenAI lawful via mechanism):** keep OpenAI vision (needed for calorie/macro recognition; Yandex inadequate), and ship on the compliance **MECHANISM** as the lawful basis for the cross-border transfer under 152-ФЗ. The mechanism — not the lawyer's verdict — gates the `FOOD_PHOTO_SCAN_ENABLED=True` flip. Legal review runs **in parallel**; Yandex (`FOOD_SCANNER_PRIMARY` flip) / off is a **fallback only** if legal rules the mechanism insufficient.
    - **Mechanism question for legal (not "may we say X"):** *The product needs to send food photos to a US vision provider (OpenAI) for calorie/macro recognition. Under 152-ФЗ, is this lawful if we implement: (a) localize-first / primary storage in RF (ст. 18.5), (b) explicit specific written consent to the cross-border transfer (ст. 12), (c) Roskomnadzor cross-border-transfer notification, (d) data minimization (EXIF stripped + downscaled/cropped), (e) provider zero-retention? What exact consent wording / conditions are required? If not sufficient, what additional mechanism is needed?*
 
 5. **«никому со стороны» as replacement for «третьим лицам»**
@@ -119,7 +121,7 @@ Pre-draft r2 (see §5) is the Tau starting point; please verify and mark up each
 
 The collapsed «Подробнее о данных» disclosure. **r1 is what customers see in the current shipped build** (`DisclosureSheet.tsx`). **r2 is the proposed expansion** pending this review.
 
-> **Note:** the r2 photo line below («не передаём фото … работает внутри российского контура») reflects the prior, now-**FALSE** assumption (see point 4). It is kept here only as the reviewed-against baseline; the cross-border food-photo wording must be **rewritten** to the honest Opt-2 disclosure (photos go to OpenAI/US under explicit cross-border consent + minimisation + zero-retention) once legal confirms the consent wording.
+> **Note:** the r2 photo line below («не передаём фото … работает внутри российского контура») reflects the prior, now-**FALSE** assumption (see point 4). It is kept here only as the reviewed-against baseline; the cross-border food-photo wording must be **rewritten** to the honest Path-B disclosure (photos go to OpenAI/US under explicit cross-border consent + minimisation + zero-retention) once legal confirms the consent wording.
 
 **The question for legal: may we ship r2 (as edited per point 4)?** (Or: keep r1, ship r2, or ship an edited r2?)
 
@@ -197,7 +199,7 @@ AI-сервис от компании Anthropic (США). Передача
 
 **Background (#950 R-1):** A code-level audit found that the **180-day message-anonymisation policy exists but the backend anonymizer job is NOT implemented**. As written, the shipped r1 claim «Сообщения — 180 дней (потом анонимизируется)» is not yet backed by code — messages would be retained indefinitely. This is a truthfulness risk.
 
-**Decision (tech-lead recommendation, founder verdict pending):** ship **honest copy now** that reflects actual customer-controlled deletion behavior, and implement the real 180-day anonymiser **post-pilot**.
+**Decision (tech-lead recommendation, founder verdict pending):** ship **honest copy now** that reflects actual customer-controlled deletion behavior, and implement the real 180-day anonimiser **post-pilot**.
 
 **Proposed retention wording to confirm (replaces the «Сколько храним» block):**
 
@@ -226,7 +228,7 @@ Please return a **yes / no / edit** verdict on each:
 1. **Provider + USA framing** — is naming the providers (Anthropic / OpenAI) + «(США)» in customer-facing copy required, sufficient, or should it be «иностранный/зарубежный сервис» with detail in the privacy policy? (152-ФЗ ст.12)
 2. **TLS 1.3 wording** — keep the specific protocol version, or switch to generic «современное шифрование»?
 3. **Provider non-retention claim** — may we state «не хранит твою переписку у себя»? (Conditional on confirming each vendor DPA / zero-retention tier — Anthropic AND OpenAI.)
-4. **Food-photo cross-border lawful mechanism (Opt 2)** — Food photos go to **OpenAI (US)** (the "stays in RF perimeter" claim is FALSE). Is the cross-border transfer **lawful** under 152-ФЗ with: (a) localize-first / primary storage in RF (ст. 18.5), (b) explicit specific written consent (ст. 12), (c) Roskomnadzor cross-border notification, (d) data minimisation (EXIF strip + downscale/crop), (e) OpenAI zero-retention? What exact consent wording / conditions are required, and if insufficient, what additional mechanism is needed? (Yandex fallback only if consent path is ruled insufficient.)
+4. **Food-photo cross-border lawful mechanism (Path B)** — Food photos go to **OpenAI (US)** (the "stays in RF perimeter" claim is FALSE). Is the cross-border transfer **lawful** under 152-ФЗ with: (a) localize-first / primary storage in RF (ст. 18.5), (b) explicit specific written consent (ст. 12), (c) Roskomnadzor cross-border notification, (d) data minimisation (EXIF strip + downscale/crop), (e) OpenAI zero-retention? What exact consent wording / conditions are required, and if insufficient, what additional mechanism is needed? (Review runs in parallel — NOT gating launch; Yandex fallback / off only if the mechanism is ruled insufficient.)
 5. **«никому со стороны» vs «третьим лицам»** — is the friendly phrasing legally equivalent under 152-ФЗ, or must «третьим лицам» stay?
 6. **Tone** — is first-person Ayla voice acceptable for the cross-border section, or must it be third-person formal Russian?
 7. **Withdrawal mechanics** — is locked-on / toggle-off + full-delete sufficient under 152-ФЗ ст.9 ч.5, or is a granular per-purpose withdrawal path required?
@@ -235,4 +237,4 @@ Please return a **yes / no / edit** verdict on each:
 
 ---
 
-*Assumptions: this brief assumes PII pseudonymisation (#842) ships before the pilot opens. If #842 slips, the cross-border data-category claims in §2–§3 must be re-reviewed. The food-photo cross-border path (point 4 / Opt 2) is GATED on the legal verdict (#947).*
+*Assumptions: this brief assumes PII pseudonymisation (#842) ships before the pilot opens. If #842 slips, the cross-border data-category claims in §2–§3 must be re-reviewed. The food-photo cross-border path (point 4 / Path B) ships on the compliance MECHANISM; the `FOOD_PHOTO_SCAN_ENABLED=True` flip is gated on mechanism-complete, not on the legal verdict (#947), which runs in parallel — a finding of insufficiency triggers fallback to Yandex/off.*
