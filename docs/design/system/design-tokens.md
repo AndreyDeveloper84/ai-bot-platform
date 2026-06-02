@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-05-27 r1 |
+| **Date** | 2026-06-02 r2 |
 | **Status** | P0 PRE_PILOT — foundational visual reference for all customer + provider surfaces |
 | **Stream** | Sigma (Visual Design) |
 | **Audience** | W1 / Iota frontend implementers · UX Architect · Brand Guardian · all subsequent visual work |
@@ -483,6 +483,16 @@ Calm wellness motion — never urgent, never jumpy. Per `customer-food-scanner-f
 | 💧 (Вода) | `droplet` | `icon-water` |
 | 🎯 (Цель) | `target` | `icon-goal` |
 | 📸 (Сфотографируй) | `camera` | `icon-camera` |
+| 🖼 (Из галереи / image picker fallback) | `image` | `icon-image` |
+| (photo failed-to-load placeholder) | `image-off` | `icon-image-off` |
+| ⚡ (offline banner) | `wifi-off` | `icon-offline` |
+| ⏱ (API down / timeout state) | `clock` | `icon-clock` |
+| ↻ (retry button) | `refresh-cw` | `icon-retry` |
+| ✎ (edit / write manually) | `pencil` | `icon-edit` |
+| ⚖ (weight / portion) | `scale` | `icon-weight` |
+| − / + (portion stepper) | `minus` / `plus` | `icon-minus` / `icon-plus` |
+| ⋯ (overflow menu) | `more-horizontal` | `icon-more` |
+| × (modal close / dismiss) | `x` | `icon-close` |
 | 📅 (Найди услугу / Записи tab) | `calendar` | `icon-bookings` |
 | 🌿 (greeting emoji) | (decorative — keep emoji OK in greeting copy per identity §3.6 max 1) | — |
 | ✨ (wordmark accent — placeholder for ☽) | (decorative — kept as emoji until Phase 2+ crescent moon ships) | — |
@@ -777,6 +787,386 @@ Animation: skeleton-shimmer 1500ms linear infinite
 Reduced-motion: static warm-100, no animation
 ```
 
+### Choice chip (meal-type, mutually-exclusive group)
+
+Used on `customer-food-scanner-flow.md` F1 / F3 / manual entry (4-chip meal-type row: Завтрак / Обед / Ужин / Перекус). Default = current local time bucket per F1 spec.
+
+```
+Min size: 64dp wide × 64dp tall (≥44dp touch target — WCAG 2.5.8)
+Padding: space-3 all sides
+Layout: emoji-or-icon above label (vertical flex)
+Background (default): warm-100
+Background (selected): sage-100
+Border (default): 1dp warm-200
+Border (selected): 1dp sage-500 (4.65:1 — 1.4.11 safe)
+Selected non-color affordance: ● indicator (6dp sage-500 dot) at bottom-center OR right of label — required (color-only forbidden)
+Text (default): text-caption (13dp) weight-medium warm-700
+Text (selected): text-caption weight-semibold sage-700
+Icon/emoji size: 20dp above label, space-1 gap to label
+Radius: radius-md (8dp)
+Gap between chips: space-2 (horizontal flex)
+Focus: elev-focus ring per chip
+```
+
+**A11y mandatory (WCAG 1.3.1 + 1.4.1 + 4.1.2):**
+
+```html
+<div role="radiogroup" aria-label="Когда ешь">
+  <button role="radio" aria-checked="false" tabindex="-1">🌅 Завтрак</button>
+  <button role="radio" aria-checked="true"  tabindex="0">🥗 Обед</button>
+  <button role="radio" aria-checked="false" tabindex="-1">🍽 Ужин</button>
+  <button role="radio" aria-checked="false" tabindex="-1">🍎 Перекус</button>
+</div>
+```
+
+- `role="radiogroup"` parent with `aria-label`
+- Each chip `role="radio" aria-checked` (NOT `aria-selected`)
+- Roving tabindex pattern — only selected chip is `tabindex="0"`; arrows cycle selection
+- Keyboard: ← / → / ↑ / ↓ cycles selection within group; Tab leaves group
+- Selected state communicated via `aria-checked`, not color alone
+
+**Anti-patterns:**
+- ❌ Color-only selected state without ● indicator + aria-checked
+- ❌ `role="button"` instead of `role="radio"` (loses semantic group meaning)
+- ❌ Using for non-mutually-exclusive multi-select (use Tag/Toggle chip pattern — out of scope MVP)
+- ❌ Disabled chip without `aria-disabled="true"`
+
+### Photo capture zone (empty-state CTA)
+
+Used on food-scanner F1 — large tap target (~240dp) inviting customer to take or pick a meal photo. Two-CTA stack pattern.
+
+```
+Min height: 240dp
+Width: 100% container
+Background: white
+Border: 1.5dp dashed warm-300 OR 1dp solid warm-200 (designer choice per surface — dashed signals "drop/pick", solid signals "card")
+Radius: radius-lg (12dp)
+Padding: space-6 all sides
+Layout: vertical flex, center-aligned
+Icon: Lucide `camera` 48dp warm-500 stroke (centered top)
+Helper: text-body warm-600 «Сделай фото или выбери из галереи» (centered)
+CTA stack: 2 Secondary buttons vertical, space-3 gap, max-width 280dp
+  CTA 1: Lucide `camera` + «Сделать фото» — triggers <input type="file" accept="image/*" capture="environment">
+  CTA 2: Lucide `image` + «Из галереи» — triggers <input type="file" accept="image/*">
+```
+
+**A11y mandatory:**
+- Zone container is NON-interactive (`<div>`, not `<button>`) — CTAs are the only tap targets (simpler focus model than nested-interactive)
+- Each CTA is a real `<button>` (or `<label for="…">` wrapping hidden `<input type="file">`) — keyboard accessible
+- Helper text linked to CTAs via `aria-describedby` if it provides decision context
+
+**Anti-patterns:**
+- ❌ Whole zone clickable + nested CTAs (double-tap-target conflict)
+- ❌ `<input type="file">` styled as the only visible CTA without `<label>` wrapper (no keyboard activation)
+- ❌ Drag-and-drop only on mobile (touch can't drag — provide tap CTAs always)
+
+### Photo preview frame (resolves Q-SIG-6)
+
+Used on F2 (140dp preview while «Узнаю что на фото») / F3 (80dp thumbnail above recognition result) / future surfaces (booking provider photos, master gallery — Phase 2+).
+
+```
+Sizes: 80dp (thumbnail), 140dp (medium preview), 100% width (cover photo Phase 2+)
+Aspect ratio: 1:1 square (meal photos) — `aspect-ratio: 1 / 1`
+Background: warm-100 (placeholder fill — visible while image loads)
+Border: 1dp warm-200
+Radius: radius-md (8dp)
+Object-fit: cover (crop overflow, never distort)
+Fallback (image failed / no src): Lucide `image-off` 32dp warm-400 centered
+Loading: skeleton-shimmer pattern (per Skeleton spec above) — same warm-100 base
+```
+
+**A11y mandatory (WCAG 1.1.1):**
+
+```html
+<!-- Preferred — descriptive alt if dish_name known after scan -->
+<img src="..." alt="Фото блюда: гречка с курицей">
+<!-- Fallback — generic alt while scan pending or for unknown dishes -->
+<img src="..." alt="Фото блюда">
+<!-- Decorative-only (rare — photo IS the content here, alt always required) -->
+```
+
+- `alt` attribute **mandatory** — never empty for meal scanner photos (photo IS the recognition subject)
+- If image fails to load and fallback icon shows: parent `aria-label="Не удалось загрузить фото"` + `role="img"`
+- Loading state: `aria-busy="true"` on parent while pending
+
+**Anti-patterns:**
+- ❌ `<div>` with `background-image` (loses alt + semantic — use `<img>`)
+- ❌ Empty alt `alt=""` on meal photo (photo IS content per scanner UX)
+- ❌ `object-fit: contain` (creates letterboxing — cover canonical for square meal frame)
+
+### Portion stepper (−/+ numeric control)
+
+Used on F3 to adjust portion multiplier (steps 50 % / 75 % / 100 % / 125 % / 150 % / 175 % / 200 %).
+
+```
+Layout: horizontal flex, space-4 gap, align-center
+Button (− / +): 44×44dp circular (radius-full) OR radius-md
+Button background: warm-100
+Button text: text-h3 (20dp) weight-medium warm-700
+Button press: warm-200 bg + scale(0.96)
+Button disabled (at min/max): warm-200 bg + warm-400 text + cursor not-allowed
+Center label: text-h3 weight-semibold warm-800
+Center label width: min 80dp (accommodates «200 %»)
+Center label font-feature-settings: "tnum" (tabular numerals — number doesn't jump width)
+Focus: elev-focus ring per button (− and + each)
+```
+
+**A11y mandatory (WCAG 1.4.3 + 4.1.2 + 4.1.3):**
+
+```html
+<div role="group" aria-label="Размер порции, сейчас 100 процентов, минимум 50, максимум 200">
+  <button aria-label="Уменьшить порцию">−</button>
+  <span class="portion-value" role="status" aria-live="polite">100 %</span>
+  <button aria-label="Увеличить порцию">+</button>
+</div>
+```
+
+- Group container `role="group"` with composite `aria-label` (includes current + range)
+- − and + buttons get `aria-label="Уменьшить порцию"` / «Увеличить порцию» (visible «−/+» glyphs are NOT screen-reader-readable as actions)
+- Center label `role="status" aria-live="polite"` — VoiceOver announces new value on change («сто двадцать пять процентов»)
+- Disabled at min/max: button `disabled` attribute + visual disabled state
+- Keyboard: Space / Enter activates; native button focus order
+
+**Anti-patterns:**
+- ❌ − / + buttons without `aria-label` (screen reader hears «minus» / «plus» as math, not action)
+- ❌ Center value as plain `<span>` (change not announced)
+- ❌ Underlying grams change without announcing in label (e.g., "150g → 113g" silent — include grams in aria-label of group, refresh on change)
+
+### Pulsing dots loader (F2 scanner-specific)
+
+Used on F2 «Узнаю что на фото» state. Animation already anchored in § 9 (1200ms ease-in-out infinite, `.pulse-dots` class targeted by reduced-motion fallback). This adds the component visual spec.
+
+```
+Container: horizontal flex, space-2 gap, align-center
+Dot count: 3 (per F2 ASCII)
+Dot size: 8dp diameter
+Dot background: sage-500
+Dot radius: radius-full
+Animation: pulse-dot 1200ms ease-in-out infinite
+  Staggered delays: 0ms / 200ms / 400ms
+  Property: opacity 0.3 → 1.0 → 0.3
+Reduced-motion: static dots at opacity 0.6, no animation (per § 9 `.pulse-dots` rule — already global)
+```
+
+**A11y mandatory (WCAG 1.4.13 + 4.1.3):**
+
+```html
+<div class="pulse-dots" aria-hidden="true">
+  <span></span><span></span><span></span>
+</div>
+<p role="status" aria-live="polite">Узнаю что на фото</p>
+```
+
+- Dots themselves `aria-hidden="true"` (decorative)
+- Adjacent status text MUST carry the announcement — `role="status" aria-live="polite"`
+- After 3s (timeout fallback per F2 spec): additional helper text + cancel button surface — do NOT re-trigger live region (would re-announce)
+
+**Anti-patterns:**
+- ❌ Dots as the ONLY loading signal (no status text — screen reader silent)
+- ❌ `role="status"` on the dots themselves (announces "blank" repeatedly)
+- ❌ Spinner emoji (⏳ ⌛) instead of dots (loses sage-green brand, off-tone)
+
+### Persistent banner (offline / stale data)
+
+Used on F1 + scanner offline state. Distinct from Toast — banner is **persistent until state changes**, no dismiss button, sticky position.
+
+```
+Position: sticky top (z-index above content, below MAX header chrome)
+Container: 100 % width
+Padding: space-2 y / space-4 x
+Min height: 36dp
+Background: amber-100 (offline / warning) | warm-100 (neutral info)
+Text: text-caption (13dp) weight-medium amber-700 (offline) | warm-600 (info)
+Icon: Lucide 16dp inline before text, space-2 gap
+  Offline: `wifi-off`
+  Stale data: `clock`
+  Info: `info`
+Border-bottom: 1dp amber-700/20% (offline) | warm-200 (info)
+No dismiss button (persistent — defeats purpose if dismissable)
+```
+
+**A11y mandatory (WCAG 4.1.3):**
+- Banner on appearance: `role="status" aria-live="polite"` (offline state change — assertive too jarring for routine connectivity blip)
+- For critical state (e.g., session-expired — out of scope MVP): `role="alert" aria-live="assertive"`
+- Icon `aria-hidden="true"` (text conveys meaning)
+
+**Anti-patterns:**
+- ❌ Persistent banner with × dismiss button (dismissable = use Toast, not Banner)
+- ❌ Red banner for offline (offline ≠ error — neutral degraded state, amber per § 4 warning semantic)
+- ❌ Banner replacing toast for transient events (use Toast — Banner is sticky)
+- ❌ Multiple banners stacked (queue → single visible at a time, priority: alert > warning > info)
+
+### Progress bar (linear)
+
+Used on F4 daily total «1 720 / 2 100 ккал · 82 %», dashboard wellness pulse fills, goal progress. Fixes dashboard § 8 BLOCKER 6 (empty track was sage-300, now `--track-empty` = warm-300).
+
+```
+Track: warm-300 bg (semantic --track-empty)
+Fill: sage-500 bg (semantic --border-focus / brand primary)
+Height: 8dp
+Radius: radius-full (pill — applies to both track + fill)
+Width: 100 % container
+Width transition on value change: motion-base + ease-out + width
+```
+
+**A11y mandatory — composite aria-label pattern (per § 5):**
+
+```html
+<div role="group" aria-label="Питание: 1720 из 2100 килокалорий, 82 процента дневной цели">
+  <span class="value-readable" aria-hidden="true">1 720 / 2 100 ккал</span>
+  <div class="progress-bar" aria-hidden="true">
+    <div class="progress-fill" style="width: 82%"></div>
+  </div>
+  <span class="percent" aria-hidden="true">82 %</span>
+</div>
+```
+
+OR native:
+
+```html
+<progress value="1720" max="2100" aria-label="Питание: 1720 из 2100 килокалорий"></progress>
+```
+
+- Composite group preferred when visual stack includes text + bar + percent (3 elements, group label combines)
+- Native `<progress>` acceptable for standalone bars (no surrounding text)
+- Bar element itself ALWAYS `aria-hidden="true"` when wrapped in composite group (parent label is canonical)
+
+**Anti-patterns:**
+- ❌ Sage-300 track (fails 1.4.11 3:1 between filled vs empty per dashboard § 8 BLOCKER 6 — must be warm-300)
+- ❌ Red/amber fill for "over goal" (anxiety — wellness voice neutral, use sage-600 darker or simply don't visually flag overshoot)
+- ❌ Percentage-only label («82 %» alone — screen reader missing context; always include value/max in aria-label)
+- ❌ Sub-1dp animation steps (jank — use width transition motion-base)
+
+### Section header divider («── Когда ──»)
+
+Used on F1 / F3 / F4 / manual entry to label sub-sections («Когда», «Фото», «Дата», «Примерно», «Сегодня»). Horizontal hairlines flank an inline label.
+
+```
+Container: flex horizontal align-center, gap space-3
+Layout: hairline-grow · label · hairline-grow
+Hairline: flex 1, 1dp warm-200, border-top OR background-color (height 1dp)
+Label: text-caption (13dp) weight-medium warm-500, sentence case (NOT uppercase)
+Vertical margin: space-5 above, space-3 below
+No bottom border on parent
+```
+
+```html
+<h3 class="section-divider">
+  <span class="hairline" aria-hidden="true"></span>
+  Когда
+  <span class="hairline" aria-hidden="true"></span>
+</h3>
+```
+
+**A11y mandatory:**
+- Use semantic heading element (`<h3>` / `<h4>` per outline depth) — NOT plain `<div>` (screen reader navigation by heading required)
+- Hairline spans `aria-hidden="true"` (decorative only)
+- ASCII em-dash literals «── Когда ──» MUST NOT appear in DOM text — use CSS hairlines (otherwise screen reader reads «dash dash Когда dash dash»)
+
+**Anti-patterns:**
+- ❌ Em-dash literals in DOM (screen reader gibberish)
+- ❌ ALL CAPS label («КОГДА» — sentence case canonical per § 5)
+- ❌ `<div>` with visual h3 styling but no semantic role (heading navigation broken)
+- ❌ Single hairline below label (looks like underline, not divider — both sides required)
+
+### Confidence indicator (low-conf scan state)
+
+Visual state on F3 «✏️ Уточнить» Secondary button when scan confidence <0.6 per `skill.py`. NOT a separate component — state override on Secondary button + paired tooltip.
+
+```
+Override on Secondary button:
+  Border: 1.5dp sage-300 (subtle — overrides default 1dp sage-500)
+  Background: sage-50 (very subtle tint — overrides transparent)
+  Otherwise inherits Secondary spec
+Lead copy on F3 (not button-internal): «Похоже на: …» (vs «Узнала: …» for ≥0.6)
+Tooltip on hover/focus: «Прикинула приблизительно — давай уточним вместе»
+```
+
+**A11y mandatory:**
+- Visual border tint MUST NOT be sole signal — paired with:
+  1. Lead copy «Похоже на:» (hedge wording per skill.py)
+  2. Tooltip via `aria-describedby` (see Tooltip below)
+- Tooltip MUST be touch-accessible (not hover-only)
+
+**Anti-patterns:**
+- ❌ Pulse animation on low-conf button (anxiety-inducing — violates voice «calm / supportive» per food-scanner § 1)
+- ❌ Red / amber tint (low confidence ≠ error — wellness voice keeps neutral approximate)
+- ❌ Icon-only signal without copy adjustment (color/icon blind users miss it)
+
+### Tooltip
+
+Used on F3 confidence indicator (above) + future inline help. Touch-first behavior (tap-toggle, NOT hover-only).
+
+```
+Container max-width: 240dp
+Padding: space-2 y / space-3 x
+Background: warm-700 (#3a3833)
+Text: text-caption (13dp) weight-regular white
+Radius: radius-sm (4dp)
+Shadow: elev-2
+Arrow: 6dp triangle pointing to anchor (warm-700 fill)
+Position: above anchor (auto-flip below if viewport overflow)
+Enter: motion-fast + ease-out + opacity
+Auto-dismiss on touch: 5000ms (or tap elsewhere)
+```
+
+**A11y mandatory (WCAG 1.4.13):**
+
+```html
+<button aria-describedby="conf-tip">✏️ Уточнить</button>
+<div role="tooltip" id="conf-tip">Прикинула приблизительно — давай уточним вместе</div>
+```
+
+- Anchor element: `aria-describedby="<tooltip-id>"`
+- Tooltip element: `role="tooltip"` + matching `id`
+- Touch behavior: tap-toggle (NOT hover — hover unavailable on touch); first tap on anchor opens tooltip without triggering button action, second tap activates button (or provide explicit «?» help icon as separate anchor)
+- Keyboard: focus on anchor shows tooltip; Escape dismisses
+- Hover desktop: 300ms delay before show; immediate hide on leave
+
+**Anti-patterns:**
+- ❌ Hover-only trigger (touch users locked out)
+- ❌ Critical information in tooltip (lost on touch / screen reader skip — duplicate in body copy)
+- ❌ Click-to-action conflict (tooltip + button on same element with single-tap behavior — use explicit «?» icon or separate inline help)
+- ❌ Tooltip wider than 240dp (becomes paragraph — promote to inline help text)
+
+### Textarea (multi-line input)
+
+Extension of Input. Used on F3 «Заметка (необязательно)» free-text field.
+
+```
+Min height: 80dp (~3 visible lines on 13dp body)
+Max height: 200dp (then internal scroll)
+Padding: space-3 all sides (uniform — Input has space-3 y / space-4 x; textarea square pad reads cleaner for paragraph text)
+Otherwise inherits Input spec entirely:
+  Border: 1dp warm-500 (--border-input, 4.59:1 — 1.4.11 safe)
+  Radius: radius-md (8dp)
+  Background: white
+  Text: text-body (15dp) warm-800
+  Placeholder: warm-400
+  Focus: 2dp sage-500 border + elev-focus ring
+  Error: 2dp rose-600 border + rose-100 bg
+  Disabled: warm-100 bg + warm-500 text
+Resize handle: hidden on mobile (`resize: none`), visible vertical on desktop (`resize: vertical`)
+```
+
+**A11y mandatory (WCAG 1.3.1 + 3.3.2):**
+
+```html
+<label for="note">Заметка (необязательно)</label>
+<textarea id="note" rows="3" aria-describedby="note-helper" maxlength="500"></textarea>
+<div id="note-helper">До 500 символов · <span aria-live="polite">0 / 500</span></div>
+```
+
+- Visible `<label for>` mandatory — placeholder is NOT a label
+- Helper text linked via `aria-describedby`
+- Character counter (if applied): visible counter + `aria-live="polite"` announces near limit (last 20 chars)
+- Optional fields: «(необязательно)» in label text (NOT placeholder) — screen reader hears it
+
+**Anti-patterns:**
+- ❌ Placeholder as the only label («Заметка...» disappears on focus — accessibility blocker)
+- ❌ No character counter on `maxlength` field (silent truncation surprise)
+- ❌ Fixed height that can't grow (long notes scroll-trap user)
+
 ---
 
 ## § 12 · Wordmark — canonical typography-based
@@ -924,7 +1314,7 @@ No text smaller than 24dp should appear directly on the purple tile (chat-list r
 | Q-SIG-3 | 🟢 | Brand sparkle ✨ → crescent moon ☽ migration timeline (per identity §2.4 Phase 2+) | Brand owner |
 | Q-SIG-4 | 🟢 | Decorative emoji в greeting copy («🌿» per dashboard) — keep as emoji or migrate to Lucide leaf icon? | Recommend keep emoji (decorative, copy-embedded, per identity §3.6 max 1) |
 | Q-SIG-5 | 🟢 | Provider-side Ayla Pro chrome — confirms **same sage palette** as customer surfaces (per identity § 4 single Ayla brand + memory `project_ayla_brand_hybrid_usage`). Any divergence requires explicit founder approval | RESOLVED — same palette default |
-| Q-SIG-6 | 🟢 | Photo system tokens (food scanner photo preview frames, master photos) — borders, radius, fallback placeholder | Defer — handled inline in food-scanner / booking-flow specs |
+| Q-SIG-6 | ✅ | Photo system tokens (food scanner photo preview frames, master photos) — borders, radius, fallback placeholder | **RESOLVED 2026-06-02** — § 11 Photo preview frame component spec (80/140dp/cover sizes, warm-100 placeholder, Lucide `image-off` fallback, mandatory alt rules) covers food_scanner F2/F3. Booking provider photos + master gallery (Phase 2+) inherit same spec. |
 | Q-SIG-7 | 🟢 | Russian non-breaking space enforcement в copy — manual vs CSS `white-space: nowrap` wrapper component | W1 implementation pattern |
 | Q-SIG-8 | 🟡 | Sage gradient explicit ban OR allowed для one specific surface (splash background)? | Lean: allow ONLY splash, never primary content |
 
@@ -1035,9 +1425,14 @@ Anchored from individual section anti-patterns. Brand Guardian + Accessibility A
   - **F5** Hex casing normalized lowercase throughout
   - **F6 / Q-SIG-5** Provider-side palette = same sage (founder-locked default)
   - **Findings 5/8/10-15** addressed inline (disabled state contrast, lang="en" scope expanded, list multi-target rule, toast pause-on-hover, amber + rose promoted to named tokens, purple AYLA contrast guidance)
-- [ ] Phase I — save (this file) + EXPERIMENTS folder + AYLA README — all committed in single PR
-- [ ] Phase J — handoff block for tech lead + W1 / Iota frontend
-- [ ] Phase K — `git rebase origin/dev` + push + `gh pr create --base dev` + CI green + self-merge (NON-§H.3 docs)
+- [x] Phase I — save (this file) + EXPERIMENTS folder + AYLA README — all committed in single PR (shipped 2026-05-27 PR #916, merged into dev)
+- [x] Phase J — handoff block for tech lead + W1 / Iota frontend (Q-SIG-1/3/8 + F2 surfaced)
+- [x] Phase K — `git rebase origin/dev` + push + `gh pr create --base dev` + CI green + self-merge (NON-§H.3 docs) (PR #916 merged 2026-05-27)
+- [x] **r2 follow-up 2026-06-02** — W1 #164 food_scanner token-coverage gap-fill (P0 support):
+  - §11 — 11 new component specs (Choice chip, Photo capture zone, Photo preview frame, Portion stepper, Pulsing dots loader, Persistent banner, Progress bar, Section header divider, Confidence indicator, Tooltip, Textarea) — each with explicit ARIA + anti-patterns
+  - §10 — Lucide map extended (11 new icon aliases: image, image-off, wifi-off, clock, refresh-cw, pencil, scale, minus, plus, more-horizontal, x)
+  - §14 — Q-SIG-6 (photo system tokens) RESOLVED inline by §11 Photo preview frame spec
+  - DoD: W1 #164 has complete token set for all 5 food_scanner screens (F1 / F2 / F3 / F3-Clarify modal / F4) + 4 error states (Not Recognized / API Down / Photo Upload Failed / Offline) + Manual Entry Fallback. No remaining token gaps.
 
 ### § 18a — Phase F adversarial review findings (audit trail)
 
@@ -1080,3 +1475,5 @@ Anchored from individual section anti-patterns. Brand Guardian + Accessibility A
 ## Last verified
 
 2026-05-27 r1 — initial draft. Manrope typography + Onest fallback. Sage primary + warm neutral + semantic palette. Lucide icon adoption resolves Q-TAU-D2 / D4 / D5. Hybrid logo distribution per memory `project_ayla_brand_hybrid_usage` — typography canonical wordmark for app, purple AYLA pack for bot/channel avatar only. Mix prohibition explicit.
+
+2026-06-02 r2 — W1 #164 food_scanner token-coverage gap-fill (P0 support per `project_ayla_active_streams`). Added 11 component specs to §11 (Choice chip, Photo capture zone, Photo preview frame, Portion stepper, Pulsing dots loader, Persistent banner, Progress bar, Section header divider, Confidence indicator, Tooltip, Textarea — each with composite ARIA pattern + anti-patterns). Extended §10 Lucide map with 11 food_scanner-relevant aliases. Resolved Q-SIG-6 (photo system tokens) inline by §11 Photo preview frame. DoD: W1 has complete token set for all 5 food_scanner screens + 4 error states + manual entry fallback.
