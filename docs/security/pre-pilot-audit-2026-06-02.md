@@ -12,13 +12,15 @@
 |---|------|---------|--------|
 | 1 | `requires_tenant=False` exemption sweep (silent-bypass post-flip) | 🟢 GREEN | None — zero production handlers declare `False`. Defence-in-depth verified. |
 | 2 | `STRICT_TENANT_REFUSE` read-site coverage (stale-cache risk) | 🟢 GREEN | None — single runtime read-site, worker-restart contract documented and load-bearing. |
-| 3 | Canonical-state mutator imports from upstream surfaces (G5.1 breadth check) | 🟢 GREEN | None new — only `views.py:668` already tracked in #925. No undiscovered DiD breach. |
+| 3 | Canonical-state mutator imports from upstream surfaces (G5.1 breadth check) | 🟡 YELLOW | Adversarial pass refuted initial GREEN — baseline contract scope was too narrow. 7 additional write-path sites in `transitions` + `feedback` not covered. New tracker #968 filed. |
 | 4 | Audit log durability under flip (`worker.tenant_required_missing` emission contract) | 🟢 GREEN | None — dual-path emit (log line always fires, DB emit conditionally), operator has fallback. |
 | 5 | PEL reaper readiness for post-flip drainage | 🟢 GREEN (runbook already enforces) | Verified — `docs/runbooks/strict-tenant-refuse-flip.md` lines 147/157/167 enforce `PEL_REAPER_ENABLED=true` as pre-flip blocker. |
 
-**Overall pre-flip security posture: 🟢 GREEN.**
+**Overall pre-flip security posture: 🟡 GREEN-with-one-YELLOW.**
 
-All five audit areas pass. The code surface is hardened against the documented threat model; the one procedural dependency (PEL reaper enablement) is already enforced by the flip runbook as a pre-flip blocker checkbox (verified at lines 147/157/167 of `strict-tenant-refuse-flip.md`).
+Four of five audit dimensions pass. §3 was downgraded from 🟢 GREEN to 🟡 YELLOW by the in-house adversarial pass on this audit doc: the `.importlinter.baseline` G5.1 contract scope was found to be narrower than the underlying ADR-0009 §5 invariant, and the auditor's first §3 grep mirrored that narrow scope and missed 7 production write-path imports of `apps.booking.services.transitions` + `apps.booking.services.feedback` from `miniapp_api` + `admin_api`. New tracker #968 filed; flip-day risk remains bounded (sync HTTP paths, JWT-resolved, not stream consumers under STRICT_TENANT_REFUSE).
+
+The §5 procedural dependency (PEL reaper enablement) is already enforced by the flip runbook as a pre-flip blocker checkbox (verified at lines 147/157/167 of `strict-tenant-refuse-flip.md`).
 
 Out-of-scope for this pre-flip pass (deferred to post-flip delta-pass):
 
@@ -55,7 +57,7 @@ apps/workers/base.py:317     post-creation mutation attacks ...           ← co
 
 `apps/workers/base.py` ships three layers of hardening:
 
-1. **Snapshot-based resolution** (`_RESOLVED_REQUIRES_TENANT` frozen at metaclass `__init__`, lines 272–273, read in `__call__` at line 343). Runtime mutation `Cls.requires_tenant = False` is neutralised — the call-site reads the frozen snapshot, not the live attribute.
+1. **Snapshot-based resolution** (`_RESOLVED_REQUIRES_TENANT` frozen at class creation via `__init_subclass__`, line 272; consumed in `__call__` at line 343 after the fallback path at 326–342). Runtime mutation `Cls.requires_tenant = False` is neutralised — the call-site reads the frozen snapshot, not the live attribute.
 2. **MRO walk via `_resolve_requires_tenant_trusted`** (line 77–106). Walks ancestor classes in MRO order; first own-`__dict__` declaration wins; non-bool values raise `TypeError`. Mixin tricks (`SystemTask` with `requires_tenant=False` as ancestor) are guarded against by an explicit mixin-conflict check (lines 248–258) which raises at class-creation if any ancestor between `cls` and `TenantAwareTask` declares the flag — forces explicit override at the leaf class.
 3. **Boot-time subscriber audit** (`apps/workers/subscriber_audit.py:125`, `emit_subscriber_audit`, issue #502). Emits one `worker.subscriber_audit` event per process boot capturing every registered handler's `(handler_name, requires_tenant, stream)`. Operator runbook query: latest `worker.subscriber_audit` row → confirm no `False` entries before flip.
 
@@ -122,9 +124,11 @@ ADR-0009 rule 5 forbids bot-platform from DB-writing booking, payment, or catalo
 
 The `.importlinter.baseline` tracks **one** such violation (`G5-projection-writes-via-consumers` → `apps/miniapp_api/views.py:668`). Pre-flip audit: confirm this is the FULL scope, not just one tracked site.
 
-### Evidence
+### Evidence — initial pass (incomplete)
 
-Grep for direct imports of `apps.booking.services.{create,reschedule,cancel}` from any non-owner app:
+Grep scope: `apps/` excluding `tests/`.
+
+Grep for direct imports of `apps.booking.services.{create,reschedule}` from any non-owner app:
 
 ```
 apps/miniapp_api/views.py:668   from apps.booking.services.create import (...)
@@ -136,16 +140,51 @@ Grep for direct imports of `apps.{ayla_payments,payments}.services` from non-own
 (no results)
 ```
 
-**Zero undiscovered breaches.** The G5.1 contract baseline is the complete set.
+The initial verdict marked this 🟢 GREEN with «zero undiscovered breaches». **The in-house adversarial pass refuted that verdict.**
+
+### Adversarial refutation
+
+The `.importlinter.baseline` G5.1 contract's `forbidden_modules` list only enumerates `apps.booking.services.create` + `apps.booking.services.reschedule`. The auditor's initial §3 grep mirrored that narrow scope, missing the actual production cancel/confirm/feedback mutator modules:
+
+- `apps/booking/services/transitions.py` — direct `row.status = ...` writes at lines 201, 241, 282, 332, 363; `BookingRequest.objects.create(...)` at line 477. Exposes `commit_cancel`, `request_cancel`, `commit_reschedule`.
+- `apps/booking/services/feedback.py` — `submit_feedback` mutates booking.
+
+Production write-path imports from non-owner apps (verified on `origin/dev`, write-path only — read-only constant imports excluded):
+
+```
+apps/miniapp_api/views.py:898   from apps.booking.services.transitions import (... request_cancel ...)
+apps/miniapp_api/views.py:934   from apps.booking.services.transitions import (...)
+apps/miniapp_api/views.py:967   from apps.booking.services.transitions import (...)
+apps/miniapp_api/views.py:999   from apps.booking.services.transitions import (...)
+apps/miniapp_api/views.py:1051  from apps.booking.services.transitions import (...)
+apps/miniapp_api/views.py:1177  from apps.booking.services.feedback import (...)
+apps/admin_api/services/master_deactivation.py:67  from apps.booking.services.transitions import (... commit_cancel, request_cancel)
+```
+
+Seven additional write-path import sites NOT tracked by the baseline contract, NOT tracked by #925 (which targets only `views.py:668`).
+
+(Note: `apps/miniapp_api/views.py:727` imports the `UNDO_WINDOW_SECONDS` constant from `transitions` — read-only, harmless, excluded from this count.)
 
 ### Verdict
 
-🟢 **GREEN with active tracker.** No latent canonical-state-mutator imports beyond the one already in #925. Phase 2.2 fix path is correct.
+🟡 **YELLOW.** The G5.1 contract scope is narrower than the underlying ADR-0009 §5 invariant. Production cancel/confirm/feedback canonical writes from `miniapp_api` (client-equivalent surface) and `admin_api` (admin surface) bypass Ayla's canonical gate on 7 sites that the import-linter does not block.
+
+**Flip-day risk:** **Bounded.** These are sync HTTP paths protected by JWT at the view boundary, not stream consumers subject to `STRICT_TENANT_REFUSE`. The flip is safe today. The risk is pre-pilot architectural debt: same SoR violation as #925, larger surface.
+
+**Pre-pilot risk:** Material. Same character as #925 — canonical-write bypass from client-equivalent authentication surface. Cross-tenant leak vector exists for the same reason: the view-layer trust boundary doesn't verify catalog/master/booking tenant-scope before mutating.
 
 ### Cross-link
 
-- #925 — the active tracker
-- Fix spec posted as comment on #925 (2026-06-02 W3 pre-fix adversarial pass)
+- #925 — original G5.1 single-site tracker (the `create` import case)
+- #968 — NEW: G5.1 contract expansion — `transitions` + `feedback` writes from non-owner apps
+- Fix spec posted as comment on #925 (2026-06-02 W3 pre-fix adversarial pass) — same Ayla REST migration pattern applies to the 7 additional sites
+
+### Recommended actions
+
+1. **Expand `.importlinter.baseline` G5.1 `forbidden_modules`** to include `transitions` + `feedback` modules. Pins the 7 sites in the baseline (no CI break) while preventing further growth.
+2. **Phase 2.2 scope expansion** in `unified-maintainability-roadmap.md` — `execute_reschedule` Ayla REST migration grows to also cover the cancel/confirm/feedback paths from `miniapp_api` + `admin_api/master_deactivation`.
+
+Both actions tracked under #968.
 
 ---
 
@@ -251,7 +290,11 @@ On flip day, the operator confirms checkbox at line 157 BEFORE flipping the stri
 
 ## Pre-flip audit conclusion
 
-The code surface for the STRICT_TENANT_REFUSE flip is **hardened and ready** under the documented threat model. All audit dimensions pass. The procedural dependency surfaced in §5 (PEL reaper enablement) is already enforced by the flip runbook as a pre-flip blocker.
+The code surface for the `STRICT_TENANT_REFUSE` flip itself is **hardened and ready** under the documented threat model. §§1, 2, 4, 5 all pass — the flag flip is safe on flip-day operator readiness.
+
+§3 was downgraded from 🟢 GREEN to 🟡 YELLOW during the in-house adversarial pass on this audit. The finding is **not a flip-day blocker** (the 7 unblocked sites are sync HTTP paths protected by JWT at the view boundary, not stream consumers subject to `STRICT_TENANT_REFUSE`) but **is a pre-pilot architectural debt item** of the same character as #925. Tracker #968 filed.
+
+This is exactly the value of adversarial framing per memory `feedback_h3_waiver_pattern` N=5 instance: a friendly review would have approved the initial 🟢 §3 verdict because the grep matched the documented contract. The adversarial pass refuted the contract scope itself.
 
 W3 will deliver a separate **post-flip delta-pass** within 24–48h after the flip is executed, exercising:
 
@@ -264,6 +307,12 @@ W3 will deliver a separate **post-flip delta-pass** within 24–48h after the fl
 
 ## Findings filed
 
-This pre-flip pass surfaced **no new code-level findings.** All five audit dimensions pass. The existing tracker landscape (#499, #500, #502, #925, #927) is the complete known surface, and §5's procedural dependency is verified as already enforced by the flip runbook.
+This pre-flip pass surfaced **one new tracker** via the adversarial pass on §3:
+
+- **#968** — G5.1 baseline contract too narrow; 7 additional write-path imports of `transitions` + `feedback` from `miniapp_api` + `admin_api` not covered by current contract. **Severity:** MUST_FIX_PRE_PILOT (not flip-day blocker).
+
+§§1, 2, 4, 5 verified against `origin/dev` with no new findings. §5 procedural dependency already enforced by the flip runbook.
+
+Existing tracker landscape relevant to this audit: #499 (PEL reaper), #500 (D-2 ceilings), #502 (subscriber audit), #925 (G5.1 single-site), #927 (G6.2 idempotency).
 
 — W3 (Zeta, security backstop)
