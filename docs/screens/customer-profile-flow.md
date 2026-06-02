@@ -382,6 +382,60 @@ Pre-draft r2 above is **Tau starting point** for legal. Please verify and mark u
 
 **Tau recommendation:** treat R-1 as P-7 blocker (same tier as #949 SUPPORT_DEEPLINK wiring). R-2 needs Alpha sign-off as part of P-6 legal review (#947). Without R-1 fix, customer copy in r1 §4.2.1 (which is SHIPPED) is already dishonest — either implement (a), or rewrite (b), or drop (c) before pilot opens.
 
+#### 4.2.6 Tech-lead resolution 2026-06-02 — path (b) + path (a) deferred post-pilot
+
+Tech lead reviewed §4.2.5 findings and chose **(b) now + (a) post-pilot** as recommendation to founder (founder verdict pending):
+
+- **Now (b):** rewrite customer copy to reflect actual retention behavior — «храним, пока активен аккаунт; удаляются, когда удаляешь аккаунт». This is honest (`apps/skills/privacy_consent/skill.py::data_delete` already implements customer-controlled deletion), 152-ФЗ-defensible through the right-to-erasure path, and ships immediately without blocking W2 (who is loaded on #842 PII critpath).
+- **Post-pilot (a):** implement actual 180-day message anonymizer for proper retention limitation. Owned by W2 — separate ticket, not pilot-blocker.
+- Tau writes voice → legal confirms wording as part of #947 → W1 ships corrected `DisclosureSheet.tsx` (one-line copy patch, anti-touch-safe).
+
+**Tau path-(b) draft copy** (replaces «Сколько храним» block in both r1 §4.2.1 + r2 §4.2.2 «Сколько храним» section):
+
+```
+Сколько храним:
+• Сообщения с Ayla — пока активен твой аккаунт. Когда
+  удалишь аккаунт — удаляются вместе с ним.
+• Записи на услуги и оплаты — 7 лет (этого требует закон,
+  записи и оплаты не удаляются раньше).
+• Память Ayla про тебя — пока ты не очистишь или не
+  удалишь аккаунт.
+• Аудит факта удаления — храним по закону, но без
+  твоего имени.
+```
+
+**Voice rules applied (path-(b)):**
+
+| Element | Rule | Status |
+|---|---|---|
+| «пока активен твой аккаунт» | Honest scope — matches `data_delete` skill reality | ✅ |
+| «удалишь аккаунт — удаляются вместе с ним» | Cause-effect framing, customer agency surfaced | ✅ |
+| «закон не удаляет раньше» | Inverted from «нельзя удалить» — honest about WHY 7y is fixed | ✅ |
+| «пока ты не очистишь или не удалишь» | Two-path customer control — clear/delete | ✅ |
+| «ты» throughout | Register canon | ✅ |
+| No «анонимизируется» / «потом» promise | Removes the dishonest claim entirely | ✅ |
+| No backend-overpromise language («автоматически удалим», «через X дней») | Pattern 4 avoided | ✅ |
+| Audit retention same as r2 (✅ R-4 matches policy) | No change needed | ✅ |
+
+**Voice rules deliberately NOT used:**
+- ❌ «храним только пока необходимо» (legally weasel — what is «necessary»?)
+- ❌ «удалим автоматически если ты долго не пользуешься» (would be partial (a) — not shipping)
+- ❌ «соблюдаем GDPR-стандарты» (vendor-speak, не applicable RU)
+- ❌ «безопасно храним» (security claim без backing)
+
+**Path-(b) handoff:**
+
+| Recipient | Action | Owner | Status |
+|---|---|---|---|
+| Founder | Approve (b)+later vs (a)-in-pilot tradeoff | founder | ⚠ pending verdict |
+| Legal | Confirm (b) wording as 152-ФЗ-defensible (part of #947 review pass) | legal advisor | ⚠ pending |
+| W1 | Ship `DisclosureSheet.tsx` retention-block copy update once founder + legal verdicts land | W1 | ⚠ blocked on founder verdict |
+| W2 | NO action pilot-side. Post-pilot ticket: 180-day message anonymizer (path (a)). | W2 | post-pilot queue |
+
+**If founder picks (a)-in-pilot instead:** keep r1/r2 copy as-is, W2 must implement 180-day anonymizer before pilot ship. Tau prepares NO additional voice — current 180-day copy stands as-written.
+
+**Until founder verdict ships:** customer in production sees r1 §4.2.1 (the dishonest «180 дней потом анонимизируется» version). Verdict urgency = P-7 (matches #949 SUPPORT_DEEPLINK).
+
 ### 4.3 «Запросить данные» — DEFERRED for pilot (export via support)
 
 > **Было:** «Скачать мои данные» → inline-JSON в bot DM. **Стало (§0 recon):** export откладывается. Bot-platform export отдаёт только свои данные (нет данных Ayla/beautygo, нет единой выгрузки). Для пилота честнее не обещать in-app выгрузку, а вести в поддержку.
