@@ -64,6 +64,12 @@ import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
 import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
+import { FoodScannerCaptureScreen } from "./screens/FoodScannerCaptureScreen";
+import { FoodScannerDiaryScreen } from "./screens/FoodScannerDiaryScreen";
+import { FoodScannerManualScreen } from "./screens/FoodScannerManualScreen";
+import { FoodScannerProcessingScreen } from "./screens/FoodScannerProcessingScreen";
+import { FoodScannerResultScreen } from "./screens/FoodScannerResultScreen";
+import { FoodScannerSavedScreen } from "./screens/FoodScannerSavedScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
@@ -958,6 +964,33 @@ function CustomerRoutes() {
           deferred Variant 3 per tech-lead 2026-06-01). New canonical
           route. Legacy /me stays mounted for bot DM deeplinks. */}
       <Route path="/customer/profile" element={<CustomerProfileScreen />} />
+      {/* Tier 1 Priority 7 Phase B — food scanner (Tau F1-F4 wizard +
+          /дневник + manual fallback). Stubs with guardProd until W4
+          ships miniapp_api proxy endpoints. */}
+      <Route
+        path="/customer/food-scanner/capture"
+        element={<FoodScannerCaptureScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/processing"
+        element={<FoodScannerProcessingScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/result"
+        element={<FoodScannerResultScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/saved"
+        element={<FoodScannerSavedScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/diary"
+        element={<FoodScannerDiaryScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/manual"
+        element={<FoodScannerManualScreen />}
+      />
       <Route path="/me" element={<ProfileScreen />} />
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
       <Route path="*" element={<HelloScreen />} />
