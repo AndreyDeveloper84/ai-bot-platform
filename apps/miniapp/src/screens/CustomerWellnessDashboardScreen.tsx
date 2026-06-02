@@ -76,6 +76,7 @@ import {
   type CatalogLayer2Item,
   type CatalogRecommendations,
 } from "../lib/customer-booking";
+import { fetchFoodPhotoScanEnabled } from "../lib/food-scanner";
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -114,6 +115,14 @@ export function CustomerWellnessDashboardScreen() {
   );
   const [waterToast, setWaterToast] = useState<string | null>(null);
   const [photoToast, setPhotoToast] = useState<string | null>(null);
+  // FOOD_PHOTO_SCAN_ENABLED flag (Path B off-state per TL 2026-06-02).
+  // While resolving, render the photo CTA optimistically (DEV default
+  // ON); fail-safe OFF in production means we'd otherwise flash the
+  // photo label and then swap to manual. The brief mismatch is fine —
+  // tap goes to /capture which itself redirects to /manual when off.
+  // FOLLOW_UP #170: swap fetchFoodPhotoScanEnabled to real /me extension.
+  // FOLLOW_UP #171: Tau-finalised copy for off-state CTA label.
+  const [photoEnabled, setPhotoEnabled] = useState<boolean | null>(null);
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(
     () => isOnboardingDismissed(),
   );
@@ -174,6 +183,16 @@ export function CustomerWellnessDashboardScreen() {
     void fetchAll();
   }, [fetchAll]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchFoodPhotoScanEnabled().then((enabled) => {
+      if (!cancelled) setPhotoEnabled(enabled);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ── online / offline transitions ─────────────────────────────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -212,12 +231,17 @@ export function CustomerWellnessDashboardScreen() {
       setPhotoToast("Для распознавания нужна сеть. Попробуйте позже.");
       return;
     }
-    // Tier 1 Priority 7 Phase B — photo handling lives in webview now
-    // (Tau Variant A wizard). The old bot-DM deeplink path is dead
-    // code per founder pivot 2026-06-02; legacy `botDmFoodScanUrl()` +
-    // `maxBridge().openLink` retained for unrelated handlers only.
+    // Path B off-state (photoEnabled=false) routes directly to manual
+    // entry. The capture screen also has its own off-state redirect
+    // (defence-in-depth), but skipping the redirect hop saves ~1
+    // render cycle + avoids the photo headline flashing on Dashboard
+    // taps when the customer is heading to manual anyway.
+    if (photoEnabled === false) {
+      navigate("/customer/food-scanner/manual");
+      return;
+    }
     navigate("/customer/food-scanner/capture");
-  }, [navigate, online]);
+  }, [navigate, online, photoEnabled]);
 
   const onWaterTap = useCallback(() => {
     // §11.8 — offline: queue to localStorage 24h TTL. Real POST is
@@ -450,16 +474,27 @@ export function CustomerWellnessDashboardScreen() {
             <button
               type="button"
               className="wellness-dash__qa-btn"
-              aria-label="Сфотографируй еду"
+              aria-label={
+                photoEnabled === false ? "Записать еду" : "Сфотографируй еду"
+              }
               aria-disabled={!online}
               aria-describedby={!online ? "qa-photo-hint" : undefined}
               onClick={onPhotoTap}
             >
               <span className="wellness-dash__qa-icon" aria-hidden="true">
-                📸
+                {photoEnabled === false ? "📝" : "📸"}
               </span>
               <span className="wellness-dash__qa-label">
-                Сфотографируй еду
+                {/*
+                  Path B placeholder copy pending Tau finalisation
+                  (FOLLOW_UP #171). «Записать еду» matches voice spec
+                  §10 («Записать в дневник» precedent) without making
+                  a coming-soon promise (§14 anti-pattern). Tau swap
+                  may refine to «Что съела?» / «Добавить приём».
+                */}
+                {photoEnabled === false
+                  ? "Записать еду"
+                  : "Сфотографируй еду"}
               </span>
               {!online && (
                 <span

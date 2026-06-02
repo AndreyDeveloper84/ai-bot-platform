@@ -189,6 +189,44 @@ function guardProd(endpoint: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// `FOOD_PHOTO_SCAN_ENABLED` flag — Path B off-state coordination per TL
+// 2026-06-02. Backend reality per W4 Веха 1 (PR #980): gate defaults to
+// False; flips to True only after #947 legal-green + #956 consent storage
+// + РКН notification. Frontend reads the flag and either renders the
+// photo-capable F1 wizard (existing UI) or falls through to the
+// manual-primary off-state (Path B — see FoodScannerCaptureScreen guard).
+//
+// Fail-safe semantic: when this lib does NOT yet talk to a real W4
+// endpoint, production returns `false` (NOT throws) — gate off is the
+// safer default because it matches backend reality during the legal/
+// consent-storage window. DEV flips via URL param `?photo_gate=on`.
+//
+// FOLLOW_UP (#170 pin): once W4 ships the read endpoint (extend `/me`
+// with `food_scanner.photo_enabled` OR new `/me/food-scanner-config`),
+// swap the body to a real fetch + drop the dev URL fallback.
+// ---------------------------------------------------------------------------
+
+export async function fetchFoodPhotoScanEnabled(): Promise<boolean> {
+  if (import.meta.env.DEV && typeof window !== "undefined") {
+    try {
+      const v = new URLSearchParams(window.location.search).get(
+        "photo_gate",
+      );
+      if (v === "on") return true;
+      if (v === "off") return false;
+    } catch {
+      /* SSR / parse failure — fall through */
+    }
+    // DEV default = ON so existing QA flows for F1/F2/F3 keep working.
+    return true;
+  }
+  // Production — fail-safe OFF until W4 B2 ships the read endpoint.
+  // Customer falls into the Path B manual-primary surface; no broken
+  // photo CTAs ship to real users.
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Stub variant picker.
 // ---------------------------------------------------------------------------
 

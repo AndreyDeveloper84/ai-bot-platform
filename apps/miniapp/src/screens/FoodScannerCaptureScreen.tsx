@@ -31,6 +31,7 @@ import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   defaultMealTypeForHour,
+  fetchFoodPhotoScanEnabled,
   readConsentAt,
   saveConsentAccepted,
   stripImageMetadata,
@@ -68,8 +69,52 @@ export function FoodScannerCaptureScreen() {
   // hardware; without disabling the buttons the customer can fire a
   // second pick + race two async navigations (adversarial CR P3).
   const [processing, setProcessing] = useState<boolean>(false);
+  // Photo-scan gate (Path B off-state per TL 2026-06-02). Null = still
+  // resolving; redirect happens in effect below. While loading we
+  // render nothing — capture screen needs the gate to even know what
+  // to show, and the fetch resolves synchronously in DEV / fail-safe
+  // OFF in prod, so the window is sub-frame.
+  const [photoEnabled, setPhotoEnabled] = useState<boolean | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Off-state guard — Path B per TL 2026-06-02. When
+  // FOOD_PHOTO_SCAN_ENABLED is off, the photo path is unreachable.
+  // We resolve the flag on mount but DEFER the redirect to /manual
+  // until AFTER the consent gate is satisfied — otherwise a customer
+  // without prior consent ping-pongs:
+  //
+  //   /capture (no consent + photo off) → redirect /manual
+  //     → /manual sees no consent → redirect /capture (consent gate)
+  //     → consent accept → photo-off triggers → redirect /manual
+  //     → ... loop
+  //
+  // By presenting the consent gate first, then redirecting in
+  // handleAcceptConsent based on the resolved flag, we get one
+  // linear flow: consent → either photo UI or /manual.
+  useEffect(() => {
+    let cancelled = false;
+    fetchFoodPhotoScanEnabled().then((enabled) => {
+      if (cancelled) return;
+      setPhotoEnabled(enabled);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Returning customer (consent already accepted) + photo gate off →
+  // redirect immediately. New customers without consent fall through
+  // to the consent gate first; handleAcceptConsent handles the
+  // photo-off branch from there.
+  useEffect(() => {
+    if (consentAt !== null && photoEnabled === false) {
+      navigate("/customer/food-scanner/manual", {
+        replace: true,
+        state: { mealType: incoming.mealType ?? mealType },
+      });
+    }
+  }, [consentAt, photoEnabled, navigate, incoming.mealType, mealType]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -86,16 +131,31 @@ export function FoodScannerCaptureScreen() {
   const handleAcceptConsent = useCallback(() => {
     const now = saveConsentAccepted();
     setConsentAt(now);
-    // If the customer arrived via deep-link to a downstream surface
-    // (e.g. /manual) and was bounced here for consent, return them
-    // home after accepting (adversarial CR F1).
+    // After consent accepted, three exit paths in priority order:
+    //   1. Deep-link returnTo (e.g. customer came from /manual) wins
+    //      so the customer lands where they intended.
+    //   2. Photo gate off → /manual (Path B off-state per TL 2026-06-02)
+    //   3. Photo gate on → stay on /capture for the photo UI (default)
     if (incoming.returnTo) {
       navigate(incoming.returnTo, {
         replace: true,
         state: { mealType: incoming.mealType },
       });
+      return;
     }
-  }, [navigate, incoming.returnTo, incoming.mealType]);
+    if (photoEnabled === false) {
+      navigate("/customer/food-scanner/manual", {
+        replace: true,
+        state: { mealType: incoming.mealType ?? mealType },
+      });
+    }
+  }, [
+    navigate,
+    incoming.returnTo,
+    incoming.mealType,
+    photoEnabled,
+    mealType,
+  ]);
 
   const handleDeclineConsent = useCallback(() => {
     navigate("/customer/main");
@@ -150,6 +210,13 @@ export function FoodScannerCaptureScreen() {
   );
 
   // ── render branches ────────────────────────────────────────────────
+  // Photo gate still resolving — render nothing for the (sub-frame)
+  // moment until either the redirect-to-manual fires or photoEnabled
+  // flips true. This prevents a flash of the photo UI before the
+  // off-state navigate replaces the screen.
+  if (photoEnabled === null) {
+    return null;
+  }
   if (consentAt === null) {
     return (
       <ConsentGate
