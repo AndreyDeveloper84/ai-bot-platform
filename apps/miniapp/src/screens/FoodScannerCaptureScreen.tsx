@@ -24,14 +24,16 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import {
+  ImageStripUnsupportedError,
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   defaultMealTypeForHour,
   readConsentAt,
   saveConsentAccepted,
+  stripImageMetadata,
   type MealType,
 } from "../lib/food-scanner";
 
@@ -42,8 +44,16 @@ const MEAL_TYPES: ReadonlyArray<MealType> = [
   "snack",
 ];
 
+interface RouterIn {
+  /** When set, consent-accept bounces back here instead of staying on F1. */
+  returnTo?: string;
+  mealType?: MealType;
+}
+
 export function FoodScannerCaptureScreen() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const incoming = (location.state ?? {}) as RouterIn;
   const [consentAt, setConsentAt] = useState<string | null>(() =>
     readConsentAt(),
   );
@@ -54,6 +64,10 @@ export function FoodScannerCaptureScreen() {
     typeof navigator !== "undefined" ? !navigator.onLine : false,
   );
   const [error, setError] = useState<string | null>(null);
+  // Processing flag — re-encode + strip takes 200-800ms on mid-tier
+  // hardware; without disabling the buttons the customer can fire a
+  // second pick + race two async navigations (adversarial CR P3).
+  const [processing, setProcessing] = useState<boolean>(false);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -72,21 +86,29 @@ export function FoodScannerCaptureScreen() {
   const handleAcceptConsent = useCallback(() => {
     const now = saveConsentAccepted();
     setConsentAt(now);
-  }, []);
+    // If the customer arrived via deep-link to a downstream surface
+    // (e.g. /manual) and was bounced here for consent, return them
+    // home after accepting (adversarial CR F1).
+    if (incoming.returnTo) {
+      navigate(incoming.returnTo, {
+        replace: true,
+        state: { mealType: incoming.mealType },
+      });
+    }
+  }, [navigate, incoming.returnTo, incoming.mealType]);
 
   const handleDeclineConsent = useCallback(() => {
     navigate("/customer/main");
   }, [navigate]);
 
   const handleFile = useCallback(
-    (file: File | null | undefined) => {
+    async (file: File | null | undefined) => {
       if (!file) return;
+      if (processing) return; // ignore second tap mid-strip
       // Client-side size guard — spec §13 item 1; backend caps at 10 MiB.
       const MAX_BYTES = 10 * 1024 * 1024;
       if (file.size > MAX_BYTES) {
-        setError(
-          "Фото слишком большое. Можно отправить файл до 10 МБ.",
-        );
+        setError("Фото слишком большое. Можно отправить файл до 10 МБ.");
         return;
       }
       if (!file.type.startsWith("image/")) {
@@ -94,12 +116,37 @@ export function FoodScannerCaptureScreen() {
         return;
       }
       setError(null);
+      setProcessing(true);
+      // Strip EXIF (incl. GPS) BEFORE the photo leaves the device.
+      // Follow-up #957 — without this, geo-tagged JPEGs leak meal
+      // location to the backend before the delete-after-recognition
+      // runs. Server-side strip is a separate W4 hardening; this is
+      // defence-in-depth layer 1.
+      //
+      // FAIL-CLOSED: if strip fails (HEIC on Safari, decode error,
+      // encode error), we REFUSE the upload rather than silent-pass
+      // the original file with GPS inside. Customer gets a clear copy
+      // and can switch camera format to JPEG.
+      let cleanFile: File;
+      try {
+        cleanFile = await stripImageMetadata(file);
+      } catch (e) {
+        if (e instanceof ImageStripUnsupportedError) {
+          setError(
+            "Не получилось обработать фото. Если у тебя iPhone, попробуй переключить формат камеры на JPEG (Настройки → Камера → Форматы → «Наиболее совместимый») и сделать снимок ещё раз.",
+          );
+        } else {
+          setError("Не получилось обработать фото. Попробуй ещё раз.");
+        }
+        setProcessing(false);
+        return;
+      }
       // Photo flows to F2 via router state (no global store needed).
       navigate("/customer/food-scanner/processing", {
-        state: { photo: file, mealType },
+        state: { photo: cleanFile, mealType },
       });
     },
-    [navigate, mealType],
+    [navigate, mealType, processing],
   );
 
   // ── render branches ────────────────────────────────────────────────
@@ -190,19 +237,22 @@ export function FoodScannerCaptureScreen() {
             <p className="food-scanner-screen__capture-hint">
               Сделай фото или выбери из галереи
             </p>
-            <div className="food-scanner-screen__capture-actions">
+            <div
+              className="food-scanner-screen__capture-actions"
+              aria-busy={processing}
+            >
               <button
                 type="button"
                 className="btn-primary food-scanner-screen__capture-btn"
-                disabled={offline}
+                disabled={offline || processing}
                 onClick={() => cameraInputRef.current?.click()}
               >
-                Сделать фото
+                {processing ? "Обрабатываю фото…" : "Сделать фото"}
               </button>
               <button
                 type="button"
                 className="btn-secondary food-scanner-screen__capture-btn"
-                disabled={offline}
+                disabled={offline || processing}
                 onClick={() => galleryInputRef.current?.click()}
               >
                 Из галереи

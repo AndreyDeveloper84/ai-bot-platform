@@ -10,7 +10,7 @@
  * optional portion + meal-type. log_meal() called with `scan_id=None`.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { Snackbar } from "../components/Snackbar";
@@ -19,6 +19,7 @@ import {
   MEAL_TYPE_LABEL,
   defaultMealTypeForHour,
   logMeal,
+  readConsentAt,
   type MealType,
 } from "../lib/food-scanner";
 
@@ -47,6 +48,27 @@ export function FoodScannerManualScreen() {
     visible: false,
     message: "",
   });
+
+  // Consent gate for manual entry path (follow-up #961). 152-FZ
+  // consent covers the food-scanner feature as a whole — dish-name PII
+  // text logged via manual entry hits the same nutrition pipeline as
+  // photo scans. If the customer never accepted the gate (deep-link
+  // bypass; legitimate path through error screens already came from
+  // /capture so they saw the gate), redirect to /capture where the
+  // gate is presented.
+  //
+  // Preserve `returnTo` so the consent-accept handler can bounce the
+  // customer back to /manual (adversarial CR F1 — without this, deep-
+  // linked /manual user lands at /capture after accept and loses the
+  // path they intended).
+  useEffect(() => {
+    if (readConsentAt() === null) {
+      navigate("/customer/food-scanner/capture", {
+        replace: true,
+        state: { returnTo: "/customer/food-scanner/manual", mealType },
+      });
+    }
+  }, [navigate, mealType]);
 
   const onSave = useCallback(async () => {
     const trimmed = dishName.trim();
