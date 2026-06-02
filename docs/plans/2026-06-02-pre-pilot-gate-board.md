@@ -18,13 +18,13 @@
 | R-1 honest retention copy → ship | Tau → W1 | to do | fixes live Variant-3 violation in DisclosureSheet.tsx |
 | #956 consent server audit-trail | W4 | in food_scanner bundle | mini-app endpoint → Ayla disclaimer_acked |
 | EXIF GPS strip: client (#957 done) + server | W1 done / W4 server | server pending | defence-in-depth |
-| Photo→US vision path (#4) | tech-lead / founder + legal | CONFIRMED | food photos → **OpenAI (US)** by default (`FOOD_SCANNER_PRIMARY="openai"`); "RF-perimeter" claim FALSE. Resolution = **Opt 2 (lawful OpenAI)**: localize-first + explicit cross-border consent + RKN notification + minimization (EXIF strip + downscale/crop) + OpenAI zero-retention + honest disclosure. GATED on legal verdict (#947). Yandex (`FOOD_SCANNER_PRIMARY` flip) = fallback if legal insufficient. |
+| Photo→US vision path (#4) | tech-lead / founder + legal (parallel) | RESOLVED → Path B | food photos → **OpenAI (US)** by default (`FOOD_SCANNER_PRIMARY="openai"`); "RF-perimeter" claim FALSE. Resolution = **Path B (OpenAI lawful via mechanism)**: the compliance MECHANISM is the legal basis, not the lawyer's verdict. `FOOD_PHOTO_SCAN_ENABLED=True` requires ALL of: (1) cross-border consent live (W4 gate + Tau copy + W1 screen); (2) **RKN cross-border-transfer notification FILED — founder/ops, time-sensitive**; (3) data minimization: server-side EXIF strip + downscale/crop (W4); (4) **OpenAI zero-retention/DPA confirmed — founder/ops**; (5) localize-first / RF-primary storage verified (Alpha); (6) honest cross-border disclosure copy (Tau + W1). Lawyer (#947) reviews consent wording + RKN form **in parallel — NOT a flip blocker**; fallback to Yandex (`FOOD_SCANNER_PRIMARY` flip) / off only if lawyer rules the mechanism insufficient. |
 
 ## B. Pre-SHIP gates (before go-live — NOT merge; legal/ops/founder)
 | Gate | Owner | Status |
 |---|---|---|
-| #947 cross-border legal verdict (brief PR #973) | founder → lawyer | pending |
-| Cross-border food-photo transfer lawfulness (Opt 2) — legal verdict + RKN notification | founder / lawyer | pending (gated on #947) |
+| #947 cross-border legal review (brief PR #973) — **in parallel, NOT a flip blocker** | founder → lawyer | parallel review |
+| Cross-border food-photo transfer (Path B) — Photo flip gated on **MECHANISM-complete** (section-A checklist), NOT on legal verdict. Two founder/ops hard items — **RKN filing + OpenAI zero-retention — are the lawful basis (without them Path B is not lawful)**. | founder / ops | mechanism in progress |
 | Anthropic + OpenAI DPA / zero-retention tier (legal point #3) | founder / ops | verify |
 | STRICT_TENANT_REFUSE flip + D-2 ceilings checklist | founder (date) + W3 | flip date pending |
 | Records/payments 7-year retention confirm (R-2) | Alpha | confirm |
@@ -91,4 +91,4 @@ Pilot tokens done (#916/#966). Re-engage only on new token request (none under B
 ## Tech-lead held gates
 - **Delivery flip signal** (payment + booking) — after #943+#965 on dev + round-trip green.
 - **W1 food_scanner swap signal** — after W4 backend + Ayla data ready.
-- **#4 photo-path** — RESOLVED to Opt 2 (lawful OpenAI path); GATED on legal verdict (#947) + RKN cross-border notification. Yandex flip = fallback if legal insufficient.
+- **#4 photo-path** — RESOLVED to **Path B (OpenAI lawful via mechanism)**. Photo flip (`FOOD_PHOTO_SCAN_ENABLED=True`) gated on **MECHANISM-complete** (section-A 6-item checklist), NOT on the lawyer's verdict. Two founder/ops hard items — **RKN cross-border notification FILED + OpenAI zero-retention confirmed** — are the lawful basis (without them Path B is not lawful). Lawyer (#947) reviews in parallel; Yandex flip / off = fallback only if lawyer rules the mechanism insufficient.
