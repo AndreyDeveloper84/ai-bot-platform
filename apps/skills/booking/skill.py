@@ -256,12 +256,6 @@ class BookingSkill:
         allowed_service_ids = {int(s.id) for s in services}
         service_lookup = build_service_lookup(services)
 
-        # E0#1 Variant A — pre-load the tenant master roster ONCE per
-        # turn (used by both LLM call sites below). Empty list when
-        # mirror is empty / lookup failed; prompt renderer silently
-        # omits the block, falling back to the `show_masters` flow.
-        known_masters = _load_tenant_master_roster(tenant)
-
         # ── Master-pick callback short-circuit ──────────────────────
         # User tapped a master-card button (cb:book:pick_master:<id>).
         # Fetch the master's available dates and render them as a date
@@ -335,11 +329,19 @@ class BookingSkill:
             else:
                 query_text = context.message_text
 
+            # E0#1 Variant A (CR #955 F11 — moved past callback
+            # short-circuits): pre-load the tenant master roster only
+            # on the path that actually consumes it. The callback
+            # branches (pick_master / pick_date) return early без
+            # building a prompt, so loading there was wasted I/O.
+            known_masters, known_masters_truncated = _load_tenant_master_roster(tenant)
+
             # ── Phase 1: first LLM call (decide on tool use) ───────
             first_messages = build_booking_prompt(
                 brand_voice=_DEFAULT_BRAND_VOICE,
                 query=query_text,
                 known_masters=known_masters,
+                known_masters_truncated=known_masters_truncated,
             )
             # #473 LLM Y3 envelope expansion: catch any LLMError (covers
             # UnknownTenantError from cost_tracker, LLMProviderUnavailable,
@@ -448,10 +450,17 @@ class BookingSkill:
                 )
 
         # ── Phase 3: second LLM call (natural-language reply) ──────
+        # CR #955 F5 — DO NOT inject `known_masters` on Phase 3. The
+        # `candidate_masters` block (from show_masters tool result) is
+        # authoritative for the current service/time context; the full
+        # roster would compete with candidates if a known-but-not-
+        # offered master is mentioned by the customer, producing
+        # contradictory advice. Phase 1's roster injection already did
+        # its job — name-grounding for tool-use decision.
         second_messages = build_booking_prompt(
             brand_voice=_DEFAULT_BRAND_VOICE,
             query=context.message_text,
-            known_masters=known_masters,
+            known_masters=None,
             candidate_masters=_masters_payload(tool_result),
             available_slots=_slots_payload(tool_result),
             confirmation=_confirmation_payload(tool_result),
@@ -1084,9 +1093,9 @@ def _audit_handled(*, tenant_id: str, tool: str) -> None:
     )
 
 
-def _load_tenant_master_roster(tenant: Any) -> list[dict[str, str]]:
-    """E0#1 Variant A — load active CatalogMaster roster для prompt
-    pre-injection.
+def _load_tenant_master_roster(tenant: Any) -> tuple[list[dict[str, str]], bool]:
+    """E0#1 Variant A — load bookable CatalogMaster roster для prompt
+    pre-injection. Returns ``(roster, is_truncated)``.
 
     Per founder verdict 2026-06-02 + memory `pilot_scope_discipline`.
     Read-only against the catalog mirror (per ADR-0009 §Hard rule #2 —
@@ -1095,18 +1104,29 @@ def _load_tenant_master_roster(tenant: Any) -> list[dict[str, str]]:
     — caller may not have a tenant_scope context active depending on
     dispatch path, so the explicit filter is the safety belt.
 
-    Returns a stable-sorted (alphabetical by name) list of dicts with
-    keys ``name`` + ``specialization``. Caps the list at
-    :data:`_KNOWN_MASTERS_ROSTER_CAP` (default 20) — pilot salons fit
-    easily; larger tenants get the top-N alphabetical subset, with the
-    remaining masters still reachable via the regular ``show_masters``
-    tool call.
+    **Adversarial CR #955 changes:**
 
-    Failure mode: any unexpected DB / ORM exception is logged WARN and
-    surfaces as an EMPTY list. Pre-injection is defence-in-depth — the
-    booking flow still works через the original `show_masters` path
-    when the roster block is absent. Critical: this function MUST NOT
-    raise (would 500 the customer turn).
+    * **F2** — filter `is_active=True AND invite_status=ACCEPTED`
+      matching the model's canonical ``bookable()`` predicate. The
+      previous `is_active`-only gate surfaced PENDING / EXPIRED /
+      CANCELLED invite masters (M0 invite-flow rows with `is_active=
+      True` by default until accepted), creating a false-positive
+      roster vs the YClients-grounded ``show_masters`` tool result.
+    * **F3** — return a `(roster, is_truncated)` tuple так prompt
+      renderer can weaken the «такого мастера нет» rule when the cap
+      fired. Without this, alphabetically-late masters get false
+      denial. Overflow probe (``[:cap+1]``) is now actually wired —
+      previously the +1 row was sliced off without any signal use.
+    * **F7** — `specialization` is loaded but NOT surfaced into the
+      prompt (renderer drops it per ADR-0011 safety concerns). Loader
+      preserves the field shape для backwards-compat с any caller
+      that might want it for non-prompt purposes (none today).
+
+    Failure mode: any unexpected DB / ORM exception is logged WARN
+    and surfaces as `([], False)`. Pre-injection is defence-in-depth
+    — the booking flow still works через the original `show_masters`
+    path when the roster block is absent. Critical: this function
+    MUST NOT raise (would 500 the customer turn).
     """
     try:
         from apps.catalog.models import CatalogMaster
@@ -1115,6 +1135,7 @@ def _load_tenant_master_roster(tenant: Any) -> list[dict[str, str]]:
             CatalogMaster.all_tenants.filter(
                 tenant=tenant,
                 is_active=True,
+                invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             )
             .order_by("name")
             .values("name", "specialization")[: _KNOWN_MASTERS_ROSTER_CAP + 1]
@@ -1125,14 +1146,25 @@ def _load_tenant_master_roster(tenant: Any) -> list[dict[str, str]]:
             getattr(tenant, "id", "?"),
             exc,
         )
-        return []
+        return [], False
 
     if not rows:
-        return []
+        return [], False
 
-    # Cap deterministically — top-N alphabetical. The +1 fetch above
-    # detects overflow without a separate `.count()` round-trip.
-    return [
+    # F3 overflow signal — the +1 probe row, if present, means the
+    # alphabetical top-N has truncated the real roster. Surface to
+    # the caller so the prompt rule can be relaxed («call show_masters
+    # if uncertain» instead of «такого мастера нет»).
+    is_truncated = len(rows) > _KNOWN_MASTERS_ROSTER_CAP
+    if is_truncated:
+        logger.warning(
+            "booking.known_masters.capped tenant=%s cap=%d "
+            "(at least one master не surfaced — relaxing prompt rule)",
+            getattr(tenant, "id", "?"),
+            _KNOWN_MASTERS_ROSTER_CAP,
+        )
+
+    roster = [
         {
             "name": (row.get("name") or "").strip(),
             "specialization": (row.get("specialization") or "").strip(),
@@ -1140,6 +1172,7 @@ def _load_tenant_master_roster(tenant: Any) -> list[dict[str, str]]:
         for row in rows[:_KNOWN_MASTERS_ROSTER_CAP]
         if (row.get("name") or "").strip()
     ]
+    return roster, is_truncated
 
 
 # ---------------------------------------------------------------------------
