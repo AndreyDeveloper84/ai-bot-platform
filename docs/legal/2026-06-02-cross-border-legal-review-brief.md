@@ -17,7 +17,7 @@ We are requesting a **152-ФЗ and cross-border data-transfer legal verdict** be
 
 - **Pilot scope:** 5–10 beauty salons in Penza, **real client data**.
 - **Target ship date:** **2026-07-15**.
-- **What we need from you:** a yes / no / edit verdict on the customer-facing cross-border disclosure copy (r1 shipped vs r2 proposed), the data-retention wording, and the 8 specific points enumerated in §4 below.
+- **What we need from you:** a yes / no / edit verdict on the customer-facing cross-border disclosure copy (r1 shipped vs r2 proposed), the data-retention wording, and the specific points enumerated in §4 below.
 
 This brief states **facts and questions only**. It does **not** assert legal conclusions. Where a claim depends on a vendor contract or backend reality not yet verified, that is flagged explicitly so legal can condition the verdict.
 
@@ -27,19 +27,32 @@ This brief states **facts and questions only**. It does **not** assert legal con
 
 **Primary data residency:** Core customer data is stored on servers **in Russia** (152-ФЗ data-localisation).
 
-**The cross-border path is the AI processing call:**
+**The cross-border path is the AI processing call.** Multiple US AI providers are in play; the disclosure must cover **all of them** (see §2.1).
 
-- To understand a customer's chat messages, Ayla sends **message text** to **Claude**, an LLM provided by **Anthropic (US-based provider)**, and receives the model's response.
+- To understand a customer's chat messages, Ayla sends **message text** to a US-based LLM provider (Anthropic and/or OpenAI — to be confirmed; see §2.1), and receives the model's response.
+- To recognise calories/macros from a food photo, the food scanner sends the **photo** to **OpenAI (US)** — see §2.1 and point 4 below.
 - Transport is encrypted (the proposed copy commits to TLS 1.3 — see point 2 below for whether to keep the specific version).
 
-**Data categories that leave Russia (to Anthropic):**
+**Data categories that leave Russia:**
 
-- **Message text** — the content of the customer's chat with Ayla, sent for understanding/intent recognition.
+- **Message text** — the content of the customer's chat with Ayla, sent to a US LLM provider for understanding/intent recognition.
+- **Food / nutrition-diary photos** — sent to **OpenAI (US)** for calorie/macro recognition (see §2.1, point 4).
 
-**Data categories that do NOT leave Russia (claimed in r2 — requires confirmation):**
+**Mitigations on the data that leaves (see §3):**
 
-- **Food / nutrition-diary photos** — the proposed copy states food-photo recognition runs **inside the Russian perimeter** and is **not** sent to Anthropic. (Confirm true at pilot ship — see point 4 below.)
-- **Raw phone numbers / direct PII** — see §3: once #842 lands, PII is tokenised before any LLM call, so Anthropic receives **tokens, not raw personal data**.
+- **Raw phone numbers / direct PII** — once #842 lands, PII is tokenised before any text LLM call, so the provider receives **tokens, not raw personal data**.
+
+### 2.1 Provider scope — ALL US AI providers actually used (code-verified)
+
+A code audit established the **actual** provider routing. The disclosure and the legal verdict must cover cross-border transfer to US AI providers **generally**, with this concrete list:
+
+| Use | Data sent | Provider (US) | Status |
+|---|---|---|---|
+| **Food-photo recognition** (calorie/macro) | food photo | **OpenAI** (`FOOD_SCANNER_PRIMARY="openai"`, `nutrition/providers/openai_vision.py`; fallback `yandex`) | **CONFIRMED by code audit** |
+| **Nutrition-comment** (daily-note / `/summary?with_comment`) | nutrition-log text | **OpenAI** | CONFIRMED |
+| **Main chat understanding** | message text | **Anthropic and/or OpenAI** | to be confirmed |
+
+> **Correction (code audit):** the earlier framing implied the only US provider was Anthropic. That is wrong. Food-vision and nutrition-comment go to **OpenAI**. Please scope the verdict to **cross-border transfer to US AI providers generally**, naming at minimum OpenAI (food-vision + nutrition-comment) and Anthropic/OpenAI (chat, TBC).
 
 ---
 
@@ -47,37 +60,37 @@ This brief states **facts and questions only**. It does **not** assert legal con
 
 **PII pseudonymisation — issue #842 (top pre-pilot blocker).**
 
-- Before any LLM call, **phone numbers and other PII are tokenised** (pseudonymised). The downstream LLM provider (Anthropic) therefore receives **tokens, not raw personal data**.
+- Before any text LLM call, **phone numbers and other PII are tokenised** (pseudonymised). The downstream LLM provider therefore receives **tokens, not raw personal data**.
 - #842 is the **top pre-pilot blocker currently being completed**.
-- **The legal position in this brief assumes #842 ships before the pilot opens.** If #842 slips, the "Anthropic receives tokens, not raw PII" assumption no longer holds and the cross-border copy must be re-reviewed.
+- **The legal position in this brief assumes #842 ships before the pilot opens.** If #842 slips, the "provider receives tokens, not raw PII" assumption no longer holds and the cross-border copy must be re-reviewed.
 
-**Encryption in transit:** transfer to Anthropic is encrypted (TLS 1.3 in the proposed copy).
+**Encryption in transit:** transfer to the US providers is encrypted (TLS 1.3 in the proposed copy).
 
 ---
 
-## 4. The 8 points needing a verdict
+## 4. The points needing a verdict
 
-Verbatim from `customer-profile-flow.md` §4.2.3 (#947). Pre-draft r2 (see §5) is the Tau starting point; please verify and mark up each point.
+Pre-draft r2 (see §5) is the Tau starting point; please verify and mark up each point.
 
-1. **Anthropic + USA framing**
+1. **Provider + USA framing**
    - r2: «AI-сервис от компании Anthropic (США)»
    - Question: is the country mention required at this level of disclosure, or is it sufficient to say «иностранный сервис» with detail in the privacy policy? 152-ФЗ ст.12 (transborder transfer) interpretation.
-   - Alternative phrasing to consider: «зарубежный AI-сервис (Anthropic, США)» — more precise about who and where.
+   - Note: copy must name the providers actually used (Anthropic and/or OpenAI for chat; **OpenAI** for food-vision/nutrition-comment) — see §2.1. Alternative phrasing to consider: «зарубежные AI-сервисы (Anthropic / OpenAI, США)».
 
 2. **TLS 1.3 mention**
    - r2: «шифрованием TLS 1.3»
    - Question: do we want a specific protocol version in customer-facing copy (commits us technically) or generic «современное шифрование»?
    - Tau lean: generic is friendlier; specific is more credible to a technical reviewer.
 
-3. **Anthropic non-retention claim**
-   - r2: «Anthropic обрабатывает текст в момент ответа и не хранит твою переписку у себя»
-   - Question: does this match the actual Anthropic Data Processing Agreement / our contract terms? If we have a zero-retention tier, this is honest; if we use default retention, this overpromises.
-   - **MUST verify with vendor contract before shipping.**
+3. **Provider non-retention claim**
+   - r2: «обрабатывает текст в момент ответа и не хранит твою переписку у себя»
+   - Question: does this match the actual provider Data Processing Agreement / our contract terms (Anthropic AND OpenAI)? If we have a zero-retention tier, this is honest; if we use default retention, this overpromises.
+   - **MUST verify with each vendor contract (incl. OpenAI DPA zero-retention) before shipping.**
 
-4. **Photo separation claim**
-   - r2: «Не передаём фото из дневника питания на Anthropic — распознавание блюд работает внутри российского контура»
-   - Question: is this true at pilot ship (food scanner uses an internal vision pipeline, no Anthropic photo path)? If a photo path adds Anthropic post-pilot, this becomes a breach — needs updating before that change.
-   - Tau lean: ship the claim if true at pilot; flag a follow-up to legal if the photo-pipeline architecture changes.
+4. **Food-photo cross-border transfer — lawful mechanism (Opt 2)**
+   - **Verified fact (code audit):** food photos are sent to **OpenAI (US)** by default — provider router default `openai`, fallback `yandex` (`FOOD_SCANNER_PRIMARY="openai"`, `nutrition/providers/openai_vision.py`). The prior r2 claim that photos «работает внутри российского контура» / are «не передаём … на Anthropic» (i.e. stay inside the Russian perimeter) is **FALSE and must NOT ship as-is**.
+   - **Decision (founder, Opt 2 — lawful OpenAI path):** keep OpenAI vision (needed for calorie/macro recognition; Yandex inadequate), and make the cross-border transfer **lawful** under 152-ФЗ. Yandex (`FOOD_SCANNER_PRIMARY` flip) is a **fallback only** if legal rules the consent path insufficient.
+   - **Mechanism question for legal (not "may we say X"):** *The product needs to send food photos to a US vision provider (OpenAI) for calorie/macro recognition. Under 152-ФЗ, is this lawful if we implement: (a) localize-first / primary storage in RF (ст. 18.5), (b) explicit specific written consent to the cross-border transfer (ст. 12), (c) Roskomnadzor cross-border-transfer notification, (d) data minimization (EXIF stripped + downscaled/cropped), (e) provider zero-retention? What exact consent wording / conditions are required? If not sufficient, what additional mechanism is needed?*
 
 5. **«никому со стороны» as replacement for «третьим лицам»**
    - Per adversarial CR (Profile Phase B PR agent `a93d90bebc68bba10`): «третьим лицам» reads as §14 legal jargon.
@@ -106,7 +119,9 @@ Verbatim from `customer-profile-flow.md` §4.2.3 (#947). Pre-draft r2 (see §5) 
 
 The collapsed «Подробнее о данных» disclosure. **r1 is what customers see in the current shipped build** (`DisclosureSheet.tsx`). **r2 is the proposed expansion** pending this review.
 
-**The question for legal: may we ship r2?** (Or: keep r1, ship r2, or ship an edited r2?)
+> **Note:** the r2 photo line below («не передаём фото … работает внутри российского контура») reflects the prior, now-**FALSE** assumption (see point 4). It is kept here only as the reviewed-against baseline; the cross-border food-photo wording must be **rewritten** to the honest Opt-2 disclosure (photos go to OpenAI/US under explicit cross-border consent + minimisation + zero-retention) once legal confirms the consent wording.
+
+**The question for legal: may we ship r2 (as edited per point 4)?** (Or: keep r1, ship r2, or ship an edited r2?)
 
 ### 5.1 r1 — shipped copy (`DisclosureSheet.tsx`)
 
@@ -208,16 +223,16 @@ AI-сервис от компании Anthropic (США). Передача
 
 Please return a **yes / no / edit** verdict on each:
 
-1. **Anthropic + USA framing** — is naming Anthropic + «(США)» in customer-facing copy required, sufficient, or should it be «иностранный/зарубежный сервис» with detail in the privacy policy? (152-ФЗ ст.12)
+1. **Provider + USA framing** — is naming the providers (Anthropic / OpenAI) + «(США)» in customer-facing copy required, sufficient, or should it be «иностранный/зарубежный сервис» with detail in the privacy policy? (152-ФЗ ст.12)
 2. **TLS 1.3 wording** — keep the specific protocol version, or switch to generic «современное шифрование»?
-3. **Anthropic non-retention claim** — may we state «не хранит твою переписку у себя»? (Conditional on confirming the vendor DPA / zero-retention tier.)
-4. **Photo separation claim** — may we state food photos are not sent to Anthropic and stay inside the Russian perimeter? (Conditional on this being true at pilot ship.)
+3. **Provider non-retention claim** — may we state «не хранит твою переписку у себя»? (Conditional on confirming each vendor DPA / zero-retention tier — Anthropic AND OpenAI.)
+4. **Food-photo cross-border lawful mechanism (Opt 2)** — Food photos go to **OpenAI (US)** (the "stays in RF perimeter" claim is FALSE). Is the cross-border transfer **lawful** under 152-ФЗ with: (a) localize-first / primary storage in RF (ст. 18.5), (b) explicit specific written consent (ст. 12), (c) Roskomnadzor cross-border notification, (d) data minimisation (EXIF strip + downscale/crop), (e) OpenAI zero-retention? What exact consent wording / conditions are required, and if insufficient, what additional mechanism is needed? (Yandex fallback only if consent path is ruled insufficient.)
 5. **«никому со стороны» vs «третьим лицам»** — is the friendly phrasing legally equivalent under 152-ФЗ, or must «третьим лицам» stay?
 6. **Tone** — is first-person Ayla voice acceptable for the cross-border section, or must it be third-person formal Russian?
 7. **Withdrawal mechanics** — is locked-on / toggle-off + full-delete sufficient under 152-ФЗ ст.9 ч.5, or is a granular per-purpose withdrawal path required?
 8. **Retention wording (R-1)** — is "messages kept while account active, deleted on account deletion" (honest copy now, 180-day anonymiser post-pilot) 152-ФЗ-acceptable, including the 7-year bookings/payments basis?
-9. **Ship verdict on r2** — may we ship the r2 expansion (§5.2) as customer-facing copy, keep r1 (§5.1), or ship an edited r2?
+9. **Ship verdict on r2** — may we ship the r2 expansion (§5.2, with the food-photo line rewritten per point 4) as customer-facing copy, keep r1 (§5.1), or ship an edited r2?
 
 ---
 
-*Assumptions: this brief assumes PII pseudonymisation (#842) ships before the pilot opens. If #842 slips, the cross-border data-category claims in §2–§3 must be re-reviewed.*
+*Assumptions: this brief assumes PII pseudonymisation (#842) ships before the pilot opens. If #842 slips, the cross-border data-category claims in §2–§3 must be re-reviewed. The food-photo cross-border path (point 4 / Opt 2) is GATED on the legal verdict (#947).*
