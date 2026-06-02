@@ -375,7 +375,13 @@ class TestBookingConfirmed:
     # ── cross-tenant spoof ──
     def test_cross_tenant_confirm_spoof_rejected(self, tenant: Tenant) -> None:
         """Tenant A owns the proxy; tenant B sends booking.confirmed for
-        the same appointment_id → TenantAuthorizationError, A untouched."""
+        the same appointment_id → TenantAuthorizationError, A untouched.
+
+        Under the pre-#246 FAIL_OPEN bridge the envelope-level
+        ``assert_envelope_tenant_authorized`` logs-and-passes; the raise
+        here comes from the ``_assert_proxy_tenant`` defence-in-depth
+        guard (the load-bearing spoof defense until #246 lands).
+        """
         from apps.eventbus.ingest_tenancy import TenantAuthorizationError
 
         self._pending_proxy(tenant)  # tenant A
