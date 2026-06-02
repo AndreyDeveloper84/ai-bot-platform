@@ -52,6 +52,12 @@ def _isolated_env(tmp_path: Path, settings: pytest.FixtureRequest):
     settings.BASE_DIR = tmp_path  # type: ignore[attr-defined]
     settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
     settings.SKILL_LLM_PROVIDER = {}  # type: ignore[attr-defined]
+    # Stabilization B2: tool-spec wiring tests below assume all 8
+    # booking specs are advertised. Production default is False; this
+    # fixture flips the flag so the spec list is unfiltered for the
+    # broad behavioural coverage in this module. Per-test overrides
+    # can flip it back if needed.
+    settings.CERTIFICATE_PAYMENT_ENABLED = True  # type: ignore[attr-defined]
     reset_router_cache()
     cache.clear()
     yield
