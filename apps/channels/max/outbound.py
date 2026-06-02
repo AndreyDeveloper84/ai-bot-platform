@@ -211,6 +211,39 @@ def send_chat_action(*, chat_id: str, action: str, timeout: float = 5.0) -> None
 # ─── inline keyboard wire-format ──────────────────────────────────────────
 
 
+# MAX-hardening Guard 2 — MAX's inline_keyboard supports a maximum of 29
+# rows (per dev.max.ru/docs-api response observed via 400 на 30-row
+# payloads). Clamping at producer boundary avoids silent message drops
+# для list-heavy keyboards (slot pickers с >29 dates, master rosters,
+# etc). Callers that emit more rows than this cap currently lose ALL
+# rows past index 28 — the bot sends NO message, MAX returns 400, and
+# the operator sees nothing besides an INFO log. Cap + log warns operators
+# so they can either compose / paginate or accept silent truncation.
+MAX_KEYBOARD_ROWS = 29
+
+
+def _clamp_keyboard_rows(
+    rows: list[list[dict[str, Any]]],
+    *,
+    context: str,
+) -> list[list[dict[str, Any]]]:
+    """Truncate keyboard rows к MAX's hard limit, logging when it bites.
+
+    Returns the input unchanged if within cap. Otherwise returns the first
+    ``MAX_KEYBOARD_ROWS`` rows + emits a WARNING с the caller-supplied
+    ``context`` slug for grep-correlation.
+    """
+    if len(rows) <= MAX_KEYBOARD_ROWS:
+        return rows
+    logger.warning(
+        "channels.max.keyboard_rows_truncated context=%s rows_in=%d cap=%d",
+        context,
+        len(rows),
+        MAX_KEYBOARD_ROWS,
+    )
+    return rows[:MAX_KEYBOARD_ROWS]
+
+
 def make_inline_keyboard_attachment(
     buttons: list[dict[str, str]],
     *,
@@ -248,6 +281,7 @@ def make_inline_keyboard_attachment(
             current = []
     if current:
         rows.append(current)
+    rows = _clamp_keyboard_rows(rows, context="flat")
     return {"type": "inline_keyboard", "payload": {"buttons": rows}}
 
 
@@ -259,9 +293,11 @@ def make_inline_keyboard_attachment_rows(
     Use when the caller has already decided which buttons share a row
     (e.g. paired Confirm/Cancel pair followed by a wider Back button).
     """
+    wire_rows = [[_button_to_max(b) for b in row] for row in rows]
+    wire_rows = _clamp_keyboard_rows(wire_rows, context="rows")
     return {
         "type": "inline_keyboard",
-        "payload": {"buttons": [[_button_to_max(b) for b in row] for row in rows]},
+        "payload": {"buttons": wire_rows},
     }
 
 
@@ -276,14 +312,27 @@ def _button_to_max(btn: dict[str, Any]) -> dict[str, Any]:
       * ``"link"`` — opens the URL in the user's external browser.
       * ``"open_app"`` — launches a MAX Mini App; requires either
         ``web_app`` (bot username) or ``contact_id``.
+      * ``"request_contact"`` — asks user to share their phone /
+        contact card; MAX sends a `message_created` with a
+        `contact` attachment back to the bot (MAX-hardening Guard 1).
 
     The channel-agnostic dict accommodates the variants via optional
-    keys: ``url`` selects link, ``web_app``/``contact_id`` selects open_app.
-    Defaults to callback when none are present.
+    keys: ``url`` selects link, ``web_app``/``contact_id`` selects open_app,
+    ``request_contact=True`` selects request_contact. Defaults to callback
+    when none are present.
     """
     text = btn.get("label") or ""
     if btn.get("url"):
         return {"type": "link", "text": text, "url": btn["url"]}
+    if btn.get("request_contact"):
+        # MAX-hardening Guard 1 — request_contact button. Per MAX docs
+        # the wire shape is `{"type": "request_contact", "text": ...}`.
+        # No payload field — the user's tap returns a contact attachment
+        # via a regular `message_created` update, NOT a callback. Parser-
+        # side tolerance (Guard 1 inbound half) ensures that downstream
+        # `message_created` events с body.attachments=[{"type":"contact"}]
+        # don't crash the dispatcher.
+        return {"type": "request_contact", "text": text}
     if btn.get("web_app") or btn.get("contact_id"):
         out: dict[str, Any] = {"type": "open_app", "text": text}
         if btn.get("web_app"):
@@ -294,6 +343,20 @@ def _button_to_max(btn: dict[str, Any]) -> dict[str, Any]:
             # MAX `open_app` button supports a `payload` carried into
             # the Mini App's initData. Reuse the `callback` field so
             # producers don't have to learn two key names.
-            out["payload"] = btn["callback"]
+            #
+            # MAX-hardening Guard 3 (memory `max_open_app_payload_format`):
+            # MAX requires the payload к be a flat slug — NO `=`, NO
+            # `&` (querystring shape gets HTTP 400 proto.payload + poisons
+            # the consumer PEL). Validate at producer boundary so a bad
+            # caller can't poison the channel.
+            payload_str = str(btn["callback"])
+            if "=" in payload_str or "&" in payload_str or "?" in payload_str:
+                raise ValueError(
+                    "MAX open_app payload must be a flat slug — no `=`, `&`, "
+                    f"or `?`; got {payload_str!r}. Per memory "
+                    "`max_open_app_payload_format`: querystring shape gets "
+                    "HTTP 400 + poisons consumer PEL."
+                )
+            out["payload"] = payload_str
         return out
     return {"type": "callback", "text": text, "payload": btn.get("callback") or ""}
