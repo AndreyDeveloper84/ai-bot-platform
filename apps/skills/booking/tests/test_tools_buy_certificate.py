@@ -55,6 +55,11 @@ def _reset_ayla_singleton(settings):
     settings.AYLA_PAYMENTS_TEST_MODE = True
     settings.AYLA_BASE_URL = ""
     settings.AYLA_INTERNAL_API_TOKEN = ""
+    # Stabilization B2: behavioural tests below assume the certificate
+    # flow is reachable. Production default is False; the dedicated
+    # ``TestCertificatePaymentFlag`` class flips it back to assert the
+    # disabled path.
+    settings.CERTIFICATE_PAYMENT_ENABLED = True
     reset_ayla_payments_client()
     yield
     reset_ayla_payments_client()
@@ -328,3 +333,94 @@ class TestIdempotenceKey:
 # Use uuid4 import locally — keeps the test module self-contained vs
 # pulling skills' internals.
 _ = uuid4
+
+
+class TestCertificatePaymentFlag:
+    """Stabilization sprint B2 — CERTIFICATE_PAYMENT_ENABLED gate.
+
+    The flag defaults False in production. These tests pin three
+    contracts:
+
+    1. When flag is False, ``buy_certificate`` short-circuits with
+       ``error="certificate_disabled"`` BEFORE any Ayla call, even when
+       all other arguments are valid (i.e. it's not a side-effect of
+       amount/auth validation).
+    2. A polite Russian-language clarification text is returned for
+       the LLM to rephrase to the customer.
+    3. The disabled path emits a single audit row with
+       ``outcome="disabled"`` so operators can observe attempted use
+       during the post-pilot freeze.
+    """
+
+    def test_flag_off_short_circuits_no_ayla_call(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        settings,
+    ) -> None:
+        settings.CERTIFICATE_PAYMENT_ENABLED = False
+        with patch(
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=AssertionError("Ayla MUST NOT be called when flag is off"),
+        ):
+            with tenant_scope(tenant):
+                result = buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={"amount_rub": 2000},
+                )
+
+        assert result.error == "certificate_disabled"
+        assert result.certificate is not None
+        assert result.certificate.ok is False
+        assert result.certificate.error == "certificate_disabled"
+        assert result.text is not None
+        assert "сертификат" in result.text.lower()
+        # Must NOT promise an ETA — founder freeze is contingent on
+        # legal review, not a fixed timeline.
+        text_lower = result.text.lower()
+        assert "запустим" not in text_lower
+        assert "чуть позже" not in text_lower
+        assert "скоро" not in text_lower
+
+    def test_flag_off_emits_disabled_audit_row(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        settings,
+    ) -> None:
+        settings.CERTIFICATE_PAYMENT_ENABLED = False
+        with tenant_scope(tenant):
+            buy_certificate(
+                tenant=tenant,
+                bot_user=bot_user,
+                arguments={"amount_rub": 2000},
+            )
+
+        rows = list(
+            AuditLog.all_tenants.filter(action="booking.tool_invoked").values_list(
+                "payload", flat=True
+            )
+        )
+        assert rows, "expected a tool-invoked audit row for disabled outcome"
+        outcomes = [r.get("outcome") for r in rows]
+        assert "disabled" in outcomes
+
+    def test_flag_on_round_trip_unaffected(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        settings,
+    ) -> None:
+        # Regression guard: enabling the flag restores the original
+        # happy-path semantics. Mirrors TestHappyPath but explicit
+        # about the dependency on the feature flag.
+        settings.CERTIFICATE_PAYMENT_ENABLED = True
+        with tenant_scope(tenant):
+            result = buy_certificate(
+                tenant=tenant,
+                bot_user=bot_user,
+                arguments={"amount_rub": 2000},
+            )
+        assert result.error == ""
+        assert result.certificate is not None and result.certificate.ok is True

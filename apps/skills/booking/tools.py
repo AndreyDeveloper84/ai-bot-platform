@@ -382,6 +382,23 @@ BOOKING_TOOL_SPECS: list[dict[str, Any]] = [
 ]
 
 
+def get_active_booking_tool_specs() -> list[dict[str, Any]]:
+    """Return the booking-tool list filtered by feature flags.
+
+    Stabilization sprint B2: ``BUY_CERTIFICATE_TOOL_SPEC`` is hidden
+    from the LLM tool advertisement when ``CERTIFICATE_PAYMENT_ENABLED``
+    is False, so the model does not pitch certificates we cannot
+    fulfil. The direct ``buy_certificate()`` call also honours the
+    flag for defence-in-depth.
+    """
+
+    from django.conf import settings
+
+    if getattr(settings, "CERTIFICATE_PAYMENT_ENABLED", False):
+        return list(BOOKING_TOOL_SPECS)
+    return [s for s in BOOKING_TOOL_SPECS if s is not BUY_CERTIFICATE_TOOL_SPEC]
+
+
 # Audit slugs.
 EVENT_BOOKING_TOOL_INVOKED = "booking.tool_invoked"
 EVENT_BOOKING_CONFIRMED = "booking.confirmed"
@@ -2546,6 +2563,8 @@ def buy_certificate(
     """
     # Local imports — keeps Django-app-load cycles narrow and lets
     # tests substitute the singleton via reset_ayla_payments_client().
+    from django.conf import settings
+
     from apps.bookings.keyboards import url_button
     from apps.integrations.ayla_payments import (
         AylaPaymentsAPIError,
@@ -2554,6 +2573,32 @@ def buy_certificate(
     )
 
     tenant_id = str(getattr(tenant, "id", ""))
+
+    # ── 0. Feature flag (B2) ────────────────────────────────────────
+    # CERTIFICATE_PAYMENT_ENABLED defaults False per founder verdict
+    # 2026-05-30 (memory ``project_certificate_payment_post_pilot``).
+    # When off, short-circuit BEFORE any Ayla call and before amount
+    # parsing — the disabled path costs zero IO and emits a single
+    # audit row so operators can see attempted use during the freeze.
+    # ``get_active_booking_tool_specs()`` already hides the spec from
+    # the LLM tool list; this guard is defence-in-depth for keyword
+    # fallbacks, replay paths, and direct programmatic callers.
+    if not getattr(settings, "CERTIFICATE_PAYMENT_ENABLED", False):
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="buy_certificate",
+            outcome="disabled",
+        )
+        return BookingToolResult(
+            certificate=BuyCertificateResult(ok=False, error="certificate_disabled"),
+            error="certificate_disabled",
+            text=(
+                # Deliberately no launch ETA — the founder freeze is
+                # contingent on legal review (ФЗ-54 / ст. 487 ГК РФ /
+                # ФЗ-2300-1), so any commitment here would overpromise.
+                "Подарочные сертификаты сейчас недоступны. Могу помочь с записью на услугу?"
+            ),
+        )
 
     # ── 1. Amount parsing + range guard ─────────────────────────────
     amount = _coerce_decimal(arguments.get("amount_rub"))

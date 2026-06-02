@@ -468,6 +468,42 @@ IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = _parse_idle_active_draft_suppress_wi
 AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
+# Stabilization sprint Block B / B2 — gift-certificate payment kill-switch.
+#
+# Founder verdict 2026-05-30 (memory ``project_certificate_payment_post_pilot``):
+# certificate domain is DEFERRED post-pilot. The ``buy_certificate`` LLM
+# tool and ``💳 Оплатить`` checkout flow stay in the codebase but must
+# not be reachable from the customer surface until proper certificate
+# implementation lands (Ayla side + bot side, ~4-5 weeks post-pilot).
+#
+# Reasons for the freeze (per founder memo):
+#   * Scope discipline — pilot focuses on the booking flow.
+#   * Prepayment legal risk under ФЗ-54 / ст. 487 ГК РФ / ФЗ-2300-1.
+#   * Volume unknown — no business case for the cohort yet.
+#   * Live mode currently broken — Ayla integration not certified.
+#
+# Default ``False`` keeps the pilot launch safe by default. Operators
+# flip per-environment via env var once the post-pilot certificate
+# ticket lands. Both the LLM tool advertisement and the direct
+# ``buy_certificate()`` call honour the flag:
+#
+#   * When False, ``apps.skills.booking.tools.get_active_booking_tool_specs()``
+#     filters ``BUY_CERTIFICATE_TOOL_SPEC`` out of the LLM tool list so
+#     the model does not pitch a feature it cannot deliver.
+#   * When False, a direct call to
+#     ``apps.skills.booking.tools.buy_certificate`` short-circuits with
+#     a graceful «функция готовится» reply (``error="certificate_disabled"``)
+#     — defence-in-depth in case a keyword fallback or replay path
+#     bypasses the tool-list filter.
+#
+# Customer-Mini-App / W2 Block B-2 reads
+# ``settings.CERTIFICATE_PAYMENT_ENABLED`` directly to hide the
+# certificate entry from the UI surface.
+CERTIFICATE_PAYMENT_ENABLED = os.environ.get("CERTIFICATE_PAYMENT_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # Phase 1 / B1 (DRF-837) — YClients booking API.
 # Single-tenant: env-based credentials. Per-tenant encrypted storage on
 # Tenant is a follow-up (requires a migration). Empty defaults keep the

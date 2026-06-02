@@ -83,6 +83,7 @@ from apps.skills.booking.tools import (
     calc_price,
     cancel_booking,
     confirm_booking,
+    get_active_booking_tool_specs,
     reschedule_booking,
     show_masters,
     show_my_bookings,
@@ -353,7 +354,7 @@ class BookingSkill:
                     provider.complete(
                         first_messages,
                         model=model,
-                        tools=BOOKING_TOOL_SPECS,
+                        tools=get_active_booking_tool_specs(),
                     )
                 )
             except LLMError as exc:
@@ -632,10 +633,11 @@ def _execute_tool(
             bot_user=bot_user,
             arguments=arguments,
         )
-        # ``amount_out_of_range`` is a clarification, NOT a handoff —
-        # the LLM rephrases the polite "сумма должна быть от ... до"
-        # response. Only the provider failure path triggers an
-        # operator handoff.
+        # ``amount_out_of_range`` and ``certificate_disabled`` (B2
+        # feature-flag short-circuit) are clarifications, NOT handoffs
+        # — the LLM rephrases the polite "сумма должна быть от ... до"
+        # / "функция готовится" response. Only the provider failure
+        # path triggers an operator handoff.
         if result.error == "certificate_provider_failure":
             return result, "certificate_provider_failure"
         return result, ""

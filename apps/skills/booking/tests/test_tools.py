@@ -26,9 +26,11 @@ from apps.integrations.yclients import (
 )
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
+    BUY_CERTIFICATE_TOOL_SPEC,
     build_master_lookup,
     build_service_lookup,
     confirm_booking,
+    get_active_booking_tool_specs,
     show_masters,
     show_my_bookings,
     show_slots,
@@ -193,6 +195,30 @@ class TestToolSpecs:
             assert "description" in spec
             assert "parameters" in spec
             assert spec["parameters"]["type"] == "object"
+
+    def test_active_specs_hide_certificate_when_flag_off(self, settings) -> None:
+        # Stabilization B2: when CERTIFICATE_PAYMENT_ENABLED is False
+        # the LLM tool advertisement must omit buy_certificate so the
+        # model does not pitch a feature we cannot deliver.
+        settings.CERTIFICATE_PAYMENT_ENABLED = False
+        active_names = {s["name"] for s in get_active_booking_tool_specs()}
+        assert BUY_CERTIFICATE_TOOL_SPEC["name"] not in active_names
+        # Other seven tools remain advertised.
+        assert active_names == {
+            "show_masters",
+            "show_slots",
+            "confirm_booking",
+            "cancel_booking",
+            "reschedule_booking",
+            "show_my_bookings",
+            "calc_price",
+        }
+
+    def test_active_specs_include_certificate_when_flag_on(self, settings) -> None:
+        settings.CERTIFICATE_PAYMENT_ENABLED = True
+        active_names = {s["name"] for s in get_active_booking_tool_specs()}
+        assert BUY_CERTIFICATE_TOOL_SPEC["name"] in active_names
+        assert len(active_names) == len(BOOKING_TOOL_SPECS)
 
 
 # ---------------------------------------------------------------------------

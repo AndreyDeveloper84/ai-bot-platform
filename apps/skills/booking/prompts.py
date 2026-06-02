@@ -138,29 +138,56 @@ def _render_system_prompt(
     if forbidden:
         sections.append("Запрещено: " + ", ".join(forbidden) + ".")
 
-    sections.append(
-        "Ты помогаешь записаться в салон. У тебя 8 инструментов:\n"
-        "• show_masters — список мастеров для услуги.\n"
-        "• show_slots — свободные слоты для мастера.\n"
+    # Stabilization B2: when CERTIFICATE_PAYMENT_ENABLED is False the
+    # buy_certificate tool is filtered out of the LLM tool list by
+    # ``get_active_booking_tool_specs()``. Keep the system prompt in
+    # sync — otherwise the LLM is taught a tool it cannot call and
+    # may either invent a tool_call (→ unknown_tool handoff) or pitch
+    # certificates to the user even though we cannot deliver them.
+    from django.conf import settings
+
+    cert_enabled = bool(getattr(settings, "CERTIFICATE_PAYMENT_ENABLED", False))
+
+    tool_lines = [
+        "• show_masters — список мастеров для услуги.",
+        "• show_slots — свободные слоты для мастера.",
         "• confirm_booking — показать карточку подтверждения новой "
-        "записи (НЕ создаёт запись напрямую — ждёт нажатия ✅).\n"
+        "записи (НЕ создаёт запись напрямую — ждёт нажатия ✅).",
         "• cancel_booking — показать карточку подтверждения отмены "
-        "существующей записи. record_id берётся из show_my_bookings.\n"
+        "существующей записи. record_id берётся из show_my_bookings.",
         "• reschedule_booking — показать карточку подтверждения "
         "переноса записи. record_id из show_my_bookings, "
-        "new_datetime — будущее время в ISO формате.\n"
-        "• show_my_bookings — показать существующие записи.\n"
+        "new_datetime — будущее время в ISO формате.",
+        "• show_my_bookings — показать существующие записи.",
         "• calc_price — посчитать цену услуги, опционально с "
         "промокодом. Вызывай, когда клиент спрашивает про цену "
         '("сколько стоит ...") или упоминает промокод. Передавай '
-        "promo_code ТОЛЬКО если клиент явно назвал код — не выдумывай.\n"
-        "• buy_certificate — выпустить ссылку на оплату подарочного "
-        'сертификата. Вызывай, когда клиент просит "купить '
-        'сертификат" / "подарочный сертификат". amount_rub — сумма '
-        "в рублях (500–100000). recipient_name — на кого "
-        "сертификат (опционально). buyer_email — email для чека "
-        "(опционально, только если клиент сам назвал)."
+        "promo_code ТОЛЬКО если клиент явно назвал код — не выдумывай.",
+    ]
+    if cert_enabled:
+        tool_lines.append(
+            "• buy_certificate — выпустить ссылку на оплату подарочного "
+            'сертификата. Вызывай, когда клиент просит "купить '
+            'сертификат" / "подарочный сертификат". amount_rub — сумма '
+            "в рублях (500–100000). recipient_name — на кого "
+            "сертификат (опционально). buyer_email — email для чека "
+            "(опционально, только если клиент сам назвал)."
+        )
+
+    sections.append(
+        f"Ты помогаешь записаться в салон. У тебя {len(tool_lines)} "
+        f"инструментов:\n" + "\n".join(tool_lines)
     )
+
+    if not cert_enabled:
+        # Defence-in-depth: if the customer asks about certificates,
+        # do not promise a launch date — the founder freeze is
+        # contingent on legal review (ФЗ-54 / ст. 487 ГК РФ).
+        sections.append(
+            "Если клиент спрашивает про подарочные сертификаты — "
+            "коротко скажи, что сейчас они недоступны, и предложи "
+            "запись на услугу. Не обещай конкретные сроки запуска."
+        )
 
     sections.append(
         "СТРОГО: master_id, service_id и record_id ВСЕГДА берутся из "
