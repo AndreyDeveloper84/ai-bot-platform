@@ -35,6 +35,7 @@ from django.test import TestCase
 from apps.conversations.models import Conversation
 from apps.eventbus.consumers.payment import (
     FailureCode,
+    _claim_notification_dispatch,
     _map_yookassa_failure_code,
     handle_payment_authorized,
     handle_payment_captured,
@@ -42,6 +43,7 @@ from apps.eventbus.consumers.payment import (
     handle_payment_refunded,
 )
 from apps.eventbus.ingest_envelope import IngestEnvelope
+from apps.eventbus.models import NotificationDispatchDedupe
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
@@ -394,6 +396,98 @@ class TestPaymentFailed:
         assert (
             RemoteBookingProxy.all_tenants.filter(appointment_id=UUID(APPOINTMENT_ID)).count() == 0
         )
+
+
+# ─── #927 notification dispatch dedupe (no duplicate payment_failed DM) ──────
+
+
+class TestPaymentFailedDispatchDedupe:
+    """#927 — exactly-once payment_failed DM, tenant-scoped.
+
+    The consumer's ``event_id`` short-circuit already blocks same-event
+    re-runs; this is the defence-in-depth guard at the channel boundary
+    (``NotificationDispatchDedupe``) plus its cross-tenant isolation.
+    Reviewer: W3 (§H.3 idempotency + cross-tenant triggers).
+    """
+
+    _TENANT_B = "11111111-2222-3333-4444-555555555555"
+
+    def test_claim_is_idempotent(self) -> None:
+        key = dict(
+            tenant_id=TENANT_ID,
+            event_id="01J9PAYMENT00000000000000ZZ",  # pragma: allowlist secret
+            recipient_id=AYLA_USER_ID,
+            channel="max",
+            kind="payment_failed",
+        )
+        assert _claim_notification_dispatch(**key) is True  # first wins
+        assert _claim_notification_dispatch(**key) is False  # replay skips
+        assert NotificationDispatchDedupe.objects.count() == 1
+
+    def test_claim_is_tenant_scoped(self) -> None:
+        # Same (event_id, recipient, channel), DIFFERENT tenant → both
+        # claim. A tenant-B attacker cannot pre-claim to suppress tenant
+        # A's legitimate DM (cross-tenant isolation, mirrors
+        # PaymentTerminalDedupe Round-2 NEW-1).
+        common = dict(
+            event_id="01J9PAYMENT00000000000000ZZ",  # pragma: allowlist secret
+            recipient_id=AYLA_USER_ID,
+            channel="max",
+            kind="payment_failed",
+        )
+        assert _claim_notification_dispatch(tenant_id=TENANT_ID, **common) is True
+        assert _claim_notification_dispatch(tenant_id=self._TENANT_B, **common) is True
+        assert NotificationDispatchDedupe.objects.count() == 2
+
+    def test_threshold_dispatch_claims_and_skill_fires_once(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock_skill:
+            with _capture_commit(execute=True):
+                handle_payment_failed(_envelope(event_name="payment.failed", data=_failed_data()))
+
+        mock_skill.assert_called_once()
+        assert (
+            NotificationDispatchDedupe.objects.filter(
+                tenant_id=TENANT_ID,
+                recipient_id=AYLA_USER_ID,
+                channel="max",
+                kind="payment_failed",
+            ).count()
+            == 1
+        )
+
+    def test_redelivery_after_claim_does_not_resend_dm(
+        self, tenant: Tenant, conversation: Conversation, settings
+    ) -> None:
+        """Defence-in-depth: even if the consumer's event_id short-circuit
+        is defeated (simulated by resetting it) and the SAME event re-
+        reaches dispatch, the claim row blocks a second DM."""
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        env = _envelope(event_name="payment.failed", data=_failed_data())
+
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["consecutive_payment_failures"])
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock1:
+            with _capture_commit(execute=True):
+                handle_payment_failed(env)
+        mock1.assert_called_once()
+
+        # Defeat the event_id short-circuit + re-arm the counter so the
+        # SAME event_id re-reaches the dispatch path.
+        conversation.refresh_from_db()
+        conversation.last_payment_event_id = ""
+        conversation.consecutive_payment_failures = 2
+        conversation.save(update_fields=["last_payment_event_id", "consecutive_payment_failures"])
+        with patch("apps.skills.payment_failed.skill.on_payment_failed_event") as mock2:
+            with _capture_commit(execute=True):
+                handle_payment_failed(env)
+        mock2.assert_not_called()  # claim row blocks the duplicate DM
+        assert NotificationDispatchDedupe.objects.count() == 1
 
 
 # ─── payment.refunded ──────────────────────────────────────────────────────
