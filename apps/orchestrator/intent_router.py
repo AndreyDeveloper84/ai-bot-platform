@@ -9,8 +9,16 @@ uses the decision to pick the right skill.
 
 - Latency budget per PHASE0_DESIGN §5.2: 1500ms p95 per turn. gpt-4o-mini
   comfortably fits with a 200-token cap.
-- Structured ``response_format={"type": "json_object"}`` forces the model
-  to emit valid JSON; we still validate shape on the Python side.
+- JSON shape enforcement:
+  * **Legacy path** (Sprint-1 OpenAIProvider, tests + tenant=None
+    callers): uses ``response_format={"type": "json_object"}`` to
+    force OpenAI JSON mode.
+  * **Production path** (post-#975, tenant supplied via pipeline):
+    the production ``LLMProvider`` protocol doesn't accept
+    ``response_format``; JSON shape relies on the schema prompt
+    + a tactical markdown-fence stripper before ``json.loads``.
+    Follow-up: extend the protocol с an optional ``response_format``
+    kwarg so OpenAI honours the flag and Anthropic falls back к prompt.
 - Sprint 7 may swap providers (Anthropic) — the function returns an
   :class:`IntentDecision` dataclass, signature stable across providers.
 
@@ -191,7 +199,8 @@ async def _classify_production_path(
     # below routes к the SAFE fallback.
     from asgiref.sync import sync_to_async
 
-    from apps.llm.protocol import LLMError
+    from apps.llm.protocol import LLMError, LLMProviderUnavailable
+    from apps.llm.retry import RetriableLLMError
     from apps.llm.router import get_router
 
     # `get_provider` emits a sync `write_audit` row (router-level
@@ -206,6 +215,16 @@ async def _classify_production_path(
 
     try:
         provider = await sync_to_async(_resolve, thread_sensitive=False)()
+    except LLMProviderUnavailable as exc:
+        # W3 MED-2 (PR #987) — provider misconfiguration / missing API
+        # key. Distinct из routine LLM errors — ops alarm category.
+        # ERROR level так Sentry tier-2 alert wakes someone.
+        logger.error(
+            "intent_router.production_provider_unavailable text_len=%d err=%s",
+            len(text or ""),
+            exc,
+        )
+        return _SAFE_FALLBACK
     except Exception as exc:  # noqa: BLE001 — router lookup failures must not crash pipeline
         logger.warning(
             "intent_router.production_provider_lookup_failed text_len=%d err=%s",
@@ -223,7 +242,24 @@ async def _classify_production_path(
             temperature=0.1,
             max_tokens=200,
         )
+    except RetriableLLMError as exc:
+        # W3 HIGH-1 (PR #987) — routine OpenAI 429s / transient errors
+        # exhausted retries. Pre-#975 Sprint-1 path returned a fallback
+        # `LLMResponse(is_fallback=True)` — soft signal, no exception.
+        # Production protocol raises instead. Treat as routine: WARN
+        # not exception. Без this branch, every 429-storm spams Sentry
+        # с full traceback ERROR-level for an expected condition.
+        logger.warning(
+            "intent_router.production_retries_exhausted text_len=%d attempts=%d last=%s",
+            len(text or ""),
+            getattr(exc, "attempts", -1),
+            type(getattr(exc, "last_error", exc)).__name__,
+        )
+        return _SAFE_FALLBACK
     except LLMError as exc:
+        # Covers LLMProviderQuotaExceeded / LLMTransportError / other
+        # known LLM-layer failures. WARN level — pipeline degrades
+        # к safe fallback gracefully.
         logger.warning(
             "intent_router.production_llm_error text_len=%d err_type=%s",
             len(text or ""),
@@ -231,6 +267,9 @@ async def _classify_production_path(
         )
         return _SAFE_FALLBACK
     except Exception as exc:  # noqa: BLE001 — safety boundary
+        # Truly unhandled — Sentry-worthy. Distinct discriminator
+        # `production_unhandled` so ops can grep separately from
+        # the routine paths above.
         logger.exception(
             "intent_router.production_unhandled text_len=%d err=%s",
             len(text or ""),
@@ -238,16 +277,43 @@ async def _classify_production_path(
         )
         return _SAFE_FALLBACK
 
+    # W3 HIGH-2 (PR #987) — production protocol's `complete()` doesn't
+    # accept `response_format={"type": "json_object"}` (Sprint-1 path
+    # used it to force OpenAI JSON mode). Without that flag the model
+    # MAY wrap JSON в a markdown fence: ```` ```json\n{...}\n``` ````
+    # despite the schema prompt's «no markdown» instruction.
+    # gpt-4o-mini at temp 0.1 still does this occasionally,
+    # especially когда user message contains markdown-like chars.
+    #
+    # Tactical fix: strip a leading code fence before `json.loads`.
+    # Long-term fix tracked в follow-up to extend the LLMProvider
+    # protocol с an optional `response_format` kwarg.
+    response_text = (result.text or "").strip()
+    if response_text.startswith("```"):
+        # Remove opening fence (with optional language tag).
+        first_nl = response_text.find("\n")
+        if first_nl != -1:
+            response_text = response_text[first_nl + 1 :]
+        # Strip trailing fence if present.
+        if response_text.rstrip().endswith("```"):
+            response_text = response_text.rstrip()[:-3].rstrip()
+
     try:
-        raw = json.loads(result.text)
+        raw = json.loads(response_text)
     except json.JSONDecodeError:
         # #842 W3 CRIT-2 — log shape only; LLM response may contain
-        # echoed tokens but they're already pseudonymized via the
-        # decorator. Length proxy is enough for ops triage.
+        # echoed tokens (already pseudonymized via decorator) or
+        # detokenized PII если model echoed user input. Length proxy
+        # avoids both leakage classes. Boolean discriminators surface
+        # the most common malformed shapes for ops triage без logging
+        # raw content.
         logger.warning(
-            "intent_router.production_malformed_json text_len=%d response_len=%d",
+            "intent_router.production_malformed_json text_len=%d "
+            "response_len=%d had_fence=%s starts_with_brace=%s",
             len(text or ""),
             len(result.text or ""),
+            (result.text or "").strip().startswith("```"),
+            response_text.startswith("{"),
         )
         return _SAFE_FALLBACK
 

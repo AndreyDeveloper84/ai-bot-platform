@@ -639,6 +639,14 @@ async def _run_under_tenant(
                 # calls per turn-1 path). #842's tactical tokenize в
                 # `_classify_legacy_path` remains for unit tests and
                 # backward-compat callers without tenant context.
+                #
+                # NOTE: `llm.call_completed` (AuditLog) and
+                # `record_ai_request` (AIRequestMetric) are NOT
+                # redundant — they write к different tables, serve
+                # different audiences (ops dashboard vs DPO/152-ФЗ
+                # auditor), different retention. W3 PR #987 LOW-3
+                # confirms via grep of `apps/observability/ai_metrics.py`
+                # vs `apps/audit/services.py`. Don't try к dedupe.
                 intent_decision = await classify(
                     message.text,
                     tenant=tenant,

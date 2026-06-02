@@ -172,6 +172,26 @@ class TestPiiPipelineRoundTrip:
             f"messages, got: {all_content!r}"
         )
 
+        # W3 LOW-1 (PR #987 follow-up) — load-bearing assertion для
+        # #975's acceptance criterion: `llm.call_completed` audit row
+        # MUST be emitted by the decorator for the intent classify
+        # call. Without this assertion, the audit-trail gap closure
+        # is unverifiable.
+        from apps.audit.models import AuditLog
+
+        def _count_audit_rows() -> int:
+            return AuditLog.all_tenants.filter(
+                action="llm.call_completed",
+            ).count()
+
+        audit_count = await sync_to_async(_count_audit_rows)()
+        assert audit_count >= 1, (
+            f"expected ≥1 `llm.call_completed` audit row (decorator "
+            f"emits one per `complete()` call); got {audit_count}. "
+            "The decorator either didn't tokenize OR `_emit_call_audit_async` "
+            "silently failed — audit-trail evidence для 152-ФЗ §6 is missing."
+        )
+
     async def test_response_token_is_detokenized_before_storage(
         self, tenant: Tenant, fake_redis: _FakeRedis
     ) -> None:
