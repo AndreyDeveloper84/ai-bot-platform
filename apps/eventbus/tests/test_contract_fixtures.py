@@ -57,6 +57,10 @@ EVENT_DATA_KEYS = {
         "price_total",
         "source",
     },
+    "booking.confirmed.v1.json": {
+        "appointment_id",
+        "payment_id",
+    },
     "payment.captured.v1.json": {
         "payment_id",
         "appointment_id",

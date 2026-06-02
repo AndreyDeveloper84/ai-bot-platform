@@ -2,6 +2,7 @@
 #   python -m tests.fixtures.contracts --write-manifest
 # Both ai-bot-platform and Ayla assert their local copies match this.
 003b4d352afa40c555972015e5137c992c667f1d43c7107095a07b3c3a40bc62  booking.created.v1.json
+3705ecf4147aa3c4bd46bd2f45bbe28aa89168be7a28d89c10678f67de56fd82  booking.confirmed.v1.json
 3838f6521813c718865bbdb222063b490da6ba7f36ad677e6ba47fd3e49770e9  payment.captured.v1.json
 fb47ff22c34e1cd197ba130c0d7d199f75fdd5d7b120d3c47be45123c99e130a  payment.failed.v1.json
 47ab9f91d135b234cb9286f462f64658cb298cb3e056e7b91f080beeadeff806  recommendations.request.json

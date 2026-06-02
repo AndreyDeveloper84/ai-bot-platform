@@ -41,6 +41,7 @@ from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.eventbus.consumers.booking import (
     handle_booking_cancelled,
     handle_booking_completed,
+    handle_booking_confirmed,
     handle_booking_created,
     handle_booking_rescheduled,
 )
@@ -58,6 +59,7 @@ pytestmark = pytest.mark.django_db
 AYLA_USER_ID = "f1a2b3c4-d5e6-4789-9abc-def012345678"
 TENANT_ID = "9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c"
 APPOINTMENT_ID = "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8"
+PAYMENT_ID = "5c8e2d1f-3b4a-4c6d-9e8f-1a2b3c4d5e6f"
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
@@ -291,6 +293,109 @@ class TestBookingCompleted:
 
         mock_emit.assert_called_once()
         assert mock_emit.call_args[0][0] == "booking_completed"
+
+
+# ─── booking.confirmed (B1) ─────────────────────────────────────────────────
+
+
+class TestBookingConfirmed:
+    """3-layer guard for the booking.confirmed consumer (B1): happy path,
+    idempotency replay×3, cross-tenant spoof rejection.
+    """
+
+    def _confirmed_data(self) -> dict[str, Any]:
+        # Canonical data — appointment_id + payment_id. Ayla emits
+        # booking_id today; migration tracked in issue #945.
+        return {"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID}
+
+    def _pending_proxy(self, tenant: Tenant) -> RemoteBookingProxy:
+        # A booking still pending payment — confirm flips it to confirmed.
+        return RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=None,
+            start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
+            end_at=dt.datetime(2026, 5, 22, 16, 0, tzinfo=dt.timezone.utc),
+            status="pending_payment",
+        )
+
+    # ── happy path ──
+    def test_flips_status_to_confirmed(self, tenant: Tenant) -> None:
+        self._pending_proxy(tenant)
+        env = _envelope(event_name="booking.confirmed", data=self._confirmed_data())
+        handle_booking_confirmed(env)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert proxy.last_synced_event_id == env.event_id
+
+    def test_unknown_appointment_no_error(self) -> None:
+        """Confirm for a proxy that doesn't exist locally (out-of-order:
+        confirmed before created). No-op on empty queryset, no raise."""
+        env = _envelope(
+            event_name="booking.confirmed",
+            data={
+                "appointment_id": "deadbeef-0000-0000-0000-000000000000",
+                "payment_id": PAYMENT_ID,
+            },
+        )
+        handle_booking_confirmed(env)
+
+    def test_emits_internal_booking_confirmed_event(self, tenant: Tenant) -> None:
+        self._pending_proxy(tenant)
+        with patch("apps.eventbus.consumers.booking.emit_internal_event") as mock_emit:
+            env = _envelope(event_name="booking.confirmed", data=self._confirmed_data())
+            handle_booking_confirmed(env)
+
+        mock_emit.assert_called_once()
+        assert mock_emit.call_args[0][0] == "booking_confirmed"
+        assert mock_emit.call_args[1]["properties"]["payment_id"] == PAYMENT_ID
+
+    # ── idempotency ×3 ──
+    def test_replay_3x_single_confirmation(self, tenant: Tenant) -> None:
+        self._pending_proxy(tenant)
+        env = _envelope(event_name="booking.confirmed", data=self._confirmed_data())
+        for _ in range(3):
+            handle_booking_confirmed(env)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert proxy.last_synced_event_id == env.event_id
+
+    def test_replay_3x_emits_only_once(self, tenant: Tenant) -> None:
+        self._pending_proxy(tenant)
+        env = _envelope(event_name="booking.confirmed", data=self._confirmed_data())
+        with patch("apps.eventbus.consumers.booking.emit_internal_event") as mock_emit:
+            for _ in range(3):
+                handle_booking_confirmed(env)
+
+        # event_id short-circuit means the side-effect emit fires once.
+        mock_emit.assert_called_once()
+
+    # ── cross-tenant spoof ──
+    def test_cross_tenant_confirm_spoof_rejected(self, tenant: Tenant) -> None:
+        """Tenant A owns the proxy; tenant B sends booking.confirmed for
+        the same appointment_id → TenantAuthorizationError, A untouched."""
+        from apps.eventbus.ingest_tenancy import TenantAuthorizationError
+
+        self._pending_proxy(tenant)  # tenant A
+        tenant_b = Tenant.objects.create(
+            id="11111111-2222-3333-4444-555555555555",
+            slug="t-attacker-confirm",
+            name="Attacker tenant",
+        )
+        env_b = _envelope(
+            event_name="booking.confirmed",
+            tenant_id=str(tenant_b.id),
+            data=self._confirmed_data(),
+        )
+
+        with pytest.raises(TenantAuthorizationError):
+            handle_booking_confirmed(env_b)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == "pending_payment"  # unchanged
+        assert str(proxy.tenant_id) == TENANT_ID
 
 
 # ─── booking.cancelled ─────────────────────────────────────────────────────

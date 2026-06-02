@@ -152,12 +152,17 @@ def registered_handlers() -> dict[tuple[str, int], EventHandler]:
     return dict(_REGISTRY)
 
 
-# `event-contract.md` §3 — the 12 closed-set event names. Used to
-# distinguish UNKNOWN_EVENT_NAME (422) from UNKNOWN_EVENT_VERSION
-# (also 422 but for a different operator response).
+# `event-contract.md` §3 closed-set event names. Used to distinguish
+# UNKNOWN_EVENT_NAME (422) from UNKNOWN_EVENT_VERSION (also 422 but for a
+# different operator response). MUST stay in sync with
+# ``ingest_envelope.ALLOWED_EVENT_NAMES`` (parse-level allowlist) — a name
+# present in one but not the other is a latent 400/422 mismatch.
+# ``booking.confirmed`` is a v1 contract extension beyond the original 12
+# (B1 consumer; contract addition tracked in issue #946).
 _KNOWN_NAMES: Final[frozenset[str]] = frozenset(
     {
         "booking.created",
+        "booking.confirmed",
         "booking.cancelled",
         "booking.rescheduled",
         "booking.completed",

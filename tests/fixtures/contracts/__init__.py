@@ -42,10 +42,11 @@ from typing import Any
 CONTRACTS_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = CONTRACTS_DIR / "MANIFEST.sha256"
 
-# The four canonical fixtures. Kept explicit (not a glob) so a stray
-# file dropped into the directory can't silently become "a contract".
+# The canonical fixtures. Kept explicit (not a glob) so a stray file
+# dropped into the directory can't silently become "a contract".
 EVENT_FIXTURES = (
     "booking.created.v1.json",
+    "booking.confirmed.v1.json",
     "payment.captured.v1.json",
     "payment.failed.v1.json",
 )
