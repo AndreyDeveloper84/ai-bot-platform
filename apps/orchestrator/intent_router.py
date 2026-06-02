@@ -91,6 +91,7 @@ async def classify(
     memory_snapshot: dict[str, Any] | None = None,
     brand_voice: dict[str, Any] | None = None,
     provider: OpenAIProvider | None = None,
+    tenant: Any = None,
     model: str = "gpt-4o-mini",
 ) -> IntentDecision:
     """Classify user text → :class:`IntentDecision`.
@@ -103,36 +104,176 @@ async def classify(
         can use customer context.
       brand_voice: optional dict from BrandVoiceConfig (Sprint 4 / F0.8).
         We pass `forbidden_phrases` summary as a hint.
-      provider: dependency-injected for tests. Defaults to OpenAIProvider().
+      provider: dependency-injected Sprint-1 ``OpenAIProvider``. When
+        supplied, the legacy path is used (tactical PII tokenize +
+        no audit row). Tests use this for in-process mocking.
+      tenant: when supplied AND ``provider`` is None, the **production**
+        ``LLMProvider`` protocol is resolved через
+        ``apps.llm.router.get_router().get_provider(tenant, skill=
+        "intent", op="complete")``. That provider is auto-wrapped в
+        :class:`apps.llm.pii_protected_provider.PIITokenizingProvider`
+        which (a) tokenizes user PII at the LLM-call boundary and
+        (b) emits an ``llm.call_completed`` audit row (152-ФЗ §6
+        transit pseudonymisation evidence per ADR-0011 §11.4).
+        Closes the audit-trail gap для intent classification (#975).
       model: LLM model override. Default gpt-4o-mini per latency budget.
 
     Returns:
       :class:`IntentDecision`. Safe fallback on any failure
       (breaker open, JSON parse error, schema validation error).
-    """
 
+    ### Two code paths (#975 production migration, 2026-06-02)
+
+    1. **Production path** — when ``tenant is not None AND provider is None``.
+       Goes through the LLM router, which auto-wraps the resolved
+       concrete provider в ``PIITokenizingProvider``. The decorator
+       handles tokenize-out / detokenize-in / audit-emit uniformly,
+       same enforcement surface as other skills.
+
+       The pipeline (``apps.orchestrator.pipeline._run_under_tenant``)
+       supplies ``tenant`` so every customer-facing classify call
+       lands here.
+
+    2. **Legacy path** — when ``provider is not None`` OR ``tenant is None``.
+       Uses Sprint-1 ``apps.orchestrator.llm.openai_provider.OpenAIProvider``
+       directly. This path retains the **tactical** PII tokenize hack
+       from #842 (decorator not in play). Audit row NOT emitted. Kept
+       for backwards compatibility с (a) unit tests that pin a mock
+       provider for deterministic intent JSON и (b) any future internal
+       caller that hasn't been ported. Production migration ensures the
+       pipeline always uses the production path.
+    """
+    if provider is not None or tenant is None:
+        return await _classify_legacy_path(
+            text,
+            memory_snapshot=memory_snapshot,
+            brand_voice=brand_voice,
+            provider=provider,
+            model=model,
+        )
+
+    return await _classify_production_path(
+        text,
+        tenant=tenant,
+        memory_snapshot=memory_snapshot,
+        brand_voice=brand_voice,
+        model=model,
+    )
+
+
+async def _classify_production_path(
+    text: str,
+    *,
+    tenant: Any,
+    memory_snapshot: dict[str, Any] | None,
+    brand_voice: dict[str, Any] | None,
+    model: str,
+) -> IntentDecision:
+    """#975 production path — resolve provider through router, let the
+    ``PIITokenizingProvider`` decorator handle tokenize + audit emit.
+
+    The production ``LLMProvider`` protocol returns
+    :class:`apps.llm.protocol.CompletionResult` (vs. Sprint-1's
+    ``LLMResponse``). Field names match closely; we read ``text``
+    instead of ``content`` and ``is_fallback`` is replaced by
+    ``finish_reason`` semantics — the production path never reaches
+    here on circuit-breaker-open (router раises ``BreakerOpenError``
+    which we catch as a general exception below and return the safe
+    fallback).
+    """
+    # Production protocol's `complete()` lacks the `response_format=
+    # {"type": "json_object"}` kwarg the Sprint-1 path used. The
+    # production OpenAI provider в `apps.llm.providers.openai_provider`
+    # accepts arbitrary kwargs but doesn't pass response_format
+    # downstream. JSON shape is enforced by the prompt's «only valid
+    # JSON, no commentary» instruction — same contract as `_build_
+    # messages`. If a future provider returns non-JSON, the catch
+    # below routes к the SAFE fallback.
+    from asgiref.sync import sync_to_async
+
+    from apps.llm.protocol import LLMError
+    from apps.llm.router import get_router
+
+    # `get_provider` emits a sync `write_audit` row (router-level
+    # «llm.provider_resolved»). When called from async context that
+    # raises `SynchronousOnlyOperation`. Skills run sync in thread
+    # via `sync_to_async(_dispatch_skill)` so they don't hit this.
+    # Intent router IS async — wrap explicitly. `thread_sensitive=False`
+    # because the router lookup + audit emit doesn't share state с
+    # the surrounding async caller.
+    def _resolve() -> Any:
+        return get_router().get_provider(tenant, skill="intent", op="complete")
+
+    try:
+        provider = await sync_to_async(_resolve, thread_sensitive=False)()
+    except Exception as exc:  # noqa: BLE001 — router lookup failures must not crash pipeline
+        logger.warning(
+            "intent_router.production_provider_lookup_failed text_len=%d err=%s",
+            len(text or ""),
+            exc,
+        )
+        return _SAFE_FALLBACK
+
+    messages = _build_messages(text, memory_snapshot or {}, brand_voice or {})
+
+    try:
+        result = await provider.complete(
+            messages,
+            model=model,
+            temperature=0.1,
+            max_tokens=200,
+        )
+    except LLMError as exc:
+        logger.warning(
+            "intent_router.production_llm_error text_len=%d err_type=%s",
+            len(text or ""),
+            type(exc).__name__,
+        )
+        return _SAFE_FALLBACK
+    except Exception as exc:  # noqa: BLE001 — safety boundary
+        logger.exception(
+            "intent_router.production_unhandled text_len=%d err=%s",
+            len(text or ""),
+            exc,
+        )
+        return _SAFE_FALLBACK
+
+    try:
+        raw = json.loads(result.text)
+    except json.JSONDecodeError:
+        # #842 W3 CRIT-2 — log shape only; LLM response may contain
+        # echoed tokens but they're already pseudonymized via the
+        # decorator. Length proxy is enough for ops triage.
+        logger.warning(
+            "intent_router.production_malformed_json text_len=%d response_len=%d",
+            len(text or ""),
+            len(result.text or ""),
+        )
+        return _SAFE_FALLBACK
+
+    return _validate_and_build(raw)
+
+
+async def _classify_legacy_path(
+    text: str,
+    *,
+    memory_snapshot: dict[str, Any] | None,
+    brand_voice: dict[str, Any] | None,
+    provider: OpenAIProvider | None,
+    model: str,
+) -> IntentDecision:
+    """Pre-#975 path — Sprint-1 OpenAIProvider + tactical PII tokenize.
+
+    Retained for backwards compatibility. The production path is
+    preferred when caller supplies ``tenant`` (the pipeline always
+    does). When ``tenant`` is None (legacy callers / unit tests) OR
+    ``provider`` is dependency-injected (mocked), this path runs.
+    """
     provider = provider or OpenAIProvider()
 
     # #842 — PII tokenization at intent_router boundary (152-ФЗ §6).
-    # ``apps.orchestrator.llm.openai_provider.OpenAIProvider`` is a
-    # Sprint-1 simpler provider returning ``LLMResponse``, NOT the
-    # production ``LLMProvider`` protocol that ``router._load_provider``
-    # auto-wraps in ``PIITokenizingProvider``. So the decorator never
-    # fires for intent classification — raw user text would otherwise
-    # cross the trust boundary к OpenAI verbatim.
-    #
-    # Tactical fix: tokenize ``text`` directly at this call site. The
-    # classifier returns structured JSON intent decisions (no user
-    # free-text echo), so detokenization on response is omitted — if
-    # the LLM ever leaks a token into the JSON, it would surface as
-    # the literal `<CAT_NONCE_INDEX>` string in `IntentDecision.intent`
-    # which downstream code treats as «unknown» and falls back safely.
-    #
-    # Audit row for transit pseudonymisation is NOT emitted at this
-    # call site — pipeline-level `record_ai_request` (W4 #816) covers
-    # observability. Follow-up: harmonise intent_router к use the
-    # production LLMProvider protocol so the decorator pattern applies
-    # uniformly.
+    # This path doesn't go через the decorator (Sprint-1 provider
+    # shape), so we tokenize here directly.
     from django.conf import settings as _settings
 
     from apps.llm.pii_tokenizer import current_conversation_id as _pii_cid
@@ -155,11 +296,7 @@ async def classify(
             temperature=0.1,
         )
     except Exception as exc:  # noqa: BLE001 — router is safety boundary
-        # #842 W3 CRIT-2 — `text` is the RAW user message. The previous
-        # `text=%s ... text[:80]` log leaked PII to Loki/Datadog on
-        # every LLM error (152-ФЗ §6 violation against the log store).
-        # Length-only proxy preserves debugging utility (correlating
-        # error rate to message length) без the data.
+        # #842 W3 CRIT-2 — length-only proxy; `text` is RAW user input.
         logger.exception("intent_router.llm_failed text_len=%d err=%s", len(text or ""), exc)
         return _SAFE_FALLBACK
 
@@ -171,7 +308,7 @@ async def classify(
     try:
         raw = json.loads(response.content)
     except json.JSONDecodeError:
-        logger.warning("intent_router.malformed_json content=%s", response.content[:200])
+        logger.warning("intent_router.malformed_json response_len=%d", len(response.content or ""))
         return _SAFE_FALLBACK
 
     return _validate_and_build(raw)

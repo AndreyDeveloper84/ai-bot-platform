@@ -630,8 +630,18 @@ async def _run_under_tenant(
 
             # --- Step 6: intent classification ---
             with _step_event(span, "intent_classify"):
+                # #975 (2026-06-02) — pass `tenant` so classify() takes
+                # the production path: provider resolved через router,
+                # auto-wrapped in `PIITokenizingProvider` decorator
+                # (handles tokenize-out + detokenize-in + `llm.call_
+                # completed` audit row). Closes 152-ФЗ §6 audit-trail
+                # gap for intent classification (~30-40% of all LLM
+                # calls per turn-1 path). #842's tactical tokenize в
+                # `_classify_legacy_path` remains for unit tests and
+                # backward-compat callers without tenant context.
                 intent_decision = await classify(
                     message.text,
+                    tenant=tenant,
                     memory_snapshot=_memory_to_dict(memory_snapshot),
                     brand_voice=None,  # Sprint 6 doesn't read BrandVoiceConfig here; Sprint 7+
                 )

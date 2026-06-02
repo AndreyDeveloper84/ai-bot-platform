@@ -72,9 +72,32 @@ def tenant():
 
 @pytest.fixture(autouse=True)
 def _stub_provider():
-    with patch(
-        "apps.orchestrator.intent_router.OpenAIProvider",
-        return_value=_fake_llm(),
+    # #975 (2026-06-02) — intent_router now takes the production path
+    # when `tenant` is supplied (pipeline always does). Stub both:
+    # legacy `OpenAIProvider` (Sprint-1, used когда tests pass provider=
+    # kwarg) AND the production router (used by pipeline). The fake
+    # LLM Sprint-1 response shape (`LLMResponse(content=...)`) maps к
+    # CompletionResult(text=...) for the production path stub.
+    from apps.llm.protocol import CompletionResult
+
+    fake_llm_response = _fake_llm()
+    classifier_completion = CompletionResult(
+        text=fake_llm_response.complete.return_value.content,
+        provider="openai",
+        finish_reason="stop",
+    )
+    production_provider = AsyncMock()
+    production_provider.complete.return_value = classifier_completion
+
+    with (
+        patch(
+            "apps.orchestrator.intent_router.OpenAIProvider",
+            return_value=fake_llm_response,
+        ),
+        patch(
+            "apps.llm.router.get_router",
+            return_value=AsyncMock(get_provider=lambda *a, **kw: production_provider),
+        ),
     ):
         yield
 
