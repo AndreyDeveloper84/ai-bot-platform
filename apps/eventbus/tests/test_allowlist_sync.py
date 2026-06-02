@@ -27,7 +27,8 @@ other fails CI loudly instead of leaking to runtime as a 400/422 mix-up.
 
 from __future__ import annotations
 
-from apps.eventbus.ingest_dispatcher import _KNOWN_NAMES, registered_handlers
+import apps.eventbus.ingest_dispatcher as dispatcher_module
+from apps.eventbus.ingest_dispatcher import _KNOWN_NAMES
 from apps.eventbus.ingest_envelope import ALLOWED_EVENT_NAMES
 
 
@@ -46,15 +47,36 @@ def test_parse_and_dispatch_allowlists_are_identical() -> None:
 
 
 def test_every_registered_handler_name_is_allowlisted() -> None:
-    # The registry is populated by EventbusConfig.ready() at app load
-    # (register_*_handlers for booking/payment/catalog/identity/
-    # schedule/reviews). A handler bound to a name missing from the
-    # allowlists can never fire — the request is rejected upstream.
-    handler_names = {name for (name, _version) in registered_handlers()}
-    assert handler_names, (
-        "No handlers registered — EventbusConfig.ready() did not run; "
-        "this guard would be vacuously true. Investigate app loading."
-    )
+    # A handler bound to a name missing from the allowlists can never
+    # fire — the request is rejected upstream (400 at parse / 422 at
+    # dispatch). We register the production consumers ourselves into a
+    # snapshot-restored registry rather than reading the ambient
+    # ``_REGISTRY`` singleton: sibling test modules clear()/restore that
+    # global, so reading it directly would make this guard order- and
+    # xdist-sensitive (mirrors the _wired pattern in
+    # test_e2e_ingest_smoke.py).
+    from apps.eventbus.consumers.booking import register_booking_handlers
+    from apps.eventbus.consumers.catalog import register_catalog_handlers
+    from apps.eventbus.consumers.identity import register_identity_handlers
+    from apps.eventbus.consumers.payment import register_payment_handlers
+    from apps.eventbus.consumers.reviews import register_reviews_handlers
+    from apps.eventbus.consumers.schedule import register_schedule_handlers
+
+    snapshot = dict(dispatcher_module._REGISTRY)
+    dispatcher_module._REGISTRY.clear()
+    try:
+        register_booking_handlers()
+        register_payment_handlers()
+        register_catalog_handlers()
+        register_identity_handlers()
+        register_schedule_handlers()
+        register_reviews_handlers()
+        handler_names = {name for (name, _version) in dispatcher_module._REGISTRY}
+    finally:
+        dispatcher_module._REGISTRY.clear()
+        dispatcher_module._REGISTRY.update(snapshot)
+
+    assert handler_names, "Production consumers registered no handlers — investigate."
     missing = handler_names - (ALLOWED_EVENT_NAMES & _KNOWN_NAMES)
     assert not missing, (
         "Registered event handler(s) for name(s) absent from one or both "
