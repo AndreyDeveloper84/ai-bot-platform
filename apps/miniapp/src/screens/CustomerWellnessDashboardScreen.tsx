@@ -76,7 +76,6 @@ import {
   type CatalogLayer2Item,
   type CatalogRecommendations,
 } from "../lib/customer-booking";
-import { maxBridge } from "../lib/max-sdk";
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -92,34 +91,6 @@ type Slice<T> =
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
   return navigator.onLine !== false;
-}
-
-// ---------------------------------------------------------------------------
-// Bot DM deep-link — Block 3 photo quick action (TL Q5 verdict —
-// photo handling lives in bot DM, NOT in Mini App).
-// ---------------------------------------------------------------------------
-
-/**
- * Construct the bot DM URL for the food-scan deep-link. Format:
- *
- *   https://max.ru/<bot-username>?start=food_scan
- *
- * Resolves the bot username from `VITE_MAX_BOT_USERNAME`. When absent
- * (dev or misconfigured), falls back to opening the boot DM via the
- * canonical Mini App fallback (which itself routes to the bot via the
- * «Доступ не настроен» recovery path used elsewhere).
- *
- * The `start` query param is a FLAT SLUG per memory
- * `reference_max_open_app_payload_format` — never `key=value&...`,
- * which crashes MAX with HTTP 400 + poisons the PEL.
- */
-function botDmFoodScanUrl(): string | null {
-  const username =
-    (import.meta.env.VITE_MAX_BOT_USERNAME as string | undefined) ?? "";
-  if (!username) return null;
-  // Defence-in-depth: strip a leading @ that the env var might carry.
-  const u = username.replace(/^@/, "");
-  return `https://max.ru/${encodeURIComponent(u)}?start=food_scan`;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,24 +212,11 @@ export function CustomerWellnessDashboardScreen() {
       setPhotoToast("Для распознавания нужна сеть. Попробуйте позже.");
       return;
     }
-    // TL Q5 — photo handling lives in bot DM, not Mini App.
-    const url = botDmFoodScanUrl();
-    if (url) {
-      const bridge = maxBridge();
-      if (bridge?.openLink) {
-        bridge.openLink(url);
-        return;
-      }
-      // Fallback for dev browser without bridge — open in same tab.
-      if (typeof window !== "undefined") {
-        window.location.href = url;
-      }
-      return;
-    }
-    // No bot username configured — graceful degradation: bounce to /
-    // (the «Доступ не настроен» screen offers a bot link). Same UX
-    // pattern used by CustomerBookingConfirmScreen anonymous gate.
-    navigate("/");
+    // Tier 1 Priority 7 Phase B — photo handling lives in webview now
+    // (Tau Variant A wizard). The old bot-DM deeplink path is dead
+    // code per founder pivot 2026-06-02; legacy `botDmFoodScanUrl()` +
+    // `maxBridge().openLink` retained for unrelated handlers only.
+    navigate("/customer/food-scanner/capture");
   }, [navigate, online]);
 
   const onWaterTap = useCallback(() => {
@@ -382,7 +340,7 @@ export function CustomerWellnessDashboardScreen() {
             type="button"
             className="wellness-dash__icon-btn"
             aria-label="Профиль"
-            onClick={() => navigate("/me")}
+            onClick={() => navigate("/customer/profile")}
           >
             <span aria-hidden="true">👤</span>
           </button>
@@ -390,7 +348,7 @@ export function CustomerWellnessDashboardScreen() {
             type="button"
             className="wellness-dash__icon-btn"
             aria-label="Настройки"
-            onClick={() => navigate("/me")}
+            onClick={() => navigate("/customer/profile")}
           >
             <span aria-hidden="true">⚙</span>
           </button>
@@ -768,7 +726,7 @@ export function CustomerWellnessDashboardScreen() {
           type="button"
           className="wellness-dash__nav-tab"
           aria-label="Я"
-          onClick={() => navigate("/me")}
+          onClick={() => navigate("/customer/profile")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             👤
