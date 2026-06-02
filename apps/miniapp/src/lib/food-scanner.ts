@@ -523,59 +523,108 @@ export function nextPortion(
 
 /**
  * Strip EXIF metadata (incl. GPS) from a customer photo via canvas
- * re-encode. Defence-in-depth for spec §2 privacy promise («Фото
- * нужно только чтобы узнать блюдо — удаляю сразу») — follow-up
- * #957 / adversarial CR A12. Without this, geo-tagged JPEGs ship
- * GPS coordinates to the backend BEFORE the delete-after-recognition
+ * re-encode. Defence-in-depth layer 1 for spec §2 privacy promise
+ * («Фото нужно только чтобы узнать блюдо — удаляю сразу») — follow-up
+ * #957 / adversarial CR A12. Without this, geo-tagged JPEGs ship GPS
+ * coordinates to the backend BEFORE the delete-after-recognition
  * runs, leaking the customer's meal location to anyone reading the
  * in-flight payload.
  *
- * Implementation: draw to a 2D canvas + re-encode as JPEG. The
- * canvas pipeline never preserves EXIF (per HTML5 Canvas spec —
+ * # Contract — fail-CLOSED, not fail-OPEN
+ *
+ * Throws `ImageStripUnsupportedError` if the file cannot be safely
+ * stripped (HEIC on Safari, decode failure, encode failure, missing
+ * canvas API). Callers MUST treat this as «refuse to upload» and
+ * surface an error to the customer — NEVER silent-fallback to the
+ * original file. iPhone shoots HEIC by default and Safari's
+ * `createImageBitmap` rejects it; silently passing the HEIC through
+ * would leak GPS exactly for the customers we care most about
+ * (pilot 2026-07-15 Пенза = real iOS users).
+ *
+ * # Implementation
+ *
+ * `createImageBitmap(file, { imageOrientation: "from-image" })` honours
+ * EXIF Orientation (per spec, otherwise portrait photos arrive rotated
+ * 90° at the backend and break recognition — adversarial CR P2).
+ * Draw to a 2D canvas + re-encode as JPEG at quality 0.92 (verified
+ * acceptable by Ayla recognition, per pre-flight Q tolerance ≥0.85).
+ * The canvas pipeline never preserves EXIF (HTML5 Canvas spec —
  * `toBlob` writes a fresh container), so output is metadata-clean
- * regardless of input. We keep dimensions identical (no downscale)
- * so backend recognition quality matches what F2 spec sized for.
+ * regardless of input.
  *
- * Server-side strip is a separate W4 hardening (defence-in-depth);
- * do not skip this layer just because the server will also strip.
- *
- * Returns the input file unchanged ONLY if the browser lacks
- * `createImageBitmap` support (extremely rare; safety fallback —
- * spec privacy text remains accurate because customer still saw
- * the consent gate).
+ * Server-side strip is a separate W4 hardening (true defence-in-depth);
+ * this layer being mandatory removes the «defence-in-hope» smell the
+ * adversarial CR flagged.
  */
+export class ImageStripUnsupportedError extends Error {
+  readonly reason:
+    | "no_browser_api"
+    | "decode_failed"
+    | "no_canvas_context"
+    | "encode_failed";
+  constructor(
+    reason:
+      | "no_browser_api"
+      | "decode_failed"
+      | "no_canvas_context"
+      | "encode_failed",
+  ) {
+    super(`stripImageMetadata failed: ${reason}`);
+    this.name = "ImageStripUnsupportedError";
+    this.reason = reason;
+  }
+}
+
 export async function stripImageMetadata(file: File): Promise<File> {
-  if (typeof createImageBitmap === "undefined") return file;
-  if (typeof document === "undefined") return file;
+  if (typeof createImageBitmap === "undefined") {
+    throw new ImageStripUnsupportedError("no_browser_api");
+  }
+  if (typeof document === "undefined") {
+    throw new ImageStripUnsupportedError("no_browser_api");
+  }
+  let bitmap: ImageBitmap;
   try {
-    const bitmap = await createImageBitmap(file);
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      bitmap.close?.();
-      return file;
-    }
-    ctx.drawImage(bitmap, 0, 0);
-    bitmap.close?.();
-    const blob = await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92);
-    });
-    if (!blob) return file;
-    // Preserve original filename + lastModified so backend logs read
-    // the same as before; only the bytes changed.
-    return new File([blob], file.name, {
-      type: "image/jpeg",
-      lastModified: file.lastModified,
+    // imageOrientation: "from-image" applies EXIF Orientation tag so
+    // portrait iPhone photos arrive upright at the backend. Default
+    // value is "none" which would mis-rotate. Supported Chromium ≥79,
+    // Safari ≥15 — older Safari throws InvalidStateError which lands
+    // in the catch below as "decode_failed" (correct fail-closed).
+    bitmap = await createImageBitmap(file, {
+      imageOrientation: "from-image",
     });
   } catch {
-    // Re-encode failure (e.g. cross-origin SecurityError on some
-    // exotic camera intents) → keep original file. Privacy promise
-    // still holds at the consent-gate layer; server-side strip is
-    // the second backstop.
-    return file;
+    // HEIC on Safari, corrupt JPEG, 0×0 image, SecurityError on exotic
+    // camera intents — all land here. Refuse the upload.
+    throw new ImageStripUnsupportedError("decode_failed");
   }
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    bitmap.close?.();
+    throw new ImageStripUnsupportedError("no_canvas_context");
+  }
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close?.();
+  const blob = await new Promise<Blob | null>((resolve) => {
+    // Quality 0.92 — backend Ayla recognition tolerance verified ≥0.85;
+    // 0.92 leaves a safety margin without inflating bytes 2×.
+    canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92);
+  });
+  if (!blob) {
+    // iOS Safari can return null under memory pressure on huge images.
+    // Fail-closed: lose the photo, keep the privacy.
+    throw new ImageStripUnsupportedError("encode_failed");
+  }
+  // Preserve filename so backend logs read the same; type forced to
+  // image/jpeg (we just encoded it). lastModified intentionally NOT
+  // preserved (soft time-of-meal leak per CR F4): use `Date.now()` so
+  // the timestamp reflects upload moment, not original photo capture.
+  return new File([blob], file.name, {
+    type: "image/jpeg",
+    lastModified: Date.now(),
+  });
 }
 
 /**

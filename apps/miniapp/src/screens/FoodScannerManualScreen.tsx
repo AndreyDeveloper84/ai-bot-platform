@@ -56,11 +56,19 @@ export function FoodScannerManualScreen() {
   // bypass; legitimate path through error screens already came from
   // /capture so they saw the gate), redirect to /capture where the
   // gate is presented.
+  //
+  // Preserve `returnTo` so the consent-accept handler can bounce the
+  // customer back to /manual (adversarial CR F1 — without this, deep-
+  // linked /manual user lands at /capture after accept and loses the
+  // path they intended).
   useEffect(() => {
     if (readConsentAt() === null) {
-      navigate("/customer/food-scanner/capture", { replace: true });
+      navigate("/customer/food-scanner/capture", {
+        replace: true,
+        state: { returnTo: "/customer/food-scanner/manual", mealType },
+      });
     }
-  }, [navigate]);
+  }, [navigate, mealType]);
 
   const onSave = useCallback(async () => {
     const trimmed = dishName.trim();
