@@ -76,4 +76,11 @@ urlpatterns = [
         views.customer_recent_activity,
         name="customer_recent_activity",
     ),
+    # Food scanner (Веха 2). Contract:
+    # ``docs/architecture/food-scanner-api-contract.md``.
+    path("food/consent", views.customer_food_consent, name="customer_food_consent"),
+    path("food/scan", views.customer_food_scan, name="customer_food_scan"),
+    path("food/log", views.customer_food_log, name="customer_food_log"),
+    path("food/diary", views.customer_food_diary, name="customer_food_diary"),
+    path("health-flags", views.customer_health_flags, name="customer_health_flags"),
 ]

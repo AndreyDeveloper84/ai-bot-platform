@@ -527,6 +527,21 @@ FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").low
     "1",
 )
 
+# Food-scanner upload ceiling (Веха 2, адверсариальный обзор PRE_PILOT #P3).
+#
+# Django's default ``DATA_UPLOAD_MAX_MEMORY_SIZE`` is 2.5 MiB; the food-
+# scan endpoint advertises a 10 MiB photo ceiling in the API contract
+# (``docs/architecture/food-scanner-api-contract.md``). Without an
+# override Django would reject every photo > 2.5 MiB with a
+# ``RequestDataTooBig`` BEFORE the view-level size guard runs, making
+# the contract ceiling unreachable. Bump to 11 MiB (10 MiB body +
+# ~1 MiB headroom for multipart envelope + auth header). The view
+# still re-validates per the food-scanner contract — this setting is
+# the floor that lets the view's check run.
+FOOD_SCAN_UPLOAD_CEILING_BYTES = 11 * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = FOOD_SCAN_UPLOAD_CEILING_BYTES
+FILE_UPLOAD_MAX_MEMORY_SIZE = FOOD_SCAN_UPLOAD_CEILING_BYTES
+
 # Stabilization sprint Block B / B2 — gift-certificate payment kill-switch.
 #
 # Founder verdict 2026-05-30 (memory ``project_certificate_payment_post_pilot``):

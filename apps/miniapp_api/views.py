@@ -1574,3 +1574,434 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
         payload["next_booking"] = next_booking
 
     return JsonResponse(payload)
+
+
+# --- food scanner (Веха 2) -------------------------------------------------
+#
+# Six endpoints backing the W1 Mini App food-scanner surface. The full
+# request/response contract lives in
+# ``docs/architecture/food-scanner-api-contract.md`` — DO NOT drift the
+# implementation from the contract; fix the implementation.
+#
+# Two-gate + consent enforcement (per ``settings.NUTRITION_ENABLED`` +
+# ``settings.FOOD_PHOTO_SCAN_ENABLED`` + ``BotUser.food_scanner_consent_at``)
+# is centralised in ``_food_gate``. The consent endpoints deliberately
+# bypass it so the F0 frontend gate can register the user before
+# anything else is reachable.
+#
+# ED-mode redaction (``apps.skills.food_scanner.services``) runs server-
+# side so a client bug / older Mini App version cannot accidentally
+# render counts.
+
+# Photo constraints — see contract §«Photo constraints».
+_FOOD_SCAN_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB
+_FOOD_SCAN_ALLOWED_MIME = ("image/jpeg", "image/png", "image/webp")
+_FOOD_LOG_MEAL_TYPES = {"breakfast", "lunch", "dinner", "snack", "other"}
+_FOOD_LOG_PORTION_MULT_MIN = 0.25
+_FOOD_LOG_PORTION_MULT_MAX = 4.0
+
+
+def _food_gate(
+    request: HttpRequest,
+    *,
+    require_photo_scan: bool,
+    require_consent: bool = True,
+) -> JsonResponse | None:
+    """Shared gate for the food endpoints.
+
+    Returns a refusal ``JsonResponse`` or ``None`` to proceed. Order:
+    master switch → photo gate (when ``require_photo_scan=True``) →
+    consent (when ``require_consent=True``). See the API contract for
+    the slug + status mapping.
+
+    The consent endpoints set ``require_consent=False`` so the F0
+    frontend can record acknowledgement before anything else.
+    """
+
+    if not getattr(settings, "NUTRITION_ENABLED", False):
+        return _error("nutrition_disabled", "nutrition feature is off", 503)
+    if require_photo_scan and not getattr(settings, "FOOD_PHOTO_SCAN_ENABLED", False):
+        return _error("photo_scan_disabled", "photo scan is off", 503)
+    if require_consent:
+        bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+        if getattr(bot_user, "food_scanner_consent_at", None) is None:
+            return _error("consent_required", "food-scanner consent required", 428)
+    return None
+
+
+@csrf_exempt
+@require_http_methods(["POST", "GET"])
+@require_init_data
+def customer_food_consent(request: HttpRequest) -> HttpResponse:
+    """152-ФЗ consent endpoint. POST records, GET polls.
+
+    Bypasses ``_food_gate`` deliberately so the F0 frontend gate can
+    register the user before any other food endpoint is reachable.
+    """
+    import json
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        accepted_at = bot_user.food_scanner_consent_at
+        return JsonResponse({"accepted_at": accepted_at.isoformat() if accepted_at else None})
+
+    # POST.
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type != "application/json" or not request.body:
+        return _error("bad_request", "expected application/json body", 400)
+    try:
+        body = json.loads(request.body)
+    except ValueError:
+        return _error("bad_request", "body is not valid JSON", 400)
+    if not isinstance(body, dict) or body.get("accepted") is not True:
+        # Refusal endpoint is reserved for post-pilot withdrawal flow.
+        return _error("bad_request", 'expected {"accepted": true}', 400)
+
+    # Idempotent: re-calls preserve the original consent timestamp so the
+    # audit trail records when the user FIRST consented, not the latest tap.
+    if bot_user.food_scanner_consent_at is None:
+        bot_user.food_scanner_consent_at = timezone.now()
+        bot_user.save(update_fields=["food_scanner_consent_at"])
+        logger.info(
+            "food.consent.recorded user=%s",
+            getattr(bot_user, "id", None),
+        )
+
+    accepted_at = bot_user.food_scanner_consent_at
+    return JsonResponse({"accepted_at": accepted_at.isoformat() if accepted_at else None})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_food_scan(request: HttpRequest) -> HttpResponse:
+    """Cross-border photo recognition. Gated by both flags + consent.
+
+    Streams the multipart upload to Ayla's nutrition scan endpoint and
+    applies ED-mode redaction to the response.
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        FoodNotRecognizedError,
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+    from apps.skills.food_scanner.services import (
+        is_ed_mode_active,
+        redact_scan_for_ed,
+    )
+
+    refusal = _food_gate(request, require_photo_scan=True)
+    if refusal is not None:
+        return refusal
+
+    image = request.FILES.get("image")
+    if image is None:
+        return _error("bad_request", "missing 'image' field", 400)
+    content_type = (image.content_type or "").lower()
+    if content_type not in _FOOD_SCAN_ALLOWED_MIME:
+        return _error(
+            "unsupported_media_type",
+            f"image must be one of {sorted(_FOOD_SCAN_ALLOWED_MIME)}",
+            415,
+        )
+    if image.size and image.size > _FOOD_SCAN_MAX_BYTES:
+        return _error(
+            "photo_too_large",
+            f"image exceeds the {_FOOD_SCAN_MAX_BYTES // (1024 * 1024)} MiB ceiling",
+            413,
+        )
+
+    photo_bytes = image.read()
+    if len(photo_bytes) > _FOOD_SCAN_MAX_BYTES:
+        # Defence-in-depth — ``image.size`` may lie for streaming uploads.
+        return _error(
+            "photo_too_large",
+            f"image exceeds the {_FOOD_SCAN_MAX_BYTES // (1024 * 1024)} MiB ceiling",
+            413,
+        )
+
+    portion_multiplier: float | None = None
+    raw_mult = request.POST.get("portion_multiplier")
+    if raw_mult:
+        try:
+            portion_multiplier = float(raw_mult)
+        except ValueError:
+            return _error("bad_request", "portion_multiplier must be a number", 400)
+        if not (_FOOD_LOG_PORTION_MULT_MIN <= portion_multiplier <= _FOOD_LOG_PORTION_MULT_MAX):
+            return _error(
+                "bad_request",
+                f"portion_multiplier must be in "
+                f"[{_FOOD_LOG_PORTION_MULT_MIN}, {_FOOD_LOG_PORTION_MULT_MAX}]",
+                400,
+            )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    async def _scan_and_profile() -> tuple[Any, Any]:
+        client = get_nutrition_client()
+        return await asyncio.gather(
+            client.scan_photo(
+                external_user_id=external_id,
+                image_bytes=photo_bytes,
+                portion_multiplier=portion_multiplier,
+            ),
+            client.get_profile(external_user_id=external_id),
+            return_exceptions=True,
+        )
+
+    scan_res, profile_res = asyncio.run(_scan_and_profile())
+
+    if isinstance(scan_res, FoodNotRecognizedError):
+        return _error("food_not_recognized", "ayla could not recognise the dish", 422)
+    if isinstance(scan_res, NutritionUnavailableError):
+        return _error("ayla_unavailable", "ayla nutrition unavailable", 503)
+    if isinstance(scan_res, NutritionAPIError):
+        return _error("ayla_error", "ayla nutrition error", 502)
+    if isinstance(scan_res, Exception):
+        logger.warning("food.scan.unexpected ext=%s err=%s", external_id, type(scan_res).__name__)
+        return _error("ayla_error", "unexpected ayla error", 502)
+
+    # Profile read is best-effort — a failure means we DEFAULT TO ED-MODE
+    # AS A SAFETY POSTURE. Failing closed (hide numbers) is the safer
+    # behaviour when we cannot verify the user's profile, even at the
+    # cost of a brief degraded UX during Ayla outages.
+    profile = profile_res if not isinstance(profile_res, Exception) else None
+    if isinstance(profile_res, Exception):
+        logger.info(
+            "food.scan.profile_unavailable ext=%s — defaulting to ED-mode",
+            external_id,
+        )
+        ed_mode = True
+    else:
+        ed_mode = is_ed_mode_active(profile)
+
+    return JsonResponse(redact_scan_for_ed(scan_res, ed_mode=ed_mode))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_food_log(request: HttpRequest) -> HttpResponse:
+    """Record an explicit food log entry. RU-side; master gate + consent.
+
+    Accepts both scan confirmations (``scan_id``) and manual entries
+    (``dish_name``). ED-mode redaction applied to the response.
+    """
+    import asyncio
+    import hashlib
+    import json
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+    from apps.skills.food_scanner.services import (
+        is_ed_mode_active,
+        redact_log_for_ed,
+    )
+
+    refusal = _food_gate(request, require_photo_scan=False)
+    if refusal is not None:
+        return refusal
+
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type != "application/json" or not request.body:
+        return _error("bad_request", "expected application/json body", 400)
+    try:
+        body = json.loads(request.body)
+    except ValueError:
+        return _error("bad_request", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("bad_request", "body must be a JSON object", 400)
+
+    scan_id = body.get("scan_id")
+    dish_name = body.get("dish_name")
+    if not scan_id and not dish_name:
+        return _error(
+            "bad_request",
+            "either 'scan_id' or 'dish_name' must be provided",
+            400,
+        )
+
+    meal_type = body.get("meal_type") or "other"
+    if meal_type not in _FOOD_LOG_MEAL_TYPES:
+        return _error(
+            "bad_request",
+            f"meal_type must be one of {sorted(_FOOD_LOG_MEAL_TYPES)}",
+            400,
+        )
+
+    portion_multiplier = body.get("portion_multiplier", 1.0)
+    try:
+        portion_multiplier = float(portion_multiplier)
+    except (TypeError, ValueError):
+        return _error("bad_request", "portion_multiplier must be a number", 400)
+    if not (_FOOD_LOG_PORTION_MULT_MIN <= portion_multiplier <= _FOOD_LOG_PORTION_MULT_MAX):
+        return _error(
+            "bad_request",
+            f"portion_multiplier must be in "
+            f"[{_FOOD_LOG_PORTION_MULT_MIN}, {_FOOD_LOG_PORTION_MULT_MAX}]",
+            400,
+        )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    # Idempotency key — re-taps return the same log row from Ayla. For
+    # manual entries the dish_name+meal_type hash is the dedup boundary;
+    # for scan confirmations the scan_id is unique per turn.
+    if scan_id:
+        idem_payload = f"scan:{scan_id}:{meal_type}"
+    else:
+        manual_hash = hashlib.sha256(
+            f"{dish_name}|{portion_multiplier}".encode("utf-8")
+        ).hexdigest()[:16]
+        idem_payload = f"manual:{manual_hash}:{meal_type}"
+    idempotency_key = f"food-log:{bot_user.id}:{idem_payload}"
+
+    async def _log_and_profile() -> tuple[Any, Any]:
+        client = get_nutrition_client()
+        return await asyncio.gather(
+            client.log_meal(
+                external_user_id=external_id,
+                scan_id=scan_id or None,
+                dish_name=dish_name or None,
+                meal_type=meal_type,
+                portion_multiplier=portion_multiplier,
+                idempotency_key=idempotency_key,
+            ),
+            client.get_profile(external_user_id=external_id),
+            return_exceptions=True,
+        )
+
+    log_res, profile_res = asyncio.run(_log_and_profile())
+
+    if isinstance(log_res, NutritionUnavailableError):
+        return _error("ayla_unavailable", "ayla nutrition unavailable", 503)
+    if isinstance(log_res, NutritionAPIError):
+        return _error("ayla_error", "ayla nutrition error", 502)
+    if isinstance(log_res, Exception):
+        logger.warning("food.log.unexpected ext=%s err=%s", external_id, type(log_res).__name__)
+        return _error("ayla_error", "unexpected ayla error", 502)
+
+    profile = profile_res if not isinstance(profile_res, Exception) else None
+    if isinstance(profile_res, Exception):
+        # Fail-closed: redact numbers when the profile read fails (same
+        # rationale as the scan endpoint — hide-by-default is safer).
+        ed_mode = True
+    else:
+        ed_mode = is_ed_mode_active(profile)
+
+    return JsonResponse(redact_log_for_ed(log_res, ed_mode=ed_mode))
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_food_diary(request: HttpRequest) -> HttpResponse:
+    """Day's food log + daily roll-up. Gated by master switch + consent."""
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+    from apps.skills.food_scanner.services import (
+        is_ed_mode_active,
+        redact_summary_for_ed,
+    )
+
+    refusal = _food_gate(request, require_photo_scan=False)
+    if refusal is not None:
+        return refusal
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    tz = ZoneInfo(getattr(bot_user, "timezone", None) or "Europe/Moscow")
+
+    raw_date = request.GET.get("date", "").strip()
+    if raw_date:
+        try:
+            target_date = date_cls.fromisoformat(raw_date)
+        except ValueError:
+            return _error("bad_request", "date must be YYYY-MM-DD", 400)
+    else:
+        target_date = timezone.now().astimezone(tz).date()
+
+    external_id = external_user_id_for(bot_user)
+
+    async def _summary_and_profile() -> tuple[Any, Any]:
+        client = get_nutrition_client()
+        return await asyncio.gather(
+            client.daily_summary(external_user_id=external_id, date=target_date.isoformat()),
+            client.get_profile(external_user_id=external_id),
+            return_exceptions=True,
+        )
+
+    summary_res, profile_res = asyncio.run(_summary_and_profile())
+
+    if isinstance(summary_res, NutritionUnavailableError):
+        return _error("ayla_unavailable", "ayla nutrition unavailable", 503)
+    if isinstance(summary_res, NutritionAPIError):
+        return _error("ayla_error", "ayla nutrition error", 502)
+    if isinstance(summary_res, Exception):
+        logger.warning(
+            "food.diary.unexpected ext=%s err=%s", external_id, type(summary_res).__name__
+        )
+        return _error("ayla_error", "unexpected ayla error", 502)
+
+    profile = profile_res if not isinstance(profile_res, Exception) else None
+    if isinstance(profile_res, Exception):
+        ed_mode = True
+    else:
+        ed_mode = is_ed_mode_active(profile)
+
+    return JsonResponse(redact_summary_for_ed(summary_res, ed_mode=ed_mode))
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_health_flags(request: HttpRequest) -> HttpResponse:
+    """Cross-cutting profile signal. Gated by master switch + consent.
+
+    Cheap O(1) read used by the Mini App to pre-style nutrition surfaces.
+    On profile fetch failure returns 503 — frontend should treat ED as
+    inactive for STYLING only (food endpoints still enforce redaction).
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+    from apps.skills.food_scanner.services import serialize_health_flags
+
+    refusal = _food_gate(request, require_photo_scan=False)
+    if refusal is not None:
+        return refusal
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    async def _fetch() -> Any:
+        return await get_nutrition_client().get_profile(external_user_id=external_id)
+
+    try:
+        profile = asyncio.run(_fetch())
+    except NutritionUnavailableError:
+        return _error("ayla_unavailable", "ayla nutrition unavailable", 503)
+    except NutritionAPIError:
+        return _error("ayla_error", "ayla nutrition error", 502)
+    except Exception as exc:
+        logger.warning(
+            "food.health_flags.unexpected ext=%s err=%s", external_id, type(exc).__name__
+        )
+        return _error("ayla_error", "unexpected ayla error", 502)
+
+    return JsonResponse(serialize_health_flags(profile))
