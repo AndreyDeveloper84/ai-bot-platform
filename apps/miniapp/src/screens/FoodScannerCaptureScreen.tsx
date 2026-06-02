@@ -32,6 +32,7 @@ import {
   defaultMealTypeForHour,
   readConsentAt,
   saveConsentAccepted,
+  stripImageMetadata,
   type MealType,
 } from "../lib/food-scanner";
 
@@ -79,14 +80,12 @@ export function FoodScannerCaptureScreen() {
   }, [navigate]);
 
   const handleFile = useCallback(
-    (file: File | null | undefined) => {
+    async (file: File | null | undefined) => {
       if (!file) return;
       // Client-side size guard — spec §13 item 1; backend caps at 10 MiB.
       const MAX_BYTES = 10 * 1024 * 1024;
       if (file.size > MAX_BYTES) {
-        setError(
-          "Фото слишком большое. Можно отправить файл до 10 МБ.",
-        );
+        setError("Фото слишком большое. Можно отправить файл до 10 МБ.");
         return;
       }
       if (!file.type.startsWith("image/")) {
@@ -94,9 +93,15 @@ export function FoodScannerCaptureScreen() {
         return;
       }
       setError(null);
+      // Strip EXIF (incl. GPS) BEFORE the photo leaves the device.
+      // Follow-up #957 — without this, geo-tagged JPEGs leak meal
+      // location to the backend before the delete-after-recognition
+      // runs. Server-side strip is a separate W4 hardening; this is
+      // defence-in-depth layer 1.
+      const cleanFile = await stripImageMetadata(file);
       // Photo flows to F2 via router state (no global store needed).
       navigate("/customer/food-scanner/processing", {
-        state: { photo: file, mealType },
+        state: { photo: cleanFile, mealType },
       });
     },
     [navigate, mealType],

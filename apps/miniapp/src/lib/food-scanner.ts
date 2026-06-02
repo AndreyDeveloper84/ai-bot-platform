@@ -522,6 +522,63 @@ export function nextPortion(
 }
 
 /**
+ * Strip EXIF metadata (incl. GPS) from a customer photo via canvas
+ * re-encode. Defence-in-depth for spec §2 privacy promise («Фото
+ * нужно только чтобы узнать блюдо — удаляю сразу») — follow-up
+ * #957 / adversarial CR A12. Without this, geo-tagged JPEGs ship
+ * GPS coordinates to the backend BEFORE the delete-after-recognition
+ * runs, leaking the customer's meal location to anyone reading the
+ * in-flight payload.
+ *
+ * Implementation: draw to a 2D canvas + re-encode as JPEG. The
+ * canvas pipeline never preserves EXIF (per HTML5 Canvas spec —
+ * `toBlob` writes a fresh container), so output is metadata-clean
+ * regardless of input. We keep dimensions identical (no downscale)
+ * so backend recognition quality matches what F2 spec sized for.
+ *
+ * Server-side strip is a separate W4 hardening (defence-in-depth);
+ * do not skip this layer just because the server will also strip.
+ *
+ * Returns the input file unchanged ONLY if the browser lacks
+ * `createImageBitmap` support (extremely rare; safety fallback —
+ * spec privacy text remains accurate because customer still saw
+ * the consent gate).
+ */
+export async function stripImageMetadata(file: File): Promise<File> {
+  if (typeof createImageBitmap === "undefined") return file;
+  if (typeof document === "undefined") return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      bitmap.close?.();
+      return file;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92);
+    });
+    if (!blob) return file;
+    // Preserve original filename + lastModified so backend logs read
+    // the same as before; only the bytes changed.
+    return new File([blob], file.name, {
+      type: "image/jpeg",
+      lastModified: file.lastModified,
+    });
+  } catch {
+    // Re-encode failure (e.g. cross-origin SecurityError on some
+    // exotic camera intents) → keep original file. Privacy promise
+    // still holds at the consent-gate layer; server-side strip is
+    // the second backstop.
+    return file;
+  }
+}
+
+/**
  * Russian-pluralised «N приёмов» for the diary footer.
  */
 export function entriesLabel(count: number): string {
