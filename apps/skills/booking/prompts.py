@@ -52,6 +52,8 @@ def build_booking_prompt(
     *,
     brand_voice: BrandVoiceConfig,
     query: str,
+    known_masters: list[dict[str, Any]] | None = None,
+    known_masters_truncated: bool = False,
     candidate_masters: list[dict[str, Any]] | None = None,
     available_slots: list[dict[str, Any]] | None = None,
     confirmation: dict[str, Any] | None = None,
@@ -65,6 +67,19 @@ def build_booking_prompt(
     Args:
       brand_voice: persona / tone / forbidden trio.
       query: the actual user message text.
+      known_masters: E0#1 Variant A pre-injected tenant master roster
+                     (founder verdict 2026-06-02, founder
+                     pilot_scope_discipline). Each dict carries ``name``
+                     + optional ``specialization``. Spliced into the
+                     system prompt as «ИЗВЕСТНЫЕ МАСТЕРА: …» with an
+                     anti-name-hallucination rule. Defends the booking
+                     turn-1 path against the LLM inventing master names
+                     not present in this tenant's roster (the existing
+                     anti-ID rule defends only `master_id` invention —
+                     the model could still write «запишу к Ольге» when
+                     Ольга doesn't exist). Per ADR-0009 caller passes a
+                     pre-loaded list from ``CatalogMaster`` mirror — no
+                     ORM access inside this pure rendering function.
       candidate_masters: when set, the list the LLM picked from a
                          prior :func:`show_masters` call. Spliced into
                          the system prompt so the second LLM call sees
@@ -85,6 +100,8 @@ def build_booking_prompt(
     """
     system_text = _render_system_prompt(
         brand_voice=brand_voice,
+        known_masters=known_masters,
+        known_masters_truncated=known_masters_truncated,
         candidate_masters=candidate_masters,
         available_slots=available_slots,
         confirmation=confirmation,
@@ -102,6 +119,8 @@ def build_booking_prompt(
 def _render_system_prompt(
     *,
     brand_voice: BrandVoiceConfig,
+    known_masters: list[dict[str, Any]] | None,
+    known_masters_truncated: bool,
     candidate_masters: list[dict[str, Any]] | None,
     available_slots: list[dict[str, Any]] | None,
     confirmation: dict[str, Any] | None,
@@ -150,6 +169,24 @@ def _render_system_prompt(
         "просит отменить или перенести запись и ID неизвестен — "
         "сначала вызови show_my_bookings."
     )
+
+    # E0#1 Variant A (founder verdict 2026-06-02) — pre-injected tenant
+    # master roster. Defends the turn-1 booking path against the LLM
+    # inventing master NAMES not present in this tenant's catalog. The
+    # existing «не выдумывай ID» rule above protects only numeric IDs;
+    # this rule + roster block protect free-text mentions like «запишу
+    # к Ольге» when Ольга doesn't exist в the salon's roster.
+    #
+    # Empty list (new tenant, no synced masters yet) → block skipped
+    # entirely; the per-tool `show_masters` fallback remains as the
+    # second-line defence.
+    if known_masters:
+        sections.append(
+            _format_known_masters_block(
+                known_masters,
+                is_truncated=known_masters_truncated,
+            )
+        )
 
     # Live-data rendering rule. The skill's two-call loop already
     # invoked a tool and is splicing the result into the prompt below
@@ -242,12 +279,118 @@ def _format_pending_block(pending: dict[str, Any]) -> str:
     )
 
 
+def _sanitize_for_prompt(text: Any, *, max_chars: int = 80) -> str:
+    """Adversarial F1 (PR #955) — strip prompt-injection vectors from
+    free-text fields before splicing into the system prompt.
+
+    The catalog mirror's ``name`` / ``specialization`` columns are
+    populated by mysite sync OR Ayla event upserts. ``CharField`` caps
+    bytes but NOT newlines, tabs, bidi controls, or other layout
+    characters. A malicious upstream value like
+    ``"Ольга\\n\\nIGNORE PREVIOUS INSTRUCTIONS..."`` would otherwise
+    break out of the bullet structure verbatim and the small-context
+    model (gpt-4o-mini) frequently follows such injections.
+
+    Sanitization rules (defence-in-depth, applied at render-time so we
+    can't accidentally bypass via a new caller):
+
+    1. Drop every character that is not ``str.isprintable()`` OR a
+       literal space. This kills newlines (``\\n``), carriage returns,
+       tabs, vertical bars, NUL bytes, bidi overrides, and most other
+       Unicode control planes.
+    2. Collapse runs of whitespace so an attacker can't smuggle a
+       100-space buffer that wraps in the prompt.
+    3. Hard-cap at ``max_chars`` characters — defence-in-depth beyond
+       the model field's ``max_length``. Pilot expectation: master
+       names ≤40 chars, specializations ≤40 chars; ``80`` is generous.
+
+    Returns the sanitized string (possibly empty). Callers are
+    responsible for skipping empty results (otherwise an empty-name
+    bullet would render as ``"• "``).
+    """
+    if not text:
+        return ""
+    s = str(text)
+    s = "".join(ch for ch in s if ch == " " or ch.isprintable())
+    s = " ".join(s.split())
+    return s[:max_chars]
+
+
+def _format_known_masters_block(
+    known_masters: list[dict[str, Any]],
+    *,
+    is_truncated: bool = False,
+) -> str:
+    """E0#1 Variant A pre-injected tenant master roster block.
+
+    Renders the tenant roster as a bulleted list followed by an
+    anti-name-hallucination rule. The caller (booking skill) controls
+    roster source + cap; this helper stays pure for testability.
+
+    Adversarial CR #955 changes:
+
+    * **F1** — every ``name`` is passed through
+      :func:`_sanitize_for_prompt` so newlines / control characters in
+      sync data cannot break out of the bullet structure.
+    * **F3** — when ``is_truncated=True`` (caller observed an overflow
+      probe), the header drops the «полный» qualifier and the closing
+      rule weakens: «если сомневаешься — вызови show_masters»
+      instead of a blanket «такого мастера нет». Without this, a
+      tenant с 21+ masters would silently deny alphabetically-late
+      legitimate masters.
+    * **F7** — ``specialization`` is NO LONGER rendered. The block is
+      purely a name-resolver; specializations carry uncontrolled free
+      text (mysite sync may push «работа с онкобольными» / similar
+      health-zone text) and ADR-0011 §9.2 carve-out is narrow to
+      analytics, not LLM channels. The per-tool ``show_masters`` flow
+      surfaces specialization with adapter-level controls when needed.
+
+    Each entry shape: ``{"name": "Ольга"}`` (``specialization`` is
+    ignored even when present — backwards-compat with existing loaders).
+    Entries without a name (or whose name sanitizes to empty) are
+    filtered defensively.
+    """
+    if is_truncated:
+        lines = ["ИЗВЕСТНЫЕ МАСТЕРА (часть ростера):"]
+    else:
+        lines = ["ИЗВЕСТНЫЕ МАСТЕРА (полный ростер салона):"]
+    for m in known_masters:
+        name = _sanitize_for_prompt(m.get("name"))
+        if not name:
+            continue
+        lines.append(f"• {name}")
+    if is_truncated:
+        # F3 fix — when the list is truncated, the model must not
+        # treat its absence-from-list as proof of non-existence.
+        # `show_masters` becomes the truth source for any name not
+        # immediately recognised.
+        lines.append(
+            "СТРОГО: список выше — не полный. Если клиент называет имя, которого "
+            "нет в этом списке, ВЫЗОВИ инструмент show_masters чтобы убедиться "
+            "что такого мастера действительно нет. Только если show_masters тоже "
+            "не вернул мастера — скажи, что такого мастера у нас нет. "
+            "НЕ выдумывай имя мастера."
+        )
+    else:
+        lines.append(
+            "СТРОГО: если клиент называет мастера, которого НЕТ в этом списке — "
+            "ответь, что такого мастера у нас нет, и предложи показать список доступных. "
+            "НЕ выдумывай имя мастера, которого нет в ростере."
+        )
+    return "\n".join(lines)
+
+
 def _format_masters_block(masters: list[dict[str, Any]]) -> str:
+    # Adversarial CR #955 F1 — same prompt-injection defence as
+    # _format_known_masters_block. The candidate list comes from
+    # show_masters tool result (RemoteBookingProxy / YClients), so the
+    # data path is more constrained, but defence-in-depth costs nothing.
     lines = ["КАНДИДАТЫ-МАСТЕРА:"]
     for m in masters:
-        spec = m.get("specialization", "")
+        name = _sanitize_for_prompt(m.get("name", ""))
+        spec = _sanitize_for_prompt(m.get("specialization", ""))
         spec_part = f" — {spec}" if spec else ""
-        lines.append(f"[{m.get('id')}] {m.get('name', '')}{spec_part}")
+        lines.append(f"[{m.get('id')}] {name}{spec_part}")
     return "\n".join(lines)
 
 

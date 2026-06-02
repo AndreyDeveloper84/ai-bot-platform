@@ -922,3 +922,108 @@ class TestRegistration:
 
         names = [s.name for s in registered()]
         assert "booking" in names
+
+
+class TestE0RegressionGuards:
+    """E0#1 Variant A adversarial-round-2 regression guards (PR #955).
+
+    Round-2 review flagged that two correctness fixes — F5 (Phase 3
+    must NOT inject `known_masters`) и F11 (callback short-circuits
+    must NOT pre-load the roster) — were enforced by single code
+    lines с no behavioural tests. These tests lock the invariants
+    so a future «consistency» refactor cannot silently undo them.
+    """
+
+    def test_callback_short_circuit_skips_roster_load(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """F11 regression guard — `pick_master` callback path returns
+        early через `_render_date_picker`, никогда не строит prompt,
+        и поэтому MUST NOT trigger the catalog-mirror SELECT for the
+        master roster.
+
+        Pre-F11: roster load ran unconditionally above the callback
+        branching → one wasted indexed SELECT per pick_master tap.
+        Post-F11: load sits after callback branches.
+        """
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = ["2026-05-22"]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_master:11",
+        )
+        with (
+            _patch_yclients(client),
+            _patch_provider_complete([]),
+            patch("apps.skills.booking.skill._load_tenant_master_roster") as mock_roster,
+        ):
+            with tenant_scope(tenant):
+                BookingSkill().handle(ctx)
+        mock_roster.assert_not_called()
+
+    def test_phase3_second_prompt_does_not_inject_known_masters(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """F5 regression guard — Phase 3 (second LLM call, после
+        tool dispatch) MUST pass `known_masters=None`. Authoritative
+        truth for the current service/time context is
+        `candidate_masters` (from `show_masters` tool result); the
+        full roster would compete and produce contradictory advice
+        when a known-but-not-offered master is mentioned.
+
+        Pre-F5: original PR passed `known_masters=known_masters` on
+        both Phase 1 + Phase 3.
+        Post-F5: Phase 1 keeps roster (для name-grounding decision);
+        Phase 3 explicitly passes `None`.
+        """
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11, "Ольга")]
+        # confirm_booking tool reaches Phase 3 (no short-circuit на
+        # show_masters / show_slots tool result).
+        tc = ToolCall(
+            id="c1",
+            name="confirm_booking",
+            arguments={
+                "master_id": 11,
+                "service_id": 22,
+                "slot_datetime": "2026-05-20T14:00:00",
+            },
+        )
+        completions = [
+            _completion(tool_calls=[tc]),
+            _completion(text="Подтверждаете запись?"),
+        ]
+        with (
+            _patch_yclients(client),
+            _patch_provider_complete(completions),
+            patch(
+                "apps.skills.booking.skill.build_booking_prompt",
+                wraps=__import__(
+                    "apps.skills.booking.skill", fromlist=["build_booking_prompt"]
+                ).build_booking_prompt,
+            ) as mock_build,
+        ):
+            with tenant_scope(tenant):
+                BookingSkill().handle(context)
+
+        # First call = Phase 1, should carry the roster.
+        # Second call = Phase 3, MUST pass known_masters=None.
+        assert mock_build.call_count >= 2, (
+            f"Expected ≥2 prompt builds (Phase 1 + Phase 3), got {mock_build.call_count}"
+        )
+        phase1_kwargs = mock_build.call_args_list[0].kwargs
+        phase3_kwargs = mock_build.call_args_list[1].kwargs
+
+        # Phase 1 may carry roster (list или None depending on mirror state).
+        # The critical invariant — Phase 3 MUST be None, never a list.
+        assert phase3_kwargs.get("known_masters") is None, (
+            "F5 regression: Phase 3 second LLM call leaked known_masters into "
+            f"the prompt — got {phase3_kwargs.get('known_masters')!r}, "
+            "expected None."
+        )
+        # Sanity — Phase 1 still gets the roster keyword (как list или []).
+        assert "known_masters" in phase1_kwargs
