@@ -18,13 +18,14 @@
 | R-1 honest retention copy → ship | Tau → W1 | to do | fixes live Variant-3 violation in DisclosureSheet.tsx |
 | #956 consent server audit-trail | W4 | in food_scanner bundle | mini-app endpoint → Ayla disclaimer_acked |
 | EXIF GPS strip: client (#957 done) + server | W1 done / W4 server | server pending | defence-in-depth |
-| Photo→US vision path (#4) | tech-lead check | VERIFYING | if photos go to Anthropic/OpenAI: legal claim #4 false + cross-border issue |
+| Photo→US vision path (#4) | tech-lead / founder + legal | CONFIRMED | food photos → **OpenAI (US)** by default (`FOOD_SCANNER_PRIMARY="openai"`); "RF-perimeter" claim FALSE. Resolution = **Opt 2 (lawful OpenAI)**: localize-first + explicit cross-border consent + RKN notification + minimization (EXIF strip + downscale/crop) + OpenAI zero-retention + honest disclosure. GATED on legal verdict (#947). Yandex (`FOOD_SCANNER_PRIMARY` flip) = fallback if legal insufficient. |
 
 ## B. Pre-SHIP gates (before go-live — NOT merge; legal/ops/founder)
 | Gate | Owner | Status |
 |---|---|---|
 | #947 cross-border legal verdict (brief PR #973) | founder → lawyer | pending |
-| Anthropic DPA / zero-retention tier (legal point #3) | founder / ops | verify |
+| Cross-border food-photo transfer lawfulness (Opt 2) — legal verdict + RKN notification | founder / lawyer | pending (gated on #947) |
+| Anthropic + OpenAI DPA / zero-retention tier (legal point #3) | founder / ops | verify |
 | STRICT_TENANT_REFUSE flip + D-2 ceilings checklist | founder (date) + W3 | flip date pending |
 | Records/payments 7-year retention confirm (R-2) | Alpha | confirm |
 | Prod delivery flip | Alpha + ops | after dev/staging round-trip green |
@@ -90,4 +91,4 @@ Pilot tokens done (#916/#966). Re-engage only on new token request (none under B
 ## Tech-lead held gates
 - **Delivery flip signal** (payment + booking) — after #943+#965 on dev + round-trip green.
 - **W1 food_scanner swap signal** — after W4 backend + Ayla data ready.
-- **#4 photo-path** verification in flight.
+- **#4 photo-path** — RESOLVED to Opt 2 (lawful OpenAI path); GATED on legal verdict (#947) + RKN cross-border notification. Yandex flip = fallback if legal insufficient.
