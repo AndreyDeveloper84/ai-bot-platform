@@ -30,6 +30,7 @@ from typing import Any, Final, Literal
 ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
     {
         "booking.created",
+        "booking.confirmed",
         "booking.cancelled",
         "booking.rescheduled",
         "booking.completed",

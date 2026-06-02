@@ -568,6 +568,62 @@ def handle_booking_completed(envelope: IngestEnvelope) -> None:
     )
 
 
+def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
+    """``booking.confirmed`` — appointment moved to ``confirmed`` (B1).
+
+    Emitted by Ayla when an appointment is confirmed (typically once
+    payment is captured). Canonical ``data``: ``appointment_id`` +
+    ``payment_id`` (the Ayla emitter currently sends ``booking_id`` —
+    tracked for migration in issue #945). booking.confirmed is a v1
+    contract extension beyond the original 12 events (issue #946).
+
+    Side-effect: idempotently flip ``RemoteBookingProxy.status`` to
+    ``confirmed``. Same canonical shape as the other booking handlers:
+    tenant guard first, then idempotency short-circuit, then an
+    upsert-shaped UPDATE. No reminder change — confirming doesn't move
+    ``start_at``, so the T-24h/T-2h rows from booking.created stand.
+    """
+    assert_envelope_tenant_authorized(envelope)
+
+    data = envelope.data
+    appointment_id = UUID(data["appointment_id"])
+
+    tenant = _resolve_tenant(envelope.tenant_id)
+    if tenant is None:
+        logger.warning(
+            "eventbus.consumer.booking.confirmed.unknown_tenant tenant_id=%s",
+            envelope.tenant_id,
+        )
+        return
+
+    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+
+    # N-Adv2: tenant guard FIRST, BEFORE the idempotency short-circuit.
+    _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
+
+    # Defence-in-depth idempotency short-circuit.
+    if proxy is not None and proxy.last_synced_event_id == envelope.event_id:
+        logger.info(
+            "eventbus.consumer.booking.confirmed.replay_skipped appointment_id=%s event_id=%s",
+            appointment_id,
+            envelope.event_id,
+        )
+        return
+
+    RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
+        status=RemoteBookingProxy.Status.CONFIRMED,
+        last_synced_event_id=envelope.event_id,
+    )
+
+    emit_internal_event(
+        "booking_confirmed",
+        properties={
+            "appointment_id": str(appointment_id),
+            "payment_id": data.get("payment_id", ""),
+        },
+    )
+
+
 # ─── registration ──────────────────────────────────────────────────────────
 
 
@@ -584,6 +640,7 @@ def register_booking_handlers() -> None:
     """
     pairs: tuple[tuple[str, int, Any], ...] = (
         ("booking.created", 1, handle_booking_created),
+        ("booking.confirmed", 1, handle_booking_confirmed),
         ("booking.cancelled", 1, handle_booking_cancelled),
         ("booking.rescheduled", 1, handle_booking_rescheduled),
         ("booking.completed", 1, handle_booking_completed),
