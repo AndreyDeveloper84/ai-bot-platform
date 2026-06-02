@@ -484,6 +484,49 @@ IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = _parse_idle_active_draft_suppress_wi
 AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
+# Wellness MVP scaled pilot (memory ``project_wellness_mvp_scaled_pilot``).
+#
+# Two-gate model per founder verdict 2026-06-02:
+#
+# 1. ``NUTRITION_ENABLED`` — master switch for the RU-side nutrition
+#    surface: food log / diary / water / basic daily summary. Data stays
+#    on the RU-side via Ayla. Default ``False`` globally so non-pilot
+#    environments don't accidentally surface the feature; pilot-env
+#    config overrides to ``True``. When False, the food_scanner skill
+#    + miniapp_api food endpoints return a graceful «feature off»
+#    reply BEFORE any Ayla call.
+#
+#    Scope of this flag:
+#      * `apps.skills.food_scanner` — photo-result diary log + callbacks.
+#      * `apps.skills.food_clarify` + `food_correction` — manual food
+#        entry helpers.
+#      * miniapp_api ``/customer/food/{log,diary,consent}`` endpoints.
+#    Out of scope (NOT gated by this flag — they are post-pilot):
+#      * Nutrition advice / weekly reports / nudges / recommendations.
+#      * Tier-B FSM / anketa / cross-domain insight cards.
+#
+# 2. ``FOOD_PHOTO_SCAN_ENABLED`` — SEPARATE gate for the cross-border
+#    path (photo → OpenAI vision provider via Ayla). Required because
+#    photo content crosses the RU border. Default ``False`` until ALL
+#    three conditions hold:
+#      * Legal-green (#947 — cross-border legal review accepts the
+#        scan pipeline).
+#      * Cross-border consent storage shipped (server audit trail per
+#        #956 for the F0 152-ФЗ acknowledgement).
+#      * РКН notification submitted for the cross-border processor.
+#    When False but ``NUTRITION_ENABLED=True``, photo turns are refused
+#    with a manual-entry hint; food log / diary / water still flow.
+#
+# Both flags are read at call time via ``getattr(settings, ...)`` so
+# runtime overrides in tests work. Pilot-env config sets the live
+# values via env vars — the import-time read here is the boot-time
+# snapshot used by the skill + endpoints.
+NUTRITION_ENABLED = os.environ.get("NUTRITION_ENABLED", "false").lower() in ("true", "1")
+FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # Stabilization sprint Block B / B2 — gift-certificate payment kill-switch.
 #
 # Founder verdict 2026-05-30 (memory ``project_certificate_payment_post_pilot``):

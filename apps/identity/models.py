@@ -182,6 +182,28 @@ class BotUser(models.Model):
             "customer-onboarding-flow.md §11)."
         ),
     )
+    # Food-scanner feature-specific 152-ФЗ consent (founder verdict
+    # 2026-06-02). Distinct from ``consent_at`` (broad welcome consent)
+    # because food data + photo uploads need their own explicit
+    # acknowledgement and audit trail per the Wellness MVP scaled
+    # pilot scope (memory ``project_wellness_mvp_scaled_pilot``). The
+    # frontend F0 gate (#962) currently persists this client-side via
+    # DeviceStorage; this column is the server-side mirror used by the
+    # food_scanner skill + miniapp_api endpoints to enforce consent on
+    # every cross-channel turn (server consent audit trail per #956).
+    # NULL = not yet consented → food_scanner skill returns a redirect-
+    # to-Mini-App reply rather than calling Ayla.
+    food_scanner_consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Feature-specific 152-ФЗ consent for the food scanner / "
+            "nutrition diary surface. NULL = not yet consented; the "
+            "food_scanner skill refuses cross-border photo processing "
+            "and local food-log writes until set. Distinct from the "
+            "broad ``consent_at`` (welcome S2)."
+        ),
+    )
     # B11 conservative blockers (P0 PRE_PILOT, founder pilot_scope_discipline
     # sequence #3). When True, customer opted out of all proactive bot-
     # initiated messages — post-visit follow-ups, review prompts, marketing
