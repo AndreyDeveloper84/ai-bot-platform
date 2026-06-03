@@ -81,3 +81,18 @@ repos:
         # separately to a CLI that already does its own globbing.
         files: ^apps/.*\.py$
         pass_filenames: false
+
+      # ADR-0009 G-series module-boundary guard (#1001, Option B). AST
+      # scan blocks source-scoped forbidden import edges (G2.1/G5.1/G6.2
+      # + cross-repo psycopg2) that ruff TID251 cannot express. See
+      # `tools/lint/import_boundaries.py` for the contracts, baseline,
+      # and documented detection scope + known limitations.
+      - id: import-boundaries
+        name: Import-boundary guard (AST lint)
+        entry: python tools/lint/import_boundaries.py apps/
+        language: system
+        # Whole-`apps/` scan (own globbing) — `pass_filenames` off, same
+        # as red-zone-guard. A full scan is also required for the
+        # stale-baseline check to be accurate (partial scans skip it).
+        files: ^apps/.*\.py$
+        pass_filenames: false

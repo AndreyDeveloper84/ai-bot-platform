@@ -126,6 +126,16 @@ jobs:
       - name: Red-zone guard (AST lint)
         run: uv run python tools/lint/red_zone_guard.py apps/
 
+      # ADR-0009 G-series module-boundary guard — source-scoped
+      # forbidden-import-edge lint (#1001, Option B). Encodes G2.1
+      # (skills↛yclients), G5.1 (api↛booking mutators), G6.2
+      # (eventbus consumer↛skills/channels) + the cross-repo psycopg2
+      # ban (rule 2). Replaces the never-created `.importlinter`
+      # baseline. See `tools/lint/import_boundaries.py` for the
+      # contracts, the on-`dev` baseline, and what is NOT detected.
+      - name: Import-boundary guard (AST lint)
+        run: uv run python tools/lint/import_boundaries.py apps/
+
       - name: Django manage.py check
         run: uv run python manage.py check
 
