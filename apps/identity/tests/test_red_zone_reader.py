@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -461,3 +462,53 @@ class TestGucResetAfterAccessor:
                 "red rows owned by a different user. Cat 3 cross-tenant "
                 "leak via GUC carryover. F1 fix not effective."
             )
+
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.skipif(
+        __import__("django.db", fromlist=["connection"]).connection.vendor != "postgresql",
+        reason="GUC mechanism is Postgres-only.",
+    )
+    def test_guc_reset_runs_after_inner_integrity_error(self) -> None:
+        """Round-5 F1-B (#702) — the explicit ``finally`` RESET (#703) actually
+        RUNS when a non-DoesNotExist exception aborts the inner ``atomic()``.
+
+        ``transaction=True`` so the accessor's ``atomic()`` is the real
+        outermost transaction, not a test SAVEPOINT.
+
+        Why we assert on captured SQL rather than just ``current_setting``
+        (S5 finding — the old test was hollow): a SAVEPOINT/transaction
+        rollback reverts ``set_config(is_local=true)`` on its own, so reading
+        the GUC back would show it empty **even if the ``finally`` RESET block
+        were deleted**. To genuinely lock the #703 RESET we capture executed
+        SQL and assert the ``RESET ayla.red_zone_access_context`` statement was
+        issued on the error path. Delete the #703 ``finally`` and this fails.
+        """
+        from django.db import IntegrityError, connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            with patch(
+                "apps.identity.services.red_zone_reader.MemoryEntry.objects.get",
+                side_effect=IntegrityError("simulated mid-flight integrity error"),
+            ):
+                with pytest.raises(IntegrityError):
+                    RedZoneReader.read(
+                        entry_id=uuid.uuid4(),
+                        user_id=uuid.uuid4(),
+                        accessor_role=RedZoneAccessLog.ACCESSOR_AYLA_LLM,
+                        request_id=uuid.uuid4(),
+                        purpose="contraindication_check",
+                    )
+
+        executed = [q["sql"] or "" for q in ctx.captured_queries]
+        assert any("RESET ayla.red_zone_access_context" in sql for sql in executed), (
+            "The #703 finally RESET did not run on the inner-IntegrityError "
+            "path — no RESET in captured SQL. The GUC could leak when the "
+            "accessor is nested in a caller's still-open transaction."
+        )
+
+        # Sanity: the GUC is clear after the call returns.
+        with connection.cursor() as cur:
+            cur.execute("SELECT current_setting('ayla.red_zone_access_context', true)")
+            value = cur.fetchone()[0]
+        assert value == "" or value is None
