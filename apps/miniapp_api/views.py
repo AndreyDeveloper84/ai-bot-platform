@@ -1173,7 +1173,6 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
     """Persist a 1-5 rating for a past visit; rating ≤ 3 escalates."""
     import json
 
-    from apps.booking.models import BookingRequest
     from apps.booking.services.feedback import (
         AlreadyRated,
         FeedbackError,
@@ -1184,13 +1183,12 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    booking = (
-        BookingRequest.objects.filter(pk=booking_id, bot_user=bot_user)
-        .select_related("conversation")
-        .first()
-    )
+    # Use the shared owner+tenant loader (explicit tenant predicate) for
+    # parity with the transition endpoints, and a generic not-found message
+    # so the response can't act as an existence oracle (#1005).
+    booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
-        return _error("not_found", "booking does not belong to this user", 404)
+        return _error("not_found", "booking not found", 404)
 
     try:
         body = json.loads(request.body or b"{}")
@@ -1205,7 +1203,7 @@ def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: 
     comment: str = comment_raw  # type: ignore[assignment]
 
     try:
-        result = service_submit_feedback(booking, rating=rating, comment=comment)
+        result = service_submit_feedback(booking, actor=bot_user, rating=rating, comment=comment)
     except (InvalidRating, AlreadyRated, NotCompletedYet) as exc:
         return _error(exc.slug, str(exc), 400)
     except FeedbackError as exc:

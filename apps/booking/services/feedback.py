@@ -38,6 +38,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.booking.models import BookingRequest
+from apps.identity.models import BotUser
 
 
 class FeedbackError(ValueError):
@@ -75,14 +76,28 @@ _LOW_RATING_THRESHOLD = 3  # rating <= 3 → handoff
 
 
 def submit_feedback(
-    booking: BookingRequest, *, rating: int, comment: str, now: Optional[datetime] = None
+    booking: BookingRequest,
+    *,
+    actor: BotUser,
+    rating: int,
+    comment: str,
+    now: Optional[datetime] = None,
 ) -> FeedbackResult:
     """Persist the F5 rating + maybe escalate to a HUMAN handoff.
 
-    Caller responsibility: load ``booking`` already filtered to the
-    calling bot_user (the view does this via ``BookingRequest.objects``
-    with tenant scope + bot_user pk match).
+    The view loads ``booking`` already filtered to the calling bot_user, but
+    feedback must NOT rely on that being the only ownership layer (#1005): a
+    future view refactor — or any non-view caller — must still be unable to
+    rate / escalate a COMPLAINT on another customer's booking. So we assert
+    ownership here too, at defence-in-depth parity with the five transition
+    services. Raises :class:`InvalidBookingTransition` (``forbidden``) on a
+    mismatch.
     """
+    # Owner guard first — before any state/validation work (#1005).
+    from apps.booking.services.transitions import _assert_actor_owns
+
+    _assert_actor_owns(booking, actor)
+
     if not isinstance(rating, int) or rating < 1 or rating > 5:
         raise InvalidRating(f"rating must be int 1..5, got {rating!r}")
 
