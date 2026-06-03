@@ -116,7 +116,7 @@ def test_happy_path_rating_5_no_handoff(tenant, bot_user, service, master, conve
     )
 
     with tenant_scope(tenant):
-        result = submit_feedback(booking, rating=5, comment="Отлично!", now=now)
+        result = submit_feedback(booking, actor=bot_user, rating=5, comment="Отлично!", now=now)
 
     assert result.handoff_created is False
     assert result.task_id is None
@@ -142,7 +142,7 @@ def test_rating_3_creates_normal_priority_complaint(
     )
 
     with tenant_scope(tenant):
-        result = submit_feedback(booking, rating=3, comment="ok", now=now)
+        result = submit_feedback(booking, actor=bot_user, rating=3, comment="ok", now=now)
 
     assert result.handoff_created is True
     task = AdminTask.all_tenants.get(pk=result.task_id)
@@ -163,7 +163,7 @@ def test_rating_1_creates_high_priority_complaint(tenant, bot_user, service, mas
     )
 
     with tenant_scope(tenant):
-        result = submit_feedback(booking, rating=1, comment="плохо", now=now)
+        result = submit_feedback(booking, actor=bot_user, rating=1, comment="плохо", now=now)
 
     task = AdminTask.all_tenants.get(pk=result.task_id)
     assert task.priority == AdminTask.Priority.HIGH
@@ -185,7 +185,7 @@ def test_no_conversation_degrades_gracefully(tenant, bot_user, service, master):
     )
 
     with tenant_scope(tenant):
-        result = submit_feedback(booking, rating=1, comment="x", now=now)
+        result = submit_feedback(booking, actor=bot_user, rating=1, comment="x", now=now)
 
     # Rating still persists — analytics signal preserved.
     assert result.rating == 1
@@ -206,9 +206,9 @@ def test_already_rated_is_idempotent_raise(tenant, bot_user, service, master, co
     )
 
     with tenant_scope(tenant):
-        submit_feedback(booking, rating=4, comment="", now=now)
+        submit_feedback(booking, actor=bot_user, rating=4, comment="", now=now)
         with pytest.raises(AlreadyRated):
-            submit_feedback(booking, rating=2, comment="", now=now)
+            submit_feedback(booking, actor=bot_user, rating=2, comment="", now=now)
 
 
 @pytest.mark.django_db
@@ -224,7 +224,7 @@ def test_invalid_rating_raises(tenant, bot_user, service, master, conversation, 
         conversation=conversation,
     )
     with tenant_scope(tenant), pytest.raises(InvalidRating):
-        submit_feedback(booking, rating=bad, comment="", now=now)
+        submit_feedback(booking, actor=bot_user, rating=bad, comment="", now=now)
 
 
 @pytest.mark.django_db
@@ -239,4 +239,4 @@ def test_pre_visit_rejects(tenant, bot_user, service, master, conversation):
         conversation=conversation,
     )
     with tenant_scope(tenant), pytest.raises(NotCompletedYet):
-        submit_feedback(booking, rating=5, comment="", now=now)
+        submit_feedback(booking, actor=bot_user, rating=5, comment="", now=now)
