@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -461,3 +462,51 @@ class TestGucResetAfterAccessor:
                 "red rows owned by a different user. Cat 3 cross-tenant "
                 "leak via GUC carryover. F1 fix not effective."
             )
+
+    @pytest.mark.skipif(
+        __import__("django.db", fromlist=["connection"]).connection.vendor != "postgresql",
+        reason="GUC mechanism is Postgres-only.",
+    )
+    def test_guc_reset_after_inner_integrity_error(self, upc) -> None:
+        """Round-5 F1-B (#702) — GUC cleared when a non-DoesNotExist exception
+        propagates out of the inner ``atomic()``.
+
+        The F1-A regressions above cover the success / DoesNotExist /
+        TenantScopeViolation exit paths, but NOT the path where an
+        ``IntegrityError`` (or other unhandled exception) fires mid-flight,
+        after ``set_config`` has already set the GUC at step 1.
+
+        Per #702 the error is injected by mocking ``MemoryEntry.objects.get`` —
+        so it is raised in Python and does NOT actually drive Postgres into the
+        backend «aborted-transaction» state. What this locks is the
+        Django-side invariant: when the exception propagates, ``atomic()``
+        rolls the savepoint back (which itself reverts the
+        ``set_config(is_local=true)`` made after that savepoint) AND the
+        ``finally`` RESET runs — together they leave the GUC clear. This guards
+        against a future reordering of the atomic block silently leaking the
+        context on the error path. (The true backend-abort path is covered by
+        Postgres' own SAVEPOINT-rollback semantics.)
+        """
+        from django.db import IntegrityError, connection
+
+        with patch(
+            "apps.identity.services.red_zone_reader.MemoryEntry.objects.get",
+            side_effect=IntegrityError("simulated mid-flight integrity error"),
+        ):
+            with pytest.raises(IntegrityError):
+                RedZoneReader.read(
+                    entry_id=uuid.uuid4(),
+                    user_id=upc.user_id,
+                    accessor_role=RedZoneAccessLog.ACCESSOR_AYLA_LLM,
+                    request_id=uuid.uuid4(),
+                    purpose="contraindication_check",
+                )
+
+        with connection.cursor() as cur:
+            cur.execute("SELECT current_setting('ayla.red_zone_access_context', true)")
+            value = cur.fetchone()[0]
+        assert value == "" or value is None, (
+            f"GUC leaked after an inner IntegrityError — value={value!r}. "
+            "F1-B regression: savepoint rollback + finally RESET must clear "
+            "the red-zone context on the abort path too."
+        )

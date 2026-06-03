@@ -39,6 +39,7 @@ AND there's no successful read with no audit row.
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import uuid
@@ -48,6 +49,8 @@ from django.db import connection, transaction
 
 from apps.identity.models import MemoryEntry, RedZoneAccessLog
 from apps.identity.services.exceptions import TenantScopeViolation
+
+logger = logging.getLogger(__name__)
 
 
 def _default_principal_for_role(role: str) -> str:
@@ -188,5 +191,20 @@ class RedZoneReader:
             # at transaction END, but caller's OUTER atomic keeps the txn
             # alive past our SAVEPOINT release — hence explicit RESET).
             if connection.vendor == "postgresql":
-                with connection.cursor() as cursor:
-                    cursor.execute("RESET ayla.red_zone_access_context")
+                # Round-5 F1-C (#703): if the connection dies between the
+                # atomic-block exit and here (Postgres OOM, network blip),
+                # `connection.cursor()` itself raises OperationalError. Letting
+                # that propagate out of `finally` would MASK the original
+                # exception from the try-block (e.g. DoesNotExist /
+                # TenantScopeViolation), so the caller would see a misleading
+                # "connection lost" instead of the real cause. A dead
+                # connection breaks subsequent ORM use regardless, so a failed
+                # RESET is non-fatal — log it for forensics and let the
+                # original exception (if any) surface unchanged.
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute("RESET ayla.red_zone_access_context")
+                except Exception:
+                    logger.exception(
+                        "RESET of red_zone_access_context failed — connection likely unusable"
+                    )
