@@ -116,13 +116,18 @@ export function CustomerWellnessDashboardScreen() {
   const [waterToast, setWaterToast] = useState<string | null>(null);
   const [photoToast, setPhotoToast] = useState<string | null>(null);
   // FOOD_PHOTO_SCAN_ENABLED flag (Path B off-state per TL 2026-06-02).
-  // While resolving, render the photo CTA optimistically (DEV default
-  // ON); fail-safe OFF in production means we'd otherwise flash the
-  // photo label and then swap to manual. The brief mismatch is fine —
-  // tap goes to /capture which itself redirects to /manual when off.
+  // Initial state matches the eventual fail-safe default per build
+  // mode (adversarial CR PRE_PILOT #3): DEV starts at null so the
+  // existing photo-flow QA renders the photo CTA until the URL gate
+  // (?photo_gate=off) flips it; PROD starts at false so the first
+  // render already shows the off-state label + icon + route. This
+  // eliminates the «Сфотографируй еду» → tap → /capture → /manual
+  // cascade and the visible label flash on slower MAX webview.
   // FOLLOW_UP #170: swap fetchFoodPhotoScanEnabled to real /me extension.
   // FOLLOW_UP #171: Tau-finalised copy for off-state CTA label.
-  const [photoEnabled, setPhotoEnabled] = useState<boolean | null>(null);
+  const [photoEnabled, setPhotoEnabled] = useState<boolean | null>(() =>
+    import.meta.env.DEV ? null : false,
+  );
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(
     () => isOnboardingDismissed(),
   );

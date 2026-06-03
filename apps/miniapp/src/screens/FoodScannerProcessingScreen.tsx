@@ -27,6 +27,7 @@ import {
   FoodNotRecognizedError,
   NutritionUnavailableError,
   PhotoBytesMissingError,
+  fetchFoodPhotoScanEnabled,
   scanPhoto,
   type MealType,
 } from "../lib/food-scanner";
@@ -82,6 +83,20 @@ export function FoodScannerProcessingScreen() {
       navigate("/customer/food-scanner/capture", { replace: true });
       return;
     }
+    // Off-state short-circuit (adversarial CR PRE_PILOT #2) — even
+    // with a photo present, if FOOD_PHOTO_SCAN_ENABLED is off the
+    // scan request would either be rejected or the response would be
+    // a deferred state. Skip the wasted /capture → /manual cascade
+    // and route directly. Fire-and-forget; the cleanup below tears
+    // down the AbortController if redirect lands first.
+    void fetchFoodPhotoScanEnabled().then((enabled) => {
+      if (!enabled) {
+        navigate("/customer/food-scanner/manual", {
+          replace: true,
+          state: { mealType },
+        });
+      }
+    });
     const controller = new AbortController();
     abortRef.current = controller;
 

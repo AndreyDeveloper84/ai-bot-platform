@@ -206,6 +206,14 @@ function guardProd(endpoint: string): void {
 // swap the body to a real fetch + drop the dev URL fallback.
 // ---------------------------------------------------------------------------
 
+/**
+ * W4 swap-day note (adversarial CR #4): when the real endpoint
+ * ships, response shape is most likely `{ enabled: boolean }` or
+ * an extension of `/me` with `food_scanner.photo_enabled`. Coerce
+ * explicitly — NEVER `Boolean(response)` (which is true for any
+ * non-null object) — to avoid silent true-positive when backend
+ * returns an envelope.
+ */
 export async function fetchFoodPhotoScanEnabled(): Promise<boolean> {
   if (import.meta.env.DEV && typeof window !== "undefined") {
     try {
@@ -223,8 +231,25 @@ export async function fetchFoodPhotoScanEnabled(): Promise<boolean> {
   // Production — fail-safe OFF until W4 B2 ships the read endpoint.
   // Customer falls into the Path B manual-primary surface; no broken
   // photo CTAs ship to real users.
+  //
+  // Telemetry signal (adversarial CR PRE_PILOT #1): single console
+  // warning per module load so the tech-lead can grep prod logs on
+  // pilot day and confirm the helper is returning the no-endpoint
+  // default. Without this, a silent OFF state is indistinguishable
+  // from a successful real-endpoint OFF read once W4 swap-day lands.
+  if (!_PROD_OFF_WARNED) {
+    _PROD_OFF_WARNED = true;
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[food-scanner] FOOD_PHOTO_SCAN_ENABLED defaulted to OFF " +
+        "(no W4 read endpoint wired yet). Path B manual-primary " +
+        "surface is active. Swap when W4 ships #170.",
+    );
+  }
   return false;
 }
+
+let _PROD_OFF_WARNED = false;
 
 // ---------------------------------------------------------------------------
 // Stub variant picker.
