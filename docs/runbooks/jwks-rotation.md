@@ -1,6 +1,6 @@
 # Runbook: JWKS key rotation drill (Ayla ⇄ bot-platform)
 
-> Status: **draft**
+> Status: **partial**
 > Last exercised: _never_
 > Target completion sprint: pre-pilot 2026-07-15 (issue #565 / NS2)
 > Owner: Security stream (S2) → on-call at rotation time
@@ -13,9 +13,11 @@ Rotate an RS256 signing keypair on either side of the JWT contract
 dual-`kid` coexistence window so the verifying side never rejects a
 token signed by a key it has not yet cached.
 
-This runbook is the **planned-rotation SOP** referenced by
+This runbook is the **planned-rotation SOP** named in
 [`docs/architecture/jwt-contract.md`](../architecture/jwt-contract.md)
-§4.3 + §4.4. For a *compromise-driven* emergency rotation, this runbook's
+§4.4 (dual-`kid` coexistence SOP); its rotation mechanics — cadence,
+overlap window, emergency path — are drawn from §4.3. For a
+*compromise-driven* emergency rotation, this runbook's
 timing is deliberately inverted — see
 [Emergency rotation](#emergency-rotation-compromise) below and
 [`security-incident.md`](security-incident.md).
@@ -31,10 +33,15 @@ timing is deliberately inverted — see
 
 > **Blocked-by note.** The bot-platform-side concrete commands (JWKS
 > cache-hit/miss telemetry queries, the `/.well-known/jwks.json`
-> publisher for key B) depend on the JWT verifier middleware landing
-> (#258 foundation + #569). Until then, the **procedure, timing, and
-> checklist are authoritative**; the exact `manage.py` invocations marked
-> _PENDING #258_ are placeholders to be filled when the middleware ships.
+> publisher for key B) depend on the **bot-platform JWT verifier
+> middleware** — the verifier-side role per `jwt-contract.md` §5.2
+> («trust but verify» middleware), filed alongside #258 (see #566/#569). Note #258 itself is the **Ayla
+> issuer-side** OAuth-callback ticket, not the verifier middleware; the
+> bot-platform telemetry below unblocks when that sibling middleware
+> ticket ships, and the key-B publisher specifically with #569. Until
+> then, the **procedure, timing, and checklist are authoritative**; the
+> `manage.py` invocations marked _PENDING (verifier middleware)_ are
+> placeholders to be filled when it ships.
 
 ## Trigger / when to run
 
@@ -115,7 +122,7 @@ The rotating side switches to signing **new** tokens with the **new**
 #   (Ayla-canonical command — run by Ayla on-call)
 #
 # For bot-platform key B rotation — flip the s2s signing kid:
-#   PENDING #258/#569 — e.g. manage.py rotate_s2s_signing_key --activate <new-kid>
+#   PENDING (verifier middleware) — e.g. manage.py rotate_s2s_signing_key --activate <new-kid>
 ```
 
 Record the exact cutover timestamp (ISO 8601 UTC) — it arms the
@@ -127,22 +134,32 @@ Both `kid`s remain in JWKS. The verifier MUST accept tokens signed by
 **any** `kid` currently in JWKS (never "only the latest"). Do nothing but
 watch telemetry (see [Verification](#verification)).
 
-### Step 4 — Drop the old `kid` (T+10min)
+### Step 4 — Retire the old `kid` (timing depends on key + token lifetime)
 
-Only after the full 10-minute window — every consumer has had ≥1
-cache-refresh cycle — remove the old `kid` from JWKS.
+The 10-minute coexistence window (Step 3) is the **verifier-cache safety
+floor** — the minimum before the *new* `kid` is guaranteed cacheable
+everywhere. It is **NOT** the old-`kid` removal deadline. When the old
+`kid` may leave JWKS depends on the longest-lived token still signed by
+it (§4.3 + §4.4):
+
+- **Key B (bot-platform s2s signing, 5-min tokens):** at T+10min every
+  old-`kid` s2s token has already expired (5 min < 10 min), so the old
+  `kid` MAY be dropped at T+10min per §4.4.
+- **Key A (Ayla access = 15 min, refresh = 90 days):** old-`kid` tokens
+  remain valid long after T+10min. Per §4.3 the old `kid` MUST stay
+  published for the full **14-day overlap** so those tokens keep
+  verifying; drop it only once all old-`kid` tokens have naturally
+  expired. Dropping at T+10min would 401 every still-valid old-`kid`
+  access/refresh token — the outage this runbook exists to prevent.
 
 ```sh
-# [AYLA-SIDE] key A: remove old kid from Ayla JWKS (Ayla-canonical).
-# bot-platform key B: PENDING #258/#569 — manage.py retire_s2s_signing_key <old-kid>
+# [AYLA-SIDE] key A: keep BOTH kids for the §4.3 14-day overlap; remove the
+#   old kid only after old-kid access/refresh tokens have expired (Ayla-canonical).
+# bot-platform key B: at/after T+10min — PENDING (verifier middleware) —
+#   e.g. manage.py retire_s2s_signing_key <old-kid>
 curl -s https://<rotating-side>/.well-known/jwks.json | jq '.keys[].kid'
-# Expect ONLY the new kid now.
+# After retirement, expect ONLY the new kid.
 ```
-
-For **planned** rotation the old `kid` may legitimately linger up to the
-§4.3 14-day overlap (refresh tokens cross rotation boundaries); the
-10-minute minimum is the *floor* for the verifier-cache safety, not a
-mandate to drop at exactly T+10.
 
 ## Verification
 
@@ -152,7 +169,7 @@ How to confirm the rotation did **not** cause a verification outage.
   miss-rate should show one brief, expected bump as caches refresh onto
   the new `kid`, then return to baseline. A **sustained** miss-rate spike
   = verifiers cannot find the signing `kid` = misconfigured rotation.
-  - _PENDING #258_: metric `jwks_cache_fetch_total{result="hit|miss"}`
+  - _PENDING (verifier middleware)_: metric `jwks_cache_fetch_total{result="hit|miss"}`
     and `jwt_verify_failed_total{reason="kid_not_found"}`.
   - **Alert**: page if `kid_not_found` > 0 sustained for >1 cache TTL
     (5 min) after T=0, or if JWKS miss-rate stays elevated >10 min.
@@ -173,8 +190,9 @@ window. Per §4.3 emergency rotation:
 - Immediate new `kid`; **old `kid` removed from JWKS within 60 seconds.**
 - Accept the worst-case ≤5-minute window where tokens forged with the
   leaked key remain valid (until verifier caches expire).
-- Trigger the §7 refresh-token blacklist: mass-blacklist all refresh
-  `jti` issued before the compromise window.
+- Trigger the mass-blacklist directive from §4.3: force-revoke all
+  refresh `jti` issued before the compromise window via the §7
+  refresh-token blacklist.
 - This runbook's planned-rotation timing does NOT apply; follow
   [`security-incident.md`](security-incident.md) and treat the brief
   401 window as acceptable collateral vs. continued exposure.
@@ -202,6 +220,9 @@ Used after every non-trivial run (and every emergency rotation).
 ## Changelog
 
 - _2026-06-03_ — S2 security stream — initial draft (#565 / NS2 item 1).
-  Procedure, dual-`kid` timing, and pre-rotation checklist authoritative;
-  bot-platform-side telemetry commands marked _PENDING #258_ until the JWT
-  verifier middleware + `/.well-known/jwks.json` publisher (#569) land.
+  Status **partial**: procedure, dual-`kid` timing, and pre-rotation
+  checklist authoritative; bot-platform-side telemetry commands marked
+  _PENDING (verifier middleware)_ until the verifier-side middleware
+  (filed alongside #258) + the `/.well-known/jwks.json` key-B publisher
+  (#569) land. Step 4 retirement timing is token-lifetime-aware (key B at
+  T+10min; key A across the §4.3 14-day overlap).
