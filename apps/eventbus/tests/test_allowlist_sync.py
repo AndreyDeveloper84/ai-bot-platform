@@ -28,14 +28,15 @@ other fails CI loudly instead of leaking to runtime as a 400/422 mix-up.
 from __future__ import annotations
 
 import apps.eventbus.ingest_dispatcher as dispatcher_module
-from apps.eventbus.ingest_dispatcher import _KNOWN_NAMES
+from apps.eventbus.ingest_dispatcher import known_event_names
 from apps.eventbus.ingest_envelope import ALLOWED_EVENT_NAMES
 
 
 def test_parse_and_dispatch_allowlists_are_identical() -> None:
-    only_in_parse = ALLOWED_EVENT_NAMES - _KNOWN_NAMES
-    only_in_dispatch = _KNOWN_NAMES - ALLOWED_EVENT_NAMES
-    assert ALLOWED_EVENT_NAMES == _KNOWN_NAMES, (
+    known = known_event_names()
+    only_in_parse = ALLOWED_EVENT_NAMES - known
+    only_in_dispatch = known - ALLOWED_EVENT_NAMES
+    assert ALLOWED_EVENT_NAMES == known, (
         "Event-name allowlists drifted apart — keep "
         "ingest_envelope.ALLOWED_EVENT_NAMES and "
         "ingest_dispatcher._KNOWN_NAMES in sync.\n"
@@ -77,7 +78,7 @@ def test_every_registered_handler_name_is_allowlisted() -> None:
         dispatcher_module._REGISTRY.update(snapshot)
 
     assert handler_names, "Production consumers registered no handlers — investigate."
-    missing = handler_names - (ALLOWED_EVENT_NAMES & _KNOWN_NAMES)
+    missing = handler_names - (ALLOWED_EVENT_NAMES & known_event_names())
     assert not missing, (
         "Registered event handler(s) for name(s) absent from one or both "
         f"allowlists — they can never fire: {sorted(missing)}. Add the "

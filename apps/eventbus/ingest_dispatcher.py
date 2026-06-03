@@ -178,6 +178,18 @@ _KNOWN_NAMES: Final[frozenset[str]] = frozenset(
 )
 
 
+def known_event_names() -> frozenset[str]:
+    """Return the §3 closed-set of dispatchable event names.
+
+    Public seam over ``_KNOWN_NAMES`` for tests and introspection
+    (mirrors :func:`registered_handlers`). The set is frozen, so the
+    object can be returned directly without a defensive copy. Callers
+    that need to assert the parse↔dispatch allowlist sync should use
+    this rather than reaching through the private name.
+    """
+    return _KNOWN_NAMES
+
+
 def dispatch_envelope(envelope: IngestEnvelope) -> DispatchResult:
     """Run the registered handler for ``envelope`` with dedupe + DLQ.
 
