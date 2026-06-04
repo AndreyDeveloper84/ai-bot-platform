@@ -2,6 +2,8 @@
 
 > Read this before opening files. It captures the project rules that are NOT obvious from the code or git history.
 > If something here contradicts an ADR or the active sprint plan, follow the more recent source — and update this doc.
+>
+> **For the authoritative current state of the platform (what exists / what does not / what blocks us) and the roadmap to MVP, see [`docs/MVP_STATE_AND_ROADMAP.md`](docs/MVP_STATE_AND_ROADMAP.md) (2026-06-04).** Where any "spec alignment" / status table disagrees with that document, that document wins.
 
 ---
 
