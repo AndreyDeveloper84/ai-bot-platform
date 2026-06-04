@@ -98,7 +98,7 @@ Ordered by impact on the vision.
 **MVP = a launchable Penza pilot that IS a (small) multi-tenant marketplace** — several independent salons (= several tenants), one Ayla bot that finds a master across them and books via Ayla. Released in stages (tech-lead decision 2026-06-04):
 
 - **① Technical Go-Live = M0 + FOUNDATION + P1 + P2 + P0/P3** — the cross-salon **booking chain**: one tenant-less bot finds a master across the pilot salons (cross-tenant discovery), enters the chosen master's tenant, books **through Ayla** (not YClients), correct slots, **no double-booking** (incl. provider walk-in), reschedule/cancel, salon sees it. Validates the riskiest unknowns (cross-tenant routing + booking on Ayla) on real users.
-- **② Product Go-Live = + MEM-lite + ENGAGE-lite** (fast-follow) — light **cross-channel** memory + recommendations/nudges so Ayla feels like Ayla. Does **not** block ①.
+- **② Product Go-Live = + MEM-lite + ENGAGE-lite + WELLNESS** (fast-follow) — light **cross-channel** memory + recommendations/nudges, plus the **daily-hook wellness skills** (food scanner / water / nutrition / health — mostly built) wired to memory. So Ayla feels like Ayla. Does **not** block ①.
 
 Everything in §4 not in a milestone above is **post-MVP** (provider self-serve onboarding G6, analytics/payouts G7, P4 hardening, rebrand).
 
