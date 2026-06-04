@@ -19,6 +19,24 @@
 - **Tenant isolation is the safety invariant** (`STRICT_TENANT_SCOPE`, `TenantScopedManager` → `CrossTenantError`), hardened this session (PRs #995/#998/#1000/#1009) and enforced by the import-boundary linter (#1011).
 - **Lock to a salon only at booking.** Discovery runs tenant-less (`current_tenant()=None`, blessed for global scope). Cross-tenant discovery is a **public, read-only carve-out** (`all_tenants`, public fields only); all commercial reads/writes stay tenant-scoped.
 - **AI conversation engine = `ayla-ai-core` v0.8.1** (frozen): `AIConcierge` orchestrator, provider-agnostic UUID-ready tool schemas, anti-hallucination dispatch, built-in Claude adapter, `AYLA_MARKETPLACE_VOICE`. Use as-is; do not modify during freeze.
+- **Memory, recommendations & personalization are CHANNEL-INDEPENDENT PLATFORM SERVICES — not bot features.** They are owned by the AI runtime (`ai-bot-platform` + `ayla-ai-core`, per ADR-0009) and exposed via API, consumed **identically by every channel**: the MAX bot, the Mini App, and the **mobile app** (the mobile app reaches them through `beautygo_backend` proxying to the personalization/recommendation API). The bot is *one* channel into Ayla's memory — memory must never live only in the bot. North Star «AI, который помнит. Всегда.» = the **same** memory + recommendations on every surface (bot chat, mobile home screen, Mini App, booking assistant). A request like the mobile `GET /api/v1/customer/home` and a bot turn must draw on the same context (preferences, history, favourite masters, constraints, wellness signals).
+
+```
+beautygo_backend  = source of truth (schedule, catalog, bookings, payments, profiles)
+ayla-ai-core      = AI logic: memory, recommendations, reasoning, anti-hallucination
+MAX bot           = conversational channel  ─┐
+Mobile app / Mini App = visual channel (DRF) ─┴─► both consume the SAME memory + AI via API
+```
+
+## Decisions — confirmed 2026-06-04 (tech lead)
+
+1. **One Ayla for all salons** — not a bot-per-salon, not an aggregator. Locked.
+2. **Ayla backend is the single source of truth** for bookings + schedule; the bot is a REST mirror, never a CRM/booking store.
+3. **Pilot is staged:** **① Technical Go-Live = M0 + FOUNDATION + P0** (iron the booking chain on Ayla first); **② Product Go-Live = + MEM-lite + ENGAGE-lite** as a fast-follow. Do **not** block the first live test on the full memory/nudge build.
+4. **Provider walk-in / manual booking is IN P0** (minimal: name · phone optional · service · time · master — no CRM/payment), to prevent double-booking.
+5. **Cross-tenant marketplace is NOT in the first Penza pilot**, but the foundation is built forward-compatible.
+6. **Memory & recommendations are platform capabilities, not bot-only** — bot and mobile app consume the same Ayla memory/recommendation/personalization via backend APIs (see the trunk bullet above). The mobile app must never become a "dumb витрина" while the magic lives only in MAX.
+7. **Status-honesty rule** — never write "done" when only the spec is done (see §6).
 
 ---
 
@@ -62,7 +80,7 @@ Ordered by impact on the vision.
 | # | Gap / blocker | Detail | Impact |
 |---|---|---|---|
 | **G1** | **Bot booking runs on YClients + single-tenant, not Ayla, not cross-salon** | `apps/skills/booking` resolves slots from YClients (dormant until `YCLIENTS_*`) and writes a local `BookingRequest`; bound to one tenant via `MAX_BOT_TENANT_SLUG`. Three divergent availability stores (Ayla native / bot-YClients / bot-own-scheduling), none reads Ayla `/slots`. | **Blocks the trunk + marketplace.** This is P0. |
-| **G2** | **Long-term memory NOT wired into conversation** | `UserPersonalContext`/`MemoryEntry` have **zero runtime references** in skills/orchestrator. North Star "AI который помнит" does **not function in chat** today (only short-term + RFM snapshot is live). | **Kills the headline differentiator.** |
+| **G2** | **Long-term memory NOT wired into runtime AI — across ANY channel** | `UserPersonalContext`/`MemoryEntry` have **zero runtime references** in skills/orchestrator. The infrastructure exists but is not wired into runtime AI experiences on **any** surface: bot chat, mobile app, Mini App, recommendation/home screens, the booking assistant. Memory is a **channel-independent platform capability**, not bot-only; today it feeds none (only short-term + RFM snapshot is live). | **Kills the headline differentiator on every channel.** |
 | **G3** | **No cross-tenant marketplace index** | `CatalogMaster`/`CatalogService` are per-tenant mirrors (`TenantScopedManager`). Discovery is within-tenant only. No nationwide search a master "joins." | **Blocks "finds a master across all salons."** |
 | **G4** | **No in-chat `recommend_services`; no proactive nudge engine** | `recommend_services` + a rich nudge engine (repeat-offer, win-back, re-engagement, care-by-health-signal, cross-promo — 11 classes) exist in `formula_tela`, **absent in platform**. Platform has only fixed reminders + one day-after nudge. `cross_domain` (mixed-intent) is a stub. | Weakens matching ("paralysis of choice") + retention. |
 | **G5** | **No provider manual/walk-in booking** | `appointments.create()` forbids non-clients. A salon can't enter a phone/walk-in booking into its own diary. If the salon books outside Ayla, the bot's slots go stale → **double-booking risk**. | Table-stakes for real salons; pilot risk. |
@@ -76,12 +94,13 @@ Ordered by impact on the vision.
 
 ## 5. MVP definition & cut-line
 
-**MVP = a launchable Penza pilot that proves the model and is forward-compatible to the nationwide marketplace.** Released in two stages:
+**MVP = a launchable Penza pilot that proves the model and is forward-compatible to the nationwide marketplace.** Released in stages (tech-lead decision 2026-06-04):
 
-- **MVP-Pilot (single-salon, validate the funnel + differentiator):** the bot books *one* Penza salon through **Ayla** (not YClients), with **live memory** and **engagement nudges**. Proves the riskiest unknowns (chat-booking on Ayla + memory) on real users. This is the cut-line for "go live."
-- **MVP-Marketplace (cross-salon):** adds cross-tenant discovery + tenant-less bot + handoff. This is the actual vision; built in parallel, flipped on when ready.
+- **① Technical Go-Live = M0 + FOUNDATION + P0** — the iron booking chain: the bot books *one* Penza salon **through Ayla** (not YClients), correct slots, **no double-booking** (incl. provider walk-in), client can reschedule/cancel, salon sees the booking. Validates the riskiest unknown (booking on Ayla) first, on real users.
+- **② Product Go-Live = + MEM-lite + ENGAGE-lite** (fast-follow) — adds light **cross-channel** memory + light recommendations/nudges so Ayla feels like Ayla, not a plain booking bot. Does **not** block ①.
+- **③ MVP-Marketplace = + P1 + P2 + P3** — cross-tenant discovery + tenant-less bot + handoff. The actual vision; built in parallel, flipped on when ready. **Not** in the first Penza pilot.
 
-Everything in §4 that is **not** in a milestone below is explicitly **post-MVP**.
+Everything in §4 not in a milestone below is **post-MVP**.
 
 ---
 
@@ -96,6 +115,14 @@ The "planned-as-done" pattern (a roadmap target cited as implemented) created re
 5. **Three availability stores** — no doc states which of Ayla-native / bot-YClients / bot-own-scheduling is canonical. This document fixes it: **Ayla is canonical; the others are divergences to retire** (G1).
 
 **Action:** add a pointer to this document at the top of both `CLAUDE.md` files; apply corrections 2–3 to the `beautygo_backend` spec-alignment table; promote #1014 to an ADR. (Done where safe in this PR; CLAUDE.md behavioural edits proposed for tech-lead sign-off.)
+
+### Status-honesty rule (adopt going forward)
+
+Docs must **never** write "done"/"implemented" when only the spec or a model exists. Every capability carries an explicit status:
+
+**`designed` → `implemented` → `wired` → `tested` → `production-ready`**
+
+"Implemented" ≠ "wired" (cf. G2: memory is *implemented* but not *wired*). This single rule prevents the planned-as-done disease that caused this session's confusion.
 
 ---
 
@@ -124,11 +151,12 @@ The shared spine for P0 + P1.
 - **Acceptance:** end-to-end chat booking in the Penza salon, slots + writes through Ayla; no double-booking with walk-ins.
 - Owner: 1 bot stream + S2 (Ayla).
 
-### MEM — Wire long-term memory into chat · M · (G2)
-- Read `UserPersonalContext`/relevant `MemoryEntry` into the prompt context-builder; write via `memory_writer` with the anti-spam rules (1 field/session, cooldown, zones).
+### MEM — Wire long-term memory as a CHANNEL-INDEPENDENT service · M · (G2)
+- Expose memory + recommendation/personalization as a **platform API** (in the AI runtime), not a bot-internal hook. Read `UserPersonalContext`/relevant `MemoryEntry` into the context-builder; write via `memory_writer` (anti-spam: 1 field/session, cooldown, zones).
+- **Consume the same service from every channel:** the MAX bot turn, the Mini App, and the **mobile app** (mobile reaches it via `beautygo_backend` proxy, e.g. `GET /api/v1/customer/home` returns personalised blocks: next booking, daily info, Ayla recommendation, suitable services, reminder).
 - Surface memory in `recommend`/`show_masters` ("как обычно к Анне", "рядом с офисом").
-- **Acceptance:** the bot demonstrably remembers a preference across sessions and uses it; 152-ФЗ "забудь X" works.
-- Owner: 1 stream. (Highest-differentiator; can run parallel to P0.)
+- **Acceptance:** the bot **and** the mobile/Mini-App home demonstrably draw on the **same** remembered preference across sessions; 152-ФЗ "забудь X" works on all surfaces. *(MEM-lite for ② = a thin first cut: read top preferences + favourite master into context; full memory schema is the fast-follow.)*
+- Owner: 1 stream. (Headline differentiator; can run parallel to P0.)
 
 ### ENGAGE — Port matching + nudges · M · (G4)
 - Port `recommend_services` (goal-based) as an in-chat tool.
@@ -169,11 +197,14 @@ ENGAGE (recommend + nudges) ─────────────────�
 POST-MVP: PROV, P4, rebrand — parallel, off critical path
 ```
 
-## 9. Open decisions (tech lead)
+## 9. Decisions
+
+**Resolved 2026-06-04 (see the Decisions block in §2):**
+- ✅ One Ayla for all salons. ✅ Ayla backend = SoR for bookings/schedule. ✅ Pilot staged: ① Technical Go-Live `M0+FOUNDATION+P0`, ② Product Go-Live `+MEM-lite+ENGAGE-lite` fast-follow. ✅ Provider walk-in IN P0 (minimal). ✅ Marketplace not in first Penza pilot, foundation forward-compatible. ✅ Memory/recommendations = channel-independent platform service (bot + mobile + Mini App). ✅ This doc = top source of truth. ✅ Status-honesty rule (§6).
+
+**Still open (do not block ①):**
 1. **Freeze exception** for the marketplace track (P1+). P0/MEM/ENGAGE are conformance/MVP and can start now.
-2. **`BookingRequest` local write** — sanctioned carve-out (#427) or latent ADR-0009 violation? P0 redirects to Ayla REST regardless.
-3. **MVP-Pilot scope** — confirm the cut-line (M0+FOUNDATION+P0+MEM+ENGAGE) vs a leaner "book-only" first cut (drop MEM/ENGAGE to a fast-follow).
-4. **Provider walk-in booking** — in P0 (recommended, avoids double-booking) or fast-follow?
+2. **`BookingRequest` local write** — sanctioned carve-out (#427) or latent ADR-0009 violation? P0 redirects to Ayla REST regardless (orchestrator to verify during P0 scoping).
 
 ---
 
