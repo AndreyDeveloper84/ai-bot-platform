@@ -98,7 +98,7 @@ Ordered by impact on the vision.
 **MVP = a launchable Penza pilot that IS a (small) multi-tenant marketplace** — several independent salons (= several tenants), one Ayla bot that finds a master across them and books via Ayla. Released in stages (tech-lead decision 2026-06-04):
 
 - **① Technical Go-Live = M0 + FOUNDATION + P1 + P2 + P0/P3** — the cross-salon **booking chain**: one tenant-less bot finds a master across the pilot salons (cross-tenant discovery), enters the chosen master's tenant, books **through Ayla** (not YClients), correct slots, **no double-booking** (incl. provider walk-in), reschedule/cancel, salon sees it. Validates the riskiest unknowns (cross-tenant routing + booking on Ayla) on real users.
-- **② Product Go-Live = + MEM-lite + ENGAGE-lite + WELLNESS** (fast-follow) — light **cross-channel** memory + recommendations/nudges, plus the **daily-hook wellness skills** (food scanner / water / nutrition / health — mostly built) wired to memory. So Ayla feels like Ayla. Does **not** block ①.
+- **② Product Go-Live = + MEM-lite + ENGAGE-lite + WELLNESS-lite** (fast-follow). **WELLNESS-lite = safe daily-hook only** — food logging/scanning + water tracking, wired to memory; **EXCLUDED from lite (post-pilot, needs 152-ФЗ + medical-advice compliance): nutrition advice, `health_screening`, Tier-B health-signal FSM, nutrition reports, medical recommendations.** **ENGAGE-lite = safe nudges only** (booking/retention: continuation, repeat-offer, win-back, returning, weekly-unlock) + `recommend_services` (**beauty only**); **NOT** the full 11-class engine — no `health_concern_*`, no care-by-health-signal, no Tier-B triggers. Does **not** block ①.
 
 Everything in §4 not in a milestone above is **post-MVP** (provider self-serve onboarding G6, analytics/payouts G7, P4 hardening, rebrand).
 
@@ -158,11 +158,11 @@ The shared spine for P0 + P1.
 - **Acceptance:** the bot **and** the mobile/Mini-App home demonstrably draw on the **same** remembered preference across sessions; 152-ФЗ "забудь X" works on all surfaces. *(MEM-lite for ② = a thin first cut: read top preferences + favourite master into context; full memory schema is the fast-follow.)*
 - Owner: 1 stream. (Headline differentiator; can run parallel to P0.)
 
-### ENGAGE — Port matching + nudges · M · (G4)
-- Port `recommend_services` (goal-based) as an in-chat tool.
-- Port the `formula_tela` nudge engine (repeat-offer, win-back, re-engagement, care-by-health-signal, cross-promo) onto Ayla events.
+### ENGAGE — Port matching + SAFE nudges · M · (G4)
+- Port `recommend_services` (goal-based, **beauty services only**) as an in-chat tool.
+- **ENGAGE-lite (pilot) = SAFE nudges only:** `booking_continuation`, `repeat-offer`, `win-back`/`reengagement`, `returning_success`, `weekly_unlock`. **EXCLUDED from lite:** the full 11-class engine — `health_concern_{high,med,low}`, any care-by-**health-signal** nudge, Tier-B-driven triggers (medical / 152-ФЗ → post-pilot after compliance).
 - (Optional) adopt `ayla-ai-core` `AIConcierge` spine + Claude adapter as a consolidation.
-- **Acceptance:** AI recommends from "paralysis of choice"; proactive repeat/win-back nudges fire on real lifecycle events.
+- **Acceptance:** AI recommends beauty services; safe booking/retention nudges fire on lifecycle events; **no** health/medical nudges.
 
 > **② Product Go-Live (fast-follow) = MEM-lite + ENGAGE-lite** — added after ① Technical Go-Live; does not block it.
 
@@ -197,6 +197,21 @@ M0 (ops: onboard the pilot salons as tenants + MAX)
                     └─► + MEM-lite + ENGAGE-lite ─► ② PRODUCT GO-LIVE
 POST-MVP (parallel, off critical path): PROV (self-serve onboarding, analytics/payouts) · P4 hardening · rebrand
 ```
+
+## Time estimates — ① Technical Go-Live (rough)
+
+Per one focused stream; assumes parallel streams + reuse of the existing #218–#401 backlog + the proven `ayla-ai-core` concierge; **not** false precision.
+
+| Phase | Estimate | Notes |
+|---|---|---|
+| **M0** ops/onboarding | 3–5 days | config + onboard pilot salons; **+ external lead time for MAX app registration** |
+| **FOUNDATION** (#1016) | 1–2 weeks | engine exists; build the REST client + expose Ayla internal endpoints (cross-repo: bot + S2) |
+| **P0** reground + walk-in (#1017) | 2–3 weeks | repoint booking skill to Ayla REST + walk-in + verify #307–#324 reuse; depends on FOUNDATION |
+| **P1** marketplace (#1018) | 1–1.5 weeks | new `apps/marketplace` + DTO + `Tenant.city` + linter contract · ∥ P2 |
+| **P2** tenant-less (#1019) | 1–1.5 weeks | ingress + sentinel `BotUser` + defer `tenant_scope` · ∥ P1 |
+| **P3** handoff (#1020) | ~1 week | wire discovery→booking; after P1+P2+P0 |
+
+**Critical path (parallelised): ≈ 4–6 weeks to ① Technical Go-Live.** Biggest variables: MAX provisioning lead time (external), how much of #307–#324 is already done (could shorten P0), cross-repo coordination + review gates. ② Product (MEM/ENGAGE/WELLNESS-lite) is a separate fast-follow, not in this estimate.
 
 ## 9. Decisions
 
