@@ -32,11 +32,12 @@ Mobile app / Mini App = visual channel (DRF) ─┴─► both consume the SAME 
 
 1. **One Ayla for all salons** — not a bot-per-salon, not an aggregator. Locked.
 2. **Ayla backend is the single source of truth** for bookings + schedule; the bot is a REST mirror, never a CRM/booking store.
-3. **Pilot is staged:** **① Technical Go-Live = M0 + FOUNDATION + P0** (iron the booking chain on Ayla first); **② Product Go-Live = + MEM-lite + ENGAGE-lite** as a fast-follow. Do **not** block the first live test on the full memory/nudge build.
-4. **Provider walk-in / manual booking is IN P0** (minimal: name · phone optional · service · time · master — no CRM/payment), to prevent double-booking.
-5. **Cross-tenant marketplace is NOT in the first Penza pilot**, but the foundation is built forward-compatible.
-6. **Memory & recommendations are platform capabilities, not bot-only** — bot and mobile app consume the same Ayla memory/recommendation/personalization via backend APIs (see the trunk bullet above). The mobile app must never become a "dumb витрина" while the magic lives only in MAX.
-7. **Status-honesty rule** — never write "done" when only the spec is done (see §6).
+3. **The pilot is a MULTI-TENANT marketplace from day one** — several **independent** salons = several tenants; one bot finds a master across them. **P1–P3 (cross-tenant discovery + tenant-less bot + handoff) are IN the pilot critical path**, not deferred. **Freeze exception for the marketplace track: GRANTED.**
+4. **Staged go-live (within marketplace scope):** **① Technical Go-Live** = the cross-salon **booking chain** on Ayla — `M0 + FOUNDATION + P1 + P2 + P0/P3` (find a master across salons → book via Ayla → no double-booking). **② Product Go-Live** = `+ MEM-lite + ENGAGE-lite`, fast-follow; does not block ①.
+5. **Provider walk-in / manual booking is IN P0** (minimal: name · phone optional · service · time · master — no CRM/payment), to prevent double-booking.
+6. **Memory & recommendations are platform capabilities, not bot-only** — bot and mobile app consume the same Ayla memory/recommendation/personalization via backend APIs (trunk bullet above). The mobile app must never become a "dumb витрина" while the magic lives only in MAX.
+7. **`BookingRequest` is a sanctioned MIRROR, not a violation** — ADR-0009 #1 permits mirrors (its docstring: "Mirrors mysite…BookingRequest"). The real deviation is booking created in **YClients, not Ayla**; P0 repoints `confirm_booking` to Ayla REST (the move #427 already made for payments), and `BookingRequest` then mirrors Ayla.
+8. **Status-honesty rule** — never write "done" when only the spec is done (see §6).
 
 ---
 
@@ -94,13 +95,12 @@ Ordered by impact on the vision.
 
 ## 5. MVP definition & cut-line
 
-**MVP = a launchable Penza pilot that proves the model and is forward-compatible to the nationwide marketplace.** Released in stages (tech-lead decision 2026-06-04):
+**MVP = a launchable Penza pilot that IS a (small) multi-tenant marketplace** — several independent salons (= several tenants), one Ayla bot that finds a master across them and books via Ayla. Released in stages (tech-lead decision 2026-06-04):
 
-- **① Technical Go-Live = M0 + FOUNDATION + P0** — the iron booking chain: the bot books *one* Penza salon **through Ayla** (not YClients), correct slots, **no double-booking** (incl. provider walk-in), client can reschedule/cancel, salon sees the booking. Validates the riskiest unknown (booking on Ayla) first, on real users.
-- **② Product Go-Live = + MEM-lite + ENGAGE-lite** (fast-follow) — adds light **cross-channel** memory + light recommendations/nudges so Ayla feels like Ayla, not a plain booking bot. Does **not** block ①.
-- **③ MVP-Marketplace = + P1 + P2 + P3** — cross-tenant discovery + tenant-less bot + handoff. The actual vision; built in parallel, flipped on when ready. **Not** in the first Penza pilot.
+- **① Technical Go-Live = M0 + FOUNDATION + P1 + P2 + P0/P3** — the cross-salon **booking chain**: one tenant-less bot finds a master across the pilot salons (cross-tenant discovery), enters the chosen master's tenant, books **through Ayla** (not YClients), correct slots, **no double-booking** (incl. provider walk-in), reschedule/cancel, salon sees it. Validates the riskiest unknowns (cross-tenant routing + booking on Ayla) on real users.
+- **② Product Go-Live = + MEM-lite + ENGAGE-lite** (fast-follow) — light **cross-channel** memory + recommendations/nudges so Ayla feels like Ayla. Does **not** block ①.
 
-Everything in §4 not in a milestone below is **post-MVP**.
+Everything in §4 not in a milestone above is **post-MVP** (provider self-serve onboarding G6, analytics/payouts G7, P4 hardening, rebrand).
 
 ---
 
@@ -164,11 +164,11 @@ The shared spine for P0 + P1.
 - (Optional) adopt `ayla-ai-core` `AIConcierge` spine + Claude adapter as a consolidation.
 - **Acceptance:** AI recommends from "paralysis of choice"; proactive repeat/win-back nudges fire on real lifecycle events.
 
-> **MVP-Pilot cut-line = M0 + FOUNDATION + P0 + MEM + ENGAGE.** Single Penza salon, booking on Ayla, memory live, engagement. Go-live candidate.
+> **② Product Go-Live (fast-follow) = MEM-lite + ENGAGE-lite** — added after ① Technical Go-Live; does not block it.
 
 ### P1 — Cross-tenant catalog discovery · M · (G3)
 - `apps/marketplace/` — sole sanctioned `all_tenants` discovery carve-out; public-field DTO; `Tenant.city`/geo; linter #1011 contract (cross-tenant catalog reads only from `apps/marketplace/*`).
-- **Freeze:** new capability — needs an explicit Phase-0 freeze exception.
+- **Freeze:** exception **GRANTED** 2026-06-04. P1–P3 are **in the pilot critical path** (multi-tenant pilot).
 
 ### P2 — Tenant-less bot + global identity · M
 - Global-bot ingress (no `tenant_scope` at entry); sentinel-tenant global `BotUser` (no migration); defer `tenant_scope` out of the miniapp decorator into booking endpoints.
@@ -176,7 +176,7 @@ The shared spine for P0 + P1.
 ### P3 — Discovery → booking handoff · M · (depends P1+P2)
 - `show_masters` → marketplace index (cross-tenant); `confirm_booking` enters `tenant_scope(master.tenant)`.
 
-> **MVP-Marketplace = + P1 + P2 + P3.** One bot finds a master across salons and books. The vision, live.
+> **① Technical Go-Live (the multi-tenant pilot) = M0 + FOUNDATION + P1 + P2 + P0/P3.** One bot finds a master across the pilot salons and books via Ayla. **This IS the pilot** (not a later phase).
 
 ### POST-MVP (parallelisable, not on the critical path)
 - **PROV**: self-serve provider onboarding + multi-master salon management (G6); provider analytics + payout ledger (G7).
@@ -188,23 +188,22 @@ The shared spine for P0 + P1.
 ## 8. Sequencing
 
 ```
-M0 (ops) ─┐
-          ├─► FOUNDATION (Ayla REST client) ─┬─► P0 (reground booking) ──┐
-          │                                  └─► P1 (catalog discovery)  │
-MEM (memory) ──────────────────────────────────────────────────────────┤► MVP-Pilot go-live
-ENGAGE (recommend + nudges) ────────────────────────────────────────────┘
-                              P0+P1 ─► P2 (tenant-less) ─► P3 (handoff) ─► MVP-Marketplace
-POST-MVP: PROV, P4, rebrand — parallel, off critical path
+M0 (ops: onboard the pilot salons as tenants + MAX)
+  └─► FOUNDATION (bot↔Ayla REST client: slots / catalog / booking)
+        ├─► P1 (cross-tenant catalog discovery)
+        ├─► P2 (tenant-less bot + global identity)
+        └─► P0/P3 (reground booking on Ayla + handoff into chosen master's tenant)
+              └─► ① TECHNICAL GO-LIVE — cross-salon booking chain (multi-tenant pilot)
+                    └─► + MEM-lite + ENGAGE-lite ─► ② PRODUCT GO-LIVE
+POST-MVP (parallel, off critical path): PROV (self-serve onboarding, analytics/payouts) · P4 hardening · rebrand
 ```
 
 ## 9. Decisions
 
 **Resolved 2026-06-04 (see the Decisions block in §2):**
-- ✅ One Ayla for all salons. ✅ Ayla backend = SoR for bookings/schedule. ✅ Pilot staged: ① Technical Go-Live `M0+FOUNDATION+P0`, ② Product Go-Live `+MEM-lite+ENGAGE-lite` fast-follow. ✅ Provider walk-in IN P0 (minimal). ✅ Marketplace not in first Penza pilot, foundation forward-compatible. ✅ Memory/recommendations = channel-independent platform service (bot + mobile + Mini App). ✅ This doc = top source of truth. ✅ Status-honesty rule (§6).
+- ✅ One Ayla for all salons. ✅ Ayla backend = SoR for bookings/schedule. ✅ **Pilot = multi-tenant marketplace; P1–P3 in the pilot critical path; freeze exception for the marketplace track GRANTED.** ✅ Staged: ① Technical Go-Live `M0+FOUNDATION+P1+P2+P0/P3`, ② Product Go-Live `+MEM-lite+ENGAGE-lite` fast-follow. ✅ Provider walk-in IN P0. ✅ Memory/recommendations = channel-independent platform service (bot + mobile + Mini App). ✅ **`BookingRequest` = sanctioned mirror, not a violation; P0 repoints booking creation to Ayla REST.** ✅ This doc = top source of truth. ✅ Status-honesty rule (§6).
 
-**Still open (do not block ①):**
-1. **Freeze exception** for the marketplace track (P1+). P0/MEM/ENGAGE are conformance/MVP and can start now.
-2. **`BookingRequest` local write** — sanctioned carve-out (#427) or latent ADR-0009 violation? P0 redirects to Ayla REST regardless (orchestrator to verify during P0 scoping).
+**No open blockers.** Next: break ① Technical Go-Live into sub-tickets (`M0`, `FOUNDATION`, `P1`, `P2`, `P0/P3`) and dispatch to streams.
 
 ---
 
