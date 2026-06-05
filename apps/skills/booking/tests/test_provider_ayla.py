@@ -275,8 +275,14 @@ class TestWrites:
         assert fake.calls[0]["appointment_id"] == "777"
 
     def test_non_numeric_appointment_id_raises_yclients_error(self) -> None:
+        # INTERIM placeholder behaviour: canonical Ayla appointment_id is a
+        # UUID (contract §8 cutover prerequisite #1). Until the bot side
+        # accepts UUIDs, a non-numeric id fails loudly rather than corrupting
+        # the int-keyed mirror. Uses a UUID to document the real shape.
         fake = FakeAylaBooking()
-        fake.create_response = AylaBookingRecord(appointment_id="a1b2c3", raw={})
+        fake.create_response = AylaBookingRecord(
+            appointment_id="3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34", raw={}
+        )
         with pytest.raises(YClientsAPIError, match="not_numeric"):
             _adapter(fake).create_record(
                 staff_id=11,

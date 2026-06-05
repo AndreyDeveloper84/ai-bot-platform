@@ -80,20 +80,24 @@ def get_booking_provider(*, bot_user: Any) -> Any:
 
 
 def _appointment_id_to_int(appointment_id: str) -> int:
-    """Map an Ayla canonical appointment id onto the int the tools expect.
+    """Map an Ayla appointment id onto the int the tools expect — INTERIM.
 
     The booking tools (and ``BookingRecord``/``UserRecord``/the mirror marker
-    ``yclients_record_id=<id>``) are int-keyed. Ayla appointment ids are
-    strings; numeric ids round-trip losslessly. A non-numeric id can't be
-    represented in the current int-centric tooling — we fail loudly rather
-    than silently corrupt the mirror. See the open item in
-    ``docs/architecture/ayla-booking-rest-contract.md`` §8 (numeric-compatible
-    id, or evolve the tooling to a str key, at contract lock).
+    ``yclients_record_id=<id>``) are int-keyed. The canonical Ayla
+    ``appointment_id`` is a **UUID** (event-contract / ``ayla-ai-core``), so
+    this numeric mapping is a deliberate placeholder for the flag-OFF skeleton
+    phase: it round-trips numeric ids and fails loudly on anything else rather
+    than silently corrupt the mirror.
+
+    **Before the httpx implementation + cutover** the bot side must accept a
+    UUID/string ``appointment_id`` (local mirror keeps its own int PK; the
+    Ayla-id column stores the UUID). Tracked as cutover prerequisite #1 in
+    ``docs/architecture/ayla-booking-rest-contract.md`` §8.
     """
     if not appointment_id.isdigit():
         raise YClientsAPIError(
-            f"ayla_appointment_id_not_numeric: {appointment_id!r} — see booking REST "
-            "contract §8 (mirror is int-keyed)"
+            f"ayla_appointment_id_not_numeric: {appointment_id!r} — interim numeric "
+            "placeholder; UUID support is cutover prerequisite #1 (booking REST contract §8)"
         )
     return int(appointment_id)
 
