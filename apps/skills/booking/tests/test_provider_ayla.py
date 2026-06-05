@@ -258,7 +258,7 @@ class TestWrites:
 
     def test_create_record_idempotency_key_is_deterministic(self) -> None:
         fake1, fake2 = FakeAylaBooking(), FakeAylaBooking()
-        kwargs = dict(
+        kwargs: dict[str, Any] = dict(
             staff_id=11,
             services=[10],
             datetime="2026-06-10T14:00:00",
