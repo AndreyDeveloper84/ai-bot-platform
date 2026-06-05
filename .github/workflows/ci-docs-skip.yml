@@ -1,0 +1,97 @@
+# Sister workflow to ci.yml — reports the required "pytest + ruff + mypy"
+# check as success WHEN AND ONLY WHEN the PR touches *only* docs/** or *.md.
+#
+# Why exists:
+#   - ci.yml has paths-ignore for docs/** so docs-only PRs don't consume
+#     CI minutes (and don't fail when Actions billing is blocked).
+#   - Branch protection still requires "pytest + ruff + mypy" check to land.
+#   - Without this sister workflow, docs PRs would block forever
+#     because the required check never reports.
+#
+# Mixed-PR safety (the path-filter gotcha):
+#   GitHub Actions `paths:` is OR-semantics — the workflow triggers if AT
+#   LEAST ONE changed file matches. A PR touching both docs/** AND code
+#   would fire BOTH this workflow AND ci.yml, and this one would
+#   false-positively report success in ~4s while the real CI ran for 60s.
+#   That meant a real CI fail could be masked by this no-op pass.
+#
+#   Fix: trigger broadly, but DETECT inside the job whether the PR is
+#   truly docs-only via `git diff`. If mixed → self-cancel the run so
+#   the check shows as "cancelled" (not "pass") and only ci.yml's
+#   verdict counts. If truly docs-only → confirm and report success.
+
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - "docs/**"
+      - "**/*.md"
+
+permissions:
+  actions: write   # required for self-cancel via `gh run cancel`
+  contents: read
+
+jobs:
+  test:
+    name: pytest + ruff + mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only vs mixed
+        id: detect
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # Fetch the PR base ref so the diff has a target.
+          git fetch origin "$BASE_REF" --depth=1
+          BASE_SHA="$(git rev-parse "origin/$BASE_REF")"
+          # Files changed in this PR (vs merge-base with base).
+          CHANGED="$(git diff --name-only "$BASE_SHA"...HEAD || true)"
+          if [ -z "$CHANGED" ]; then
+            # No diff (shouldn't happen for a PR; treat as docs-only no-op).
+            echo "::warning::No changed files detected — treating as docs-only no-op."
+            echo "is_docs_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Filter out files that ARE in docs/ OR end in .md anywhere.
+          NON_DOCS="$(echo "$CHANGED" | grep -vE '^docs/|\.md$' || true)"
+          if [ -z "$NON_DOCS" ]; then
+            echo "is_docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "All ${CHANGED} change(s) are in docs/** or *.md. Engineering CI not needed."
+          else
+            echo "is_docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Mixed PR — non-docs files detected. Real ci.yml will run; cancelling this docs-skip run to avoid duplicate-check false-positive."
+            echo "Non-docs files:"
+            echo "$NON_DOCS"
+          fi
+
+      - name: Confirm docs-only success
+        if: steps.detect.outputs.is_docs_only == 'true'
+        run: echo "✓ Docs-only PR — engineering CI not needed. Reporting success to satisfy required-check branch protection."
+
+      - name: Mixed PR — self-cancel so ci.yml is the only authority
+        if: steps.detect.outputs.is_docs_only == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Self-cancelling: this PR has non-docs changes, so the real ci.yml workflow must be the source of truth for the 'pytest + ruff + mypy' check."
+          gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}"
+          # Cancellation is async; loop until the runner terminates us.
+          for i in $(seq 1 30); do
+            echo "Waiting for cancellation to propagate ($i/30)..."
+            sleep 2
+          done
+          # Defensive fallback — fail loudly if cancel didn't take effect,
+          # so we never silently report success on a mixed PR.
+          echo "::error::gh run cancel did not stop the job after 60s. Failing to avoid masking real CI."
+          exit 1

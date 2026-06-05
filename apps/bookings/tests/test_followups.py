@@ -593,6 +593,7 @@ class TestEmptyQueue:
             "sent": 0,
             "skipped_already_sent": 0,
             "skipped_no_chat_id": 0,
+            "skipped_blocked": 0,
             "send_failed": 0,
         }
         mock_send.assert_not_called()
@@ -696,3 +697,336 @@ class TestMoscowWindow:
         assert today_msk.isoformat() == "2026-05-16"
         assert start_utc == datetime(2026, 5, 14, 21, 0, tzinfo=dt_timezone.utc)
         assert end_utc == datetime(2026, 5, 15, 21, 0, tzinfo=dt_timezone.utc)
+
+
+# ────────────────────────────────────────────────────────────────────
+# B11 conservative blockers (P0 PRE_PILOT, founder sequence #3)
+# ────────────────────────────────────────────────────────────────────
+
+
+def _make_booking_for_followup(
+    *,
+    tenant: Tenant,
+    bot_user: BotUser,
+    completed_at=None,
+    status: str | None = None,
+):
+    """Helper — create a BookingRequest row to exercise B11 blockers."""
+    from apps.booking.models import BookingRequest
+
+    return BookingRequest.all_tenants.create(
+        tenant=tenant,
+        bot_user=bot_user,
+        service_name="Массаж",
+        master_name="Lera",
+        client_name="Anna",
+        client_phone="79991234567",
+        status=status or BookingRequest.Status.CONFIRMED,
+        completed_at=completed_at,
+    )
+
+
+def _link_reminder_to_booking(reminder: BookingReminder, booking) -> None:
+    """Attach booking_request FK after reminder creation (mirrors B5 wire-up)."""
+    BookingReminder.all_tenants.filter(pk=reminder.pk).update(booking_request=booking)
+    reminder.refresh_from_db()
+
+
+class TestB11ConservativeBlockers:
+    """Per founder pilot_scope_discipline #3 + Tau §4.1 cut к pilot scope.
+
+    4 pilot blockers implementable со текущей моделью; 7 remaining states
+    deferred к Phase 1 Ayla event integration."""
+
+    def test_opt_out_blocks_followup(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """customer.proactive_messages_opt_out=True → no send."""
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(proactive_messages_opt_out=True)
+        bot_user.refresh_from_db()
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["sent"] == 0
+        assert result["skipped_blocked"] == 1
+
+    def test_completed_at_null_blocks_followup(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """booking.completed_at IS NULL → no send (visit not registered)."""
+        booking = _make_booking_for_followup(tenant=tenant, bot_user=bot_user, completed_at=None)
+        rem = _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        _link_reminder_to_booking(rem, booking)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+
+    def test_booking_cancelled_blocks_followup(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """booking.status=CANCELLED → no send (bundles refund-cancellation
+        case per Tau §4.1 conservative cut)."""
+        from apps.booking.models import BookingRequest
+
+        booking = _make_booking_for_followup(
+            tenant=tenant,
+            bot_user=bot_user,
+            completed_at=NOW_UTC - timedelta(hours=1),  # had completed_at
+            status=BookingRequest.Status.CANCELLED,  # but then cancelled
+        )
+        rem = _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        _link_reminder_to_booking(rem, booking)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            send_post_visit_followups()
+        mock_send.assert_not_called()
+
+    def test_booking_rescheduled_blocks_followup(self, tenant: Tenant, bot_user: BotUser) -> None:
+        from apps.booking.models import BookingRequest
+
+        booking = _make_booking_for_followup(
+            tenant=tenant,
+            bot_user=bot_user,
+            completed_at=NOW_UTC - timedelta(hours=1),
+            status=BookingRequest.Status.RESCHEDULED,
+        )
+        rem = _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        _link_reminder_to_booking(rem, booking)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            send_post_visit_followups()
+        mock_send.assert_not_called()
+
+    def test_payment_failures_threshold_blocks_followup(
+        self, tenant: Tenant, bot_user: BotUser, settings
+    ) -> None:
+        """consecutive_payment_failures >= threshold (default 3) → no send.
+
+        Per project_payment_failed_dm_threshold memory + tech-lead pilot
+        verdict — active payment cascade means review prompt = poor UX."""
+        from apps.conversations.models import Conversation
+
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        Conversation.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=3,
+            is_active=True,
+            is_shadow=False,
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+
+    def test_payment_failures_below_threshold_allows_followup(
+        self, tenant: Tenant, bot_user: BotUser, settings
+    ) -> None:
+        """1-2 payment failures (under threshold=3) still allows B11."""
+        from apps.conversations.models import Conversation
+
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        Conversation.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=2,
+            is_active=True,
+            is_shadow=False,
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            send_post_visit_followups()
+        mock_send.assert_called_once()
+
+    def test_happy_path_confirmed_completed_opt_in_no_failures_sends(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """All 4 gates pass → B11 fires (smoke test for full flow)."""
+        booking = _make_booking_for_followup(
+            tenant=tenant,
+            bot_user=bot_user,
+            completed_at=NOW_UTC - timedelta(hours=1),
+        )
+        rem = _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        _link_reminder_to_booking(rem, booking)
+        # Default opt_out=False; no Conversation row = no payment failures.
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_called_once()
+        assert result["sent"] == 1
+        assert result["skipped_blocked"] == 0
+
+    def test_null_fk_legacy_or_ayla_path_sends_when_other_gates_pass(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """NULL booking_request FK (legacy / Ayla-path reminder) — can't
+        check completed_at + booking.status, но opt_out + payment_failures
+        gates still apply. Default opt_out=False, no Conversation =
+        sends. Documented Phase 1 gap для Ayla event integration."""
+        # _make_reminder без _link_reminder_to_booking = NULL FK.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_called_once()
+        assert result["sent"] == 1
+
+    def test_blocked_send_emits_audit_row(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """Blocked send emits ``bookings.followup.blocked`` audit с reason."""
+        from apps.audit.models import AuditLog
+
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(proactive_messages_opt_out=True)
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message"):
+            send_post_visit_followups()
+        rows = AuditLog.all_tenants.filter(
+            action="bookings.followup.blocked",
+            target_id=bot_user.pk,
+        )
+        assert rows.exists()
+        first = rows.first()
+        assert first is not None  # narrow для mypy
+        assert first.payload["reason"] == "opt_out"
+
+    def test_multiple_blockers_first_match_wins(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """When multiple blockers apply, helper returns the first one hit.
+        Per implementation order: opt_out → payment_failures → completed_at
+        → status. opt_out wins when both opt_out + cancelled booking set."""
+        from apps.audit.models import AuditLog
+        from apps.booking.models import BookingRequest
+
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(proactive_messages_opt_out=True)
+        booking = _make_booking_for_followup(
+            tenant=tenant,
+            bot_user=bot_user,
+            status=BookingRequest.Status.CANCELLED,
+        )
+        rem = _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        _link_reminder_to_booking(rem, booking)
+        with patch("apps.bookings.followups.send_message"):
+            send_post_visit_followups()
+        # opt_out checked first → reason = opt_out (not booking_status_*).
+        first = AuditLog.all_tenants.filter(
+            action="bookings.followup.blocked", target_id=bot_user.pk
+        ).first()
+        assert first is not None
+        assert first.payload["reason"] == "opt_out"
+
+    def test_backward_compat_existing_users_default_send(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Existing users default proactive_messages_opt_out=False → sends
+        normally. Migration backfill safety lock."""
+        # Verify field default behavior — no opt-out set explicitly.
+        assert bot_user.proactive_messages_opt_out is False
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            send_post_visit_followups()
+        mock_send.assert_called_once()
+
+    def test_shadow_conversation_does_not_mask_payment_cascade(
+        self, tenant: Tenant, bot_user: BotUser, settings
+    ) -> None:
+        """CR #874 B1: shadow conversations carry meaningless counters
+        (observability artefacts). Active primary conversation с real
+        failures must NOT be hidden by a later-inserted shadow row."""
+        from apps.conversations.models import Conversation
+
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        # Primary active conversation с real payment cascade.
+        Conversation.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=5,  # over threshold
+            is_active=True,
+            is_shadow=False,
+            last_message_at=NOW_UTC - timedelta(hours=2),
+        )
+        # Later-inserted shadow row с zero failures — must be ignored.
+        Conversation.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=0,
+            is_active=True,
+            is_shadow=True,
+            last_message_at=NOW_UTC - timedelta(minutes=10),
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        # Cascade detected via primary conv, shadow ignored → block.
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+
+    def test_payment_cascade_in_other_tenant_does_not_block(
+        self, tenant: Tenant, bot_user: BotUser, settings
+    ) -> None:
+        """CR #874 B2: BotUser bridges tenants per cross-tenant invisible
+        relationship. Cascade в salon A must NOT block followup для salon
+        B's visit."""
+        from apps.conversations.models import Conversation
+
+        settings.PAYMENT_FAILED_HANDOFF_THRESHOLD = 3
+        # Another tenant where the same BotUser had a payment cascade.
+        other_tenant = Tenant.objects.create(slug="other-salon", name="Other")
+        Conversation.all_tenants.create(
+            tenant=other_tenant,
+            bot_user=bot_user,
+            consecutive_payment_failures=10,  # cascade в OTHER tenant
+            is_active=True,
+            is_shadow=False,
+            last_message_at=NOW_UTC,
+        )
+        # Reminder for our tenant — should NOT see other tenant's cascade.
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        # No conversation в the reminder's tenant → no blocker → send.
+        mock_send.assert_called_once()
+        assert result["sent"] == 1

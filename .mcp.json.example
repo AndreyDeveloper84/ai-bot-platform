@@ -1,0 +1,19 @@
+{
+  "_comment": "Claude Code MCP server config template. Copy to .mcp.json and fill tokens from 1Password Connect. See docs/setup/secrets-vault.md for the operator workflow. The real .mcp.json is gitignored — never commit it. Issue #419.",
+  "mcpServers": {
+    "figma": {
+      "command": "npx",
+      "args": ["-y", "@figma/mcp-server"],
+      "env": {
+        "FIGMA_ACCESS_TOKEN": "REPLACE_WITH_1PASSWORD_OP://Engineering/Figma MCP/access_token"
+      }
+    },
+    "notion": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-notion"],
+      "env": {
+        "NOTION_API_KEY": "REPLACE_WITH_1PASSWORD_OP://Engineering/Notion MCP/api_key"
+      }
+    }
+  }
+}

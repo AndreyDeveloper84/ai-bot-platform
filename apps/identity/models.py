@@ -39,6 +39,7 @@ from __future__ import annotations
 import uuid
 
 from django.db import models
+from django_cryptography.fields import encrypt
 
 from apps.tenancy.managers import TenantScopedManager
 
@@ -62,6 +63,50 @@ class BotUser(models.Model):
         help_text="Owning tenant. Same (channel, channel_user_id) under "
         "different tenants → two distinct BotUsers by design.",
     )
+
+    # Bridge to the canonical Ayla User UUID (Ayla djangoproject `users.User.id`).
+    # NULL until the user has been linked — typically populated when a
+    # `booking.created` event arrives via the cross-service event contract
+    # (Gamma's #442 booking consumer) and we observe envelope.user_id for
+    # the first time.
+    #
+    # NOT a Django FK because the canonical User lives in Ayla djangoproject
+    # per ADR-0009 §Hard rule #1 (no duplicate canonical state; no shared DB).
+    #
+    # No unique constraint at this stage: a single Ayla User may have BotUsers
+    # in multiple channels (MAX, future Telegram, etc.) or multiple tenants.
+    # Lookup pattern: `BotUser.all_tenants.filter(tenant=t, ayla_user_id=u).first()`.
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Canonical Ayla User UUID (from Ayla djangoproject "
+        "users.User.id). NULL until the bridge is established — typically "
+        "populated when the booking event consumer (Gamma #442) sees this "
+        "channel-user for the first time. Used by the consumer to resolve "
+        "envelope.user_id → BotUser for BookingReminder + Conversation update.",
+    )
+
+    # Synced from Ayla's `user.profile.updated` domain event (Gamma #446,
+    # event-contract.md §3.12). Mirror-only — Ayla owns the canonical
+    # value per ADR-0009 §Hard rule #1. Refresh via REST GET
+    # /api/v1/users/{ayla_user_id} on event receipt OR re-sync from event
+    # payload. Used by bot-platform UI surfaces (mini app, conversation
+    # thread, master-side internal-chat) for visual rendering only.
+    # Empty string default for backward compat with rows that pre-date
+    # the bridge / for users with no avatar set in Ayla.
+    avatar_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Avatar URL mirrored from Ayla user.profile.updated event "
+        "(per event-contract.md §3.12). Used by bot-platform for UI "
+        "rendering (mini app, conversation thread). NOT a canonical "
+        "store — Ayla djangoproject is. Refresh via REST GET "
+        "/api/v1/users/{ayla_user_id} on event receipt. Empty string "
+        "default for backward compat.",
+    )
+
     channel = models.CharField(
         max_length=32,
         help_text="Channel slug — 'max', 'telegram', 'whatsapp', 'web'.",
@@ -103,6 +148,75 @@ class BotUser(models.Model):
     )
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField(auto_now=True)
+
+    # S1 onboarding idempotency (task #85, W2/Epsilon, 2026-05-26).
+    # Set by :class:`apps.skills.welcome.skill.WelcomeSkill` at first
+    # successful welcome delivery. NULL until set; never reset.
+    # WelcomeSkill.matches() short-circuits the auto-trigger path when
+    # this is non-NULL (otherwise welcome would re-fire on every message).
+    welcomed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Timestamp первого успешного welcome (S1 onboarding) "
+        "delivery. NULL для BotUsers до task #85 deploy.",
+    )
+
+    # S2 privacy consent (152-ФЗ) — task #85 part 2 / 5, 2026-05-26.
+    # Set by welcome skill when user taps «Да, продолжим» or «Понятно,
+    # продолжим» (S2a fold). NULL = never consented (либо refused
+    # «Не сейчас», либо ещё не дошёл до S2). Distinguish via combination
+    # с welcomed_at: welcomed=True + consent=NULL → likely refused or
+    # exited mid-flow. Used by returning-user query (Tau's §11 State 4):
+    # ``last_interaction_at < now - 30d AND consent_at IS NOT NULL`` →
+    # soft re-welcome, skip onboarding.
+    consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "152-ФЗ consent timestamp. NULL = not yet consented, "
+            "не ходит дальше welcome S1. Set when user actions S2 "
+            "consent CTA («Да, продолжим» или «Понятно, продолжим» "
+            "из S2a fold). Used to gate downstream actions + "
+            "distinguish returning-user states (per Tau's "
+            "customer-onboarding-flow.md §11)."
+        ),
+    )
+    # Food-scanner feature-specific 152-ФЗ consent (founder verdict
+    # 2026-06-02). Distinct from ``consent_at`` (broad welcome consent)
+    # because food data + photo uploads need their own explicit
+    # acknowledgement and audit trail per the Wellness MVP scaled
+    # pilot scope (memory ``project_wellness_mvp_scaled_pilot``). The
+    # frontend F0 gate (#962) currently persists this client-side via
+    # DeviceStorage; this column is the server-side mirror used by the
+    # food_scanner skill + miniapp_api endpoints to enforce consent on
+    # every cross-channel turn (server consent audit trail per #956).
+    # NULL = not yet consented → food_scanner skill returns a redirect-
+    # to-Mini-App reply rather than calling Ayla.
+    food_scanner_consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Feature-specific 152-ФЗ consent for the food scanner / "
+            "nutrition diary surface. NULL = not yet consented; the "
+            "food_scanner skill refuses cross-border photo processing "
+            "and local food-log writes until set. Distinct from the "
+            "broad ``consent_at`` (welcome S2)."
+        ),
+    )
+    # B11 conservative blockers (P0 PRE_PILOT, founder pilot_scope_discipline
+    # sequence #3). When True, customer opted out of all proactive bot-
+    # initiated messages — post-visit follow-ups, review prompts, marketing
+    # nudges, etc. Reminders themselves (B5 T-24h / B6 T-2h) still fire
+    # because those are contract-required dispatch ahead of confirmed
+    # bookings, not «proactive» в the marketing-engagement sense. Default
+    # False — existing users continue receiving B11 nudges until they
+    # explicitly opt out via UI / chat command (UI surface lands в Phase 1).
+    proactive_messages_opt_out = models.BooleanField(
+        default=False,
+        help_text="Customer-level opt-out of proactive bot-initiated "
+        "messages (B11 post-visit follow-up etc.). False = receive.",
+    )
     context = models.JSONField(
         default=dict,
         blank=True,
@@ -115,8 +229,27 @@ class BotUser(models.Model):
         help_text="IANA timezone for time-of-day rendering in messages.",
     )
 
+    # GDPR-style soft delete (Phase 3 / F4). ``deleted_at`` set when the
+    # customer requests data deletion via the Mini App profile screen.
+    # ``soft_delete_user()`` scrubs PII (client_name/phone/context) at the
+    # same time. We keep the row so historical FKs (BookingRequest,
+    # Conversation) stay intact for salon reporting + audit.
+    deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When the customer requested data deletion. Non-null "
+        "means PII has been scrubbed and the user should be invisible to "
+        "default queries.",
+    )
+
     # Default manager scopes to current_tenant(). Use ``all_tenants`` for
     # admin / maintenance code that must see every row.
+    #
+    # Soft-deleted users (``deleted_at__isnull=False``) are NOT filtered
+    # at the manager layer — that would silently change semantics of
+    # every existing call site. Instead, auth (require_init_data) and
+    # profile views filter deleted_at explicitly.
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
@@ -132,6 +265,94 @@ class BotUser(models.Model):
     def __str__(self) -> str:
         label = self.display_name or self.client_name or self.channel_user_id
         return f"BotUser[{self.channel}:{label}]"
+
+
+class UserPreferences(models.Model):
+    """Customer-set notification + personal preferences (Phase 3 / F4).
+
+    OneToOne with :class:`BotUser` (primary key = bot_user_id, same shape
+    as :class:`ClientProfile`). Editable from the Mini App profile screen
+    (F4); read by the proactive scheduler before sending reminders /
+    retention / promo / birthday templates.
+
+    Per ``docs/design/handoffs/2026-05-18-customer-first-time-handoff.md``
+    §12 F4 — 4 toggles + birthday + allergies. Favorites are computed
+    elsewhere (top-master-by-bookings) and surfaced read-only on F4.
+
+    ### Why a separate model and not BotUser.context JSONB
+
+    Per Phase 3 design Q1 — preferences are *contractual*: the
+    proactive scheduler MUST honor them, retention SLA is measured
+    against opt-out timestamps, and analytics needs structured access
+    (count tenants by promo opt-in rate). JSONB hides those shapes
+    behind dict lookups and won't be migration-safe when v1.1 adds
+    new toggles.
+    """
+
+    bot_user = models.OneToOneField(
+        BotUser,
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="preferences",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="user_preferences",
+        help_text="Owning tenant. CASCADE — preferences die with the "
+        "tenant, no value in keeping them otherwise.",
+    )
+
+    # Notification toggles per handoff §12 F4 layout
+    notify_reminders = models.BooleanField(
+        default=True,
+        help_text="T-24h / T-2h / T-15m reminders for confirmed bookings. "
+        "Even when False, transactional confirmations still fire — only "
+        "soft reminders mute.",
+    )
+    notify_retention = models.BooleanField(
+        default=True,
+        help_text="Proactive «время обновить» nudge ~6 weeks after last visit.",
+    )
+    notify_promo = models.BooleanField(
+        default=False,
+        help_text="Promo / marketing campaigns. Default OFF — opt-in.",
+    )
+    notify_birthday = models.BooleanField(
+        default=True,
+        help_text="Birthday greeting + gift offer. Requires birthday_date to actually trigger.",
+    )
+
+    # Personal data per handoff §12 F4 — optional, can be skipped
+    birthday_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Optional birthday for the birthday greeting flow. Year "
+        "is preserved for age-conditional offers but never displayed back.",
+    )
+    allergies = models.TextField(
+        blank=True,
+        default="",
+        help_text="Free-text contraindications / allergies surfaced to the "
+        "master before each booking. Read by the booking confirm view.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "User preferences"
+        verbose_name_plural = "User preferences"
+        indexes = [
+            models.Index(fields=["tenant", "notify_promo"]),
+            models.Index(fields=["tenant", "notify_birthday", "birthday_date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"UserPreferences[{self.bot_user_id}]"
 
 
 class ClientProfile(models.Model):
@@ -235,6 +456,35 @@ class ClientProfile(models.Model):
         help_text="bronze | silver | gold | platinum.",
     )
 
+    # --- Reviews (Gamma #446 review.created consumer handoff) ---
+    # Synced from Ayla's `review.created` domain event per event-contract.md
+    # §3.13. Mirror-only — Ayla djangoproject owns the canonical Review
+    # state. These fields are the bot-platform's denormalised projection
+    # for admin queue / sentiment analytics / proactive nudge logic.
+    last_review_rating = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Rating (1-5) of this client's most recent review, "
+        "from review.created event payload. NULL = no reviews yet.",
+    )
+    last_review_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when the most recent review.created event "
+        "was emitted (Ayla domain). NULL = no reviews yet.",
+    )
+    low_rating_flag = models.BooleanField(
+        default=False,
+        help_text="True if the most recent review had rating <= 2. "
+        "Triggers admin queue «review attention» surfacing.",
+    )
+    sentiment_score = models.FloatField(
+        default=0.0,
+        help_text="Derived from last_review_rating: 5→1.0, 4→0.5, 3→0.0, "
+        "2→-0.5, 1→-1.0. Bonus field for future analytics. Stays 0.0 "
+        "for clients with no reviews yet.",
+    )
+
     # --- Bookkeeping ---
     last_recomputed_at = models.DateTimeField(
         null=True,
@@ -259,4 +509,432 @@ class ClientProfile(models.Model):
         return (
             f"ClientProfile[{self.bot_user_id} "
             f"seg={self.rfm_segment or '—'} tier={self.loyalty_tier}]"
+        )
+
+
+# ─── Sprint 1 Track A — UserPersonalContext memory layer ────────────────
+#
+# Source of truth: docs/specs/memory-entry-schema.md (canonical tabular spec).
+# Companion rationale: docs/adr/ADR-0011-user-personal-context-privacy.md.
+# Acceptance criteria: issues #570 (RedZoneReader audit-before-read atomic),
+# #571 (RedZoneAccessLog.accessor_principal), #572 (admin red-zone runtime
+# assertion).
+#
+# These models are CROSS-TENANT (no `tenant` FK + no TenantScopedManager).
+# UserPersonalContext follows the user across all tenants — that's per
+# ADR-0009 §Memory model «core user memory is user-owned, not cross-tenant
+# at the storage layer; reuse boundary enforced at app layer via voice
+# modulator + zone semantics».
+#
+# Tenant relationship that a MemoryEntry was sourced FROM is captured by
+# the nullable MemoryEntry.source_tenant_id field — informational, not a
+# scoping boundary.
+
+
+class UserPersonalContext(models.Model):
+    """Cross-channel, cross-tenant AI memory profile per Ayla User.
+
+    One row per user, ever. Soft-delete only (152-ФЗ erasure right uses
+    `soft_deleted_at` + tombstone retention; hard-delete is forbidden).
+
+    See spec `docs/specs/memory-entry-schema.md` §1 for canonical schema.
+    """
+
+    user_id = models.UUIDField(
+        primary_key=True,
+        editable=False,
+        help_text="Canonical Ayla User.id. 1-to-1 with UPC. NOT a Django "
+        "FK because the canonical User lives in Ayla djangoproject per "
+        "ADR-0009 §Hard rule #1 (no duplicate canonical state).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    soft_deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Set when user invoked forget-all OR account-closure. "
+        "Hard-delete forbidden — soft-delete + tombstone retention per "
+        "152-ФЗ Chapter 3 right-to-be-forgotten implementation.",
+    )
+
+    display_name_preferred = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Optional — Ayla's preferred display name for the user.",
+    )
+    language_preferred = models.CharField(
+        max_length=8,
+        null=True,
+        blank=True,
+        help_text="ISO-639-1 language code, e.g. 'ru'. NULL until user sets a preference.",
+    )
+    summary = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Ayla's running summary of who this user is. "
+        "Application-side capped at 8 KB. NOT encrypted at storage layer "
+        "because it's intentionally retrievable in plaintext by the LLM "
+        "context-building path on every conversation.",
+    )
+
+    forget_all_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Set when user invokes POST /api/v1/users/me/memory/"
+        "forget-all (per ADR-0011 §3.3). Records user-intent moment; "
+        "async sweep then soft-deletes all entries.",
+    )
+    minor_lock = models.BooleanField(
+        default=False,
+        help_text="Per ADR-0011 §10.2 + spec §1: set true when "
+        "reconciliation job detects post-fact that the user is a minor; "
+        "blocks future yellow/red writes via the writer guard. "
+        "Reconciliation job tracked in issue #597.",
+    )
+
+    # NOT TenantScopedManager — UPC is cross-tenant by design.
+    objects = models.Manager()
+
+    class Meta:
+        verbose_name = "User personal context"
+        verbose_name_plural = "User personal contexts"
+        indexes = [
+            models.Index(fields=["soft_deleted_at"], name="upc_soft_del_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"UserPersonalContext[{self.user_id}]"
+
+
+class MemoryEntry(models.Model):
+    """Zone-tagged fact about a user, owned by a UserPersonalContext.
+
+    See spec `docs/specs/memory-entry-schema.md` §2 for canonical schema.
+
+    Sensitivity zones (§5):
+      - green:  innocuous (preferences); no consent record required;
+                no auto-TTL; encrypted at rest like everything else.
+      - yellow: personal (family context, finance signals); CHECK 2
+                requires `consent_at IS NOT NULL` at write OR
+                soft-delete tombstone; 365-day TTL from last use.
+      - red:    sensitive (152-ФЗ §10 special category — health, etc.);
+                same consent requirement as yellow; 90-day TTL; reads
+                MUST go through RedZoneReader accessor (§10 spec);
+                every read writes RedZoneAccessLog row.
+
+    DB-level invariants enforced via 3 CHECK constraints (see spec §4 +
+    migration 0005_user_personal_context).
+
+    Direct reads of red-zone rows from production code OUTSIDE
+    `apps/identity/services/red_zone_reader.py` are PROHIBITED — both
+    by the BEFORE SELECT trigger (DB layer) AND by the AST-based lint
+    rule `tools/lint/red_zone_guard.py` (CI layer).
+    """
+
+    SENSITIVITY_GREEN = "green"
+    SENSITIVITY_YELLOW = "yellow"
+    SENSITIVITY_RED = "red"
+    SENSITIVITY_ZONE_CHOICES = [
+        (SENSITIVITY_GREEN, "Green — innocuous"),
+        (SENSITIVITY_YELLOW, "Yellow — personal"),
+        (SENSITIVITY_RED, "Red — sensitive (152-ФЗ §10 category)"),
+    ]
+
+    SOURCE_EXPLICIT = "explicit"
+    SOURCE_INFERRED = "inferred"
+    SOURCE_SIGNAL = "signal"
+    SOURCE_CHOICES = [
+        (SOURCE_EXPLICIT, "Explicit — user stated directly"),
+        (SOURCE_INFERRED, "Inferred — Ayla derived from conversation"),
+        (SOURCE_SIGNAL, "Signal — derived from observable events"),
+    ]
+
+    KIND_CHOICES = [
+        ("preference", "Preference"),
+        ("contraindication", "Contraindication"),
+        ("symptom", "Symptom"),
+        ("lifestyle", "Lifestyle"),
+        ("relationship", "Relationship"),
+        ("financial", "Financial"),
+        ("other", "Other"),
+    ]
+
+    DELETION_REASON_USER_DELETE = "user_delete"
+    DELETION_REASON_WITHDRAWAL = "withdrawal"
+    DELETION_REASON_FORGET_ALL = "forget_all"
+    DELETION_REASON_TTL_PURGE = "ttl_purge"
+    DELETION_REASON_MINOR_PROTECTION = "minor_protection"
+    DELETION_REASON_UNKNOWN_LEGACY = "unknown_legacy"
+    DELETION_REASON_CHOICES = [
+        (DELETION_REASON_USER_DELETE, "User-initiated per-entry delete"),
+        (DELETION_REASON_WITHDRAWAL, "Consent withdrawn for yellow/red entry"),
+        (DELETION_REASON_FORGET_ALL, "User invoked forget-all"),
+        (DELETION_REASON_TTL_PURGE, "Auto-purged by TTL sweep"),
+        (DELETION_REASON_MINOR_PROTECTION, "Auto-purged by minor-protection guard"),
+        (DELETION_REASON_UNKNOWN_LEGACY, "Pre-spec-era soft-delete (backfill only)"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_id = models.UUIDField(
+        db_index=True,
+        help_text="Denormalised — matches personal_context.user_id. "
+        "Convenience for queries that don't go through the UPC join.",
+    )
+    personal_context = models.ForeignKey(
+        UserPersonalContext,
+        on_delete=models.CASCADE,
+        related_name="memory_entries",
+        help_text="Owning UPC. CASCADE — deleting UPC soft-deletes all "
+        "entries (semantically: forget-all is a UPC-level + entries "
+        "cascade soft-delete; physical CASCADE only relevant for the "
+        "rare ops-level hard-delete after 30d tombstone retention).",
+    )
+    sensitivity_zone = models.CharField(
+        max_length=8,
+        choices=SENSITIVITY_ZONE_CHOICES,
+        db_index=True,
+        help_text="Per-fact zone (green/yellow/red). Drives consent "
+        "requirement, retention, audit-log scope. See spec §5.",
+    )
+    source = models.CharField(
+        max_length=10,
+        choices=SOURCE_CHOICES,
+        db_index=True,
+        help_text="How the fact entered memory. CHECK 1 enforces "
+        "last_inferred_at nullness invariant against source.",
+    )
+    last_inferred_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When inference last updated this entry. MUST be NULL "
+        "when source='explicit' and NOT NULL when source IN ('inferred', "
+        "'signal') — enforced by CHECK 1.",
+    )
+    source_tenant_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Tenant the fact originated at. NULL if cross-tenant "
+        "or platform-level. Informational — NOT a scoping boundary; "
+        "tenant scoping is enforced at the app-layer voice modulator + "
+        "cross-tenant reuse rule per ADR-0011 §9.",
+    )
+    kind = models.CharField(
+        max_length=20,
+        choices=KIND_CHOICES,
+        default="other",
+        help_text="Categorical bucket for UX (Bonuses tab grouping).",
+    )
+    content = encrypt(
+        models.JSONField(
+            default=dict,
+            help_text="The fact payload. Encrypted at rest with the Fernet "
+            "key via django-cryptography-django5 EncryptedJSONField (per "
+            "ADR-0006). Red entries additionally hash-pepper'd before "
+            "encryption — pepper management tracked in ADR-0011 §13.5.",
+        )
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="Updated by the LLM access path (event-sourced batch, "
+        "not synchronous — see spec §13.2 yellow-zone TTL sweep + "
+        "ADR-0011 §6).",
+    )
+    last_used_count = models.IntegerField(
+        default=0,
+        help_text="Rolled up by the yellow-zone access count rollup job.",
+    )
+    ttl_days = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Per-zone retention cap. NULL = no auto-TTL (green "
+        "default); 365 (yellow default); 90 (red default).",
+    )
+    consent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When user explicitly consented to storing this entry. "
+        "MUST be NOT NULL for sensitivity_zone IN ('yellow', 'red') "
+        "before the entry is read or used — enforced by CHECK 2 + "
+        "app-layer write guard. Withdrawal is NOT modeled as setting "
+        "consent_at=NULL on a live row; see spec §4 for the soft-delete "
+        "exemption pattern.",
+    )
+    delete_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="User-intent moment for entry deletion. Set in the "
+        "same UPDATE as deletion_reason.",
+    )
+    soft_deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Set by the soft-delete job OR in the same transaction "
+        "as delete_requested_at during withdrawal. Physical purge happens "
+        "30 days later (tombstone retention per spec §5).",
+    )
+    deletion_reason = models.CharField(
+        max_length=20,
+        choices=DELETION_REASON_CHOICES,
+        null=True,
+        blank=True,
+        help_text="Distinguishes WHY a row is being deleted. CHECK 3 "
+        "enforces nullness invariant: live rows MUST have NULL; deleted "
+        "rows MUST have non-NULL. unknown_legacy reserved for backfill.",
+    )
+
+    # NOT TenantScopedManager — MemoryEntry is cross-tenant by design.
+    objects = models.Manager()
+
+    class Meta:
+        verbose_name = "Memory entry"
+        verbose_name_plural = "Memory entries"
+        indexes = [
+            models.Index(fields=["user_id", "sensitivity_zone"], name="me_user_zone_idx"),
+            models.Index(
+                fields=["sensitivity_zone", "last_used_at"],
+                name="me_zone_ttl_idx",
+                condition=models.Q(soft_deleted_at__isnull=True),
+            ),
+            models.Index(
+                fields=["delete_requested_at"],
+                name="me_delete_req_idx",
+                condition=models.Q(
+                    delete_requested_at__isnull=False,
+                    soft_deleted_at__isnull=True,
+                ),
+            ),
+        ]
+        # NOTE: 3 DB CHECK constraints are managed by migration 0007 via
+        # RunSQL with NOT VALID + VALIDATE pattern (spec §4 + §12). We do
+        # NOT use models.CheckConstraint here because:
+        # 1. Django CheckConstraint adds the constraint in CreateModel
+        #    inside one transaction → defeats the NOT VALID + VALIDATE
+        #    split (the whole point is to allow the long-running VALIDATE
+        #    step to run in a separate transaction on a populated table).
+        # 2. Future schema-tightening migrations on populated production
+        #    tables would have the same problem; standardize on RunSQL.
+        # See migration 0007_user_personal_context for the actual SQL.
+        # Application-side validation lives in apps/identity/services/
+        # memory_writer.py (veha 3).
+
+    def __str__(self) -> str:
+        return (
+            f"MemoryEntry[{self.id} zone={self.sensitivity_zone} "
+            f"kind={self.kind} user={self.user_id}]"
+        )
+
+
+class RedZoneAccessLog(models.Model):
+    """Immutable audit log for red-zone reads + writes + purges.
+
+    See spec `docs/specs/memory-entry-schema.md` §3 for canonical schema.
+
+    INSERT-only — enforced at DB level via dedicated role + trigger blocking
+    UPDATE/DELETE on this table. 7-year retention.
+
+    No FK CASCADE on memory_entry_id — log rows STAY when MemoryEntry is
+    physically purged. The 152-ФЗ Chapter 3 «who accessed» auditor query
+    depends on log surviving entry purge.
+
+    Per round-2 AS2 fix: `accessor_principal` carries concrete identity
+    (Celery worker hostname / cron name / staff UUID / service-account
+    name) beyond the coarse `accessor_role` enum. Indexed for «every
+    access by staff X in date range» queries.
+    """
+
+    ACCESSOR_AYLA_LLM = "ayla_llm"
+    ACCESSOR_SYSTEM_JOB = "system_job"
+    ACCESSOR_OPS_ADMIN = "ops_admin"
+    ACCESSOR_ROLE_CHOICES = [
+        (ACCESSOR_AYLA_LLM, "Ayla LLM prompt construction"),
+        (ACCESSOR_SYSTEM_JOB, "System job (TTL sweep, forget-all)"),
+        (ACCESSOR_OPS_ADMIN, "Ops admin (break-glass)"),
+    ]
+
+    ACCESS_READ = "read"
+    ACCESS_WRITE = "write"
+    ACCESS_PURGE = "purge"
+    ACCESS_WITHDRAWAL = "withdrawal"
+    ACCESS_WRITE_REJECTED_DOB = "write_rejected_dob_lookup"
+    ACCESS_TYPE_CHOICES = [
+        (ACCESS_READ, "Read"),
+        (ACCESS_WRITE, "Write"),
+        (ACCESS_PURGE, "Purge"),
+        (ACCESS_WITHDRAWAL, "Withdrawal — explicit consent revocation"),
+        (
+            ACCESS_WRITE_REJECTED_DOB,
+            "Write rejected — DOB lookup failed (Ayla REST outage)",
+        ),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    memory_entry_id = models.UUIDField(
+        help_text="The entry being accessed. NOT a Django FK with CASCADE "
+        "— log rows persist after entry purge. Migration uses RunSQL to "
+        "add raw FK with ON DELETE NO ACTION.",
+    )
+    user_id = models.UUIDField(
+        help_text="Subject the entry belongs to. Indexed via "
+        "(user_id, ts) for the primary auditor query.",
+    )
+    accessor_role = models.CharField(
+        max_length=20,
+        choices=ACCESSOR_ROLE_CHOICES,
+        help_text="Coarse category. Round-2 AS2: insufficient alone for "
+        "152-ФЗ Chapter 3 «who accessed» — accessor_principal carries "
+        "the concrete identity.",
+    )
+    accessor_principal = models.CharField(
+        max_length=256,
+        help_text="Round-2 AS2 fix — concrete identity per accessor_role: "
+        "Celery worker hostname + queue name (ayla_llm); cron job name + "
+        "worker hostname (system_job); staff User.id UUID string "
+        "(ops_admin); caller service-account name (future service_to_"
+        "service). Indexed for staff-X-date-range auditor queries.",
+    )
+    access_type = models.CharField(
+        max_length=32,
+        choices=ACCESS_TYPE_CHOICES,
+        help_text="What kind of access. Round-2 AS2 + ADR-0011 §11.3 "
+        "added 'withdrawal' + 'write_rejected_dob_lookup' values.",
+    )
+    ts = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When the access happened. Indexed via three composite indexes per spec §3.",
+    )
+    request_id = models.UUIDField(
+        help_text="Audit reference — Celery task id, HTTP request id, OR "
+        "ops ticket id. Validated as UUID by the BEFORE SELECT trigger "
+        "(spec §9). Round-3 A5: MUST be a real audit reference, not "
+        "arbitrary string.",
+    )
+    purpose = models.TextField(
+        help_text="Human-readable purpose (round-3 A5): "
+        "'contraindication_check', 'subject_access_request', "
+        "'incident_debug', 'ttl_sweep', etc.",
+    )
+
+    objects = models.Manager()
+
+    class Meta:
+        verbose_name = "Red-zone access log"
+        verbose_name_plural = "Red-zone access logs"
+        indexes = [
+            # Primary auditor query: every access to user X in date range.
+            models.Index(fields=["user_id", "ts"], name="rzlog_user_ts_idx"),
+            # Secondary auditor query: every access by staff X (round-2 AS2).
+            models.Index(
+                fields=["accessor_principal", "ts"],
+                name="rzlog_principal_ts_idx",
+            ),
+            # Operational: withdrawals/DOB-failures in date range.
+            models.Index(fields=["access_type", "ts"], name="rzlog_type_ts_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"RedZoneAccessLog[{self.access_type} entry={self.memory_entry_id} "
+            f"user={self.user_id} ts={self.ts:%Y-%m-%d %H:%M:%S}]"
         )

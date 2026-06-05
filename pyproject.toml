@@ -24,7 +24,23 @@ dependencies = [
     "django>=5.2,<6.0",
     "djangorestframework>=3.15",
     "celery[redis]>=5.4",
+    # Database-backed scheduler for celery beat. Required by
+    # config.settings.base INSTALLED_APPS + the systemd beat command
+    # `--scheduler django_celery_beat.schedulers:DatabaseScheduler`.
+    "django-celery-beat>=2.7",
     "redis>=5.0",
+    # Issue #552 — django-redis backend for the Django CACHES framework.
+    # Required because:
+    #   * Rate limiters (apps.master_api.services.ai_draft_limits) and DM
+    #     idempotency locks (apps.admin_api.tasks) depend on cross-worker
+    #     atomic SETNX/INCR semantics. Django's built-in locmem cache is
+    #     per-worker and silently bypasses these guards (each worker has
+    #     its own counter → effective limit = N × configured limit).
+    #   * apps.skills.faq.tools.invalidate_kb_search_cache uses the
+    #     ``delete_pattern`` extension, a django-redis-specific API.
+    # The boot assertion in apps.master_api.apps fails fast in production
+    # when the configured BACKEND is not a Redis backend.
+    "django-redis>=5.4",
     "psycopg[binary]>=3.2",
     "chromadb>=0.5",
     "openai>=1.50",
@@ -55,6 +71,13 @@ dependencies = [
     # called inside the seed_kb_from_gdocs management command which runs in
     # production environments — never in tests alone.
     "transliterate>=1.10",
+    # PR #524 round-1 A2 — per-IP rate limit on the cross-service
+    # events ingest endpoint. Used by
+    # apps.eventbus.views.InternalEventsIngestView via
+    # @method_decorator(ratelimit(...)). Production deploys may
+    # disable via RATELIMIT_ENABLE=False when WAF/CDN-level limits
+    # are deployed at the edge.
+    "django-ratelimit>=4.1,<5",
 ]
 
 [project.optional-dependencies]
@@ -80,8 +103,46 @@ dependencies = [
 #   3. Replace the @<SHA> below.
 #   4. `uv lock --upgrade-package ayla-ai-core`
 #   5. Run `tests/smoke/test_ayla_import.py` — update the version
-#      assertion to match the new release.
+#      assertion to match the new release. The SHA-pin guard
+#      (`test_package_sha_pinned`) auto-reads this file и will fail
+#      if `uv.lock` drifts from `pyproject.toml`.
 #   6. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
+#
+# Cross-repo joint-bump (Block A9 — maintainability roadmap):
+#   ayla-ai-core has TWO consumer repos in production — this one
+#   (`ai-bot-platform`) and `Ayla/djangoproject`. They MUST pin the
+#   IDENTICAL SHA or behaviour diverges between the AI runtime and
+#   the canonical state-of-record. The two bumps ship as a PAIR:
+#
+#     - bot-platform PR: edits this file + `uv.lock`.
+#     - Ayla djangoproject PR: edits `requirements.txt` to the same SHA.
+#     - Both PRs cross-reference each other in the description.
+#     - Land-order: merge bot-platform first (this CI runs faster);
+#       Ayla merge follows immediately so production deploys converge.
+#
+#   ENFORCEMENT SCOPE (adversarial CR H3, 2026-06-01): only the
+#   INTRA-repo invariant is CI-gated. `tests/smoke/test_ayla_import.py
+#   ::test_package_sha_pinned` asserts this file's pin ↔ installed
+#   `direct_url.json` SHA. There is NO CI gate that fetches
+#   Ayla djangoproject's `requirements.txt` to verify cross-repo
+#   alignment from this side. Cross-repo SHA convergence is
+#   OPERATIONAL — ops grep both production container streams для
+#   `orchestrator.ayla_ai_core.boot` (this repo) and the analogous
+#   Ayla boot log to confirm. A proper cross-repo CI gate is a
+#   Phase-1 follow-up (founder discipline «stop expanding scope»).
+#
+#   The boot-time INFO log `orchestrator.ayla_ai_core.boot
+#   version=<X.Y.Z> source=<url>@<sha>` (apps/orchestrator/apps.py)
+#   surfaces the resolved SHA in container stdout — ops grep both
+#   log streams to confirm convergence without shelling into either
+#   runtime.
+#
+#   BUMP CHECKLIST UPDATE (when bumping ayla-ai-core):
+#     - Update the @<SHA> below.
+#     - Update `tests/smoke/test_ayla_import.py::test_package_version_pinned`
+#       assertion to the new version string.
+#     - `apps/orchestrator/tests/test_apps_boot_log.py::test_boot_log_emits_version`
+#       reads the live version via importlib.metadata — no manual edit needed.
 #
 # Current: v0.8.1 — additive only. Adds RELEASING.md + LTS_POLICY.md +
 # tests/test_public_api_surface.py drift gate. Zero behavioural changes;

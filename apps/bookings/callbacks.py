@@ -435,6 +435,27 @@ class BookingGateCallbackSkill:
         except PendingBookingAction.DoesNotExist:
             return SkillResult(reply_text=REPLY_NOT_FOUND)
 
+        if not _gate_tenant_matches(row, context.bot_user):
+            # Bookings/callbacks retro #3: defence-in-depth tenant guard.
+            # Today the bot_user ownership gate below catches every cross-
+            # tenant case because bot_users are partitioned per-tenant.
+            # If a future misrouted webhook ever lands a PendingBookingAction
+            # with the wrong tenant_id (or a same-channel_user_id collision
+            # across tenants ever surfaces), this assert turns silent data
+            # corruption into a loud REPLY_FORBIDDEN + audit row.
+            write_audit(
+                action=AUDIT_BOOK_GATE_FORBIDDEN,
+                target="PendingBookingAction",
+                target_id=row.pk,
+                payload={
+                    "sender_id": str(context.bot_user.pk),
+                    "reason": "tenant_mismatch",
+                    "row_tenant_id": str(row.tenant_id),
+                    "sender_tenant_id": str(context.bot_user.tenant_id),
+                },
+            )
+            return SkillResult(reply_text=REPLY_FORBIDDEN)
+
         if not _gate_sender_matches(row, context.bot_user.pk):
             write_audit(
                 action=AUDIT_BOOK_GATE_FORBIDDEN,
@@ -622,6 +643,21 @@ class BookingGateCallbackSkill:
         except PendingBookingAction.DoesNotExist:
             return SkillResult(reply_text=REPLY_NOT_FOUND)
 
+        # Symmetric tenant guard (see retro #3 note in _handle_confirm_tap).
+        if not _gate_tenant_matches(row, context.bot_user):
+            write_audit(
+                action=AUDIT_BOOK_GATE_FORBIDDEN,
+                target="PendingBookingAction",
+                target_id=row.pk,
+                payload={
+                    "sender_id": str(context.bot_user.pk),
+                    "reason": "tenant_mismatch",
+                    "row_tenant_id": str(row.tenant_id),
+                    "sender_tenant_id": str(context.bot_user.tenant_id),
+                },
+            )
+            return SkillResult(reply_text=REPLY_FORBIDDEN)
+
         if not _gate_sender_matches(row, context.bot_user.pk):
             write_audit(
                 action=AUDIT_BOOK_GATE_FORBIDDEN,
@@ -648,6 +684,34 @@ class BookingGateCallbackSkill:
             payload={"kind": row.kind},
         )
         return SkillResult(reply_text=REPLY_BOOK_CANCELLED_PREVIEW)
+
+
+def _gate_tenant_matches(
+    row: PendingBookingAction,
+    bot_user: object,
+) -> bool:
+    """Defence-in-depth tenant check (Bookings/callbacks retro #3).
+
+    A PendingBookingAction is keyed on a globally-unique UUID and looked
+    up via ``all_tenants``. The downstream ``execute_*`` tools trust
+    ``row.tenant`` blindly — so if a future misrouted webhook ever lands
+    a row with the wrong tenant, the callback would happily execute it
+    cross-tenant because the ownership gate (`_gate_sender_matches`)
+    only verifies ``bot_user``. ``bot_user`` partitions per-tenant
+    today, but we don't want this property to be load-bearing across
+    future BotUser refactors.
+
+    Returns ``True`` when ``row.tenant_id`` matches the sender's
+    ``bot_user.tenant_id``. Caller renders REPLY_FORBIDDEN on mismatch.
+
+    Both sides are required to be non-None: a defence-in-depth gate that
+    silently passes on ``None == None`` is the wrong default. Production
+    webhooks always carry a tenant; a None-bearing sender (synthetic,
+    misconfigured) MUST fall into the reject branch.
+    """
+    row_tid = getattr(row, "tenant_id", None)
+    sender_tid = getattr(bot_user, "tenant_id", None)
+    return row_tid is not None and row_tid == sender_tid
 
 
 def _gate_sender_matches(
@@ -745,25 +809,41 @@ def _render_reschedule_success_text(
     )
 
 
-def _try_yclients_cancel(yclients_record_id: str) -> bool:
+def _try_yclients_cancel(yclients_record_id: str | None) -> bool:
     """Best-effort upstream cancel. Returns True on success.
 
     Wrapped in a broad exception handler — a YClients outage, a
     missing/misconfigured integration client, or a 4xx from YClients
     all map to ``False`` here. The local cancel already happened by
     the time this runs; the upstream call is informational.
+
+    ``yclients_record_id`` is ``str | None`` because the column is
+    nullable as of #442 (Ayla consumer path writes NULL). Pre-existing
+    YClients rows still carry a string; Ayla rows skip the upstream
+    cancel via the early-return below.
     """
     if not yclients_record_id:
+        return False
+    # Bookings/callbacks retro #6: distinguish «can't cancel because the
+    # id is non-numeric» from «can't cancel because YClients is down».
+    # Enterprise tenants are anticipated to grow opaque-id schemes (B2
+    # model docstring); when that happens, ``int(yclients_record_id)``
+    # would raise ValueError → broad except → looks identical to a
+    # YClients outage in metrics/dashboards. Short-circuit early with a
+    # distinct log line so the metric is honest.
+    if not yclients_record_id.isdigit():
+        logger.info(
+            "bookings.callback.yclients_cancel_skipped_non_numeric yc_id=%s",
+            yclients_record_id,
+        )
         return False
     try:
         from apps.integrations.yclients import get_yclients_client
 
         client = get_yclients_client()
-        # B1 (DRF-837) exposes ``cancel_record(record_id: int)``. The
-        # stored ``yclients_record_id`` is a string per the B2 model
-        # contract (handles future enterprise-tenant opaque ids), so
-        # we coerce on call. A non-numeric value silently falls into
-        # the except branch — best-effort.
+        # B1 (DRF-837) exposes ``cancel_record(record_id: int)``.
+        # ``yclients_record_id`` is stored as a string per the B2 model
+        # contract; isdigit() guard above ensures int() can't fail here.
         client.cancel_record(record_id=int(yclients_record_id))
         return True
     except Exception:  # noqa: BLE001 — best-effort by design

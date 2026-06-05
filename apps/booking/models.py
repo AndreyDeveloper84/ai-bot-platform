@@ -178,17 +178,111 @@ class BookingRequest(models.Model):
         """
 
         CONFIRMED = "confirmed", "Confirmed"
+        CANCEL_REQUESTED = (
+            "cancel_requested",
+            "Cancel requested (within undo window)",
+        )
+        RESCHEDULE_REQUESTED = (
+            "reschedule_requested",
+            "Reschedule requested (candidate stashed)",
+        )
         CANCELLED = "cancelled", "Cancelled"
         RESCHEDULED = "rescheduled", "Rescheduled (replaced)"
 
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Stamped by apps.bookings.tasks.detect_completed_bookings "
+        "when the periodic scan finds the visit has ended (visit_at + "
+        "duration + grace < now()) AND status is still CONFIRMED. Acts as "
+        "the idempotency lock for the booking.completed eventbus producer: "
+        "the task SET ... WHERE completed_at IS NULL — rowcount tells "
+        "whether we won the race. NULL on rows where the visit hasn't "
+        "happened yet, was cancelled, or where the producer hasn't run yet.",
+    )
     status = models.CharField(
-        max_length=16,
+        max_length=24,
         choices=Status.choices,
         default=Status.CONFIRMED,
         db_index=True,
-        help_text="Lifecycle: confirmed (default), cancelled (customer "
-        "cancel), rescheduled (replaced by a new row after a "
-        "cancel-and-create reschedule).",
+        help_text=(
+            "Lifecycle: confirmed (default) → cancel_requested → "
+            "cancelled OR reschedule_requested → rescheduled. "
+            "cancel_requested and reschedule_requested are interim "
+            "states reversible by the customer."
+        ),
+    )
+    cancel_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Set when state flips to CANCEL_REQUESTED. Used to compute "
+            "the undo window expiry (5s per customer-cancellation-"
+            "reschedule-spec §3.4 / Q-CR1)."
+        ),
+    )
+    rescheduled_from = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="rescheduled_into",
+        help_text=(
+            "Self-FK: the old BookingRequest this row replaced after a "
+            "customer-initiated reschedule. PROTECT so the audit linkage "
+            "cannot be silently broken by deleting the old row."
+        ),
+    )
+    commercial_identity_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Q12-α #541 (founder ACK 2026-05-23) — snapshot of the "
+            "service's commercial identity at booking write time. Used "
+            "by reschedule continuation chain to break when the salon "
+            "admin mutates the service (price hike, duration change, "
+            "currency swap, FK relink). Schema: {service_id, "
+            "service_name, sticker_price_amount, currency, "
+            "duration_minutes}. Only 4 fields are compared "
+            "(service_name is informational). Pre-#541 rows have NULL "
+            "→ chain check skipped per memory "
+            "q12a-billing-founder-gate (legacy chains preserved)."
+        ),
+    )
+    original_booking_event = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reschedule_continuations",
+        # Tech-lead double-pass S4: db_index=False so the FK constraint
+        # adds without an auto-index. Migration 0010 then creates the
+        # index via ``CREATE INDEX CONCURRENTLY`` to avoid the multi-
+        # second AccessExclusiveLock that ``AddField(db_index=True)``
+        # would take on prod-tenant booking tables with >100k rows.
+        db_index=False,
+        help_text=(
+            "Q12-α continuation-chain root (issue #478, founder ACK "
+            "2026-05-22). NULL when this row starts a new billable chain "
+            "(fresh ai_direct booking OR a reschedule that broke the "
+            "chain via service_swap / >90d / partial-failure terminal). "
+            "Set to the chain ROOT's id when this row is a continuation "
+            "(same service, ≤90d from root, no intervening cancel). "
+            "PROTECT so a deleted root can't silently orphan the chain. "
+            "Always points at the ROOT, never at an intermediate link — "
+            "see apps/booking/services/attribution.py::"
+            "compute_reschedule_continuation."
+        ),
+    )
+    reschedule_candidate = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Stashed candidate slot for an in-flight reschedule: "
+            "{'new_master_id', 'new_service_id', 'new_visit_at'}. "
+            "Cleared on commit/abandon."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -257,6 +351,36 @@ class BookingRequest(models.Model):
         related_name="bookings",
     )
 
+    # Phase 4 / F5 — post-visit feedback. Filled when the customer
+    # submits the rating form; before that all four fields are NULL.
+    # ``rating <= 3`` triggers a HUMAN_LOCKED handoff (apps.handoff
+    # AdminTask + Conversation.state=HUMAN_HANDOFF), see
+    # apps/booking/services/feedback.py.
+    rating = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Customer rating 1-5. NULL until they submit the F5 form. "
+        "Values <= 3 fire the handoff flow.",
+    )
+    feedback_comment = models.TextField(
+        blank=True,
+        default="",
+        help_text="Optional free-text comment from the F5 form (≤500 chars enforced at the API).",
+    )
+    feedback_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Wall-clock when the rating was submitted. Idempotency anchor: "
+        "submit_feedback raises 'already_rated' when this is non-NULL.",
+    )
+    feedback_prompt_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When the post-visit DM prompt was dispatched. NULL = not yet sent. "
+        "Phase 4b will scan WHERE NULL and visit_at < now()-1h.",
+    )
+
     def save(self, *args, **kwargs):
         self._validate_attribution_metadata()
         super().save(*args, **kwargs)
@@ -303,13 +427,27 @@ class BookingRequest(models.Model):
             models.Index(fields=["tenant", "bot_user"]),
             models.Index(fields=["tenant", "status"]),
         ]
-        # 4a-hardening: partial UNIQUE on (master, visit_at) WHERE
-        # status='confirmed' — DB-level backstop against double-bookings.
+        # 4a-hardening + customer-cancel-reschedule spec §2 partial
+        # UNIQUE on (master, visit_at) WHERE status is one of the
+        # "this row still holds the slot" states — DB-level backstop
+        # against double-bookings even mid-cancel-undo.
         constraints = [
             models.UniqueConstraint(
                 fields=["master", "visit_at"],
-                condition=models.Q(status="confirmed", visit_at__isnull=False),
-                name="booking_unique_master_confirmed_visit_at",
+                condition=models.Q(
+                    status__in=(
+                        "confirmed",
+                        "cancel_requested",
+                        "reschedule_requested",
+                    ),
+                    visit_at__isnull=False,
+                ),
+                name="booking_unique_master_active_visit_at",
+            ),
+            # Phase 4 — rating must be NULL or in 1..5.
+            models.CheckConstraint(
+                condition=models.Q(rating__isnull=True) | models.Q(rating__gte=1, rating__lte=5),
+                name="booking_rating_in_range_or_null",
             ),
         ]
 
@@ -370,6 +508,14 @@ class BookingReminder(models.Model):
         CANCELLED = "cancelled", "Client / admin cancelled"
         ESCALATED = "escalated", "Escalated to human operator"
         FAILED = "failed", "Send error"
+        # P0 PRE_PILOT — send-time booking-state re-check invariant.
+        # Distinct from CANCELLED (which means «B2 webhook said cancelled»).
+        # STALE_DROPPED means «при dispatch обнаружили что underlying
+        # BookingRequest изменилось (cancelled / rescheduled / completed)
+        # ИЛИ became invalid между schedule + dispatch». Auditable как
+        # отдельный signal для post-pilot analytics (stale-rate spike
+        # detection per master / service / time-of-day).
+        STALE_DROPPED = "stale_dropped", "Dropped at dispatch (booking changed)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(
@@ -398,15 +544,31 @@ class BookingReminder(models.Model):
     yclients_record_id = models.CharField(
         max_length=64,
         db_index=True,
+        null=True,
         blank=True,
         help_text="YClients record id (stringified — YClients ints fit "
         "fine but the API will return larger opaque ids on enterprise "
-        "tenants per their roadmap).",
+        "tenants per their roadmap). Nullable so the Ayla consumer path "
+        "(#442) writes NULL here while the legacy unique_together "
+        "(yclients_record_id, kind) stays non-conflicting — NULL ≠ NULL "
+        "in Postgres uniqueness, so two Ayla appointments with the same "
+        "kind don't collide.",
     )
     chat_id = models.CharField(
         max_length=128,
         help_text="Snapshot of BotUser.chat_id at write time. "
         "Snapshot — chat_id may change in BotUser later.",
+    )
+    ayla_appointment_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Ayla appointment UUID per ADR-0009 event contract. "
+        "When set, replaces yclients_record_id as the idempotency key "
+        "for Ayla-side reminders (#442 booking consumer). Coexists with "
+        "the YClients legacy path: rows from the YClients webhook keep "
+        "yclients_record_id + leave this nullable; rows from the Ayla "
+        "consumer set this + leave yclients_record_id blank.",
     )
     visit_at = models.DateTimeField(
         help_text="When the actual salon visit is scheduled.",
@@ -444,6 +606,15 @@ class BookingReminder(models.Model):
             models.Index(fields=["tenant", "yclients_record_id"]),
             models.Index(fields=["kind", "visit_at"]),
         ]
+        # #442 booking consumer — partial unique on the Ayla side is
+        # created via raw RunSQL in migration 0012 (CREATE UNIQUE INDEX
+        # CONCURRENTLY) so prod doesn't acquire a table lock on a
+        # large bookingreminder. Declared as a Postgres index, NOT as
+        # a Django UniqueConstraint, on purpose: Django's constraint
+        # path runs ALTER TABLE → table-level lock + sync DDL. The
+        # index gives the same uniqueness guarantee with non-blocking
+        # online creation. See migration
+        # 0012_remote_booking_proxy_and_ayla_appointment_id.py.
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()} {self.master_name} {self.visit_at:%d.%m %H:%M}"
@@ -561,3 +732,164 @@ class PendingBookingAction(models.Model):
 
     def __str__(self) -> str:
         return f"{self.get_kind_display()} pending={self.consumed_at is None}"
+
+
+class RemoteBookingProxy(models.Model):
+    """Local mirror of an Ayla djangoproject ``Appointment`` row.
+
+    Per ADR-0009 §Domain ownership matrix, Ayla djangoproject owns the
+    canonical booking; bot-platform keeps a thin read-cache for AI
+    grounding, reminder scheduling, and RFM/sentiment fan-out.
+
+    ### What lives here
+
+    Identifier (``appointment_id`` from Ayla), schedule windows
+    (``start_at`` / ``end_at`` — needed for reminder math and for
+    ``booking.rescheduled`` duration preservation), status, source,
+    and two opaque ID references (``service_id`` + ``specialist_id``)
+    that the AI uses to look up display names via the catalog mirror
+    on demand.
+
+    ### What does NOT live here (PII rule §7 of event-contract.md)
+
+    No customer name / phone / email / price. The AI fetches those
+    from Ayla REST on demand or from the catalog mirror; storing them
+    locally would duplicate PII surface for 90+ days of retention.
+
+    ### Idempotency surface
+
+    ``last_synced_event_id`` records the ULID of the last
+    cross-service event that updated this row. The ingest-side
+    dedupe table (``IngestDedupe``) is the canonical de-duplicator
+    on ``event_id``; this field is for forensic trace + observable
+    «which event last touched this proxy» rather than the primary
+    idempotency mechanism.
+
+    Pattern note: copies the catalog ``_MirrorBase`` shape
+    (``TenantScopedManager`` + ``all_tenants`` + ``synced_at``) by
+    composition, not inheritance — the base assumes a mysite
+    ``IntegerField`` for ``external_id``, ours is a UUID.
+    """
+
+    class Status(models.TextChoices):
+        """Mirrors event-contract.md §3.1 + §3.4 enum values."""
+
+        CONFIRMED = "confirmed", "Confirmed"
+        PENDING_PAYMENT = "pending_payment", "Pending payment"
+        TENTATIVE = "tentative", "Tentative"
+        CANCELLED = "cancelled", "Cancelled"
+        COMPLETED = "completed", "Completed"
+
+    class Source(models.TextChoices):
+        """Mirrors event-contract.md §3.1 source enum."""
+
+        MOBILE_APP = "mobile_app", "Mobile app"
+        ADMIN_CONSOLE = "admin_console", "Admin console"
+        AUTOMATION = "automation", "Automation"
+        YCLIENTS_SYNC = "yclients_sync", "YClients sync"
+
+    appointment_id = models.UUIDField(
+        primary_key=True,
+        editable=False,
+        help_text="Canonical Ayla djangoproject Appointment.id (UUID).",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="remote_booking_proxies",
+        help_text="Owning tenant. CASCADE — the proxy is derived data; "
+        "if the tenant goes, the local mirror goes too.",
+    )
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="remote_booking_proxies",
+        help_text="Channel-side user identity. Nullable: an Ayla "
+        "mobile-only customer can have bookings before ever opening "
+        "the bot, so the proxy is written orphan and a post_save "
+        "signal on BotUser backfills the ref when the user appears "
+        "via any channel. CASCADE applies only to the linked case: "
+        "if the BotUser is purged (GDPR erasure), linked mirrors go "
+        "too — orphan rows are unaffected (no link to cascade through).",
+    )
+
+    # ── Schedule window (for reminders + reschedule math) ──────────
+    start_at = models.DateTimeField(
+        db_index=True,
+        help_text="Appointment start, salon-local timezone. Reminder "
+        "math (T-24h / T-2h) computes against this.",
+    )
+    end_at = models.DateTimeField(
+        help_text="Appointment end. Round-3 spec §3.3: reschedule "
+        "preserves duration via "
+        "``new_end_at = new_start_at + (old_end_at - old_start_at)`` — "
+        "this field is what the math reads.",
+    )
+
+    # ── Status + source (mirrors §3 enums) ─────────────────────────
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        db_index=True,
+    )
+    source = models.CharField(
+        max_length=20,
+        choices=Source.choices,
+        blank=True,
+        default="",
+        help_text="Where the booking originated. Empty when source isn't "
+        "carried in the event (booking.cancelled / .rescheduled / "
+        ".completed don't repeat the source).",
+    )
+
+    # ── Opaque references (catalog mirror does the name lookup) ────
+    service_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Ayla Service.id — looked up via catalog mirror for "
+        "the AI to say 'у тебя стрижка'. Nullable because update "
+        "events (cancelled / rescheduled / completed) don't repeat "
+        "the service reference; the row keeps the value set at "
+        "creation time.",
+    )
+    specialist_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Ayla Master.id — analogous to ``service_id``.",
+    )
+
+    # ── Audit / observability ──────────────────────────────────────
+    last_synced_event_id = models.CharField(
+        max_length=26,
+        blank=True,
+        default="",
+        help_text="ULID of the last cross-service event that touched "
+        "this row. Forensic trace, not the primary idempotency key "
+        "(that's the IngestDedupe table on the ingest side).",
+    )
+    synced_at = models.DateTimeField(
+        auto_now=True,
+        help_text="When the platform last updated this row.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Remote booking proxy"
+        verbose_name_plural = "Remote booking proxies"
+        ordering = ["-start_at"]
+        indexes = [
+            # «Next booking for this user» — hot read path for the AI.
+            models.Index(fields=["bot_user", "start_at"]),
+            # «Active bookings for tenant analytics».
+            models.Index(fields=["tenant", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"RemoteBookingProxy[{self.appointment_id} {self.status}]"

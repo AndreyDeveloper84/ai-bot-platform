@@ -495,3 +495,146 @@ class TestEmptyQueue:
             "skipped": 0,
         }
         mock_send.assert_not_called()
+
+
+# ────────────────────────────────────────────────────────────────────
+# E0 #6 — Send-time booking-state recheck (founder verdict 2026-06-01)
+# ────────────────────────────────────────────────────────────────────
+class TestStateRecheckBeforeSend:
+    """Escalation must not DM the manager for bookings that have been
+    cancelled (or moved into other terminal states) after the T-24h
+    reminder was sent. Mirrors the dispatch-side recheck in
+    ``send_due_reminders`` so drop/defer semantics stay aligned."""
+
+    def test_cancelled_booking_does_not_dm_manager(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        # Stale T-24h reminder linked to a booking the client just
+        # cancelled through Ayla. Without E0 #6 the manager would
+        # be DM'd "Клиент не подтвердил" — false positive that
+        # damages the salon's relationship with the client.
+        br = BookingRequest.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            service_name="Массаж",
+            master_name="Lera",
+            client_name="Anna",
+            client_phone="79991234567",
+            source="bot",
+            status=BookingRequest.Status.CANCELLED,
+        )
+        row = _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
+
+        with patch("apps.bookings.escalation.send_message") as mock_send:
+            result = escalate_stale_reminders()
+
+        mock_send.assert_not_called()
+        assert result["skipped"] == 1
+        assert result["escalated"] == 0
+
+        # Row transitions to ESCALATED so it is not re-evaluated on
+        # the next hourly tick — terminal state with a "dropped"
+        # audit trail.
+        row.refresh_from_db()
+        assert row.status == BookingReminder.Status.ESCALATED
+
+    def test_completed_booking_does_not_dm_manager(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        # Booking was completed before the escalation window closed
+        # (defensive — the 12h window normally bounds this out, but
+        # T-24h reminders technically can race a same-day completion).
+        br = BookingRequest.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            service_name="Массаж",
+            master_name="Lera",
+            client_name="Anna",
+            client_phone="79991234567",
+            source="bot",
+            status=BookingRequest.Status.CONFIRMED,
+            completed_at=timezone.now() - timedelta(minutes=10),
+        )
+        _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
+
+        with patch("apps.bookings.escalation.send_message") as mock_send:
+            result = escalate_stale_reminders()
+
+        mock_send.assert_not_called()
+        assert result["skipped"] == 1
+
+    def test_cancel_requested_defers_without_terminal_transition(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        # Interim reversible state — client tapped Cancel but is still
+        # within the ~5s undo window. The escalation should defer so
+        # the next hourly tick can re-evaluate after the user commits.
+        br = BookingRequest.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            service_name="Массаж",
+            master_name="Lera",
+            client_name="Anna",
+            client_phone="79991234567",
+            source="bot",
+            status=BookingRequest.Status.CANCEL_REQUESTED,
+        )
+        row = _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
+
+        with patch("apps.bookings.escalation.send_message") as mock_send:
+            result = escalate_stale_reminders()
+
+        mock_send.assert_not_called()
+        assert result["skipped"] == 1
+        # Row stays in SENT_NO_REPLY so next tick can re-decide.
+        row.refresh_from_db()
+        assert row.status == BookingReminder.Status.SENT_NO_REPLY
+
+    def test_confirmed_booking_still_escalates(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        # Sanity: a confirmed booking with no client reply on the
+        # T-24h keyboard still escalates (the whole point of the
+        # feature). Without this assertion an over-eager recheck
+        # could silently swallow every escalation.
+        br = BookingRequest.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            service_name="Массаж",
+            master_name="Lera",
+            client_name="Anna",
+            client_phone="79991234567",
+            source="bot",
+            status=BookingRequest.Status.CONFIRMED,
+        )
+        _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
+
+        with patch("apps.bookings.escalation.send_message") as mock_send:
+            result = escalate_stale_reminders()
+
+        assert mock_send.call_count == 1
+        assert result["escalated"] == 1
+
+    def test_null_booking_request_still_escalates(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        # NULL FK = legacy row OR Ayla-path (no BookingRequest mirror
+        # yet). The helper returns SEND with reason
+        # "null_fk_legacy_or_ayla_path" — documented Phase 0 gap.
+        # Behaviour pinned so a future tightening of this branch is
+        # an intentional change, not a regression.
+        _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=None)
+        with patch("apps.bookings.escalation.send_message") as mock_send:
+            result = escalate_stale_reminders()
+        assert mock_send.call_count == 1
+        assert result["escalated"] == 1

@@ -53,6 +53,229 @@ CONSENT_WITHDRAWN = "consent_withdrawn"
 CLIENT_PROFILE_RECOMPUTED = "client_profile_recomputed"
 REPLAY_CAPTURED = "replay_captured"
 
+# --- Booking lifecycle (customer-cancellation-reschedule-spec) ----------
+# Slugs use dotted notation (booking.cancelled etc.) to match the
+# attribution + event-taxonomy conventions in
+# `docs/design/policies/event-taxonomy.md` §3.1.
+BOOKING_CANCEL_REQUESTED = "booking.cancel_requested"
+BOOKING_CANCEL_UNDONE = "booking.cancel_undone"
+BOOKING_CANCELLED = "booking.cancelled"
+BOOKING_RESCHEDULE_REQUESTED = "booking.reschedule_requested"
+BOOKING_RESCHEDULE_ABANDONED = "booking.reschedule_abandoned"
+BOOKING_RESCHEDULED = "booking.rescheduled"
+
+# --- payment_failed skill triggered (W2/Epsilon, #443 + Variant C) -----
+# Emitted by Gamma's #443 payment.failed consumer when delegating to
+# the payment_failed skill (apps/skills/payment_failed/). Observability
+# row — actual skill behavior (master DM info + client DM retry button)
+# is driven by direct function call, not pub/sub. Payload contract:
+# {payment_id}.
+PAYMENT_FAILED_SKILL_TRIGGERED = "payment_failed_skill_triggered"
+
+
+# --- Master M0 onboarding (master-mobile §M0 + master-management MM2) ---
+# Audit slugs registered here so out-of-vocab warnings stay silent in CI.
+# Payload contract: {tenant_id, master_id, bot_user_id, ...extra}.
+MASTER_ONBOARDING_STARTED = "master.onboarding_started"
+MASTER_ONBOARDING_ACCEPTED = "master.onboarding_accepted"
+MASTER_ONBOARDING_REJECTED = "master.onboarding_rejected"
+MASTER_PROFILE_INITIALIZED = "master.profile_initialized"
+
+# --- Admin master-roster CRUD (master-management MM1-MM3 backend) --------
+# Emitted from apps.admin_api when an owner/admin edits a master record
+# through the Ayla Pro web dashboard or admin Mini App. Payload contract:
+# {master_id, actor_role, fields_changed: [..], previous_values: {..}} for
+# profile updates; {master_id, actor_role, size_bytes, mime} for photo.
+MASTER_PROFILE_UPDATED_BY_ADMIN = "master.profile_updated_by_admin"
+MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
+
+# --- Admin master invite flow (master-management MM2 backend / PR 3) -----
+# Emitted from apps.admin_api when an owner/admin issues a fresh
+# CatalogMaster invite. Payload contract:
+#   master.invited:
+#     {master_id, actor_id, actor_role, role: "master", contact_method,
+#      mode, services_count, idempotent: bool}
+#   master.invite_dispatched:
+#     {master_id, channel: "max", delivery: "queued"|"failed"|"skipped",
+#      error?: str}
+# The two events are paired: ``invited`` records the admin's intent +
+# the DB row creation, ``invite_dispatched`` records the side-channel
+# delivery attempt (queued post-commit via ``transaction.on_commit``).
+MASTER_INVITED = "master.invited"
+MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
+
+# --- Admin services ↔ masters mapping (master-management MM4 / PR 4) -----
+# Emitted from apps.admin_api when an owner/admin toggles the M2M between
+# CatalogMaster and CatalogService. One event PER affected master with a
+# bundled diff (not per change row) to keep the audit feed readable.
+# Payload contract:
+#   master.services_changed:
+#     {master_id, actor_id, actor_role, tenant_id,
+#      services_added: [<service_uuid>...],
+#      services_removed: [<service_uuid>...],
+#      occurred_at: <iso>}
+MASTER_SERVICES_CHANGED = "master.services_changed"
+
+# --- Admin master deactivation cascade (master-management MM5 / PR Tier1.1) --
+# Emitted from apps.admin_api.services.master_deactivation. Payload contracts:
+#   master.deactivation_started (low-volume; preview endpoint):
+#     {master_id, actor_id, actor_role, tenant_id,
+#      future_bookings_count}
+#   master.bookings_reassigned (per booking):
+#     {master_id, actor_id, actor_role, tenant_id, booking_id,
+#      from_master_id, to_master_id, visit_at,
+#      customer_notification_message_hash}
+#   master.bookings_cancelled (per booking):
+#     {master_id, actor_id, actor_role, tenant_id, booking_id, visit_at,
+#      customer_notification_message_hash}
+#   master.deactivated (terminal):
+#     {master_id, actor_id, actor_role, tenant_id, reason,
+#      reassigned_count, cancelled_count}
+#   master.reactivated (terminal):
+#     {master_id, actor_id, actor_role, tenant_id, notified_master}
+MASTER_DEACTIVATION_STARTED = "master.deactivation_started"
+MASTER_BOOKINGS_REASSIGNED = "master.bookings_reassigned"
+MASTER_BOOKINGS_CANCELLED = "master.bookings_cancelled"
+MASTER_DEACTIVATED = "master.deactivated"
+MASTER_REACTIVATED = "master.reactivated"
+
+# --- Master schedule self-service (master-mobile §M3, PR Tier1.2) ---------
+# Master taps «Помечу как недоступно» / requests an off-time window via the
+# M3 schedule screen. Payload contract:
+#   master.availability_change_requested:
+#     {tenant_id, master_id, request_id, bot_user_id,
+#      requested_start: <iso>, requested_end: <iso>,
+#      reason_class: vacation|sick|personal|other}
+# Note: NO PII in payload — the master's free-form reason_text is in the
+# DB row only, never on the analytics bus.
+MASTER_AVAILABILITY_CHANGE_REQUESTED = "master.availability_change_requested"
+
+# --- Admin availability-request decision (M3-admin / Bundle B backend) -----
+# Emitted from apps.admin_api.services.availability when an owner/admin
+# resolves a master's PENDING availability request. Payload contracts:
+#   admin.availability_approved:
+#     {tenant_id, master_id, request_id, actor_id, actor_role,
+#      requested_start: <iso>, requested_end: <iso>, reason_class,
+#      materialised_dates: ["YYYY-MM-DD", ...]}
+#   admin.availability_rejected:
+#     {tenant_id, master_id, request_id, actor_id, actor_role,
+#      requested_start: <iso>, requested_end: <iso>, reason_class,
+#      rejection_reason: <str ≤500>}
+# rejection_reason is free-form admin context, NOT customer PII; we keep
+# it on the audit bus so forensic review can rebuild why a request was
+# declined without re-joining through the DB row.
+ADMIN_AVAILABILITY_APPROVED = "admin.availability_approved"
+ADMIN_AVAILABILITY_REJECTED = "admin.availability_rejected"
+
+# --- Master conversation detail (master-mobile §M6, PR M6.1) ---------------
+# Master reads/sends/promotes in their own conversation. Payload contracts:
+#   conversation.master_replied:
+#     {tenant_id, conversation_id, master_id, message_id}
+#   conversation.marked_read_by_master:
+#     {tenant_id, conversation_id, master_id, marked_count}
+#   conversation.tier_promoted_to_human_locked:
+#     {tenant_id, conversation_id, master_id, reason_class, reason_text}
+# Reason_text is free-form forensic context; never PII per master's
+# own PII gating (the master themselves never sees customer phone/LTV).
+CONVERSATION_MASTER_REPLIED = "conversation.master_replied"
+CONVERSATION_MARKED_READ_BY_MASTER = "conversation.marked_read_by_master"
+CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED = "conversation.tier_promoted_to_human_locked"
+
+# --- Master notification preferences (master-mobile §M7, Bundle B / 3) -----
+# Emitted from apps.master_api.services.notification_prefs.update_prefs
+# whenever a master toggles any setting on the M7 screen. Payload contract:
+#   master.notification_prefs_updated:
+#     {tenant_id, master_id, bot_user_id,
+#      changes: {<field>: {before: <val>, after: <val>}, ...}}
+# No customer PII in payload — the diff carries only boolean toggles + the
+# master's own quiet-hours times (HH:MM strings).
+MASTER_NOTIFICATION_PREFS_UPDATED = "master.notification_prefs_updated"
+
+# --- Master AI drafts (master-mobile §M6, Bundle B / item 4 backend) -------
+# Master generates / sends / releases an LLM draft on a customer conversation.
+# Payload contracts (analytics bus + audit log):
+#   master.ai_draft_generated:
+#     {tenant_id, conversation_id, master_id, draft_id,
+#      llm_provider, llm_model, llm_cost_usd: "0.000123",
+#      content_length: int, trigger_message_id?: <uuid>}
+#   master.draft_sent_as_self:
+#     {tenant_id, conversation_id, master_id, draft_id,
+#      message_id, was_edited: bool}
+#   master.draft_released_to_ai:
+#     {tenant_id, conversation_id, master_id, draft_id, message_id}
+# Cost rendered as a stringified Decimal so the analytics bus keeps the
+# exact precision the cost-tracker uses; no PII (message content stays
+# in the AiDraft row, never on the bus).
+MASTER_AI_DRAFT_GENERATED = "master.ai_draft_generated"
+# M6 deferred follow-up: distinct slug for the auto-trigger path so
+# analytics can split «master tapped ✨ Предложить ответ» (manual) from
+# «assistant proactively drafted on customer inbound» (auto, spec §M6
+# line 660 «— помощник готовит ответ —»). Payload shape mirrors the
+# manual slug — adding ``trigger="auto"`` would have worked too but a
+# distinct slug keeps consumer code paths grep-able and lets the events
+# bus partition cleanly.
+MASTER_AI_DRAFT_AUTO_GENERATED = "master.ai_draft_auto_generated"
+MASTER_DRAFT_SENT_AS_SELF = "master.draft_sent_as_self"
+MASTER_DRAFT_RELEASED_TO_AI = "master.draft_released_to_ai"
+
+# --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
+# The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
+# (analytics-bus event names — snake_case dotted notation aligned with
+# event-taxonomy.md §3.12). The SLA-breach + auto-close slugs land
+# alongside the Celery beat that detects them (separate PR); kept out of
+# the canonical set here so an out-of-vocab warning doesn't fire from
+# stub code that does not yet emit them.
+#
+# Payload contracts (consumed by event-taxonomy.md §3.12):
+#   internal_chat.thread_created:
+#     {tenant_id, thread_id, master_id, topic, linked_artifact_type,
+#      linked_artifact_id, actor_id, is_sensitive}
+#   internal_chat.message_sent:
+#     {tenant_id, thread_id, message_id, sender_role, sender_user_id,
+#      has_attachments}     # NOTE: body content NEVER in payload
+#   internal_chat.thread_status_changed:
+#     {tenant_id, thread_id, from_status, to_status, actor_id}
+#   internal_chat.thread_assigned:
+#     {tenant_id, thread_id, assigned_admin_id, actor_id}
+#   internal_chat.escalated_to_founder:
+#     {tenant_id, thread_id, master_id, reason_class}
+#   internal_chat.marked_read:
+#     {tenant_id, thread_id, reader_role, reader_user_id, count}
+INTERNAL_CHAT_THREAD_CREATED = "internal_chat.thread_created"
+INTERNAL_CHAT_MESSAGE_SENT = "internal_chat.message_sent"
+INTERNAL_CHAT_THREAD_STATUS_CHANGED = "internal_chat.thread_status_changed"
+INTERNAL_CHAT_THREAD_ASSIGNED = "internal_chat.thread_assigned"
+INTERNAL_CHAT_ESCALATED_TO_FOUNDER = "internal_chat.escalated_to_founder"
+INTERNAL_CHAT_MARKED_READ = "internal_chat.marked_read"
+
+# --- Payment fan-out (#443 — payment.* consumer family) -------------------
+# Internal snake_case events emitted by the apps/eventbus/consumers/payment
+# handlers. Distinct from the cross-service ``payment.*`` dot.notation
+# events in apps/eventbus/ — these are in-process analytics + skill
+# triggers on the apps/events/ bus.
+#
+# Payload contracts:
+#   loyalty_bonus_eligible (after payment.captured):
+#     {user_id, tenant_id, payment_id, appointment_id, amount, currency}
+#     -> downstream loyalty subscriber (Epic #289) computes + writes
+#     the ledger row.
+#
+#   loyalty_refund_reverse (after payment.refunded):
+#     {user_id, tenant_id, payment_id, appointment_id, refund_amount,
+#      currency, reason}
+#     -> loyalty subscriber reverses the accrual tied to the original
+#     capture.
+#
+#   payment_failed_skill_triggered (after Nth payment.failed, threshold
+#   via settings.PAYMENT_FAILED_HANDOFF_THRESHOLD):
+#     {user_id, tenant_id, payment_id, appointment_id, failure_code,
+#      consecutive_failures}
+#     -> payment_failed skill (separate PR, deferred FOLLOW_UP)
+#     subscribes + prompts user with retry / handoff buttons.
+LOYALTY_BONUS_ELIGIBLE = "loyalty_bonus_eligible"
+LOYALTY_REFUND_REVERSE = "loyalty_refund_reverse"
+PAYMENT_FAILED_SKILL_TRIGGERED = "payment_failed_skill_triggered"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -69,6 +292,47 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         CONSENT_WITHDRAWN,
         CLIENT_PROFILE_RECOMPUTED,
         REPLAY_CAPTURED,
+        BOOKING_CANCEL_REQUESTED,
+        BOOKING_CANCEL_UNDONE,
+        BOOKING_CANCELLED,
+        BOOKING_RESCHEDULE_REQUESTED,
+        BOOKING_RESCHEDULE_ABANDONED,
+        BOOKING_RESCHEDULED,
+        MASTER_ONBOARDING_STARTED,
+        MASTER_ONBOARDING_ACCEPTED,
+        MASTER_ONBOARDING_REJECTED,
+        MASTER_PROFILE_INITIALIZED,
+        PAYMENT_FAILED_SKILL_TRIGGERED,
+        MASTER_PROFILE_UPDATED_BY_ADMIN,
+        MASTER_PHOTO_UPDATED_BY_ADMIN,
+        MASTER_INVITED,
+        MASTER_INVITE_DISPATCHED,
+        MASTER_SERVICES_CHANGED,
+        INTERNAL_CHAT_THREAD_CREATED,
+        INTERNAL_CHAT_MESSAGE_SENT,
+        INTERNAL_CHAT_THREAD_STATUS_CHANGED,
+        INTERNAL_CHAT_THREAD_ASSIGNED,
+        INTERNAL_CHAT_ESCALATED_TO_FOUNDER,
+        INTERNAL_CHAT_MARKED_READ,
+        MASTER_DEACTIVATION_STARTED,
+        MASTER_BOOKINGS_REASSIGNED,
+        MASTER_BOOKINGS_CANCELLED,
+        MASTER_DEACTIVATED,
+        MASTER_REACTIVATED,
+        MASTER_AVAILABILITY_CHANGE_REQUESTED,
+        ADMIN_AVAILABILITY_APPROVED,
+        ADMIN_AVAILABILITY_REJECTED,
+        CONVERSATION_MASTER_REPLIED,
+        CONVERSATION_MARKED_READ_BY_MASTER,
+        CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED,
+        MASTER_NOTIFICATION_PREFS_UPDATED,
+        MASTER_AI_DRAFT_GENERATED,
+        MASTER_AI_DRAFT_AUTO_GENERATED,
+        MASTER_DRAFT_SENT_AS_SELF,
+        MASTER_DRAFT_RELEASED_TO_AI,
+        LOYALTY_BONUS_ELIGIBLE,
+        LOYALTY_REFUND_REVERSE,
+        PAYMENT_FAILED_SKILL_TRIGGERED,
     }
 )
 

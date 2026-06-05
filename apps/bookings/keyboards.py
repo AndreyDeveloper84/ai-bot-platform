@@ -43,6 +43,33 @@ CALLBACK_CANCEL_PREFIX = "cb:rem:cancel:"
 CALLBACK_BOOK_CONFIRM_PREFIX = "cb:book:confirm:"
 CALLBACK_BOOK_CANCEL_PREFIX = "cb:book:cancel:"
 
+# Booking master-pick callback (2026-05-21). When the user taps a master
+# card after a show_masters result, the button payload carries the YClients
+# staff id verbatim. Booking skill matches this prefix and dispatches
+# show_slots(master_id=<id>) directly — no LLM round-trip needed for the
+# selection itself. Suffix is the raw integer YClients staff id (NOT a
+# UUID like the confirm/cancel preview tokens — those are platform-side
+# pending-action rows, this is a stateless deterministic id).
+CALLBACK_BOOK_PICK_MASTER_PREFIX = "cb:book:pick_master:"
+
+# Booking slot-pick callback (2026-05-21). When the user taps a slot
+# card after a show_slots result, the button payload carries the slot's
+# ISO datetime verbatim. Booking skill matches this prefix and
+# synthesises a user-text query ("запиши меня на <datetime>") so the
+# normal Phase-1 LLM call emits confirm_booking with master_id +
+# service_id pulled from short-term conversation memory. Suffix is
+# the raw ISO string YClients returned in show_slots — kept verbatim
+# so the LLM's confirm_booking arguments match the prior tool output.
+CALLBACK_BOOK_PICK_SLOT_PREFIX = "cb:book:pick_slot:"
+
+# Booking date-pick callback (2026-05-21). Date-picker sits between
+# master pick and slot pick — without it show_slots auto-selects the
+# nearest available date and the user never gets to pick when. Payload
+# carries the master_id + date so the slot-listing call can pin the
+# date without re-fetching the master's date list. Format:
+# ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>``.
+CALLBACK_BOOK_PICK_DATE_PREFIX = "cb:book:pick_date:"
+
 
 # Button labels — Russian per the salon brand voice (see
 # ``apps.skills.booking.prompts`` for tone alignment).
@@ -131,8 +158,13 @@ def url_button(label: str, url: str) -> list[dict[str, str]]:
     Args:
       label: button label rendered in the inline keyboard. e.g.
              ``"💳 Оплатить"`` for the buy_certificate flow.
-      url: external URL the button opens. For YooKassa checkout this
-             is :attr:`apps.orders.models.Order.checkout_url`.
+      url: external URL the button opens. For payment checkout this
+             is the ``checkout_url`` returned by Ayla
+             ``POST /api/v1/payments/create`` (see
+             :class:`apps.integrations.ayla_payments.client.PaymentCreateResponse`).
+             Pre-#427: was ``apps.orders.models.Order.checkout_url`` —
+             that table was retired when YooKassa lifecycle moved to
+             Ayla per ADR-0009 §Domain ownership.
 
     Returns:
       A one-element list with a ``{label, url}`` dict. The channel

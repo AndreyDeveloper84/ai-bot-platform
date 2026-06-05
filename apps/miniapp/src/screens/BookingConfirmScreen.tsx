@@ -37,6 +37,9 @@ export function BookingConfirmScreen() {
     setSubmitting(true);
     setErr(null);
     try {
+      // Reschedule flow now lives in dev's dedicated RescheduleScreen
+      // (route /my-visits/:bookingId/reschedule); this confirm screen is
+      // create-only post-merge.
       const { booking } = await createBooking({
         service_id: draft.serviceId,
         master_id: draft.masterId,
@@ -69,10 +72,16 @@ export function BookingConfirmScreen() {
 
   return (
     <ScreenLayout
-      title="Подтверждение"
+      title={false ? "Перенос записи" : "Подтверждение"}
       cta={
         <StickyCta onClick={onConfirm} disabled={submitting}>
-          {submitting ? "Записываю…" : "Подтвердить запись"}
+          {submitting
+            ? false
+              ? "Переношу…"
+              : "Записываю…"
+            : false
+              ? "Подтвердить перенос"
+              : "Подтвердить запись"}
         </StickyCta>
       }
     >

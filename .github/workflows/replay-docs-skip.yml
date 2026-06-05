@@ -1,0 +1,74 @@
+# Sister workflow to replay.yml — reports "replay fixtures (golden +
+# adversarial + voice)" check as success WHEN AND ONLY WHEN the PR
+# touches *only* docs/** or *.md.
+#
+# Why exists + mixed-PR safety: see ci-docs-skip.yml — same pattern.
+
+name: replay
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - "docs/**"
+      - "**/*.md"
+
+permissions:
+  actions: write   # required for self-cancel via `gh run cancel`
+  contents: read
+
+jobs:
+  fixtures:
+    name: replay fixtures (golden + adversarial + voice)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only vs mixed
+        id: detect
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_REF" --depth=1
+          BASE_SHA="$(git rev-parse "origin/$BASE_REF")"
+          CHANGED="$(git diff --name-only "$BASE_SHA"...HEAD || true)"
+          if [ -z "$CHANGED" ]; then
+            echo "::warning::No changed files detected — treating as docs-only no-op."
+            echo "is_docs_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NON_DOCS="$(echo "$CHANGED" | grep -vE '^docs/|\.md$' || true)"
+          if [ -z "$NON_DOCS" ]; then
+            echo "is_docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "All changes are in docs/** or *.md. Replay fixtures not affected."
+          else
+            echo "is_docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Mixed PR — non-docs files detected. Real replay.yml will run; cancelling this docs-skip run."
+            echo "Non-docs files:"
+            echo "$NON_DOCS"
+          fi
+
+      - name: Confirm docs-only success
+        if: steps.detect.outputs.is_docs_only == 'true'
+        run: echo "✓ Docs-only PR — replay fixtures not affected. Reporting success."
+
+      - name: Mixed PR — self-cancel so replay.yml is the only authority
+        if: steps.detect.outputs.is_docs_only == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Self-cancelling: this PR has non-docs changes, so the real replay.yml workflow must be the source of truth for the replay-fixtures check."
+          gh run cancel "${{ github.run_id }}" --repo "${{ github.repository }}"
+          for i in $(seq 1 30); do
+            echo "Waiting for cancellation to propagate ($i/30)..."
+            sleep 2
+          done
+          echo "::error::gh run cancel did not stop the job after 60s. Failing to avoid masking real CI."
+          exit 1

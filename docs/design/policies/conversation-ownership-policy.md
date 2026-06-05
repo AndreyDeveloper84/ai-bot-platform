@@ -1,12 +1,50 @@
 # Conversation Ownership Policy
 
-**Date:** 2026-05-17
-**Status:** v1 (founder-approved)
-**Scope:** Operational policy for AI ↔ human collaboration in customer conversations
+**Date:** 2026-05-17 (r1) · DEPRECATED 2026-05-19
+**Status:** ⚠ **DEPRECATED 2026-05-19** — superseded by [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md) per Ayla-first pivot.
+**Scope (historical):** Operational policy for AI ↔ human collaboration in customer conversations under salon-owned-AI model.
 
-This document codifies **who can say what to a customer, when, and with what supervision**. It is the source-of-truth for engineering (bot behavior gating), product (UX states), QA (test scenarios), legal (audit/compliance), and CSM (escalation).
+> **⚠ DO NOT USE FOR NEW DESIGN.** This doc described the «3-tier customer-facing ownership» model from 2026-05-17 (`AI_CONTINUITY` / `HUMAN_SUPERVISED` / `HUMAN_LOCKED` with customer-visible state transitions).
+>
+> Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory locked 2026-05-19: customer-facing 3-tier ownership is removed. New model = «Ayla always speaks; admin/founder work in separate UI; emergency system fallback» — see [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md).
 
-Foundation: [single-assistant identity](~/.claude/projects/.../memory/project_single_assistant_identity.md). Customer always sees one AI-assistant; this doc is the **invisible** machinery behind it.
+---
+
+## ⚠ Migration map
+
+Engineering / docs consumers — use the new model:
+
+| Old r1 concept | New r2 (Doc #3) replacement |
+|---|---|
+| `AI_CONTINUITY` tier | Default state — Ayla autonomous |
+| `HUMAN_SUPERVISED` tier | Emergency fallback `payment_dispute` LOW/MEDIUM OR `booking_conflict` MEDIUM |
+| `HUMAN_LOCKED` tier (refund / complaint / medical) | Emergency fallback `payment_dispute` HIGH/CRITICAL OR `legally_sensitive` |
+| Customer-visible tier transitions | Customer-invisible per [`ayla-emergency-fallback-policy §2.12`](./ayla-emergency-fallback-policy.md) |
+| «вам отвечает администратор Анна» framing | Ayla speaks: «передаю команде на проверку, вернусь в течение N» |
+| `conversation.ownership_tier` field on Conversation | `conversation.active_emergency_event_id` (FK to EmergencyEvent) — schema migration per [`ayla-emergency-fallback-policy §12.3`](./ayla-emergency-fallback-policy.md) |
+| Auto-resume rules | N/A — admin doesn't reply in customer thread anymore |
+| Admin compose draft per `HUMAN_SUPERVISED` | Admin selects outcome via structured UI per Doc #3 §5.2; Ayla composes from template |
+| SLA tier mapping (15/30/60/120 min) | Per-tier SLA matrix per Doc #3 §7 |
+
+---
+
+## ⚠ What stays valid (backend mechanics retained)
+
+These principles remain valid as **backend / Ayla Pro internal concerns** — they describe what admin/founder see in their own UI, not customer experience:
+- Permissions matrix (Owner / Admin / Receptionist / Master roles) — moved to [`tenant-as-provider-model §2.10`](./tenant-as-provider-model.md)
+- Audit log events on every customer-facing message — extended in [`ayla-emergency-fallback-policy §8`](./ayla-emergency-fallback-policy.md) `EmergencyAuditLog`
+- Retention policy (180d transcripts, 365d audit, 7y sensitive) — moved per data type to respective foundation docs
+- SLA discipline — values changed; structure preserved in Doc #3 §7
+
+---
+
+## ⚠ Original r1 content preserved below for historical trace
+
+The sections below are retained for migration trace + engineering reference for in-flight code. **DO NOT cite for new design.** New design references foundation Docs #1-5.
+
+Historical:
+
+Foundation: [single-assistant identity](~/.claude/projects/.../memory/project_single_assistant_identity.md) (also deprecated 2026-05-19; superseded by [`project_ayla_personal_ai`](~/.claude/projects/.../memory/project_ayla_personal_ai.md)). Customer always sees one AI-assistant; this doc is the **invisible** machinery behind it.
 
 ---
 

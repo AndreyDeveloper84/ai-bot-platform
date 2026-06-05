@@ -71,6 +71,20 @@ STRICT_OPT_OUT_PREFIXES = (
     # Customer Mini App API: tenant resolved from verified initData →
     # BotUser → tenant inside @require_init_data.
     "/api/v1/customer/",
+    # Admin REST API (PR 2 / MM1-MM3): tenant resolved from verified
+    # initData → BotUser → tenant inside @require_admin_role. The
+    # X-Tenant header is never sent. (Master surface /api/v1/master/
+    # follows the same pattern but is opted in to strict mode for
+    # parity with PR 1 — left as-is to keep PR scope tight.)
+    "/api/v1/admin/",
+    # #732 (PRE_PILOT) — temporary 410 Gone for retired YooKassa
+    # webhook. YooKassa has no X-Tenant header (external webhook).
+    # Without this opt-out the strict-mode flip (2026-05-28 per
+    # project_strict_tenant_refuse_soak) would return 400
+    # TENANT_REQUIRED before the 410 view runs, defeating the
+    # forensic-capture design. Removed by the cleanup PR alongside
+    # the apps.integrations.yookassa_retired package.
+    "/api/v1/yookassa/",
 )
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.

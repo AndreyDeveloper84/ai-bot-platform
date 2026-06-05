@@ -8,6 +8,8 @@ export interface BookingDraft {
   masterId: string | null;
   masterName: string | null;
   visitAt: string | null;
+  /** Set when flow is a reschedule of an existing booking. */
+  rescheduleOf: string | null;
 }
 
 const EMPTY: BookingDraft = {
@@ -16,6 +18,7 @@ const EMPTY: BookingDraft = {
   masterId: null,
   masterName: null,
   visitAt: null,
+  rescheduleOf: null,
 };
 
 let state: BookingDraft = { ...EMPTY };
@@ -33,6 +36,16 @@ export const setMaster = (id: string, name: string) => {
 };
 export const setVisitAt = (visitAt: string | null) => {
   state = { ...state, visitAt };
+  emit();
+};
+export const setRescheduleContext = (
+  rescheduleOf: string,
+  serviceId: string,
+  serviceName: string,
+  masterId: string,
+  masterName: string,
+) => {
+  state = { ...EMPTY, rescheduleOf, serviceId, serviceName, masterId, masterName };
   emit();
 };
 export const resetBooking = () => {

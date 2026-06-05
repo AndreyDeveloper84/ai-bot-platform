@@ -2,11 +2,15 @@
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-05-18 r1 |
-| **Status** | Strategic foundation — affects ALL downstream UX, data model, AI behavior |
+| **Date** | 2026-05-19 r2 (Ayla-first voice-sweep) |
+| **Status** | Strategic foundation — wellness profile = Ayla's memory of user (cross-tenant); see Doc #2 for memory operational model |
 | **Type** | Architectural foundation (not a handoff — это spec для всех будущих handoffs) |
-| **Scope** | Define what AI knows about a person, how it's stored, how it's used, how it influences UX |
-| **Replaces** | «Customer profile» (transactional) → «Wellness profile» (relational) |
+| **Scope** | Define what Ayla knows about a person, how it's stored, how it's used, how it influences UX |
+| **Replaces** | «Customer profile» (transactional) → «Wellness profile» (relational) → «Ayla memory» (Ayla-first model 2026-05-19) |
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19: Wellness Profile IS **Ayla's memory of user** per [`ayla-memory-and-personalization §3-9`](./ayla-memory-and-personalization.md). 10-layer model maps to MemoryEntry vocabulary. Cross-tenant persistent; tenant CANNOT see per [`tenant-as-provider-model §4.4`](./tenant-as-provider-model.md). 3-zone sensitivity framework (🟢🟡🔴) overlay applies per [`ayla-identity-and-brand §8`](./ayla-identity-and-brand.md). Terminology updated: «AI помощник» → «Ayla».
 
 ## What this document IS
 
@@ -37,7 +41,7 @@ These produce fundamentally different products:
 | Main screen | catalog / book / pay | «как вы себя чувствуете сегодня?» + AI state |
 | AI behavior | reactive (responds to user) | **proactive** (notices, suggests, supports) |
 | Retention loop | reminders + promos | observe → recommend → support → analyze → improve |
-| Customer value | «бот для записи» | «AI помощник который меня знает» |
+| Customer value | «бот для записи» | «Ayla — мой AI-помощник, который меня помнит» |
 | Switching cost | low | high (12+ months of personal data) |
 | LTV | medium | 3-5× higher |
 | Pricing model | salon pays platform | platform charges salon AND optionally customer |
@@ -859,7 +863,7 @@ This document changes how existing handoffs are understood:
 | Q-WP6 | «Forget» action — can customer remove specific service from history? | YES for display/personalization, NO from BookingRequest itself (financial record) | Legal | 🟡 |
 | Q-WP7 | Confidence display to customer — show «I'm 87% confident you'd like this»? | NO — feels robotic. Use natural language: «обычно вам подходит» | Design | 🟢 |
 | Q-WP8 | Recommendation engine MVP — pure rules or simple ML from start? | Pure rules MVP (transparent, explainable); ML Phase 2 | Eng | 🟡 |
-| Q-WP9 | Behavioral data inference — what's the consent disclosure? Bot collects implicitly while customer interacts | Honest mention in onboarding: «помощник учится на ваших предпочтениях», customer can opt-out | PM + Legal | 🟡 |
+| Q-WP9 | Behavioral data inference — what's the consent disclosure? Ayla collects implicitly while customer interacts | Honest mention in onboarding: «Ayla замечает паттерны и запоминает, чтобы рекомендовать точнее», customer can opt-out per [`ayla-memory-and-personalization §10.9`](./ayla-memory-and-personalization.md). RESOLVED for r2 via 3-zone framework + memory transparency surface. | PM + Legal | ✅ |
 | Q-WP10 | Wellness Goals — fixed taxonomy of 12 OR customer can add custom? | Fixed MVP (curated); custom in v1.2+ | PM | 🟢 |
 
 ---

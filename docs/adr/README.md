@@ -14,6 +14,8 @@ Read these before changing anything that contradicts them.
 | 0004 | Stack — PostgreSQL + Redis + chromadb + S3 | Accepted | 2026-05-07 | [`ADR-0004-stack-postgres-redis-chromadb-s3.md`](ADR-0004-stack-postgres-redis-chromadb-s3.md) |
 | 0005 | Multi-LLM provider routing from Sprint 6 | Accepted | 2026-05-07 | [`ADR-0005-multi-llm-provider-routing.md`](ADR-0005-multi-llm-provider-routing.md) |
 | 0006 | Field-level encryption via django-cryptography-django5 | Accepted | 2026-05-09 | [`ADR-0006-field-level-encryption.md`](ADR-0006-field-level-encryption.md) |
+| 0007 | Conversation State enum — minimal-first | Accepted | 2026-05-11 | [`ADR-0007-conversation-state-enum.md`](ADR-0007-conversation-state-enum.md) |
+| 0008 | Role detection foundation — TenantStaff + CatalogMaster split | Accepted | 2026-05-19 | [`ADR-0008-role-detection-and-staff-model.md`](ADR-0008-role-detection-and-staff-model.md) |
 
 ## Source
 

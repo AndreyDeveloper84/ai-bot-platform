@@ -54,6 +54,7 @@ from typing import Any, ClassVar
 from apps.audit.services import write_audit
 from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
+from apps.llm.protocol import LLMError
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.faq.prompts import BrandVoiceConfig, build_faq_prompt
 from apps.skills.faq.tools import (
@@ -158,94 +159,127 @@ class FAQSkill:
 
         tenant = context.conversation.tenant
         tenant_id = str(tenant.id)
-        provider = get_router().get_provider(tenant, skill=self.name, op="complete")
-        model = getattr(provider, "default_completion_model", None) or ""
 
-        # Phase 1 — first LLM call (decide on tool use).
-        first_messages = build_faq_prompt(
-            brand_voice=_DEFAULT_BRAND_VOICE,
-            retrieved_chunks=None,
-            query=context.message_text,
-        )
-        first = asyncio.run(
-            provider.complete(
-                first_messages,
-                model=model,
-                tools=[SEARCH_KB_TOOL_SPEC],
+        # #473 LLM Y3 envelope expansion: the entire LLM-touching flow
+        # (provider lookup at line ↓, two ``provider.complete`` calls,
+        # and the embedding-provider lookup + ``provider.embed`` inside
+        # ``_execute_search_tool``) is wrapped here so ANY LLMError
+        # variant — UnknownTenantError, LLMProviderUnavailable,
+        # LLMTransportError, LLMQuotaError, LLMProviderQuotaExceeded —
+        # converts to a friendly handoff instead of 500-ing the customer.
+        #
+        # SCOPE NOTE: envelope intentionally covers ``_audit_faq`` +
+        # ``_build_skill_result`` too (they sit at the bottom of the
+        # try). Neither raises ``LLMError`` today (one is an ORM write,
+        # the other a dataclass build). Non-LLM exceptions (DB outage,
+        # serialisation crash) bubble past ``except LLMError`` and
+        # surface as 500 — that's pre-existing F2 behaviour, untouched
+        # by #473. Tracked as future hardening (outer ``except
+        # Exception`` with ``reason='unexpected_error'``) if pilot
+        # telemetry shows the gap matters.
+        try:
+            provider = get_router().get_provider(tenant, skill=self.name, op="complete")
+            model = getattr(provider, "default_completion_model", None) or ""
+
+            # Phase 1 — first LLM call (decide on tool use).
+            first_messages = build_faq_prompt(
+                brand_voice=_DEFAULT_BRAND_VOICE,
+                retrieved_chunks=None,
+                query=context.message_text,
             )
-        )
-
-        if not first.tool_calls:
-            # No retrieval needed (small-talk / direct answer).
-            return _build_skill_result(
-                text=first.text,
-                tool_calls_made=[],
-                confidence=None,
+            first = asyncio.run(
+                provider.complete(
+                    first_messages,
+                    model=model,
+                    tools=[SEARCH_KB_TOOL_SPEC],
+                )
             )
 
-        first_call = first.tool_calls[0]
-        if first_call.name != SEARCH_KB_TOOL_SPEC["name"]:
-            return _handoff(
-                tool_calls_made=first.tool_calls,
-                reason="faq_unknown_tool",
-                text=_FALLBACK_HANDOFF_TEXT,
+            if not first.tool_calls:
+                # No retrieval needed (small-talk / direct answer).
+                return _build_skill_result(
+                    text=first.text,
+                    tool_calls_made=[],
+                    confidence=None,
+                )
+
+            first_call = first.tool_calls[0]
+            if first_call.name != SEARCH_KB_TOOL_SPEC["name"]:
+                return _handoff(
+                    tool_calls_made=first.tool_calls,
+                    reason="faq_unknown_tool",
+                    text=_FALLBACK_HANDOFF_TEXT,
+                )
+
+            # Phase 2 — tool execution (sync, writes ORM audit rows).
+            # NOTE: _execute_search_tool ALSO does an LLM call internally
+            # (embedding for retrieval) — its LLMError is caught here.
+            tool_result = _execute_search_tool(tenant, first_call.arguments)
+
+            if not tool_result.hits:
+                _audit_faq(
+                    tenant_id=tenant_id,
+                    hits_count=0,
+                    confidence=None,
+                    handoff=True,
+                )
+                return _handoff(
+                    tool_calls_made=first.tool_calls,
+                    reason="faq_low_confidence",
+                    text=_FALLBACK_HANDOFF_TEXT,
+                )
+
+            confidence = _compute_confidence(tool_result)
+            retrieved_chunks = [
+                {
+                    "text": hit.text,
+                    "score": hit.score,
+                    "doc_type": hit.doc_type,
+                    "source_uri": hit.source_uri,
+                }
+                for hit in tool_result.hits
+            ]
+
+            # Phase 3 — second LLM call (grounded answer).
+            second_messages = build_faq_prompt(
+                brand_voice=_DEFAULT_BRAND_VOICE,
+                retrieved_chunks=retrieved_chunks,
+                query=context.message_text,
             )
+            second = asyncio.run(provider.complete(second_messages, model=model))
 
-        # Phase 2 — tool execution (sync, writes ORM audit rows).
-        tool_result = _execute_search_tool(tenant, first_call.arguments)
-
-        if not tool_result.hits:
+            # Phase 4 — audit + return.
+            handoff = confidence < _CONFIDENCE_HANDOFF_THRESHOLD
             _audit_faq(
                 tenant_id=tenant_id,
-                hits_count=0,
-                confidence=None,
-                handoff=True,
+                hits_count=len(tool_result.hits),
+                confidence=confidence,
+                handoff=handoff,
             )
-            return _handoff(
+            if handoff:
+                return _handoff(
+                    tool_calls_made=first.tool_calls,
+                    reason="faq_low_confidence",
+                    text=_FALLBACK_HANDOFF_TEXT,
+                    confidence=confidence,
+                )
+            return _build_skill_result(
+                text=second.text,
                 tool_calls_made=first.tool_calls,
-                reason="faq_low_confidence",
-                text=_FALLBACK_HANDOFF_TEXT,
-            )
-
-        confidence = _compute_confidence(tool_result)
-        retrieved_chunks = [
-            {
-                "text": hit.text,
-                "score": hit.score,
-                "doc_type": hit.doc_type,
-                "source_uri": hit.source_uri,
-            }
-            for hit in tool_result.hits
-        ]
-
-        # Phase 3 — second LLM call (grounded answer).
-        second_messages = build_faq_prompt(
-            brand_voice=_DEFAULT_BRAND_VOICE,
-            retrieved_chunks=retrieved_chunks,
-            query=context.message_text,
-        )
-        second = asyncio.run(provider.complete(second_messages, model=model))
-
-        # Phase 4 — audit + return.
-        handoff = confidence < _CONFIDENCE_HANDOFF_THRESHOLD
-        _audit_faq(
-            tenant_id=tenant_id,
-            hits_count=len(tool_result.hits),
-            confidence=confidence,
-            handoff=handoff,
-        )
-        if handoff:
-            return _handoff(
-                tool_calls_made=first.tool_calls,
-                reason="faq_low_confidence",
-                text=_FALLBACK_HANDOFF_TEXT,
                 confidence=confidence,
             )
-        return _build_skill_result(
-            text=second.text,
-            tool_calls_made=first.tool_calls,
-            confidence=confidence,
-        )
+        except LLMError as exc:
+            logger.warning(
+                "faq.llm.failed tenant=%s err_type=%s err=%s",
+                tenant_id,
+                type(exc).__name__,
+                exc,
+            )
+            return _handoff(
+                tool_calls_made=[],
+                reason="llm_error",
+                text=_FALLBACK_HANDOFF_TEXT,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +384,7 @@ def _audit_faq(
 
 
 _QUESTION_SIGNALS: tuple[str, ...] = (
+    # Generic question markers
     "?",
     "сколько",
     "когда",
@@ -360,11 +395,25 @@ _QUESTION_SIGNALS: tuple[str, ...] = (
     "какая",
     "какие",
     "что такое",
+    "что входит",
+    "есть ли",
+    "можно ли",
+    # Imperative info-requests. Cutover smoke 2026-05-19 surfaced
+    # «Расскажи про RF-лифтинг» falling through to echo because no
+    # interrogative signal matched. These are common Russian phrasings
+    # of "give me info about X" and rarely appear in greetings.
+    "расскажи",
+    "опиши",
+    "подскажи",
+    "интересует",
+    "поведай",
+    # English fallbacks
     "what is",
     "how much",
     "when",
     "where",
     "why",
+    "tell me",
 )
 
 

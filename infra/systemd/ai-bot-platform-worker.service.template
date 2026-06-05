@@ -1,0 +1,34 @@
+# ai-bot-platform — Celery worker systemd unit (TEMPLATE).
+#
+# Placeholders: see ai-bot-platform-web.service.template.
+# Install at: /etc/systemd/system/ai-bot-platform-{ENV}-worker.service
+
+[Unit]
+Description=ai-bot-platform Celery worker — {ENV}
+After=network.target redis-server.service postgresql.service
+Wants=network.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=taximeter
+Group=taximeter
+WorkingDirectory={DEPLOY_PATH}
+EnvironmentFile={ENV_FILE}
+Environment="DJANGO_SETTINGS_MODULE=config.settings.production"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart={DEPLOY_PATH}/.venv/bin/celery -A config worker \
+    --loglevel=INFO \
+    --concurrency=2
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
+
+# RAM cap per worker. 2 concurrency × ~120MB Django process ≈ 350MB
+# steady-state. Cap at 512MB to absorb temporary spikes.
+MemoryMax=512M
+MemoryHigh=400M
+
+[Install]
+WantedBy=multi-user.target

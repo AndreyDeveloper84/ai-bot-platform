@@ -327,3 +327,77 @@ def _post_to_max(token: str, chat_id: str, text: str) -> None:
             resp.text,
         )
     resp.raise_for_status()
+
+
+# ─── AI quality observability daily task (Веха 2 / #771) ────────────────
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)  # type: ignore[misc]
+def aggregate_ai_metrics_daily(self: Any, target_date_iso: str | None = None) -> dict[str, Any]:
+    """Iterate every active tenant + roll up AIRequestMetric for the target date.
+
+    Beat-scheduled at 03:00 UTC (mirrors Sprint 8 cadence per Q3 verdict
+    2026-05-26). Optional `target_date_iso` kwarg supports operator replays
+    («re-run for 2026-05-25»).
+
+    For each tenant:
+      1. `aggregate_daily_metrics(target_date, tenant)` writes/updates the
+         `AIDailyMetricSummary` row.
+      2. `_alert_breaches(summary)` fires `page()` for any threshold
+         breach (warning severity, deduped per `(tenant, date, metric)`).
+
+    Idempotent — `update_or_create` keyed on `(tenant, snapshot_date)`.
+    Late-arriving AIRequestMetric rows (back-fills) appear in the next
+    aggregation pass.
+
+    Returns a per-tenant summary dict for observability + caller-side
+    smoke checks. Empty-day tenants ship `total_requests=0` rows so the
+    dashboard can render «no traffic» badges without a missing-row case.
+    """
+    from apps.observability.ai_metrics import _alert_breaches, aggregate_daily_metrics
+    from apps.tenancy.models import Tenant
+
+    target_date = _resolve_target_date(target_date_iso)
+    logger.info("observability.ai_metrics.aggregate_started target_date=%s", target_date)
+
+    per_tenant: dict[str, Any] = {}
+    alerts_total = 0
+    for tenant in Tenant.objects.filter(is_active=True):
+        try:
+            summary = aggregate_daily_metrics(target_date, tenant)
+            fired = _alert_breaches(summary)
+            alerts_total += fired
+            per_tenant[tenant.slug] = {
+                "total_requests": summary.total_requests,
+                "fallback_rate": round(summary.fallback_rate, 4),
+                "task_success_rate": round(summary.task_success_rate, 4),
+                "latency_p95_ms": summary.latency_p95_ms,
+                "mean_cost_usd": str(summary.mean_cost_usd),
+                "alerts_fired": fired,
+            }
+        except Exception:  # noqa: BLE001 — degrade per-tenant, continue
+            logger.exception(
+                "observability.ai_metrics.aggregate_failed tenant=%s target_date=%s",
+                tenant.slug,
+                target_date,
+            )
+            per_tenant[tenant.slug] = {"error": "see logs"}
+
+    result = {
+        "target_date": str(target_date),
+        "tenants_processed": len(per_tenant),
+        "alerts_total": alerts_total,
+        "per_tenant": per_tenant,
+    }
+    logger.info(
+        "observability.ai_metrics.aggregate_complete target_date=%s tenants=%d alerts=%d",
+        target_date,
+        len(per_tenant),
+        alerts_total,
+    )
+    return result

@@ -1,0 +1,6 @@
+# Contract fixtures (Gamma A10) are hashed byte-for-byte by
+# tests/fixtures/contracts/MANIFEST.sha256. Pin them to LF so the
+# digests stay identical across OSes and fresh checkouts (autocrlf
+# would otherwise rewrite them to CRLF on Windows and break the guard).
+tests/fixtures/contracts/*.json text eol=lf
+tests/fixtures/contracts/MANIFEST.sha256 text eol=lf

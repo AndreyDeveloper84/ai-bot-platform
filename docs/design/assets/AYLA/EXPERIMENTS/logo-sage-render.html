@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>ayla — logo color experiment</title>
+<style>
+  body {
+    margin: 0;
+    padding: 48px;
+    background: #fafaf8;
+    font-family: 'Manrope', system-ui, sans-serif;
+    color: #25241f;
+  }
+  h1 { font-weight: 600; font-size: 28px; letter-spacing: -0.02em; margin: 0 0 8px; color: #5a8557; }
+  .lede { font-size: 15px; color: #7a766c; margin-bottom: 48px; max-width: 640px; line-height: 1.5; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; max-width: 960px; }
+  .cell { background: white; border: 1px solid #e8e6df; border-radius: 12px; overflow: hidden; }
+  .cell-label { padding: 16px 20px; font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: #7a766c; border-bottom: 1px solid #e8e6df; }
+  .cell img { display: block; width: 100%; height: auto; }
+  .footnote { margin-top: 48px; padding: 24px; background: #f3f7f3; border-left: 3px solid #7ba478; font-size: 14px; line-height: 1.6; color: #3a5638; max-width: 800px; border-radius: 4px; }
+  .footnote code { font-family: ui-monospace, monospace; font-size: 13px; background: white; padding: 2px 6px; border-radius: 4px; border: 1px solid #c7d9c4; }
+</style>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<h1>logo color experiment · purple → sage</h1>
+<p class="lede">Side-by-side: original purple bot/channel avatar asset vs experimental sage-green swap. Sage hex = <code style="font-family:ui-monospace,monospace">#5A8557</code> (sage-500, text-safe darker per Tau dashboard §8 anchor).</p>
+
+<div class="grid">
+  <div class="cell">
+    <div class="cell-label">Original · purple #7D63EF · bot/channel avatar</div>
+    <img src="../../logo/logo.svg" alt="Purple AYLA bot avatar">
+  </div>
+  <div class="cell">
+    <div class="cell-label">Experiment · sage #5A8557 · color swap</div>
+    <img src="./logo-sage-experiment.svg" alt="Sage AYLA experiment">
+  </div>
+</div>
+
+<div class="footnote">
+  <strong>Verdict:</strong> sage swap technically works (color contrast preserved), но styling
+  всё ещё marketing-heavy — sparkles, decorative «AYLA» plate, ALL CAPS treatment.
+  Это <strong>working experiment</strong>, не canonical app logo.<br><br>
+  Per <code>project_ayla_brand_hybrid_usage</code> founder verdict 2026-05-27:
+  primary canonical wordmark = typography-based lowercase «ayla» в Manrope sage-500
+  (see <code>design-tokens.md §12 Wordmark</code>). Финальный logo asset = pending
+  founder designer commission, не Sigma scope.
+</div>
+
+</body>
+</html>

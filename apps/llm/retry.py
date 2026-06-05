@@ -323,11 +323,23 @@ async def run_with_retry(
     # so test signatures stay forward-compatible.
     _ = _now or time.monotonic
 
+    # LLM retro Y4: catch ``Exception``, not ``BaseException``. Bare
+    # ``except BaseException`` swallowed ``KeyboardInterrupt``,
+    # ``SystemExit``, and ``asyncio.CancelledError`` — a worker shut
+    # down mid-retry would have its cancel signal absorbed and the
+    # retry loop would keep firing until the predicate returned
+    # non-retriable. ``CancelledError`` is explicitly re-raised below
+    # to defend against a caller's predicate accidentally treating it
+    # as retriable.
     last_exc: BaseException | None = None
     for attempt in range(1, policy.max_attempts + 1):
         try:
             return await fn()
-        except BaseException as exc:  # noqa: BLE001 — caller's predicate decides
+        except asyncio.CancelledError:
+            # Worker shutdown / task cancellation — propagate IMMEDIATELY
+            # so the runtime can unwind, regardless of any predicate.
+            raise
+        except Exception as exc:  # noqa: BLE001 — caller's predicate decides
             if not is_retriable(exc):
                 # Non-retriable: propagate immediately without firing
                 # on_attempt_failed (it's reserved for retriable

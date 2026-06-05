@@ -39,8 +39,11 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from django.conf import settings
+
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
+from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import (
     InitDataBadSignature,
     InitDataError,
@@ -51,6 +54,7 @@ from apps.miniapp_api.auth import (
     extract_init_data,
     verify_init_data,
 )
+from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.scheduling.services.resolver import (
     collect_time_block_intervals,
     compute_free_slots,
@@ -69,6 +73,44 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
+def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUser:
+    """Create a BotUser from a verified initData on first Mini App tap.
+
+    Used when the customer DM'd the bot through the legacy mysite
+    backend (so the row exists in mysite_stage but not in the platform
+    DB) — or, post-cutover, simply hadn't opened the bot yet but found
+    the Mini App URL another way. Either way, the HMAC proves they
+    have legitimate access to the bot.
+    """
+    user = verified.user
+    first = (user.get("first_name") or "").strip()
+    last = (user.get("last_name") or "").strip()
+    display = (f"{first} {last}".strip() or f"max:{verified.user_id}")[:200]
+
+    chat_id = ""
+    if verified.chat and "id" in verified.chat:
+        chat_id = str(verified.chat.get("id", ""))[:128]
+
+    bot_user, created = BotUser.all_tenants.get_or_create(
+        tenant=tenant,
+        channel="max",
+        channel_user_id=verified.user_id,
+        defaults={
+            "display_name": display,
+            "chat_id": chat_id,
+            "timezone": tenant.timezone,
+        },
+    )
+    if created:
+        logger.info(
+            "miniapp_api.auth.lazy_register tenant=%s channel_user_id=%s display=%r",
+            tenant.slug,
+            verified.user_id,
+            display,
+        )
+    return bot_user
+
+
 def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
     """Decorator: verify ``Authorization: MaxInitData …`` and resolve identity.
 
@@ -85,6 +127,19 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
 
     @wraps(view_func)
     def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        # Dev-bypass (DEBUG-gated, header-opt-in, loudly logged) — see
+        # apps/miniapp_api/dev_bypass.py. In prod, the first line of
+        # try_dev_bypass is `if not settings.DEBUG: return None`, so this
+        # branch is dead code in production regardless of header presence.
+        bypass = try_dev_bypass(request)
+        if bypass is not None:
+            bot_user_b, _bypass_tenant = bypass
+            request.verified_init_data = None  # type: ignore[attr-defined]
+            request.bot_user = bot_user_b  # type: ignore[attr-defined]
+            request.tenant = bot_user_b.tenant  # type: ignore[attr-defined]
+            with tenant_scope(bot_user_b.tenant):
+                return view_func(request, *args, **kwargs)
+
         header = request.headers.get("Authorization", "")
         try:
             raw = extract_init_data(header)
@@ -101,18 +156,56 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
         except InitDataError as exc:  # safety net
             return _error("unauthorized", str(exc), 401)
 
-        bot_user = (
-            BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
+        # Tenant resolution: in single-bot mode the env binds the bot to
+        # exactly one tenant. Multi-tenant ingress will rewire this later
+        # via the channel-token map (CHANNEL_TOKEN_TO_TENANT_SLUG).
+        bot_tenant_slug = getattr(settings, "MAX_BOT_TENANT_SLUG", "")
+        bot_tenant = (
+            Tenant.objects.filter(slug=bot_tenant_slug).first() if bot_tenant_slug else None
+        )
+
+        # Look up scoped to that tenant — including soft-deleted rows so
+        # we can return a distinct error for those users (they need to
+        # contact support, not silently re-onboard).
+        existing = (
+            BotUser.all_tenants.filter(
+                tenant=bot_tenant,
+                channel="max",
+                channel_user_id=verified.user_id,
+            )
             .select_related("tenant")
             .order_by("-last_seen")
             .first()
+            if bot_tenant is not None
+            else None
         )
-        if bot_user is None:
+
+        if existing is not None and existing.deleted_at is not None:
             return _error(
-                "user_not_registered",
-                "first interact with the bot before opening the Mini App",
-                404,
+                "user_deleted",
+                "Аккаунт удалён. Чтобы восстановить, напишите в поддержку студии.",
+                403,
             )
+
+        if existing is not None:
+            bot_user = existing
+        else:
+            # Lazy-create. The HMAC has already proven the user is a
+            # legitimate MAX user of the bot owning this Mini App; we
+            # don't gate twice. Pre-cutover, this fills the gap where
+            # webhook is still pointing at mysite and no BotUser exists
+            # in ai_bot_platform_dev yet.
+            if bot_tenant is None:
+                logger.error(
+                    "miniapp_api.auth.no_tenant_configured slug=%r — cannot lazy-create BotUser",
+                    bot_tenant_slug,
+                )
+                return _error(
+                    "server_misconfigured",
+                    "Bot tenant not configured — contact support.",
+                    500,
+                )
+            bot_user = _lazy_register_bot_user(bot_tenant, verified)
 
         request.verified_init_data = verified  # type: ignore[attr-defined]
         request.bot_user = bot_user  # type: ignore[attr-defined]
@@ -137,10 +230,65 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
     non-sensitive fields; PII like phone is NOT returned here even if
     the BotUser has it on file (the profile endpoint, Phase 3, is the
     authorized surface for that).
+
+    # pending_booking_intent (P0 PRE_PILOT, anonymous-gate restoration)
+
+    Per memory `project_booking_flow_implementation_cut` founder cut #6:
+    the Mini App may pass an optional `pending_booking_intent` object in
+    the POST body to preserve the draft booking the user was assembling
+    when the OAuth gate fired. Backend caches it (Redis, 10min TTL,
+    keyed by BotUser.id) and echoes the current value in the response so
+    the frontend can restore the booking flow state post-OAuth.
+
+    Request body (optional):
+      ```
+      {
+        "pending_booking_intent": {
+          "master_id": "...uuid...",
+          "service_id": "...uuid...",
+          "slot_iso": "2026-07-15T14:00:00+03:00",
+          "price_quoted": 1800,
+          "note": "массаж лица",
+          "loyalty_apply": true
+        }
+      }
+      ```
+
+    Response always includes `pending_booking_intent` (the current
+    cached value OR null if nothing cached / expired).
     """
+    import json
+
+    from apps.miniapp_api.pending_intent import (
+        PendingIntentInvalid,
+        get_intent,
+        store_intent,
+        validate_intent,
+    )
 
     verified: VerifiedInitData = request.verified_init_data  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # Optional body — Mini App may call /auth/verify without any pending
+    # intent on first launch. Only attempt JSON parse when the caller
+    # explicitly declares `Content-Type: application/json`; multipart /
+    # form / empty bodies are treated as «no intent» without error.
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type == "application/json" and request.body:
+        try:
+            body = json.loads(request.body)
+        except ValueError:
+            return _error("malformed", "body is not valid JSON", 400)
+        if not isinstance(body, dict):
+            return _error("malformed", "body must be a JSON object", 400)
+        if "pending_booking_intent" in body:
+            try:
+                sanitised = validate_intent(body["pending_booking_intent"])
+            except PendingIntentInvalid as exc:
+                return _error("invalid_intent", str(exc), 400)
+            store_intent(bot_user.id, sanitised)
+
+    cached_intent = get_intent(bot_user.id)
 
     return JsonResponse(
         {
@@ -155,6 +303,7 @@ def auth_verify(request: HttpRequest) -> HttpResponse:
                 "name": bot_user.tenant.name,
                 "timezone": bot_user.tenant.timezone,
             },
+            "pending_booking_intent": cached_intent,
         }
     )
 
@@ -207,10 +356,19 @@ def _collect_occupied(
 
     window_start_local = datetime.combine(date_from, datetime.min.time(), tzinfo=tz)
     window_end_local = datetime.combine(date_to + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+    # Active states that still hold the slot — CONFIRMED plus the two
+    # interim "reversible" states from customer-cancellation-reschedule
+    # spec §2. A booking in CANCEL_REQUESTED is still bookable to the
+    # original customer (5-sec undo); a booking in RESCHEDULE_REQUESTED
+    # has stashed a candidate but the original slot is still theirs.
     qs = BookingRequest.all_tenants.filter(
         tenant_id=tenant_id,
         master_id=master_id,
-        status=BookingRequest.Status.CONFIRMED,
+        status__in=(
+            BookingRequest.Status.CONFIRMED,
+            BookingRequest.Status.CANCEL_REQUESTED,
+            BookingRequest.Status.RESCHEDULE_REQUESTED,
+        ),
         visit_at__isnull=False,
         visit_at__gte=window_start_local,
         visit_at__lt=window_end_local,
@@ -542,3 +700,875 @@ def create_booking(request: HttpRequest) -> HttpResponse:
         },
         status=201,
     )
+
+
+# --- bookings: list / detail / cancel / reschedule -------------------------
+# Customer cancel + reschedule per
+# docs/design/policies/customer-cancellation-reschedule-spec.md §3-§5.
+
+
+_TERMINAL_STATUSES = (
+    "cancelled",
+    "rescheduled",
+)
+_ACTIVE_STATUSES = (
+    "confirmed",
+    "cancel_requested",
+    "reschedule_requested",
+)
+"""States where the booking still exists from the customer's POV."""
+
+
+_BOOKINGS_PAGE_DEFAULT = 20
+_BOOKINGS_PAGE_MAX = 50
+
+
+def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
+    from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
+
+    visit_at_iso = b.visit_at.isoformat() if b.visit_at else ""
+    cancel_requested_iso = b.cancel_requested_at.isoformat() if b.cancel_requested_at else None
+    # Cancellable + reschedulable derived flags. Action buttons in the
+    # Mini App use these directly — spec §3.4 + §5.3.
+    cancellable = b.status in (
+        "confirmed",
+        "reschedule_requested",
+    )
+    # reschedulable requires both an active status AND live FKs to
+    # service+master. If the catalog row was deleted (e.g. dev catalog
+    # re-seed) the booking keeps service_name / master_name strings but
+    # has NULL FKs — the reschedule slot lookup can't run without them.
+    reschedulable = b.status == "confirmed" and b.service_id is not None and b.master_id is not None
+    # Phase 4 — post-visit rating exposure. can_rate is computed against
+    # the shared `now` so a batch listing is internally consistent.
+    moment = now or timezone.now()
+    is_past = bool(b.visit_at and b.visit_at < moment)
+    can_rate = is_past and b.status == "confirmed" and b.rating is None
+    return {
+        "id": str(b.id),
+        "status": b.status,
+        "service_id": str(b.service_id) if b.service_id else None,
+        "service_name": b.service_name,
+        "master_id": str(b.master_id) if b.master_id else None,
+        "master_name": b.master_name,
+        "visit_at": visit_at_iso,
+        "duration_min": b.duration_min,
+        "cancel_requested_at": cancel_requested_iso,
+        "undo_window_seconds": UNDO_WINDOW_SECONDS,
+        "cancellable": cancellable,
+        "reschedulable": reschedulable,
+        # Phase 4 — F5 rating exposure
+        "rating": b.rating,
+        "can_rate": can_rate,
+    }
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def bookings_list(request: HttpRequest) -> HttpResponse:
+    """List the bot_user's bookings.
+
+    Query
+    -----
+    ``status`` (optional, repeatable) — filter to specific statuses.
+       Special value ``past`` toggles the past-bookings view (visit_at
+       < now, terminal statuses).
+       Default (no ``status`` param): upcoming — visit_at >= now,
+       active statuses (CONFIRMED + RESCHEDULE_REQUESTED).
+    ``limit`` (optional, default 20, max 50) — page size.
+    ``before`` (optional, ISO datetime) — cursor: only items with
+       visit_at < ``before`` (descending pagination).
+
+    Returns
+    -------
+    ``{"items": [...], "next_cursor": "ISO" | null}``
+    """
+
+    from apps.booking.models import BookingRequest
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    statuses = request.GET.getlist("status")
+    is_past_view = "past" in statuses
+    if is_past_view:
+        statuses = [s for s in statuses if s != "past"]
+
+    try:
+        limit = int(request.GET.get("limit", _BOOKINGS_PAGE_DEFAULT))
+    except ValueError:
+        return _error("bad_request", "limit must be integer", 400)
+    if limit <= 0 or limit > _BOOKINGS_PAGE_MAX:
+        return _error("bad_request", f"limit must be 1..{_BOOKINGS_PAGE_MAX}", 400)
+
+    before = _parse_iso_datetime(request.GET.get("before"))
+
+    from django.db.models import Q
+
+    qs = BookingRequest.all_tenants.filter(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+    )
+    now = timezone.now()
+    if is_past_view:
+        # Past = either visit_at strictly before now OR a terminal status.
+        # Covers customers who cancelled (terminal but visit_at could be
+        # in either direction) AND walk-aways still on CONFIRMED whose
+        # visit time has passed.
+        qs = qs.filter(Q(visit_at__lt=now) | Q(status__in=_TERMINAL_STATUSES))
+        qs = qs.order_by("-visit_at", "-created_at")
+    else:
+        # Upcoming: visit_at >= now, status in CONFIRMED /
+        # RESCHEDULE_REQUESTED (default) OR caller-supplied list.
+        wanted = statuses or [
+            BookingRequest.Status.CONFIRMED,
+            BookingRequest.Status.RESCHEDULE_REQUESTED,
+        ]
+        qs = qs.filter(status__in=wanted, visit_at__gte=now)
+        qs = qs.order_by("visit_at", "created_at")
+
+    if before is not None:
+        qs = qs.filter(visit_at__lt=before)
+
+    # Fetch one extra to compute next_cursor without a second query.
+    rows = list(qs[: limit + 1])
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    next_cursor: str | None = None
+    if has_more and rows:
+        last = rows[-1]
+        next_cursor = last.visit_at.isoformat() if last.visit_at else None
+
+    return JsonResponse({"items": [_booking_to_dict(b) for b in rows], "next_cursor": next_cursor})
+
+
+def _get_booking_owned(bot_user: BotUser, booking_id: str):
+    """Fetch a BookingRequest scoped to (tenant, bot_user).
+
+    Returns the row or None. Tenant + bot_user guard prevents
+    cross-customer + cross-tenant access (spec §11).
+    """
+    from apps.booking.models import BookingRequest
+
+    try:
+        return BookingRequest.all_tenants.get(
+            id=booking_id,
+            tenant=bot_user.tenant,
+            bot_user=bot_user,
+        )
+    except BookingRequest.DoesNotExist:
+        return None
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def booking_detail(request: HttpRequest, booking_id: str) -> HttpResponse:
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    return JsonResponse({"booking": _booking_to_dict(booking)})
+
+
+_TRANSITION_SLUG_TO_STATUS = {
+    "invalid_state": 409,
+    "forbidden": 403,
+    "undo_window_elapsed": 409,
+    "master_not_found": 404,
+    "master_archived": 409,
+    "master_not_bookable": 409,
+    "service_not_found": 404,
+    "service_unbookable": 409,
+    "service_not_offered": 404,
+    "slot_unavailable": 409,
+}
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_cancel_request(request: HttpRequest, booking_id: str) -> HttpResponse:
+    """POST /bookings/{id}/cancel — request cancel, returns immediately.
+
+    Body (optional)::
+
+        {"reason_class": "timing" | "plans_changed" | "not_needed" | "other",
+         "reason_text": "..."}
+    """
+
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        request_cancel,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+
+    import json
+
+    try:
+        body = json.loads(request.body or b"{}") if request.body else {}
+    except json.JSONDecodeError:
+        return _error("bad_request", "invalid JSON body", 400)
+    reason_class = body.get("reason_class") or None
+    reason_text = body.get("reason_text") or None
+
+    try:
+        row = request_cancel(
+            booking,
+            actor=bot_user,
+            reason_class=reason_class,
+            reason_text=reason_text,
+        )
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_cancel_confirm(request: HttpRequest, booking_id: str) -> HttpResponse:
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        commit_cancel,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    try:
+        row = commit_cancel(booking, actor=bot_user)
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+
+    # BILLING_REFUND_STUB_LOG: refund evaluation (spec §4) is engineering
+    # / billing scope. Stub the call so the audit trail captures the
+    # intent; no payment provider integration here.
+    if booking.visit_at and booking.billable:
+        minutes_before = (booking.visit_at - timezone.now()).total_seconds() / 60
+        if minutes_before < 60:
+            logger.info(
+                "BILLING_REFUND_STUB_LOG: refund_eligible=True amount=100 "
+                "reason=late_cancel_auto booking_id=%s",
+                booking.id,
+            )
+
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_cancel_undo(request: HttpRequest, booking_id: str) -> HttpResponse:
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        undo_cancel,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    try:
+        row = undo_cancel(booking, actor=bot_user)
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpResponse:
+    """POST /bookings/{id}/reschedule — stash a candidate slot.
+
+    Body::
+
+        {"new_master_id": "...", "new_service_id": "...",
+         "new_visit_at": "ISO 8601"}
+
+    The candidate is validated lightly here (parse + future check)
+    and re-validated under-lock in
+    :func:`commit_reschedule`. Slot collision is caught there too.
+    """
+
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        request_reschedule,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+
+    import json
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _error("bad_request", "invalid JSON body", 400)
+    new_master_id = body.get("new_master_id") or ""
+    new_service_id = body.get("new_service_id") or ""
+    new_visit_at = _parse_iso_datetime(body.get("new_visit_at"))
+
+    if not new_master_id or not new_service_id or new_visit_at is None:
+        return _error(
+            "bad_request",
+            "new_master_id, new_service_id, new_visit_at (ISO 8601) are required",
+            400,
+        )
+    if new_visit_at <= timezone.now():
+        return _error("visit_in_past", "new_visit_at must be in the future", 400)
+
+    try:
+        row = request_reschedule(
+            booking,
+            actor=bot_user,
+            new_master_id=new_master_id,
+            new_service_id=new_service_id,
+            new_visit_at=new_visit_at,
+        )
+    except InvalidBookingTransition as exc:
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+    return JsonResponse({"booking": _booking_to_dict(row)})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpResponse:
+    """POST /bookings/{id}/reschedule/confirm — actually rotate to new booking.
+
+    On slot collision (409 inside commit_reschedule): roll the old
+    row back to CONFIRMED so the customer can pick again.
+    """
+
+    from apps.booking.services.transitions import (
+        InvalidBookingTransition,
+        abandon_reschedule,
+        commit_reschedule,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+    try:
+        old_row, new_row = commit_reschedule(booking, actor=bot_user)
+    except InvalidBookingTransition as exc:
+        # On slot collision, roll back the old row to CONFIRMED so
+        # the customer's original visit is still on the books.
+        if exc.slug == "slot_unavailable":
+            try:
+                abandon_reschedule(booking, actor=bot_user)
+            except InvalidBookingTransition:
+                pass
+        return _error(exc.slug, exc.detail, _TRANSITION_SLUG_TO_STATUS.get(exc.slug, 409))
+
+    return JsonResponse(
+        {
+            "old_booking": _booking_to_dict(old_row),
+            "new_booking": _booking_to_dict(new_row),
+        }
+    )
+
+
+# --- /me — profile read / update / delete (Phase 3 / F4) -------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_init_data
+def me(request: HttpRequest) -> HttpResponse:
+    """Read or partially update the current customer's profile."""
+    import json
+
+    from apps.identity.services.profile import (
+        ProfileUpdateError,
+        get_profile,
+        update_profile,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if request.method == "GET":
+        snap = get_profile(bot_user)
+        return JsonResponse(_profile_to_dict(snap))
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    try:
+        snap = update_profile(bot_user, body)
+    except ProfileUpdateError as exc:
+        return _error("invalid_field", str(exc), 400)
+    return JsonResponse(_profile_to_dict(snap))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def delete_me(request: HttpRequest) -> HttpResponse:
+    """Soft-delete the current customer (scrub PII + drop prefs)."""
+    import json
+
+    from apps.identity.services.profile import (
+        DELETE_CONFIRMATION_TOKEN,
+        DeletionConfirmationMismatch,
+        soft_delete_user,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    confirmation = body.get("confirmation", "")
+    try:
+        soft_delete_user(bot_user, confirmation)
+    except DeletionConfirmationMismatch:
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+    return JsonResponse({"deleted": True}, status=200)
+
+
+def _profile_to_dict(snap) -> dict:
+    """Serialise a :class:`ProfileSnapshot` for the JSON response."""
+    return {
+        "bot_user_id": snap.bot_user_id,
+        "display_name": snap.display_name,
+        "client_name": snap.client_name,
+        "phone_masked": snap.phone_masked,
+        "timezone": snap.timezone,
+        "joined_at": snap.joined_at,
+        "preferences": snap.preferences,
+        "favorites": {
+            "master_name": snap.favorite_master_name,
+            "service_name": snap.favorite_service_name,
+        },
+    }
+
+
+# --- /bookings/<id>/feedback — post-visit rating (Phase 4 / F5) ------------
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: ignore[no-untyped-def]
+    """Persist a 1-5 rating for a past visit; rating ≤ 3 escalates."""
+    import json
+
+    from apps.booking.services.feedback import (
+        AlreadyRated,
+        FeedbackError,
+        InvalidRating,
+        NotCompletedYet,
+        submit_feedback as service_submit_feedback,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # Use the shared owner+tenant loader (explicit tenant predicate) for
+    # parity with the transition endpoints, and a generic not-found message
+    # so the response can't act as an existence oracle (#1005).
+    booking = _get_booking_owned(bot_user, booking_id)
+    if booking is None:
+        return _error("not_found", "booking not found", 404)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+
+    rating_raw = body.get("rating")
+    comment_raw = body.get("comment", "")
+    rating: int = rating_raw  # type: ignore[assignment]
+    comment: str = comment_raw  # type: ignore[assignment]
+
+    try:
+        result = service_submit_feedback(booking, actor=bot_user, rating=rating, comment=comment)
+    except (InvalidRating, AlreadyRated, NotCompletedYet) as exc:
+        return _error(exc.slug, str(exc), 400)
+    except FeedbackError as exc:
+        return _error(exc.slug, str(exc), 400)
+
+    return JsonResponse(
+        {
+            "booking_id": result.booking_id,
+            "rating": result.rating,
+            "comment": result.comment,
+            "feedback_at": result.feedback_at,
+            "handoff_created": result.handoff_created,
+            "task_id": result.task_id,
+        },
+        status=200,
+    )
+
+
+# --- /customer/recommendations — Ayla catalog proxy ------------------------
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_recommendations(request: HttpRequest) -> HttpResponse:
+    """Proxy recommendations call onto Ayla per identity-bridging contract.
+
+    The Mini App calls ``POST /api/v1/customer/recommendations`` with a
+    JSON body describing what to score (``lat`` / ``lon`` / ``goal`` /
+    ``tenant_history``). This view translates the call onto Ayla's
+    ``POST /internal/me/catalog/recommendations/`` endpoint using the
+    service-to-service identity bridge:
+
+    * ``Authorization: Bearer {AYLA_SERVICE_TOKEN}`` — bot-platform's
+      service credential. The customer's initData HMAC stays here; we
+      never forward it to Ayla.
+    * ``X-External-User-ID: bot:{channel}:{channel_user_id}`` — Ayla
+      resolves this to its ProxyUser via the user_proxy mapping.
+
+    The Ayla response body is passed through verbatim. The Mini App
+    side owns the rendering contract, so adding a translation layer
+    here only creates a release-lockstep tax.
+
+    Failure mapping:
+
+    * 400 — body not valid JSON object, OR Ayla returned 4xx
+      (Ayla's response body forwarded under ``ayla_error``).
+    * 502 — Ayla timeout / 5xx / malformed JSON.
+    * 503 — bot-platform misconfigured (missing service token / base URL).
+    """
+    import json
+
+    from apps.integrations.ayla import external_user_id_for
+    from apps.integrations.ayla.recommendations_client import (
+        RecommendationsBadRequest,
+        RecommendationsConfigError,
+        RecommendationsUnavailable,
+        fetch_recommendations,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # Match the /auth/verify pattern: only parse JSON when the caller
+    # explicitly declares `Content-Type: application/json`. Empty/
+    # multipart bodies are treated as «no scoring hints» — Ayla receives
+    # `{}` and returns its default ranking.
+    body: dict = {}
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type == "application/json" and request.body:
+        try:
+            parsed = json.loads(request.body)
+        except ValueError:
+            return _error("malformed", "body is not valid JSON", 400)
+        if not isinstance(parsed, dict):
+            return _error("malformed", "body must be a JSON object", 400)
+        body = parsed
+
+    try:
+        ayla_body = fetch_recommendations(
+            external_user_id=external_user_id_for(bot_user),
+            payload=body,
+        )
+    except RecommendationsConfigError as exc:
+        logger.error("customer_recommendations.config_error: %s", exc)
+        return _error("not_configured", "ayla recommendations not configured", 503)
+    except RecommendationsBadRequest as exc:
+        return JsonResponse(
+            {
+                "error": "ayla_bad_request",
+                "detail": f"ayla returned HTTP {exc.status_code}",
+                "ayla_error": exc.body,
+            },
+            status=400,
+        )
+    except RecommendationsUnavailable as exc:
+        logger.warning("customer_recommendations.unavailable: %s", exc)
+        return _error("ayla_unavailable", "ayla recommendations unavailable", 502)
+
+    return JsonResponse(ayla_body)
+
+
+# --- /customer/wellness/today — nutrition composition ----------------------
+
+# Standard glass = 250 ml. The Ayla water endpoint reports millilitres;
+# the Mini App dashboard (Tau §6 Block 5) renders glasses. Conversion
+# lives here so the frontend stays unit-agnostic.
+_WATER_GLASS_ML = 250
+# Cold-start default when the customer skipped the nutrition anketa and
+# Ayla reports norm_ml=0. Matches the frontend stub default (Tau §11.1).
+_WATER_GLASSES_TARGET_DEFAULT = 8
+
+
+def _ml_to_glasses(ml: float) -> int:
+    """Round millilitres to whole glasses (250 ml each). Never negative."""
+    if ml <= 0:
+        return 0
+    return round(ml / _WATER_GLASS_ML)
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_wellness_today(request: HttpRequest) -> HttpResponse:
+    """Compose the customer's today-snapshot for the Wellness dashboard.
+
+    Wraps two Ayla nutrition reads — ``daily_summary`` (calories + PFC)
+    and ``get_water_today`` (hydration) — into the ``WellnessToday``
+    shape the Mini App expects (see
+    ``apps/miniapp/src/lib/customer-wellness.ts``).
+
+    Identity bridging: the NutritionClient sends
+    ``X-External-User-ID: bot:{channel}:{channel_user_id}`` +
+    ``X-Service-Token``; the customer's initData HMAC never leaves
+    bot-platform.
+
+    ## Graceful degradation
+
+    The two Ayla calls run concurrently and degrade INDEPENDENTLY: if
+    `daily_summary` fails, calories/PFC zero out but hydration still
+    renders, and vice-versa. The endpoint returns 200 with whatever
+    succeeded — a dashboard that renders partial data beats a blank
+    error screen. Zeros are a valid «no logs today» state per the
+    frontend contract, so a degraded response is indistinguishable from
+    a genuinely empty day; that's an accepted trade for resilience.
+
+    ## Fields without an Ayla source (documented gaps)
+
+    * ``active_goals`` — the Layer-2 Goals system has no REST endpoint
+      yet; returned as ``[]`` so the frontend shows the «Выбери цель»
+      CTA (Tau §11.2). Wire when the goals endpoint ships.
+    * ``pfc.protein_target_g`` + ``day_pattern_hint`` — omitted (no
+      clean source). Frontend treats both as optional.
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    async def _fetch() -> tuple[Any, Any]:
+        client = get_nutrition_client()
+        return await asyncio.gather(
+            client.daily_summary(external_user_id=external_id),
+            client.get_water_today(external_user_id=external_id),
+            return_exceptions=True,
+        )
+
+    summary_res, water_res = asyncio.run(_fetch())
+
+    nutrition_errors = (NutritionUnavailableError, NutritionAPIError)
+
+    # ── calories + PFC (from daily_summary) ─────────────────────────────
+    calories_eaten = 0
+    calories_target = 0
+    pfc: dict[str, Any] | None = None
+    if isinstance(summary_res, nutrition_errors):
+        logger.warning("wellness_today.summary_unavailable ext=%s err=%s", external_id, summary_res)
+    elif isinstance(summary_res, Exception):
+        # Unexpected exception type — log + degrade, never 500 the dashboard.
+        logger.warning(
+            "wellness_today.summary_unexpected ext=%s err=%s",
+            external_id,
+            type(summary_res).__name__,
+        )
+    else:
+        calories_eaten = round(summary_res.calories_total)
+        calories_target = int(summary_res.calories_goal)
+        pfc = {
+            "protein_g": round(summary_res.protein_g),
+            "fat_g": round(summary_res.fat_g),
+            "carbs_g": round(summary_res.carbs_g),
+        }
+
+    # ── hydration (from get_water_today) ────────────────────────────────
+    water_glasses_eaten = 0
+    water_glasses_target = _WATER_GLASSES_TARGET_DEFAULT
+    if isinstance(water_res, nutrition_errors):
+        logger.warning("wellness_today.water_unavailable ext=%s err=%s", external_id, water_res)
+    elif isinstance(water_res, Exception):
+        logger.warning(
+            "wellness_today.water_unexpected ext=%s err=%s",
+            external_id,
+            type(water_res).__name__,
+        )
+    else:
+        water_glasses_eaten = _ml_to_glasses(water_res.total_ml)
+        target = _ml_to_glasses(water_res.norm_ml)
+        water_glasses_target = target or _WATER_GLASSES_TARGET_DEFAULT
+
+    payload: dict[str, Any] = {
+        "calories_eaten": calories_eaten,
+        "calories_target": calories_target,
+        "water_glasses_eaten": water_glasses_eaten,
+        "water_glasses_target": water_glasses_target,
+        # No Goals-system endpoint yet — empty array drives the «Выбери
+        # цель» CTA. See docstring.
+        "active_goals": [],
+        "display_name": bot_user.client_name or bot_user.display_name or "",
+    }
+    if pfc is not None:
+        payload["pfc"] = pfc
+
+    return JsonResponse(payload)
+
+
+# --- /customer/recent-activity — dashboard rollup --------------------------
+
+# Russian short weekday names (Mon=0 … Sun=6) for the date_human label.
+_RU_WEEKDAY_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+# Russian month names in genitive case («3 июня») for non-relative dates.
+_RU_MONTH_GENITIVE = [
+    "",
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+]
+
+
+def _format_visit_human(visit_at, tz: ZoneInfo, *, now=None) -> str:
+    """Render a booking's visit time as «Завтра · пт · 16:00» (customer TZ).
+
+    Relative-day prefix: «Сегодня» / «Завтра» for delta 0/1, else the
+    «{day} {month_genitive}» date. Always followed by the short weekday
+    + 24h time. Server-rendered so the frontend prints verbatim.
+    """
+    local = visit_at.astimezone(tz)
+    moment = (now or timezone.now()).astimezone(tz)
+    day_delta = (local.date() - moment.date()).days
+
+    if day_delta == 0:
+        prefix = "Сегодня"
+    elif day_delta == 1:
+        prefix = "Завтра"
+    else:
+        prefix = f"{local.day} {_RU_MONTH_GENITIVE[local.month]}"
+
+    weekday = _RU_WEEKDAY_SHORT[local.weekday()]
+    return f"{prefix} · {weekday} · {local:%H:%M}"
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_recent_activity(request: HttpRequest) -> HttpResponse:
+    """Dashboard rollup — next booking + this-week count (bookings-only).
+
+    Backs the Mini App Wellness dashboard Block 5/6 (see
+    ``apps/miniapp/src/lib/customer-wellness.ts:RecentActivity``).
+
+    ## Scope: bookings-only pilot
+
+    Per tech-lead verdict 2026-05-29 + memory `project_pilot_scope_discipline`:
+    Ayla has no meals-list / timeline endpoint (only single-day
+    `daily_summary` + aggregate `weekly_deficits`), so the nutrition
+    rollup is deferred to a «meals layer» Phase-1 expansion that wires
+    when Alpha ships a meals-list endpoint. `weekly_progress` therefore
+    returns zeros — Block 6 (Прогресс недели) is gated on
+    `active_days_count >= 3` (Tau §11.4 cold-start) so it stays hidden
+    gracefully rather than showing misleading data.
+
+    ## Data source
+
+    `next_booking` + `this_week_booking_count` read the local
+    `BookingRequest` mirror (populated by the Ayla booking-event
+    consumer per ADR-0009 — a read of cached canonical state, not
+    ownership). No Ayla round-trip on this path.
+
+    ## Fields without a source (documented gaps)
+
+    * `next_booking.address` — bot-platform's `Tenant` has no address
+      field; returned as `""`. Frontend renders empty until the address
+      lands (Ayla salon profile OR a tenant config field).
+    """
+    from datetime import timedelta
+
+    from apps.booking.models import BookingRequest
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    tenant = bot_user.tenant
+    try:
+        tz = ZoneInfo(tenant.timezone or "Europe/Moscow")
+    except Exception:  # noqa: BLE001 — bad tz config must not 500 the dashboard
+        tz = ZoneInfo("Europe/Moscow")
+
+    now = timezone.now()
+
+    # ── next upcoming CONFIRMED booking ─────────────────────────────────
+    next_qs = BookingRequest.all_tenants.filter(
+        tenant=tenant,
+        bot_user=bot_user,
+        status=BookingRequest.Status.CONFIRMED,
+        visit_at__gte=now,
+    ).order_by("visit_at")
+    next_row = next_qs.first()
+
+    next_booking: dict[str, Any] | None = None
+    if next_row is not None and next_row.visit_at is not None:
+        next_booking = {
+            "date_human": _format_visit_human(next_row.visit_at, tz, now=now),
+            "service_name": next_row.service_name,
+            "duration_min": next_row.duration_min or 0,
+            "master_name": next_row.master_name,
+            "salon_name": tenant.name,
+            # No address field on Tenant — graceful empty per docstring.
+            "address": "",
+            "booking_id": str(next_row.id),
+        }
+
+    # ── this-week CONFIRMED count (Mon 00:00 … next Mon, customer TZ) ────
+    local_now = now.astimezone(tz)
+    week_start_local = (local_now - timedelta(days=local_now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    week_end_local = week_start_local + timedelta(days=7)
+    this_week_count = BookingRequest.all_tenants.filter(
+        tenant=tenant,
+        bot_user=bot_user,
+        status=BookingRequest.Status.CONFIRMED,
+        visit_at__gte=week_start_local,
+        visit_at__lt=week_end_local,
+    ).count()
+
+    payload: dict[str, Any] = {
+        "this_week_booking_count": this_week_count,
+        # Nutrition rollup deferred — see docstring. Zeros keep Block 6
+        # hidden (gated on active_days_count >= 3).
+        "weekly_progress": {
+            "water_days_logged": 0,
+            "food_days_logged": 0,
+            "active_days_count": 0,
+        },
+    }
+    if next_booking is not None:
+        payload["next_booking"] = next_booking
+
+    return JsonResponse(payload)

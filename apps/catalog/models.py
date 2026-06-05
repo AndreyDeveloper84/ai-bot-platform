@@ -90,6 +90,16 @@ class CatalogService(_MirrorBase):
     `seo_title`/`seo_description`. M2M relations (`related_services`,
     `options`) intentionally NOT mirrored — Sprint 7 retrieval only
     needs scalar fields.
+
+    ### Ayla event-driven update path (#444)
+
+    ``ayla_service_id`` and ``cache_version`` were added in migration
+    ``0006_catalogservice_ayla_service_id_cache_version`` so the
+    ``service.updated`` cross-service event consumer in
+    ``apps/eventbus/consumers/catalog.py`` can find mirror rows by
+    Ayla's canonical UUID and signal cache invalidation to downstream
+    readers. ADR-0009 hard rule #1: bot-platform mirror is a
+    read-replica, never the source of truth.
     """
 
     slug = models.SlugField(max_length=100)
@@ -106,6 +116,40 @@ class CatalogService(_MirrorBase):
     requires_health_check = models.BooleanField(default=False)
     contraindications = models.TextField(blank=True, default="")
     raw = models.JSONField(default=dict, blank=True)
+
+    # #444 — link to Ayla's canonical Service.id (UUID). Coexists with
+    # the legacy mysite integer ``external_id``: mysite-synced rows set
+    # external_id + leave this nullable; Ayla-event-fed rows set this
+    # + may leave external_id null. Lookup key for the
+    # service.updated consumer.
+    ayla_service_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla Service.id (UUID). Lookup key for the "
+            "apps/eventbus service.updated consumer. Coexists with "
+            "legacy integer external_id while mysite sync still runs; "
+            "a separate cleanup PR removes external_id once mysite is "
+            "fully retired."
+        ),
+    )
+
+    # #444 — mirror-staleness signal. Bumped on every service.updated
+    # event. Future cache layers (Redis, in-memory) include cache_version
+    # in their key so a version bump invalidates the old cache
+    # transparently. No active cache layer reads this today — it is a
+    # forward-compatible signal so the consumer can land before the
+    # cache layer ships.
+    cache_version = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Mirror-staleness counter, incremented on every "
+            "service.updated event. Downstream cache layers include "
+            "it in their cache key so increments transparently "
+            "invalidate stale entries. No active cache reads it today."
+        ),
+    )
 
     class Meta:
         verbose_name = "Catalog: service"
@@ -169,7 +213,54 @@ class CatalogMaster(_MirrorBase):
         help_text="YClients staff id — pre-populated from mysite so the "
         "Phase 1 booking flow can dispatch without a second lookup.",
     )
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla user_id (UUID) for this master. Bridge for "
+            "event-payload master_user_id → CatalogMaster ORM JOIN. "
+            "Nullable because legacy mysite-synced rows lack this — "
+            "back-filled by catalog-sync service or master event consumer."
+        ),
+    )
     raw = models.JSONField(default=dict, blank=True)
+
+    # Canonical Ayla user_id for master. Added on dev via 0007
+    # migration (parallel work). Used by the #445 master.schedule.
+    # updated consumer + the #443 booking consumer's master_user_id
+    # bridge. Symmetric with BotUser.ayla_user_id (#442) +
+    # CatalogService.ayla_service_id (#444).
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla user_id (UUID) for this master. Bridge "
+            "for event-payload master_user_id → CatalogMaster ORM "
+            "JOIN. Nullable because legacy mysite-synced rows lack "
+            "this — back-filled by catalog-sync service or master "
+            "event consumer."
+        ),
+    )
+
+    # #445 — slot cache staleness counter. Bumped on every
+    # master.schedule.updated event. Forward-compatible signal for
+    # downstream slot cache layers (apps/scheduling has no active
+    # cache today); incrementing this invalidates cache keys
+    # transparently once a cache layer reads it. Same pattern as
+    # CatalogService.cache_version (#444).
+    cache_version = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Slot-cache staleness counter, incremented on every "
+            "master.schedule.updated event. Future cache layers "
+            "(Redis, in-memory) include this in their key so "
+            "increments transparently invalidate stale slot lookups. "
+            "No active cache layer reads this today — it's a "
+            "forward-compatible signal."
+        ),
+    )
 
     invite_status = models.CharField(
         max_length=16,
@@ -186,8 +277,51 @@ class CatalogMaster(_MirrorBase):
     )
     photo_url = models.URLField(max_length=500, blank=True, default="")
     archived_at = models.DateTimeField(null=True, blank=True)
+    archive_reason = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Owner-provided rationale for the most recent deactivation "
+            "(MM5 Step 3, «Причина»). Persisted as a forensic note next "
+            "to the AuditLog row; cleared on reactivate so the next "
+            "deactivation starts fresh."
+        ),
+    )
     invited_at = models.DateTimeField(null=True, blank=True)
     max_handle = models.CharField(max_length=64, blank=True, default="")
+
+    # M0 onboarding (master mobile handoff §M0 + master-management MM2).
+    # invite_token: opaque UUID emitted by MM2 POST /api/v1/masters/invite,
+    # carried in the Mini App deeplink as ?token=<uuid>. UUID format (not
+    # HMAC) per the MM2 response contract; cleared on accept (one-shot).
+    # invite_expires_at: invited_at + 7d; checked on every onboarding/*
+    # endpoint. After expiry, the row stays PENDING but the token can no
+    # longer be claimed — operator must re-issue.
+    # linked_bot_user: OneToOne to BotUser. SET_NULL on BotUser delete so
+    # the master row survives (audit trail). A master has exactly one
+    # MAX/Telegram identity in Phase 1; multi-device is later.
+    invite_token = models.UUIDField(
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="One-shot opaque token from MM2 invite-create. Cleared "
+        "on accept; uniqueness enforced so a stale token can't collide.",
+    )
+    invite_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="invited_at + 7d (Q-MM2). Past-expiry tokens 410.",
+    )
+    linked_bot_user = models.OneToOneField(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="master_identity",
+        help_text="MAX/Telegram BotUser this master signs in with. "
+        "SET_NULL on BotUser delete preserves the master audit trail.",
+    )
 
     objects = _MasterManager()  # type: ignore[misc]
     all_tenants = models.Manager()  # type: ignore[misc]

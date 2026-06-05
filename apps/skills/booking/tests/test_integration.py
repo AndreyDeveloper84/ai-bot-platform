@@ -23,7 +23,7 @@ from apps.booking.models import BookingRequest
 from apps.conversations.models import Conversation
 from apps.identity.models import BotUser
 from apps.integrations.yclients import AvailableTime, BookingRecord, Service, Staff
-from apps.llm.protocol import CompletionResult, ToolCall
+from apps.llm.protocol import CompletionResult, ToolCall, UnknownTenantError
 from apps.llm.router import reset_router_cache
 from apps.skills.base import SkillContext
 from apps.skills.booking.skill import BookingSkill
@@ -213,3 +213,95 @@ class TestEndToEnd:
         assert len(client.create_calls) == 1
         assert client.create_calls[0]["staff_id"] == 11
         assert client.create_calls[0]["services"] == [22]
+
+
+class TestLLMY3StaleUUIDEndToEnd:
+    """Issue #473 acceptance: stale UUID through the booking skill MUST
+    produce a friendly handoff, NOT a 500.
+
+    Pre-#473: ``cost_tracker._read_tenant_caps`` soft-failed to
+    «generous defaults» on stale tenant_id → typo'd id silently ran
+    against a fictitious budget.
+
+    Phase 1 (#473): same call now raises ``UnknownTenantError(LLMError)``
+    inside ``provider.complete()``. The booking skill envelope catches
+    LLMError and returns ``should_handoff=True`` + ``reason='llm_error'``
+    so the customer sees a polite handoff instead of an exception
+    crash. End-to-end here means: real BookingSkill().handle() invoked,
+    the LLMError surfaces through the production envelope, friendly
+    handoff returned.
+    """
+
+    def test_stale_tenant_uuid_through_booking_skill_yields_friendly_handoff(self, db) -> None:
+        tenant = Tenant.objects.create(slug="stale-uuid", name="Stale UUID test")
+        bu = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="stale-1",
+            chat_id="stale-1",
+            phone="79991234567",
+            client_name="Anna",
+        )
+        conv = Conversation.all_tenants.create(tenant=tenant, bot_user=bu)
+        context = SkillContext(
+            conversation=conv,
+            bot_user=bu,
+            message_text="запиши меня",
+            trace_id="t-stale-uuid",
+        )
+
+        # YClients fixture: present so the prefetch doesn't trip a
+        # different handoff path. The LLM error must dominate.
+        client = FakeYClients()
+        client.services_rows = [
+            Service(
+                id=22,
+                title="Massage",
+                price_min=0,
+                price_max=0,
+                duration_s=3600,
+                category_id=None,
+                raw={},
+            )
+        ]
+        client.staff_rows = [
+            Staff(
+                id=11,
+                name="Olga",
+                specialization="",
+                rating=0.0,
+                avatar="",
+                position="master",
+                raw={},
+            )
+        ]
+
+        # Simulate the production scenario: ``provider.complete``
+        # internally invokes ``cost_tracker.enforce_caps`` which raises
+        # ``UnknownTenantError`` for the stale tenant. We inject this
+        # at the provider boundary so the production envelope wiring
+        # is exercised end-to-end without faking the cost_tracker
+        # internals.
+        from apps.llm.providers.openai_provider import OpenAIProvider
+
+        with (
+            patch(
+                "apps.integrations.yclients.get_yclients_client",
+                return_value=client,
+            ),
+            patch.object(
+                OpenAIProvider,
+                "complete",
+                side_effect=UnknownTenantError("tenant_id=<stale-uuid> not found in Tenant table"),
+            ),
+        ):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+
+        # Acceptance criterion: friendly handoff, NOT a raised
+        # exception bubbling up to 500.
+        assert result.should_handoff is True
+        assert result.handoff_reason == "llm_error"
+        # No BookingRequest written — the LLM call failed before any
+        # write would occur.
+        assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bu).count() == 0

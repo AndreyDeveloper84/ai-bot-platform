@@ -190,8 +190,14 @@ class OpenAIProvider:
         # Phase 1 / PI9 (DRF-860) — per-tenant cost cap pre-call gate.
         # Same call shape on both providers via the shared cost_tracker
         # module. Raises TenantQuotaExceeded; orchestrator catches and
-        # serves the static Russian fallback.
-        await _enforce_tenant_caps()
+        # serves the static Russian fallback. LLM retro B2: gate
+        # reserves a worst-case cost so concurrent calls can't all
+        # read "under cap" and overshoot. Reservation threaded back
+        # to record_usage below.
+        reservation = await _enforce_tenant_caps(
+            model=chosen_model,
+            max_completion_tokens=max_tokens,
+        )
 
         client = self._get_client()
 
@@ -261,6 +267,7 @@ class OpenAIProvider:
             model=actual_model,
             input_tokens=prompt_tokens,
             output_tokens=completion_tokens,
+            reservation=reservation,
         )
 
         return CompletionResult(
@@ -362,7 +369,17 @@ class OpenAIProvider:
 # ---------------------------------------------------------------------------
 
 
-async def _enforce_tenant_caps(*, projected_tokens: int = 0) -> None:
+# LLM retro B2: imported from the cost_tracker module — shared with
+# the Anthropic provider via the cost_tracker constant. See reviewer
+# Y3 (extract-to-shared) note.
+
+
+async def _enforce_tenant_caps(
+    *,
+    projected_tokens: int = 0,
+    model: str | None = None,
+    max_completion_tokens: int | None = None,
+):
     """Call into the shared cost_tracker if a tenant is in scope.
 
     Skips the gate entirely when ``current_tenant()`` is None — that
@@ -370,13 +387,44 @@ async def _enforce_tenant_caps(*, projected_tokens: int = 0) -> None:
     test suite or an admin shell). The gate exists to protect
     operational tenants; system-context calls (migrations, management
     commands without tenant_scope) shouldn't be billed.
+
+    LLM retro B2: when ``model`` is provided we compute a worst-case
+    ``estimated_cost_usd`` (= price(model, projected_tokens,
+    max_completion_tokens or default)) and pass it to
+    :func:`enforce_caps` to enable the reserve-then-record path. The
+    returned :class:`CostReservation` is threaded back to
+    :func:`_record_tenant_usage` so the post-call accounting refunds
+    the over-estimate.
+
+    Returns the reservation when one is made, or ``None`` for the
+    no-scope skip.
     """
     tenant = current_tenant()
     if tenant is None:
-        return
+        return None
     from apps.llm.cost_tracker import enforce_caps
+    from apps.llm.pricing import UnknownModelError, compute_cost
 
-    await enforce_caps(str(tenant.id), projected_tokens=projected_tokens)
+    estimated_cost_usd: _Decimal | None = None
+    if model:
+        from apps.llm.cost_tracker import RESERVATION_DEFAULT_MAX_TOKENS
+
+        try:
+            estimated_cost_usd = compute_cost(
+                model,
+                input_tokens=max(0, projected_tokens),
+                output_tokens=max_completion_tokens or RESERVATION_DEFAULT_MAX_TOKENS,
+            )
+        except UnknownModelError:
+            # Unknown model in pricing table → skip reservation; gate
+            # still runs the token-cap check + legacy cost-cap soft-check.
+            estimated_cost_usd = None
+
+    return await enforce_caps(
+        str(tenant.id),
+        projected_tokens=projected_tokens,
+        estimated_cost_usd=estimated_cost_usd,
+    )
 
 
 async def _record_tenant_usage(
@@ -384,6 +432,7 @@ async def _record_tenant_usage(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    reservation=None,
 ) -> None:
     """Compute cost via :mod:`apps.llm.pricing` and forward to
     :func:`apps.llm.cost_tracker.record_usage`.
@@ -392,6 +441,11 @@ async def _record_tenant_usage(
     price-table entry to break the surrounding LLM call — the cost cap
     will under-count for that one call and the cost-table audit (CI
     test for compute_cost) will surface the omission separately.
+
+    ``reservation`` is the :class:`CostReservation` returned by the
+    matching :func:`_enforce_tenant_caps` call. Threading it through
+    enables the LLM retro B2 reserve-then-record reconciliation
+    (refund the over-estimate / top up the under-estimate).
     """
     tenant = current_tenant()
     if tenant is None:
@@ -416,6 +470,7 @@ async def _record_tenant_usage(
         str(tenant.id),
         tokens=max(0, int(input_tokens or 0)) + max(0, int(output_tokens or 0)),
         cost_usd=cost_usd,
+        reservation=reservation,
     )
 
 

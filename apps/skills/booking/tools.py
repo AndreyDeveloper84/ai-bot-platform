@@ -86,6 +86,15 @@ from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingRequest, PendingBookingAction
+from apps.booking.services.attribution import (
+    CommercialIdentitySnapshot,
+    build_customer_attribution_metadata,
+    build_live_commercial_identity,
+    compute_assist_score,
+    compute_billable,
+    get_reschedulable_statuses,
+)
+from apps.eventbus import services as eventbus_services
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
 from apps.bookings.reminders_factory import create_reminders_for_booking
@@ -319,15 +328,16 @@ CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
 BUY_CERTIFICATE_TOOL_SPEC: dict[str, Any] = {
     "name": "buy_certificate",
     "description": (
-        "Issue a YooKassa hosted-checkout URL for a gift certificate "
-        "purchase. Call when the client asks to buy a сертификат / "
-        "подарочный сертификат. amount_rub MUST be a positive number in "
-        "[500, 100000] roubles — out-of-range values trigger a polite "
-        "clarification. recipient_name is the person the certificate is "
-        "for (free-text, optional — blank means 'for me'). buyer_email "
-        "is optional; supply it ONLY if the client volunteers an email "
-        "for the receipt. The tool returns a checkout URL — render it "
-        "with an inline '💳 Оплатить' button so the client can pay."
+        "Request a hosted-checkout URL for a gift certificate purchase "
+        "from the Ayla payments service. Call when the client asks to "
+        "buy a сертификат / подарочный сертификат. amount_rub MUST be "
+        "a positive number in [500, 100000] roubles — out-of-range "
+        "values trigger a polite clarification. recipient_name is the "
+        "person the certificate is for (free-text, optional — blank "
+        "means 'for me'). buyer_email is optional; supply it ONLY if "
+        "the client volunteers an email for the receipt. The tool "
+        "returns a checkout URL — render it with an inline "
+        "'💳 Оплатить' button so the client can pay."
     ),
     "parameters": {
         "type": "object",
@@ -370,6 +380,23 @@ BOOKING_TOOL_SPECS: list[dict[str, Any]] = [
     CALC_PRICE_TOOL_SPEC,
     BUY_CERTIFICATE_TOOL_SPEC,
 ]
+
+
+def get_active_booking_tool_specs() -> list[dict[str, Any]]:
+    """Return the booking-tool list filtered by feature flags.
+
+    Stabilization sprint B2: ``BUY_CERTIFICATE_TOOL_SPEC`` is hidden
+    from the LLM tool advertisement when ``CERTIFICATE_PAYMENT_ENABLED``
+    is False, so the model does not pitch certificates we cannot
+    fulfil. The direct ``buy_certificate()`` call also honours the
+    flag for defence-in-depth.
+    """
+
+    from django.conf import settings
+
+    if getattr(settings, "CERTIFICATE_PAYMENT_ENABLED", False):
+        return list(BOOKING_TOOL_SPECS)
+    return [s for s in BOOKING_TOOL_SPECS if s is not BUY_CERTIFICATE_TOOL_SPEC]
 
 
 # Audit slugs.
@@ -524,13 +551,17 @@ class BuyCertificateResult:
     Fields:
 
     * ``ok``           — True on a successful checkout-URL issuance.
-    * ``order_id``     — UUID of the created
-                         :class:`apps.orders.models.Order`. Empty on
+    * ``order_id``     — Ayla payment id (#427 carve-out: the DTO
+                         field name is unchanged for downstream
+                         render-layer compatibility, but the value is
+                         now Ayla djangoproject's canonical payment_id
+                         since bot-platform no longer owns an Order
+                         row per ADR-0009 §Hard rule #1). Empty on
                          failure paths.
     * ``amount_rub``   — Echoed for downstream rendering. ``Decimal("0")``
                          on failures.
-    * ``checkout_url`` — YooKassa-hosted checkout URL the bot hands the
-                         client (stub URL in test mode). Empty on
+    * ``checkout_url`` — YooKassa-hosted checkout URL Ayla obtained on
+                         our behalf (stub URL in test mode). Empty on
                          failures.
     * ``error``        — Slug used by the skill to map onto a handoff
                          reason. Empty on success.
@@ -944,6 +975,28 @@ def execute_confirm(
             error="invalid_payload",
         )
 
+    # Phase 4a-IMPL1 closure: validate visit_at BEFORE the YClients call
+    # so a parse failure can't leave a YClients record without our
+    # corresponding BookingRequest. The model validator at
+    # apps/booking/models.py::_validate_attribution_metadata raises when
+    # booking_source != 'external' AND visit_at IS NULL (Q-ATT-IMPL3);
+    # we're about to flip booking_source to 'ai_direct', so guard up-front.
+    visit_at_dt = _parse_iso_datetime(slot_datetime)
+    if visit_at_dt is None:
+        logger.warning(
+            "booking.confirm.exec.unparseable_slot slot=%s",
+            slot_datetime,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_confirm",
+            outcome="invalid_slot_datetime",
+        )
+        return BookingToolResult(
+            confirmation=ConfirmationResult(ok=False, error="invalid_payload"),
+            error="invalid_payload",
+        )
+
     try:
         record: BookingRecord = client.create_record(
             staff_id=master_id,
@@ -983,30 +1036,112 @@ def execute_confirm(
 
     yc_id = str(record.record_id)
     yc_marker = f"yclients_record_id={yc_id}"
+    # Skills retro hotfix #1: anchor the idempotency lookup to the
+    # documented comment prefix instead of substring-matching a
+    # free-text field. A spoofed service_name / client_name carrying
+    # ``yclients_record_id=<other-id>`` would otherwise short-circuit
+    # a legitimate confirm. Both writers use this exact prefix:
+    #   - execute_confirm:    "Bot booking | yclients_record_id=<id>"
+    #   - execute_reschedule: "Bot booking | yclients_record_id=<id> | rescheduled_from=..."
+    _idem_prefix = f"Bot booking | {yc_marker}"
 
     existing = BookingRequest.all_tenants.filter(
         tenant=tenant,
         bot_user=bot_user,
-        comment__contains=yc_marker,
+        comment__startswith=_idem_prefix,
     ).first()
 
-    visit_at_dt = _parse_iso_datetime(slot_datetime)
-    visit_at_iso = visit_at_dt.isoformat() if visit_at_dt else slot_datetime
+    # visit_at_dt was parsed above (pre-YClients), reuse here.
+    visit_at_iso = visit_at_dt.isoformat()
 
+    # The `existing` lookup is the idempotency short-circuit for tool
+    # replay (LLM retry, double-tap). Rows written before this PR have
+    # booking_source='external' and we deliberately do NOT update them
+    # here — backfilling legacy rows is a separate migration question.
     if existing is None:
-        BookingRequest.all_tenants.create(
-            tenant=tenant,
-            bot_user=bot_user,
-            category_name="",
-            service_name=service_name or "—",
-            master_name=master_name or "—",
-            client_name=client_name,
-            client_phone=phone,
-            comment=f"Bot booking | {yc_marker}",
-            source="bot",
-            is_processed=False,
+        # Phase 4a-IMPL1 closure: bot-confirm path = ai_direct attribution.
+        # Without this, BookingRequest.booking_source defaults to
+        # "external" and the row is NOT billable — bot bookings would
+        # silently fall out of the billing pipeline (per attribution
+        # policy §6 «billable = ai_direct AND CONFIRMED»).
+        billable, billing_reason = compute_billable(
+            booking_source="ai_direct",
             status=BookingRequest.Status.CONFIRMED,
         )
+        # Skills retro hotfix #2: mirror Hotfix D's split-brain recovery
+        # for the confirm path. YClients create_record already succeeded
+        # (record exists on their side). If the local BookingRequest
+        # write raises — DB transient, future model-validator addition,
+        # JSONField surprise — we MUST compensate by cancelling the
+        # YClients record. Otherwise the customer holds a real
+        # appointment that our DB / reminders / Loyalty cannot see.
+        try:
+            BookingRequest.all_tenants.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                category_name="",
+                service_name=service_name or "—",
+                master_name=master_name or "—",
+                client_name=client_name,
+                client_phone=phone,
+                comment=_idem_prefix,
+                source="bot",
+                is_processed=False,
+                status=BookingRequest.Status.CONFIRMED,
+                visit_at=visit_at_dt,
+                booking_source="ai_direct",
+                ai_assist_score=compute_assist_score(booking_source="ai_direct"),
+                billable=billable,
+                billing_reason=billing_reason,
+                attribution_metadata=build_customer_attribution_metadata(
+                    booking_created_at=dj_timezone.now().isoformat(),
+                    test_mode=False,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — recover, do not propagate
+            logger.exception(
+                "booking.confirm.local_create_failed yc_id=%s err=%s",
+                yc_id,
+                exc,
+            )
+            compensate_ok = False
+            try:
+                client.cancel_record(record_id=int(yc_id))
+                compensate_ok = True
+            except Exception:  # noqa: BLE001 — compensate is best-effort
+                logger.exception(
+                    "booking.confirm.compensate_cancel_failed yc_id=%s",
+                    yc_id,
+                )
+
+            _audit_tool(
+                tenant_id=tenant_id,
+                tool="execute_confirm",
+                outcome="local_create_failed_compensated"
+                if compensate_ok
+                else "local_create_failed_split_brain",
+            )
+            write_audit(
+                EVENT_BOOKING_CONFIRM_FAILED,
+                target="BookingSkill",
+                payload={
+                    "tenant_id": tenant_id,
+                    "yclients_record_id": yc_id,
+                    "reason": "local_create_failed",
+                    "compensate_ok": compensate_ok,
+                },
+            )
+            # Don't lie to the caller: if compensate failed, split-brain
+            # persists. Either way the confirm did not complete from the
+            # customer's perspective on our side, so report failure and
+            # let the caller hand off to a human operator.
+            return BookingToolResult(
+                confirmation=ConfirmationResult(
+                    ok=False,
+                    error="booking_confirm_partial_failure",
+                ),
+                error="booking_confirm_partial_failure",
+            )
         _schedule_reminders(
             tenant=tenant,
             bot_user=bot_user,
@@ -1279,6 +1414,23 @@ def execute_cancel(
         target="BookingSkill",
         payload={"tenant_id": tenant_id, "record_id": record_id},
     )
+
+    # Domain bus — taxonomy §3.1 booking.cancelled. Swallow errors so a
+    # bus outage never unwinds the cancel side-effect.
+    try:
+        eventbus_services.emit_booking_cancelled(
+            booking_id=str(booking.pk),
+            cancelled_by="customer",
+            cancellation_reason=reason or "",
+            cancelled_at=dj_timezone.now().isoformat(),
+            actor_type="human",
+            actor_role="customer",
+            actor_id=str(bot_user.pk) if bot_user else None,
+            tenant=tenant,
+        )
+    except Exception:  # noqa: BLE001 — domain telemetry never breaks the tool
+        logger.exception("booking.cancel.eventbus_emit_failed booking=%s", booking.pk)
+
     text = "Готово, запись отменена."
     return BookingToolResult(text=text)
 
@@ -1487,10 +1639,102 @@ def execute_reschedule(
     if record_id is None or master_id is None or service_id is None or not new_datetime:
         return BookingToolResult(error="invalid_payload")
 
+    # Phase 4a-IMPL1 closure: validate new_datetime BEFORE the YClients
+    # cancel call so a parse failure can't leave us in a half-state
+    # (old record cancelled but new BookingRequest write fails on the
+    # ai_direct + visit_at=NULL validator). Mirrors execute_confirm.
+    visit_at_dt = _parse_iso_datetime(new_datetime)
+    if visit_at_dt is None:
+        logger.warning(
+            "booking.reschedule.exec.unparseable_slot slot=%s",
+            new_datetime,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="invalid_new_datetime",
+        )
+        return BookingToolResult(error="invalid_payload")
+
     booking = _find_user_booking(tenant=tenant, bot_user=bot_user, record_id=record_id)
     if booking is None:
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="invalid_record_id")
         return BookingToolResult(error="invalid_record_id")
+
+    # Tech-lead double-pass S1: enforce CONFIRMED-only at the LLM tool
+    # layer, mirroring ``apps.booking.services.reschedule.py:74``.
+    # Without this, a customer who tapped Cancel (status →
+    # CANCEL_REQUESTED during the 5s undo window) then tapped Reschedule
+    # via the LLM would have the LLM tool happily reschedule a cancel-
+    # pending row. Service-layer rejects; LLM path used to silently
+    # accept. Same business invariant now enforced in BOTH places.
+    # Q12-α #560 (PRE_PILOT 2026-07-15): ALLOW-list — mirrors
+    # services/reschedule.py gate. Default-deny for any future enum
+    # addition.
+    if booking.status not in get_reschedulable_statuses():
+        logger.info(
+            "booking.reschedule.exec.not_reschedulable record_id=%s status=%s",
+            record_id,
+            booking.status,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="not_reschedulable_status",
+        )
+        return BookingToolResult(error="not_reschedulable")
+
+    # Skills retro hotfix #4: re-check slot availability at execute time.
+    # The preview-time check (reschedule_booking) is up to 10 min stale
+    # (pending-action expiry window). Between preview ✓ and ✅ tap,
+    # another customer can claim the slot. If we proceed to cancel the
+    # old record first and the new slot is already taken, YClients
+    # rejects create_record → user loses their old booking AND has no
+    # new one. Re-checking here shrinks the race window from minutes to
+    # milliseconds (still not zero — another concurrent execute could
+    # squeak in — but the broker semantics of YClients' create_record
+    # close that residual window on their side).
+    try:
+        _avail_times = client.get_available_times(
+            staff_id=master_id,
+            date=visit_at_dt.date().isoformat(),
+            service_ids=[service_id],
+        )
+    except YClientsUnavailableError as exc:
+        logger.warning("booking.reschedule.recheck.unavailable err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="recheck_unavailable",
+        )
+        return BookingToolResult(error="yclients_unavailable")
+    except YClientsAPIError as exc:
+        logger.info("booking.reschedule.recheck.api_error err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="recheck_api_error",
+        )
+        return BookingToolResult(error="yclients_api_error")
+    if not _slot_available(
+        _avail_times,
+        visit_at_dt.strftime("%H:%M"),
+        new_datetime,
+    ):
+        # Old record stays intact — no destructive action yet. Surface a
+        # clear «slot taken» error so the caller can ask for another
+        # time without losing the current booking.
+        logger.info(
+            "booking.reschedule.recheck.slot_taken record_id=%s new_datetime=%s",
+            record_id,
+            new_datetime,
+        )
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="slot_taken_at_execute",
+        )
+        return BookingToolResult(error="slot_unavailable")
 
     # Step 1: cancel the old record.
     try:
@@ -1525,6 +1769,27 @@ def execute_reschedule(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
+    # Domain bus — taxonomy §3.1 booking.rescheduled. Fresh correlation_id
+    # captured so the partial-failure cancel below (if it happens) can
+    # share it — subscribers then recognise the composite "old visit
+    # dead, no new visit booked" outcome.
+    _reschedule_correlation_id = eventbus_services.new_correlation_id()
+    try:
+        _old_visit_iso = booking.visit_at.isoformat() if booking.visit_at else ""
+        eventbus_services.emit_booking_rescheduled(
+            booking_id=str(booking.pk),
+            old_slot_start=_old_visit_iso,
+            new_slot_start=new_datetime,
+            rescheduled_by="customer",
+            actor_type="human",
+            actor_role="customer",
+            actor_id=str(bot_user.pk) if bot_user else None,
+            correlation_id=_reschedule_correlation_id,
+            tenant=tenant,
+        )
+    except Exception:  # noqa: BLE001 — domain telemetry never breaks the tool
+        logger.exception("booking.reschedule.eventbus_emit_failed booking=%s", booking.pk)
+
     # Step 2: create the new record. Partial-failure handling per
     # the module docstring.
     try:
@@ -1548,6 +1813,21 @@ def execute_reschedule(
         BookingRequest.all_tenants.filter(pk=booking.pk).update(
             status=BookingRequest.Status.CANCELLED,
         )
+        # Reschedule degraded to cancel — emit booking.cancelled with the
+        # SAME correlation_id as the booking.rescheduled above so subscribers
+        # see the composite outcome.
+        try:
+            eventbus_services.emit_booking_cancelled(
+                booking_id=str(booking.pk),
+                cancelled_by="system",
+                cancellation_reason="reschedule_partial_failure",
+                cancelled_at=dj_timezone.now().isoformat(),
+                actor_type="system",
+                correlation_id=_reschedule_correlation_id,
+                tenant=tenant,
+            )
+        except Exception:  # noqa: BLE001 — domain telemetry never breaks the tool
+            logger.exception("booking.reschedule.partial_cancel_emit_failed booking=%s", booking.pk)
         _audit_tool(
             tenant_id=tenant_id,
             tool="execute_reschedule",
@@ -1562,34 +1842,255 @@ def execute_reschedule(
                 "new_datetime": new_datetime,
                 "master_id": master_id,
                 "service_id": service_id,
+                # Q12-α (founder ACK 2026-05-22 decision #4): a
+                # partial-failure reschedule is a chain TERMINATOR —
+                # the old row is cancelled, the new row never written,
+                # so any future booking the customer makes is a fresh
+                # billable sale (a new chain via execute_confirm).
+                # Surface this on the audit row so admin/ops dashboards
+                # can filter for «manual rebook required» tickets
+                # without having to cross-reference the event_type.
+                "q12a_chain_terminator": True,
+                "q12a_chain_terminator_reason": "partial_failure",
             },
         )
         return BookingToolResult(error="booking_reschedule_partial_failure")
 
     new_yc_id = str(record.record_id)
     new_yc_marker = f"yclients_record_id={new_yc_id}"
-    visit_at_dt = _parse_iso_datetime(new_datetime)
-    visit_at_iso = visit_at_dt.isoformat() if visit_at_dt else new_datetime
+    # visit_at_dt was parsed at the top of this function (pre-cancel).
+    visit_at_iso = visit_at_dt.isoformat()
 
+    # Skills retro hotfix #1: anchor on the documented Bot-booking prefix
+    # (see execute_confirm for rationale). The reschedule writer below
+    # uses ``"Bot booking | yclients_record_id=<id> | rescheduled_from=..."``
+    # — startswith on the first two tokens is sufficient and not spoofable
+    # via free-text comment payload.
+    _new_idem_prefix = f"Bot booking | {new_yc_marker}"
     existing_new = BookingRequest.all_tenants.filter(
         tenant=tenant,
         bot_user=bot_user,
-        comment__contains=new_yc_marker,
+        comment__startswith=_new_idem_prefix,
     ).first()
     if existing_new is None:
-        BookingRequest.all_tenants.create(
-            tenant=tenant,
-            bot_user=bot_user,
-            category_name="",
-            service_name=service_name or booking.service_name or "—",
-            master_name=master_name or booking.master_name or "—",
-            client_name=client_name,
-            client_phone=phone,
-            comment=(f"Bot booking | {new_yc_marker} | rescheduled_from={record_id}"),
-            source="bot",
-            is_processed=False,
-            status=BookingRequest.Status.CONFIRMED,
+        # Tech-lead double-pass S3: wrap the chain compute + new-row
+        # write in a single ``transaction.atomic()`` with
+        # ``select_for_update`` on the OLD booking. Without this, two
+        # concurrent reschedule calls on different chain links could
+        # both walk to the same root, both pass continuation check, and
+        # both write new continuation rows pointing at the root — a
+        # chain fork. The atomic + lock mirrors
+        # ``apps.booking.services.reschedule.py:63`` so both reschedule
+        # paths now enforce the same concurrency contract.
+        from django.db import transaction as _db_transaction
+
+        from apps.booking.services.attribution import (
+            compute_reschedule_continuation,
         )
+
+        with _db_transaction.atomic():
+            booking = (
+                BookingRequest.all_tenants.select_for_update()
+                .select_related("service")
+                .get(pk=booking.pk)
+            )
+
+            # Q12-α continuation decision (issue #478, founder ACK
+            # 2026-05-22). The LLM reschedule tool always keeps the
+            # same service + master (the LLM prompt enforces it); a
+            # service swap is structurally not a normal LLM flow today.
+            # We pass ``booking.service_id`` as ``new_service_id`` so
+            # the helper's strict-equality check is tautologically
+            # satisfied — the 90-day chain-root threshold is the
+            # meaningful gate at this layer. If the LLM ever starts
+            # allowing service swaps from this path, this call site
+            # MUST be updated.
+            # Q12-α #541 (founder ACK 2026-05-23): live commercial
+            # identity for chain-break detection. ``booking.service``
+            # may be None on legacy LLM rows (B1 adversarial-pass note);
+            # in that case skip the snapshot — the comparator's NULL-on-
+            # either-side rule keeps the chain intact and preserves the
+            # legacy chain (consistent with q12a-billing-founder-gate).
+            # #618 follow-up: shape lives in
+            # ``attribution.build_live_commercial_identity``.
+            live_commercial_identity: CommercialIdentitySnapshot | None = (
+                build_live_commercial_identity(booking.service)
+                if booking.service is not None
+                else None
+            )
+
+            is_continuation, chain_break_reason, chain_root_id = compute_reschedule_continuation(
+                old=booking,
+                new_service_id=str(booking.service_id) if booking.service_id else "",
+                new_visit_at=visit_at_dt,
+                new_commercial_identity=live_commercial_identity,
+            )
+
+            # Carry root's snapshot on continuation; fresh-snapshot on
+            # chain break. Mirrors services/reschedule.py logic.
+            # #616 (PRE_PILOT 2026-07-15) — root read locked via bare
+            # ``select_for_update()`` (``of=`` omitted, see
+            # services/reschedule.py for full rationale). FOOT-GUN:
+            # do NOT add ``.select_related(...)`` here — would expand
+            # FOR UPDATE scope to joined tables on Postgres.
+            carry_snapshot: CommercialIdentitySnapshot | None = None
+            if is_continuation and chain_root_id is not None:
+                try:
+                    root = BookingRequest.all_tenants.select_for_update().get(id=chain_root_id)
+                    carry_snapshot = root.commercial_identity_snapshot
+                except BookingRequest.DoesNotExist:
+                    carry_snapshot = None
+            elif live_commercial_identity is not None:
+                # Chain broken → new chain root, snapshot the current
+                # live view so future reschedules anchor against it.
+                carry_snapshot = live_commercial_identity
+
+            billable, billing_reason = compute_billable(
+                booking_source="ai_direct",
+                status=BookingRequest.Status.CONFIRMED,
+                created_by="execute_reschedule",
+                is_reschedule_continuation=is_continuation,
+                chain_break_reason=chain_break_reason,
+            )
+            reschedule_metadata = build_customer_attribution_metadata(
+                booking_created_at=dj_timezone.now().isoformat(),
+                test_mode=False,
+            )
+            reschedule_metadata["created_by"] = "execute_reschedule"
+            reschedule_metadata["rescheduled_from_record_id"] = record_id
+            reschedule_metadata["q12a_is_continuation"] = is_continuation
+            if chain_break_reason:
+                reschedule_metadata["q12a_chain_break_reason"] = chain_break_reason
+            # Founder ACK 2026-05-23 option (b): mirror the snapshot
+            # into attribution_metadata for the LLM path so an analyst
+            # can replay the commercial-identity decision from a single
+            # JSON blob without joining back through the chain.
+            if carry_snapshot is not None:
+                reschedule_metadata["commercial_identity_snapshot"] = carry_snapshot
+
+            # Hotfix D (retro review #2): the window between YClients-
+            # create success and local-write success is the last split-
+            # brain gap the Q-ATT-IMPL1 closure didn't seal. The early
+            # _parse_iso_datetime guard rejected unparseable slots
+            # before any YClients call, but the local create can still
+            # fail on DB transients, JSONField validation surprises, or
+            # any future model-level validator additions. If we land
+            # here without recovery, YClients has the customer's new
+            # appointment but our DB and reminders + Loyalty don't know
+            # about it.
+            try:
+                BookingRequest.all_tenants.create(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    category_name="",
+                    service_name=service_name or booking.service_name or "—",
+                    master_name=master_name or booking.master_name or "—",
+                    client_name=client_name,
+                    client_phone=phone,
+                    comment=(f"Bot booking | {new_yc_marker} | rescheduled_from={record_id}"),
+                    source="bot",
+                    is_processed=False,
+                    status=BookingRequest.Status.CONFIRMED,
+                    visit_at=visit_at_dt,
+                    booking_source="ai_direct",
+                    ai_assist_score=compute_assist_score(booking_source="ai_direct"),
+                    billable=billable,
+                    billing_reason=billing_reason,
+                    attribution_metadata=reschedule_metadata,
+                    original_booking_event_id=chain_root_id,
+                    commercial_identity_snapshot=carry_snapshot,
+                )
+            except Exception as exc:  # noqa: BLE001 — recover, do not propagate
+                # Split-brain recovery: try to cancel the new YClients record
+                # so the customer isn't double-booked on their side. Then
+                # treat this as a reschedule_partial_failure for analytics.
+                logger.exception(
+                    "booking.reschedule.local_create_failed yc_id=%s err=%s",
+                    new_yc_id,
+                    exc,
+                )
+                compensate_ok = False
+                try:
+                    client.cancel_record(record_id=int(new_yc_id))
+                    compensate_ok = True
+                except Exception:  # noqa: BLE001 — compensate is best-effort
+                    logger.exception(
+                        "booking.reschedule.compensate_cancel_failed yc_id=%s",
+                        new_yc_id,
+                    )
+
+                # If compensate succeeded, the rescheduled-from-old is now a
+                # plain cancel (no new visit anywhere). Flip the old row from
+                # RESCHEDULED to CANCELLED to keep analytics honest and emit
+                # booking.cancelled with the SHARED correlation_id so
+                # subscribers (Loyalty, analytics) see the composite outcome.
+                #
+                # When compensate FAILS (else branch below — we don't take any
+                # action there), we intentionally LEAVE the old row in
+                # RESCHEDULED. Customer still has a visit on YClients side
+                # that we can't link to locally; marking the old row CANCELLED
+                # would tell Loyalty «no visit happens» when in fact one might.
+                # The critical-severity health alert below is the ops hook to
+                # reconcile manually.
+                if compensate_ok:
+                    BookingRequest.all_tenants.filter(pk=booking.pk).update(
+                        status=BookingRequest.Status.CANCELLED,
+                    )
+                    try:
+                        eventbus_services.emit_booking_cancelled(
+                            booking_id=str(booking.pk),
+                            cancelled_by="system",
+                            cancellation_reason="reschedule_local_create_failed",
+                            cancelled_at=dj_timezone.now().isoformat(),
+                            actor_type="system",
+                            correlation_id=_reschedule_correlation_id,
+                            tenant=tenant,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "booking.reschedule.recovery_cancel_emit_failed booking=%s",
+                            booking.pk,
+                        )
+
+                # Always audit + alert — ops needs visibility regardless of
+                # whether compensate succeeded.
+                write_audit(
+                    "bookings.reschedule.local_create_failed",
+                    target="BookingSkill",
+                    payload={
+                        "tenant_id": tenant_id,
+                        "old_record_id": record_id,
+                        "new_yc_record_id": new_yc_id,
+                        "compensate_succeeded": compensate_ok,
+                        "error": str(exc)[:200],
+                    },
+                )
+                try:
+                    eventbus_services.emit(
+                        "system.module.health.degraded",
+                        {
+                            "module_name": "booking.execute_reschedule",
+                            "severity": "critical" if not compensate_ok else "warning",
+                            "metric": (
+                                f"split_brain_unresolved_yc_id={new_yc_id}"
+                                if not compensate_ok
+                                else f"split_brain_recovered_yc_id={new_yc_id}"
+                            ),
+                        },
+                        actor_type="system",
+                        tenant=tenant,
+                    )
+                except Exception:  # noqa: BLE001 — alert never breaks the tool
+                    logger.exception("booking.reschedule.alert_emit_failed")
+                _audit_tool(
+                    tenant_id=tenant_id,
+                    tool="execute_reschedule",
+                    outcome=(
+                        "split_brain_recovered" if compensate_ok else "split_brain_unresolved"
+                    ),
+                )
+                return BookingToolResult(error="booking_reschedule_local_create_failed")
+
         _schedule_reminders(
             tenant=tenant,
             bot_user=bot_user,
@@ -1637,8 +2138,18 @@ def _find_user_booking(
     Filters out terminal-cancelled rows so a user can't re-cancel an
     already-cancelled booking — the LLM would otherwise see the row
     in show_my_bookings and accidentally route to cancel_booking.
+
+    Skills retro hotfix #1 (cont'd): anchor on the pipe-space-prefixed
+    marker rather than the bare ``yclients_record_id=<id>`` substring.
+    Both legitimate writers ship the marker right after ``" | "``:
+      - skill:         ``"Bot booking | yclients_record_id=<id>"``
+      - admin webhook: ``"YClients admin booking | yclients_record_id=<id>"``
+    The pipe character is structurally reserved in our comment format,
+    so an attacker can't inject `` | yclients_record_id=<victim-id>``
+    via a free-text service_name / client_name. This closes the reader-
+    side half of the spoof vector the previous PR closed for writers.
     """
-    marker = f"yclients_record_id={int(record_id)}"
+    marker = f" | yclients_record_id={int(record_id)}"
     return (
         BookingRequest.all_tenants.filter(
             tenant=tenant,
@@ -1659,6 +2170,16 @@ def _find_yclients_user_record(*, client: Any, record_id: int) -> Any:
     the API is unreachable OR the id isn't in the user's records (the
     record may be salon-side only, or the user_token doesn't have
     access).
+
+    Perf note (skills retro residual #9): YClients exposes only
+    ``GET /user/records`` — no single-record-by-id endpoint. We iterate
+    the full list and return on first match. Customer record history is
+    typically dozens of entries (Q-CO5 — user_token is per-customer), so
+    the O(N) is bounded by individual customer activity, not platform-
+    wide volume. If a power-user customer's record list ever grows to
+    hundreds and reschedule latency regresses, file an enhancement on
+    the YClients integration to cache the records-by-id map per tenant
+    request.
     """
     try:
         records = client.get_user_records()
@@ -1691,10 +2212,28 @@ def show_my_bookings(
     tenant_id = str(getattr(tenant, "id", ""))
     now = dj_timezone.now()
 
+    # Skills retro residual #10: exclude terminal-cancelled and
+    # replaced-by-reschedule rows. Without this filter the LLM sees
+    # «ghost» bookings in show_my_bookings → the user gets a confusing
+    # list that mixes live + dead rows, and a subsequent cancel/reschedule
+    # tool call routed at a ghost row dies inside _find_user_booking
+    # (which already filters terminal statuses) with «not found».
+    # CANCEL_REQUESTED / RESCHEDULE_REQUESTED stay excluded too — those
+    # are transient states for the in-flight 2-button preview, not
+    # something to surface as «your upcoming booking».
+    #
+    # Reader/writer asymmetry note: _find_user_booking (the cancel/
+    # reschedule reader) excludes only CANCELLED + RESCHEDULED — it
+    # accepts CANCEL_REQUESTED / RESCHEDULE_REQUESTED so the same record
+    # the customer is mid-confirming can be actioned by ✅ tap. This is
+    # the intended split: show_my_bookings is the LLM's «what's live»
+    # view (no transient rows); _find_user_booking is the gate executor's
+    # «can the customer act on this id» view (transient rows included).
     rows = list(
         BookingRequest.all_tenants.filter(
             tenant=tenant,
             bot_user=bot_user,
+            status=BookingRequest.Status.CONFIRMED,
         ).order_by("-created_at")[:20]
     )
 
@@ -1978,13 +2517,22 @@ def buy_certificate(
     bot_user: Any,
     arguments: dict[str, Any],
 ) -> BookingToolResult:
-    """Issue a YooKassa hosted-checkout URL for a gift certificate.
+    """Request a checkout URL from Ayla for a gift certificate.
+
+    Phase 0 / #427 + ADR-0009 §Hard rule #5: bot-platform no longer
+    talks to YooKassa directly. The skill calls Ayla djangoproject's
+    ``POST /api/v1/payments/create`` — Ayla persists the canonical
+    Payment row, drives the YooKassa lifecycle, and owns the webhook.
+    bot-platform's role shrinks to: parse the user's intent, ask
+    Ayla, render the returned checkout URL via an inline button.
 
     Args:
-      tenant: current :class:`apps.tenancy.models.Tenant`. Scopes the
-              created :class:`apps.orders.models.Order` row.
+      tenant: current :class:`apps.tenancy.models.Tenant`. Used for
+              audit only — bot-platform no longer writes a payment
+              row scoped to the tenant (canonical state lives in
+              Ayla, which is multi-tenant-aware on its own side).
       bot_user: current :class:`apps.identity.models.BotUser` — the
-              buyer.
+              buyer. Still recorded in the audit row.
       arguments: LLM-supplied ``{amount_rub, recipient_name?, buyer_email?}``.
 
     Returns a :class:`BookingToolResult` with ``certificate`` populated.
@@ -1993,31 +2541,64 @@ def buy_certificate(
 
     Error contract:
 
-    * ``amount_out_of_range`` — clarification, no Order created.
-    * ``certificate_provider_failure`` — YooKassa raised; Order row
-      saved with status=FAILED so the operator can see the attempt.
+    * ``amount_out_of_range`` — clarification, no Ayla call.
+    * ``certificate_provider_failure`` — Ayla payments endpoint
+      raised (5xx / 4xx / unreachable). Audit row written so the
+      operator can see the attempt.
 
-    Validation order (matters for tests):
+    Validation order:
 
-    1. Parse + range-check the amount BEFORE creating the Order. An
-       out-of-range value MUST NOT leave an orphan Order row.
-    2. Create the Order in ``pending``.
-    3. Generate idempotence_key, call YooKassa.
-    4. On success: stamp the payment_id + URL onto the Order, flip to
-       ``awaiting_payment``. Build the keyboard.
-    5. On failure: flip Order to ``failed`` so admin sees the attempt.
+    1. Parse + range-check the amount BEFORE calling Ayla. An
+       out-of-range value MUST NOT trigger any HTTP call.
+    2. Generate idempotence_key, call Ayla.
+    3. On success: build the keyboard from the returned URL.
+    4. On failure: audit + return handoff slug.
+
+    Compared to the prior YooKassa-direct shape, the Order row write
+    is GONE — per ADR-0009 §Hard rule #1 (no duplicate canonical
+    state), Ayla owns the Payment row. The legacy YooKassa webhook
+    + ``apps/orders/tasks.py`` survive until #428 to drain any
+    in-flight YooKassa payments during the safety window; new
+    payments after this PR lands flow exclusively through Ayla.
     """
-    # Local imports — avoid the top-level Django-import cycle that
-    # would otherwise force apps.orders to import at module load.
-    from apps.integrations.yookassa import (
-        YooKassaAPIError,
-        YooKassaUnavailableError,
-        get_yookassa_client,
-    )
+    # Local imports — keeps Django-app-load cycles narrow and lets
+    # tests substitute the singleton via reset_ayla_payments_client().
+    from django.conf import settings
+
     from apps.bookings.keyboards import url_button
-    from apps.orders.models import Order
+    from apps.integrations.ayla_payments import (
+        AylaPaymentsAPIError,
+        AylaPaymentsUnavailableError,
+        get_ayla_payments_client,
+    )
 
     tenant_id = str(getattr(tenant, "id", ""))
+
+    # ── 0. Feature flag (B2) ────────────────────────────────────────
+    # CERTIFICATE_PAYMENT_ENABLED defaults False per founder verdict
+    # 2026-05-30 (memory ``project_certificate_payment_post_pilot``).
+    # When off, short-circuit BEFORE any Ayla call and before amount
+    # parsing — the disabled path costs zero IO and emits a single
+    # audit row so operators can see attempted use during the freeze.
+    # ``get_active_booking_tool_specs()`` already hides the spec from
+    # the LLM tool list; this guard is defence-in-depth for keyword
+    # fallbacks, replay paths, and direct programmatic callers.
+    if not getattr(settings, "CERTIFICATE_PAYMENT_ENABLED", False):
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="buy_certificate",
+            outcome="disabled",
+        )
+        return BookingToolResult(
+            certificate=BuyCertificateResult(ok=False, error="certificate_disabled"),
+            error="certificate_disabled",
+            text=(
+                # Deliberately no launch ETA — the founder freeze is
+                # contingent on legal review (ФЗ-54 / ст. 487 ГК РФ /
+                # ФЗ-2300-1), so any commitment here would overpromise.
+                "Подарочные сертификаты сейчас недоступны. Могу помочь с записью на услугу?"
+            ),
+        )
 
     # ── 1. Amount parsing + range guard ─────────────────────────────
     amount = _coerce_decimal(arguments.get("amount_rub"))
@@ -2052,83 +2633,63 @@ def buy_certificate(
 
     recipient_name = str(arguments.get("recipient_name") or "").strip()
     buyer_email = str(arguments.get("buyer_email") or "").strip()
-
-    # ── 2. Persist the Order in pending ──────────────────────────────
     description = f"Сертификат на {amount:.0f} ₽" + (
         f" для {recipient_name}" if recipient_name else ""
     )
-    order = Order.all_tenants.create(
-        tenant=tenant,
-        bot_user=bot_user,
-        kind=Order.Kind.CERTIFICATE,
-        amount_rub=amount,
-        recipient_name=recipient_name,
-        buyer_email=buyer_email,
-        description=description[:255],
-        status=Order.Status.PENDING,
-    )
 
-    # ── 3. YooKassa call ─────────────────────────────────────────────
+    # ── 2. Ayla payments call ────────────────────────────────────────
     from uuid import uuid4
 
     idempotence_key = uuid4()
-    client = get_yookassa_client()
+    client = get_ayla_payments_client()
     try:
         result = client.create_payment(
             amount_rub=amount,
             description=description[:128],
-            order_id=order.id,
             idempotence_key=idempotence_key,
+            recipient_name=recipient_name,
+            buyer_email=buyer_email,
+            kind="certificate",
         )
-    except (YooKassaUnavailableError, YooKassaAPIError) as exc:
+    except (AylaPaymentsUnavailableError, AylaPaymentsAPIError) as exc:
         logger.warning(
-            "buy_certificate.provider_failure order_id=%s err=%s",
-            order.id,
+            "buy_certificate.provider_failure idem=%s err=%s",
+            idempotence_key,
             type(exc).__name__,
         )
-        Order.all_tenants.filter(pk=order.pk).update(status=Order.Status.FAILED)
         _audit_tool(
             tenant_id=tenant_id,
             tool="buy_certificate",
             outcome="provider_failure",
             extra={
-                "order_id": str(order.id),
+                "idempotence_key": str(idempotence_key),
                 "exception_type": type(exc).__name__,
             },
         )
         write_audit(
             EVENT_CERTIFICATE_CHECKOUT_FAILED,
             target="BookingSkill",
-            target_id=order.id,
             payload={
                 "tenant_id": tenant_id,
-                "order_id": str(order.id),
+                "idempotence_key": str(idempotence_key),
                 "exception_type": type(exc).__name__,
             },
         )
         return BookingToolResult(
             certificate=BuyCertificateResult(
                 ok=False,
-                order_id=str(order.id),
                 amount_rub=amount,
                 error="certificate_provider_failure",
             ),
             error="certificate_provider_failure",
         )
 
-    # ── 4. Stamp the payment id + URL onto the Order ────────────────
-    Order.all_tenants.filter(pk=order.pk).update(
-        external_payment_id=result.payment_id,
-        checkout_url=result.checkout_url,
-        status=Order.Status.AWAITING_PAYMENT,
-    )
-
     _audit_tool(
         tenant_id=tenant_id,
         tool="buy_certificate",
         outcome="ok",
         extra={
-            "order_id": str(order.id),
+            "payment_id": result.payment_id,
             "amount": str(amount),
             "test_mode": result.test,
         },
@@ -2136,13 +2697,12 @@ def buy_certificate(
     write_audit(
         EVENT_CERTIFICATE_CHECKOUT_REQUESTED,
         target="BookingSkill",
-        target_id=order.id,
         payload={
             "tenant_id": tenant_id,
-            "order_id": str(order.id),
-            # Audit payload MUST NOT include the secret key. Shop id +
-            # payment id are safe (they're public-facing identifiers).
-            "external_payment_id": result.payment_id,
+            # Audit payload MUST NOT include the bearer token. The Ayla
+            # payment_id is a public-facing identifier (mirrors the
+            # YooKassa-era external_payment_id field).
+            "payment_id": result.payment_id,
             "amount_rub": str(amount),
             "test_mode": result.test,
         },
@@ -2158,7 +2718,11 @@ def buy_certificate(
         text=text,
         certificate=BuyCertificateResult(
             ok=True,
-            order_id=str(order.id),
+            # ``order_id`` is the public DTO field name — kept for
+            # backwards compatibility with the channel adapter +
+            # rendering layer. Populated from Ayla's ``payment_id``
+            # now that bot-platform no longer owns an Order row.
+            order_id=result.payment_id,
             amount_rub=amount,
             checkout_url=result.checkout_url,
         ),

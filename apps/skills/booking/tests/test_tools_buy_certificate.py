@@ -1,35 +1,42 @@
-"""buy_certificate tool tests (DRF-843 / Phase 1 / B7).
+"""buy_certificate tool tests (DRF-843 → #427 Ayla payments refactor).
 
-The tool itself is a sync ORM-writing handler — we drive it directly
-with a stub YooKassa client. The skill-level orchestration (LLM
-provider mocking, dispatcher) is covered separately.
+Phase 0 / #427: the tool now calls Ayla djangoproject's REST API
+instead of YooKassa directly. bot-platform no longer writes an
+Order row — Ayla is canonical SoR for payment lifecycle.
 
 Behaviour we assert:
 
-1. Happy path in test-mode → Order created, status=awaiting_payment,
-   keyboard returned with the stub URL, no HTTP made.
-2. Amount too low → clarification, no Order created.
-3. Amount too high → clarification, no Order created.
+1. Happy path in test-mode → Ayla returns stub URL, keyboard rendered,
+   no HTTP made.
+2. Amount too low → clarification, no Ayla call.
+3. Amount too high → clarification, no Ayla call.
 4. Non-numeric amount → clarification.
-5. YooKassa failure → Order in failed state, handoff slug emitted.
+5. Ayla failure → handoff slug emitted, audit row written.
 6. Audit row 'booking.certificate_checkout_requested' on success.
 7. Audit row 'booking.certificate_checkout_failed' on failure.
+8. Recipient_name + buyer_email forwarded to the Ayla request body.
+9. Audit payload does not leak the Ayla bearer token.
+
+(Original test 8 «bot-platform writes NO Order row» retired in
+#427+#428 — the Order model was deleted entirely; the assertion
+became trivially true.)
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
 from apps.audit.models import AuditLog
 from apps.identity.models import BotUser
-from apps.integrations.yookassa import reset_yookassa_client
-from apps.integrations.yookassa.client import (
-    YooKassaUnavailableError,
+from apps.integrations.ayla_payments import (
+    AylaPaymentsUnavailableError,
+    CreatePaymentResult,
+    reset_ayla_payments_client,
 )
-from apps.orders.models import Order
 from apps.skills.booking.tools import (
     CERTIFICATE_AMOUNT_MAX,
     CERTIFICATE_AMOUNT_MIN,
@@ -43,11 +50,19 @@ pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture(autouse=True)
-def _reset_yk_singleton(settings):
+def _reset_ayla_singleton(settings):
     settings.STRICT_TENANT_SCOPE = "audit"
-    reset_yookassa_client()
+    settings.AYLA_PAYMENTS_TEST_MODE = True
+    settings.AYLA_BASE_URL = ""
+    settings.AYLA_INTERNAL_API_TOKEN = ""
+    # Stabilization B2: behavioural tests below assume the certificate
+    # flow is reachable. Production default is False; the dedicated
+    # ``TestCertificatePaymentFlag`` class flips it back to assert the
+    # disabled path.
+    settings.CERTIFICATE_PAYMENT_ENABLED = True
+    reset_ayla_payments_client()
     yield
-    reset_yookassa_client()
+    reset_ayla_payments_client()
 
 
 @pytest.fixture
@@ -76,12 +91,7 @@ class TestHappyPath:
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
-        settings.YOOKASSA_SHOP_ID = ""
-        settings.YOOKASSA_SECRET_KEY = ""
-
         with tenant_scope(tenant):
             result = buy_certificate(
                 tenant=tenant,
@@ -93,102 +103,115 @@ class TestHappyPath:
         assert result.certificate is not None
         assert result.certificate.ok is True
         assert result.certificate.amount_rub == Decimal("2000")
-        # Stub URL contains the order id.
-        assert result.certificate.order_id in result.certificate.checkout_url
+        # Stub URL points at the safe yoomoney.test sentinel host.
         assert "yoomoney.test" in result.certificate.checkout_url
-        # Keyboard returned.
+        # The DTO's order_id field now carries Ayla's payment_id; in
+        # test mode it has the "test-" prefix from the client stub.
+        assert result.certificate.order_id.startswith("test-")
+        # Keyboard returned with the URL.
         assert len(result.keyboard) == 1
         assert result.keyboard[0]["url"] == result.certificate.checkout_url
-        # Order row persisted, status=awaiting_payment.
-        order = Order.all_tenants.get(pk=result.certificate.order_id)
-        assert order.status == Order.Status.AWAITING_PAYMENT
-        assert order.amount_rub == Decimal("2000")
-        assert order.bot_user_id == bot_user.id
         # Audit row written.
         assert "booking.certificate_checkout_requested" in _audit_actions()
 
-    def test_recipient_name_persisted(
+    def test_recipient_and_email_forwarded_to_ayla(
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
-        with tenant_scope(tenant):
-            result = buy_certificate(
-                tenant=tenant,
-                bot_user=bot_user,
-                arguments={
-                    "amount_rub": 1500,
-                    "recipient_name": "Olya",
-                    "buyer_email": "buyer@example.com",
-                },
+        # Patch the singleton's create_payment to inspect what we send.
+        captured: dict[str, object] = {}
+
+        def _fake_create(**kwargs):
+            captured.update(kwargs)
+            return CreatePaymentResult(
+                payment_id="pay-stub",
+                checkout_url="https://yoomoney.test/checkout/x",
+                status="pending",
+                test=True,
             )
-        assert result.certificate is not None
-        order = Order.all_tenants.get(pk=result.certificate.order_id)
-        assert order.recipient_name == "Olya"
-        assert order.buyer_email == "buyer@example.com"
-        assert "для Olya" in order.description
+
+        with patch(
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=_fake_create,
+        ):
+            with tenant_scope(tenant):
+                result = buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={
+                        "amount_rub": 1500,
+                        "recipient_name": "Olya",
+                        "buyer_email": "buyer@example.com",
+                    },
+                )
+
+        assert result.error == ""
+        assert captured["recipient_name"] == "Olya"
+        assert captured["buyer_email"] == "buyer@example.com"
+        assert captured["kind"] == "certificate"
+        # Description carries the recipient suffix for the YooKassa page.
+        assert "для Olya" in str(captured["description"])
 
 
 class TestAmountValidation:
-    def test_too_low_clarification_no_order(
+    def test_too_low_clarification_no_ayla_call(
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
-        with tenant_scope(tenant):
-            result = buy_certificate(
-                tenant=tenant,
-                bot_user=bot_user,
-                arguments={"amount_rub": 100},
-            )
+        with patch(
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=AssertionError("Ayla MUST NOT be called for invalid amount"),
+        ):
+            with tenant_scope(tenant):
+                result = buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={"amount_rub": 100},
+                )
         assert result.error == "amount_out_of_range"
         assert result.certificate is not None and result.certificate.ok is False
-        # No Order row written.
-        assert Order.all_tenants.count() == 0
 
-    def test_too_high_clarification_no_order(
+    def test_too_high_clarification_no_ayla_call(
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
-        with tenant_scope(tenant):
-            result = buy_certificate(
-                tenant=tenant,
-                bot_user=bot_user,
-                arguments={"amount_rub": 200000},
-            )
+        with patch(
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=AssertionError("Ayla MUST NOT be called for invalid amount"),
+        ):
+            with tenant_scope(tenant):
+                result = buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={"amount_rub": 200000},
+                )
         assert result.error == "amount_out_of_range"
-        assert Order.all_tenants.count() == 0
 
     def test_non_numeric_amount_clarification(
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
-        with tenant_scope(tenant):
-            result = buy_certificate(
-                tenant=tenant,
-                bot_user=bot_user,
-                arguments={"amount_rub": "not-a-number"},
-            )
+        with patch(
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=AssertionError("Ayla MUST NOT be called for invalid amount"),
+        ):
+            with tenant_scope(tenant):
+                result = buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={"amount_rub": "not-a-number"},
+                )
         assert result.error == "amount_out_of_range"
-        assert Order.all_tenants.count() == 0
 
     def test_boundary_min_accepted(
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
         with tenant_scope(tenant):
             result = buy_certificate(
                 tenant=tenant,
@@ -201,9 +224,7 @@ class TestAmountValidation:
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
         with tenant_scope(tenant):
             result = buy_certificate(
                 tenant=tenant,
@@ -214,17 +235,14 @@ class TestAmountValidation:
 
 
 class TestProviderFailure:
-    def test_yookassa_unavailable_flips_order_to_failed(
+    def test_ayla_unavailable_returns_handoff(
         self,
         tenant: Tenant,
         bot_user: BotUser,
-        settings,
     ) -> None:
-        settings.YOOKASSA_TEST_MODE = True
-        # Patch the client returned by the singleton so create_payment raises.
         with patch(
-            "apps.integrations.yookassa.client.YooKassaClient.create_payment",
-            side_effect=YooKassaUnavailableError("down"),
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=AylaPaymentsUnavailableError("down"),
         ):
             with tenant_scope(tenant):
                 result = buy_certificate(
@@ -233,23 +251,27 @@ class TestProviderFailure:
                     arguments={"amount_rub": 2000},
                 )
         assert result.error == "certificate_provider_failure"
-        # One Order row, status=failed.
-        orders = list(Order.all_tenants.all())
-        assert len(orders) == 1
-        assert orders[0].status == Order.Status.FAILED
+        assert result.certificate is not None and result.certificate.ok is False
         assert "booking.certificate_checkout_failed" in _audit_actions()
 
 
-class TestNoSecretLeakInAudit:
-    def test_audit_payload_contains_no_secret(
+# TestNoCanonicalStateWrite retired in #427+#428 — the Order model
+# was deleted entirely (apps/orders.models.Order no longer exists).
+# The class's regression intent («bot-platform writes NO canonical
+# Payment state») now lives at the schema level: there is no table
+# to write to. ADR-0009 §Hard rule #1 (no duplicate canonical state)
+# is enforced structurally, not by a count() == 0 assertion.
+
+
+class TestNoTokenLeakInAudit:
+    def test_audit_payload_contains_no_bearer_token(
         self,
         tenant: Tenant,
         bot_user: BotUser,
         settings,
     ) -> None:
-        secret = "masked-stub-do-not-log"  # pragma: allowlist secret
-        settings.YOOKASSA_TEST_MODE = True
-        settings.YOOKASSA_SECRET_KEY = secret
+        token = "ayla-bearer-stub-do-not-log"  # pragma: allowlist secret
+        settings.AYLA_INTERNAL_API_TOKEN = token
         with tenant_scope(tenant):
             buy_certificate(
                 tenant=tenant,
@@ -257,4 +279,148 @@ class TestNoSecretLeakInAudit:
                 arguments={"amount_rub": 2000},
             )
         for row in AuditLog.all_tenants.all():
-            assert secret not in str(row.payload)
+            assert token not in str(row.payload)
+
+
+class TestIdempotenceKey:
+    """Pin that bot-platform generates a fresh idempotence_key per call.
+
+    The key is what Ayla uses to dedupe duplicate POSTs (and what
+    Ayla forwards to YooKassa). Tests in
+    apps/integrations/ayla_payments/tests/test_client.py pin the
+    on-the-wire header shape; this one pins the skill's contract
+    of supplying a UUID each call so retries don't reuse keys.
+    """
+
+    def test_idempotence_key_passed_as_uuid_and_unique_per_call(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        from uuid import UUID
+
+        seen: list[UUID] = []
+
+        def _fake_create(**kwargs):
+            seen.append(kwargs["idempotence_key"])
+            return CreatePaymentResult(
+                payment_id="pay-stub",
+                checkout_url="https://yoomoney.test/checkout/x",
+                status="pending",
+                test=True,
+            )
+
+        with patch(
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=_fake_create,
+        ):
+            with tenant_scope(tenant):
+                buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={"amount_rub": 2000},
+                )
+                buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={"amount_rub": 2000},
+                )
+        assert len(seen) == 2
+        assert all(isinstance(k, UUID) for k in seen)
+        assert seen[0] != seen[1]
+
+
+# Use uuid4 import locally — keeps the test module self-contained vs
+# pulling skills' internals.
+_ = uuid4
+
+
+class TestCertificatePaymentFlag:
+    """Stabilization sprint B2 — CERTIFICATE_PAYMENT_ENABLED gate.
+
+    The flag defaults False in production. These tests pin three
+    contracts:
+
+    1. When flag is False, ``buy_certificate`` short-circuits with
+       ``error="certificate_disabled"`` BEFORE any Ayla call, even when
+       all other arguments are valid (i.e. it's not a side-effect of
+       amount/auth validation).
+    2. A polite Russian-language clarification text is returned for
+       the LLM to rephrase to the customer.
+    3. The disabled path emits a single audit row with
+       ``outcome="disabled"`` so operators can observe attempted use
+       during the post-pilot freeze.
+    """
+
+    def test_flag_off_short_circuits_no_ayla_call(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        settings,
+    ) -> None:
+        settings.CERTIFICATE_PAYMENT_ENABLED = False
+        with patch(
+            "apps.integrations.ayla_payments.client.AylaPaymentsClient.create_payment",
+            side_effect=AssertionError("Ayla MUST NOT be called when flag is off"),
+        ):
+            with tenant_scope(tenant):
+                result = buy_certificate(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    arguments={"amount_rub": 2000},
+                )
+
+        assert result.error == "certificate_disabled"
+        assert result.certificate is not None
+        assert result.certificate.ok is False
+        assert result.certificate.error == "certificate_disabled"
+        assert result.text is not None
+        assert "сертификат" in result.text.lower()
+        # Must NOT promise an ETA — founder freeze is contingent on
+        # legal review, not a fixed timeline.
+        text_lower = result.text.lower()
+        assert "запустим" not in text_lower
+        assert "чуть позже" not in text_lower
+        assert "скоро" not in text_lower
+
+    def test_flag_off_emits_disabled_audit_row(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        settings,
+    ) -> None:
+        settings.CERTIFICATE_PAYMENT_ENABLED = False
+        with tenant_scope(tenant):
+            buy_certificate(
+                tenant=tenant,
+                bot_user=bot_user,
+                arguments={"amount_rub": 2000},
+            )
+
+        rows = list(
+            AuditLog.all_tenants.filter(action="booking.tool_invoked").values_list(
+                "payload", flat=True
+            )
+        )
+        assert rows, "expected a tool-invoked audit row for disabled outcome"
+        outcomes = [r.get("outcome") for r in rows]
+        assert "disabled" in outcomes
+
+    def test_flag_on_round_trip_unaffected(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        settings,
+    ) -> None:
+        # Regression guard: enabling the flag restores the original
+        # happy-path semantics. Mirrors TestHappyPath but explicit
+        # about the dependency on the feature flag.
+        settings.CERTIFICATE_PAYMENT_ENABLED = True
+        with tenant_scope(tenant):
+            result = buy_certificate(
+                tenant=tenant,
+                bot_user=bot_user,
+                arguments={"amount_rub": 2000},
+            )
+        assert result.error == ""
+        assert result.certificate is not None and result.certificate.ok is True

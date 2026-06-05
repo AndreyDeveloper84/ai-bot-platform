@@ -1,0 +1,47 @@
+# ai-bot-platform — Django web (gunicorn) systemd unit.
+#
+# This file is a TEMPLATE. Replace placeholders before installing:
+#
+#   {ENV}             prod | dev
+#   {DEPLOY_PATH}     /home/taximeter/ai-bot-platform{,-dev}
+#   {ENV_FILE}        /etc/ai-bot-platform/{prod,dev}.env
+#   {GUNICORN_PORT}   8013 (prod) | 8014 (dev)
+#   {WORKERS}         3 (prod) | 2 (dev)
+#
+# Install at: /etc/systemd/system/ai-bot-platform-{ENV}.service
+# Then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable ai-bot-platform-{ENV}
+#   sudo systemctl start ai-bot-platform-{ENV}
+
+[Unit]
+Description=ai-bot-platform Django web (gunicorn) — {ENV}
+After=network.target postgresql.service redis-server.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=taximeter
+Group=taximeter
+WorkingDirectory={DEPLOY_PATH}
+EnvironmentFile={ENV_FILE}
+Environment="DJANGO_SETTINGS_MODULE=config.settings.production"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart={DEPLOY_PATH}/.venv/bin/gunicorn config.wsgi:application \
+    --bind 127.0.0.1:{GUNICORN_PORT} \
+    --workers {WORKERS} \
+    --timeout 30 \
+    --access-logfile - \
+    --error-logfile -
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=20
+
+# Resource limits — app.penza.taxi is RAM-constrained. Cap each web
+# process at 512MB to prevent runaway from killing other services.
+MemoryMax=512M
+MemoryHigh=400M
+
+[Install]
+WantedBy=multi-user.target

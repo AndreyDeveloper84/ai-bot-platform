@@ -18,16 +18,27 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import socket
 import sys
 from typing import Iterable
 
-from apps.events.services import emit
-from apps.ingress import streams as ingress_streams
-from apps.ingress.streams import DEFAULT_GROUP_NAME
-from apps.tenancy.context import tenant_scope, trace_id_scope
-from apps.workers.base import resolve_tenant_by_id_string
-from apps.workers.registry import lookup, registered_streams
+# Bootstrap Django before any apps.* imports. Required when this module
+# is run as `python -m apps.workers.consumer` (systemd) — otherwise the
+# apps.events / apps.ingress imports below trip AppRegistryNotReady.
+# When imported from a Django-aware context (manage.py shell, tests)
+# this is a no-op.
+import django
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.local")
+django.setup()
+
+from apps.events.services import emit  # noqa: E402
+from apps.ingress import streams as ingress_streams  # noqa: E402
+from apps.ingress.streams import DEFAULT_GROUP_NAME  # noqa: E402
+from apps.tenancy.context import tenant_scope, trace_id_scope  # noqa: E402
+from apps.workers.base import resolve_tenant_by_id_string  # noqa: E402
+from apps.workers.registry import lookup, registered_streams  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +150,14 @@ def consume_once(
                     handler_failed = True
 
             if handler_failed:
-                # Do NOT XACK on failure. Entry stays in PEL for retry
-                # / manual claim. Consumer moves on to the next entry.
+                # Do NOT XACK on failure. Entry stays in PEL for
+                # operator escalation (manual XCLAIM / XAUTOCLAIM).
+                # **No automatic DLQ retry is wired** as of 2026-05-21
+                # — XREADGROUP ">" returns only NEW entries, so the
+                # same entry will not redeliver until XCLAIM moves it.
+                # Strict-mode TenantRequiredButMissing follows the
+                # same path. See follow-up XAUTOCLAIM reaper issue.
+                # Consumer moves on to the next entry.
                 continue
 
             client.xack(stream_name, group, entry_id)
@@ -191,10 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Django setup so models/ORM work in the CLI.
-    import django
-
-    django.setup()
+    # Django setup already happened at module import time so apps.*
+    # imports could complete. No-op here for backward compatibility.
 
     if args.once:
         n = consume_once(streams=args.streams, group=args.group)

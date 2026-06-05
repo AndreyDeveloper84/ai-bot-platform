@@ -1,0 +1,73 @@
+# ai-bot-platform — Django API nginx vhost (TEMPLATE).
+#
+# Placeholders:
+#   {SUBDOMAIN}        api.gobeauty.site (prod) | api-dev.gobeauty.site (dev)
+#   {GUNICORN_PORT}    8013 (prod) | 8014 (dev)
+#   {CERT_PATH}        /etc/letsencrypt/live/{SUBDOMAIN}/...
+#
+# Install:
+#   sudo cp ai-bot-platform-api.conf.template /etc/nginx/sites-available/{SUBDOMAIN}
+#   sudo sed -i 's/{SUBDOMAIN}/api-dev.gobeauty.site/g; s/{GUNICORN_PORT}/8014/g' \
+#       /etc/nginx/sites-available/{SUBDOMAIN}
+#   sudo certbot --nginx -d {SUBDOMAIN}
+#   sudo ln -s /etc/nginx/sites-available/{SUBDOMAIN} /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+
+server {
+    listen 80;
+    server_name {SUBDOMAIN};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name {SUBDOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/{SUBDOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{SUBDOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    # Body size — MAX webhook payloads are small; allow 5MB for safety
+    # margin on attachments + future Mini App uploads.
+    client_max_body_size 5M;
+
+    # Logs
+    access_log /var/log/nginx/ai-bot-platform-{SUBDOMAIN}-access.log;
+    error_log /var/log/nginx/ai-bot-platform-{SUBDOMAIN}-error.log warn;
+
+    # Health probes — direct passthrough, no auth.
+    location ~ ^/(healthz|readyz)/?$ {
+        proxy_pass http://127.0.0.1:{GUNICORN_PORT};
+        proxy_set_header Host $host;
+        proxy_read_timeout 5s;
+        access_log off;
+    }
+
+    # Main app
+    location / {
+        proxy_pass http://127.0.0.1:{GUNICORN_PORT};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+        proxy_connect_timeout 10s;
+    }
+
+    # Django admin static
+    location /static/ {
+        alias {DEPLOY_PATH}/staticfiles/;
+        expires 7d;
+        add_header Cache-Control "public, immutable";
+    }
+}

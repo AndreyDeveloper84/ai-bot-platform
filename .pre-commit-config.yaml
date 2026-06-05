@@ -47,3 +47,52 @@ repos:
             legacy_formulatela_mcp/.*|
             legacy_notifications/.*
           )$
+
+  - repo: local
+    hooks:
+      # Belt-and-suspenders for issue #419. `.gitignore` is the primary
+      # defense — `.mcp.json` is listed there and shouldn't reach staging.
+      # If an engineer force-adds it (`git add -f`) or removes the gitignore
+      # entry by accident, this hook refuses the commit. detect-secrets'
+      # default entropy plugins don't reliably catch Figma/Notion token
+      # shapes, so explicit pattern refusal is the cheaper guarantee.
+      - id: forbid-mcp-json
+        name: Refuse to commit .mcp.json (use .mcp.json.example instead)
+        entry: scripts/forbid_mcp_json.sh
+        language: script
+        files: ^\.mcp\.json$
+        # `files` regex scopes the hook: it only runs when the matching
+        # file is actually staged. Unrelated commits → no invocation,
+        # no failure.
+
+      # Red-zone direct-access guard (#229 + spec §13 row 14.25). AST
+      # scan blocks direct ORM reads of red MemoryEntry rows outside
+      # the sanctioned `RedZoneReader` accessor. First line of defence
+      # per ADR-0011 §10; RLS policy (`memory_entry_non_red_visible`)
+      # is the final line. See `tools/lint/red_zone_guard.py` for the
+      # documented detection scope + known limitations.
+      - id: red-zone-guard
+        name: Red-zone direct-access guard (AST lint)
+        entry: python tools/lint/red_zone_guard.py apps/
+        language: system
+        # Run on any staged `.py` change under `apps/`. The script
+        # scans the whole `apps/` tree anyway, so `pass_filenames` is
+        # off — we don't want pre-commit to pass each staged file
+        # separately to a CLI that already does its own globbing.
+        files: ^apps/.*\.py$
+        pass_filenames: false
+
+      # ADR-0009 G-series module-boundary guard (#1001, Option B). AST
+      # scan blocks source-scoped forbidden import edges (G2.1/G5.1/G6.2
+      # + cross-repo psycopg2) that ruff TID251 cannot express. See
+      # `tools/lint/import_boundaries.py` for the contracts, baseline,
+      # and documented detection scope + known limitations.
+      - id: import-boundaries
+        name: Import-boundary guard (AST lint)
+        entry: python tools/lint/import_boundaries.py apps/
+        language: system
+        # Whole-`apps/` scan (own globbing) — `pass_filenames` off, same
+        # as red-zone-guard. A full scan is also required for the
+        # stale-baseline check to be accurate (partial scans skip it).
+        files: ^apps/.*\.py$
+        pass_filenames: false

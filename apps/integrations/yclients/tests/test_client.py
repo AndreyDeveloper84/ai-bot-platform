@@ -163,7 +163,7 @@ class TestGetAvailableDates:
         ) as mock:
             result = api.get_available_dates(staff_id=5)
 
-        assert mock.call_args.kwargs["url"] == ("https://yclients.test/api/v1/schedule/dates/42")
+        assert mock.call_args.kwargs["url"] == ("https://yclients.test/api/v1/book_dates/42")
         assert result == ["2026-05-15", "2026-05-18", "2026-05-20"]
         assert mock.call_args.kwargs["params"] == {"staff_id": 5}
 
@@ -415,4 +415,130 @@ class TestSingleton:
         yc.reset_yclients_client()
         with pytest.raises(ValueError, match="YCLIENTS_PARTNER_TOKEN"):
             yc.get_yclients_client()
+        yc.reset_yclients_client()
+
+
+# ---------------------------------------------------------------------------
+# YClients retro hotfix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB2RetryPolicy:
+    """Pre-fix the urllib3 Retry policy allowed retries on POST/PUT/DELETE.
+    A successful YClients write followed by a transient 5xx on the
+    response leg would re-POST and silently create a duplicate booking
+    with no compensate path. Post-fix only idempotent verbs retry.
+    """
+
+    def test_retry_allowed_methods_excludes_unsafe_verbs(self, settings: Any) -> None:
+        settings.YCLIENTS_PARTNER_TOKEN = "p"
+        settings.YCLIENTS_USER_TOKEN = "u"
+        settings.YCLIENTS_COMPANY_ID = "c"
+        yc.reset_yclients_client()
+        instance = yc.get_yclients_client()
+        # Pull the mounted HTTPAdapter to inspect its retry policy.
+        adapter = instance._session.get_adapter("https://api.yclients.com/")
+        retry = adapter.max_retries
+        allowed = {m.upper() for m in (retry.allowed_methods or [])}
+        # Idempotent verbs only.
+        assert "GET" in allowed
+        # Unsafe verbs MUST NOT be retried — duplicate-write hazard.
+        assert "POST" not in allowed
+        assert "PUT" not in allowed
+        assert "DELETE" not in allowed
+        yc.reset_yclients_client()
+
+
+class TestRetroY11PiiRedaction:
+    """4xx YClients responses echo submitted phone/email back; the
+    pre-fix log preview + exception message leaked them. Post-fix
+    redacts via _redact_pii before logging / raising.
+    """
+
+    def test_phone_redacted(self) -> None:
+        from apps.integrations.yclients.client import _redact_pii
+
+        s = "Invalid phone: +79991234567 cannot be used"
+        out = _redact_pii(s)
+        assert "+79991234567" not in out
+        assert "[REDACTED:phone]" in out
+
+    def test_email_redacted(self) -> None:
+        from apps.integrations.yclients.client import _redact_pii
+
+        s = "Email already used: anna@example.com"
+        out = _redact_pii(s)
+        assert "anna@example.com" not in out
+        assert "[REDACTED:email]" in out
+
+    def test_non_pii_passthrough(self) -> None:
+        from apps.integrations.yclients.client import _redact_pii
+
+        s = "Invalid service_id=22"
+        assert _redact_pii(s) == s
+
+
+class TestRetroY12DtoTypeGuards:
+    """create_record pre-fix fabricated ``record_id=0`` on missing/
+    malformed response. Post-fix raises YClientsAPIError so Hotfix D's
+    compensating ``cancel_record(record_id=0)`` can't fire with garbage
+    that succeeds-with-NOT_FOUND and hides the split-brain.
+    """
+
+    def test_create_record_raises_on_missing_record_id(
+        self, settings: Any, monkeypatch: Any
+    ) -> None:
+        from apps.integrations.yclients.client import YClientsAPIError
+
+        settings.YCLIENTS_PARTNER_TOKEN = "p"
+        settings.YCLIENTS_USER_TOKEN = "u"
+        settings.YCLIENTS_COMPANY_ID = "c"
+        yc.reset_yclients_client()
+        client = yc.get_yclients_client()
+
+        # Stub _request to return a malformed «success but no record_id»
+        # response shape — exactly the failure mode the retro flagged.
+        def _stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "success": True,
+                "data": [{"record_hash": "h", "datetime": "2026-05-22 10:00:00"}],
+                "meta": {},
+            }
+
+        monkeypatch.setattr(client, "_request", _stub)
+        with pytest.raises(YClientsAPIError, match="missing_record_id"):
+            client.create_record(
+                staff_id=11,
+                services=[22],
+                datetime="2026-05-22T10:00:00",
+                client_phone="79991234567",
+                client_name="Anna",
+            )
+        yc.reset_yclients_client()
+
+    def test_create_record_raises_on_zero_record_id(self, settings: Any, monkeypatch: Any) -> None:
+        from apps.integrations.yclients.client import YClientsAPIError
+
+        settings.YCLIENTS_PARTNER_TOKEN = "p"
+        settings.YCLIENTS_USER_TOKEN = "u"
+        settings.YCLIENTS_COMPANY_ID = "c"
+        yc.reset_yclients_client()
+        client = yc.get_yclients_client()
+
+        def _stub(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "success": True,
+                "data": [{"record_id": 0, "record_hash": "h"}],
+                "meta": {},
+            }
+
+        monkeypatch.setattr(client, "_request", _stub)
+        with pytest.raises(YClientsAPIError, match="missing_record_id"):
+            client.create_record(
+                staff_id=11,
+                services=[22],
+                datetime="2026-05-22T10:00:00",
+                client_phone="79991234567",
+                client_name="Anna",
+            )
         yc.reset_yclients_client()

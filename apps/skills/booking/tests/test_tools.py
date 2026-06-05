@@ -26,9 +26,11 @@ from apps.integrations.yclients import (
 )
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
+    BUY_CERTIFICATE_TOOL_SPEC,
     build_master_lookup,
     build_service_lookup,
     confirm_booking,
+    get_active_booking_tool_specs,
     show_masters,
     show_my_bookings,
     show_slots,
@@ -193,6 +195,30 @@ class TestToolSpecs:
             assert "description" in spec
             assert "parameters" in spec
             assert spec["parameters"]["type"] == "object"
+
+    def test_active_specs_hide_certificate_when_flag_off(self, settings) -> None:
+        # Stabilization B2: when CERTIFICATE_PAYMENT_ENABLED is False
+        # the LLM tool advertisement must omit buy_certificate so the
+        # model does not pitch a feature we cannot deliver.
+        settings.CERTIFICATE_PAYMENT_ENABLED = False
+        active_names = {s["name"] for s in get_active_booking_tool_specs()}
+        assert BUY_CERTIFICATE_TOOL_SPEC["name"] not in active_names
+        # Other seven tools remain advertised.
+        assert active_names == {
+            "show_masters",
+            "show_slots",
+            "confirm_booking",
+            "cancel_booking",
+            "reschedule_booking",
+            "show_my_bookings",
+            "calc_price",
+        }
+
+    def test_active_specs_include_certificate_when_flag_on(self, settings) -> None:
+        settings.CERTIFICATE_PAYMENT_ENABLED = True
+        active_names = {s["name"] for s in get_active_booking_tool_specs()}
+        assert BUY_CERTIFICATE_TOOL_SPEC["name"] in active_names
+        assert len(active_names) == len(BOOKING_TOOL_SPECS)
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +542,68 @@ class TestShowMyBookings:
             )
             result = show_my_bookings(client=client, tenant=tenant, bot_user=bot_user)
         assert result.bookings == []
+
+    def test_terminal_status_rows_excluded(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # Skills retro residual #10: CANCELLED + RESCHEDULED rows are
+        # «ghosts» from the user's POV — they were cancelled or replaced
+        # by a newer reschedule row. Surfacing them in show_my_bookings
+        # confuses the LLM (which then offers to cancel something
+        # already cancelled) and the customer.
+        client = FakeYClients()
+        future = (dj_timezone.now() + timedelta(days=2)).replace(microsecond=0).isoformat()
+        # YClients also reports the live (confirmed) one only.
+        client.get_user_records_rows = [
+            UserRecord(
+                id=200,
+                services=[{"id": 22, "title": "Маникюр"}],
+                company={},
+                staff={"name": "Ольга"},
+                date=future,
+                datetime=future,
+                seance_length=3600,
+                raw={},
+            )
+        ]
+        with tenant_scope(tenant):
+            # Ghost #1 — explicitly cancelled by the customer.
+            BookingRequest.objects.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_name="Cancelled visit",
+                master_name="Ольга",
+                client_name="Anna",
+                client_phone="79991234567",
+                comment="Bot booking | yclients_record_id=100",
+                source="bot",
+                status=BookingRequest.Status.CANCELLED,
+            )
+            # Ghost #2 — replaced by a reschedule (old row).
+            BookingRequest.objects.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_name="Replaced visit",
+                master_name="Ольга",
+                client_name="Anna",
+                client_phone="79991234567",
+                comment="Bot booking | yclients_record_id=150",
+                source="bot",
+                status=BookingRequest.Status.RESCHEDULED,
+            )
+            # Live row — the one we DO want surfaced.
+            BookingRequest.objects.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_name="Live visit",
+                master_name="Ольга",
+                client_name="Anna",
+                client_phone="79991234567",
+                comment="Bot booking | yclients_record_id=200",
+                source="bot",
+                status=BookingRequest.Status.CONFIRMED,
+            )
+            result = show_my_bookings(client=client, tenant=tenant, bot_user=bot_user)
+        # Exactly the one live row — ghosts excluded by the status filter.
+        assert [b.record_id for b in result.bookings] == [200]
 
 
 # ---------------------------------------------------------------------------
