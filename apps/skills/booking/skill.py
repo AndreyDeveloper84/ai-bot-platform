@@ -160,8 +160,8 @@ class BookingSkill:
         return _legacy_keyword_match(context.message_text)
 
     def handle(self, context: SkillContext) -> SkillResult:
-        from apps.integrations.yclients import get_yclients_client
         from apps.llm.router import get_router
+        from apps.skills.booking.provider import get_booking_provider
 
         emit(
             SKILL_DISPATCHED,
@@ -179,7 +179,11 @@ class BookingSkill:
         # validation in confirm_booking AND for the health-check gate.
         # Failure is fatal because we can't validate IDs without it.
         try:
-            yclients = get_yclients_client()
+            # Provider selection (S1 / #1016): YClients (default) or the Ayla
+            # canonical REST bridge behind ``BOOKING_VIA_AYLA_REST``. The
+            # adapter presents the YClients-shaped interface the tools expect,
+            # so the rest of this flow is provider-agnostic.
+            yclients = get_booking_provider(bot_user=context.bot_user)
             services = yclients.get_services()
         except Exception as exc:  # noqa: BLE001
             logger.warning("booking.prefetch.failed err=%s", exc)

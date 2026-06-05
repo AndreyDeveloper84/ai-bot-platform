@@ -107,6 +107,13 @@ unaffected.
 
 `appointment_id` is Ayla's canonical id and becomes the bot-side mirror key.
 
+> **Open tension (see §8):** the bot's booking tools are currently int-keyed
+> (`BookingRecord.record_id`, `UserRecord.id`, and the mirror marker
+> `yclients_record_id=<id>` are ints). The adapter maps a **numeric**
+> `appointment_id` losslessly and **fails loudly** on a non-numeric one rather
+> than corrupt the mirror. Lock either a numeric-compatible id here, or commit
+> to evolving the tools to a string key, before flipping the flag ON.
+
 ## 5. Idempotency
 
 Writes carry an idempotency key so a retried bot turn cannot double-book.
@@ -145,6 +152,9 @@ Error body shape (code for mapping) — **confirm with S2**:
 - [ ] **S2:** confirm/amend §3 paths, §4 field names, §6 error codes.
 - [ ] **S2:** stand up the endpoints in the Ayla canonical backend.
 - [ ] **S1 + S2:** fix the idempotency header name (§5).
+- [ ] **S1 + S2:** decide `appointment_id` representation — numeric-compatible
+      (so the int-keyed mirror round-trips) or string (and evolve the tools).
+      The adapter currently rejects non-numeric ids (§4).
 - [ ] **Both:** s2s-auth convergence ADR (RS256) — supersedes §2's interim Bearer.
 - [ ] **S1 (follow-up, after lock):** replace the `booking_client.py` skeleton
       with the real `requests`-based implementation; then a separate change
