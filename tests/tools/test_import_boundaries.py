@@ -215,6 +215,74 @@ class TestRealReposClean:
         }
         assert observed == set(ib.BASELINE)
 
+    def test_catalog_baseline_matches_reality(self) -> None:
+        """Same regression for the MKT1 cross-tenant catalog rule: with an
+        empty catalog baseline, the flagged files are EXACTLY the shipped
+        CATALOG_CROSS_TENANT_BASELINE."""
+        found = ib.scan_paths([_PROJECT_ROOT / "apps"], _PROJECT_ROOT, catalog_baseline=frozenset())
+        observed = {
+            (
+                ib.CATALOG_CROSS_TENANT_CONTRACT_ID,
+                v.file.resolve().relative_to(_PROJECT_ROOT).as_posix(),
+                ib._CATALOG_ROOT,
+            )
+            for v in found
+            if ib.CATALOG_CROSS_TENANT_CONTRACT_ID in v.message
+        }
+        assert observed == set(ib.CATALOG_CROSS_TENANT_BASELINE)
+
+
+# ── MKT1: cross-tenant catalog-read rule (#1018) ──────────────────────
+
+
+class TestCatalogCrossTenantRule:
+    def _scan_cat(self, root, baseline=_EMPTY):
+        # Only the catalog rule matters here; pass no import contracts.
+        return ib.scan_paths([root / "apps"], root, contracts=(), catalog_baseline=baseline)
+
+    @pytest.mark.parametrize(
+        "stmt",
+        [
+            "CatalogMaster.all_tenants.filter(x=1)",
+            "CatalogService.all_tenants.all()",
+            "qs = CatalogMaster.all_tenants.select_for_update().get(pk=1)",
+        ],
+    )
+    def test_catalog_all_tenants_flagged_outside_marketplace(self, tmp_path, stmt) -> None:
+        _write(tmp_path, "apps/foo/views.py", stmt + "\n")
+        v = self._scan_cat(tmp_path)
+        assert len(v) == 1
+        assert ib.CATALOG_CROSS_TENANT_CONTRACT_ID in v[0].message
+
+    def test_allowed_inside_marketplace(self, tmp_path) -> None:
+        _write(tmp_path, "apps/marketplace/discovery.py", "CatalogMaster.all_tenants.all()\n")
+        assert self._scan_cat(tmp_path) == []
+
+    def test_baselined_file_passes(self, tmp_path) -> None:
+        _write(tmp_path, "apps/foo/views.py", "CatalogMaster.all_tenants.all()\n")
+        baseline = frozenset(
+            {(ib.CATALOG_CROSS_TENANT_CONTRACT_ID, "apps/foo/views.py", ib._CATALOG_ROOT)}
+        )
+        assert self._scan_cat(tmp_path, baseline) == []
+
+    def test_non_catalog_all_tenants_ignored(self, tmp_path) -> None:
+        # `.all_tenants` on a non-catalog model is not this rule's concern.
+        _write(tmp_path, "apps/foo/views.py", "BotUser.all_tenants.filter(x=1)\n")
+        assert self._scan_cat(tmp_path) == []
+
+    def test_objects_manager_not_flagged(self, tmp_path) -> None:
+        _write(tmp_path, "apps/foo/views.py", "CatalogMaster.objects.all()\n")
+        assert self._scan_cat(tmp_path) == []
+
+    def test_stale_catalog_baseline_reported(self, tmp_path) -> None:
+        _write(tmp_path, "apps/foo/views.py", "CatalogMaster.objects.all()\n")
+        baseline = frozenset(
+            {(ib.CATALOG_CROSS_TENANT_CONTRACT_ID, "apps/foo/views.py", ib._CATALOG_ROOT)}
+        )
+        v = self._scan_cat(tmp_path, baseline)
+        assert len(v) == 1
+        assert "STALE BASELINE" in v[0].message
+
 
 def _parse_contract_and_root(message: str) -> tuple[str | None, str | None]:
     """Pull (contract_id, imported-root) back out of a violation message.
@@ -222,7 +290,7 @@ def _parse_contract_and_root(message: str) -> tuple[str | None, str | None]:
     Message shape: `[<id>] imports '<module>' — ...`. The root is the
     forbidden module the import fell under, recomputed from the contract.
     """
-    if not message.startswith("["):
+    if not message.startswith("[") or "imports '" not in message:
         return None, None
     contract_id = message[1 : message.index("]")]
     mod_start = message.index("imports '") + len("imports '")
