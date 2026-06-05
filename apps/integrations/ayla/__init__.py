@@ -8,6 +8,20 @@ from apps.integrations.ayla.user_proxy import (
     external_user_id_for,
     parse_external_user_id,
 )
+from apps.integrations.ayla.booking_client import (
+    AylaBookingClient,
+    AylaBookingHTTPClient,
+    AylaBookingRecord,
+    AylaMaster,
+    AylaService,
+    AylaSlot,
+    AylaUserRecord,
+    BookingAPIError,
+    BookingBadRequestError,
+    BookingUnavailableError,
+    get_ayla_booking_client,
+    reset_ayla_booking_client,
+)
 from apps.integrations.ayla.nutrition_client import (
     CrossDomainInsight,
     DeficitsResponse,
@@ -26,6 +40,16 @@ from apps.integrations.ayla.nutrition_client import (
 )
 
 __all__ = [
+    "AylaBookingClient",
+    "AylaBookingHTTPClient",
+    "AylaBookingRecord",
+    "AylaMaster",
+    "AylaService",
+    "AylaSlot",
+    "AylaUserRecord",
+    "BookingAPIError",
+    "BookingBadRequestError",
+    "BookingUnavailableError",
     "CrossDomainInsight",
     "DeficitsResponse",
     "FoodLogResponse",
@@ -39,7 +63,9 @@ __all__ = [
     "WaterEntryResponse",
     "WaterTodayResponse",
     "external_user_id_for",
+    "get_ayla_booking_client",
     "get_nutrition_client",
     "parse_external_user_id",
+    "reset_ayla_booking_client",
     "reset_nutrition_client",
 ]

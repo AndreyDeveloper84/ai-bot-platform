@@ -198,6 +198,22 @@ MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
+# S1 / #1016 — Ayla canonical booking REST bridge (ADR-0009).
+# Auth model is Bearer per the #1016 ground-truth: shipped Ayla internal
+# endpoints authenticate with ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}``
+# (reads → IsInternalBearer; writes → IsBotServiceWithVerifiedClient, which
+# also requires ``X-External-User-ID``). Distinct from the nutrition client's
+# legacy ``X-Service-Token`` shared-secret. Empty default keeps the booking
+# bridge dormant until configured.
+AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
+
+# Feature flag: route the booking skill through the Ayla canonical REST bridge
+# instead of direct YClients calls. DEFAULT OFF — the Ayla booking endpoints
+# are not live yet (contract pending S2 sign-off, see
+# docs/architecture/ayla-booking-rest-contract.md) and the real HTTP client is
+# still a skeleton. Flipping this ON before those land will fail loudly.
+BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
+
 # Phase 1 / B1 (DRF-837) — YClients booking API.
 # Single-tenant: env-based credentials. Per-tenant encrypted storage on
 # Tenant is a follow-up (requires a migration). Empty defaults keep the
