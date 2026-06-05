@@ -80,7 +80,10 @@ from apps.channels.max.photo import (
 from apps.conversations.models import Conversation
 from apps.conversations.services import record_message, resolve_active_conversation
 from apps.events.services import emit
-from apps.identity.services import resolve_or_create_bot_user
+from apps.identity.services import (
+    resolve_or_create_bot_user,
+    resolve_or_create_global_bot_user,
+)
 from apps.orchestrator.memory import short_term
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -258,6 +261,59 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
             },
         )
         return
+
+
+def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
+    """Process one MAX webhook for the nationwide GLOBAL (tenant-less) bot.
+
+    #1019 / EPIC #1014. The sibling of :func:`handle_max_event` for the legacy
+    per-tenant path. Called by ``GlobalMaxHandler(requires_tenant=False)`` after
+    the consumer enters ``trace_id_scope`` + ``tenant_scope(None)`` — discovery
+    runs at ``current_tenant()=None`` and a tenant is selected only at booking.
+
+    Scope of this function (P2 plumbing, per #1019): resolve the global user
+    identity under the sentinel tenant and emit telemetry. It deliberately does
+    **NOT** persist a Conversation / Message / short-term memory, because those
+    domains are per-tenant today (``resolve_active_conversation`` /
+    ``record_message`` raise ``ValueError`` at ``current_tenant()=None``) and a
+    commercial-model read here MUST raise ``CrossTenantError`` (the safety
+    invariant). The tenant-less discovery conversation + memory routing + the
+    outbound discovery reply are the explicit seam for #1016 (bot↔Ayla REST) and
+    #1018 (marketplace carve-out). Do NOT add per-tenant service calls here.
+    """
+
+    # Tolerate-and-skip unsupported update types (same contract as the
+    # per-tenant handler) so the PEL doesn't retry-storm on lifecycle updates.
+    try:
+        event = parse_max_webhook(payload)
+    except ParseError as exc:
+        logger.info(
+            "channels.max.global.skipped_unsupported update_type=%r reason=%s",
+            (payload or {}).get("update_type") if isinstance(payload, dict) else None,
+            exc,
+        )
+        return
+
+    bot_user = resolve_or_create_global_bot_user(
+        channel=event.channel,
+        channel_user_id=event.channel_user_id,
+        chat_id=event.chat_id,
+    )
+    logger.info(
+        "channels.max.global.received bot_user=%s channel_user_id=%s text_len=%d",
+        bot_user.id,
+        event.channel_user_id,
+        len(event.text),
+    )
+    emit(
+        "channels.max.global.received",
+        payload={
+            "bot_user_id": str(bot_user.id),
+            "channel": event.channel,
+            "text_len": len(event.text),
+            "attachments": len(event.attachments),
+        },
+    )
 
 
 def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:

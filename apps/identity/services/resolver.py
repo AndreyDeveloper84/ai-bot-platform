@@ -38,10 +38,12 @@ boolean ``enriched`` flag. Phone is **never** in the payload — only the
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from apps.events.services import emit
 from apps.identity.models import BotUser
+from apps.identity.services.global_tenant import get_global_bot_tenant
 from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
@@ -138,6 +140,105 @@ def resolve_or_create_bot_user(
         "created" if created else "resolved",
         bot_user.id,
         tenant.id,
+        channel,
+    )
+    return bot_user
+
+
+def resolve_or_create_global_bot_user(
+    *,
+    channel: str,
+    channel_user_id: str,
+    ayla_user_id: "uuid.UUID | str | None" = None,
+    display_name: str = "",
+    phone: str = "",
+    chat_id: str = "",
+) -> BotUser:
+    """Resolve-or-create the GLOBAL (tenant-less) BotUser under the sentinel.
+
+    The nationwide bot (#1019 / EPIC #1014) serves every salon; discovery runs
+    at ``current_tenant()=None`` and a tenant is selected only at booking. This
+    is the resolver for that path — the sibling of
+    :func:`resolve_or_create_bot_user`, which is reserved for the legacy
+    per-tenant direct-salon bots and is left untouched.
+
+    Unlike the per-tenant resolver this does **not** require (and does not
+    enter) a ``tenant_scope``: the BotUser is parked under the ``global_bot``
+    sentinel tenant purely to satisfy ``unique_together (tenant, channel,
+    channel_user_id)`` without a schema migration. We use ``BotUser.all_tenants``
+    (the non-scoped manager) so the write bypasses ``TenantScopedManager``
+    enforcement and ``current_tenant()`` stays ``None`` throughout — exactly the
+    discovery contract.
+
+    Args:
+      channel: Channel slug — "max", "telegram", "whatsapp", "web".
+      channel_user_id: Stable user identifier within the channel.
+      ayla_user_id: Canonical Ayla User UUID, when already known. Set on create
+                    and blank-filled on resolve (never overwrites a non-null).
+      display_name / phone / chat_id: opportunistic blank-fill enrichment, same
+                    privacy-respect rule as the per-tenant resolver.
+
+    Returns:
+      A `BotUser` owned by the sentinel ``global_bot`` tenant.
+    """
+    sentinel = get_global_bot_tenant()
+
+    defaults: dict[str, Any] = {
+        "display_name": display_name,
+        "phone": phone,
+        "chat_id": chat_id,
+    }
+    if ayla_user_id:
+        defaults["ayla_user_id"] = ayla_user_id
+
+    # all_tenants (non-scoped) — the global path runs at current_tenant()=None
+    # by design, so the scoped manager would raise/return-empty. The explicit
+    # tenant=sentinel kwarg satisfies the natural key.
+    bot_user, created = BotUser.all_tenants.get_or_create(
+        tenant=sentinel,
+        channel=channel,
+        channel_user_id=channel_user_id,
+        defaults=defaults,
+    )
+
+    enriched = False
+    if not created:
+        # Opportunistic enrichment — fill blanks, never overwrite. ayla_user_id
+        # joins the blank-fill set so a later real value populates a NULL but a
+        # known value is never stomped.
+        update_fields: list[str] = []
+        for field_name, incoming in (
+            ("display_name", display_name),
+            ("phone", phone),
+            ("chat_id", chat_id),
+            ("ayla_user_id", ayla_user_id),
+        ):
+            current = getattr(bot_user, field_name)
+            if incoming and not current:
+                setattr(bot_user, field_name, incoming)
+                update_fields.append(field_name)
+        if update_fields:
+            update_fields.append("last_seen")
+            bot_user.save(update_fields=update_fields)
+            enriched = True
+        else:
+            bot_user.save(update_fields=["last_seen"])
+
+    emit(
+        "identity.bot_user.created" if created else "identity.bot_user.resolved",
+        payload={
+            "bot_user_id": str(bot_user.id),
+            "channel": channel,
+            "phone_present": bool(phone),  # never the raw value
+            "enriched": enriched,
+            "global": True,
+        },
+    )
+    logger.info(
+        "identity.bot_user.%s id=%s tenant=%s(global) channel=%s",
+        "created" if created else "resolved",
+        bot_user.id,
+        sentinel.id,
         channel,
     )
     return bot_user

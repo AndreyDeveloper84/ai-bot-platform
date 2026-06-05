@@ -120,7 +120,13 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
     * ``request.bot_user`` — :class:`BotUser` matching the user.id
     * ``request.tenant`` — the :class:`Tenant` owning the BotUser
 
-    Then enters :func:`tenant_scope` for the duration of the view call.
+    It does **NOT** enter :func:`tenant_scope` (#1019 / EPIC #1014): the
+    nationwide bot serves discovery tenant-less, so per-request scope is no
+    longer a blanket decorator concern. Views that read/write tenant-scoped
+    models MUST stack :func:`with_request_tenant` below this decorator to enter
+    ``tenant_scope(request.tenant)`` for their body. Tenant-less surfaces
+    (pure proxies) run without a scope.
+
     On failure: 401 (bad signature / stale / not configured), 400
     (malformed), 404 (user not yet registered with any tenant).
     """
@@ -137,8 +143,7 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
             request.verified_init_data = None  # type: ignore[attr-defined]
             request.bot_user = bot_user_b  # type: ignore[attr-defined]
             request.tenant = bot_user_b.tenant  # type: ignore[attr-defined]
-            with tenant_scope(bot_user_b.tenant):
-                return view_func(request, *args, **kwargs)
+            return view_func(request, *args, **kwargs)
 
         header = request.headers.get("Authorization", "")
         try:
@@ -210,7 +215,27 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
         request.verified_init_data = verified  # type: ignore[attr-defined]
         request.bot_user = bot_user  # type: ignore[attr-defined]
         request.tenant = bot_user.tenant  # type: ignore[attr-defined]
-        with tenant_scope(bot_user.tenant):
+        return view_func(request, *args, **kwargs)
+
+    return wrapper
+
+
+def with_request_tenant(view_func: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
+    """Enter ``tenant_scope(request.tenant)`` for the wrapped view body (#1019).
+
+    Stack **below** :func:`require_init_data` (so ``request.tenant`` is already
+    attached). Required on every view that reads/writes tenant-scoped models via
+    the default (``.objects``) manager — booking writes AND catalog reads
+    (``slots`` / ``services`` / ``masters``) — because :func:`require_init_data`
+    no longer enters a scope and those reads would otherwise raise
+    ``CrossTenantError`` in strict mode. Booking still enters the correct
+    tenant scope this way; discovery / pure-proxy surfaces stay tenant-less.
+    """
+
+    @wraps(view_func)
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        tenant = getattr(request, "tenant", None)
+        with tenant_scope(tenant):
             return view_func(request, *args, **kwargs)
 
     return wrapper
@@ -385,6 +410,7 @@ def _collect_occupied(
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def slots(request: HttpRequest) -> HttpResponse:
     """List free slot starts for ``master_id`` × ``service_id`` over a date range.
 
@@ -536,6 +562,7 @@ def _master_to_dict(m: CatalogMaster) -> dict[str, Any]:
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def services_list(request: HttpRequest) -> HttpResponse:
     """List active CatalogService rows for the tenant.
 
@@ -550,6 +577,7 @@ def services_list(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def service_detail(request: HttpRequest, service_id: str) -> HttpResponse:
     try:
         service = CatalogService.objects.get(id=service_id, is_active=True)
@@ -560,6 +588,7 @@ def service_detail(request: HttpRequest, service_id: str) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def masters_list(request: HttpRequest) -> HttpResponse:
     """List bookable masters; optionally filter by service.
 
@@ -587,6 +616,7 @@ def masters_list(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def master_detail(request: HttpRequest, master_id: str) -> HttpResponse:
     try:
         master = CatalogMaster.objects.bookable().get(id=master_id)
@@ -634,6 +664,7 @@ _ERROR_SLUG_TO_STATUS = {
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def create_booking(request: HttpRequest) -> HttpResponse:
     """Thin view: parses body, delegates to
     :func:`apps.booking.services.create.create_customer_booking`,
@@ -765,6 +796,7 @@ def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def bookings_list(request: HttpRequest) -> HttpResponse:
     """List the bot_user's bookings.
 
@@ -861,6 +893,7 @@ def _get_booking_owned(bot_user: BotUser, booking_id: str):
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def booking_detail(request: HttpRequest, booking_id: str) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     booking = _get_booking_owned(bot_user, booking_id)
@@ -886,6 +919,7 @@ _TRANSITION_SLUG_TO_STATUS = {
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def booking_cancel_request(request: HttpRequest, booking_id: str) -> HttpResponse:
     """POST /bookings/{id}/cancel — request cancel, returns immediately.
 
@@ -930,6 +964,7 @@ def booking_cancel_request(request: HttpRequest, booking_id: str) -> HttpRespons
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def booking_cancel_confirm(request: HttpRequest, booking_id: str) -> HttpResponse:
     from apps.booking.services.transitions import (
         InvalidBookingTransition,
@@ -963,6 +998,7 @@ def booking_cancel_confirm(request: HttpRequest, booking_id: str) -> HttpRespons
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def booking_cancel_undo(request: HttpRequest, booking_id: str) -> HttpResponse:
     from apps.booking.services.transitions import (
         InvalidBookingTransition,
@@ -983,6 +1019,7 @@ def booking_cancel_undo(request: HttpRequest, booking_id: str) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpResponse:
     """POST /bookings/{id}/reschedule — stash a candidate slot.
 
@@ -1041,6 +1078,7 @@ def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpRes
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpResponse:
     """POST /bookings/{id}/reschedule/confirm — actually rotate to new booking.
 
@@ -1084,6 +1122,7 @@ def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpRes
 @csrf_exempt
 @require_http_methods(["GET", "PATCH"])
 @require_init_data
+@with_request_tenant
 def me(request: HttpRequest) -> HttpResponse:
     """Read or partially update the current customer's profile."""
     import json
@@ -1116,6 +1155,7 @@ def me(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def delete_me(request: HttpRequest) -> HttpResponse:
     """Soft-delete the current customer (scrub PII + drop prefs)."""
     import json
@@ -1169,6 +1209,7 @@ def _profile_to_dict(snap) -> dict:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
+@with_request_tenant
 def submit_feedback(request: HttpRequest, booking_id) -> HttpResponse:  # type: ignore[no-untyped-def]
     """Persist a 1-5 rating for a past visit; rating ≤ 3 escalates."""
     import json
@@ -1479,6 +1520,7 @@ def _format_visit_human(visit_at, tz: ZoneInfo, *, now=None) -> str:
 
 @require_http_methods(["GET"])
 @require_init_data
+@with_request_tenant
 def customer_recent_activity(request: HttpRequest) -> HttpResponse:
     """Dashboard rollup — next booking + this-week count (bookings-only).
 

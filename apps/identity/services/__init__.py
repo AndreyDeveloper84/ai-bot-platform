@@ -19,12 +19,16 @@ keep working — re-exports from :mod:`apps.identity.services.resolver`.
 - :mod:`apps.identity.services.recompute` — `recompute_profile` (P6 / DRF-532)
 """
 
+from apps.identity.services.global_tenant import get_global_bot_tenant
 from apps.identity.services.resolver import (
     delete_bot_user_data,
     resolve_or_create_bot_user,
+    resolve_or_create_global_bot_user,
 )
 
 __all__ = [
     "delete_bot_user_data",
+    "get_global_bot_tenant",
     "resolve_or_create_bot_user",
+    "resolve_or_create_global_bot_user",
 ]
