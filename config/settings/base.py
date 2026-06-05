@@ -52,6 +52,7 @@ LOCAL_APPS = [
     "apps.experiments",
     "apps.voice",
     "apps.catalog",
+    "apps.marketplace",
     "apps.replay",
     "apps.promptreg",
     "apps.adminconsole",

@@ -245,6 +245,17 @@ class Tenant(models.Model):
         "a successful pull-upsert cycle.",
     )
 
+    # P1 marketplace (#1018) — the salon's city, used to filter nationwide
+    # cross-tenant discovery (apps.marketplace). Minimal geo for the Penza
+    # pilot: a plain city string, no PostGIS. Blank until backfilled.
+    city = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text="Salon city for marketplace discovery (e.g. «Пенза»). "
+        "Blank = not yet set; minimal geo for the pilot (no lat/lng).",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
