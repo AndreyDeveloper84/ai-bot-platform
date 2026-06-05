@@ -100,20 +100,32 @@ unaffected.
 
 **Appointment — response** (create / reschedule / list item)
 ```json
-{ "appointment_id": "a1b2c3", "specialist": { "...": "..." },
-  "services": [ { "...": "..." } ], "datetime": "2026-06-10T14:00:00+03:00",
-  "duration_s": 3600, "status": "confirmed" }
+{ "appointment_id": "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34",
+  "specialist": { "...": "..." }, "services": [ { "...": "..." } ],
+  "datetime": "2026-06-10T14:00:00+03:00", "duration_s": 3600,
+  "status": "confirmed" }
 ```
 
 `appointment_id` is Ayla's canonical id and becomes the bot-side mirror key.
+
+> **🔒 MUST lock with S2 (item #1, see §8): `appointment_id` is a UUID.**
+> Per the event-contract canon and the UUID-ready `ayla-ai-core` tooling,
+> Ayla's `Appointment.id` is a **UUID string**, not numeric. The current
+> adapter is an interim placeholder: it maps numeric ids onto the int-keyed
+> booking tools (`BookingRecord.record_id`, `UserRecord.id`, the mirror marker
+> `yclients_record_id=<id>`) and fails loudly on non-numeric. **Before the
+> httpx implementation + cutover**, the bot side must accept a UUID/string
+> `appointment_id` (the local mirror keeps its own int PK, but the Ayla-id
+> column stores the UUID). This is the canonical decision — captured here in
+> the spec, not in prod. Tracked as the first cutover prerequisite in §8.
 
 ## 5. Idempotency
 
 Writes carry an idempotency key so a retried bot turn cannot double-book.
 
-- **Header name: TBD — confirm exact spelling with S2.** bot-platform's
+- **🔒 MUST lock with S2 (item #2, see §8): exact header name.** bot-platform's
   payment client uses `Idempotence-Key`; the nutrition client uses
-  `X-Idempotency-Key`. Pick one and record it here before PR-A merges. The
+  `X-Idempotency-Key`. S2 picks one at sign-off and it is recorded here. The
   bot client passes `idempotency_key` through to whichever header S2 names.
 - Key is required on `POST .../appointments` and recommended on cancel /
   reschedule. Ayla returns the original result on a duplicate key (no new row).
@@ -142,9 +154,21 @@ Error body shape (code for mapping) — **confirm with S2**:
 
 ## 8. Open items before lock (owners)
 
+**🔒 MUST lock with S2 at sign-off (block the httpx implementation + cutover):**
+
+1. [ ] **`appointment_id` = UUID** (§4). Canonical per event-contract +
+       `ayla-ai-core`. The bot side must accept a UUID/string id before
+       cutover; the current numeric placeholder adapter is interim only.
+2. [ ] **Idempotency header name** (§5) — S2 picks `Idempotence-Key` vs
+       `X-Idempotency-Key`; recorded here.
+
+These two are caught in the spec now precisely so they never surface in prod —
+the value of spec-first. Neither blocks the current PRs (skeleton, flag OFF).
+
+**Other open items:**
+
 - [ ] **S2:** confirm/amend §3 paths, §4 field names, §6 error codes.
 - [ ] **S2:** stand up the endpoints in the Ayla canonical backend.
-- [ ] **S1 + S2:** fix the idempotency header name (§5).
 - [ ] **Both:** s2s-auth convergence ADR (RS256) — supersedes §2's interim Bearer.
 - [ ] **S1 (follow-up, after lock):** replace the `booking_client.py` skeleton
       with the real `requests`-based implementation; then a separate change

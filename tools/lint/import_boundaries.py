@@ -157,9 +157,17 @@ BaselineKey = tuple[str, str, str]
 
 BASELINE: frozenset[BaselineKey] = frozenset(
     {
-        # G2.1 — skills → YClients (#928, 2 prod files; Phase 2.2 reroute via Ayla REST)
+        # G2.1 — skills → YClients (#928, 3 prod files; Phase 2.2 reroute via Ayla REST).
+        # provider.py is the strangler seam: behind BOOKING_VIA_AYLA_REST=OFF (default) it
+        # returns the unchanged YClients client; flag-ON routes through Ayla REST. Retired
+        # together with skill.py/tools.py when #928 completes the cutover.
         ("G2.1-skills-no-yclients", "apps/skills/booking/skill.py", "apps.integrations.yclients"),
         ("G2.1-skills-no-yclients", "apps/skills/booking/tools.py", "apps.integrations.yclients"),
+        (
+            "G2.1-skills-no-yclients",
+            "apps/skills/booking/provider.py",
+            "apps.integrations.yclients",
+        ),
         # G5.1 — API surfaces → booking mutators (#925 create; #968 transitions/feedback)
         (
             "G5.1-api-no-booking-mutators",
