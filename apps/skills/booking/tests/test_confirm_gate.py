@@ -212,3 +212,76 @@ class TestExecuteConfirm:
             )
         assert result.error == "invalid_payload"
         assert client.create_calls == []
+
+    def test_writes_ai_direct_attribution(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """Phase 4a-IMPL1 closure: bot-confirm path = ai_direct + billable.
+
+        Without these fields BookingRequest.booking_source defaults to
+        'external' and bot-created bookings would silently fall out of
+        the billing pipeline.
+        """
+        from decimal import Decimal
+
+        client = FakeClient()
+        client.create_response = BookingRecord(record_id=42, record_hash="h", raw={})
+        future_iso = (timezone.now() + timedelta(days=3)).replace(microsecond=0).isoformat()
+        with tenant_scope(tenant):
+            execute_confirm(
+                client=client,
+                payload={
+                    "master_id": 11,
+                    "service_id": 22,
+                    "slot_datetime": future_iso,
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        row = BookingRequest.all_tenants.get(
+            tenant=tenant,
+            bot_user=bot_user,
+            comment__contains="yclients_record_id=42",
+        )
+        assert row.booking_source == "ai_direct"
+        assert row.billable is True
+        assert row.billing_reason  # populated when billable
+        assert row.ai_assist_score == Decimal("1.00")
+        # attribution_metadata required-keys per attribution-policy §4.
+        assert row.attribution_metadata["actor_type"] == "customer"
+        assert row.attribution_metadata["created_by"] == "execute_confirm"
+        assert row.attribution_metadata["started_by"] == "customer"
+        assert row.attribution_metadata["test_mode"] is False
+        # visit_at populated — Q-ATT-IMPL3 validator passes for non-external.
+        assert row.visit_at is not None
+
+    def test_unparseable_slot_rejects_before_yclients_call(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Phase 4a-IMPL1 split-brain guard: if slot_datetime is
+        unparseable, reject BEFORE calling YClients so we don't leave a
+        YClients record without a corresponding BookingRequest row.
+        """
+        client = FakeClient()
+        client.create_response = BookingRecord(record_id=99, record_hash="h", raw={})
+        with tenant_scope(tenant):
+            result = execute_confirm(
+                client=client,
+                payload={
+                    "master_id": 11,
+                    "service_id": 22,
+                    "slot_datetime": "garbage-not-iso",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "invalid_payload"
+        # YClients never called — no split-brain.
+        assert client.create_calls == []
+        assert BookingRequest.all_tenants.filter(tenant=tenant).count() == 0

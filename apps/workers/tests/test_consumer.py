@@ -33,6 +33,8 @@ class _FakeStreamRedis:
         # group_offset[(stream, group)] = next index to read
         self.group_offset: dict[tuple[str, str], int] = {}
         self._counter = 0
+        # Reaper cursor persistence (B3 adversarial-pass).
+        self._kv: dict[str, str] = {}
 
     def xgroup_create(self, name: str, groupname: str, id: str, mkstream: bool):  # noqa: A002
         import redis
@@ -44,7 +46,9 @@ class _FakeStreamRedis:
         self.streams.setdefault(name, [])
         self.group_offset[(name, groupname)] = 0
 
-    def xadd(self, stream: str, fields: dict[str, str]) -> str:
+    def xadd(self, stream: str, fields: dict[str, str], **_kwargs) -> str:
+        # ``**_kwargs`` accepts the reaper's ``maxlen=`` + ``approximate=``
+        # without modelling trimming (the stub is not memory-bounded).
         self._counter += 1
         entry_id = f"1700000000-{self._counter}"
         self.streams.setdefault(stream, []).append((entry_id, dict(fields)))
@@ -81,6 +85,43 @@ class _FakeStreamRedis:
 
     def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
         return list(self.streams.get(stream, []))
+
+    def xautoclaim(
+        self,
+        name: str,
+        groupname: str,
+        consumername: str,
+        min_idle_time: int,
+        start_id: str = "0",
+        count: int | None = None,
+    ):
+        """Stub XAUTOCLAIM for the PEL reaper test (#499).
+
+        Real Redis returns ``[next_cursor, [(entry_id, fields), …], [deleted_ids]]``.
+        For the stub, the «idle threshold» concept doesn't exist (entries
+        have no real timestamp), so every PEL entry past ``start_id`` is
+        returned up to ``count``. Tests that need «idle skip» behaviour
+        should pre-fill the PEL via xreadgroup + selectively not-xack.
+        """
+
+        pel = self.pel.get((name, groupname), {})
+        entries = sorted(pel.items(), key=lambda kv: int(kv[0].rsplit("-", 1)[-1]))
+        if start_id != "0":
+            entries = [(eid, fields) for eid, fields in entries if eid > start_id]
+        if count is not None:
+            entries = entries[:count]
+        claimed = [(eid, dict(fields)) for eid, fields in entries]
+        return ("0", claimed, [])
+
+    # ---- Cursor persistence for the PEL reaper (B3 adversarial-pass) ----
+
+    def get(self, key: str):
+        return self._kv.get(key)
+
+    def set(self, key: str, value: str, *, ex: int | None = None):
+        # `ex` (TTL) ignored — the stub doesn't expire keys; tests that
+        # need to assert expiry can call `.set` directly with mock time.
+        self._kv[key] = value
 
 
 @pytest.fixture
@@ -272,3 +313,751 @@ class TestEmptyRegistry:
     def test_no_streams_returns_zero(self, fake_redis):
         processed = consumer.consume_once()
         assert processed == 0
+
+
+# ---------------------------------------------------------------------------
+# Tenancy retro B4 — requires_tenant tag + STRICT_TENANT_REFUSE flag
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB4RequiresTenantTag:
+    """Pre-fix workers silently entered ``tenant_scope(None)`` for every
+    handler when ``resolved_tenant_id`` was empty/invalid. Reads
+    returned empty + warn but handlers proceeded on phantom-tenant
+    context. Post-fix the ``requires_tenant`` ClassVar + ``STRICT_TENANT_REFUSE``
+    settings flag let strict-tenant handlers refuse entries cleanly
+    (PEL retention; no auto-DLQ — see follow-up XAUTOCLAIM issue) OR
+    log-only during the rollout soak.
+    """
+
+    def test_default_requires_tenant_is_true(self):
+        # The default conservative tag — every handler is presumed to
+        # need a tenant unless it explicitly opts out.
+        class _DefaultHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        assert _DefaultHandler.requires_tenant is True
+
+    def test_log_only_mode_proceeds_with_none_tenant(self, fake_redis, settings, caplog):
+        # STRICT_TENANT_REFUSE=False (default) → handler runs against
+        # tenant_scope(None), ERROR log captures the violation.
+        settings.STRICT_TENANT_REFUSE = False
+        captured: dict[str, Any] = {}
+
+        @register("ingress:b4-log-only")
+        class _StrictHandler(TenantAwareTask):
+            # requires_tenant inherited as True.
+            def handle(self, payload):  # noqa: ANN001
+                captured["tenant"] = current_tenant()
+                captured["ran"] = True
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-log-only",
+                {"data": json.dumps({}), "trace_id": "t-b4-log"},
+            )
+            with caplog.at_level("ERROR", logger="apps.workers.base"):
+                processed = consumer.consume_once(streams=["ingress:b4-log-only"])
+
+            assert processed == 1
+            assert captured.get("ran") is True
+            assert captured.get("tenant") is None
+            assert any(
+                "tenant_required_missing" in rec.message and "log-only mode" in rec.message
+                for rec in caplog.records
+            ), "expected ERROR log in log-only mode"
+        finally:
+            clear_registry()
+
+    def test_strict_mode_dlqs_handler_with_required_tenant_missing(
+        self, fake_redis, settings, caplog
+    ):
+        # STRICT_TENANT_REFUSE=True → handler refuses to dispatch,
+        # raises TenantRequiredButMissing. The consumer treats this
+        # like any other handler exception (no XACK; PEL retains for
+        # DLQ retry policy).
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+        ran = {"handle_called": False}
+
+        @register("ingress:b4-strict")
+        class _StrictHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                ran["handle_called"] = True
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-strict",
+                {"data": json.dumps({}), "trace_id": "t-b4-strict"},
+            )
+            with caplog.at_level("ERROR", logger="apps.workers.base"):
+                # consumer.consume_once swallows handler exceptions
+                # (no XACK; entry stays in PEL). The raise is
+                # contained — test verifies handle was NOT called.
+                consumer.consume_once(streams=["ingress:b4-strict"])
+
+            # Handler MUST NOT have been invoked.
+            assert ran["handle_called"] is False
+            # Strict-mode refusal log is present. NOTE: pre-PR-#487 this
+            # asserted on the substring «DLQ» which was misleading — there
+            # is no automatic DLQ retry wired (no XAUTOCLAIM); the entry
+            # stays in the PEL. The accurate assertion matches the new
+            # log line "refusing dispatch".
+            assert any(
+                "tenant_required_missing" in rec.message and "refusing dispatch" in rec.message
+                for rec in caplog.records
+            ), "expected strict-mode refusal ERROR log"
+            # And the exception class name shows up on the
+            # worker.handler_failed event payload.
+            assert TenantRequiredButMissing.__name__
+        finally:
+            clear_registry()
+
+    def test_tenant_optional_handler_logs_info(self, fake_redis, settings, caplog):
+        # requires_tenant=False handler runs with tenant_scope(None)
+        # cleanly — INFO log, no ERROR.
+        settings.STRICT_TENANT_REFUSE = True  # even strict mode allows opt-out
+        ran = {"ran": False}
+
+        @register("ingress:b4-optional")
+        class _SystemHandler(TenantAwareTask):
+            # System-tier handler: declares itself tenant-optional.
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                ran["ran"] = True
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-optional",
+                {"data": json.dumps({}), "trace_id": "t-b4-opt"},
+            )
+            with caplog.at_level("INFO", logger="apps.workers.base"):
+                processed = consumer.consume_once(streams=["ingress:b4-optional"])
+
+            assert processed == 1
+            assert ran["ran"] is True
+            assert any("tenantless_handler" in rec.message for rec in caplog.records), (
+                "expected INFO-level tenantless_handler log"
+            )
+            # No ERROR-level tenant_required logs.
+            assert not any(
+                rec.levelname == "ERROR" and "tenant_required" in rec.message
+                for rec in caplog.records
+            )
+        finally:
+            clear_registry()
+
+    def test_strict_mode_with_tenant_present_proceeds_normally(self, fake_redis, settings, db):
+        # Negative regression: strict mode must NOT affect handlers
+        # whose entry carries a valid tenant.
+        settings.STRICT_TENANT_REFUSE = True
+        captured: dict[str, Any] = {}
+
+        tenant = Tenant.objects.create(slug="b4-ok", name="B4-OK")
+
+        @register("ingress:b4-strict-ok")
+        class _StrictHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                captured["tenant_id"] = current_tenant().id if current_tenant() else None
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-strict-ok",
+                {
+                    "data": json.dumps({}),
+                    "trace_id": "t-b4-ok",
+                    "resolved_tenant_id": str(tenant.id),
+                },
+            )
+            processed = consumer.consume_once(streams=["ingress:b4-strict-ok"])
+
+            assert processed == 1
+            assert captured.get("tenant_id") == tenant.id
+        finally:
+            clear_registry()
+
+    def test_tenant_optional_handler_with_tenant_present_proceeds_normally(
+        self, fake_redis, settings, db, caplog
+    ):
+        # Completes the 2x2 enforcement matrix (closes reviewer Y3
+        # missing test cell): requires_tenant=False handler that
+        # happens to receive a tenant-tagged entry must silently
+        # proceed — no INFO «tenantless» log, no ERROR. Handler sees
+        # the real tenant via current_tenant() and dispatches normally.
+        settings.STRICT_TENANT_REFUSE = True  # irrelevant when tenant present
+        captured: dict[str, Any] = {}
+
+        tenant = Tenant.objects.create(slug="b4-opt-ok", name="B4-Opt-OK")
+
+        @register("ingress:b4-opt-ok")
+        class _SystemHandler(TenantAwareTask):
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                captured["tenant_id"] = current_tenant().id if current_tenant() else None
+
+        try:
+            fake_redis.xadd(
+                "ingress:b4-opt-ok",
+                {
+                    "data": json.dumps({}),
+                    "trace_id": "t-b4-opt-ok",
+                    "resolved_tenant_id": str(tenant.id),
+                },
+            )
+            with caplog.at_level("INFO", logger="apps.workers.base"):
+                processed = consumer.consume_once(streams=["ingress:b4-opt-ok"])
+
+            assert processed == 1
+            assert captured.get("tenant_id") == tenant.id
+            # No tenantless / tenant_required logs — handler dispatched
+            # cleanly with real tenant in scope.
+            assert not any(
+                "tenantless_handler" in rec.message or "tenant_required_missing" in rec.message
+                for rec in caplog.records
+            ), "expected no tenant-status logs when tenant is present"
+        finally:
+            clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# Tenancy retro B4 follow-up — adversarial-pass blockers (PR #476 retro)
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB4BlockersPreFlip:
+    """Adversarial Code Reviewer pass on PR #476 found 4 blockers that
+    the first-pass review missed. Each is fixed here pre-strict-mode-flip
+    (earliest 2026-05-28). See ``docs/runbooks/strict-tenant-refuse-flip.md``.
+    """
+
+    # ---- B1: orphan emits inside trace_id_scope ----
+
+    def test_b1_strict_mode_emit_carries_trace_id_via_contextvar(self, settings, monkeypatch):
+        """B1: ``emit(worker.tenant_required_missing, ...)`` in strict mode
+        must fire INSIDE ``trace_id_scope`` so the audit row carries the
+        right trace_id. Pre-fix: emit fired before trace_id_scope enter,
+        so a direct ``TenantAwareTask()`` call (bypassing consumer.py's
+        outer scope) emitted orphan events with no trace correlation.
+        """
+
+        from apps.workers import base as base_mod
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+        captured_trace: dict[str, str | None] = {}
+
+        real_emit = base_mod.emit
+
+        def spy_emit(event_type: str, *, payload: dict[str, Any] | None = None) -> None:
+            if event_type == "worker.tenant_required_missing":
+                captured_trace["trace_id"] = current_trace_id()
+            return real_emit(event_type, payload=payload)
+
+        monkeypatch.setattr(base_mod, "emit", spy_emit)
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        with pytest.raises(TenantRequiredButMissing):
+            _SpyHandler()({"data": "{}", "trace_id": "trace-b1-strict", "resolved_tenant_id": ""})
+
+        assert captured_trace.get("trace_id") == "trace-b1-strict", (
+            "B1: emit must fire inside trace_id_scope so the row carries trace_id"
+        )
+
+    def test_b1_log_only_mode_emit_carries_trace_id_via_contextvar(self, settings, monkeypatch):
+        """B1: same invariant for log-only mode — emit must be trace-correlated."""
+
+        from apps.workers import base as base_mod
+
+        settings.STRICT_TENANT_REFUSE = False
+        captured_trace: dict[str, str | None] = {}
+
+        real_emit = base_mod.emit
+
+        def spy_emit(event_type: str, *, payload: dict[str, Any] | None = None) -> None:
+            if event_type == "worker.tenant_required_missing":
+                captured_trace["trace_id"] = current_trace_id()
+            return real_emit(event_type, payload=payload)
+
+        monkeypatch.setattr(base_mod, "emit", spy_emit)
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        _SpyHandler()({"data": "{}", "trace_id": "trace-b1-logonly", "resolved_tenant_id": ""})
+
+        assert captured_trace.get("trace_id") == "trace-b1-logonly", (
+            "B1: log-only emit must also fire inside trace_id_scope"
+        )
+
+    def test_576_drill_tag_forwarded_to_payload(self, settings, monkeypatch):
+        """#576: если raw_entry имеет ``_drill`` маркер, ``emit()`` payload
+        должен содержать ``drill=True``. Это маркер по которому drill
+        cleanup отличает synthetic от legitimate tenant-missing rows."""
+        from apps.workers import base as base_mod
+
+        settings.STRICT_TENANT_REFUSE = False
+        captured_payload: dict[str, Any] = {}
+
+        def spy_emit(event_type: str, *, payload: dict[str, Any] | None = None) -> None:
+            if event_type == "worker.tenant_required_missing":
+                captured_payload.update(payload or {})
+
+        monkeypatch.setattr(base_mod, "emit", spy_emit)
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        _SpyHandler()(
+            {
+                "data": "{}",
+                "trace_id": "trace-576",
+                "resolved_tenant_id": "",
+                "_drill": "1",
+            }
+        )
+        assert captured_payload.get("drill") is True
+        assert captured_payload.get("handler") == "_SpyHandler"
+        assert captured_payload.get("strict_mode") is False
+
+    def test_576_no_drill_tag_means_no_drill_field(self, settings, monkeypatch):
+        """Mirror: legitimate entry без ``_drill`` маркера НЕ должна
+        получить ``drill`` в payload. Защита от false-positive cleanup."""
+        from apps.workers import base as base_mod
+
+        settings.STRICT_TENANT_REFUSE = False
+        captured_payload: dict[str, Any] = {}
+
+        def spy_emit(event_type: str, *, payload: dict[str, Any] | None = None) -> None:
+            if event_type == "worker.tenant_required_missing":
+                captured_payload.update(payload or {})
+
+        monkeypatch.setattr(base_mod, "emit", spy_emit)
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        _SpyHandler()(
+            {
+                "data": "{}",
+                "trace_id": "trace-no-drill",
+                "resolved_tenant_id": "",
+                # NO _drill field
+            }
+        )
+        assert "drill" not in captured_payload, (
+            "#576: legitimate entry без _drill не должна иметь drill=True в payload"
+        )
+
+    def test_576_explicit_non_one_drill_value_ignored(self, settings, monkeypatch):
+        """#576 — точный match на "1": пустая строка и "0" не должны
+        активировать drill-маркер. Документирует intent явного opt-in
+        (адверсарий-pass vectors 3+4 — `bool("0")=True` сюрприз)."""
+        from apps.workers import base as base_mod
+
+        settings.STRICT_TENANT_REFUSE = False
+        monkeypatch.setattr(
+            base_mod, "emit", lambda *a, **k: captured.update(k.get("payload") or {})
+        )
+
+        class _SpyHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        for non_one_value in ("", "0", "true", "yes"):
+            captured: dict[str, Any] = {}
+            _SpyHandler()(
+                {
+                    "data": "{}",
+                    "trace_id": "trace-non-one",
+                    "resolved_tenant_id": "",
+                    "_drill": non_one_value,
+                }
+            )
+            assert "drill" not in captured, (
+                f"#576: _drill={non_one_value!r} НЕ должно активировать "
+                "drill-маркер (точный match на '1')"
+            )
+
+    # ---- B2: __init_subclass__ MRO bypass guard ----
+
+    def test_b2_mixin_with_requires_tenant_attr_rejected_at_class_creation(self):
+        """B2: a mixin sibling of TenantAwareTask that declares
+        ``requires_tenant = False`` MUST not silently override the
+        subclass's resolved value. Class creation raises TypeError.
+        """
+
+        class _BadSystemMixin:
+            requires_tenant = False  # would silently shadow TenantAwareTask's True
+
+        with pytest.raises(TypeError, match="requires_tenant"):
+
+            class _Compromised(_BadSystemMixin, TenantAwareTask):
+                def handle(self, payload):  # noqa: ANN001
+                    pass
+
+    def test_b2_explicit_optout_on_subclass_itself_is_allowed(self):
+        """B2: opt-out via direct subclass declaration is allowed — the
+        check is about ancestors silently shadowing the default, not
+        about forbidding opt-out entirely.
+        """
+
+        class _SystemHandler(TenantAwareTask):
+            # requires_tenant=False: documented opt-out — system-tier.
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        assert _SystemHandler.requires_tenant is False
+
+    def test_b2_default_subclass_inherits_true(self):
+        """B2: a subclass that doesn't touch requires_tenant resolves
+        to TenantAwareTask's True default without any MRO surprise.
+        """
+
+        class _Default(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        assert _Default.requires_tenant is True
+
+    def test_b2_mixin_without_requires_tenant_does_not_trigger_check(self):
+        """B2: bare mixins (no ``requires_tenant`` in __dict__) coexist
+        cleanly — the guard only fires when an ancestor between cls and
+        TenantAwareTask shadows the attribute.
+        """
+
+        class _LoggingMixin:
+            def log_thing(self) -> None:
+                pass
+
+        class _OK(_LoggingMixin, TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        assert _OK.requires_tenant is True
+
+    def test_b2_subclass_of_optout_subclass_inherits_optout_cleanly(self):
+        """B2: legitimate intermediate-class opt-out chain
+        (``SystemTask(TenantAwareTask, requires_tenant=False)`` →
+        ``AuditSweepHandler(SystemTask)``) must work. The MRO guard
+        targets external mixins that shadow the attribute, NOT the
+        documented inheritance chain of opt-out subclasses.
+
+        Caught by first-pass Code Reviewer 2026-05-21 — without the
+        ``issubclass(ancestor, TenantAwareTask)`` skip, ANY further
+        subclass of an opt-out ``TenantAwareTask`` descendant would
+        fail at class creation, breaking the very pattern the docstring
+        on ``__init_subclass__`` says is allowed.
+        """
+
+        class _SystemTask(TenantAwareTask):
+            # requires_tenant=False: documented opt-out for system-tier
+            # handlers (audit sweep, outbox dispatcher).
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        class _AuditSweepHandler(_SystemTask):
+            # Concrete system-tier subclass — inherits the opt-out.
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        assert _SystemTask.requires_tenant is False
+        assert _AuditSweepHandler.requires_tenant is False
+
+    # ---- B2 adversarial-pass regressions (B-2/3/4 multi-defense) ----
+
+    def test_b2_post_creation_mutation_ignored_at_dispatch(self, settings, fake_redis):
+        """B-2 adversarial: ``Cls.requires_tenant = False`` set AFTER
+        class creation must NOT defeat strict-mode refuse.
+
+        Pre-fix dispatch read ``self.requires_tenant`` live → mutation
+        won. Post-fix dispatch reads the FROZEN snapshot stored by
+        ``__init_subclass__`` → mutation has no effect.
+        """
+
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+
+        class _Mutated(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        # Snapshot was True at class creation. Attacker tries to flip it.
+        _Mutated.requires_tenant = False
+
+        # Dispatch with missing tenant: post-mutation `requires_tenant`
+        # is False, but the frozen snapshot is True → must refuse.
+        with pytest.raises(TenantRequiredButMissing):
+            _Mutated()({"data": "{}", "trace_id": "t-mut", "resolved_tenant_id": ""})
+
+    def test_b2_init_subclass_shadow_does_not_defeat_strict_refuse(self, settings):
+        """B-3 adversarial: a descendant that overrides
+        ``__init_subclass__`` without calling ``super()`` blocks the
+        snapshot from being SET on its further descendants. The
+        runtime lookup in ``__call__`` falls back through MRO to find
+        the nearest TenantAwareTask-descendant's snapshot — which IS
+        set (because ``TenantAwareTask.__init_subclass__`` ran when
+        ``_Shadow`` itself was created and stored True on ``_Shadow``).
+
+        Outcome: strict-mode refuse STILL happens even with the shadow
+        attack pattern. The external mixin's ``requires_tenant=False``
+        is ignored because (a) it's not in the trusted MRO chain and
+        (b) ``_Shadow``'s snapshot is True.
+        """
+
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+
+        class _Shadow(TenantAwareTask):
+            """Blocks the __init_subclass__ chain — adversarial pattern."""
+
+            def __init_subclass__(cls, **kwargs):  # noqa: ANN001, D401
+                # NO super() call — kills hook propagation to descendants.
+                pass
+
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        class _ExternalMixinSetsFalse:
+            requires_tenant = False  # the would-be silent bypass
+
+        # Multi-inheritance: external mixin BEFORE Shadow in MRO. Pre-fix
+        # dispatch would resolve ``self.requires_tenant`` to False here.
+        class _Compromised(_ExternalMixinSetsFalse, _Shadow):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        # Strict refuse must STILL happen — the shadow attack is defeated.
+        with pytest.raises(TenantRequiredButMissing):
+            _Compromised()({"data": "{}", "trace_id": "t-shadow", "resolved_tenant_id": ""})
+
+    def test_b2_property_descriptor_rejected_at_class_creation(self):
+        """B-4 adversarial: a ``@property`` on the subclass's own
+        ``__dict__`` for ``requires_tenant`` is NOT a literal bool.
+        Type-purity check must reject it at class creation.
+        """
+
+        with pytest.raises(TypeError, match="must be a literal"):
+
+            class _Sneaky(TenantAwareTask):
+                @property
+                def requires_tenant(self):
+                    return False
+
+                def handle(self, payload):  # noqa: ANN001
+                    pass
+
+    def test_b2_non_bool_assignment_rejected_at_class_creation(self):
+        """B-4 adversarial: any non-bool type on own ``__dict__``
+        (int, callable, lambda, string) is rejected. The strict-mode
+        decision MUST be a literal bool.
+        """
+
+        with pytest.raises(TypeError, match="must be a literal"):
+
+            class _IntAttack(TenantAwareTask):
+                requires_tenant = 0  # truthy/falsy abuse vector
+
+                def handle(self, payload):  # noqa: ANN001
+                    pass
+
+        with pytest.raises(TypeError, match="must be a literal"):
+
+            class _CallableAttack(TenantAwareTask):
+                requires_tenant = lambda self: False  # noqa: E731
+
+                def handle(self, payload):  # noqa: ANN001
+                    pass
+
+    # ---- B1 adversarial-pass hardening — emit spy via audit Event row ----
+
+    def test_b1_strict_mode_emit_row_carries_trace_id_via_audit_table(self, settings, fake_redis):
+        """B-1 adversarial-pass D-5: spying on a module-imported
+        ``emit`` reference is brittle to refactor (`from X import emit`
+        captures by value). The robust assertion is on the audit
+        ``Event`` row itself — that's the system-of-record for trace
+        correlation. If emit lands inside ``trace_id_scope``, the
+        row's ``trace_id`` column matches.
+        """
+
+        from apps.workers.base import TenantRequiredButMissing
+
+        settings.STRICT_TENANT_REFUSE = True
+
+        class _StrictHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        with pytest.raises(TenantRequiredButMissing):
+            _StrictHandler()({"data": "{}", "trace_id": "trace-b1-audit", "resolved_tenant_id": ""})
+
+        rows = list(
+            Event.objects.filter(event_type="worker.tenant_required_missing").values(
+                "event_type", "trace_id"
+            )
+        )
+        assert rows, "expected a worker.tenant_required_missing audit row"
+        assert all(r["trace_id"] == "trace-b1-audit" for r in rows), (
+            "B1: every audit row must carry the raw_entry's trace_id "
+            "(emit fired inside trace_id_scope)"
+        )
+
+    # ---- D-4 cross-flag coupling — STRICT_TENANT_REFUSE × STRICT_TENANT_SCOPE ----
+
+    def test_d4_optout_handler_under_strict_scope_documents_all_tenants_path(
+        self, settings, fake_redis
+    ):
+        """D-4 adversarial: a ``requires_tenant=False`` handler running
+        under ``STRICT_TENANT_SCOPE=strict`` MUST use
+        ``Model.all_tenants`` for tenant-scoped reads. The runbook
+        mandates this; this test asserts the handler path proceeds
+        cleanly when the handler doesn't touch tenant-scoped managers.
+
+        A handler that DOES violate the mandate (uses ``Model.objects``)
+        would raise ``CrossTenantError`` at the ORM layer — that
+        traceback would surface as a normal ``worker.handler_failed``
+        path, NOT as a B4 ``TenantRequiredButMissing``. Verified by the
+        log-shape contract here so the flip plan can rely on the
+        documented behaviour.
+        """
+
+        # Both flags strict — the operationally hardest combination.
+        settings.STRICT_TENANT_REFUSE = True
+        settings.STRICT_TENANT_SCOPE = "strict"
+
+        ran = {"called": False}
+
+        class _SystemTask(TenantAwareTask):
+            # Documented opt-out — uses .all_tenants for any read.
+            requires_tenant = False
+
+            def handle(self, payload):  # noqa: ANN001
+                ran["called"] = True
+
+        # Empty resolved_tenant_id under both strict flags. The handler
+        # opts out of tenant requirement, so dispatch must proceed.
+        _SystemTask()({"data": "{}", "trace_id": "t-d4", "resolved_tenant_id": ""})
+        assert ran["called"] is True, (
+            "D-4: opt-out handler must dispatch cleanly under both "
+            "strict flags when it doesn't touch tenant-scoped managers"
+        )
+
+    # ---- B3: documented restart-required ----
+
+    def test_b3_strict_flag_read_site_documents_restart_required(self):
+        """B3: ``STRICT_TENANT_REFUSE`` is imported from os.environ once at
+        config load (config/settings/base.py). The per-message read in
+        base.py looks live but returns the frozen value. The flag-read
+        site MUST carry an explicit «restart required» note so anyone
+        reading the code doesn't assume hot-reload semantics. The
+        operator runbook is the authoritative reference.
+        """
+
+        from apps.workers import base as base_mod
+        import inspect
+
+        src = inspect.getsource(base_mod)
+        # Look for the keyword «restart» near the STRICT_TENANT_REFUSE
+        # read site — proxy for the contract being documented.
+        assert "STRICT_TENANT_REFUSE" in src
+        assert "restart" in src.lower(), (
+            "B3: base.py must document worker-restart-required semantics "
+            "near the STRICT_TENANT_REFUSE read site "
+            "(see docs/runbooks/strict-tenant-refuse-flip.md)"
+        )
+
+    def test_b3_runbook_file_exists_and_mentions_restart_and_xautoclaim(self):
+        """B3 + B4: the operator runbook lives at the documented path
+        and covers (a) the worker-restart-required flip and (b) the
+        absence of XAUTOCLAIM-based DLQ — both contracts that the code
+        comments cross-reference.
+        """
+
+        from pathlib import Path
+
+        runbook = (
+            Path(__file__).resolve().parents[3]
+            / "docs"
+            / "runbooks"
+            / ("strict-tenant-refuse-flip.md")
+        )
+        assert runbook.exists(), f"missing runbook: {runbook}"
+        text = runbook.read_text(encoding="utf-8")
+        assert "restart" in text.lower(), "runbook must cover the restart step"
+        assert "XAUTOCLAIM" in text or "PEL" in text, (
+            "runbook must document the PEL retention contract (no auto-DLQ)"
+        )
+
+    # ---- B4: PEL retention is documented as the contract, not «DLQ» ----
+
+    def test_b4_exception_docstring_does_not_overclaim_dlq(self):
+        """B4: ``TenantRequiredButMissing`` docstring must NOT promise DLQ
+        semantics — there is no XAUTOCLAIM reaper. The entry stays in
+        the PEL until manual operator intervention. Documenting the
+        contract accurately prevents downstream callers from relying on
+        retry mechanics that don't exist.
+        """
+
+        from apps.workers import base as base_mod
+        import inspect
+
+        exc_doc = inspect.getdoc(base_mod.TenantRequiredButMissing) or ""
+        # The forbidden phrasing — the old docstring said «DLQ the entry».
+        # «DLQ» can appear in a cross-reference («no DLQ infra yet») but
+        # must not be used as a positive claim about current behaviour.
+        assert "DLQ the entry" not in exc_doc, (
+            "B4: exception docstring claimed DLQ semantics — not implemented"
+        )
+        # The accurate replacement: PEL retention.
+        assert "PEL" in exc_doc, "B4: docstring must reference the PEL retention contract"
+
+    def test_b4_call_docstring_does_not_overclaim_dlq(self):
+        """B4: same fix on ``TenantAwareTask.__call__`` docstring."""
+
+        from apps.workers import base as base_mod
+        import inspect
+
+        call_doc = inspect.getdoc(base_mod.TenantAwareTask.__call__) or ""
+        assert "DLQ the" not in call_doc, "B4: __call__ docstring must not promise DLQ behaviour"
+        assert "PEL" in call_doc, "B4: __call__ docstring must describe PEL retention accurately"
+
+    def test_b4_strict_mode_entry_remains_in_pel_no_autoclaim(self, fake_redis, settings):
+        """B4: regression — confirm that the strict-mode DLQ behaviour we
+        documented is what the code does. After a TenantRequiredButMissing
+        raise, the consumer must NOT XACK; the entry must remain in the
+        PEL. (XAUTOCLAIM reaping is out of scope for this PR.)
+        """
+
+        settings.STRICT_TENANT_REFUSE = True
+
+        @register("ingress:b4-pel")
+        class _StrictHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        entry_id = fake_redis.xadd(
+            "ingress:b4-pel",
+            {"data": json.dumps({}), "trace_id": "t-b4-pel", "resolved_tenant_id": ""},
+        )
+
+        consumer.consume_once(streams=["ingress:b4-pel"])
+
+        pel = fake_redis.pel.get(("ingress:b4-pel", "consumers"), {})
+        assert entry_id in pel, (
+            "B4: strict-mode refuse must leave the entry in the PEL (no auto-DLQ)"
+        )

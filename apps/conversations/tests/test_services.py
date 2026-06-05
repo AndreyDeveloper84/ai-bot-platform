@@ -192,3 +192,162 @@ class TestEndToEndChain:
         assert asst_msg.trace_id == trace
         conv.refresh_from_db()
         assert conv.last_message_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Conversations retro hotfix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB2CrossTenantBotUser:
+    """Pre-fix ``resolve_active_conversation`` filtered only by bot_user +
+    is_active. ``Conversation.objects`` is TenantScopedManager which auto-
+    adds the tenant filter, but a caller passing a bot_user from a
+    different tenant than ``current_tenant()`` was silently invalid —
+    the row miss + IntegrityError-recovery created or returned a row
+    linked to the wrong tenant. Post-fix raises CrossTenantError loudly.
+    """
+
+    def test_cross_tenant_bot_user_raises(
+        self,
+        tenant_a: Tenant,
+        tenant_b: Tenant,
+        bot_user_b: BotUser,
+    ) -> None:
+        from apps.conversations.services import resolve_active_conversation
+
+        # Enter tenant_a scope but pass a bot_user from tenant_b — that's
+        # the programmer-error case the defence-in-depth check guards.
+        with tenant_scope(tenant_a):
+            with pytest.raises(CrossTenantError):
+                resolve_active_conversation(bot_user_b)
+
+
+class TestRetroB1SkillStateAtomicWrite:
+    """Pre-fix skills did read-modify-write on Conversation.skill_state.
+    Two concurrent writers to different sub-keys would clobber each other:
+    each read the same pre-image and ``save(update_fields=["skill_state"])``
+    replaced the column with the writer's single-key view.
+
+    Post-fix ``write_skill_state`` wraps the read-modify-write in
+    ``transaction.atomic`` + ``select_for_update`` so per-subkey writes
+    serialise instead of clobbering.
+    """
+
+    def test_sequential_writes_preserve_distinct_subkeys(
+        self,
+        tenant_a: Tenant,
+        bot_user_a: BotUser,
+    ) -> None:
+        from apps.conversations.services import (
+            resolve_active_conversation,
+            write_skill_state,
+        )
+
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+            assert conv is not None
+            write_skill_state(conv, "skill_one", {"step": "a"})
+            write_skill_state(conv, "skill_two", {"step": "b"})
+
+        # Re-fetch to confirm both subkeys land — pre-fix the second
+        # writer's update_fields would have wiped skill_one.
+        conv.refresh_from_db()
+        assert conv.skill_state == {
+            "skill_one": {"step": "a"},
+            "skill_two": {"step": "b"},
+        }
+
+    def test_value_none_deletes_subkey_atomically(
+        self,
+        tenant_a: Tenant,
+        bot_user_a: BotUser,
+    ) -> None:
+        from apps.conversations.services import (
+            resolve_active_conversation,
+            write_skill_state,
+        )
+
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+            assert conv is not None
+            write_skill_state(conv, "ephemeral", {"v": 1})
+            write_skill_state(conv, "persistent", {"v": 2})
+            write_skill_state(conv, "ephemeral", None)
+
+        conv.refresh_from_db()
+        assert conv.skill_state == {"persistent": {"v": 2}}
+
+    def test_write_without_tenant_scope_raises(
+        self,
+        tenant_a: Tenant,
+        bot_user_a: BotUser,
+    ) -> None:
+        from apps.conversations.services import (
+            resolve_active_conversation,
+            write_skill_state,
+        )
+
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+            assert conv is not None
+
+        # OUTSIDE tenant_scope — must fail loud.
+        with pytest.raises(ValueError, match="tenant in scope"):
+            write_skill_state(conv, "key", {"v": 1})
+
+    def test_cross_tenant_conversation_raises(
+        self,
+        tenant_a: Tenant,
+        tenant_b: Tenant,
+        bot_user_a: BotUser,
+    ) -> None:
+        from apps.conversations.services import (
+            resolve_active_conversation,
+            write_skill_state,
+        )
+
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+        assert conv is not None  # noqa: S101 — narrow Optional for mypy
+        # tenant_a's conversation passed in while tenant_b is in scope.
+        with tenant_scope(tenant_b):
+            with pytest.raises(CrossTenantError):
+                write_skill_state(conv, "key", {"v": 1})
+
+
+class TestRetroY6StateCheckConstraint:
+    """Reviewer Y-3: assert the DB-level CHECK constraint actually
+    rejects out-of-enum state values. Pre-fix Django only validated
+    state at full_clean() — bypassed by ``.update()`` calls. Post-fix
+    the CHECK constraint rejects at the DB layer.
+
+    Postgres-only: SQLite does not enforce CHECK constraints emitted
+    by Django's ``models.CheckConstraint`` for table-level checks
+    consistently across versions.
+    """
+
+    @pytest.mark.skipif(
+        Conversation._meta.app_label  # noqa: SLF001 — sentinel guard
+        and getattr(
+            __import__("django.db", fromlist=["connection"]).connection,
+            "vendor",
+            "",
+        )
+        != "postgresql",
+        reason="CHECK constraint enforcement requires Postgres",
+    )
+    def test_bogus_state_raises_integrity_error(
+        self,
+        tenant_a: Tenant,
+        bot_user_a: BotUser,
+    ) -> None:
+        from django.db import IntegrityError
+
+        from apps.conversations.services import resolve_active_conversation
+
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+            assert conv is not None
+            with pytest.raises(IntegrityError):
+                Conversation.all_tenants.filter(pk=conv.pk).update(state="zombie")

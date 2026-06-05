@@ -48,7 +48,9 @@ from django.utils import timezone
 
 from apps.booking.models import BookingRequest
 from apps.booking.services.attribution import (
+    CommercialIdentitySnapshot,
     build_customer_attribution_metadata,
+    build_live_commercial_identity,
     compute_assist_score,
     compute_billable,
 )
@@ -93,6 +95,28 @@ class CreateBookingInput:
     service_id: str
     master_id: str
     visit_at: datetime  # timezone-aware, in the future
+    created_by: str = "execute_confirm"
+    """Attribution tag — 'execute_confirm' (default) or 'execute_reschedule'.
+
+    The reschedule service (apps.booking.services.reschedule) passes
+    'execute_reschedule' so compute_billable can apply Q12-α
+    continuation logic.
+    """
+    # Q12-α continuation chain (issue #478, founder ACK 2026-05-22).
+    # Caller computes these via ``compute_reschedule_continuation``
+    # BEFORE invoking this service. For execute_confirm (fresh sale)
+    # leave at defaults. For execute_reschedule, the reschedule
+    # service is responsible for populating these.
+    is_reschedule_continuation: bool = False
+    chain_break_reason: str | None = None
+    original_booking_event_id: object | None = None  # UUID or None
+    # Q12-α #541 commercial_identity_snapshot is INTENTIONALLY NOT a
+    # field on this dataclass — see #619 + adversarial-pass A6 fix
+    # (2026-05-24). Moved to a private kwarg on
+    # :func:`create_customer_booking` so any future REST/webhook/LLM
+    # binding of CreateBookingInput as a request schema CANNOT forge a
+    # snapshot. Only direct in-process callers (services/reschedule.py
+    # and skills/booking/tools.py) can supply the snapshot.
 
 
 def _occupied_intervals(*, tenant, master, on_date, tz):
@@ -100,10 +124,17 @@ def _occupied_intervals(*, tenant, master, on_date, tz):
     here so the lock window stays short.
     """
 
+    # Match the slot-API filter — CONFIRMED + interim reversible
+    # states still occupy the slot (customer-cancellation-reschedule
+    # spec §2 / 5-sec undo window).
     qs = BookingRequest.all_tenants.filter(
         tenant_id=tenant.id,
         master_id=master.id,
-        status=BookingRequest.Status.CONFIRMED,
+        status__in=(
+            BookingRequest.Status.CONFIRMED,
+            BookingRequest.Status.CANCEL_REQUESTED,
+            BookingRequest.Status.RESCHEDULE_REQUESTED,
+        ),
         visit_at__isnull=False,
         visit_at__date=on_date,
     ).values_list("visit_at", "duration_min")
@@ -127,12 +158,41 @@ def create_customer_booking(
     *,
     inp: CreateBookingInput,
     correlation_id: str | None = None,
+    _commercial_identity_snapshot: CommercialIdentitySnapshot | None = None,
 ) -> BookingRequest:
     """Atomic customer booking creation. Returns the created
     :class:`BookingRequest` or raises :class:`BookingCreateError`.
 
     Caller MUST already be inside the tenant's ``tenant_scope`` OR the
     function will re-enter it from ``inp.tenant``.
+
+    **INTERNAL CONTRACT — Q12-α #619/A6 trust boundary** (2026-05-24).
+
+    ``_commercial_identity_snapshot`` is billing-affecting (controls
+    the comparator behaviour in ``compute_reschedule_continuation``).
+    The leading underscore signals «internal only» — this kwarg MUST
+    ONLY be populated by trusted server-side flows that themselves
+    derive the dict via :func:`build_live_commercial_identity` from a
+    DB-loaded ``CatalogService`` row OR by carrying forward a root
+    row's already-persisted ``commercial_identity_snapshot``.
+
+    Authorised producers as of 2026-05-24:
+
+    * ``apps.booking.services.reschedule.reschedule_customer_booking``
+      (REST reschedule path — carries root.snapshot or live build)
+    * ``apps.skills.booking.tools.execute_reschedule`` (LLM reschedule
+      path — writes via ``BookingRequest.create()`` directly, NOT
+      through this function — included for completeness)
+
+    **NEVER** wire this kwarg to a REST request body, webhook payload,
+    or LLM tool argument. A forged snapshot whose 4 compared fields
+    don't match the live service could bypass the chain-break check
+    and silently mark a fresh sale as a ``reschedule_continuation``
+    (``billable=False``) → revenue leak. Moving the parameter off the
+    dataclass + leading-underscore name + this docstring are the
+    layered defence; if a future external boundary needs to influence
+    the snapshot, add a server-side integrity check BEFORE forwarding
+    it here.
 
     Race ordering inside the transaction
     ------------------------------------
@@ -223,14 +283,34 @@ def create_customer_booking(
             if not any(slot.start == local_visit for slot in free):
                 raise BookingCreateError("slot_unavailable", "slot is no longer available")
 
+            # Q12-α #541 (founder ACK 2026-05-23): snapshot the
+            # service's commercial identity at write time. Reschedule
+            # callers pass the ROOT chain's snapshot through unchanged
+            # via the private ``_commercial_identity_snapshot`` kwarg
+            # (#619/A6 trust boundary 2026-05-24) to preserve the
+            # original sale's commercial truth across the chain. Fresh
+            # sales (None) snapshot from the live ``service`` row.
+            # #618 follow-up: shape lives in
+            # ``attribution.build_live_commercial_identity`` (single
+            # source of truth across all 3 write sites).
+            commercial_identity_snapshot = (
+                _commercial_identity_snapshot
+                if _commercial_identity_snapshot is not None
+                else build_live_commercial_identity(service)
+            )
+
             now_iso = timezone.now().isoformat()
             attribution_metadata = build_customer_attribution_metadata(
                 booking_created_at=now_iso,
                 test_mode=False,
+                created_by=inp.created_by,
             )
             billable, billing_reason = compute_billable(
                 booking_source="ai_direct",
                 status=BookingRequest.Status.CONFIRMED,
+                created_by=inp.created_by,
+                is_reschedule_continuation=inp.is_reschedule_continuation,
+                chain_break_reason=inp.chain_break_reason,
             )
             ai_assist_score = compute_assist_score(booking_source="ai_direct")
 
@@ -252,6 +332,8 @@ def create_customer_booking(
                 billable=billable,
                 billing_reason=billing_reason,
                 attribution_metadata=attribution_metadata,
+                original_booking_event_id=inp.original_booking_event_id,
+                commercial_identity_snapshot=commercial_identity_snapshot,
             )
 
     # Emit AFTER commit so consumers see the row.
@@ -275,6 +357,22 @@ def create_customer_booking(
         booking.visit_at,
         booking.billable,
     )
+
+    # YC push — async, best-effort. Platform = source of truth; YC is
+    # eventual mirror. Task is no-op if tenant has no YClients integration
+    # (features.yclients_integration=false) or master/service lacks YC ids.
+    # Failure modes documented in apps.integrations.yclients.tasks.
+    try:
+        from apps.integrations.yclients.tasks import push_booking_to_yclients
+
+        push_booking_to_yclients.delay(booking_id=str(booking.id))
+    except Exception as exc:  # noqa: BLE001 — never let YC push break booking flow
+        logger.warning(
+            "yclients.push.enqueue_failed booking=%s exc=%s",
+            booking.id,
+            exc,
+        )
+
     return booking
 
 

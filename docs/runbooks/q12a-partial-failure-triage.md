@@ -1,0 +1,185 @@
+# Runbook: Q12-α partial-failure reschedule triage
+
+> Status: **draft**
+> Last exercised: _never (created 2026-05-25)_
+> Target completion sprint: _Phase 0 close / pilot prep_
+> Owner: _on-call ops / W3 stream_
+
+## Purpose
+
+Find and resolve customer-facing reschedule operations that left the
+system in a split-brain state — the YClients booking was cancelled but
+the new BookingRequest was never written to our DB. Customer thinks
+they have an appointment (or doesn't, depending on UI feedback); we
+need to fix this manually.
+
+These tickets are tagged with `q12a_chain_terminator: True` in the
+audit row payload per founder ACK 2026-05-22 decision #4 (issue #478
+close-out).
+
+## Trigger / when to run
+
+- Customer support ticket: «бот меня перенёс, но в YClients ничего нет»
+  / «куда делась моя запись»
+- Daily ops review (T+24h post-flip / once-per-day during pilot)
+- Spike in `booking.reschedule.partial` event rate (eventbus dashboard)
+
+## Prerequisites
+
+- Django Admin access (`/admin/audit/auditlog/`)
+- OR direct Postgres access (production read-replica is sufficient for
+  triage; mutation requires primary)
+- Slack #ops channel handle for status updates
+
+## Procedure
+
+### Option A — admin UI (recommended for routine triage)
+
+1. Open `/admin/audit/auditlog/` in Django Admin.
+2. In the right-hand «Filter» sidebar locate **Q12-α chain terminator**.
+3. Select **«Chain terminators (partial-failure tickets)»**.
+4. The list now shows ONLY audit rows where the partial-failure path
+   fired. Default ordering is `-created_at` (newest first).
+5. For each row needing follow-up, click into the detail view:
+   - `action` should be `booking.reschedule.partial` (or related —
+     widen the prose filter if you see other actions)
+   - `payload` JSON contains `q12a_chain_terminator_reason: "partial_failure"`
+     and the original `record_id` / `new_datetime` / `master_id` /
+     `service_id` needed for manual rebook
+6. Manual rebook via YClients admin → confirm with customer over chat.
+7. Document resolution in incident log if rate is non-zero — feed back
+   into #561 (Prometheus alerting) for proactive future detection.
+
+### Option B — raw SQL (use when admin UI is down OR for batch export)
+
+```sql
+-- Postgres @> containment (uses the GIN index on payload added by
+-- migration audit/0003 — auditlog_payload_gin, USING gin (payload)
+-- with default jsonb_ops opclass; indexes BOTH `?` and `@>`).
+SELECT
+    id,
+    created_at,
+    tenant_id,
+    action,
+    payload->>'old_record_id'           AS old_yc_record_id,
+    payload->>'new_datetime'            AS attempted_new_datetime,
+    payload->>'master_id'               AS master_id,
+    payload->>'service_id'              AS service_id,
+    payload->>'q12a_chain_terminator_reason' AS terminator_reason
+FROM audit_auditlog
+WHERE payload @> '{"q12a_chain_terminator": true}'
+  AND created_at >= NOW() - INTERVAL '7 days'
+ORDER BY created_at DESC
+LIMIT 100;
+```
+
+Alternative if you don't need the partial-failure subset narrowing
+(also works on SQLite for local replication of an issue):
+
+```sql
+SELECT id, created_at, action, payload
+FROM audit_auditlog
+WHERE payload ? 'q12a_chain_terminator'    -- key-presence form
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+The `?` (key-presence) form is what the Django admin filter
+generates — it's backend-portable. The `@>` (containment) form is
+Postgres-specific but safer if writers ever start storing
+`q12a_chain_terminator: False` (today they don't — contract pinned
+in `apps/audit/tests/test_admin_filters.py`).
+
+## Decision branches
+
+- **Zero terminator rows in window** → healthy state, no action.
+- **1-5 rows / week** → expected pilot baseline; manual rebook each,
+  log for trend analysis.
+- **>5 rows / day OR sudden spike** → escalate to W3 / tech-lead:
+  likely a YClients API change or local DB write regression.
+  Cross-reference with `apps.events.services` event-emit error logs
+  for the same window.
+
+## Safe-default signal triage (#561)
+
+Independent of partial-failure (which is a YClients-side / DB-write
+half-failure), Q12-α has a second ops-relevant signal: the
+**«caller forgot to compute continuation» safe-default WARN**.
+
+When `compute_billable` is invoked with `created_by="execute_reschedule"`
+but WITHOUT `is_reschedule_continuation`, the code defaults to
+«billable=True, reason=`reschedule_chain_broken: missing_continuation_signal`»
+to protect revenue (better over-charge once than silently undercharge
+salons). This branch fires a structured WARN log so ops can detect a
+regression where a caller starts systematically forgetting the
+continuation flag.
+
+### Detection
+
+Log grep (any aggregator — journalctl, Loki, ELK):
+
+```sh
+# Last hour, prod log aggregator. NOTE: ai-bot-platform-web is an
+# example unit name — adapt to your deploy (see
+# docs/runbooks/server-deployment.md for actual systemd units).
+journalctl -u ai-bot-platform-web --since "1 hour ago" \
+  | grep "billing.q12a.missing_continuation_signal"
+```
+
+Or structured JSON-log query (Loki/Grafana example):
+
+```logql
+{job="ai-bot-platform"} |~ "billing.q12a.missing_continuation_signal"
+```
+
+### Decision branches
+
+> **Numeric thresholds below are TENTATIVE** — calibrate against
+> actual pilot data after the first 30 days. Pre-pilot we have no
+> baseline; the safe rule is «any sustained non-zero rate warrants a
+> look at the most recent reschedule-path PRs».
+
+- **Zero events in 24h window** → healthy. Every reschedule caller
+  remembers to pass the continuation flag.
+- **Low sustained rate (~1-10/day, tentative)** → likely an admin
+  shell / migration script bypassing the normal call path; verify
+  with `git log` + caller stack in the log message. Not customer-
+  affecting unless the path also writes a billing event.
+- **Spike or sustained higher rate (>10/hour, tentative)** →
+  regression. Cross-reference recent PRs touching
+  `apps/skills/booking/tools.py` or
+  `apps/booking/services/reschedule.py`. The customer-facing impact:
+  each event is one over-billed reschedule for a salon. File a
+  rollback decision if rate is sustained.
+
+### Future: Prometheus counter
+
+Issue #561 tracks the upgrade to a Prometheus counter
+(`billing_q12a_missing_signal_total`) + alert rule for sustained
+non-zero rate. Today the log is the cheap always-on signal. When the
+counter is wired (depends on `apps/observability/` getting a
+`MeterProvider` / `prometheus_client` integration), this section
+will gain a Grafana panel link + alert routing detail.
+
+## Out of scope
+
+- The Q12-α billing semantics — closed in PR #526; the audit row's
+  `q12a_chain_terminator: True` already signals the chain is broken
+  and any subsequent booking by this customer is billable as a fresh
+  sale.
+- Proactive alerting — tracked in #561 (Prometheus
+  `billing_q12a_missing_signal_total` counter + alert rule, deferred
+  until observability infra mature).
+
+## Related
+
+- Issue #530 (admin filter + this runbook seed)
+- Issue #561 (safe-default WARN log + future Prometheus counter)
+- Issue #478 (Q12-α founder ACK)
+- PR #526 (Q12-α core implementation)
+- `apps/skills/booking/tools.py::execute_reschedule` (partial-failure
+  emit site, ~line 1818)
+- `apps/booking/services/attribution.py::compute_billable`
+  (safe-default WARN emit site)
+- `apps/audit/admin.py::Q12aChainTerminatorFilter` (Django Admin
+  filter)

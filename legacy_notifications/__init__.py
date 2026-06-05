@@ -10,8 +10,11 @@
 и не требует ничего от website/payments.
 
 Вызывается из всех endpoint'ов и задач, где создаётся заявка/заказ:
-api_wizard_booking, api_bundle_request, api_certificate_request,
-payments.views.yookassa_webhook, payments.tasks.fulfill_*.
+api_wizard_booking, api_bundle_request, api_certificate_request.
+(Исторически также из ``payments.views.yookassa_webhook`` +
+``payments.tasks.fulfill_*`` — оба удалены в PR #739 #427+#428 при
+переезде YooKassa lifecycle в Ayla djangoproject per ADR-0009
+§Domain ownership.)
 
 - Telegram: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID из окружения
 - Email:    список получателей из SiteSettings.notification_emails

@@ -6,16 +6,15 @@
     <meta name="color-scheme" content="light dark" />
     <title>Помощник студии</title>
     <!--
-      MAX Mini App SDK loader (placeholder URL).
+      MAX Mini App bridge loader.
 
-      Replace the src below with the canonical MAX bridge script once
-      published. The MAX bridge is expected to expose `window.WebApp`
-      (per ux-architect/references/platforms/max-mini-apps.md). Our
-      `src/lib/max-sdk.ts` wrapper falls back to no-ops when the
-      script is missing, so a wrong URL only breaks haptics + closing
-      confirmation + theme — never the auth flow.
+      Per https://dev.max.ru/docs/webapps/bridge — the canonical CDN URL
+      is `https://st.max.ru/js/max-web-app.js`. Exposes `window.WebApp`
+      with `.initData` (HMAC-signed query string) used by
+      `src/lib/max-sdk.ts` for auth. Without this script loaded, the
+      Mini App will fail auth verification.
     -->
-    <script src="https://dev.max.ru/sdk/web-app.js"></script>
+    <script src="https://st.max.ru/js/max-web-app.js"></script>
   </head>
   <body>
     <div id="root"></div>

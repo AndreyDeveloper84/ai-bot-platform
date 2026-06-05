@@ -147,6 +147,97 @@ def _target_status(kind: str) -> str:
     return BookingReminder.Status.SENT
 
 
+# ── Send-time booking-state re-check (P0 PRE_PILOT, founder sequence #2) ──
+#
+# Between the moment a reminder is scheduled (T-24h or T-2h before visit)
+# and the moment the beat dispatcher claims it, the underlying booking
+# may have flipped state — customer cancelled via B5, admin rescheduled,
+# visit already happened. Sending in those states = «Ayla напомнила о
+# записи которую я отменила» = trust break.
+#
+# This helper re-fetches the linked ``BookingRequest`` mirror at dispatch
+# time and classifies the action к take:
+#
+#   * **send** — booking still CONFIRMED + not completed; proceed normally.
+#   * **drop** — booking moved к a terminal-invalid state. Reminder
+#                transitions к ``STALE_DROPPED`` (audit trail), no send.
+#   * **defer** — booking is in an interim reversible state
+#                 (CANCEL_REQUESTED / RESCHEDULE_REQUESTED within undo
+#                 window). Skip THIS tick без CAS; next 15-min tick
+#                 re-checks. Avoids the «user un-cancels but reminder
+#                 already dropped» edge case.
+#
+# Action constants live as plain strings (no Enum) — minimum surface for a
+# 3-state classifier; callers branch on equality directly.
+_ACTION_SEND = "send"
+_ACTION_DROP = "drop"
+_ACTION_DEFER = "defer"
+
+
+def _recheck_booking_state(reminder: BookingReminder) -> tuple[str, str]:
+    """Classify the dispatch action for ``reminder`` based on current
+    booking state. See module-level rationale block above for verbatim
+    state-mapping table.
+
+    Returns:
+      A ``(action, reason)`` pair. ``reason`` is a stable slug suitable
+      для audit payload / log line correlation. Caller chooses what к
+      do based on ``action``.
+
+    ### NULL FK / Ayla-path handling
+
+    ``BookingReminder.booking_request`` may be NULL для:
+
+      * Legacy rows pre-B5 (B5 introduced ``BookingRequest.status``
+        enum and the FK on the reminder).
+      * Ayla-path rows that link via ``ayla_appointment_id`` instead.
+
+    Both cases return ``(send, "null_fk_legacy_or_ayla_path")`` — known
+    Phase 0 gap. Ayla-path stale detection lands в Phase 1 (Ayla emits
+    ``appointment.cancelled`` event → bot-platform consumer pre-emptively
+    drops the reminder). Documented prominently в PR description.
+    """
+    booking_request = reminder.booking_request
+    if booking_request is None:
+        # NULL FK = legacy row OR Ayla-path. Pilot-scope gap.
+        return (_ACTION_SEND, "null_fk_legacy_or_ayla_path")
+
+    # Completed visit — T-2h reminder for already-happened appointment
+    # is absurd; T-24h race window technically impossible (visit_at < 24h
+    # away can't be completed yet) but defensive check costs nothing.
+    if booking_request.completed_at is not None:
+        return (_ACTION_DROP, "booking_completed")
+
+    # Import locally to avoid module-import cycle с apps.booking.models
+    # (which may reach back into bookings via signals).
+    from apps.booking.models import BookingRequest
+
+    status = booking_request.status
+    if status in (
+        BookingRequest.Status.CANCELLED,
+        BookingRequest.Status.RESCHEDULED,
+    ):
+        return (_ACTION_DROP, f"booking_status_{status}")
+
+    if status in (
+        BookingRequest.Status.CANCEL_REQUESTED,
+        BookingRequest.Status.RESCHEDULE_REQUESTED,
+    ):
+        # Interim reversible state (~5s undo window per booking spec).
+        # Defer без CAS so user can revert and still receive reminder.
+        return (_ACTION_DEFER, f"booking_status_{status}")
+
+    if status == BookingRequest.Status.CONFIRMED:
+        return (_ACTION_SEND, "booking_confirmed")
+
+    # Unknown / future status (mirror may receive new Ayla state slugs
+    # before this code learns about them — e.g. ``provider_cancelled``,
+    # ``no_show``, ``dispute`` arrive в Phase 1). Conservative default:
+    # defer + log. Better к miss a few reminders one tick than send for
+    # a state we don't understand.
+    return (_ACTION_DEFER, f"booking_status_unknown_{status}")
+
+
 @shared_task(name="bookings.send_due_reminders")
 def send_due_reminders() -> dict[str, int]:
     """Dispatch every reminder whose ``scheduled_at`` has passed.
@@ -169,8 +260,15 @@ def send_due_reminders() -> dict[str, int]:
     5. On send failure: catch, flip to FAILED, audit. Don't requeue —
        see module docstring.
 
-    Returns a dict ``{"sent": int, "failed": int, "skipped": int}``
+    Returns a dict
+    ``{"sent": int, "failed": int, "skipped": int, "stale": int, "deferred": int}``
     for telemetry / test visibility.
+
+    ``stale`` counts reminders dropped at dispatch because the underlying
+    booking changed state (P0 PRE_PILOT send-time re-check invariant).
+    ``deferred`` counts rows left PENDING because booking is in an
+    interim reversible state (CANCEL_REQUESTED / RESCHEDULE_REQUESTED) —
+    the next 15-min tick re-checks.
     """
     now = timezone.now()
     due_qs = (
@@ -178,14 +276,81 @@ def send_due_reminders() -> dict[str, int]:
             status=BookingReminder.Status.PENDING,
             scheduled_at__lte=now,
         )
-        .select_related("tenant", "bot_user")
+        .select_related("tenant", "bot_user", "booking_request")
         .order_by("scheduled_at")[:BATCH_LIMIT]
     )
 
     sent = 0
     failed = 0
     skipped = 0
+    stale = 0
+    deferred = 0
     for row in due_qs:
+        # Send-time re-check invariant (P0 PRE_PILOT). See
+        # ``_recheck_booking_state`` docstring + module-level rationale
+        # block above the helper для full state-mapping table.
+        action, reason = _recheck_booking_state(row)
+        if action == _ACTION_DEFER:
+            # Interim reversible state OR unknown status. Don't touch
+            # the row — leave PENDING for next 15-min tick. No CAS, no
+            # send, no audit (defer is normal flow, not a finding).
+            logger.info(
+                "bookings.dispatch.deferred pk=%s kind=%s reason=%s",
+                row.pk,
+                row.kind,
+                reason,
+            )
+            deferred += 1
+            continue
+        if action == _ACTION_DROP:
+            # Booking became invalid между schedule + dispatch. CAS PENDING
+            # → STALE_DROPPED. Loser of the race silently skips.
+            rowcount = BookingReminder.all_tenants.filter(
+                pk=row.pk,
+                status=BookingReminder.Status.PENDING,
+            ).update(status=BookingReminder.Status.STALE_DROPPED)
+            if rowcount == 0:
+                logger.info(
+                    "bookings.dispatch.race_lost_on_stale pk=%s kind=%s",
+                    row.pk,
+                    row.kind,
+                )
+                skipped += 1
+                continue
+            logger.info(
+                "bookings.dispatch.stale_dropped pk=%s kind=%s reason=%s",
+                row.pk,
+                row.kind,
+                reason,
+            )
+            # Audit is forensic best-effort here — row already CAS'd к
+            # STALE_DROPPED, status enum carries the signal. If audit
+            # raises (DB blip / payload-validation glitch), don't kill
+            # the batch loop. CR #851 suggestion #6 hardening.
+            try:
+                write_audit(
+                    action="bookings.reminder.stale_dropped",
+                    target="BookingReminder",
+                    target_id=row.pk,
+                    payload={
+                        "kind": row.kind,
+                        "yclients_record_id": row.yclients_record_id,
+                        "reason": reason,
+                        "booking_request_id": (
+                            str(row.booking_request_id) if row.booking_request_id else None
+                        ),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "bookings.dispatch.stale_audit_failed pk=%s reason=%s",
+                    row.pk,
+                    reason,
+                )
+            stale += 1
+            continue
+
+        # action == _ACTION_SEND — normal dispatch path.
         target_status = _target_status(row.kind)
         # Compare-and-set: only proceed if we are the first to claim
         # this row. .update() returns the affected rowcount; 0 means
@@ -271,11 +436,156 @@ def send_due_reminders() -> dict[str, int]:
         )
         sent += 1
 
-    if sent or failed or skipped:
+    if sent or failed or skipped or stale or deferred:
         logger.info(
-            "bookings.dispatch.summary sent=%d failed=%d skipped=%d",
+            "bookings.dispatch.summary sent=%d failed=%d skipped=%d stale=%d deferred=%d",
             sent,
             failed,
             skipped,
+            stale,
+            deferred,
         )
-    return {"sent": sent, "failed": failed, "skipped": skipped}
+    return {
+        "sent": sent,
+        "failed": failed,
+        "skipped": skipped,
+        "stale": stale,
+        "deferred": deferred,
+    }
+
+
+# ─── booking.completed producer ───────────────────────────────────────────
+# Phase 2.3 — emits taxonomy §3.1 booking.completed when the periodic scan
+# finds a confirmed booking whose visit time has passed. Without this
+# producer LoyaltySubscriber (apps/loyalty, Phase 1.a) has nothing to
+# subscribe to. YClients webhook port (Q-ATT-IMPL7) will be the more
+# accurate signal later; this scan is the unblocking MVP until then.
+
+# Buffer after visit_at + duration_min before we declare the visit done.
+# 30 min covers «service overran» without delaying loyalty point credit
+# unreasonably. Tunable via monkeypatch in tests.
+COMPLETED_GRACE_MINUTES = 30
+# Soft cap on rows per tick. Catches up over multiple ticks if backlog
+# accumulates (post-outage). Same defensive pattern as BATCH_LIMIT above.
+COMPLETED_BATCH_LIMIT = 200
+
+
+@shared_task(name="bookings.detect_completed_bookings")
+def detect_completed_bookings() -> dict[str, int]:
+    """Scan CONFIRMED bookings whose visit time has passed; emit
+    ``booking.completed`` and stamp ``completed_at`` exactly once each.
+
+    Returns:
+      Counters: ``{scanned, emitted, raced}``.
+      - ``scanned``: rows matched the time predicate
+      - ``emitted``: rows where this worker won the CAS and emitted
+      - ``raced``: rows another worker had already stamped (lost the CAS)
+
+    ### Race-safety
+
+    The CAS on ``completed_at IS NULL`` is the «exactly-once emit»
+    guarantee. Two workers hitting the same row do an UPDATE; only one
+    rowcount comes back 1. The winning worker emits to eventbus; the
+    losing worker's rowcount=0 path is silent.
+
+    ### Tenant-less query intentional
+
+    We use ``BookingRequest.all_tenants`` and rely on the eventbus emit
+    to carry ``tenant`` from the row itself. The task itself runs from
+    system context (Celery beat — no request, no current_tenant).
+
+    ### Why a Celery task, not a model signal
+
+    Visit completion is a *temporal* event («the clock ran out»), not a
+    data-mutation event. Nothing in the booking record actually changes
+    at completion time. Signal-based detection would require either a
+    polling sentinel or a stored timer; the Celery beat IS the timer.
+    """
+
+    from apps.booking.models import BookingRequest
+    from apps.eventbus import services as eventbus_services
+
+    now = timezone.now()
+    # Coalesce duration_min (NULL means «unknown, assume 60»). Apply the
+    # buffer at query time so we don't pull millions of just-finished rows.
+    from datetime import timedelta
+
+    default_duration_min = 60
+
+    candidates = list(
+        BookingRequest.all_tenants.filter(
+            status=BookingRequest.Status.CONFIRMED,
+            completed_at__isnull=True,
+            visit_at__isnull=False,
+            visit_at__lte=now - timedelta(minutes=COMPLETED_GRACE_MINUTES),
+        ).order_by("visit_at")[:COMPLETED_BATCH_LIMIT]
+    )
+
+    counters = {"scanned": 0, "emitted": 0, "raced": 0, "emit_failed": 0}
+
+    for booking in candidates:
+        duration = booking.duration_min or default_duration_min
+        # Per-row recheck: visit_at + duration + grace ≤ now. The query-
+        # level filter is `visit_at + grace`, conservative without
+        # duration. Filter out rows where the duration pushes completion
+        # into the future.
+        #
+        # ``visit_at`` is guaranteed non-NULL by the query filter
+        # (visit_at__isnull=False) — assert for mypy and as a defensive
+        # invariant against future filter drift.
+        assert booking.visit_at is not None
+        if booking.visit_at + timedelta(minutes=duration + COMPLETED_GRACE_MINUTES) > now:
+            continue
+
+        counters["scanned"] += 1
+
+        # CAS: win the right to emit. WHERE completed_at IS NULL guards
+        # against two workers stamping the same row twice.
+        rowcount = BookingRequest.all_tenants.filter(
+            pk=booking.pk,
+            completed_at__isnull=True,
+            status=BookingRequest.Status.CONFIRMED,
+        ).update(completed_at=now)
+        if rowcount == 0:
+            counters["raced"] += 1
+            continue
+
+        try:
+            eventbus_services.emit(
+                "booking.completed",
+                {
+                    "booking_id": str(booking.pk),
+                    "completed_at": now.isoformat(),
+                    # «marked_by=system» because no human/yclients signal
+                    # triggered completion — the Celery scanner detected it.
+                    # When Q-ATT-IMPL7 lands, YClients webhook becomes the
+                    # producer for status-driven completion with
+                    # marked_by=external.
+                    "marked_by": "system",
+                },
+                actor_type="system",
+                tenant=booking.tenant,
+            )
+            counters["emitted"] += 1
+        except Exception:  # noqa: BLE001 — emit failure should NOT block other rows
+            logger.exception(
+                "bookings.detect_completed.emit_failed booking=%s",
+                booking.pk,
+            )
+            # Roll back the completed_at stamp so the next tick retries.
+            BookingRequest.all_tenants.filter(pk=booking.pk).update(completed_at=None)
+            # Telemetry: track emit-failure separately. Earlier code
+            # decremented `scanned` on rollback which lied about work
+            # done — ops dashboards now see {scanned, emitted, raced,
+            # emit_failed} where scanned == emitted + raced + emit_failed.
+            counters["emit_failed"] += 1
+
+    if counters["emitted"] or counters["raced"] or counters["emit_failed"]:
+        logger.info(
+            "bookings.detect_completed.summary scanned=%d emitted=%d raced=%d emit_failed=%d",
+            counters["scanned"],
+            counters["emitted"],
+            counters["raced"],
+            counters["emit_failed"],
+        )
+    return counters

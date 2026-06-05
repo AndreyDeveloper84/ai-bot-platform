@@ -166,15 +166,27 @@ def consume_pending(token: UUID) -> PendingActionLookup:
         logger.info("bookings.pending.already_consumed token=%s", token)
         return PendingActionLookup(row=row, already_consumed=True)
 
+    # Bookings/callbacks retro #1: include ``expires_at__gt=now`` in the
+    # CAS filter. The Python-side check at line 157 reads an un-locked
+    # snapshot; a token whose ``expires_at`` ticks past ``now`` between
+    # that read and this UPDATE would otherwise be claimed despite being
+    # expired. Mirrors the well-formed filter in ``discard_pending``.
     rowcount = PendingBookingAction.all_tenants.filter(
         pk=token,
         consumed_at__isnull=True,
+        expires_at__gt=now,
     ).update(consumed_at=now)
     if rowcount == 0:
-        # Race lost to a concurrent tap — re-fetch to surface the
-        # already-consumed flag rather than the in-memory stale copy.
+        # CAS lost — could be either of two states; refresh and
+        # disambiguate so the caller renders the right reply. Check
+        # ``consumed_at`` BEFORE expiry: if both happened in quick
+        # succession (consume won by another tap, then expiry ticked
+        # past during our refresh), the user-facing truth is «another
+        # tap handled it» rather than «too much time passed».
         row.refresh_from_db()
-        return PendingActionLookup(row=row, already_consumed=True)
+        if row.consumed_at is not None:
+            return PendingActionLookup(row=row, already_consumed=True)
+        return PendingActionLookup(row=row, expired=True)
 
     # We claimed it. Re-fetch to return the current row state with
     # consumed_at populated (callers may read it for audit).

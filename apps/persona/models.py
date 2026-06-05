@@ -109,6 +109,20 @@ class BrandVoiceConfig(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Tenancy system-check opt-out (tenancy.W900 / W901). Load-bearing
+    # reason: ops/admin paths query this from outside any tenant_scope
+    # (management commands listing per-tenant brand configs cross-
+    # tenant, batch warm-up of the voice cache during deploy, etc.).
+    # Auto-scoping by current_tenant() would return empty for those
+    # paths in audit mode and raise in strict mode.
+    #
+    # Structural note: the OneToOne with Tenant (line 48) enforces
+    # «exactly one row per tenant» at the DB layer — this is a
+    # uniqueness invariant, NOT read-scoping. ``load_voice`` and other
+    # request-path callers pass ``tenant=tenant`` explicitly in .get(),
+    # which is the lookup contract.
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
     class Meta:
         verbose_name = "Brand voice configuration"
         verbose_name_plural = "Brand voice configurations"

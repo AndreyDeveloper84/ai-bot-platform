@@ -415,3 +415,88 @@ class TestPhoneNormalisation:
             assert resp.status_code == 200
             assert resp.json()["status"] == "created", incoming
             assert BookingReminder.all_tenants.count() == 2, incoming
+
+
+# ---------------------------------------------------------------------------
+# YClients retro B4 — phone-match ambiguity is deterministic + audited
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB4PhoneAmbiguity:
+    """Pre-fix ``_find_bot_user`` returned ``BotUser.objects.filter(
+    phone__contains=last10).first()`` — non-deterministic on multi-match.
+    Two BotUsers in the same tenant sharing their last 10 phone digits
+    (e.g. ``+79991234567`` and ``89991234567``) would silently link a
+    new booking to whichever Django returned first.
+
+    Post-fix: order by ``-first_seen``, most-recent registration wins,
+    AND an audit row is written so ops can spot the collision.
+    """
+
+    def test_phone_collision_deterministic_and_audited(
+        self,
+        client: Client,
+        tenant: Tenant,
+    ) -> None:
+        # Build two BotUsers in the same tenant whose phones share the
+        # last 10 digits — exact mixed-format reality the docstring
+        # acknowledges.
+        old_bu = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="user-old",
+            chat_id="chat-old",
+            phone="+79991234567",
+            client_name="Anna-old",
+        )
+        # Sleep-free way to force a deterministic ordering: write directly.
+        import datetime as dt
+
+        BotUser.all_tenants.filter(pk=old_bu.pk).update(
+            first_seen=dt.datetime(2024, 1, 1, tzinfo=dt.UTC)
+        )
+        new_bu = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="user-new",
+            chat_id="chat-new",
+            phone="89991234567",  # Same last 10 digits, different format.
+            client_name="Anna-new",
+        )
+        BotUser.all_tenants.filter(pk=new_bu.pk).update(
+            first_seen=dt.datetime(2026, 5, 1, tzinfo=dt.UTC)
+        )
+
+        with patch("apps.integrations.yclients.webhooks.emit"):
+            resp = _post(
+                client,
+                _payload_create(yc_id=77777, phone="+79991234567"),
+            )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "created"
+
+        # Booking linked to the MORE RECENT BotUser deterministically.
+        booking = BookingRequest.all_tenants.get(comment__contains="yclients_record_id=77777")
+        assert booking.bot_user_id == new_bu.pk
+
+        # And an ambiguity audit row was written.
+        ambiguity_audits = [a for a in _audit_actions() if "phone_match_ambiguous" in a]
+        assert len(ambiguity_audits) == 1, (
+            f"expected exactly one phone_match_ambiguous audit row, got: {_audit_actions()}"
+        )
+
+    def test_single_match_no_ambiguity_audit(
+        self,
+        client: Client,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        # Single match — no audit row (negative regression).
+        with patch("apps.integrations.yclients.webhooks.emit"):
+            resp = _post(
+                client,
+                _payload_create(yc_id=88888, phone="+79991234567"),
+            )
+        assert resp.status_code == 200
+        ambiguity_audits = [a for a in _audit_actions() if "phone_match_ambiguous" in a]
+        assert len(ambiguity_audits) == 0

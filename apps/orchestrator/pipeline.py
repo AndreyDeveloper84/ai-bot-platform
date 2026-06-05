@@ -51,13 +51,21 @@ sub-budget — covered by G4 latency SLO test (DRF-553).
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 
+from apps.llm.pii_tokenizer import (
+    _enter_scope_unsafe as _pii_enter,
+    _exit_scope_unsafe as _pii_exit,
+)
+from apps.observability.ai_metrics import record_ai_request
+from apps.observability.models import AIRequestMetric
 from apps.orchestrator.composer import ComposedReply, compose
 from apps.orchestrator.intent_router import IntentDecision, classify
 from apps.orchestrator.memory.coordinator import MemorySnapshot, load_snapshot
@@ -149,6 +157,160 @@ _FALLBACK_CLARIFY = (
 )
 _FALLBACK_HANDOFF = "Передаю менеджеру — ответят в течение 30 минут."
 _FALLBACK_ERROR = "Извините, что-то пошло не так. Попробуйте позже или напишите «оператор»."
+
+
+def _confidence_floor_reason(skill_result: Any) -> str:
+    """Return a diagnostic reason slug when skill's confidence is below
+    the configured threshold; empty string otherwise.
+
+    Tier-A #4 (P1 PRE_PILOT, 2026-05-27 — founder
+    pilot_scope_discipline #5). Pipeline-level defense-in-depth: if
+    skill returned a numeric confidence < threshold AND didn't set
+    ``should_handoff=True`` itself, step 10.5 escalates к human
+    operator automatically.
+
+    Per-skill threshold via ``settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD``
+    dict (``{"faq": 0.5, ...}``); falls back к global
+    ``settings.AI_CONFIDENCE_HANDOFF_THRESHOLD`` when skill not listed.
+    Explicit ``None`` value в the dict disables enforcement для that
+    skill (skill remains owning the decision).
+
+    ``confidence=None`` на result (Sprint 3 deterministic skills /
+    error-path branches) → no enforcement, return "".
+
+    Skill name is extracted from ``meta["skill"]`` (preferred — FAQ
+    sets this explicitly) или fallback к ``action_type`` так дispatcher
+    doesn't expose the skill instance. Empty name → only global default
+    applies.
+
+    Diagnostic format (per tech-lead verdict 2026-05-27, Q4 trace
+    preservation): ``pipeline_confidence_floor(confidence=0.32, threshold=0.50)``.
+    AdminTask.reason concatenates this с skill's own reason если
+    ``should_handoff=True`` already.
+    """
+    confidence = getattr(skill_result, "confidence", None)
+    if confidence is None:
+        return ""
+
+    meta = getattr(skill_result, "meta", {}) or {}
+    skill_name = meta.get("skill") or getattr(skill_result, "action_type", "") or ""
+
+    per_skill = getattr(settings, "SKILL_CONFIDENCE_HANDOFF_THRESHOLD", {}) or {}
+    if skill_name in per_skill:
+        threshold = per_skill[skill_name]
+        if threshold is None:
+            # Explicit disable для this skill.
+            return ""
+    else:
+        threshold = getattr(settings, "AI_CONFIDENCE_HANDOFF_THRESHOLD", 0.5)
+
+    try:
+        threshold_f = float(threshold)
+    except (TypeError, ValueError):
+        return ""
+
+    if confidence >= threshold_f:
+        return ""
+
+    return f"pipeline_confidence_floor(confidence={confidence:.2f}, threshold={threshold_f:.2f})"
+
+
+def _safe_emit_ai_request_metric(
+    *,
+    tenant: Tenant,
+    trace_id: str,
+    t_start: float,
+    message_text_length: int,
+    outcome: str,
+    bot_user: Any = None,
+    conversation: Any = None,
+    intent_decision: Any = None,
+    skill_result: Any = None,
+    fallback_triggered: bool = False,
+) -> None:
+    """Tier-A #3 Q6 BUNDLE (founder + tech-lead 2026-05-29) — emit one
+    ``AIRequestMetric`` row per pipeline turn at every terminal return.
+
+    Wraps :func:`record_ai_request` in a broad ``try/except``: observability
+    emission MUST NOT crash the user-facing pipeline. A failure here logs
+    WARN with ``trace_id`` + ``outcome`` so ops can correlate later.
+
+    ``intent_decision`` and ``skill_result`` are best-effort enrichment:
+    callers at early returns (BLOCK / CLARIFY / pre-skill HANDOFF) pass
+    only ``intent_decision``; post-skill paths pass both so ``skill_selected``
+    prefers ``skill_result.meta['skill']`` over the classifier's hint.
+
+    All keyword-only so call sites self-document at the 8+ terminal returns.
+    """
+    try:
+        latency_total_ms = int((time.monotonic() - t_start) * 1000)
+
+        try:
+            request_uuid = uuid.UUID(trace_id)
+        except (ValueError, TypeError, AttributeError):
+            # Tier-A #3 adversarial CRIT-2 (2026-05-31) — preserve
+            # correlation between log lines (which carry the raw
+            # ``trace_id`` string) and the ``AIRequestMetric.request_id``
+            # column (UUID). A random ``uuid4()`` would silently
+            # disconnect ops grep paths: searching logs for trace_id X
+            # would find the WARN line but no metric row.
+            #
+            # Use ``uuid5(NAMESPACE_DNS, trace_id)`` so the same string
+            # trace_id always hashes to the same UUID. The fallback is
+            # deterministic and reversible enough that ops can derive
+            # the metric UUID from the trace_id string when forensic-
+            # tracing an incident.
+            #
+            # WARN loudly — any non-UUID trace_id is an upstream channel-
+            # adapter contract violation that should be fixed at the
+            # ingress (apps/channels/<channel>/inbound.py) by setting a
+            # proper UUID7 / UUID4 string.
+            logger.warning(
+                "pipeline.ai_metric_trace_id_not_uuid trace_id=%r outcome=%s — "
+                "using deterministic uuid5 fallback (fix upstream channel adapter)",
+                trace_id,
+                outcome,
+            )
+            request_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, str(trace_id) if trace_id else "pipeline-no-trace"
+            )
+
+        intent_label = ""
+        intent_confidence: float | None = None
+        skill_label = ""
+        if intent_decision is not None:
+            intent_label = getattr(intent_decision, "intent", "") or ""
+            raw_conf = getattr(intent_decision, "confidence", None)
+            if isinstance(raw_conf, (int, float)):
+                intent_confidence = float(raw_conf)
+            skill_label = getattr(intent_decision, "skill", "") or ""
+        if skill_result is not None:
+            meta = getattr(skill_result, "meta", {}) or {}
+            skill_label = (
+                meta.get("skill") or getattr(skill_result, "action_type", "") or skill_label
+            )
+
+        record_ai_request(
+            tenant=tenant,
+            bot_user=bot_user,
+            conversation=conversation,
+            request_id=request_uuid,
+            message_text_length=message_text_length,
+            intent_classified=intent_label,
+            intent_confidence=intent_confidence,
+            skill_selected=skill_label,
+            fallback_triggered=fallback_triggered,
+            latency_total_ms=latency_total_ms,
+            outcome=outcome,
+        )
+    except Exception as emit_exc:  # noqa: BLE001 — observability never crashes the turn
+        logger.warning(
+            "pipeline.ai_metric_emit_failed trace_id=%s outcome=%s err=%s",
+            trace_id,
+            outcome,
+            emit_exc,
+        )
+
 
 # Phase 1 / PI9 (DRF-860) — daily LLM cost-cap exhausted. Static Russian
 # fallback served when apps.llm.cost_tracker.TenantQuotaExceeded bubbles
@@ -258,6 +420,16 @@ async def turn(message: ChannelMessage) -> TurnResult:
     """
 
     trace_id = message.trace_id or str(uuid.uuid4())
+    # Tier-A #3 Q6 BUNDLE — wall-clock start captured ONCE at the outermost
+    # turn() entry so every terminal return (8+ short-circuit branches +
+    # outer LLM fallbacks + unhandled-except) reports a coherent
+    # ``latency_total_ms`` against the same baseline.
+    t_start = time.monotonic()
+    message_text_length = len(message.text or "")
+    # Declared up-front so the outer ``except`` can guard ``tenant is not None``
+    # before emitting (a failure in ``_resolve_tenant`` itself would otherwise
+    # leave the name unbound).
+    tenant: Tenant | None = None
 
     with _root_span(message, trace_id) as span:
         try:
@@ -267,6 +439,8 @@ async def turn(message: ChannelMessage) -> TurnResult:
             if tenant is None:
                 if span is not None:
                     span.set_attribute("short_circuit_step", 1)
+                # Cannot emit AIRequestMetric — tenant FK is PROTECT and
+                # unknown_tenant means there is no tenant row to attribute to.
                 return _error_result(trace_id, "unknown_tenant", step=1)
 
             if span is not None:
@@ -277,7 +451,14 @@ async def turn(message: ChannelMessage) -> TurnResult:
             from apps.llm.retry import RetriableLLMError
 
             try:
-                return await _run_under_tenant(message, tenant, trace_id, span=span)
+                return await _run_under_tenant(
+                    message,
+                    tenant,
+                    trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    span=span,
+                )
             except TenantQuotaExceeded as quota_exc:
                 # Phase 1 / PI9 (DRF-860) — graceful fallback when the
                 # per-tenant daily token or cost cap is exhausted. Any
@@ -300,6 +481,14 @@ async def turn(message: ChannelMessage) -> TurnResult:
                     span.set_attribute("tenant_quota_cap", str(getattr(quota_exc, "which_cap", "")))
                 await sync_to_async(_write_quota_fallback_audit, thread_sensitive=False)(
                     trace_id=trace_id, quota_exc=quota_exc
+                )
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                    fallback_triggered=True,
                 )
                 return TurnResult(
                     ok=True,
@@ -334,6 +523,13 @@ async def turn(message: ChannelMessage) -> TurnResult:
                 await sync_to_async(_send_retry_exhausted_alert, thread_sensitive=False)(
                     tenant=tenant, retry_exc=retry_exc
                 )
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    outcome=AIRequestMetric.OUTCOME_ERROR,
+                )
                 return TurnResult(
                     ok=True,
                     trace_id=trace_id,
@@ -354,6 +550,14 @@ async def turn(message: ChannelMessage) -> TurnResult:
             # tenant resolution might have succeeded.
             _sentry_capture_pipeline_error(exc, trace_id, message)
             await sync_to_async(_emit_pipeline_error, thread_sensitive=False)(trace_id, str(exc))
+            if tenant is not None:
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    outcome=AIRequestMetric.OUTCOME_ERROR,
+                )
             return _error_result(trace_id, f"unhandled: {exc}", step=0)
 
 
@@ -362,9 +566,17 @@ async def _run_under_tenant(
     tenant: Tenant,
     trace_id: str,
     *,
+    t_start: float,
+    message_text_length: int,
     span: Any = None,
 ) -> TurnResult:
-    """Steps 2-19. Entered after tenant_scope is established."""
+    """Steps 2-19. Entered after tenant_scope is established.
+
+    ``t_start`` and ``message_text_length`` are threaded in от outermost
+    ``turn()`` so each terminal return calls
+    :func:`_safe_emit_ai_request_metric` against a single coherent timing
+    baseline (Tier-A #3 Q6 BUNDLE).
+    """
 
     # Sprint 8 / S2 (DRF-717) — shadow-mode early decision. Per-message
     # `is_shadow` (from the X-Shadow edge header, N2) OR the per-tenant
@@ -389,216 +601,359 @@ async def _run_under_tenant(
         with _step_event(span, "resolve_conversation"):
             conversation = await sync_to_async(_resolve_conversation)(bot_user, is_shadow=is_shadow)
 
-        # --- Step 4: save user Message ---
-        with _step_event(span, "save_user_message"):
-            await sync_to_async(_save_user_message)(conversation, message.text, trace_id)
-
-        # --- Step 5: load memory snapshot ---
-        with _step_event(span, "load_memory"):
-            memory_snapshot = await sync_to_async(load_snapshot)(conversation)
-
-        # --- Step 6: intent classification ---
-        with _step_event(span, "intent_classify"):
-            intent_decision = await classify(
-                message.text,
-                memory_snapshot=_memory_to_dict(memory_snapshot),
-                brand_voice=None,  # Sprint 6 doesn't read BrandVoiceConfig here; Sprint 7+
-            )
-            if span is not None and intent_decision is not None:
-                span.set_attribute("intent", getattr(intent_decision, "intent", "") or "")
-                span.set_attribute("skill", getattr(intent_decision, "skill", "") or "")
-
-        # --- Step 7: safety pre-check ---
-        with _step_event(span, "pre_check"):
-            pre_result = pre_check(message.text, intent_decision=intent_decision)
-            if span is not None:
-                span.set_attribute("pre_check_verdict", pre_result.verdict.value)
-
-        # --- Step 8: blocked / clarify short-circuit ---
-        if pre_result.verdict == SafetyVerdict.BLOCK:
-            reply = await sync_to_async(_canned_reply)(_FALLBACK_BLOCK)
-            await sync_to_async(_save_assistant)(conversation, reply.text, "block", trace_id)
-            return TurnResult(
-                ok=True,
-                trace_id=trace_id,
-                reply=reply,
-                intent=intent_decision,
-                pre_check_verdict=pre_result.verdict.value,
-                short_circuited_at_step=8,
-            )
-
-        if pre_result.verdict == SafetyVerdict.CLARIFY:
-            reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
-            await sync_to_async(_save_assistant)(conversation, reply.text, "clarify", trace_id)
-            return TurnResult(
-                ok=True,
-                trace_id=trace_id,
-                reply=reply,
-                intent=intent_decision,
-                pre_check_verdict=pre_result.verdict.value,
-                short_circuited_at_step=8,
-            )
-
-        # --- Step 9: handoff ---
-        if pre_result.verdict == SafetyVerdict.HANDOFF:
-            await sync_to_async(_create_handoff)(
-                conversation, reason=pre_result.reason or "pre_check_handoff"
-            )
-            reply = await sync_to_async(_canned_reply)(_FALLBACK_HANDOFF)
-            await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
-            return TurnResult(
-                ok=True,
-                trace_id=trace_id,
-                reply=reply,
-                intent=intent_decision,
-                pre_check_verdict=pre_result.verdict.value,
-                short_circuited_at_step=9,
-            )
-
-        # --- Step 10: skill dispatch ---
-        with _step_event(span, "skill_dispatch"):
-            skill_result = await sync_to_async(_dispatch_skill)(
-                conversation, bot_user, message.text, trace_id, intent_decision
-            )
-            if span is not None and skill_result is not None:
-                span.set_attribute(
-                    "skill.action_type", getattr(skill_result, "action_type", "") or ""
-                )
-        if skill_result is None:
-            # No skill matched + no echo fallback hit — pipeline fallback.
-            reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
-            await sync_to_async(_save_assistant)(conversation, reply.text, "no_skill", trace_id)
-            return TurnResult(
-                ok=False,
-                trace_id=trace_id,
-                reply=reply,
-                intent=intent_decision,
-                pre_check_verdict=pre_result.verdict.value,
-                error="no_skill_matched",
-                short_circuited_at_step=10,
-            )
-
-        # --- Step 10.5: post-skill handoff (Sprint 7 / O2 / DRF-556) ---
-        # A KB-driven skill (e.g. FAQ on a low-confidence retrieval) can
-        # request handoff AFTER running. Sprint 6 only had pre-skill
-        # handoff at step 9 via SafetyVerdict.HANDOFF; this branch is the
-        # post-dispatch counterpart. We reuse _create_handoff (same one
-        # step 9 uses) so a single AdminTask flow handles both pre- and
-        # post-skill cases.
+        # ─── #842 PII tokenization scope (152-ФЗ §6 compliance) ─────
+        # Activate AFTER conversation is resolved (token format
+        # `<CAT_NONCE_INDEX>` is keyed by conversation.id) and BEFORE
+        # ANY step that could route user text to an external LLM
+        # vendor — step 6 intent classifier, step 10 skill dispatch,
+        # any future LLM-touching step.
         #
-        # The skill MAY have set its own ``reply_text`` (a softer
-        # "переключаю на менеджера…" line); we honour it when non-empty
-        # and fall back to the canned _FALLBACK_HANDOFF when blank.
-        if skill_result.should_handoff:
-            reason = skill_result.handoff_reason or "skill_requested_handoff"
-            await sync_to_async(_create_handoff)(conversation, reason=reason)
-            handoff_text = skill_result.reply_text or _FALLBACK_HANDOFF
-            reply = await sync_to_async(_canned_reply)(handoff_text)
-            await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
-            return TurnResult(
-                ok=True,
-                trace_id=trace_id,
-                reply=reply,
-                intent=intent_decision,
-                pre_check_verdict=pre_result.verdict.value,
-                short_circuited_at_step=10.5,
-            )
-
-        # --- Step 11: tool invocation (Phase 0: skills don't emit tool_calls) ---
-        # Reserved for Sprint 7+ when skills start emitting tool_calls_made.
-
-        # --- Step 12: safety post-check ---
-        with _step_event(span, "post_check"):
-            post_result = post_check(getattr(skill_result, "reply_text", ""))
-            if span is not None:
-                span.set_attribute("post_check_verdict", post_result.verdict.value)
-
-        # --- Step 13: compose ---
-        with _step_event(span, "compose"):
-            reply = compose(skill_result, post_check=post_result)
-
-        # --- Step 14: save assistant Message ---
-        with _step_event(span, "save_assistant"):
-            await sync_to_async(_save_assistant)(
-                conversation,
-                reply.text,
-                getattr(skill_result, "action_type", "") or "skill_reply",
-                trace_id,
-            )
-
-        # --- Step 15: update short-term memory ---
-        with _step_event(span, "update_memory"):
-            await sync_to_async(_update_short_term)(conversation, reply.text, trace_id)
-
-        # --- Step 16: emit message_sent event ---
-        with _step_event(span, "emit_message_sent"):
-            await sync_to_async(_emit_message_sent, thread_sensitive=False)(
-                bot_user, conversation, trace_id, intent_decision
-            )
-
-        # --- Step 17: write audit row (each layer already writes its own;
-        # final summary audit goes here) ---
-        with _step_event(span, "write_audit"):
-            await sync_to_async(_write_pipeline_audit, thread_sensitive=False)(
-                trace_id, intent_decision, pre_result.verdict.value, post_result.verdict.value
-            )
-
-        # --- Step 18: replay recorder.capture ---
-        with _step_event(span, "replay_capture"):
-            await sync_to_async(_replay_capture, thread_sensitive=False)(
-                trace_id,
-                message,
-                intent_decision,
-                pre_result.verdict.value,
-                skill_result,
-                post_result.verdict.value,
-                reply,
-            )
-
-        # --- Step 19: channel outbound send (Sprint 6 / O9 / DRF-546) ---
-        # Send the composed reply to the channel with retry-3x backoff.
-        # Permanent failure → AdminTask of type=MANUAL for operator triage
-        # (DLQ via tasks table — no separate queue infra in Phase 0).
+        # The contextvar set here propagates through:
+        #   * `await classify(message.text, ...)` (step 6, intent_router)
+        #   * `_dispatch_skill(...)` (step 10) → booking/faq skills
+        #     which call `get_router().get_provider(...).complete(...)`
+        #   * any future skill that uses the LLM router (auto-wrapped
+        #     by `PIITokenizingProvider` in `apps.llm.router._load_provider`)
         #
-        # Sprint 8 / S2 (DRF-717): when `is_shadow` is True we DO NOT
-        # send outbound — every other observability hook (audit, replay,
-        # delta) already ran. The shadow Conversation/Message rows let
-        # the daily delta (S3) measure agreement without showing the
-        # platform's reply to the real user.
-        if is_shadow:
-            with _step_event(span, "send_outbound_skipped_shadow"):
-                await sync_to_async(_write_shadow_drop_audit, thread_sensitive=False)(
-                    trace_id, conversation
+        # Flat enter/exit (instead of `with pii_context()`) keeps the
+        # 270-line pipeline body at its current indent — see helper
+        # docstrings in `apps.llm.pii_tokenizer`.
+        _pii_token = _pii_enter(conversation.id)
+        try:
+            # --- Step 4: save user Message ---
+            with _step_event(span, "save_user_message"):
+                await sync_to_async(_save_user_message)(conversation, message.text, trace_id)
+
+            # --- Step 5: load memory snapshot ---
+            with _step_event(span, "load_memory"):
+                memory_snapshot = await sync_to_async(load_snapshot)(conversation)
+
+            # --- Step 6: intent classification ---
+            with _step_event(span, "intent_classify"):
+                # #975 (2026-06-02) — pass `tenant` so classify() takes
+                # the production path: provider resolved через router,
+                # auto-wrapped in `PIITokenizingProvider` decorator
+                # (handles tokenize-out + detokenize-in + `llm.call_
+                # completed` audit row). Closes 152-ФЗ §6 audit-trail
+                # gap for intent classification (~30-40% of all LLM
+                # calls per turn-1 path). #842's tactical tokenize в
+                # `_classify_legacy_path` remains for unit tests and
+                # backward-compat callers without tenant context.
+                #
+                # NOTE: `llm.call_completed` (AuditLog) and
+                # `record_ai_request` (AIRequestMetric) are NOT
+                # redundant — they write к different tables, serve
+                # different audiences (ops dashboard vs DPO/152-ФЗ
+                # auditor), different retention. W3 PR #987 LOW-3
+                # confirms via grep of `apps/observability/ai_metrics.py`
+                # vs `apps/audit/services.py`. Don't try к dedupe.
+                intent_decision = await classify(
+                    message.text,
+                    tenant=tenant,
+                    memory_snapshot=_memory_to_dict(memory_snapshot),
+                    brand_voice=None,  # Sprint 6 doesn't read BrandVoiceConfig here; Sprint 7+
                 )
-            if span is not None:
-                span.set_attribute("outbound_ok", True)
-                span.set_attribute("shadow_dropped_outbound", True)
+                if span is not None and intent_decision is not None:
+                    span.set_attribute("intent", getattr(intent_decision, "intent", "") or "")
+                    span.set_attribute("skill", getattr(intent_decision, "skill", "") or "")
+
+            # --- Step 7: safety pre-check ---
+            with _step_event(span, "pre_check"):
+                pre_result = pre_check(message.text, intent_decision=intent_decision)
+                if span is not None:
+                    span.set_attribute("pre_check_verdict", pre_result.verdict.value)
+
+            # --- Step 8: blocked / clarify short-circuit ---
+            if pre_result.verdict == SafetyVerdict.BLOCK:
+                reply = await sync_to_async(_canned_reply)(_FALLBACK_BLOCK)
+                await sync_to_async(_save_assistant)(conversation, reply.text, "block", trace_id)
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    intent_decision=intent_decision,
+                    outcome=AIRequestMetric.OUTCOME_SUCCESS,
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent=intent_decision,
+                    pre_check_verdict=pre_result.verdict.value,
+                    short_circuited_at_step=8,
+                )
+
+            if pre_result.verdict == SafetyVerdict.CLARIFY:
+                reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
+                await sync_to_async(_save_assistant)(conversation, reply.text, "clarify", trace_id)
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    intent_decision=intent_decision,
+                    outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                    fallback_triggered=True,
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent=intent_decision,
+                    pre_check_verdict=pre_result.verdict.value,
+                    short_circuited_at_step=8,
+                )
+
+            # --- Step 9: handoff ---
+            if pre_result.verdict == SafetyVerdict.HANDOFF:
+                await sync_to_async(_create_handoff)(
+                    conversation, reason=pre_result.reason or "pre_check_handoff"
+                )
+                reply = await sync_to_async(_canned_reply)(_FALLBACK_HANDOFF)
+                await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    intent_decision=intent_decision,
+                    outcome=AIRequestMetric.OUTCOME_ESCALATED,
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent=intent_decision,
+                    pre_check_verdict=pre_result.verdict.value,
+                    short_circuited_at_step=9,
+                )
+
+            # --- Step 10: skill dispatch ---
+            with _step_event(span, "skill_dispatch"):
+                skill_result = await sync_to_async(_dispatch_skill)(
+                    conversation, bot_user, message.text, trace_id, intent_decision
+                )
+                if span is not None and skill_result is not None:
+                    span.set_attribute(
+                        "skill.action_type", getattr(skill_result, "action_type", "") or ""
+                    )
+            if skill_result is None:
+                # No skill matched + no echo fallback hit — pipeline fallback.
+                reply = await sync_to_async(_canned_reply)(_FALLBACK_CLARIFY)
+                await sync_to_async(_save_assistant)(conversation, reply.text, "no_skill", trace_id)
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    intent_decision=intent_decision,
+                    outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                    fallback_triggered=True,
+                )
+                return TurnResult(
+                    ok=False,
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent=intent_decision,
+                    pre_check_verdict=pre_result.verdict.value,
+                    error="no_skill_matched",
+                    short_circuited_at_step=10,
+                )
+
+            # --- Step 10.5: post-skill handoff (Sprint 7 / O2 / DRF-556) ---
+            # A KB-driven skill (e.g. FAQ on a low-confidence retrieval) can
+            # request handoff AFTER running. Sprint 6 only had pre-skill
+            # handoff at step 9 via SafetyVerdict.HANDOFF; this branch is the
+            # post-dispatch counterpart. We reuse _create_handoff (same one
+            # step 9 uses) so a single AdminTask flow handles both pre- and
+            # post-skill cases.
+            #
+            # The skill MAY have set its own ``reply_text`` (a softer
+            # "переключаю на менеджера…" line); we honour it when non-empty
+            # and fall back to the canned _FALLBACK_HANDOFF when blank.
+            #
+            # Tier-A #4 (P1 PRE_PILOT, 2026-05-27): defense-in-depth
+            # confidence-floor enforcement. Even if a skill forgot
+            # к set ``should_handoff=True``, fall through to handoff когда
+            # ``confidence < threshold`` (per-skill override or global
+            # default). AdminTask reason carries diagnostic
+            # ``pipeline_confidence_floor(confidence=X, threshold=Y)``
+            # appended to the skill's own reason если any.
+            confidence_floor_reason = _confidence_floor_reason(skill_result)
+            if skill_result.should_handoff or confidence_floor_reason:
+                skill_reason = skill_result.handoff_reason or (
+                    "skill_requested_handoff" if skill_result.should_handoff else ""
+                )
+                if confidence_floor_reason:
+                    reason = (
+                        f"{skill_reason} | {confidence_floor_reason}"
+                        if skill_reason
+                        else confidence_floor_reason
+                    )
+                else:
+                    reason = skill_reason
+                await sync_to_async(_create_handoff)(conversation, reason=reason)
+                handoff_text = skill_result.reply_text or _FALLBACK_HANDOFF
+                reply = await sync_to_async(_canned_reply)(handoff_text)
+                await sync_to_async(_save_assistant)(conversation, reply.text, "handoff", trace_id)
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    intent_decision=intent_decision,
+                    skill_result=skill_result,
+                    outcome=AIRequestMetric.OUTCOME_ESCALATED,
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent=intent_decision,
+                    pre_check_verdict=pre_result.verdict.value,
+                    short_circuited_at_step=10.5,
+                )
+
+            # --- Step 11: tool invocation (Phase 0: skills don't emit tool_calls) ---
+            # Reserved for Sprint 7+ when skills start emitting tool_calls_made.
+
+            # --- Step 12: safety post-check ---
+            with _step_event(span, "post_check"):
+                post_result = post_check(getattr(skill_result, "reply_text", ""))
+                if span is not None:
+                    span.set_attribute("post_check_verdict", post_result.verdict.value)
+
+            # --- Step 13: compose ---
+            with _step_event(span, "compose"):
+                reply = compose(skill_result, post_check=post_result)
+
+            # --- Step 14: save assistant Message ---
+            with _step_event(span, "save_assistant"):
+                await sync_to_async(_save_assistant)(
+                    conversation,
+                    reply.text,
+                    getattr(skill_result, "action_type", "") or "skill_reply",
+                    trace_id,
+                )
+
+            # --- Step 15: update short-term memory ---
+            with _step_event(span, "update_memory"):
+                await sync_to_async(_update_short_term)(conversation, reply.text, trace_id)
+
+            # --- Step 16: emit message_sent event ---
+            with _step_event(span, "emit_message_sent"):
+                await sync_to_async(_emit_message_sent, thread_sensitive=False)(
+                    bot_user, conversation, trace_id, intent_decision
+                )
+
+            # --- Step 17: write audit row (each layer already writes its own;
+            # final summary audit goes here) ---
+            with _step_event(span, "write_audit"):
+                await sync_to_async(_write_pipeline_audit, thread_sensitive=False)(
+                    trace_id, intent_decision, pre_result.verdict.value, post_result.verdict.value
+                )
+
+            # --- Step 18: replay recorder.capture ---
+            with _step_event(span, "replay_capture"):
+                await sync_to_async(_replay_capture, thread_sensitive=False)(
+                    trace_id,
+                    message,
+                    intent_decision,
+                    pre_result.verdict.value,
+                    skill_result,
+                    post_result.verdict.value,
+                    reply,
+                )
+
+            # --- Step 19: channel outbound send (Sprint 6 / O9 / DRF-546) ---
+            # Send the composed reply to the channel with retry-3x backoff.
+            # Permanent failure → AdminTask of type=MANUAL for operator triage
+            # (DLQ via tasks table — no separate queue infra in Phase 0).
+            #
+            # Sprint 8 / S2 (DRF-717): when `is_shadow` is True we DO NOT
+            # send outbound — every other observability hook (audit, replay,
+            # delta) already ran. The shadow Conversation/Message rows let
+            # the daily delta (S3) measure agreement without showing the
+            # platform's reply to the real user.
+            if is_shadow:
+                with _step_event(span, "send_outbound_skipped_shadow"):
+                    await sync_to_async(_write_shadow_drop_audit, thread_sensitive=False)(
+                        trace_id, conversation
+                    )
+                if span is not None:
+                    span.set_attribute("outbound_ok", True)
+                    span.set_attribute("shadow_dropped_outbound", True)
+                await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    t_start=t_start,
+                    message_text_length=message_text_length,
+                    intent_decision=intent_decision,
+                    skill_result=skill_result,
+                    outcome=AIRequestMetric.OUTCOME_SUCCESS,
+                )
+                return TurnResult(
+                    ok=True,
+                    trace_id=trace_id,
+                    reply=reply,
+                    intent=intent_decision,
+                    pre_check_verdict=pre_result.verdict.value,
+                    post_check_verdict=post_result.verdict.value,
+                    error="",
+                )
+
+            with _step_event(span, "send_outbound"):
+                outbound_ok = await sync_to_async(_send_outbound, thread_sensitive=False)(
+                    message, reply, conversation, trace_id
+                )
+                if span is not None:
+                    span.set_attribute("outbound_ok", bool(outbound_ok))
+
+            await sync_to_async(_safe_emit_ai_request_metric, thread_sensitive=False)(
+                tenant=tenant,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                t_start=t_start,
+                message_text_length=message_text_length,
+                intent_decision=intent_decision,
+                skill_result=skill_result,
+                outcome=AIRequestMetric.OUTCOME_SUCCESS
+                if outbound_ok
+                else AIRequestMetric.OUTCOME_ERROR,
+            )
             return TurnResult(
-                ok=True,
+                ok=outbound_ok,
                 trace_id=trace_id,
                 reply=reply,
                 intent=intent_decision,
                 pre_check_verdict=pre_result.verdict.value,
                 post_check_verdict=post_result.verdict.value,
-                error="",
+                error="" if outbound_ok else "outbound_failed",
             )
-
-        with _step_event(span, "send_outbound"):
-            outbound_ok = await sync_to_async(_send_outbound, thread_sensitive=False)(
-                message, reply, conversation, trace_id
-            )
-            if span is not None:
-                span.set_attribute("outbound_ok", bool(outbound_ok))
-
-        return TurnResult(
-            ok=outbound_ok,
-            trace_id=trace_id,
-            reply=reply,
-            intent=intent_decision,
-            pre_check_verdict=pre_result.verdict.value,
-            post_check_verdict=post_result.verdict.value,
-            error="" if outbound_ok else "outbound_failed",
-        )
+        finally:
+            # #842 PII scope cleanup — reset contextvar regardless of
+            # which terminal return fired (block / clarify / handoff /
+            # no_skill / post-skill handoff / shadow / success /
+            # outbound failure / unhandled exception). Critical
+            # invariant: the contextvar MUST NOT leak across turns on
+            # the same worker, otherwise turn N+1 для different
+            # conversation would inherit turn N's scope and tokenize
+            # against a stale Redis namespace.
+            _pii_exit(_pii_token)
 
 
 # --- Helpers (sync, called via sync_to_async from turn()) -------------------

@@ -52,6 +52,7 @@ LOCAL_APPS = [
     "apps.experiments",
     "apps.voice",
     "apps.catalog",
+    "apps.marketplace",
     "apps.replay",
     "apps.promptreg",
     "apps.adminconsole",
@@ -70,15 +71,50 @@ LOCAL_APPS = [
     # Owns the Promotion model + promo-validation service; the
     # ``calc_price`` tool wiring lives in apps.skills.booking.
     "apps.promotions",
-    # Phase 1 / B7 (DRF-843) — orders (certificates today, extensible).
-    # Owns the Order + PaymentEvent models. The YooKassa client +
-    # webhook live in apps.integrations.yookassa; the buy_certificate
-    # LLM tool wiring lives in apps.skills.booking.
+    # #427+#428 stub — Order + PaymentEvent tables retired in
+    # migration 0002. App entry stays in INSTALLED_APPS so Django's
+    # migration history applies cleanly on deploy; a future cleanup
+    # PR removes this entry + the directory. Payment lifecycle now
+    # lives in Ayla djangoproject per ADR-0009 §Domain ownership.
+    # The bot-facing ``buy_certificate`` LLM tool talks to Ayla via
+    # apps.integrations.ayla_payments.
     "apps.orders",
     # Customer Mini App Phase 0a — master schedule + slot resolver.
     "apps.scheduling",
+    # Master Mini App M7 (Bundle B / item 3) — per-master notification
+    # toggles + quiet-hours window. See
+    # ``docs/design/handoffs/2026-05-18-master-mobile-handoff.md`` §M7.
+    "apps.notifications",
     # Customer Mini App Phase 0b — HTTP API for the MAX Mini App webview.
     "apps.miniapp_api",
+    # Master Mini App PR 1 (M0 onboarding) — claim-invite flow + BotUser
+    # linkage + session-token issuance. See
+    # ``docs/design/handoffs/2026-05-18-master-mobile-handoff.md`` §M0.
+    "apps.master_api",
+    # Admin REST API PR 2 — master roster CRUD (MM1 list + MM3 detail/edit).
+    # See ``docs/design/handoffs/2026-05-18-master-management-handoff.md``.
+    # Distinct from apps.adminconsole (which is reserved for Django admin
+    # chrome). PR 2 owns the REST surface that the Ayla Pro web dashboard
+    # + admin Mini App consume.
+    "apps.admin_api",
+    # 2026-05-19 — domain event bus (Postgres outbox per Q-EV-IMPL3).
+    # Distinct from apps.events (analytics, snake_case, sync fanout):
+    # apps.eventbus carries dot.notation domain events per
+    # docs/design/policies/event-taxonomy.md §3 catalog. Two-bus
+    # architecture by design — see memory two-bus-event-architecture.
+    "apps.eventbus",
+    # Loyalty (Volna 4) — points tracking. Phase 1.a ships the data
+    # layer + LoyaltySubscriber listening to booking.completed.
+    # Tiers / redemption flow / referrals / config UI deferred.
+    # Subscriber activates by adding apps.loyalty.subscribers.LoyaltySubscriber
+    # to DOMAIN_EVENT_SUBSCRIBERS env var.
+    "apps.loyalty",
+    # Master-Admin internal chat — PR 6 (production blocker for
+    # earnings disputes, leave requests, review concerns, substitution,
+    # offboarding). See ``docs/design/handoffs/2026-05-19-master-admin-internal-chat-handoff.md``.
+    # Data layer + basic CRUD; SLA beat, PII scan, founder flow,
+    # frontend Mini-App tabs all in follow-up PRs.
+    "apps.internal_chat",
 ]
 
 INSTALLED_APPS = [
@@ -89,6 +125,11 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    # Celery beat scheduler tables — required when systemd beat runs
+    # with `--scheduler django_celery_beat.schedulers:DatabaseScheduler`
+    # (infra/systemd/ai-bot-platform-beat.service.template). Without
+    # this entry the beat process crashes on import of SolarSchedule.
+    "django_celery_beat",
     *LOCAL_APPS,
 ]
 
@@ -115,6 +156,75 @@ MIDDLEWARE = [
 #   off    — no tenant resolution. Reserved for environments with multi-tenancy
 #            fully disabled (none today).
 STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
+
+# Tenancy retro B4 (2026-05-21) — STRICT_TENANT_REFUSE gates the
+# ``TenantAwareTask`` ``requires_tenant`` enforcement.
+#
+#   False — log-only. Missing tenant on a requires_tenant=True handler
+#           logs ERROR but proceeds with ``tenant_scope(None)``. Same
+#           pre-B4 behaviour, but loud. Default during Phase 0 rollout
+#           soak — same pattern as STRICT_TENANT_SCOPE shadow window.
+#   True  — refuse-dispatch. Missing tenant raises
+#           TenantRequiredButMissing → consumer.py treats it like any
+#           handler exception (no XACK; entry stays in the PEL for
+#           manual escalation). **No automatic DLQ retry is wired**
+#           — XAUTOCLAIM reaper is a follow-up; PEL retention is the
+#           current contract.
+#
+# Flip to True only after the dev-side soak shows zero
+# ``worker.tenant_required_missing`` events in audit for a clean
+# week (mirrors the Sprint 8 STRICT_TENANT_SCOPE flip cadence).
+#
+# **WORKER RESTART REQUIRED ON FLIP.** This value is read from
+# ``os.environ`` exactly once, here, at module import time. After
+# that, ``settings.STRICT_TENANT_REFUSE`` is a static attribute on
+# the settings module. The runtime read in ``apps.workers.base``
+# returns the import-frozen value, NOT the live env var. Operator
+# flip sequence is documented in
+# ``docs/runbooks/strict-tenant-refuse-flip.md``.
+STRICT_TENANT_REFUSE = os.environ.get("STRICT_TENANT_REFUSE", "false").lower() == "true"
+
+# Issue #500 (D-2 operator-side ceilings): max
+# ``worker.tenant_required_missing`` audit emits per (handler, hour).
+# Default 100 keeps audit-table growth bounded even when a misbehaving
+# ingress pushes 1000+ entries/hour with empty ``resolved_tenant_id``.
+# Set to 0 to disable the ceiling entirely (every emit fires — escape
+# hatch for diagnostic windows).
+WORKER_TENANT_MISSING_RATE_LIMIT = int(os.environ.get("WORKER_TENANT_MISSING_RATE_LIMIT", "100"))
+
+# Tenancy retro B4 — post-flip monitor (mirrors STRICT_SCOPE_FLIP_AT
+# pattern from Sprint 8 / F2). Operator sets this to the ISO 8601 flip
+# timestamp at the same moment they roll STRICT_TENANT_REFUSE=true in
+# /etc/ai-bot-platform/.env. A future observability task (NOT shipped
+# in this PR) can read this and page on any
+# ``worker.tenant_required_missing`` event in the 24h post-flip
+# window. Runbook: docs/runbooks/strict-tenant-refuse-flip.md (TBD).
+STRICT_TENANT_REFUSE_FLIP_AT = os.environ.get("STRICT_TENANT_REFUSE_FLIP_AT", "")
+
+# Issue #499 — XAUTOCLAIM-based PEL reaper.
+#
+# Drains the Redis Streams Pending Entries List (PEL) for every
+# registered ``ingress:*`` stream by claiming entries idle past
+# PEL_REAPER_IDLE_SECONDS via XAUTOCLAIM, classifying them, and
+# routing terminal entries to ``<stream>:dlq`` for operator triage.
+# See ``apps/workers/reaper.py`` + ``docs/runbooks/strict-tenant-refuse-flip.md``.
+#
+# Opt-in. The Celery beat task ``apps.workers.tasks.reap_pel`` is
+# scheduled below but no-ops while disabled — adding the schedule
+# entry is safe before flip.
+PEL_REAPER_ENABLED = os.environ.get("PEL_REAPER_ENABLED", "false").lower() == "true"
+
+# Minimum idle time before an entry is eligible for reaping.
+# Default 1h — long enough that a slow handler still in-flight on a
+# real workload isn't reaped out from under itself, short enough that
+# a strict-mode B4 refusal doesn't accumulate for a full day before
+# being moved to DLQ. Tunable per-env via env var.
+PEL_REAPER_IDLE_SECONDS = int(os.environ.get("PEL_REAPER_IDLE_SECONDS", "3600"))
+
+# Max entries claimed per beat tick (caps work per fire). Real Redis
+# handles much higher batches, but bounded here so a single tick can't
+# DoS the audit pipeline if 100K entries are stuck.
+PEL_REAPER_BATCH_SIZE = int(os.environ.get("PEL_REAPER_BATCH_SIZE", "100"))
 
 # Sprint 8 / F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip monitor armed.
 # Operator sets this to the ISO 8601 flip timestamp at the same moment
@@ -152,6 +262,54 @@ AUDIT_LOG_RETENTION_MODE = os.environ.get("AUDIT_LOG_RETENTION_MODE", "hard")
 # dedup tokens, not forensic data (Order carries the forensic trail).
 PAYMENT_EVENT_RETENTION_DAYS = int(os.environ.get("PAYMENT_EVENT_RETENTION_DAYS", "90"))
 
+# #443 — payment.failed consumer threshold. After N consecutive failures
+# without an intervening capture, the consumer emits
+# ``payment_failed_skill_triggered`` (separate PR for the skill itself).
+# Env-driven so founder can dial without a code change. Bumping mid-flight
+# is forward-compatible: counter is per-Conversation, the next failure
+# event re-evaluates against the new threshold.
+PAYMENT_FAILED_HANDOFF_THRESHOLD = int(os.environ.get("PAYMENT_FAILED_HANDOFF_THRESHOLD", "3"))
+
+# Tier-A #4 (P1 PRE_PILOT, founder pilot_scope_discipline sequence #5).
+#
+# AI safety formalization: skills что compute а ``confidence`` score
+# (FAQ on RAG retrieval, future LLM-driven flows) trigger handoff к
+# human operator when confidence falls below a threshold. Pipeline
+# step 10.5 enforces this as **defense-in-depth** — even if the skill
+# forgot к set ``should_handoff=True``, the pipeline catches low
+# confidence и transitions к handoff automatically.
+#
+# Global default (``AI_CONFIDENCE_HANDOFF_THRESHOLD``) applies к any
+# skill that doesn't have a per-skill override. Per-skill dict
+# (``SKILL_CONFIDENCE_HANDOFF_THRESHOLD``) lets ops tune individual
+# skills без code change — analogous to ``SKILL_LLM_PROVIDER`` pattern.
+# Set к ``None`` per skill (or omit) → disable enforcement for that
+# skill (skill remains owning the decision via ``should_handoff``).
+#
+# Skill confidence semantics (locked in ``apps.skills.base.SkillResult``
+# docstring 2026-05-27): scale ``[0.0, 1.0]``; ``None`` = skill didn't
+# compute (Sprint 3 deterministic skills); ``1.0`` = full confidence
+# (tool success); ``< threshold`` → pipeline auto-handoffs.
+AI_CONFIDENCE_HANDOFF_THRESHOLD = float(os.environ.get("AI_CONFIDENCE_HANDOFF_THRESHOLD", "0.5"))
+# Per-skill override dict. Key = skill ``name`` attribute (e.g. ``"faq"``,
+# ``"booking"``). Value = threshold float OR ``None`` к disable. Skills
+# не listed here fall back к ``AI_CONFIDENCE_HANDOFF_THRESHOLD``.
+# Env-driven not supported для dict; set in deployment-specific
+# settings module if per-skill tuning needed.
+SKILL_CONFIDENCE_HANDOFF_THRESHOLD: dict[str, float | None] = {}
+
+# #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
+# raises gets retried by Ayla per §6.3; after this many failed
+# attempts (counted per event_id + handler), bot-platform upserts a
+# DLQ row with reason="handler_exception" so operator triage has a
+# DB-level handle instead of digging through log aggregator. Below
+# threshold = silent retries (current behaviour); at-or-above =
+# operator-visible row. Env-driven so ops can tighten/loosen without
+# a deploy. See ``apps/eventbus/models.py::HandlerFailureTracker``.
+EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD = int(
+    os.environ.get("EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD", "3")
+)
+
 # Sprint 5 / A3 — Replay infrastructure config (PHASE0_DESIGN §7.1).
 # Per-env sample rate so prod/staging stay at 100% (1 tenant, low traffic;
 # ~30MB/30d retention) while tests default to 0 to avoid noisy row creation
@@ -163,6 +321,22 @@ REPLAY_SAMPLE_RATE_TEST = float(os.environ.get("REPLAY_SAMPLE_RATE_TEST", "0.0")
 
 # 30 days per design §7.1 expires_at; A4 cleanup task evicts past-expiry rows.
 REPLAY_RETENTION_DAYS = int(os.environ.get("REPLAY_RETENTION_DAYS", "30"))
+
+# #842 PII tokenization at LLM exit boundary (Tier-A #1 P0 — 152-ФЗ §6).
+# Defaults to ENABLED. The `PIITokenizingProvider` decorator in
+# `apps/llm/pii_protected_provider.py` reads this; when False, it
+# bypasses tokenization entirely (raw text → vendor). Production MUST
+# leave this on; the gate exists to let CI tests run without a Redis
+# instance + to let internal smoke flows (without user PII) opt out
+# without monkey-patching the decorator.
+#
+# Test conftest sets this to False — explicit override per
+# `feedback_pre_post_flip_rubric` (test isolation > production default).
+PII_TOKENIZER_ENABLED = os.environ.get("PII_TOKENIZER_ENABLED", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 # Redaction allowlist — strings the regex layer should NOT replace. Useful for
 # brand / master / service names that look like phones or emails. Comma-
@@ -181,6 +355,19 @@ EVENT_FANOUTS: list[str] = [
     if p.strip()
 ]
 
+# Phase 2.2 PR-B — `apps.eventbus` (domain bus) subscriber registry.
+# Comma-separated dotted paths to ``apps.eventbus.dispatcher.Subscriber``
+# implementations. Default ships ``NoopSubscriber`` so the dispatcher has
+# something to call against until real subscribers (AuditSubscriber, etc.)
+# land in follow-up PRs. Distinct from ``EVENT_FANOUTS`` (analytics bus).
+DOMAIN_EVENT_SUBSCRIBERS: list[str] = [
+    p.strip()
+    for p in os.environ.get(
+        "DOMAIN_EVENT_SUBSCRIBERS", "apps.eventbus.dispatcher.NoopSubscriber"
+    ).split(",")
+    if p.strip()
+]
+
 # Sprint 2 / C1 — short-term Redis memory window depth + TTL.
 # Caller (apps/orchestrator/memory/short_term.py) reads these on every
 # append; runtime-changeable via settings override in tests.
@@ -191,6 +378,106 @@ SHORT_TERM_MEMORY_TTL_SECONDS = int(os.environ.get("SHORT_TERM_MEMORY_TTL_SECOND
 MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
+
+# Phase 5 lazy-onboarding (apps/miniapp_api/views.py:require_init_data).
+# Single-bot mode binds the bot's HMAC token to exactly one tenant; this
+# slug picks which one. Multi-tenant ingress will replace this with the
+# CHANNEL_TOKEN_TO_TENANT_SLUG map already wired for /api/v1/ingress/max/.
+MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
+
+# Welcome-skill keyboard config (apps/skills/welcome). When the bot's
+# Mini App username is set, the welcome buttons use MAX's native
+# ``open_app`` button type so the Mini App opens INSIDE the MAX client.
+# When unset, the fallback ``link`` button opens MAX_MINIAPP_URL in the
+# user's external browser — degraded UX but always works.
+MAX_BOT_WEB_APP = os.environ.get("MAX_BOT_WEB_APP", "")
+MAX_MINIAPP_URL = os.environ.get("MAX_MINIAPP_URL", "")
+
+# Master Mini App session token (PR 1 / M0 onboarding).
+#
+# Issued by POST /api/v1/master/onboarding/accept. The Mini App stores it
+# in ``WebApp.DeviceStorage.setItem('master_token', ...)`` and (later
+# PRs) replays it on dashboard endpoints. PR 1 only ISSUES the token —
+# consumption / middleware decode lands when the dashboard endpoints
+# do (PR 7+).
+#
+# Format: signed JSON via ``django.core.signing.TimestampSigner`` (we do
+# not have PyJWT in deps and the spec is intentionally compatible with
+# any future JWT migration — the payload is the same shape). Signing key
+# defaults to SECRET_KEY when MASTER_SESSION_SECRET is unset, matching
+# the rest of the platform's session-data signing pattern.
+MASTER_SESSION_SECRET = os.environ.get("MASTER_SESSION_SECRET", "")
+MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
+
+# Master invite flow (PR 3 / MM2). The admin invite endpoint
+# (`apps/admin_api/views_invite.py`) renders a web fallback URL that
+# embeds the invite token, used by the owner's UI as a "copy invite
+# link" option when the in-bot DM fails. The token is also encoded into
+# a MAX deeplink `max://bot/<MASTER_BOT_USERNAME>?start=master_invite_<token>`.
+# Defaults:
+#   * SITE_DOMAIN — Vite dev default; production overrides via env.
+#   * MASTER_BOT_USERNAME — falls back to `<tenant_slug>_bot` when empty
+#     (the management command does the same fallback).
+SITE_DOMAIN = os.environ.get("SITE_DOMAIN", "http://localhost:5173")
+MASTER_BOT_USERNAME = os.environ.get("MASTER_BOT_USERNAME", "")
+
+# M6 AI drafts auto-trigger (deferred follow-up from PR #535 / #540).
+#
+# When True, every inbound customer Message (``role=USER``) on a
+# conversation that involves a master enqueues a Celery task that
+# generates an :class:`apps.conversations.models.AiDraft` proactively —
+# so the master sees «✨ Предложен ответ» on M5 list refresh without
+# tapping «✨ Предложить ответ» first (spec §M6 line 660 «— помощник
+# готовит ответ —»).
+#
+# Default False keeps the pilot launch ramp conservative. Operators
+# flip per-environment via env var once cost / rate telemetry is
+# stable. The Celery task is enqueued unconditionally from the hook;
+# the flag is re-checked inside the worker as a cheap short-circuit
+# so an LLM call NEVER happens with the flag off.
+AI_DRAFTS_AUTO_TRIGGER_ENABLED = os.environ.get(
+    "AI_DRAFTS_AUTO_TRIGGER_ENABLED", "false"
+).lower() in ("true", "1")
+
+
+# M6 auto-trigger idle-active-draft suppress window (issue #659).
+# If an ACTIVE draft on a conversation is younger than this many seconds,
+# skip auto-trigger regeneration — the master is probably still viewing
+# the existing draft. Prevents the documented #659 collision race:
+#
+#   1. Customer message arrives → auto-trigger task starts LLM call
+#      (1-3s under Conversation row lock).
+#   2. Master taps «Отправить от себя» on the ACTIVE draft visible in UI.
+#   3. send_draft_as_master returns 429 conversation_busy (PR #551 lock).
+#   4. Frontend retries after Retry-After: 3 — by then auto-trigger has
+#      REPLACED the visible draft with a fresh one.
+#   5. send-as-me targets REPLACED draft → 400 draft_already_acted.
+#
+# Suppressing auto-trigger while the master likely still has the draft
+# on-screen breaks the race at step 1. Setting this to 0 disables the
+# suppress (regression escape hatch for ops).
+#
+# Issue #693 (follow-up from #659 review): wrap ``int()`` parsing in a
+# try/except so a non-integer env value (operator typo, e.g.
+# ``IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=abc``) does NOT crash
+# Django boot on every worker.  Fall back to the 60s default and log a
+# WARNING so the misconfiguration is visible without taking the service
+# down — module-load ValueErrors take out ALL workers simultaneously.
+def _parse_idle_active_draft_suppress_window() -> int:
+    raw = os.environ.get("IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS", "60")
+    try:
+        return int(raw)
+    except ValueError:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Invalid IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=%r — falling back to 60",
+            raw,
+        )
+        return 60
+
+
+IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = _parse_idle_active_draft_suppress_window()
 
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
@@ -214,6 +501,85 @@ AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 # still a skeleton. Flipping this ON before those land will fail loudly.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
+# Wellness MVP scaled pilot (memory ``project_wellness_mvp_scaled_pilot``).
+#
+# Two-gate model per founder verdict 2026-06-02:
+#
+# 1. ``NUTRITION_ENABLED`` — master switch for the RU-side nutrition
+#    surface: food log / diary / water / basic daily summary. Data stays
+#    on the RU-side via Ayla. Default ``False`` globally so non-pilot
+#    environments don't accidentally surface the feature; pilot-env
+#    config overrides to ``True``. When False, the food_scanner skill
+#    + miniapp_api food endpoints return a graceful «feature off»
+#    reply BEFORE any Ayla call.
+#
+#    Scope of this flag:
+#      * `apps.skills.food_scanner` — photo-result diary log + callbacks.
+#      * `apps.skills.food_clarify` + `food_correction` — manual food
+#        entry helpers.
+#      * miniapp_api ``/customer/food/{log,diary,consent}`` endpoints.
+#    Out of scope (NOT gated by this flag — they are post-pilot):
+#      * Nutrition advice / weekly reports / nudges / recommendations.
+#      * Tier-B FSM / anketa / cross-domain insight cards.
+#
+# 2. ``FOOD_PHOTO_SCAN_ENABLED`` — SEPARATE gate for the cross-border
+#    path (photo → OpenAI vision provider via Ayla). Required because
+#    photo content crosses the RU border. Default ``False`` until ALL
+#    three conditions hold:
+#      * Legal-green (#947 — cross-border legal review accepts the
+#        scan pipeline).
+#      * Cross-border consent storage shipped (server audit trail per
+#        #956 for the F0 152-ФЗ acknowledgement).
+#      * РКН notification submitted for the cross-border processor.
+#    When False but ``NUTRITION_ENABLED=True``, photo turns are refused
+#    with a manual-entry hint; food log / diary / water still flow.
+#
+# Both flags are read at call time via ``getattr(settings, ...)`` so
+# runtime overrides in tests work. Pilot-env config sets the live
+# values via env vars — the import-time read here is the boot-time
+# snapshot used by the skill + endpoints.
+NUTRITION_ENABLED = os.environ.get("NUTRITION_ENABLED", "false").lower() in ("true", "1")
+FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
+# Stabilization sprint Block B / B2 — gift-certificate payment kill-switch.
+#
+# Founder verdict 2026-05-30 (memory ``project_certificate_payment_post_pilot``):
+# certificate domain is DEFERRED post-pilot. The ``buy_certificate`` LLM
+# tool and ``💳 Оплатить`` checkout flow stay in the codebase but must
+# not be reachable from the customer surface until proper certificate
+# implementation lands (Ayla side + bot side, ~4-5 weeks post-pilot).
+#
+# Reasons for the freeze (per founder memo):
+#   * Scope discipline — pilot focuses on the booking flow.
+#   * Prepayment legal risk under ФЗ-54 / ст. 487 ГК РФ / ФЗ-2300-1.
+#   * Volume unknown — no business case for the cohort yet.
+#   * Live mode currently broken — Ayla integration not certified.
+#
+# Default ``False`` keeps the pilot launch safe by default. Operators
+# flip per-environment via env var once the post-pilot certificate
+# ticket lands. Both the LLM tool advertisement and the direct
+# ``buy_certificate()`` call honour the flag:
+#
+#   * When False, ``apps.skills.booking.tools.get_active_booking_tool_specs()``
+#     filters ``BUY_CERTIFICATE_TOOL_SPEC`` out of the LLM tool list so
+#     the model does not pitch a feature it cannot deliver.
+#   * When False, a direct call to
+#     ``apps.skills.booking.tools.buy_certificate`` short-circuits with
+#     a graceful «функция готовится» reply (``error="certificate_disabled"``)
+#     — defence-in-depth in case a keyword fallback or replay path
+#     bypasses the tool-list filter.
+#
+# Customer-Mini-App / W2 Block B-2 reads
+# ``settings.CERTIFICATE_PAYMENT_ENABLED`` directly to hide the
+# certificate entry from the UI surface.
+CERTIFICATE_PAYMENT_ENABLED = os.environ.get("CERTIFICATE_PAYMENT_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # Phase 1 / B1 (DRF-837) — YClients booking API.
 # Single-tenant: env-based credentials. Per-tenant encrypted storage on
 # Tenant is a follow-up (requires a migration). Empty defaults keep the
@@ -235,35 +601,196 @@ YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.co
 # + 200 (still no retries from YClients) until ops configures the slug.
 YCLIENTS_WEBHOOK_TENANT_SLUG = os.environ.get("YCLIENTS_WEBHOOK_TENANT_SLUG", "")
 
-# Phase 1 / B7 (DRF-843) — YooKassa hosted-checkout integration.
-# Powers the ``buy_certificate`` LLM tool. Empty defaults keep the
-# integration dormant until ops configures it; ``YOOKASSA_TEST_MODE``
-# defaults to True so any accidental call returns a stubbed checkout
-# URL and never hits api.yookassa.ru. Production deployments MUST set
-# ``YOOKASSA_TEST_MODE=false`` AND populate the shop id + secret key
-# AND override ``YOOKASSA_RETURN_URL`` to the public post-checkout
-# landing page.
-#
-# SECURITY: ``YOOKASSA_SECRET_KEY`` is a payments credential — never
-# log it, never include it in audit / event payloads, never include
-# it in any breaker-alert / observability path.
-YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
-YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
-YOOKASSA_RETURN_URL = os.environ.get(
-    "YOOKASSA_RETURN_URL",
-    "https://example.com/payment/return",
-)
-YOOKASSA_TEST_MODE = os.environ.get("YOOKASSA_TEST_MODE", "true").lower() in (
-    "true",
-    "1",
-    "yes",
-    "on",
-)
+# #428 (Bucket 6) — YooKassa settings RETIRED. Per ADR-0009 §Domain
+# ownership matrix, YooKassa payment lifecycle (create, capture,
+# refund, webhook) lives in Ayla djangoproject only. The four settings
+# previously defined here — ``YOOKASSA_SHOP_ID``, ``YOOKASSA_SECRET_KEY``,
+# ``YOOKASSA_RETURN_URL``, ``YOOKASSA_TEST_MODE`` — are deleted to
+# eliminate the dead-credential surface (no code reads them after this
+# PR, but they would otherwise persist in .env files, secret manager,
+# CI vaults and Sentry context). SRE: sunset these env vars from all
+# deployment environments in the same window as this deploy. The
+# matching Ayla-side settings live in ayla-djangoproject/config/settings.
 
 # Sprint 2 / E2 — admin chat for breaker state-transition alerts.
 # Empty (default) → telegram_alert is a no-op. Set to the operator's
 # MAX chat id to receive 🚨 messages on breaker open/close.
 ADMIN_MAX_CHAT_ID = os.environ.get("ADMIN_MAX_CHAT_ID", "")
+
+# Issue #552 — Django CACHES backed by Redis (django-redis).
+#
+# WHY THIS EXISTS
+# ---------------
+# Several production code paths rely on the Django cache framework for
+# *cross-worker* atomic semantics — namely:
+#
+#   * apps.master_api.services.ai_draft_limits — per-master rate limit
+#     (cache.add SETNX + cache.incr) for the M6 AI drafts endpoint
+#     (PR #540).
+#   * apps.admin_api.tasks — per-(request_id, decision) SETNX lock that
+#     prevents duplicate MAX DMs after a Celery broker hiccup (PR #539).
+#   * apps.llm.providers.anthropic_provider — daily-token-counter INCR
+#     used by the L5 cost-cap router fallback (DRF-585).
+#   * apps.skills.faq.tools — invalidate_kb_search_cache uses
+#     ``cache.delete_pattern`` (django-redis-specific API).
+#
+# Without an explicit CACHES configuration Django falls through to
+# ``locmem``, which is *per-worker*. Under N gunicorn workers each
+# worker maintains its own counters and SETNX locks; the rate limiter
+# silently caps at 10/min × N and idempotency locks let through
+# duplicate DMs whenever the second delivery happens to land on a
+# different worker. The production boot assertion below
+# (``_assert_production_cache_backend``) fails fast if CACHES ends up
+# pointing at a non-Redis backend in production.
+#
+# KEY_PREFIX
+# ----------
+# Single Redis instance is shared across dev / staging / prod environments
+# in some single-tenant deployments. The prefix scopes cache keys per
+# environment + service so a staging rate-limiter never collides with a
+# production rate-limiter on the same key. ``DJANGO_ENV`` (already used
+# by ``DEPLOYMENT_ENVIRONMENT``) selects the suffix; defaults to ``local``.
+#
+# CONNECTION_POOL_KWARGS
+# ----------------------
+# ``max_connections=50`` per process is the django-redis recommended
+# default and matches the gunicorn workers × Celery workers × eventloops
+# arithmetic for the Phase 1 single-tenant deploy (4 web × 4 celery × ~3
+# concurrent cache calls each = ~48 peak). Raise via env if multi-tenant
+# Phase 2 fan-out increases the per-process concurrency.
+#
+# TIMEOUT
+# -------
+# 300s (5 min) default applies only to callers that pass no explicit
+# ``timeout``. The rate limiter and SETNX callers above pass explicit
+# TTLs (90 / 90_000 / 3600 / 86_400 seconds); they are unaffected by
+# this default.
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        "KEY_PREFIX": f"ai_bot_platform:{os.environ.get('DJANGO_ENV', 'local')}",
+        "TIMEOUT": 300,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "CONNECTION_POOL_KWARGS": {
+                "max_connections": 50,
+                "retry_on_timeout": True,
+            },
+            # IGNORE_EXCEPTIONS=False (default) — surface Redis outages
+            # as ConnectionError to the caller. The rate limiter would
+            # otherwise silently allow every request through on a
+            # transient Redis blip (worse than 503-ing the request).
+        },
+    },
+}
+
+
+def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
+    """Fail-fast guard wired into apps.master_api.apps.MasterApiConfig.ready().
+
+    Verifies the configured ``default`` cache BACKEND is a Redis-backed
+    backend whenever DEBUG=False. LocMem in production silently breaks
+    rate limiters and idempotency locks (see CACHES docstring above);
+    this assertion turns that into a loud :class:`ImproperlyConfigured`
+    on Django boot rather than a subtle production correctness bug.
+
+    Additionally guards two env-derived failure modes the BACKEND check
+    alone cannot catch (adversarial review PRE_PILOT findings on PR #552):
+
+    * **REDIS_URL silent localhost fallback.** ``CACHES['default']['LOCATION']``
+      defaults to ``redis://localhost:6379/0`` when ``REDIS_URL`` is unset.
+      In production this points at a Redis the host does not run; boot
+      succeeds, the first cache write ``ConnectionError``s. Reject
+      ``localhost`` / ``127.0.0.1`` LOCATION when ``DEBUG=False``.
+    * **DJANGO_ENV unset → keyspace collision.** ``KEY_PREFIX`` interpolates
+      ``DJANGO_ENV`` (defaults to ``local``). On a shared Redis instance
+      across dev/staging/prod, a prod boot with ``DJANGO_ENV`` unset
+      collides with dev's ``local`` namespace → SETNX idempotency
+      false-positives + rate-limit cross-contamination. Reject
+      ``DJANGO_ENV`` unset/``local`` when ``DEBUG=False``.
+
+    Local dev + tests run with ``DEBUG=True`` and may use locmem freely.
+
+    Raises:
+        django.core.exceptions.ImproperlyConfigured: when DEBUG=False and
+          any of (BACKEND not Redis, LOCATION points at localhost, empty
+          LOCATION, DJANGO_ENV unset/``local``).
+    """
+
+    from django.core.exceptions import ImproperlyConfigured
+
+    if debug:
+        return  # Local dev + tests tolerate locmem.
+
+    cache_cfg = caches.get("default") or {}
+    backend = cache_cfg.get("BACKEND", "")
+    # Accept both django-redis (RedisCache class) and Django 4+ built-in
+    # (django.core.cache.backends.redis.RedisCache) — both deliver atomic
+    # cross-worker SETNX/INCR via the same Redis server. ``delete_pattern``
+    # is django-redis-specific; faq/tools.py degrades gracefully when the
+    # method is absent (falls back to ``cache.clear()``), so the built-in
+    # backend is also acceptable for the assertion gate.
+    if "RedisCache" not in backend:
+        raise ImproperlyConfigured(
+            f"Production cache backend must be Redis (got {backend!r}). "
+            "Rate limiters (apps.master_api.services.ai_draft_limits) and "
+            "idempotency locks (apps.admin_api.tasks) depend on cross-worker "
+            "atomic cache operations (SETNX/INCR). LocMem is per-worker and "
+            "silently bypasses these guards — each gunicorn worker holds its "
+            "own counter, so the effective rate cap becomes N×configured. "
+            "Set REDIS_URL and ensure CACHES['default']['BACKEND'] resolves "
+            "to 'django_redis.cache.RedisCache' (or Django 4+ built-in "
+            "'django.core.cache.backends.redis.RedisCache'). See "
+            "config/settings/base.py CACHES docstring for the rationale."
+        )
+
+    # PRE_PILOT #1 — REDIS_URL silent localhost fallback.
+    location = str(cache_cfg.get("LOCATION", ""))
+    if not location:
+        raise ImproperlyConfigured(
+            "CACHES['default']['LOCATION'] is empty in production. Set "
+            "REDIS_URL env to a non-empty Redis URL "
+            "(e.g. redis://redis.internal:6379/0)."
+        )
+    if "localhost" in location or "127.0.0.1" in location:
+        raise ImproperlyConfigured(
+            f"CACHES['default']['LOCATION']={location!r} points at localhost "
+            "in production. This is the silent fallback that triggers when "
+            "the REDIS_URL env var is unset (see CACHES config in "
+            "config/settings/base.py). Set REDIS_URL to the real Redis URL "
+            "(e.g. redis://redis.internal:6379/0). Boot would otherwise "
+            "succeed but the first cache.add/incr call would ConnectionError "
+            "at runtime."
+        )
+
+    # PRE_PILOT #2 — DJANGO_ENV unset → keyspace collision.
+    # Two layers of defence: the KEY_PREFIX-suffix check catches whatever
+    # the prefix interpolation resolved to, and the env-var check catches
+    # the upstream cause directly. Either one alone leaves a gap (custom
+    # KEY_PREFIX could bypass the suffix check; an explicit DJANGO_ENV
+    # plus a hand-edited prefix could bypass the env check), so both run.
+    key_prefix = str(cache_cfg.get("KEY_PREFIX", ""))
+    if key_prefix.endswith(":local") or key_prefix.endswith(":"):
+        raise ImproperlyConfigured(
+            f"CACHES['default']['KEY_PREFIX']={key_prefix!r} suggests "
+            "DJANGO_ENV is unset or set to 'local' in production. KEY_PREFIX "
+            "uses DJANGO_ENV to namespace cache keys; a missing/'local' "
+            "value collides with dev/CI environments on a shared Redis "
+            "instance (SETNX idempotency false-positives + rate-limit "
+            "cross-contamination). Set DJANGO_ENV=production "
+            "(or staging/canary/etc) to differentiate the keyspace."
+        )
+
+    env = os.environ.get("DJANGO_ENV", "")
+    if not env or env == "local":
+        raise ImproperlyConfigured(
+            "DJANGO_ENV env var must be set to a non-'local' value in "
+            f"production (currently {env!r}). KEY_PREFIX uses DJANGO_ENV "
+            "to namespace cache keys; missing/'local' value collides with "
+            "dev environments on a shared Redis instance."
+        )
+
 
 # Sprint 2 / E3 — Celery broker + beat schedule for retention tasks.
 # CELERY_BROKER_URL falls through to REDIS_URL so dev/prod share one
@@ -276,6 +803,13 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "")
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+# Modules whose tasks Celery autodiscover_tasks() misses because the
+# package isn't a Django app in INSTALLED_APPS. Producer-side imports
+# (e.g. apps.booking.services.create) register the task on the web
+# process, but the worker only autoloads INSTALLED_APPS; without this
+# list it would reject tasks with KeyError on dispatch.
+CELERY_IMPORTS = ("apps.integrations.yclients.tasks",)
 
 # Beat schedule — keep retention tasks on separate cadences per the
 # 6A-split rule (AuditLog 90d daily sweep vs IdempotencyKey 7d hourly
@@ -293,6 +827,25 @@ CELERY_BEAT_SCHEDULE = {
         # cron jobs from other systems often fire at :00).
         "schedule": crontab(minute="15"),
     },
+    # Phase 2.3 — booking.completed producer. Scans CONFIRMED bookings
+    # whose visit time has passed and emits taxonomy §3.1 booking.completed
+    # exactly once per booking. Unblocks LoyaltySubscriber (no-op without
+    # a producer). Cadence 30 min: tight enough to credit loyalty points
+    # within an hour of visit end, sparse enough to spare worker pool.
+    "detect_completed_bookings": {
+        "task": "bookings.detect_completed_bookings",
+        "schedule": crontab(minute="*/30"),
+    },
+    # Phase 2.c (Loyalty) — daily inactivity hard-downgrade. Scans
+    # LoyaltyAccount rows with no EARN_VISIT in ≥ 365 days, drops tier
+    # to STARTER + stamps tier_reset_at. Soft 6-month notification
+    # deferred (requires notification surface). Daily 05:00 UTC —
+    # offset from the 04:00/04:30 cleanup sweeps to keep the worker pool
+    # from being slammed by overlapping batch jobs.
+    "loyalty_apply_inactivity_downgrades": {
+        "task": "loyalty.apply_inactivity_downgrades",
+        "schedule": crontab(hour="5", minute="0"),
+    },
     "catalog_sync_every_15min": {
         # Sprint 7 / C5 (DRF-579) — fan-out catalog sync across every
         # active tenant. Cadence matched to apps.catalog.services.sync
@@ -308,16 +861,11 @@ CELERY_BEAT_SCHEDULE = {
         # worker pool isn't slammed by both sweeps simultaneously.
         "schedule": crontab(hour="4", minute="0"),
     },
-    # Phase 1 / PI1 (DRF-851) — PaymentEvent dedup-ledger retention.
-    # Daily 04:30 UTC — slotted between the 04:00 replay sweep and the
-    # 05:00 shadow-delta compute so no two sweeps fire simultaneously
-    # against the same worker pool. PaymentEvent is a small table in
-    # Phase 1 (1 tenant, low webhook volume) but accumulates fast
-    # under YooKassa redelivery — daily hard-delete keeps it bounded.
-    "cleanup_old_payment_events": {
-        "task": "apps.orders.tasks.cleanup_old_payment_events",
-        "schedule": crontab(hour="4", minute="30"),
-    },
+    # #427+#428 — `cleanup_old_payment_events` beat entry RETIRED.
+    # apps/orders/tasks.py was deleted; YooKassa webhook lifecycle
+    # moved to Ayla djangoproject per ADR-0009 §Domain ownership.
+    # The Ayla side runs its own equivalent retention sweep on its
+    # PaymentEvent ledger.
     "recompute_profiles_daily": {
         "task": "apps.identity.tasks.recompute_profiles_daily",
         # Daily 03:30 UTC — between the 03:00 audit cleanup and the
@@ -369,6 +917,47 @@ CELERY_BEAT_SCHEDULE = {
         "task": "bookings.send_post_visit_followups",
         # 16:00 UTC = 19:00 МСК (UTC+3, Russia does not observe DST).
         "schedule": crontab(hour="16", minute="0"),
+    },
+    # Issue #499 — PEL reaper. No-ops while PEL_REAPER_ENABLED=False
+    # (default). Operator flips the flag after the STRICT_TENANT_REFUSE
+    # log-only soak completes; this beat entry is here in advance so
+    # enabling the flag is a one-line config change with no further
+    # deploy. Every 5 min — tight enough that strict-mode refusals
+    # don't pile up past the PEL alert threshold (issue #500), sparse
+    # enough that the audit table isn't hammered.
+    "workers.reap_pel": {
+        "task": "apps.workers.tasks.reap_pel",
+        "schedule": crontab(minute="*/5"),
+    },
+    # PR #507 adversarial A8 — bound the cross-service event-ingest
+    # tables' retention. DLQ persists envelope.data per §6.4 (PII
+    # surface per ADR-0011 §3.4 + 152-ФЗ); dedupe per §5.3.
+    "eventbus.cleanup_ingest_dlq": {
+        "task": "apps.eventbus.cleanup_ingest_dlq",
+        # Daily 04:45 UTC — slotted after the 04:30 payment-events
+        # cleanup and before the 05:00 shadow-delta sweep, so no two
+        # large-table sweeps fire simultaneously.
+        "schedule": crontab(hour="4", minute="45"),
+    },
+    "eventbus.cleanup_ingest_dedupe": {
+        "task": "apps.eventbus.cleanup_ingest_dedupe",
+        # Daily 04:50 UTC — 5 min after the DLQ sweep, separate
+        # transaction so a long dedupe sweep doesn't block the
+        # DLQ task.
+        "schedule": crontab(hour="4", minute="50"),
+    },
+    # PR #535 follow-up Blocker #5 Layer 2 — AI draft retention sweep.
+    # Hard-deletes terminal AiDraft rows (SENT_AS_MASTER / RELEASED_TO_AI
+    # / REPLACED / DISMISSED) older than 30 days. Layer 1 (immediate
+    # content clear on status flip) lives in
+    # apps/master_api/services/ai_drafts.py — that closes the at-rest
+    # PII window. Layer 2 sweeps the metadata stubs after the finance
+    # reconciliation window closes. Daily 03:15 UTC — slotted between
+    # the 03:00 audit cleanup and the 03:30 profile recompute to keep
+    # worker pool spikes staggered.
+    "purge_old_ai_drafts": {
+        "task": "apps.conversations.tasks.purge_old_ai_drafts",
+        "schedule": crontab(hour="3", minute="15"),
     },
 }
 
@@ -548,19 +1137,39 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
+
 # Database routing:
-#   - When POSTGRES_HOST is set (docker compose / staging / prod) → Postgres.
+#   - When POSTGRES_HOST or DB_HOST is set → Postgres.
 #   - Otherwise SQLite for fast local boot without docker.
+#
+# Two env naming schemes are accepted side-by-side:
+#   - POSTGRES_HOST / POSTGRES_DB / ...  — docker-compose convention,
+#     used by the Phase 0 platform stack and CI.
+#   - DB_HOST / DB_NAME / ...            — the Phase 0 dev-server
+#     env template (infra/env/dev.env.example) used these. Kept as
+#     aliases so existing /etc/ai-bot-platform/*.env files keep working
+#     after the merge that introduced the POSTGRES_* scheme.
+#
 # Full DATABASE_URL parsing lands in Sprint 9 (production hardening).
-if os.environ.get("POSTGRES_HOST"):
+def _pg_env(*keys: str, default: str | None = None) -> str | None:
+    """Return the first non-empty environment value across ``keys``."""
+    for key in keys:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return default
+
+
+_PG_HOST = _pg_env("POSTGRES_HOST", "DB_HOST")
+if _PG_HOST:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB", "ai_bot_platform"),
-            "USER": os.environ.get("POSTGRES_USER", "platform"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "platform"),
-            "HOST": os.environ["POSTGRES_HOST"],
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            "NAME": _pg_env("POSTGRES_DB", "DB_NAME", default="ai_bot_platform"),
+            "USER": _pg_env("POSTGRES_USER", "DB_USER", default="platform"),
+            "PASSWORD": _pg_env("POSTGRES_PASSWORD", "DB_PASSWORD", default="platform"),
+            "HOST": _PG_HOST,
+            "PORT": _pg_env("POSTGRES_PORT", "DB_PORT", default="5432"),
         }
     }
 else:
@@ -584,6 +1193,13 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+# Phase 0 deploy (DRF-891 / server-deployment.md §2.5) — collectstatic
+# target. Required for prod/staging gunicorn deploys; local dev with
+# runserver works without it (Django serves static directly via
+# staticfiles.views in DEBUG). Sub-directory of BASE_DIR keeps
+# everything inside the deploy checkout; nginx serves from
+# ``{DEPLOY_PATH}/staticfiles/`` per the api vhost template.
+STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Phase 1 / PI8 (DRF-859) — PII-redacting log filter wired into every

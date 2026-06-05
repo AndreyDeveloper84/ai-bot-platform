@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ayla — typography exploration · Manrope</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&family=Onest:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  /* Sage primary scale — provisional, will lock in design-tokens.md §2 */
+  --sage-50:  #f3f7f3;
+  --sage-100: #e3ede1;
+  --sage-200: #c7d9c4;
+  --sage-300: #a3bf9e;
+  --sage-400: #7ba478;       /* primary decorative (existing Tau anchor) */
+  --sage-500: #5a8557;       /* text-safe darker, WCAG 4.5:1 on white */
+  --sage-600: #4a6e47;
+  --sage-700: #3a5638;
+  --sage-800: #2a3f29;
+  --sage-900: #1c2a1b;
+
+  /* Warm neutral — provisional */
+  --warm-50:  #fafaf8;
+  --warm-100: #f3f2ee;
+  --warm-200: #e8e6df;
+  --warm-300: #d4d1c6;
+  --warm-400: #a8a499;
+  --warm-500: #7a766c;
+  --warm-600: #54514a;
+  --warm-700: #3a3833;
+  --warm-800: #25241f;
+  --warm-900: #161510;
+
+  --paper: #fafaf8;
+  --ink:   #25241f;
+  --hair:  #e8e6df;
+
+  --ff-manrope: 'Manrope', system-ui, sans-serif;
+  --ff-onest:   'Onest', system-ui, sans-serif;
+  --ff-display: var(--ff-manrope);  /* swap to --ff-onest if Manrope fails */
+  --ff-body:    var(--ff-manrope);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--ff-body);
+  font-feature-settings: "kern", "liga", "calt";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 64px 48px 128px;
+  line-height: 1.45;
+}
+
+/* Document chrome */
+.doc-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 32px;
+  margin-bottom: 64px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--hair);
+}
+.wordmark {
+  font-family: var(--ff-display);
+  font-weight: 500;
+  font-size: 56px;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  color: var(--sage-500);
+}
+.wordmark::before { content: ""; }
+.doc-meta {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--warm-500);
+  text-align: right;
+}
+.doc-meta b { display: block; color: var(--ink); font-weight: 600; margin-top: 4px; }
+
+.doc-subtitle {
+  font-family: var(--ff-display);
+  font-weight: 300;
+  font-size: 28px;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  color: var(--warm-700);
+  max-width: 640px;
+  margin-bottom: 48px;
+}
+
+/* Section anatomy */
+section { margin-top: 72px; }
+section + section { border-top: 1px solid var(--hair); padding-top: 64px; }
+.section-num {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sage-500);
+  margin-bottom: 8px;
+}
+.section-title {
+  font-family: var(--ff-display);
+  font-weight: 600;
+  font-size: 24px;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+.section-hint {
+  font-size: 14px;
+  color: var(--warm-500);
+  margin-bottom: 32px;
+  max-width: 640px;
+}
+
+/* Type scale specimens */
+.scale-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 100px;
+  gap: 24px;
+  align-items: baseline;
+  padding: 16px 0;
+  border-bottom: 1px dashed var(--hair);
+}
+.scale-row:last-child { border-bottom: 0; }
+.scale-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--warm-500);
+}
+.scale-specs {
+  font-size: 11px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  color: var(--warm-400);
+  text-align: right;
+}
+.scale-sample { font-family: var(--ff-display); color: var(--ink); }
+
+.s-display { font-size: 48px; font-weight: 600; line-height: 1.05; letter-spacing: -0.035em; }
+.s-h1      { font-size: 32px; font-weight: 600; line-height: 1.15; letter-spacing: -0.025em; }
+.s-h2      { font-size: 24px; font-weight: 600; line-height: 1.25; letter-spacing: -0.015em; }
+.s-h3      { font-size: 20px; font-weight: 500; line-height: 1.3;  letter-spacing: -0.01em; }
+.s-h4      { font-size: 17px; font-weight: 500; line-height: 1.35; }
+.s-body    { font-size: 15px; font-weight: 400; line-height: 1.5;  font-family: var(--ff-body); }
+.s-caption { font-size: 13px; font-weight: 400; line-height: 1.4;  font-family: var(--ff-body); color: var(--warm-600); }
+.s-micro   { font-size: 11px; font-weight: 500; line-height: 1.35; font-family: var(--ff-body); letter-spacing: 0.04em; text-transform: uppercase; color: var(--warm-500); }
+
+/* Real samples — Tau-shipped copy */
+.specimen {
+  background: white;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  padding: 32px;
+  margin-bottom: 16px;
+}
+.specimen-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sage-500);
+  margin-bottom: 16px;
+}
+
+.greeting-h1 { font-size: 32px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15; }
+.greeting-sub { font-size: 15px; color: var(--warm-500); margin-top: 6px; font-weight: 400; }
+.greeting-body { font-size: 17px; font-weight: 400; line-height: 1.4; color: var(--warm-700); margin-top: 14px; max-width: 480px; }
+
+.booking-title { font-size: 17px; font-weight: 600; line-height: 1.3; }
+.booking-meta { font-size: 14px; color: var(--warm-500); margin-top: 4px; font-feature-settings: "tnum"; }
+.booking-reason { font-size: 13px; color: var(--sage-600); margin-top: 8px; font-style: italic; }
+.booking-detail-line { font-size: 15px; line-height: 1.55; color: var(--warm-700); margin-top: 12px; }
+
+.wellness-caption {
+  font-size: 14px;
+  color: var(--warm-600);
+  margin-bottom: 8px;
+  font-feature-settings: "tnum";
+  letter-spacing: -0.005em;
+}
+
+/* Buttons */
+.btn-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.btn {
+  font-family: var(--ff-body);
+  font-size: 15px;
+  font-weight: 500;
+  padding: 12px 22px;
+  border-radius: 999px;
+  border: 1px solid var(--sage-400);
+  background: var(--sage-400);
+  color: white;
+  cursor: pointer;
+  letter-spacing: -0.005em;
+  transition: background 200ms ease-out, transform 200ms ease-out;
+}
+.btn:hover { background: var(--sage-500); border-color: var(--sage-500); }
+.btn--secondary { background: transparent; color: var(--sage-500); }
+.btn--secondary:hover { background: var(--sage-50); color: var(--sage-600); }
+.btn--ghost { background: transparent; color: var(--warm-600); border-color: var(--hair); }
+.btn--ghost:hover { background: var(--warm-100); }
+
+/* Bottom nav */
+.nav-bar {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  background: white;
+  overflow: hidden;
+  max-width: 380px;
+}
+.nav-item {
+  text-align: center;
+  padding: 14px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--warm-500);
+  border-right: 1px solid var(--hair);
+}
+.nav-item:last-child { border-right: 0; }
+.nav-item.active { color: var(--sage-500); font-weight: 600; }
+.nav-icon { display: block; font-size: 18px; margin-bottom: 4px; }
+
+/* Status badges */
+.badge-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 999px;
+  letter-spacing: -0.005em;
+}
+.badge--ok      { background: var(--sage-100); color: var(--sage-700); }
+.badge--neutral { background: var(--warm-100); color: var(--warm-600); }
+.badge--warn    { background: #f5ecd9;       color: #7a5a1a; }
+.badge--icon::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.7; }
+
+/* Empty + long-form */
+.empty-state {
+  font-size: 17px;
+  line-height: 1.5;
+  color: var(--warm-600);
+  text-align: center;
+  padding: 48px 24px;
+}
+.empty-state a { color: var(--sage-500); text-decoration: none; border-bottom: 1px solid var(--sage-200); }
+
+.long-form-body {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--warm-700);
+  max-width: 560px;
+}
+
+/* Reminder voice (B5/B6/B11) */
+.reminder {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 24px;
+  padding: 20px 0;
+  border-bottom: 1px dashed var(--hair);
+  align-items: start;
+}
+.reminder:last-child { border-bottom: 0; }
+.reminder-tag {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sage-500);
+  padding-top: 4px;
+}
+.reminder-text {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--warm-700);
+  max-width: 560px;
+}
+
+/* Cyrillic stress lab */
+.stress-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px;
+  background: var(--hair);
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.stress-cell { background: white; padding: 24px; }
+.stress-cell h4 {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--warm-500);
+  margin-bottom: 12px;
+}
+.glyph-iso {
+  font-size: 96px;
+  font-weight: 500;
+  font-family: var(--ff-display);
+  letter-spacing: 0;
+  line-height: 1;
+  color: var(--ink);
+}
+.glyph-iso span { color: var(--sage-500); }
+
+.weight-row { display: flex; flex-direction: column; gap: 8px; font-family: var(--ff-display); font-size: 22px; line-height: 1.15; letter-spacing: -0.01em; }
+.weight-row span { display: block; }
+.w-200 { font-weight: 200; }
+.w-300 { font-weight: 300; }
+.w-400 { font-weight: 400; }
+.w-500 { font-weight: 500; }
+.w-600 { font-weight: 600; }
+.w-700 { font-weight: 700; }
+.w-800 { font-weight: 800; }
+.weight-row em {
+  font-size: 9px;
+  font-weight: 500;
+  font-style: normal;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--warm-400);
+  font-family: ui-monospace, monospace;
+  margin-left: 12px;
+  vertical-align: middle;
+}
+
+.numerals {
+  font-family: var(--ff-display);
+  font-size: 24px;
+  font-weight: 500;
+  font-feature-settings: "tnum", "lnum";
+  letter-spacing: -0.01em;
+  line-height: 1.5;
+}
+.numerals em { font-size: 11px; font-style: normal; color: var(--warm-400); font-weight: 400; font-family: ui-monospace, monospace; letter-spacing: 0.05em; text-transform: uppercase; margin-left: 8px; }
+
+.punctuation {
+  font-family: var(--ff-display);
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.spacing-test {
+  font-family: var(--ff-display);
+  font-size: 17px;
+  line-height: 1.5;
+}
+.spacing-test span { display: block; padding: 4px 0; }
+.spacing-test em {
+  display: inline-block;
+  font-size: 10px;
+  font-style: normal;
+  color: var(--warm-400);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-family: ui-monospace, monospace;
+  margin-left: 8px;
+}
+
+/* Side-by-side comparison: Manrope vs Onest */
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 24px;
+}
+.compare-cell {
+  background: white;
+  border: 1px solid var(--hair);
+  border-radius: 12px;
+  padding: 24px;
+}
+.compare-cell h4 {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--sage-500);
+  margin-bottom: 16px;
+  font-family: var(--ff-display);
+}
+.compare-cell.manrope { font-family: var(--ff-manrope); }
+.compare-cell.onest   { font-family: var(--ff-onest); }
+.compare-cell .row { padding: 8px 0; border-bottom: 1px dashed var(--hair); font-size: 16px; line-height: 1.4; }
+.compare-cell .row:last-child { border-bottom: 0; }
+.compare-cell .row strong { font-weight: 600; }
+
+/* Verdict — printed after manual review */
+.verdict {
+  margin-top: 96px;
+  padding: 32px;
+  background: var(--sage-50);
+  border-left: 3px solid var(--sage-400);
+  border-radius: 4px;
+}
+.verdict h3 {
+  font-family: var(--ff-display);
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--sage-700);
+}
+.verdict-checklist { list-style: none; padding: 0; font-size: 14px; line-height: 1.7; }
+.verdict-checklist li::before { content: "☐  "; color: var(--sage-400); font-weight: 700; }
+.verdict-foot {
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--warm-600);
+  line-height: 1.55;
+}
+
+/* Mobile narrow check */
+@media (max-width: 720px) {
+  body { padding: 32px 20px 64px; }
+  .doc-head { grid-template-columns: 1fr; align-items: start; }
+  .doc-meta { text-align: left; }
+  .compare { grid-template-columns: 1fr; }
+  .stress-grid { grid-template-columns: 1fr; }
+  .scale-row { grid-template-columns: 60px 1fr; }
+  .scale-specs { display: none; }
+  .wordmark { font-size: 40px; }
+}
+</style>
+</head>
+<body>
+
+<header class="doc-head">
+  <div>
+    <div class="wordmark">ayla</div>
+    <div class="doc-subtitle">Manrope rendering на реальной русской UI-копии из Tau customer docs — type-scale специмен, cyrillic stress, side-by-side с Onest fallback.</div>
+  </div>
+  <div class="doc-meta">
+    Sigma · Phase C<br>
+    <b>typography evaluation</b><br>
+    2026-05-27
+  </div>
+</header>
+
+<!-- §1 Type scale specimen -->
+<section>
+  <div class="section-num">§ 1 · Type scale</div>
+  <h2 class="section-title">Шкала размеров</h2>
+  <p class="section-hint">Provisional 8-step scale на Manrope. Финальные значения зафиксированы в <code>design-tokens.md §5</code>.</p>
+
+  <div class="scale-row">
+    <div class="scale-label">display</div>
+    <div class="scale-sample s-display">Привет, Анна!</div>
+    <div class="scale-specs">48 / 1.05 / 600<br>−3.5%</div>
+  </div>
+  <div class="scale-row">
+    <div class="scale-label">h1</div>
+    <div class="scale-sample s-h1">Доброе утро, Анна</div>
+    <div class="scale-specs">32 / 1.15 / 600<br>−2.5%</div>
+  </div>
+  <div class="scale-row">
+    <div class="scale-label">h2</div>
+    <div class="scale-sample s-h2">Ближайшая запись</div>
+    <div class="scale-specs">24 / 1.25 / 600<br>−1.5%</div>
+  </div>
+  <div class="scale-row">
+    <div class="scale-label">h3</div>
+    <div class="scale-sample s-h3">Что сделаем сейчас</div>
+    <div class="scale-specs">20 / 1.30 / 500<br>−1%</div>
+  </div>
+  <div class="scale-row">
+    <div class="scale-label">h4</div>
+    <div class="scale-sample s-h4">Прогресс недели</div>
+    <div class="scale-specs">17 / 1.35 / 500</div>
+  </div>
+  <div class="scale-row">
+    <div class="scale-label">body</div>
+    <div class="scale-sample s-body">Если планы изменились — можно открыть запись и перенести или отменить. Я рядом.</div>
+    <div class="scale-specs">15 / 1.50 / 400</div>
+  </div>
+  <div class="scale-row">
+    <div class="scale-label">caption</div>
+    <div class="scale-sample s-caption">Сегодня среда, 14 декабря · обновлено 2 ч назад</div>
+    <div class="scale-specs">13 / 1.40 / 400</div>
+  </div>
+  <div class="scale-row">
+    <div class="scale-label">micro</div>
+    <div class="scale-sample s-micro">Главная · День · Записи · Услуги · Я</div>
+    <div class="scale-specs">11 / 1.35 / 500<br>+4% tracking</div>
+  </div>
+</section>
+
+<!-- §2 Real Tau samples -->
+<section>
+  <div class="section-num">§ 2 · Shipped copy</div>
+  <h2 class="section-title">Реальные сэмплы из Tau</h2>
+  <p class="section-hint">Не lorem ipsum — точные строки из dashboard / booking / records / reminders, которые W1 будет рендерить.</p>
+
+  <div class="specimen">
+    <div class="specimen-label">Dashboard · Block 1 — greeting</div>
+    <div class="greeting-h1">Привет, Анна!</div>
+    <div class="greeting-sub">Сегодня среда, 14 декабря</div>
+    <div class="greeting-body">У тебя 3 записи на этой неделе. Завтра — массаж у Ирины.</div>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-label">Booking flow · F2 master detail + F1 catalog reasoning</div>
+    <div class="booking-title">Маникюр гель-лак · 90 мин · 1 800 ₽</div>
+    <div class="booking-meta">Анна Петрова · Beauty Place</div>
+    <div class="booking-reason">20 минут от тебя, рейтинг 4.9</div>
+    <div class="booking-detail-line">Сегодня в 16:00 запись у Анны в Beauty Place. Адрес: Тверская 12.</div>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-label">Dashboard · pulse + wellness captions</div>
+    <div class="wellness-caption">Выпито 1.2 L из 2 L</div>
+    <div class="wellness-caption">Сегодня: 1 230 ккал · Б 65 / Ж 45 / У 130</div>
+    <div class="wellness-caption">До цели: ещё 770 мл</div>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-label">Buttons · primary actions</div>
+    <div class="btn-row">
+      <button class="btn">Записаться</button>
+      <button class="btn btn--secondary">Сообщить по записи</button>
+      <button class="btn btn--ghost">Перенести</button>
+      <button class="btn btn--ghost">Отменить</button>
+      <button class="btn btn--secondary">Открыть запись</button>
+      <button class="btn">Записаться ещё</button>
+      <button class="btn btn--secondary">Оставить отзыв</button>
+    </div>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-label">Bottom nav · 5 tabs</div>
+    <div class="nav-bar">
+      <div class="nav-item active"><span class="nav-icon">🏠</span>Главная</div>
+      <div class="nav-item"><span class="nav-icon">☀</span>День</div>
+      <div class="nav-item"><span class="nav-icon">📅</span>Записи</div>
+      <div class="nav-item"><span class="nav-icon">💅</span>Услуги</div>
+      <div class="nav-item"><span class="nav-icon">👤</span>Я</div>
+    </div>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-label">Records · 8 status badges (§R4 vocabulary)</div>
+    <div class="badge-grid">
+      <span class="badge badge--ok badge--icon">Подтверждена</span>
+      <span class="badge badge--neutral badge--icon">Перенесена</span>
+      <span class="badge badge--neutral badge--icon">Отменена</span>
+      <span class="badge badge--warn badge--icon">Отменена салоном</span>
+      <span class="badge badge--ok badge--icon">Прошла</span>
+      <span class="badge badge--neutral badge--icon">Не состоялась</span>
+      <span class="badge badge--neutral badge--icon">Возврат в обработке</span>
+      <span class="badge badge--ok badge--icon">Возврат завершён</span>
+    </div>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-label">Records · empty state</div>
+    <div class="empty-state">
+      Пока записей нет.<br>
+      Можно <a href="#">найти услугу</a> или <a href="#">спросить Ayla</a>.
+    </div>
+  </div>
+
+  <div class="specimen">
+    <div class="specimen-label">Booking detail · long-form note</div>
+    <div class="long-form-body">Если планы изменились, можно открыть запись и перенести или отменить.</div>
+  </div>
+</section>
+
+<!-- §3 Reminder voice -->
+<section>
+  <div class="section-num">§ 3 · Reminder voice</div>
+  <h2 class="section-title">B5 / B6 / B11 — long-form rendering</h2>
+  <p class="section-hint">Реальные тексты напоминаний — проверка читабельности на body/15px и узких 360–414dp viewports.</p>
+
+  <div class="reminder">
+    <div class="reminder-tag">B5 · T−24h</div>
+    <div class="reminder-text">Завтра в 16:00 — Анна в Beauty Place. Если планы изменились, можно открыть запись и перенести или отменить.</div>
+  </div>
+  <div class="reminder">
+    <div class="reminder-tag">B6 · T−2h</div>
+    <div class="reminder-text">Скоро запись: 16:00, маникюр у Анны в Beauty Place. Адрес: Тверская 12. Если задерживаешься или нужно уточнить подготовку — можно сообщить по записи.</div>
+  </div>
+  <div class="reminder">
+    <div class="reminder-tag">B11 · T+24h</div>
+    <div class="reminder-text">Как прошёл визит? Если хочешь, можешь оставить короткий отзыв — он поможет мастеру и другим клиентам.</div>
+  </div>
+</section>
+
+<!-- §4 Cyrillic stress lab -->
+<section>
+  <div class="section-num">§ 4 · Cyrillic stress lab</div>
+  <h2 class="section-title">Стресс-тест кириллицы</h2>
+  <p class="section-hint">Проверка качества Manrope для русского: изолированные глифы, ширина, веса, числа, валюта, пунктуация.</p>
+
+  <div class="stress-grid">
+
+    <div class="stress-cell">
+      <h4>Critical glyphs — й, ё, hooks</h4>
+      <div class="glyph-iso">й ё <span>щ</span> ц ъ ь</div>
+      <div class="weight-row" style="margin-top: 16px; font-size: 15px;">
+        <span>«Если задерживаешься, можно сообщить по записи.»</span>
+      </div>
+    </div>
+
+    <div class="stress-cell">
+      <h4>Wide-character spacing</h4>
+      <div class="spacing-test">
+        <span>миллиметры <em>narrow ascenders</em></span>
+        <span>щекотливый <em>щ + к + л — тесный</em></span>
+        <span>фффункция <em>repeated wide</em></span>
+        <span>Беловежская Пуща <em>caps + diacritics</em></span>
+      </div>
+    </div>
+
+    <div class="stress-cell">
+      <h4>Weight contrast — 200 → 800</h4>
+      <div class="weight-row">
+        <span class="w-200">Beauty Place <em>200 extralight</em></span>
+        <span class="w-300">Beauty Place <em>300 light</em></span>
+        <span class="w-400">Beauty Place <em>400 regular</em></span>
+        <span class="w-500">Beauty Place <em>500 medium</em></span>
+        <span class="w-600">Beauty Place <em>600 semibold</em></span>
+        <span class="w-700">Beauty Place <em>700 bold</em></span>
+        <span class="w-800">Beauty Place <em>800 extrabold</em></span>
+      </div>
+    </div>
+
+    <div class="stress-cell">
+      <h4>Numerals + currency ₽</h4>
+      <div class="numerals">
+        1 800 ₽ <em>tabular</em><br>
+        2 400 ₽ · 1 600 ₽ · 18 баллов<br>
+        16:00 · 14:30 · 09:45 <em>time</em><br>
+        +7 (912) 345-67-89 <em>phone</em><br>
+        4.9 ★ (47 отзывов) <em>rating</em><br>
+        1 240 / 2 100 ккал · 59 % <em>dashboard pulse</em>
+      </div>
+    </div>
+
+    <div class="stress-cell">
+      <h4>Punctuation — «ёлочки», — em dash</h4>
+      <div class="punctuation">
+        «Готово! Записала тебя.»<br>
+        — Это твоё обычное время.<br>
+        Запись — у Анны в Beauty Place.<br>
+        «Привет, Анна!» «До цели — ещё 770 мл.»<br>
+        ул. Тверская 12, Пенза · 09:00—21:00<br>
+        Б · Ж · У = 65 · 45 · 130 г
+      </div>
+    </div>
+
+    <div class="stress-cell">
+      <h4>Russian + Latin mix</h4>
+      <div class="weight-row" style="font-size: 17px;">
+        <span>Ayla подобрала Beauty Place</span>
+        <span><strong>POST</strong> /api/v1/customer/bookings</span>
+        <span>WCAG 2.2 AA · 4.5:1</span>
+        <span>Маникюр в Casa Bella</span>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- §5 Side-by-side comparison: Manrope vs Onest -->
+<section>
+  <div class="section-num">§ 5 · Side-by-side</div>
+  <h2 class="section-title">Manrope ↔ Onest — кандидаты в финал</h2>
+  <p class="section-hint">Onest — backup если Manrope провалит cyrillic stress (более тёплый character, шире щ/ц, лучше italic optical sizes).</p>
+
+  <div class="compare">
+    <div class="compare-cell manrope">
+      <h4>Manrope · current pick</h4>
+      <div class="row" style="font-size: 28px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15;">Привет, Анна!</div>
+      <div class="row">Маникюр гель-лак · 90 мин · <strong>1 800 ₽</strong></div>
+      <div class="row">Анна Петрова · Beauty Place</div>
+      <div class="row">«Если планы изменились — можно открыть запись и перенести.»</div>
+      <div class="row">Подтверждена · Перенесена · Возврат в обработке</div>
+      <div class="row" style="font-feature-settings: 'tnum';">1 230 ккал · Б 65 / Ж 45 / У 130 · 16:00</div>
+    </div>
+    <div class="compare-cell onest">
+      <h4>Onest · fallback</h4>
+      <div class="row" style="font-size: 28px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15;">Привет, Анна!</div>
+      <div class="row">Маникюр гель-лак · 90 мин · <strong>1 800 ₽</strong></div>
+      <div class="row">Анна Петрова · Beauty Place</div>
+      <div class="row">«Если планы изменились — можно открыть запись и перенести.»</div>
+      <div class="row">Подтверждена · Перенесена · Возврат в обработке</div>
+      <div class="row" style="font-feature-settings: 'tnum';">1 230 ккал · Б 65 / Ж 45 / У 130 · 16:00</div>
+    </div>
+  </div>
+</section>
+
+<!-- §6 Verdict checklist (manual fill-in) -->
+<section>
+  <div class="verdict">
+    <h3>Verdict checklist · Manrope</h3>
+    <ul class="verdict-checklist">
+      <li>Кириллица: «й» / «ё» / hooks читаются на 13–15dp без артефактов</li>
+      <li>«щ» / «ц» / «ъ» / «ь» — equal proportions, не сжаты</li>
+      <li>Wide cyrillic не разрывает строки в кнопках 44dp</li>
+      <li>Weight contrast 400 ↔ 600 различимо на body 15px</li>
+      <li>Tabular numerals (tnum) активируются для «1 800 ₽» / «16:00» / «1 240 / 2 100»</li>
+      <li>Currency «₽» правильной высоты + расстояние до числа</li>
+      <li>«ёлочки» — углы, не подменены на " "</li>
+      <li>Em dash — длина и kerning соответствует европейской типографике</li>
+      <li>Italic / oblique (если есть) — не ломает русские глифы</li>
+      <li>Display 32–48px — letterspacing −2.5%/−3.5% не схлопывает соседние буквы</li>
+    </ul>
+    <div class="verdict-foot">
+      Если ≥2 пункта fail — switch <code>--ff-display</code> и <code>--ff-body</code> на <code>'Onest'</code>, заново render. Финальный verdict + screenshot фиксируется в <code>docs/design/assets/AYLA/EXPERIMENTS/README.md</code>.
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

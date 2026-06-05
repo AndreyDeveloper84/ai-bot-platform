@@ -29,11 +29,20 @@ class TestVocabulary:
             assert hasattr(vocabulary, name), f"missing canonical constant: {name}"
 
     def test_canonical_events_frozenset_membership(self):
-        assert len(CANONICAL_EVENTS) == 13
+        # Sprint 3 baseline = 13. PR #192 (customer cancel/reschedule) added 6.
+        # PR #203 (master M0 onboarding) added 4 → current total = 23.
+        # Assertion is ≥ 13 so the test catches accidental REMOVAL but
+        # not benign additions (per Hotfix C policy decision on dev).
+        assert len(CANONICAL_EVENTS) >= 13
         assert "consent_granted" in CANONICAL_EVENTS
         assert "consent_withdrawn" in CANONICAL_EVENTS
         assert "safety_triggered" in CANONICAL_EVENTS
         assert "conversation_started" in CANONICAL_EVENTS
+        # Master onboarding slugs registered in PR 1.
+        assert "master.onboarding_started" in CANONICAL_EVENTS
+        assert "master.onboarding_accepted" in CANONICAL_EVENTS
+        assert "master.onboarding_rejected" in CANONICAL_EVENTS
+        assert "master.profile_initialized" in CANONICAL_EVENTS
 
     def test_canonical_events_is_immutable(self):
         """frozenset, not set — vocabulary must not drift at runtime."""

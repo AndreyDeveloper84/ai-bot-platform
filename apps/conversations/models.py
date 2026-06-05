@@ -55,6 +55,18 @@ from apps.tenancy.managers import TenantScopedManager
 class Conversation(models.Model):
     """A single thread between a BotUser and the platform."""
 
+    class Tier(models.TextChoices):
+        # Per docs/design/policies/conversation-ownership-policy.md §4.
+        # AI_CONTINUITY: bot replies autonomously; master can read +
+        # send (audited).
+        # HUMAN_SUPERVISED: bot drafts only; master/admin reviews
+        # before send (out of scope for this PR — placeholder).
+        # HUMAN_LOCKED: bot is silent; only admin/owner can speak.
+        # Master surface goes read-only (see M6 §M6 layout block).
+        AI_CONTINUITY = "ai_continuity", "AI Continuity"
+        HUMAN_SUPERVISED = "human_supervised", "Human Supervised"
+        HUMAN_LOCKED = "human_locked", "Human Locked"
+
     class State(models.TextChoices):
         # Per ADR-0007: minimal-first. Add new values alongside the
         # writer code that emits them, not pre-emptively.
@@ -159,6 +171,132 @@ class Conversation(models.Model):
         help_text="Set by record_message() on every insert. Drives the "
         "by-recency admin list and inactivity-cleanup queries.",
     )
+    last_booking_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Tenant-local datetime of the customer's most recent confirmed "
+            "booking start. Set from booking.confirmed event data.start_at "
+            "per docs/architecture/event-contract.md §3.1.4. Used by AI "
+            "grounding to anchor «когда вы у нас были последний раз»."
+        ),
+    )
+    # Payment event grounding fields. Populated by Gamma's payment consumer
+    # from Ayla canonical payment.* events per event-contract.md §3.5-§3.8.
+    # All nullable — pre-existing rows stay NULL until first payment event.
+    last_payment_captured_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "When the customer's most recent successful payment "
+            "was captured (Ayla canonical payment.captured event). "
+            "Used for AI context grounding."
+        ),
+    )
+    last_payment_failed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the customer's most recent payment attempt failed.",
+    )
+    last_payment_failure_code = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text=(
+            "Enum code for last failure reason. Values: "
+            "'insufficient_funds' | 'card_expired' | 'card_declined' "
+            "| 'three_d_secure_failed' | 'other'. "
+            "CRITICAL: enum-only — YooKassa error messages may "
+            "contain PII (card numbers). Free-text reasons must be "
+            "mapped to enum in payment consumer."
+        ),
+    )
+    last_payment_refunded_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the customer's most recent payment was refunded.",
+    )
+    pending_payment_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Ayla canonical payment_id for currently-pending payment "
+            "(authorized but not yet captured/failed). Reset to NULL "
+            "on captured/failed/refunded."
+        ),
+    )
+    consecutive_payment_failures = models.PositiveSmallIntegerField(
+        default=0,
+        help_text=(
+            "Counter incremented on payment.failed, reset to 0 on "
+            "payment.captured. Used for human handoff threshold "
+            "(PAYMENT_FAILED_HANDOFF_THRESHOLD env var)."
+        ),
+    )
+    last_payment_event_id = models.CharField(
+        max_length=26,  # ULID
+        blank=True,
+        default="",
+        help_text=(
+            "ULID of the last cross-service payment.* event that "
+            "touched this conversation. Handler-level idempotency "
+            "key: if envelope.event_id matches this, the handler "
+            "short-circuits before side-effects. Mirrors the "
+            "RemoteBookingProxy.last_synced_event_id pattern from "
+            "#442. Forensic trace, NOT the primary idempotency "
+            "guard — that's IngestDedupe at the dispatcher layer."
+        ),
+    )
+    # Master M6 / PR M6.1 — conversation ownership tier per
+    # docs/design/policies/conversation-ownership-policy.md §4.
+    tier = models.CharField(
+        max_length=24,
+        choices=Tier.choices,
+        default=Tier.AI_CONTINUITY,
+        db_index=True,
+        help_text=(
+            "Ownership tier. HUMAN_LOCKED disables master compose + AI "
+            "auto-reply; only admin/owner downgrades."
+        ),
+    )
+    tier_reason_class = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text=(
+            "Classification when tier is locked: "
+            "complaint|financial|medical|other. Empty otherwise."
+        ),
+    )
+    tier_locked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the conversation entered HUMAN_LOCKED.",
+    )
+    tier_locked_by_master = models.ForeignKey(
+        "catalog.CatalogMaster",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="conversations_locked",
+        help_text="Master who promoted the conversation to HUMAN_LOCKED.",
+    )
+    tier_locked_reason_text = models.CharField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Free-form forensic context. Never surfaced as PII.",
+    )
+    last_read_by_master_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Last time the assigned master tapped mark-read on this "
+            "conversation. Used to compute the per-master unread count."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     # Default manager scopes to current_tenant(). Use ``all_tenants`` for
@@ -190,6 +328,18 @@ class Conversation(models.Model):
                 fields=["bot_user", "tenant"],
                 condition=models.Q(is_active=True, deleted_at__isnull=True, is_shadow=False),
                 name="conversation_one_active_per_bot_user_tenant",
+            ),
+            # Conversations retro Y6: ``state`` is a CharField with
+            # TextChoices, which Django does NOT enforce at the DB
+            # layer. A hand-edited row with ``state='zombie'`` would
+            # load silently and the D4 dispatcher's HUMAN_HANDOFF
+            # short-circuit would pass through → bot runs on undefined
+            # state. CHECK constraint keeps the model and DB invariants
+            # aligned. New states must be added here AND to the State
+            # enum (linkage enforced via the migration that adds them).
+            models.CheckConstraint(
+                condition=models.Q(state__in=["idle", "consulting", "escalated", "human_handoff"]),
+                name="conversation_state_known_value",
             ),
         ]
 
@@ -331,3 +481,146 @@ class Message(models.Model):
     def __str__(self) -> str:
         preview = (self.content or self.rendered_text)[:40]
         return f"Message[{self.role}]({preview!r})"
+
+
+class AiDraft(models.Model):
+    """LLM-generated reply suggestion for a master to act on (M6 / Bundle B item 4).
+
+    A *transient* artifact: replaced when regenerated, marked terminal
+    when the master sends as themselves / releases to AI / dismisses.
+    Drafts are NOT stored in :class:`Message` — they aren't messages
+    until sent. Once sent, a new :class:`Message` row with
+    ``action_type="master_compose"`` (or plain ``"assistant"``) is
+    created and the draft moves to a terminal status.
+
+    ### Status lifecycle
+
+    ``ACTIVE`` is the only writable state. Every other state is terminal::
+
+        ACTIVE ─┬─→ SENT_AS_MASTER     (master tapped «Отправить от себя»)
+                ├─→ RELEASED_TO_AI     (master tapped «Пусть помощник ответит»)
+                ├─→ REPLACED           (master regenerated)
+                └─→ DISMISSED          (reserved — endpoint not in this PR)
+
+    Per-conversation invariant: at most one ``ACTIVE`` row exists at any
+    time. Enforced via the partial unique constraint
+    :attr:`ai_draft_one_active_per_conversation` and a
+    ``select_for_update`` lock in the service layer (which also marks
+    the previous ACTIVE row as REPLACED in the same transaction).
+
+    ### Tenant scoping
+
+    Default manager filters by ``current_tenant()``. Service code that
+    needs cross-tenant access (cleanup sweeps, replay) goes through
+    :attr:`all_tenants`. The master detail GET reads via the tenant-
+    scoped manager so a cross-tenant master can't see a foreign draft
+    even if a UUID collision happened.
+
+    ### Spec quote (master-mobile §M6 line 706-712)
+
+        «When master taps «Отправить от себя» on a draft, the message
+        renders to the customer as «Помощник: …». Same single assistant
+        identity. Master's authorship is recorded in attribution
+        metadata (``actor_type=master``, ``composed_by=master_id``)»
+
+    ### Spec quote (master-mobile §M6 lines 662-671 — the draft card)
+
+        «✨ Предложенный ответ ... [Отправить от себя] [Отредактировать]
+        [Пусть помощник ответит]»
+
+    The three action endpoints in :mod:`apps.master_api.services.ai_drafts`
+    map 1:1 to these three buttons.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        SENT_AS_MASTER = "sent_as_master", "Sent by master"
+        RELEASED_TO_AI = "released_to_ai", "Released to AI auto-send"
+        REPLACED = "replaced", "Replaced by newer draft"
+        DISMISSED = "dismissed", "Dismissed by master"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="ai_drafts",
+        help_text="Owning tenant. CASCADE — drafts are transient artifacts; "
+        "tenant deletion already cascades through booking + conversation.",
+    )
+    conversation = models.ForeignKey(
+        Conversation,
+        on_delete=models.CASCADE,
+        related_name="ai_drafts",
+        help_text="Conversation this draft suggests a reply for.",
+    )
+    master = models.ForeignKey(
+        "catalog.CatalogMaster",
+        on_delete=models.CASCADE,
+        related_name="+",
+        help_text="Master the draft is suggested to.",
+    )
+    content = models.TextField(
+        help_text="The LLM-generated reply text — 1-3 sentences typical.",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        db_index=True,
+    )
+    trigger_message = models.ForeignKey(
+        Message,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="The most recent customer message at generation time. "
+        "Used for the 60s idempotency window: if the master taps "
+        "«Generate» twice within 60 seconds AND no new customer message "
+        "arrived in between, we return the existing draft instead of "
+        "billing another LLM call.",
+    )
+    llm_provider = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Provider name as reported by the LLM router ('openai' / 'anthropic').",
+    )
+    llm_model = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Model id echoed by the provider (e.g. 'gpt-4o-mini').",
+    )
+    llm_cost_usd = models.DecimalField(
+        max_digits=8,
+        decimal_places=6,
+        default=0,
+        help_text="USD cost of the single LLM call. Computed via "
+        "apps.llm.pricing.compute_cost. 0 on stub / unknown model.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "AI draft"
+        verbose_name_plural = "AI drafts"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["conversation"],
+                condition=models.Q(status="active"),
+                name="ai_draft_one_active_per_conversation",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "master", "status"]),
+            models.Index(fields=["conversation", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        preview = (self.content or "")[:40]
+        return f"AiDraft[{self.status}]({preview!r})"

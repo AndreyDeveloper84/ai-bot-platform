@@ -65,6 +65,14 @@ class IdempotencyKey(models.Model):
     # that don't always have a tenant (worker boot, breaker reset).
     # Caller is responsible for scoping reads via .filter(tenant=...) when
     # the operation is tenant-aware.
+    #
+    # Tenancy system-check opt-out (tenancy.W900 / W901). The lookup
+    # contract is by global ``key`` (unique=True at line 42) — caller
+    # encodes operation + payload + tenant-discriminator into the key
+    # itself. Auto-scoping by current_tenant() would break worker-boot
+    # / breaker-reset paths that legitimately have no tenant context.
+    _IGNORE_TENANT_MANAGER_CHECK = True
+
     objects = models.Manager()
 
     class Meta:

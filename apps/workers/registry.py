@@ -45,3 +45,14 @@ def registered_streams() -> list[str]:
     """Return the list of streams that have handlers registered."""
 
     return list(_HANDLERS.keys())
+
+
+def iter_handlers() -> list[tuple[str, "TenantAwareTask"]]:  # type: ignore[name-defined]  # noqa: F821
+    """Canonical accessor for ``(stream, handler_instance)`` pairs.
+
+    Used by :mod:`apps.workers.subscriber_audit` (issue #502 boot-time
+    inventory emit). Callers MUST NOT touch ``_HANDLERS`` directly — the
+    module-private dict is an implementation detail.
+    """
+
+    return list(_HANDLERS.items())

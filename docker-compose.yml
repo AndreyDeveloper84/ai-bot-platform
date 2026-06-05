@@ -1,6 +1,6 @@
 # ai-bot-platform — Sprint 0 dev stack.
 #
-# Brings up 5 services: web, postgres 16, redis 7, chromadb, minio.
+# Brings up 6 services: web, worker, postgres 16, redis 7, chromadb, minio.
 # All persistent state lives in named volumes — `docker compose down`
 # preserves data; `docker compose down -v` is the explicit reset.
 
@@ -112,6 +112,44 @@ services:
       chromadb:
         condition: service_healthy
       minio:
+        condition: service_healthy
+
+  # MAX DM consumer (#1010). Drains the `ingress:max` Redis stream into the
+  # handler pipeline via XREADGROUP; without it MAX DM webhooks are accepted
+  # and journaled but never processed. Same image/env as `web`, no ports
+  # (not an HTTP service). The Mini App booking path is synchronous HTTP on
+  # init-data auth and does NOT need this worker.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m apps.workers.consumer --forever
+    # A drainer that dies silently re-creates the #1010 symptom (stream
+    # accepted but never processed). --forever exits cleanly on SIGINT; any
+    # other unhandled error should bounce the container back up.
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_DEBUG: "True"
+      DJANGO_ALLOWED_HOSTS: "*"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_bot_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_HTTP_HOST: chromadb
+      CHROMA_HTTP_PORT: "8000"
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_REPLAY_BUCKET: ai-bot-replay
+    volumes:
+      - ./:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:

@@ -282,3 +282,265 @@ async def _create_tenant_async(*, name: str) -> Tenant:
         daily_token_cap=10_000,
         daily_cost_cap_usd=Decimal("5.00"),
     )
+
+
+# ---------------------------------------------------------------------------
+# LLM retro hotfix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestRetroY3UnknownTenantLogsLoudly:
+    """LLM retro Y3 evolved from «log loudly + soft-fail defaults»
+    (Phase 0 bridge in PR #409) to «log loudly + raise UnknownTenantError»
+    (Phase 1 in PR #473).
+
+    Pre-Phase-1: stale UUID silently ran against a fictitious budget
+    (1M tokens, $50) — bounded by the daily cap but invisible.
+    Post-Phase-1: stale UUID raises :class:`UnknownTenantError(LLMError)`
+    which is caught by the skill envelope in booking/faq and converted
+    to a friendly handoff. The ERROR-level log is still emitted before
+    raising so Sentry triage stays cheap.
+    """
+
+    async def test_unknown_tenant_logs_error_and_raises(self, caplog) -> None:
+        from apps.llm.protocol import UnknownTenantError
+
+        bogus_id = str(uuid4())
+        with caplog.at_level("ERROR", logger="apps.llm.cost_tracker"):
+            with pytest.raises(UnknownTenantError) as exc_info:
+                await enforce_caps(bogus_id)
+
+        # The exception message embeds the offending id.
+        assert bogus_id in str(exc_info.value)
+
+        # ERROR-level log fires BEFORE the raise so Sentry sees it
+        # even if a future caller swallows the exception.
+        matching = [
+            rec
+            for rec in caplog.records
+            if rec.levelname == "ERROR" and "tenant_not_found" in rec.message
+        ]
+        assert matching, "expected ERROR-level tenant_not_found log"
+        assert bogus_id in matching[0].message
+
+    async def test_unknown_tenant_alert_ctx_also_raises(self, caplog) -> None:
+        from asgiref.sync import sync_to_async
+
+        from apps.llm.cost_tracker import _read_tenant_alert_context
+        from apps.llm.protocol import UnknownTenantError
+
+        bogus_id = str(uuid4())
+        with caplog.at_level("ERROR", logger="apps.llm.cost_tracker"):
+            with pytest.raises(UnknownTenantError) as exc_info:
+                await sync_to_async(_read_tenant_alert_context)(bogus_id)
+
+        assert bogus_id in str(exc_info.value)
+        matching = [
+            rec
+            for rec in caplog.records
+            if rec.levelname == "ERROR" and "tenant_not_found" in rec.message
+        ]
+        assert matching, "expected ERROR-level tenant_not_found log"
+
+
+class TestRetroB3PostIncrAtomicAccounting:
+    """Pre-fix threshold-crossing detection used `new = previous + delta`
+    where `previous` was a NON-ATOMIC snapshot taken before the INCR.
+    Two concurrent record_usage calls would both read the same
+    `previous`, both compute identical `new`, and EITHER fire the
+    80% alert twice OR skip it entirely (when neither call
+    individually crossed but their sum did).
+
+    Post-fix uses _incr_with_ttl's return value (Redis INCRBY-atomic
+    post-state) so `new_tokens` / `new_cost` reflect the actual
+    cumulative position even under concurrent writes.
+    """
+
+    async def test_incr_with_ttl_returns_post_state(self) -> None:
+        from apps.llm.cost_tracker import _incr_with_ttl, _tokens_key
+
+        tenant_id = str(uuid4())
+        key = _tokens_key(tenant_id)
+        first_total = _incr_with_ttl(key, 100)
+        assert first_total == 100
+
+        second_total = _incr_with_ttl(key, 50)
+        assert second_total == 150
+
+        # Zero-amount call returns current state without incrementing.
+        same_total = _incr_with_ttl(key, 0)
+        assert same_total == 150
+
+    async def test_record_usage_uses_post_incr_for_new_state(self, tenant: Tenant) -> None:
+        # Two record_usage calls that together cross the 80% threshold
+        # — pre-fix the second call's `new` was computed from the
+        # pre-INCR snapshot, missing the first call's increment, and
+        # neither call individually crossed 80% so the alert would
+        # never fire. Post-fix the second call's new_tokens reflects
+        # the cumulative state (4000 + 4500 = 8500 / 10000 = 85% > 80%).
+        await record_usage(str(tenant.id), tokens=4000, cost_usd=Decimal("0.10"))
+        await record_usage(str(tenant.id), tokens=4500, cost_usd=Decimal("0.10"))
+
+        # Cumulative state is now visible — confirms the post-INCR
+        # value was used to update the Redis counter atomically.
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.tokens_used == 8500
+
+
+# ---------------------------------------------------------------------------
+# LLM retro B2 — reserve-then-record cap enforcement (TOCTOU fix)
+# ---------------------------------------------------------------------------
+
+
+class TestRetroB2ReserveThenRecord:
+    """Pre-fix enforce_caps read current_cost, compared against cap, then
+    returned. Two concurrent callers both read `current < cap`, both
+    proceeded, both charged — overshoot O(concurrency × max_call_cost).
+
+    Post-fix enforce_caps INCRBYs a worst-case `estimated_cost_usd`
+    before the cap check. If the post-INCR total exceeds the cap,
+    DECRBYs the reservation and raises. Each caller sees their own
+    post-INCR value (Redis INCRBY is atomic), so only the callers
+    that genuinely fit under the cap proceed. record_usage refunds
+    the delta between reservation and actual.
+    """
+
+    async def test_reservation_is_returned(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import enforce_caps
+
+        # Plenty of headroom — reservation should be created.
+        reservation = await enforce_caps(
+            str(tenant.id),
+            estimated_cost_usd=Decimal("0.05"),
+        )
+        assert reservation is not None
+        assert reservation.microcents > 0
+
+    async def test_reservation_is_refunded_on_cap_exceed(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import (
+            TenantQuotaExceeded,
+            enforce_caps,
+            get_current_usage,
+        )
+
+        # Pre-fill close to the cap so an estimate that would push over
+        # 100% is rejected.
+        await record_usage(str(tenant.id), tokens=0, cost_usd=Decimal("4.80"))
+
+        with pytest.raises(TenantQuotaExceeded) as exc_info:
+            await enforce_caps(
+                str(tenant.id),
+                estimated_cost_usd=Decimal("0.50"),  # 4.80 + 0.50 = 5.30 > 5.00
+            )
+        assert exc_info.value.which_cap == "cost"
+
+        # The reservation MUST have been refunded — the cost key is
+        # back to 4.80, not stuck at 5.30.
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.cost_used_usd == Decimal("4.80")
+
+    async def test_record_usage_refunds_over_estimate(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import enforce_caps, get_current_usage
+
+        # Reserve $0.10 worst-case, actually use $0.02.
+        reservation = await enforce_caps(
+            str(tenant.id),
+            estimated_cost_usd=Decimal("0.10"),
+        )
+        # After enforce_caps the cost key reflects the reservation.
+        usage_after_reserve = await get_current_usage(str(tenant.id))
+        assert usage_after_reserve.cost_used_usd == Decimal("0.10")
+
+        # record_usage with the reservation refunds the over-estimate.
+        await record_usage(
+            str(tenant.id),
+            tokens=50,
+            cost_usd=Decimal("0.02"),
+            reservation=reservation,
+        )
+        usage_after_record = await get_current_usage(str(tenant.id))
+        # Net effect: 0.10 reserved − 0.08 refund = 0.02 actual.
+        assert usage_after_record.cost_used_usd == Decimal("0.02")
+
+    async def test_record_usage_tops_up_under_estimate(self, tenant: Tenant) -> None:
+        from apps.llm.cost_tracker import enforce_caps, get_current_usage
+
+        # Reserve $0.05 worst-case, actually use $0.08 (over-spend).
+        reservation = await enforce_caps(
+            str(tenant.id),
+            estimated_cost_usd=Decimal("0.05"),
+        )
+        await record_usage(
+            str(tenant.id),
+            tokens=50,
+            cost_usd=Decimal("0.08"),
+            reservation=reservation,
+        )
+        usage = await get_current_usage(str(tenant.id))
+        # Reservation 0.05 + top-up 0.03 = 0.08 actual.
+        assert usage.cost_used_usd == Decimal("0.08")
+
+    async def test_concurrent_reservations_prevent_overshoot(self, tenant: Tenant) -> None:
+        import asyncio
+
+        from apps.llm.cost_tracker import TenantQuotaExceeded, enforce_caps
+
+        # Pre-fill so only ~$0.50 of headroom remains; spawn 5 concurrent
+        # reservations of $0.20 each. Pre-fix: all 5 would pass (cost
+        # read 4.50 < 5.00, all proceed). Post-fix: exactly 2 pass
+        # (4.50 + 0.20 × 2 = 4.90 ≤ 5.00; the 3rd would push to 5.10 >
+        # 5.00 and refund), the other 3 raise TenantQuotaExceeded with
+        # the reservation already refunded.
+        #
+        # Atomicity note (closes reviewer Y2): on locmem (single-process
+        # pytest backend) ``cache.incr`` is atomic via threading.RLock,
+        # and ``asyncio.gather`` runs coroutines cooperatively on one
+        # thread — so this test exercises the deterministic side of the
+        # gate logic. It does NOT prove Redis INCRBY atomicity in
+        # production; that property is contractually relied upon (Redis
+        # single-threaded model). Real-Redis integration coverage lives
+        # in the staging soak.
+        await record_usage(str(tenant.id), tokens=0, cost_usd=Decimal("4.50"))
+
+        async def _try_reserve():
+            try:
+                return await enforce_caps(
+                    str(tenant.id),
+                    estimated_cost_usd=Decimal("0.20"),
+                )
+            except TenantQuotaExceeded:
+                return None
+
+        results = await asyncio.gather(*[_try_reserve() for _ in range(5)])
+        accepted = [r for r in results if r is not None]
+        rejected = [r for r in results if r is None]
+
+        # Tight bounds (closes reviewer Y1 inverse-bug guard): exactly 2
+        # reservations fit. ``<= 2`` alone would pass even on a broken
+        # gate that rejects everyone; ``== 2`` catches over-rejection.
+        assert len(accepted) == 2
+        assert len(rejected) == 3
+        # And the net cost reflects only the accepted reservations.
+        usage = await get_current_usage(str(tenant.id))
+        expected_max = Decimal("4.50") + Decimal("0.20") * len(accepted)
+        assert usage.cost_used_usd == expected_max
+
+    async def test_legacy_callers_without_estimate_still_work(self, tenant: Tenant) -> None:
+        # Backward-compat: callers that don't pass estimated_cost_usd
+        # get the legacy soft-check path. enforce_caps returns a
+        # zero-microcent reservation; record_usage falls back to the
+        # plain INCR path.
+        from apps.llm.cost_tracker import enforce_caps, get_current_usage
+
+        reservation = await enforce_caps(str(tenant.id))
+        assert reservation.microcents == 0
+
+        await record_usage(
+            str(tenant.id),
+            tokens=100,
+            cost_usd=Decimal("0.03"),
+            reservation=reservation,
+        )
+        usage = await get_current_usage(str(tenant.id))
+        assert usage.cost_used_usd == Decimal("0.03")
+        assert usage.tokens_used == 100

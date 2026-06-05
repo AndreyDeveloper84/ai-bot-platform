@@ -125,3 +125,58 @@ def compute_cost(
     output_tokens = max(0, int(output_tokens or 0))
 
     return (in_rate * Decimal(input_tokens) + out_rate * Decimal(output_tokens)) / Decimal(1000)
+
+
+def validate_pricing_coverage() -> list[str]:
+    """Return the list of model names referenced by the platform but
+    missing from :data:`MODEL_PRICES`.
+
+    LLM retro Y7: when a provider's pricing-table entry drifts out of
+    sync with the model names the router resolves (vendor rename,
+    typo in settings, new model added without a pricing row), the cost
+    path silently raises :class:`UnknownModelError` on first use —
+    which then either masks the cap (if swallowed by an outer handler)
+    or fails a customer-facing call. A CI-time self-test catches the
+    drift before the model lands in prod.
+
+    Pulled model names:
+      - Per-skill provider defaults from ``settings.SKILL_LLM_PROVIDER``
+        (only the provider name, not the model — so we walk the default
+        models of each provider class).
+      - The two provider classes' ``_DEFAULT_*_MODEL`` constants.
+
+    Returns ``[]`` when every referenced model has a pricing row.
+    """
+
+    # Lazy imports to avoid pulling provider SDKs into pricing.py.
+    referenced: set[str] = set()
+
+    try:
+        from apps.llm.providers.openai_provider import (
+            _DEFAULT_COMPLETION_MODEL as _OPENAI_COMPLETION,
+        )
+        from apps.llm.providers.openai_provider import (
+            _DEFAULT_EMBEDDING_MODEL as _OPENAI_EMBEDDING,
+        )
+
+        referenced.add(_OPENAI_COMPLETION)
+        referenced.add(_OPENAI_EMBEDDING)
+    except ImportError:
+        # Provider class structure may evolve — don't break the validator.
+        pass
+
+    try:
+        from apps.llm.providers.anthropic_provider import (
+            _DEFAULT_INTENT_MODEL as _ANTHROPIC_INTENT,
+        )
+        from apps.llm.providers.anthropic_provider import (
+            _DEFAULT_REPLY_MODEL as _ANTHROPIC_REPLY,
+        )
+
+        referenced.add(_ANTHROPIC_INTENT)
+        referenced.add(_ANTHROPIC_REPLY)
+    except ImportError:
+        pass
+
+    missing = sorted(m for m in referenced if m not in MODEL_PRICES)
+    return missing

@@ -87,6 +87,22 @@ NOT_RECOGNIZED_FALLBACK = (
     "Фото немного сложное — не разобралась. Можешь переснять поближе или просто написать, что было?"
 )
 
+# Веха 1 (founder verdict 2026-06-02) — two-gate fallback copy.
+NUTRITION_OFF_FALLBACK = "Дневник еды пока недоступен — функция готовится. Могу помочь с записью?"
+
+PHOTO_SCAN_OFF_FALLBACK = (
+    # Адверсариальный обзор #7 — текст НЕ должен советовать ввести блюдо
+    # в чате: food_clarify перехватывает короткий текст и отвечает
+    # «Скинь фото» → цикл. Mini App «manual entry» — единственный
+    # реально работающий путь при выключенном photo gate.
+    "Фото-распознавание пока недоступно. Открой Mini App — там можно записать блюдо вручную."
+)
+
+CONSENT_REQUIRED_FALLBACK = (
+    "Чтобы записать еду, нужно открыть Mini App и подтвердить согласие "
+    "на обработку данных (152-ФЗ). После этого вернись — и пришли фото."
+)
+
 
 # ─── skill ────────────────────────────────────────────────────────────────
 
@@ -122,6 +138,17 @@ class FoodScannerSkill:
     # ─── photo flow ──────────────────────────────────────────────────────
 
     def _handle_photo(self, context: SkillContext) -> SkillResult:
+        # Веха 1 gates: master switch → photo gate → consent. Order
+        # matters — we surface the most informative refusal first
+        # («feature off» beats «consent missing» when both are true).
+        gate = _check_gates(
+            context,
+            require_photo_scan=True,
+            kind="photo",
+        )
+        if gate is not None:
+            return gate
+
         photo_bytes = _extract_photo_bytes(context)
         if not photo_bytes:
             logger.info(
@@ -181,6 +208,22 @@ class FoodScannerSkill:
 
         action = parsed["action"]
         scan_id = parsed["ref"]
+
+        # Веха 1 gate. Callbacks reference a prior scan, so if the
+        # nutrition surface was turned off / consent revoked between the
+        # scan and the tap, we refuse here rather than committing the
+        # log to Ayla. ``require_photo_scan=False`` — the photo gate is
+        # only needed for new scans, not the buttons on an already-
+        # rendered card. ``reject`` is harmless; we don't gate it (silent
+        # ack costs nothing and a refusal popup would be confusing).
+        if action != "reject":
+            gate = _check_gates(
+                context,
+                require_photo_scan=False,
+                kind="callback",
+            )
+            if gate is not None:
+                return gate
 
         if action == "reject":
             return SkillResult(
@@ -247,6 +290,79 @@ def _extract_photo_bytes(context: SkillContext) -> bytes | None:
     emits ``PHOTO_NO_BYTES``.
     """
     return getattr(context.conversation, "last_photo_bytes", None)
+
+
+def _check_gates(
+    context: SkillContext,
+    *,
+    require_photo_scan: bool,
+    kind: str,
+) -> SkillResult | None:
+    """Veха 1 two-flag + consent gate. Returns a refusal SkillResult or
+    ``None`` to proceed.
+
+    Order:
+
+    1. ``settings.NUTRITION_ENABLED`` — master switch. False → «feature
+       off» reply. Covers the whole RU-side nutrition surface.
+    2. ``settings.FOOD_PHOTO_SCAN_ENABLED`` — cross-border gate.
+       Only consulted when ``require_photo_scan=True`` (new scans).
+       False → manual-entry hint.
+    3. ``BotUser.food_scanner_consent_at`` — feature-specific 152-ФЗ
+       acknowledgement. NULL → redirect-to-Mini-App reply.
+
+    ``kind`` is a label («photo» / «callback») used in the meta so
+    observability can distinguish refusal sites.
+
+    The skill matches() still owns turn capture; the gate refuses
+    here so other skills (e.g. echo) don't accidentally pick up
+    the photo turn.
+    """
+    from django.conf import settings
+
+    if not getattr(settings, "NUTRITION_ENABLED", False):
+        logger.info(
+            "food_scanner.gate.nutrition_off kind=%s conv=%s",
+            kind,
+            getattr(context.conversation, "id", None),
+        )
+        return SkillResult(
+            reply_text=NUTRITION_OFF_FALLBACK,
+            meta={"reply_kind": "food_scanner_nutrition_off"},
+        )
+
+    if require_photo_scan and not getattr(settings, "FOOD_PHOTO_SCAN_ENABLED", False):
+        logger.info(
+            "food_scanner.gate.photo_scan_off kind=%s conv=%s",
+            kind,
+            getattr(context.conversation, "id", None),
+        )
+        return SkillResult(
+            reply_text=PHOTO_SCAN_OFF_FALLBACK,
+            meta={"reply_kind": "food_scanner_photo_scan_off"},
+        )
+
+    # Адверсариальный обзор #2 — Mock(spec=None).food_scanner_consent_at
+    # авто-генерирует truthy Mock-объект вместо None, и тест без явной
+    # установки атрибута молча проходит гейт. Защита: требуем datetime
+    # (production-shape — Django возвращает aware datetime либо None).
+    # Это покрывает replay fixtures, integration stubs и любые будущие
+    # тесты, которые забыли inscribe ``food_scanner_consent_at = …``.
+    from datetime import datetime as _datetime
+
+    consent_at = getattr(context.bot_user, "food_scanner_consent_at", None)
+    if not isinstance(consent_at, _datetime):
+        logger.info(
+            "food_scanner.gate.consent_missing kind=%s conv=%s",
+            kind,
+            getattr(context.conversation, "id", None),
+        )
+        return SkillResult(
+            reply_text=CONSENT_REQUIRED_FALLBACK,
+            meta={"reply_kind": "food_scanner_consent_required"},
+        )
+
+    return None
 
 
 def _format_scan_card(scan) -> str:

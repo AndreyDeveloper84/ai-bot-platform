@@ -2,12 +2,16 @@
 
 | Field | Value |
 |---|---|
-| **Date** | 2026-05-18 r1 |
+| **Date** | 2026-05-19 r2 (Ayla-first voice-sweep) |
 | **Designer** | UX-architect skill / AndreyDeveloper84 |
 | **Status** | Draft for founder ratification (recommendation: ACTIVE role — see §3) |
-| **Surfaces** | MAX Mini App (primary, mobile-first) + MAX manager-bot DMs (push channel) + web (secondary, desktop fallback) + MAX group chat patterns (team coordination) |
-| **Scope** | Master-persona mobile experience: onboarding, dashboard, schedule, profile, conversation list/detail (subset of Conversations module), notification settings, app settings |
-| **Screens** | 8 mobile (Mini App) + 1 onboarding flow + 4 MAX-bot push templates + 1 web parity layout |
+| **Surfaces** | **Ayla Pro** Mini App (primary, mobile-first) + manager-bot DMs (push channel) + web (secondary, desktop fallback) + group chat patterns (team coordination) |
+| **Scope** | Master-persona mobile experience in Ayla Pro: onboarding, dashboard, schedule, profile, conversation list/detail (own customers only), notification settings, app settings |
+| **Screens** | 8 mobile (Ayla Pro Mini App) + 1 onboarding flow + 4 bot push templates + 1 web parity layout |
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](../policies/ayla-identity-and-brand.md) memory 2026-05-19: master's mobile experience is **Ayla Pro** (tenant's provider tool per [`tenant-as-provider-model §5`](../policies/tenant-as-provider-model.md)) — separate from Ayla customer Mini App. Master sees own customers (initials only) per Doc #4 §5.3. Master ↔ Ayla messages (booking notifications, customer alerts) use functional Ayla voice per master-conversational-templates r2. Master ↔ Admin internal channel uses operational tone per [`master-admin-internal-chat-handoff`](./2026-05-19-master-admin-internal-chat-handoff.md). Deprecated `conversation-ownership-policy.md` refs preserved as backend mechanic.
 | **Persona** | Master = stylist/master who works at a salon; mobile primary; 30-sec attention windows between clients |
 | **Foundation docs** | See §2 — read those first |
 
@@ -934,7 +938,7 @@ Master can opt-out of team-chat mentions in §M7 (future setting; v1.1).
 
 ### Pattern 1 — Sticky bottom CTA (replacing MainButton)
 
-Every screen with a primary action uses fixed-position bottom CTA bar. Pattern from [`max-mini-apps.md` Part 6](.../platforms/max-mini-apps.md):
+Every screen with a primary action uses fixed-position bottom CTA bar. Pattern from `max-mini-apps.md` Part 6 (skill ref at `~/.claude/skills/ux-architect/references/platforms/max-mini-apps.md`):
 
 ```css
 .cta-bar {
@@ -1001,7 +1005,7 @@ Inline keyboard buttons use `callback` for actions that route to Mini App, with 
 
 ### Pattern 6 — No screenshot protection for master
 
-Per [max-mini-apps Part 6 Pattern 5](.../platforms/max-mini-apps.md), `ScreenCapture.disableScreenCapture()` is for PII screens. Master never sees phone/LTV/medical, so **no screen capture lock**. Master's conversation detail does not need protection.
+Per max-mini-apps Part 6 Pattern 5 (skill ref at `~/.claude/skills/ux-architect/references/platforms/max-mini-apps.md`), `ScreenCapture.disableScreenCapture()` is for PII screens. Master never sees phone/LTV/medical, so **no screen capture lock**. Master's conversation detail does not need protection.
 
 ### Pattern 7 — Persona DM voice
 

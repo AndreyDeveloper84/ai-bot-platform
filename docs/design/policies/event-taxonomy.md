@@ -1,6 +1,6 @@
 # Event Taxonomy — canonical event names + payload contract
 
-**Date:** 2026-05-18 r1
+**Date:** 2026-05-19 r3
 **Status:** Foundational — locks event names + envelope structure across all modules
 **Reads:** [`attribution-policy.md`](./attribution-policy.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`core-wellness-profile.md`](./core-wellness-profile.md)
 
@@ -417,7 +417,95 @@ Forbidden:
 
 ---
 
-## 14. What this unblocks
+## 14. Scope separation from `apps/events/` (product analytics)
+
+### 14.1 Two separate buses by deliberate design
+
+The codebase has **two event systems by deliberate design**, NOT one with conflicting names:
+
+| System | Path | Purpose | Naming | Delivery | Catalog size |
+|---|---|---|---|---|---|
+| **Product analytics events** | `apps/events/` (exists) | Tracking user actions for Mixpanel / GA4 / Warehouse funnels | `snake_case` (e.g., `consent_granted`, `message_sent`) | Sync fanout to analytics tools | 13 (Sprint 3 vocabulary) |
+| **Domain event bus** | `apps/eventbus/` (NEW per Q-EV-IMPL1) | Durable domain lifecycle events for internal subscribers (billing, loyalty, retention, AI inference, audit) | `domain.entity.action` (e.g., `customer.consent.changed`, `booking.attribution.assigned`) | Postgres outbox + poller per [§5 replay](#5-replay--dead-letter) | 50+ across 10 domains |
+
+This doc (`event-taxonomy.md`) is **authoritative for the domain bus only**. It does NOT replace `apps/events/`.
+
+### 14.2 When to use which (decision tree)
+
+```
+Am I emitting an event because…
+│
+├─ I want to track a user action for product funnels / engagement analytics?
+│  └─ Use apps/events/ — sync, snake_case, fast-and-forgiving delivery
+│
+├─ Something happened that changes business state and other internal modules
+│  need to react reliably (charge billing, update loyalty, update profile,
+│  trigger AI inference, audit-log)?
+│  └─ Use apps/eventbus/ (NEW) — durable outbox, dot.notation, guaranteed delivery
+│
+└─ Both?
+   └─ Emit to BOTH. Deliberately. This IS the right pattern — analytics tracks
+      «user did X»; domain bus signals «X state happened, react». Different
+      consumers, different SLAs.
+```
+
+### 14.3 Overlap policy
+
+Some lifecycle moments fire on BOTH buses by design. Example:
+
+| Moment | apps/events/ (analytics) | apps/eventbus/ (domain) |
+|---|---|---|
+| Customer grants wellness module consent | `consent_granted` (Mixpanel funnel «module activations per week») | `customer.consent.changed` + `wellness.module.activated` (wellness aggregator subscribes; profile layer updates) |
+| Customer sends first message to bot | `message_sent` (engagement metric for product team) | `conversation.started` + `conversation.message.sent` (AI persona violation linter subscribes; state machine evaluates) |
+| Booking attribution assigned | (typically NOT in analytics — internal-state only) | `booking.attribution.assigned` (billing subscribes; analytics dashboard derives KPIs) |
+
+**Overlap is OK. Coordination is NOT required.** Emitter explicitly calls both APIs when both are relevant. No silent mirroring (anti-magical pattern).
+
+### 14.4 Naming convention difference is intentional
+
+- `snake_case` in `apps/events/` signals «this is analytics-side, fire-and-forget» to readers
+- `dot.notation` in `apps/eventbus/` signals «this is domain-side, durable, subscriber-binding» to readers
+
+If we unified naming, engineers couldn't tell which API to call. Different conventions = decision aid.
+
+### 14.5 Engineering review rule
+
+Every PR that emits events must answer in PR description:
+> «This emits to: [ ] apps/events/ (product analytics) — for {{funnel/metric}} / [ ] apps/eventbus/ (domain bus) — for {{subscriber}}. Both / neither / one — and why.»
+
+Code reviewer rejects vague «emit event» commits without this clarity.
+
+### 14.6 Migration policy
+
+- `apps/events/` STAYS as-is. 60+ existing call sites unaffected.
+- `apps/eventbus/` is NEW work — port-as-needed, not big-bang migration.
+- When a NEW domain event is needed → add to `apps/eventbus/` per §10 «Adding a new event» procedure
+- When new analytics tracking is needed → add to `apps/events/vocabulary.py`
+- If a domain event is found to be missing analytics-side tracking (or vice versa) → add to other bus deliberately, NEVER silently mirror via interceptor
+
+### 14.7 Cross-bus correlation
+
+Both buses share `correlation_id` (or `apps/events/`-equivalent `trace_id`) when fired in same request context. Allows joining «user click → analytics event + domain event» in observability tooling.
+
+Engineering convention: pass `correlation_id` through both emitter APIs in same handler:
+```python
+correlation_id = generate_correlation_id()
+# Analytics
+product_events.emit("consent_granted", distinct_id=user.id, trace_id=correlation_id)
+# Domain
+domain_bus.emit("customer.consent.changed", actor=user, correlation_id=correlation_id, ...)
+```
+
+### 14.8 Implementation status (as of r2)
+
+- **apps/events/** — exists, 13 vocabulary events, sync fanout to Mixpanel/GA4/Warehouse skeletons, ~60 call sites. Unchanged.
+- **apps/eventbus/** — **shipped 2026-05-19 (Phase 2.1)**. DomainEvent outbox table + ULID generator + Envelope dataclass + emit() helper + 6 typed emit helpers + Celery beat dispatcher + 22 Phase 1 event names (booking + customer + master domains, §3.1 / §3.2 / §3.3) + NoopSubscriber default + signal-based wireup of `booking.created` only. 44 tests passing. Q-EV-IMPL1-5 → DECIDED (decisions-log r20). Phase 2.1 deviations documented in §18.
+
+Phase 2.2 (next): real subscribers (billing / loyalty / retention / AI inference) wired by their owning modules; remaining domain events auto-emitted from their domain code as those modules touch the lifecycle.
+
+---
+
+## 15. What this unblocks
 
 - **4a attribution backend** has canonical event names to emit
 - **Schedule rebuild (PR A)** knows what events to fire on WorkingHours/TimeBlock/etc.
@@ -426,15 +514,17 @@ Forbidden:
 - **Loyalty / marketing** have firm event names to listen for
 - **New modules** added in future can extend without renaming chaos
 
-## 15. What this does NOT unblock
+## 16. What this does NOT unblock
 
 - ❌ Replace event-bus technology decision (Q-EV1 still open)
 - ❌ Skip PII review on payloads (every PR with new event MUST be reviewed)
 - ❌ Allow ad-hoc event emission outside this catalog
+- ❌ Replace `apps/events/` (product analytics — stays per §14)
+- ❌ Silently mirror events between buses via interceptor (§14.6 — explicit emission only)
 
 ---
 
-## 16. Sign-off
+## 17. Sign-off
 
 | Role | Approval | Date |
 |---|---|---|
@@ -444,5 +534,76 @@ Forbidden:
 | Legal (PII rules §6) | ☐ | |
 | Security (cross-tenant §8) | ☐ | |
 
+---
+
+## 18. Implementation deviations & transition concessions (r2, post-Phase-2.1-ship)
+
+apps/eventbus/ Phase 2.1 shipped 2026-05-19. Five deviations from the as-designed policy are documented here per the [attribution-policy §15 pattern](./attribution-policy.md#15-implementation-deviations--transition-concessions-r3-post-4a). Each is classified ACCEPTED FINAL / TEMPORARY / DEFERRED, with the resolution path captured.
+
+§14 (Scope separation from `apps/events/`) is the **architectural** decision and is not duplicated here. §18 covers Phase 2.1 **implementation** concessions only.
+
+### 18.1 Phase 1 auto-wired events = `booking.created` only — TEMPORARY
+
+**Deviation**: §3 catalog spec'd 50+ events across 10 domains; Phase 1 §3.1/§3.2/§3.3 lists 22 events across booking/customer/master. Phase 2.1 ship auto-emits only **one**: `booking.created` (via post_save signal on `BookingRequest`). All other 21 Phase 1 events are exposed as typed emit helpers in `apps/eventbus/services.py` but have no call-site wireup.
+
+**Why**: status-transition events (`booking.cancelled` / `booking.completed` / `booking.rescheduled`) need service-layer diff detection — that's the cancellation/reschedule PR's scope, not the bus PR's. `customer.*` events need identity / consent bridges still being designed. `master.*` events need Master models that don't exist yet (Phase 2 master CRUD).
+
+**Resolution path**: per-domain auto-wire ships in PRs that touch those lifecycle modules:
+- `booking.cancelled` / `booking.rescheduled` → customer-cancellation-reschedule handoff implementation (handoff exists, Q-CR1-15 closed)
+- `booking.attribution.assigned` → 4a attribution backend follow-up
+- `booking.completed` / `booking.no_show` → YClients webhook + reminder factory (Q-ATT-IMPL7)
+- `customer.consent.changed` → consent module audit-event integration
+- `customer.state.changed` → core-user-states FSM module (deferred per Q-US pending integration)
+- `master.*` → master-management implementation (Q-MM open)
+
+**Risk**: subscribers built against future events see no traffic until the auto-wire PR ships. Acceptable; Phase 2.1 NoopSubscriber means no observable side-effect waiting on auto-wire anyway. Documented in Q-EV-IMPL2.
+
+### 18.2 Phase 2.1 subscriber set = NoopSubscriber only — TEMPORARY
+
+**Deviation**: §4 lists real subscribers per event (analytics, audit, AI inference, loyalty, marketing, billing, slot resolver). Phase 2.1 ships with **only** `NoopSubscriber` registered in `apps/eventbus/dispatcher.py::_subscribers()`.
+
+**Why**: real subscribers belong to their owning modules (billing/loyalty/retention/AI), and those modules need their own integration work. Shipping the bus infra first lets each subscriber land independently without blocking on a monolithic «subscriber framework» PR.
+
+**Resolution path**: Phase 2.2 — each real subscriber lands in its own PR per [§10 «Adding a new event»](#10-adding-a-new-event) procedure (extended to «adding a subscriber»: subscriber + tests + settings registration). Subscriber registration moves from hard-coded list to dotted-path-in-settings (`DOMAIN_EVENT_SUBSCRIBERS`) when the second real subscriber lands.
+
+**Risk**: outbox accumulates rows that get dispatched to Noop only. Storage cost is bounded (taxonomy §5 90-day retention applies; cleanup task ships with Phase 2.2 subscribers). Acceptable in Phase 2.1.
+
+### 18.3 ULID — inline implementation, no new dependency — ACCEPTED FINAL
+
+**Deviation**: §2 requires ULID `event_id` but does not dictate a library. Phase 2.1 ships an inline ULID generator (`apps/eventbus/ulid.py`, ~30 LOC) instead of adding `python-ulid` to `pyproject.toml`.
+
+**Why**: avoid a new runtime dependency for a 30-line algorithm. The Crockford-base32 ULID format is a public spec; our implementation produces compliant 26-char IDs.
+
+**Resolution path**: ACCEPTED FINAL. If ULID requirements grow (strict monotonicity within same ms, parsing utilities, timestamp extraction APIs), revisit and swap to `python-ulid` then.
+
+**Risk**: strict monotonicity within the same millisecond is NOT guaranteed (random suffix per call; no monotonic counter). Outbox FIFO order is correct across millisecond boundaries; same-ms collisions sort arbitrarily. Acceptable — dispatcher does not depend on intra-ms ordering.
+
+### 18.4 PII §6 enforcement asymmetry vs `apps/events/` — ACCEPTED FINAL
+
+**Deviation**: §6 says «forbidden in event payloads». `apps/events/` (analytics) implements §6 as warn-and-still-insert (telemetry never drops). `apps/eventbus/` (domain) implements §6 as **REJECT** — `emit()` raises `EventbusPiiViolation` and no row is written.
+
+**Why**: the two buses have different blast radii. Analytics events flow to external warehouses where rotation/redaction is easier; domain events feed durable internal subscribers (billing, retention, audit), where PII contamination is a legal-grade issue. REJECT for the domain bus is the correct asymmetry.
+
+**Resolution path**: ACCEPTED FINAL. Both buses honor §6 by intent — only the severity of the response differs. Engineering review rule (§14.5) catches violations at PR time; runtime REJECT is the last-line defense.
+
+**Risk**: developer hits unexpected REJECT in production and event is lost. Mitigation: PII heuristics are conservative (forbidden key list + phone-with-+-prefix value heuristic + email regex); false positives unlikely on well-shaped payloads. Documented in test suite (`tests/test_validation.py::TestLintPii`).
+
+### 18.5 Dead-letter — RESOLVED (Phase 2.2 PR-A)
+
+**Original deviation (Phase 2.1)**: §5 mentions a DLQ with engineering alerting and manual triage. Phase 2.1 dispatcher implemented dead-letter as «row stops being re-claimed after `dispatch_attempts >= 3`» — no separate field, no alerting, no replay surface.
+
+**Resolution shipped 2026-05-19 (Phase 2.2 PR-A)**:
+- `DomainEvent.dead_lettered_at` field added (migration `0002_domainevent_dead_lettered_at`) + `is_dead_letter` property
+- Dispatcher claim query: `is_dispatched=False AND dead_lettered_at IS NULL` (cleaner than attempts-based filter)
+- On threshold crossing: `dead_lettered_at = now()` set explicitly inside the same transaction; dispatcher then emits `system.module.health.degraded` event (taxonomy §3.10, tenant-less per §8) with `metric=dlq_count_in_run=<N>` AFTER commit
+- Admin: `DeadLetterFilter` + bulk «Replay selected dead-letter events» action calling `replay_dead_letter(event_ids)` which resets `dead_lettered_at=None`, `dispatch_attempts=0`, `last_error=''`
+- `system.module.health.degraded` added to vocabulary (catalog §3.10 first entry) with payload `{module_name, severity, metric}`
+
+**Tests**: 11 dispatcher tests covering happy path, retry, threshold crossing, DLQ exclusion from claim, replay idempotency, replay re-claim, alert emission, clean-run no-alert.
+
+**Status**: ACCEPTED FINAL. No longer a deviation.
+
+---
+
 ## Last verified
-2026-05-18 (initial draft, locked event catalog)
+2026-05-19 r3 — Phase 2.2 PR-A shipped (DLQ + replay + health-degraded alert); §18.5 status RESOLVED. Earlier: 2026-05-19 r2 (Phase 2.1 ship), 2026-05-18 r1 (initial draft, catalog locked).

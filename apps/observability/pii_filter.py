@@ -201,7 +201,9 @@ class PIIRedactingFilter(logging.Filter):
     Whitelisted keys (NOT redacted, treated as opaque identifiers):
 
       * ``tenant_id``, ``trace_id``, ``conversation_id``, ``bot_user_id``
-      * ``record_id`` (YClients), ``payment_id`` (YooKassa)
+      * ``record_id`` (YClients), ``payment_id`` (Ayla — via the
+        cross-service event contract; the bot-platform-side YooKassa
+        integration was retired in PR #739 / ADR-0009)
       * any dict-args key ending in ``_id`` or ``_uuid``
 
     NOT implemented in this filter:

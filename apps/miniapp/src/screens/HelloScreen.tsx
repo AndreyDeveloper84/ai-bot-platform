@@ -1,23 +1,100 @@
-/** Root — auth round-trip + CTA into catalog. */
+/** Root — auth round-trip + CTA into catalog.
+ *
+ * The Mini App's first screen. Calls /auth/verify once on launch; on
+ * success the rest of the app is unblocked. Failure cases get
+ * slug-specific recovery copy instead of dumping raw English messages
+ * (see ERROR_COPY map below).
+ */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify, type AuthVerifyResponse } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
-import { signalReady } from "../lib/max-sdk";
+import { getStartPayload, parseStartRoute, signalReady } from "../lib/max-sdk";
 
 type State =
   | { kind: "loading" }
   | { kind: "ok"; data: AuthVerifyResponse }
   | { kind: "error"; status: number; slug: string; detail: string };
 
+type ErrorCopy = {
+  title: string;
+  body: string;
+  /** Action verb shown on the recovery button. Omit to hide the button. */
+  retryLabel?: string;
+};
+
+/**
+ * Map auth-failure slugs to human-readable Russian copy.
+ *
+ * Slugs come from apps/miniapp_api/views.py:require_init_data:
+ *  - bad_signature (401)
+ *  - stale (401)        — auth_date older than 60 min
+ *  - malformed (400)    — missing / mangled Authorization header
+ *  - user_deleted (403) — soft-deleted user re-entry
+ *  - server_misconfigured (500) — MAX_BOT_TOKEN / MAX_BOT_TENANT_SLUG missing
+ *  - http_error / network — client-side fallback when JSON parse failed
+ */
+const ERROR_COPY: Record<string, ErrorCopy> = {
+  bad_signature: {
+    title: "Не получилось подтвердить личность",
+    body: "Это может быть проблема с авторизацией в MAX. Закройте Mini App и откройте заново. Если проблема повторится — напишите в студию.",
+    retryLabel: "Попробовать снова",
+  },
+  stale: {
+    title: "Сессия устарела",
+    body: "Прошло больше часа с момента открытия. Просто откройте Mini App заново.",
+    retryLabel: "Попробовать снова",
+  },
+  malformed: {
+    title: "Не получилось войти",
+    body: "MAX не передал данные для входа. Попробуйте закрыть Mini App и открыть заново — это часто помогает.",
+    retryLabel: "Попробовать снова",
+  },
+  user_deleted: {
+    title: "Аккаунт удалён",
+    body: "Вы попросили удалить данные ранее. Чтобы восстановить профиль, напишите боту студии — мы поможем.",
+  },
+  user_not_registered: {
+    title: "Сейчас откроем",
+    body: "Создаём ваш профиль в студии — это может занять секунду. Если страница не обновится сама — нажмите кнопку.",
+    retryLabel: "Попробовать снова",
+  },
+  server_misconfigured: {
+    title: "Что-то у нас не так",
+    body: "Не получилось войти из-за временной проблемы на нашей стороне. Уже разбираемся — попробуйте чуть позже.",
+    retryLabel: "Попробовать снова",
+  },
+  http_error: {
+    title: "Не удалось загрузить",
+    body: "Проверьте интернет и попробуйте ещё раз.",
+    retryLabel: "Попробовать снова",
+  },
+  network: {
+    title: "Нет связи",
+    body: "Mini App не получилось подключиться к интернету. Проверьте соединение и попробуйте снова.",
+    retryLabel: "Попробовать снова",
+  },
+};
+
+function pickCopy(slug: string): ErrorCopy {
+  return (
+    ERROR_COPY[slug] ?? {
+      title: "Не удалось войти",
+      body: "Попробуйте закрыть Mini App и открыть заново. Если повторится — напишите в студию.",
+      retryLabel: "Попробовать снова",
+    }
+  );
+}
+
 export function HelloScreen() {
   const navigate = useNavigate();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useEffect(() => {
-    signalReady();
+  const verify = useCallback((isFirstCall: boolean) => {
+    if (isFirstCall) signalReady();
+    setState({ kind: "loading" });
     let cancelled = false;
     authVerify()
       .then((data) => {
@@ -37,6 +114,28 @@ export function HelloScreen() {
     };
   }, []);
 
+  useEffect(() => {
+    const cancel = verify(true);
+    return cancel;
+  }, [verify]);
+
+  // Deeplink redirect (F3): when MAX opens the Mini App via a welcome
+  // ``open_app`` button, the button's ``payload`` (e.g. ``route=catalog``)
+  // arrives as initData's ``start_param``. After auth succeeds, jump
+  // straight to the matching screen so the user doesn't see Hello at
+  // all — the menu tap "lands" exactly where they expected.
+  //
+  // Runs only on auth success (we don't want to redirect mid-error or
+  // mid-loading) and only ONCE per session (the dep array tracks the
+  // state transition, not the start_param itself).
+  useEffect(() => {
+    if (state.kind !== "ok") return;
+    const target = parseStartRoute(getStartPayload());
+    if (target) {
+      navigate(target, { replace: true });
+    }
+  }, [state.kind, navigate]);
+
   if (state.kind === "loading") {
     return (
       <ScreenLayout title="Помощник студии">
@@ -46,11 +145,21 @@ export function HelloScreen() {
   }
 
   if (state.kind === "error") {
+    const copy = pickCopy(state.slug);
     return (
-      <ScreenLayout title="Не удалось войти">
-        <div className="callout callout--danger" role="alert">
-          <strong>{state.slug}</strong>
-          <p style={{ margin: "var(--s-2) 0 0" }}>{state.detail}</p>
+      <ScreenLayout title={copy.title}>
+        <div className="hello-error" role="alert">
+          <p>{copy.body}</p>
+          {copy.retryLabel && (
+            <button
+              type="button"
+              className="btn-secondary"
+              style={{ marginTop: "var(--s-3)" }}
+              onClick={() => verify(false)}
+            >
+              {copy.retryLabel}
+            </button>
+          )}
         </div>
       </ScreenLayout>
     );
@@ -64,6 +173,14 @@ export function HelloScreen() {
       cta={<StickyCta onClick={() => navigate("/catalog")}>Записаться</StickyCta>}
     >
       <p>Помогу записаться в студию {tenant.name}.</p>
+      <nav className="hello-nav" aria-label="Разделы">
+        <button type="button" className="btn-secondary" onClick={() => navigate("/my-visits")}>
+          Мои записи
+        </button>
+        <button type="button" className="btn-secondary" onClick={() => navigate("/customer/profile")}>
+          Профиль
+        </button>
+      </nav>
     </ScreenLayout>
   );
 }

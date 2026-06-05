@@ -28,10 +28,31 @@ urlpatterns = [
         "api/v1/yclients/",
         include("apps.integrations.yclients.urls", namespace="yclients"),
     ),
-    # Phase 1 / B7 (DRF-843) — YooKassa hosted-checkout webhook receiver.
+    # #428 (Bucket 6) — YooKassa webhook RETIRED. Per ADR-0009 §Domain
+    # ownership matrix, YooKassa payment lifecycle (create, capture,
+    # refund, webhook) lives in Ayla djangoproject only. YooKassa
+    # Personal Cabinet webhook URL was switched to Ayla before #739
+    # merged. bot-platform no longer terminates YooKassa traffic.
+    #
+    # #732 (PRE_PILOT) — temporary 410 Gone endpoint at the original
+    # ``/api/v1/yookassa/webhook/`` path catches any in-flight
+    # YooKassa retries from Cabinets that haven't been flipped yet,
+    # so they don't fall through to Django's default 404 (which
+    # YooKassa treats as «do not retry, payment event lost forever»).
+    # 30-day soak window post-#739 deploy, then deleted by the
+    # cleanup PR. See ``apps/integrations/yookassa_retired/__init__.py``
+    # for the lifecycle contract.
     path(
         "api/v1/yookassa/",
-        include("apps.integrations.yookassa.urls", namespace="yookassa"),
+        include("apps.integrations.yookassa_retired.urls", namespace="yookassa_retired"),
+    ),
+    # Phase 0 / #432 (ADR-0009 §Mandatory event contract) — internal
+    # events ingest channel from Ayla djangoproject. Stub today
+    # (501 Not Implemented); full per-event dispatch arrives with
+    # Beta #441 (event-contract.md) + Gamma #442-#446 consumers.
+    path(
+        "api/v1/internal/events/",
+        include("apps.eventbus.urls", namespace="eventbus_internal"),
     ),
     # Phase 1 / CH1 (DRF-848) — Telegram channel adapter webhook.
     # Tenant resolution happens from the URL slug, not the X-Tenant
@@ -47,6 +68,39 @@ urlpatterns = [
     path(
         "api/v1/customer/",
         include("apps.miniapp_api.urls", namespace="miniapp_api"),
+    ),
+    # PR 1.5 / ADR-0008 — unified identity surface. Today carries the
+    # /api/v1/me endpoint used by every Mini App on launch to learn the
+    # caller's role + capabilities. Mounted at the bare /api/v1/ prefix
+    # because /me is shared across customer / master / admin surfaces.
+    path(
+        "api/v1/",
+        include("apps.identity.urls", namespace="identity"),
+    ),
+    # Master Mini App API (PR 1 / M0 onboarding) — claim-invite, accept,
+    # reject, profile init, /me. Init-data verified on every call;
+    # tenant resolved via the linked BotUser. See
+    # ``docs/design/handoffs/2026-05-18-master-mobile-handoff.md`` §M0.
+    path(
+        "api/v1/master/",
+        include("apps.master_api.urls", namespace="master_api"),
+    ),
+    # Admin REST API (PR 2 / MM1-MM3) — owner/admin master roster CRUD.
+    # Role-gated via apps.admin_api.auth.require_admin_role (owner OR
+    # admin; receptionist/master/customer → 403). See
+    # ``docs/design/handoffs/2026-05-18-master-management-handoff.md``.
+    path(
+        "api/v1/admin/",
+        include("apps.admin_api.urls", namespace="admin_api"),
+    ),
+    # Master ↔ Admin internal chat (PR 6 / handoff 2026-05-19). Production
+    # blocker for earnings disputes / leave requests / review concerns /
+    # substitution / offboarding tracks. Two parallel surfaces:
+    #   /master/... — gated by master init-data decorator.
+    #   /admin/... — gated by admin-role decorator.
+    path(
+        "api/v1/internal-chat/",
+        include("apps.internal_chat.urls", namespace="internal_chat"),
     ),
     # Phase 5 / KB-SYNC — Shiro-Py salon-knowledge consumer.
     # POST /api/v1/salon-knowledge/webhook/approved/ receives

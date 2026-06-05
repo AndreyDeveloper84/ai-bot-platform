@@ -1,10 +1,25 @@
 # Customer First-Touch + Mini App States Catalog
 
-**Date:** 2026-05-18 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep; r1 was 2026-05-18 salon-owned-AI model)
 **Status:** Foundational — preemptive spec for Phase 1 / 4b (customer Mini App 6 screens)
-**Reads:** [`product-ux-vision.md`](./product-ux-vision.md), [`core-user-states.md`](./core-user-states.md), [`user-journeys.md`](./user-journeys.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`information-architecture.md`](./information-architecture.md), [`attribution-policy.md`](./attribution-policy.md), [`assistant-persona.md`](./assistant-persona.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`ayla-memory-and-personalization.md`](./ayla-memory-and-personalization.md), [`anonymous-to-registered-gate.md`](./anonymous-to-registered-gate.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`product-ux-vision.md`](./product-ux-vision.md), [`core-user-states.md`](./core-user-states.md), [`user-journeys.md`](./user-journeys.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`information-architecture.md`](./information-architecture.md), [`attribution-policy.md`](./attribution-policy.md), [`assistant-persona.md`](./assistant-persona.md) (r2)
 
-> Two adjacent gaps in one doc: (1) what does the customer see/hear when they FIRST arrive (cold entry from QR / Instagram / Maps / referral / etc.), and (2) what does every Mini App screen show in each of its operational states (loading / empty / error / disabled / offline). Both must conform to single-assistant voice and customer-care tone.
+> Two adjacent gaps in one doc: (1) what does the customer see/hear when they FIRST arrive (cold entry from QR / Instagram / Maps / referral / etc.), and (2) what does every Mini App screen show in each of its operational states (loading / empty / error / disabled / offline). Both must conform to **Ayla voice** and anonymous-friendly entry per [`anonymous-to-registered-gate.md`](./anonymous-to-registered-gate.md).
+
+---
+
+## ⚠ r2 voice-sweep — Ayla-first migration
+
+This doc is r2 — re-framed for Ayla-first pivot per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19.
+
+Key flips from r1:
+- «помощник студии» / «помощник {{salon_name}}» → **«Ayla»**
+- First-touch flow is now **anonymous-friendly** by default — Mini App opens functional without registration per [`anonymous-to-registered-gate §2.1`](./anonymous-to-registered-gate.md)
+- Salon as brand co-presence («Ayla в Формуле тела») — not subordination («помощник Формулы тела»)
+- Customer's voice from «Вы» moving to «ты» per assistant-persona r2 §2
+- Cross-tenant identity consistency — single Ayla across all customer's tenants
+
+Section 4 first-touch templates updated below. Some sections lower in doc may still use «Вы» / «помощник» phrasing from r1 — pending sweep deeper into doc per Batch 2-3 if needed.
 
 ---
 
@@ -118,14 +133,16 @@ Per [`attribution-policy.md`](./attribution-policy.md), `attribution_metadata` p
 Per [`conversational-ux-framework.md`](./conversational-ux-framework.md) and [`assistant-persona.md`](./assistant-persona.md):
 - Warm + Calm + Premium-but-accessible
 - No emoji in opener (§8 of conversational-ux-framework)
-- Single-assistant identity preserved («помощник студии», never «бот»)
+- Ayla identity preserved («Ayla», never «бот», never «помощник студии») per [`ayla-identity-and-brand §2`](./ayla-identity-and-brand.md)
+- Anonymous browsing OK by default per [`anonymous-to-registered-gate §2.1`](./anonymous-to-registered-gate.md)
+- Cross-tenant memory persists per [`ayla-memory-and-personalization §9`](./ayla-memory-and-personalization.md)
 - Length: ≤ 3 sentences
 
 ### 4.1 Source 1 — QR code (physical placement at salon)
 
 **Template:**
 ```
-Здравствуйте. Я помощник студии «{{salon_name}}» — отвечу на вопросы по услугам, помогу записаться или подобрать.
+Привет! Я Ayla — помогу с записью, услугами, подберу мастера. В этот раз ты в {{salon_name}}, но я останусь с тобой и в других студиях, если будут.
 
 С чего удобнее начать?
 
@@ -146,7 +163,7 @@ Per [`conversational-ux-framework.md`](./conversational-ux-framework.md) and [`a
 
 **Template:**
 ```
-Здравствуйте. Я помощник студии «{{salon_name}}» — отвечу на вопросы по услугам и помогу записаться.
+Привет! Я Ayla — помогу с услугами {{salon_name}} и записью. Можешь смотреть и спрашивать без регистрации — она нужна только когда захочешь записаться.
 
 Что вас интересует?
 
@@ -197,7 +214,7 @@ Falls back to source 2 template.
 
 **Template:**
 ```
-Здравствуйте. Я помощник студии «{{salon_name}}» — рада знакомству.
+Привет! Я Ayla — рада знакомству. {{salon_name}} — одна из студий, где помогаю.
 
 {{referrer_first_name}} поделилась с вами — расскажу про наши услуги или сразу подберём?
 

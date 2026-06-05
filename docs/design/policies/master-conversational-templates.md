@@ -1,10 +1,18 @@
-# Master-side Conversational Templates — bot voice for the practitioner
+# Master-side Conversational Templates — Ayla voice for the practitioner
 
-**Date:** 2026-05-18 r1
+**Date:** 2026-05-19 r2 (Ayla-first voice-sweep)
 **Status:** Foundational — spinoff from [`conversational-ux-framework.md`](./conversational-ux-framework.md) Q-CV11
-**Reads:** [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`assistant-persona.md`](./assistant-persona.md), [`conversation-ownership-policy.md`](./conversation-ownership-policy.md), [`event-taxonomy.md`](./event-taxonomy.md)
+**Reads:** [`ayla-identity-and-brand.md`](./ayla-identity-and-brand.md), [`tenant-as-provider-model.md`](./tenant-as-provider-model.md), [`ayla-emergency-fallback-policy.md`](./ayla-emergency-fallback-policy.md), [`conversational-ux-framework.md`](./conversational-ux-framework.md), [`assistant-persona.md`](./assistant-persona.md) (r2), [`event-taxonomy.md`](./event-taxonomy.md)
 
-> The assistant talks to masters differently than to customers. Same identity (one «помощник студии» — never «бот»), but functional voice — denser, faster, action-clear. The master is at work, processing many notifications. Every message must respect that.
+> Ayla relays customer context to masters in functional voice — denser, faster, action-clear than customer-facing tone. The master is at work, processing many notifications. Every message must respect that. Master also interacts with admin via Ayla Pro internal channels (NOT Ayla voice — operational tone).
+
+## ⚠ r2 Ayla-first voice-sweep note
+
+Per [`project_ayla_first_strategic_pivot`](./ayla-identity-and-brand.md) memory 2026-05-19:
+- Master ↔ Ayla messages (Ayla relaying customer context, booking notifications, customer no-show alerts, etc.) use **functional Ayla voice** per [`ayla-identity-and-brand §3.2`](./ayla-identity-and-brand.md) situation tone matrix — Ayla as proper noun, first-person, but shorter/denser than customer-facing
+- Master ↔ Admin internal channel (per [`master-admin-internal-chat-handoff`](../handoffs/2026-05-19-master-admin-internal-chat-handoff.md)) uses **tenant operational tone** — admin/master humans communicating; NOT Ayla persona
+- «Помощник студии» framing from r1 (which positioned Ayla as salon's assistant) replaced — Ayla belongs to user; master is provider via Ayla Pro per [`tenant-as-provider-model §2.1`](./tenant-as-provider-model.md)
+- Deprecated `conversation-ownership-policy.md` references in this doc preserved as backend mechanic but customer-facing handoff goes through [`ayla-emergency-fallback-policy §3`](./ayla-emergency-fallback-policy.md) (admin/master work in own UI, not customer thread)
 
 ---
 

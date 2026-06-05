@@ -21,6 +21,9 @@ When the time comes to actually run a procedure (rolling back the canary at 02:3
 | [`canary-ramp.md`](canary-ramp.md) | **complete** | Sprint 10 / X-criteria (DRF-871) | Lead |
 | [`on-call.md`](on-call.md) | **complete** | Sprint 10 / O3 (DRF-864) | Lead |
 | [`disaster-recovery.md`](disaster-recovery.md) | draft | Phase 1 / PI2 (DRF-852) | Lead |
+| [`miniapp-acceptance.md`](miniapp-acceptance.md) | **complete** | Phase 5 (customer Mini App) | PI Track |
+| [`m6-auto-draft-suppress-tuning.md`](m6-auto-draft-suppress-tuning.md) | draft | Pilot 2026-07-15 (issue #690) | W1 Delta |
+| [`jwks-rotation.md`](jwks-rotation.md) | partial | Pre-pilot 2026-07-15 (issue #565 / NS2) | Security stream (S2) |
 
 ## Setup (one-time procedures)
 

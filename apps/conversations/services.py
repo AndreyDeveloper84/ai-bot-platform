@@ -54,12 +54,14 @@ def resolve_active_conversation(
     — phantom rows are worse than a stack trace).
 
     Args:
-      bot_user: identity.BotUser instance. The function does NOT
-                validate `bot_user.tenant_id == current_tenant.id` —
-                callers (channel handlers) are responsible for
-                supplying a BotUser already resolved under the current
-                tenant_scope. A cross-tenant bot_user here is a
-                programmer error, not a runtime concern.
+      bot_user: identity.BotUser instance. Conversations retro B2: the
+                function NOW validates ``bot_user.tenant_id ==
+                current_tenant.id`` and raises ``CrossTenantError`` on
+                mismatch. Callers (channel handlers) are still expected
+                to supply a BotUser already resolved under the current
+                tenant_scope; the in-function check is defence-in-depth
+                that turns a silent cross-tenant Conversation-create
+                into a loud error.
       create_if_missing: when False and no active Conversation exists,
                 returns None instead of creating one. Used by
                 read-only inspection paths.
@@ -70,6 +72,7 @@ def resolve_active_conversation(
 
     Raises:
       ValueError: ``current_tenant()`` is None.
+      CrossTenantError: ``bot_user.tenant_id != current_tenant().id``.
     """
 
     tenant = current_tenant()
@@ -79,8 +82,29 @@ def resolve_active_conversation(
             "Wrap the call in `tenant_scope(t)` before invocation."
         )
 
+    # Conversations retro B2: defence-in-depth tenant check. The
+    # ``Conversation.objects`` manager is ``TenantScopedManager`` and
+    # already auto-filters by ``tenant=current_tenant()`` — but the
+    # bot_user argument is the source of latent cross-tenant risk: a
+    # caller (channel handler bug, misrouted webhook) handing us a
+    # bot_user from another tenant would silently miss the existing
+    # row + try to ``Conversation.objects.create(...)`` linking a
+    # cross-tenant bot_user to the current tenant. The FK protection
+    # would catch it eventually, but the audit row says nothing about
+    # the mismatch. Fail loud at the gate.
+    bot_user_tenant_id = getattr(bot_user, "tenant_id", None)
+    if bot_user_tenant_id is not None and bot_user_tenant_id != tenant.id:
+        raise CrossTenantError(
+            f"resolve_active_conversation: bot_user belongs to tenant "
+            f"{bot_user_tenant_id!r} but current_tenant is {tenant.id!r}"
+        )
+
+    # Explicit ``tenant=tenant`` makes the contract load-bearing —
+    # a future refactor that swaps ``objects`` for ``all_tenants``
+    # (e.g., for an admin pass) does NOT silently leak across tenants.
     existing = (
         Conversation.objects.filter(
+            tenant=tenant,
             bot_user=bot_user,
             is_active=True,
             deleted_at__isnull=True,
@@ -107,8 +131,10 @@ def resolve_active_conversation(
             conversation = Conversation.objects.create(tenant=tenant, bot_user=bot_user)
     except IntegrityError:
         # Race winner already created the active conversation; re-fetch.
+        # Same explicit ``tenant=tenant`` defence as the pre-check above.
         existing = (
             Conversation.objects.filter(
+                tenant=tenant,
                 bot_user=bot_user,
                 is_active=True,
                 deleted_at__isnull=True,
@@ -258,6 +284,36 @@ def record_message(
             },
         )
     )
+
+    # M6 AI drafts auto-trigger (deferred follow-up from PR #535 / #540).
+    # Spec §M6 line 660: «— помощник готовит ответ —» — every inbound
+    # customer message kicks off a proactive draft generation in the
+    # background.  The Celery task re-checks the feature flag, master
+    # involvement, tier, staleness and per-conversation debounce inside
+    # the worker; this hook only ENQUEUES on the role=USER fast path.
+    # We import the task module lazily inside the if-block to avoid a
+    # module-load circular: master_api imports conversations heavily.
+    # `transaction.on_commit` defers the enqueue until after the DB
+    # commit so the worker can never read a Message that hasn't
+    # actually landed.
+    if role == Message.Role.USER:
+        captured_msg_id = message.id
+        captured_conv_id = conversation.id
+        captured_tenant_id = tenant.id
+
+        def _enqueue_auto_draft() -> None:
+            # Lazy import — keeps the producer-side import graph thin
+            # and avoids the master_api → conversations circular at
+            # app boot.
+            from apps.master_api.tasks import auto_generate_draft_for_inbound
+
+            auto_generate_draft_for_inbound.delay(
+                conversation_id=str(captured_conv_id),
+                trigger_message_id=str(captured_msg_id),
+                tenant_id=str(captured_tenant_id),
+            )
+
+        transaction.on_commit(_enqueue_auto_draft)
     logger.info(
         "conversations.message.stored id=%s conversation=%s role=%s",
         message.id,
@@ -317,3 +373,62 @@ def close_conversation(
         conversation.id,
         outcome,
     )
+
+
+def write_skill_state(
+    conversation: Conversation,
+    subkey: str,
+    value: Any | None,
+) -> None:
+    """Atomically write ``conversation.skill_state[subkey] = value``.
+
+    Conversations retro B1: skills used to do a read-modify-write on
+    the JSONField — ``raw = conversation.skill_state; raw[key] = val;
+    conversation.save(update_fields=["skill_state"])``. Two concurrent
+    skills writing different sub-keys would silently clobber each
+    other: each read the same pre-image, each wrote their own pre-
+    image+delta, the second writer's ``update_fields=["skill_state"]``
+    replaced the whole JSON column with its single-key view.
+
+    Post-fix: wrap the read-modify-write in ``transaction.atomic`` +
+    ``select_for_update`` on the Conversation row. Per-row lock
+    serialises concurrent subkey writes; the in-memory ``conversation``
+    parameter is refreshed from DB so the caller doesn't see stale
+    state. Tenant invariant re-asserted defensively.
+
+    ``value=None`` deletes the subkey (no-op when it doesn't exist).
+    The full ``skill_state`` JSON is never replaced with ``None``.
+    """
+
+    tenant = current_tenant()
+    if tenant is None:
+        raise ValueError(
+            "write_skill_state requires a tenant in scope. "
+            "Wrap the call in `tenant_scope(t)` before invocation."
+        )
+    if getattr(conversation, "tenant_id", None) is not None and conversation.tenant_id != tenant.id:
+        raise CrossTenantError(
+            f"write_skill_state: conversation.tenant_id={conversation.tenant_id!r} "
+            f"does not match current_tenant={tenant.id!r}"
+        )
+
+    with transaction.atomic():
+        locked = (
+            Conversation.all_tenants.select_for_update()
+            .only("id", "skill_state")
+            .get(pk=conversation.pk)
+        )
+        current = locked.skill_state if isinstance(locked.skill_state, dict) else {}
+        if value is None:
+            if subkey not in current:
+                return
+            new_state = {k: v for k, v in current.items() if k != subkey}
+        else:
+            new_state = dict(current)
+            new_state[subkey] = value
+        Conversation.all_tenants.filter(pk=conversation.pk).update(
+            skill_state=new_state,
+        )
+        # Refresh the caller's in-memory instance so subsequent reads
+        # see the new state without an extra DB round-trip.
+        conversation.skill_state = new_state

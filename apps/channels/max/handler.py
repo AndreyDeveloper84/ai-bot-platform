@@ -63,9 +63,20 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
-from apps.channels.max.outbound import send_message
-from apps.channels.max.parser import CanonicalEvent, parse_max_webhook
+from apps.channels.max.outbound import (
+    make_inline_keyboard_attachment_rows,
+    send_message,
+)
+from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
+from apps.channels.max.photo import (
+    PhotoDownloadError,
+    PhotoTooLargeError,
+    download_photo,
+    extract_first_photo_url,
+    safe_hostname,
+)
 from apps.conversations.models import Conversation
 from apps.conversations.services import record_message, resolve_active_conversation
 from apps.events.services import emit
@@ -89,6 +100,67 @@ _WELCOME_TEXT = (
 
 _FALLBACK_NO_ECHO = "(нечем эхом) 🙂"
 _FALLBACK_EMPTY = "?"
+
+
+def _build_attachments(action_data: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """Pull the channel-agnostic keyboard from ``SkillResult.action_data``.
+
+    Two shapes are accepted, in priority order:
+
+    1. **Platform-canonical envelope** —
+       ``action_data["attachments"] = [{"type": "inline_keyboard",
+                                        "payload": {"buttons": [...]}}]``.
+       The booking skill (B7 / reminder callbacks) emits this shape
+       because Telegram's ``_extract_keyboard`` reads it directly (see
+       :func:`apps.channels.telegram.handler._extract_keyboard`); we
+       must match that contract or booking keyboards silently vanish
+       on MAX. ``buttons`` is the channel-agnostic ``[{label, callback}]``
+       list which we run through :func:`make_inline_keyboard_attachment_rows`
+       (or ``…_attachment`` for the flat-list variant) to get the MAX
+       wire shape.
+
+    2. **Flat short-form** — ``action_data["buttons"]`` (or
+       ``["button_rows"]``) at the top level. Used by the welcome skill
+       and food_scanner where the producer doesn't need to be channel-aware.
+
+    Returns None when neither key is present so the outbound body stays
+    exactly as before — guarantees zero regression for skills that don't
+    opt in to keyboards.
+    """
+    if not action_data:
+        return None
+
+    # (1) Platform-canonical envelope — booking + reminders.
+    envelope_attachments = action_data.get("attachments")
+    if isinstance(envelope_attachments, list):
+        for att in envelope_attachments:
+            if not isinstance(att, dict) or att.get("type") != "inline_keyboard":
+                continue
+            payload = att.get("payload") or {}
+            buttons = payload.get("buttons")
+            if not isinstance(buttons, list) or not buttons:
+                continue
+            # ``buttons`` may be a flat list of {label, callback} dicts OR a
+            # pre-shaped 2-D matrix. booking emits the flat form (the
+            # `result.pending.keyboard` is a single row); telegram's adapter
+            # accepts both, so we mirror.
+            if buttons and isinstance(buttons[0], list):
+                return [make_inline_keyboard_attachment_rows(buttons)]
+            from apps.channels.max.outbound import make_inline_keyboard_attachment
+
+            return [make_inline_keyboard_attachment(buttons, columns=1)]
+
+    # (2) Flat short-form — welcome + food_scanner.
+    rows = action_data.get("button_rows")
+    if isinstance(rows, list) and rows:
+        return [make_inline_keyboard_attachment_rows(rows)]
+    buttons = action_data.get("buttons")
+    if isinstance(buttons, list) and buttons:
+        from apps.channels.max.outbound import make_inline_keyboard_attachment
+
+        columns = action_data.get("button_columns") or 1
+        return [make_inline_keyboard_attachment(buttons, columns=int(columns))]
+    return None
 
 
 def _echo_text(event: CanonicalEvent) -> str:
@@ -128,7 +200,31 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
       propagates (retry policy on MAX API side, not ours).
     """
 
-    event = parse_max_webhook(payload)
+    # Tolerate-and-skip for unsupported update types: parser raises
+    # ParseError, we log + emit an event + return cleanly. This prevents
+    # PEL retry-storms when MAX delivers a lifecycle update we don't
+    # parse yet (e.g. bot_started, message_edited). Dev incident
+    # 2026-05-21: bot_started poisoned the PEL because handler raised
+    # and consumer didn't ACK — bot went silent for the user.
+    try:
+        event = parse_max_webhook(payload)
+    except ParseError as exc:
+        logger.info(
+            "channels.max.handler.skipped_unsupported update_type=%r reason=%s",
+            (payload or {}).get("update_type") if isinstance(payload, dict) else None,
+            exc,
+        )
+        emit(
+            "channels.max.handler.skipped",
+            payload={
+                "update_type": (payload or {}).get("update_type")
+                if isinstance(payload, dict)
+                else None,
+                "reason": str(exc)[:200],
+            },
+        )
+        return
+
     logger.info(
         "channels.max.handler.received channel_user_id=%s text_len=%d attachments=%d",
         event.channel_user_id,
@@ -136,7 +232,16 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
         len(event.attachments),
     )
 
-    idempotency_key = f"webhook:max:{event.channel_message_id or event.channel_user_id}"
+    # Callback events carry their own unique id (callback_id) — distinct
+    # from any message id. Key off that so a button-tap retry collapses
+    # cleanly with the original tap, and a button-tap doesn't collide
+    # with the bot's preceding message (which shares the message_id the
+    # button was attached to).
+    callback_id = (event.raw or {}).get("callback_id", "") if isinstance(event.raw, dict) else ""
+    if callback_id:
+        idempotency_key = f"webhook:max:callback:{callback_id}"
+    else:
+        idempotency_key = f"webhook:max:{event.channel_message_id or event.channel_user_id}"
     try:
         with with_idempotency(idempotency_key, ttl_seconds=86_400):
             _handle_max_event_inner(event, trace_id)
@@ -157,6 +262,18 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
 
 def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Inner pipeline — parse-already-done caller. Side-effects only."""
+
+    # MAX UX indicators: tell the chat we've read the message and we're
+    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
+    # Both are best-effort fire-and-forget — failures are logged inside
+    # send_chat_action and do not propagate. Done first so the user
+    # sees the «прочитано / печатает…» chrome that mysite's MAX SDK
+    # provided automatically (post-cutover regression 2026-05-20).
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="mark_seen")
+        send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     bot_user = resolve_or_create_bot_user(
         channel=event.channel,
@@ -180,6 +297,43 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         role="user",
         content=event.text,
     )
+
+    # Photo bytes path — Веха 2 of the photo adapter port.
+    #
+    # The food_scanner skill consumes `conversation.last_photo_bytes`
+    # (set as a runtime Python attribute, NOT a DB field — see ADR-0011
+    # + skill docstring). Channel-adapter contract: if the inbound
+    # message carries an IMAGE attachment, we stream the bytes from
+    # MAX CDN here and stash them on the conversation instance for the
+    # skill to pick up via getattr.
+    #
+    # On any failure (oversize, timeout, network, 4xx/5xx) we set the
+    # attribute to None — food_scanner already handles the None case
+    # gracefully (PHOTO_NO_BYTES reply). Photo download MUST NOT raise
+    # through the dispatcher; the customer should always get a reply,
+    # even if it's «не получилось скачать фото».
+    if event.attachments:
+        photo_url = extract_first_photo_url(event.attachments)
+        if photo_url is not None:
+            try:
+                conversation.last_photo_bytes = download_photo(photo_url)  # type: ignore[attr-defined]
+            except PhotoTooLargeError:
+                # Log hostname only — MAX CDN URLs commonly include
+                # signed bearer tokens in the querystring (PR #893 B2).
+                logger.warning(
+                    "channels.max.handler.photo_too_large conversation=%s host=%s",
+                    conversation.id,
+                    safe_hostname(photo_url),
+                )
+                conversation.last_photo_bytes = None  # type: ignore[attr-defined]
+            except PhotoDownloadError as exc:
+                logger.warning(
+                    "channels.max.handler.photo_download_failed conversation=%s host=%s exc=%s",
+                    conversation.id,
+                    safe_hostname(photo_url),
+                    exc,
+                )
+                conversation.last_photo_bytes = None  # type: ignore[attr-defined]
 
     # Sprint 3 / D1 — dispatch through the skill registry. Lazy import
     # of skills.registry breaks the echo-skill ↔ handler.py module-load
@@ -260,8 +414,15 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             len(reply_text),
         )
 
+    # Extract optional inline keyboard from the skill result. The
+    # platform's keyboard contract (see apps/orchestrator/ui/keyboards.py)
+    # stores the channel-agnostic ``[{label, callback}]`` list in
+    # ``action_data["buttons"]``; the channel adapter converts it to the
+    # native wire format. Mirrors apps/channels/telegram/handler._extract_keyboard.
+    attachments = _build_attachments(action_data)
+
     # Outbound — MaxAPIError propagates up (handler does not swallow).
-    send_message(chat_id=event.chat_id, text=reply_text)
+    send_message(chat_id=event.chat_id, text=reply_text, attachments=attachments)
 
     emit(
         "channels.max.outbound.sent",
@@ -277,6 +438,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
                 if event.attachments
                 else "empty_prompt"
             ),
+            "has_keyboard": bool(attachments),
         },
     )
     logger.info(

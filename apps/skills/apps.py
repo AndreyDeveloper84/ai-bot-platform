@@ -67,4 +67,24 @@ class SkillsConfig(AppConfig):
         # ordering only.
         from apps.skills.booking import skill as _booking  # noqa: F401
 
+        # 2026-05-20 — welcome skill ports the /start greeting into a
+        # dedicated handler that emits an inline keyboard with Mini App
+        # quick-actions (📅 Записаться / 📋 Мои визиты / 👤 Профиль / ❓ Задать
+        # вопрос). Registered BEFORE echo so /start lands here; the
+        # cb:welcome:* callbacks route the «❓ Задать вопрос» tap to a
+        # helpful prompt rather than verbatim echo. Restores the inline-
+        # keyboard UX that mysite's MAX SDK shipped pre-platform-cutover.
+        from apps.skills.welcome import skill as _welcome  # noqa: F401
+
+        # #738 (Round-2 P-1) — payment_failed skill owns ``cb:payment:
+        # retry:<payment_id>`` button taps shipped by the threshold-
+        # gated DM (``apps/eventbus/consumers/payment.py::handle_payment_
+        # failed`` → ``on_payment_failed_event`` direct call). The
+        # eventbus consumer lazy-imports the entry-point function, so
+        # WITHOUT this eager import here the ``@register`` decorator
+        # never fires on workers that haven't tripped a threshold
+        # themselves — leaving the inline button dead (echo-claimed).
+        # Registered BEFORE echo because echo always matches.
+        from apps.skills.payment_failed import skill as _payment_failed  # noqa: F401
+
         from apps.skills.echo import skill as _echo  # noqa: F401

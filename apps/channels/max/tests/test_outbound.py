@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from apps.channels.max.outbound import MaxAPIError, send_message
+from apps.channels.max.outbound import (
+    MAX_KEYBOARD_ROWS,
+    MaxAPIError,
+    make_inline_keyboard_attachment,
+    make_inline_keyboard_attachment_rows,
+    send_message,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -102,3 +108,214 @@ class TestSendMessageErrors:
         assert "MAX_BOT_TOKEN" in exc_info.value.body
         # No HTTP call should have been attempted.
         assert httpx_mock.get_requests() == []
+
+
+class TestInlineKeyboardAttachment:
+    """make_inline_keyboard_attachment builds the MAX wire shape from
+    the channel-agnostic ``[{label, callback}]`` list. The output must
+    match the dev.max.ru spec exactly: top-level ``type``+``payload``,
+    nested ``buttons`` as a 2-D matrix, each button with ``type`` discriminator.
+    """
+
+    def test_callback_button_wire_shape(self):
+        att = make_inline_keyboard_attachment(
+            [{"label": "📅 Записаться", "callback": "cb:welcome:book"}],
+        )
+        assert att["type"] == "inline_keyboard"
+        assert att["payload"]["buttons"] == [
+            [{"type": "callback", "text": "📅 Записаться", "payload": "cb:welcome:book"}],
+        ]
+
+    def test_link_button_wire_shape(self):
+        att = make_inline_keyboard_attachment(
+            [{"label": "Сайт", "url": "https://example.com"}],
+        )
+        assert att["payload"]["buttons"] == [
+            [{"type": "link", "text": "Сайт", "url": "https://example.com"}],
+        ]
+
+    def test_open_app_button_wire_shape(self):
+        att = make_inline_keyboard_attachment(
+            [
+                {
+                    "label": "📅 Записаться",
+                    # MAX-hardening Guard 3 — flat slug required; updated
+                    # from legacy `route=catalog` form which would now raise.
+                    "callback": "catalog",
+                    "web_app": "id583_bot",
+                },
+            ],
+        )
+        btn = att["payload"]["buttons"][0][0]
+        assert btn["type"] == "open_app"
+        assert btn["text"] == "📅 Записаться"
+        assert btn["web_app"] == "id583_bot"
+        # Channel-agnostic ``callback`` reused as MAX ``payload`` for open_app.
+        assert btn["payload"] == "catalog"
+
+    def test_columns_layout_pairs_buttons(self):
+        att = make_inline_keyboard_attachment(
+            [
+                {"label": "A", "callback": "cb:a"},
+                {"label": "B", "callback": "cb:b"},
+                {"label": "C", "callback": "cb:c"},
+            ],
+            columns=2,
+        )
+        rows = att["payload"]["buttons"]
+        assert len(rows) == 2
+        assert [b["text"] for b in rows[0]] == ["A", "B"]
+        assert [b["text"] for b in rows[1]] == ["C"]
+
+    def test_columns_default_is_one_per_row(self):
+        att = make_inline_keyboard_attachment(
+            [{"label": x, "callback": f"cb:{x}"} for x in ("A", "B", "C")],
+        )
+        assert [len(row) for row in att["payload"]["buttons"]] == [1, 1, 1]
+
+    def test_invalid_columns_raises(self):
+        with pytest.raises(ValueError, match="columns must be >= 1"):
+            make_inline_keyboard_attachment(
+                [{"label": "A", "callback": "cb:a"}],
+                columns=0,
+            )
+
+    def test_rows_form_preserves_grouping(self):
+        att = make_inline_keyboard_attachment_rows(
+            [
+                [{"label": "Да", "callback": "cb:yes"}, {"label": "Нет", "callback": "cb:no"}],
+                [{"label": "Назад", "callback": "cb:back"}],
+            ],
+        )
+        rows = att["payload"]["buttons"]
+        assert [b["text"] for b in rows[0]] == ["Да", "Нет"]
+        assert [b["text"] for b in rows[1]] == ["Назад"]
+
+    def test_empty_buttons_emits_empty_grid(self):
+        att = make_inline_keyboard_attachment([])
+        assert att == {"type": "inline_keyboard", "payload": {"buttons": []}}
+
+
+class TestMaxHardeningGuards:
+    """MAX-hardening 3-guards bundle (2026-06-02, founder pilot scope).
+
+    Defends against three production-observed gotchas:
+
+    1. ``request_contact`` button type — outbound producer support.
+    2. ``MAX_KEYBOARD_ROWS=29`` cap — silent truncation prevention.
+    3. ``open_app`` flat-slug payload — memory `max_open_app_payload_format`
+       querystring shape gets HTTP 400 + poisons consumer PEL.
+    """
+
+    def test_guard1_request_contact_button_wire_shape(self):
+        att = make_inline_keyboard_attachment(
+            [{"label": "📱 Поделиться номером", "request_contact": True}],
+        )
+        rows = att["payload"]["buttons"]
+        assert rows == [
+            [{"type": "request_contact", "text": "📱 Поделиться номером"}],
+        ]
+
+    def test_guard1_request_contact_has_no_payload_field(self):
+        # Per MAX docs, request_contact buttons DON'T carry payload —
+        # user's tap returns the contact via `message_created` attachment.
+        # Producer MUST NOT emit a `payload` key (MAX rejects unknown keys).
+        att = make_inline_keyboard_attachment(
+            [
+                {
+                    "label": "Поделиться",
+                    "request_contact": True,
+                    "callback": "should-not-leak",
+                },
+            ],
+        )
+        btn = att["payload"]["buttons"][0][0]
+        assert btn["type"] == "request_contact"
+        assert "payload" not in btn
+        assert "callback" not in btn
+
+    def test_guard2_keyboard_rows_clamped_at_cap_flat_form(self):
+        # 35 vertical buttons (one per row by default columns=1) →
+        # clamped to MAX_KEYBOARD_ROWS=29.
+        buttons = [{"label": f"B{i}", "callback": f"cb:{i}"} for i in range(35)]
+        att = make_inline_keyboard_attachment(buttons)
+        rows = att["payload"]["buttons"]
+        assert len(rows) == MAX_KEYBOARD_ROWS
+        # First 29 preserved; last 6 dropped.
+        assert rows[0][0]["text"] == "B0"
+        assert rows[-1][0]["text"] == f"B{MAX_KEYBOARD_ROWS - 1}"
+
+    def test_guard2_keyboard_rows_clamped_at_cap_rows_form(self):
+        rows_in = [[{"label": f"R{i}", "callback": f"cb:{i}"}] for i in range(40)]
+        att = make_inline_keyboard_attachment_rows(rows_in)
+        out_rows = att["payload"]["buttons"]
+        assert len(out_rows) == MAX_KEYBOARD_ROWS
+
+    def test_guard2_under_cap_passes_through_unchanged(self):
+        buttons = [{"label": f"B{i}", "callback": f"cb:{i}"} for i in range(MAX_KEYBOARD_ROWS)]
+        att = make_inline_keyboard_attachment(buttons)
+        assert len(att["payload"]["buttons"]) == MAX_KEYBOARD_ROWS
+
+    def test_guard3_open_app_payload_rejects_querystring_form(self):
+        # Memory `max_open_app_payload_format` — payload `route=catalog`
+        # would produce HTTP 400 + poison the consumer PEL. Reject at
+        # producer boundary.
+        with pytest.raises(ValueError, match="flat slug"):
+            make_inline_keyboard_attachment(
+                [
+                    {
+                        "label": "Open",
+                        "callback": "route=catalog",
+                        "web_app": "id583_bot",
+                    },
+                ],
+            )
+
+    def test_guard3_open_app_payload_rejects_ampersand(self):
+        with pytest.raises(ValueError, match="flat slug"):
+            make_inline_keyboard_attachment(
+                [
+                    {
+                        "label": "Open",
+                        "callback": "a=1&b=2",
+                        "web_app": "id583_bot",
+                    },
+                ],
+            )
+
+    def test_guard3_open_app_payload_rejects_question_mark(self):
+        # Bonus: querystring intro `?` is also forbidden — same poisoning
+        # class as `=` / `&`.
+        with pytest.raises(ValueError, match="flat slug"):
+            make_inline_keyboard_attachment(
+                [
+                    {
+                        "label": "Open",
+                        "callback": "path?q=x",
+                        "web_app": "id583_bot",
+                    },
+                ],
+            )
+
+    def test_guard3_open_app_payload_accepts_flat_slug(self):
+        # Sanity — the canonical flat-slug shape (alphanumeric + `:` for
+        # namespacing, dot, dash, underscore) MUST still pass through.
+        att = make_inline_keyboard_attachment(
+            [
+                {
+                    "label": "Open",
+                    "callback": "cb:miniapp:catalog",
+                    "web_app": "id583_bot",
+                },
+            ],
+        )
+        assert att["payload"]["buttons"][0][0]["payload"] == "cb:miniapp:catalog"
+
+    def test_guard3_callback_button_unaffected_by_slug_check(self):
+        # Slug check ONLY applies to open_app payloads (the MAX-specific
+        # poisoning class). Plain callback buttons still accept any text.
+        att = make_inline_keyboard_attachment(
+            [{"label": "X", "callback": "cb:any=thing&with=stuff"}],
+        )
+        # Callback buttons still emit, no exception.
+        assert att["payload"]["buttons"][0][0]["payload"] == "cb:any=thing&with=stuff"
