@@ -163,7 +163,11 @@ BASELINE: frozenset[BaselineKey] = frozenset(
         # together with skill.py/tools.py when #928 completes the cutover.
         ("G2.1-skills-no-yclients", "apps/skills/booking/skill.py", "apps.integrations.yclients"),
         ("G2.1-skills-no-yclients", "apps/skills/booking/tools.py", "apps.integrations.yclients"),
-        ("G2.1-skills-no-yclients", "apps/skills/booking/provider.py", "apps.integrations.yclients"),
+        (
+            "G2.1-skills-no-yclients",
+            "apps/skills/booking/provider.py",
+            "apps.integrations.yclients",
+        ),
         # G5.1 — API surfaces → booking mutators (#925 create; #968 transitions/feedback)
         (
             "G5.1-api-no-booking-mutators",
