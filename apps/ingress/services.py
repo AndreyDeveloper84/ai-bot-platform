@@ -65,10 +65,37 @@ def _channel_token_map() -> dict[str, str]:
     return out
 
 
+def _global_bot_tokens() -> set[str]:
+    """Read the set of channel tokens that belong to the nationwide global bot.
+
+    Format: env var / setting ``GLOBAL_BOT_TOKENS`` = ``"tokenA,tokenB"``.
+    Empty when unset (#1019 / EPIC #1014).
+    """
+
+    raw = getattr(settings, "GLOBAL_BOT_TOKENS", None) or os.environ.get("GLOBAL_BOT_TOKENS", "")
+    return {tok.strip() for tok in raw.split(",") if tok.strip()}
+
+
+def is_global_bot_token(channel_token: str) -> bool:
+    """True when the token belongs to the tenant-less nationwide global bot.
+
+    Global-bot webhooks run discovery at ``current_tenant()=None`` and are
+    routed to the ``ingress:max_global`` stream; a tenant is selected only at
+    booking. Tokens not in ``GLOBAL_BOT_TOKENS`` keep the legacy per-tenant
+    path. A token may not be both global and per-tenant; if mis-configured as
+    both, global wins (the explicit nationwide opt-in).
+    """
+
+    return bool(channel_token) and channel_token in _global_bot_tokens()
+
+
 def _resolve_tenant(channel_token: str):
     """Look up the Tenant for a channel token. Returns None if unknown."""
 
     if not channel_token:
+        return None
+    # Global-bot tokens are tenant-less by design — never resolve a tenant.
+    if is_global_bot_token(channel_token):
         return None
     slug = _channel_token_map().get(channel_token)
     if not slug:
@@ -111,6 +138,7 @@ def record_webhook(
     """
 
     tenant = _resolve_tenant(channel_token)
+    is_global = is_global_bot_token(channel_token)
     trace_id = current_trace_id() or ""
 
     try:
@@ -143,6 +171,7 @@ def record_webhook(
                     "channel": channel,
                     "external_event_id": external_event_id,
                     "tenant_resolved": tenant is not None,
+                    "is_global_bot": is_global,
                 },
             )
             # Sprint 2.5 review M7: write an audit row on the success
@@ -160,7 +189,10 @@ def record_webhook(
                     "tenant_resolved": tenant is not None,
                 },
             )
-            if tenant is None and channel_token:
+            # A global-bot webhook is tenant-less BY DESIGN (discovery runs at
+            # current_tenant()=None) — not an unknown/mis-bound tenant, so we
+            # suppress the unknown_tenant audit for it.
+            if tenant is None and channel_token and not is_global:
                 write_audit(
                     "ingress.webhook_unknown_tenant",
                     target="WebhookJournal",

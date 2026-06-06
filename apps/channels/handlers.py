@@ -54,3 +54,30 @@ class MaxHandler(TenantAwareTask):
         # explicitly so D3's `record_message` doesn't have to re-look-up.
         trace_id = current_trace_id()
         max_handler.handle_max_event(payload, trace_id=trace_id)
+
+
+@register("ingress:max_global")
+class GlobalMaxHandler(TenantAwareTask):
+    """Dispatches nationwide GLOBAL (tenant-less) MAX entries (#1019 / #1014).
+
+    The one nationwide Ayla bot serves every salon: the conversation starts
+    WITHOUT a tenant (discovery) and a tenant is selected only at booking. The
+    ingress layer (``apps/ingress/views.py``) routes webhooks bearing a
+    ``GLOBAL_BOT_TOKENS`` token to the ``ingress:max_global`` stream with an
+    empty ``resolved_tenant_id``.
+
+    ``requires_tenant = False`` — the first legitimate use of the
+    ``TenantAwareTask`` opt-out (``apps/workers/base.py``). With ``tenant=None``
+    the base class enters ``trace_id_scope`` + ``tenant_scope(None)`` and skips
+    the strict-refuse path; discovery runs at ``current_tenant()=None`` so any
+    commercial-model read still raises ``CrossTenantError`` (safety invariant
+    preserved). Identity is resolved under the ``global_bot`` sentinel tenant
+    via ``resolve_or_create_global_bot_user`` — it does NOT call the per-tenant
+    ``resolve_or_create_bot_user``.
+    """
+
+    requires_tenant = False
+
+    def handle(self, payload: dict[str, Any]) -> None:
+        trace_id = current_trace_id()
+        max_handler.handle_global_max_event(payload, trace_id=trace_id)

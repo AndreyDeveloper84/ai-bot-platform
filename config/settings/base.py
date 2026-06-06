@@ -988,6 +988,22 @@ LLM_RETRY_MAX_DELAY_S = float(os.environ.get("LLM_RETRY_MAX_DELAY_S", "30.0"))
 # encrypted-on-tenant lookup (ADR-0006).
 CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", "")
 
+# #1019 / EPIC #1014 — global (nationwide) bot tokens. Comma-separated set of
+# channel tokens (the same X-Max-Bot-Api-Secret values) that belong to the ONE
+# nationwide Ayla bot rather than a single salon. Webhooks bearing one of these
+# tokens are routed to the tenant-less global ingress path (discovery at
+# ``current_tenant()=None``); a tenant is selected only at booking. Tokens NOT
+# in this set keep the legacy per-tenant routing via
+# ``CHANNEL_TOKEN_TO_TENANT_SLUG``. Empty when unset (no global bot configured).
+#
+# Deployment note: a MAX webhook is first gated on the single shared
+# ``MAX_WEBHOOK_SECRET`` (``apps/ingress/views.py::max_webhook``), and that same
+# header value is then matched against this set. So to route the nationwide bot
+# globally, ``GLOBAL_BOT_TOKENS`` must CONTAIN the ``MAX_WEBHOOK_SECRET`` value.
+# (Per-tenant encrypted multi-token support is the Sprint 4 / ADR-0006 work; the
+# current single-secret gate is unchanged by #1019.)
+GLOBAL_BOT_TOKENS = os.environ.get("GLOBAL_BOT_TOKENS", "")
+
 # Sprint 8 / T1 (DRF-705) — OpenTelemetry configuration.
 # Empty endpoint = no-op exporter (local dev + tests).
 # Sample rate is Decision 3 from sprint-8-observability-shadow.md.

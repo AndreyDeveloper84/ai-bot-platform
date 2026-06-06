@@ -49,7 +49,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.ingress.services import record_webhook
+from apps.ingress.services import is_global_bot_token, record_webhook
 from apps.ingress.streams import enqueue
 
 logger = logging.getLogger(__name__)
@@ -111,19 +111,34 @@ def max_webhook(request: HttpRequest) -> HttpResponse:
     )
 
     if created:
-        resolved_tenant_id = (
-            str(journal_row.resolved_tenant_id) if journal_row.resolved_tenant_id else None
-        )
-        enqueue(
-            channel="max",
-            payload=payload,
-            tenant_id=resolved_tenant_id,
-        )
-        logger.info(
-            "channels.max.webhook.enqueued external_event_id=%s tenant=%s",
-            external_event_id,
-            resolved_tenant_id,
-        )
+        if is_global_bot_token(secret_got):
+            # Nationwide global bot (#1019) — route to the tenant-less stream.
+            # `tenant_id=None` → the consumer enters `tenant_scope(None)` and
+            # `GlobalMaxHandler(requires_tenant=False)` runs discovery without a
+            # tenant. A tenant is selected only at booking.
+            enqueue(
+                channel="max_global",
+                payload=payload,
+                tenant_id=None,
+            )
+            logger.info(
+                "channels.max.webhook.enqueued_global external_event_id=%s",
+                external_event_id,
+            )
+        else:
+            resolved_tenant_id = (
+                str(journal_row.resolved_tenant_id) if journal_row.resolved_tenant_id else None
+            )
+            enqueue(
+                channel="max",
+                payload=payload,
+                tenant_id=resolved_tenant_id,
+            )
+            logger.info(
+                "channels.max.webhook.enqueued external_event_id=%s tenant=%s",
+                external_event_id,
+                resolved_tenant_id,
+            )
     else:
         logger.info("channels.max.webhook.dedup external_event_id=%s", external_event_id)
 
