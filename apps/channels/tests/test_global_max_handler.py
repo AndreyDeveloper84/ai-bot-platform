@@ -1,8 +1,12 @@
-"""Tests for the tenant-less global MAX path (#1019 / EPIC #1014).
+"""Tests for the tenant-less global MAX path (#1019 + #1026 / EPIC #1014).
 
 Covers the GlobalMaxHandler (requires_tenant=False) + handle_global_max_event,
 and the headline acceptance invariant: any commercial-model read attempted on
 the tenant-less discovery path raises CrossTenantError in strict mode.
+
+The full discovery turn (persist → reply → re-read) lives in
+``test_tenant_less_discovery_e2e.py``; here we keep the identity / no-refuse /
+invariant guards, mocking the reply + memory + outbound so the handler runs.
 """
 
 from __future__ import annotations
@@ -13,8 +17,10 @@ import uuid
 import pytest
 
 from apps.channels.handlers import GlobalMaxHandler
+from apps.channels.max import handler as max_handler
 from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
 from apps.identity.models import BotUser
+from apps.orchestrator.memory import short_term
 from apps.tenancy.context import current_tenant, tenant_scope
 from apps.tenancy.exceptions import CrossTenantError
 
@@ -41,27 +47,58 @@ def _raw_entry(payload: dict) -> dict:
     }
 
 
-def test_global_handler_resolves_under_sentinel_no_tenant_required(settings) -> None:
+@pytest.fixture
+def mock_send(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_send(*, chat_id, text, attachments=None, timeout=10.0):
+        calls.append({"chat_id": chat_id, "text": text})
+        return {"ok": True}
+
+    monkeypatch.setattr(max_handler, "send_message", fake_send)
+    return calls
+
+
+@pytest.fixture
+def fake_redis(monkeypatch):
+    from apps.orchestrator.memory.tests.test_short_term import _FakeRedis
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def mock_discovery(monkeypatch):
+    """Stub the LLM discovery reply so the handler doesn't make a live call."""
+    monkeypatch.setattr(
+        max_handler, "generate_discovery_reply", lambda *a, **k: "Привет! Какая услуга интересует?"
+    )
+
+
+def test_global_handler_resolves_under_sentinel_no_tenant_required(
+    settings, mock_send, fake_redis, mock_discovery
+) -> None:
     """requires_tenant=False → no TenantRequiredButMissing even with strict refuse;
     identity resolved under the global_bot sentinel at current_tenant()=None.
     """
-    # Even with the strict-refuse flag ON, the global handler must not refuse —
-    # discovery is tenant-less by design.
     settings.STRICT_TENANT_REFUSE = True
 
     GlobalMaxHandler()(_raw_entry(_payload(user_id=7777, chat_id=8888)))
 
     bot_user = BotUser.all_tenants.get(channel="max", channel_user_id="7777")
     assert bot_user.tenant.slug == GLOBAL_BOT_TENANT_SLUG
-    # The handler must not have leaked a tenant scope.
+    # Reply was sent and the handler did not leak a tenant scope.
+    assert len(mock_send) == 1
     assert current_tenant() is None
 
 
-def test_global_handler_skips_unsupported_update_type(settings) -> None:
+def test_global_handler_skips_unsupported_update_type(settings, mock_send, fake_redis) -> None:
     settings.STRICT_TENANT_REFUSE = True
     # An unsupported lifecycle update must be tolerated (no raise, no PEL storm).
     GlobalMaxHandler()(_raw_entry({"update_type": "bot_started"}))
     assert BotUser.all_tenants.filter(channel="max").count() == 0
+    assert len(mock_send) == 0
 
 
 def test_commercial_read_before_booking_raises_crosstenanterror(settings) -> None:

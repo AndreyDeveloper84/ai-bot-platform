@@ -432,3 +432,174 @@ def write_skill_state(
         # Refresh the caller's in-memory instance so subsequent reads
         # see the new state without an extra DB round-trip.
         conversation.skill_state = new_state
+
+
+# ─── Global (tenant-less) discovery persistence (#1026 / EPIC #1014) ──────
+#
+# Siblings of resolve_active_conversation / record_message for the nationwide
+# discovery bot. The conversation runs at current_tenant()=None (discovery);
+# its Conversation/Message rows are parked under the `global_bot` sentinel
+# tenant — written via the non-scoped `all_tenants` manager with an explicit
+# tenant=sentinel, so TenantScopedManager._enforce_write_tenant never fires and
+# current_tenant() stays None throughout (the commercial-read invariant holds).
+# The per-tenant functions above are intentionally left untouched.
+
+
+def resolve_active_global_conversation(
+    global_bot_user,
+    *,
+    create_if_missing: bool = True,
+) -> Conversation | None:
+    """Find-or-create the open global Conversation for ``global_bot_user``.
+
+    Tenant-less sibling of :func:`resolve_active_conversation` for the
+    nationwide discovery bot (#1026). Does NOT require/enter a ``tenant_scope``;
+    the Conversation is parked under the ``global_bot`` sentinel tenant via
+    ``Conversation.all_tenants`` + explicit ``tenant=sentinel``.
+
+    Raises:
+      ValueError: ``global_bot_user`` is not owned by the sentinel tenant
+                  (defence-in-depth — pass a BotUser from
+                  ``resolve_or_create_global_bot_user``).
+    """
+
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+
+    sentinel = get_global_bot_tenant()
+    if global_bot_user.tenant_id != sentinel.id:
+        raise ValueError(
+            "resolve_active_global_conversation: bot_user.tenant_id="
+            f"{global_bot_user.tenant_id!r} is not the global_bot sentinel "
+            f"{sentinel.id!r}. Pass a BotUser from resolve_or_create_global_bot_user."
+        )
+
+    existing = (
+        Conversation.all_tenants.filter(
+            tenant=sentinel,
+            bot_user=global_bot_user,
+            is_active=True,
+            deleted_at__isnull=True,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if existing is not None:
+        return existing
+    if not create_if_missing:
+        return None
+
+    try:
+        with transaction.atomic():
+            conversation = Conversation.all_tenants.create(
+                tenant=sentinel,
+                bot_user=global_bot_user,
+            )
+    except IntegrityError:
+        # Race winner already created the single active row — re-fetch it.
+        existing = (
+            Conversation.all_tenants.filter(
+                tenant=sentinel,
+                bot_user=global_bot_user,
+                is_active=True,
+                deleted_at__isnull=True,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if existing is None:
+            raise
+        return existing
+
+    emit(
+        "conversations.conversation.created",
+        payload={
+            "conversation_id": str(conversation.id),
+            "bot_user_id": str(global_bot_user.id),
+            "is_global_bot": True,
+        },
+    )
+    write_audit(
+        "conversation.created",
+        target="Conversation",
+        target_id=conversation.id,
+        payload={"is_global_bot": True},
+    )
+    logger.info(
+        "conversations.conversation.created(global) id=%s bot_user=%s tenant=%s",
+        conversation.id,
+        global_bot_user.id,
+        sentinel.id,
+    )
+    return conversation
+
+
+def record_global_message(
+    conversation: Conversation,
+    *,
+    role: str,
+    content: str,
+    rendered_text: str = "",
+    trace_id: uuid.UUID | str | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    latency_ms: int | None = None,
+) -> Message:
+    """Persist a turn under a global (sentinel) Conversation (#1026).
+
+    Tenant-less sibling of :func:`record_message`. Writes via
+    ``Message.all_tenants`` / ``Conversation.all_tenants`` with explicit
+    ``tenant=sentinel`` so ``current_tenant()`` stays None. Re-asserts the
+    ``Message.tenant == Conversation.tenant == sentinel`` invariant.
+    """
+
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+
+    sentinel = get_global_bot_tenant()
+    if conversation.tenant_id != sentinel.id:
+        raise ValueError(
+            "record_global_message: conversation.tenant_id="
+            f"{conversation.tenant_id!r} is not the global_bot sentinel "
+            f"{sentinel.id!r}. Pass a Conversation from "
+            "resolve_active_global_conversation."
+        )
+
+    if trace_id is None:
+        ctx_trace = current_trace_id()
+        trace_id = uuid.UUID(ctx_trace) if ctx_trace else None
+    elif isinstance(trace_id, str):
+        trace_id = uuid.UUID(trace_id)
+
+    now = timezone.now()
+    with transaction.atomic():
+        message = Message.all_tenants.create(
+            conversation=conversation,
+            tenant=sentinel,
+            role=role,
+            content=content,
+            rendered_text=rendered_text,
+            trace_id=trace_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            latency_ms=latency_ms,
+        )
+        Conversation.all_tenants.filter(pk=conversation.pk).update(last_message_at=now)
+    conversation.last_message_at = now
+
+    transaction.on_commit(
+        lambda: emit(
+            "conversations.message.stored",
+            payload={
+                "message_id": str(message.id),
+                "conversation_id": str(conversation.id),
+                "role": role,
+                "is_global_bot": True,
+            },
+        )
+    )
+    logger.info(
+        "conversations.message.stored(global) id=%s conversation=%s role=%s",
+        message.id,
+        conversation.id,
+        role,
+    )
+    return message

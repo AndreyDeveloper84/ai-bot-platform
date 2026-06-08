@@ -78,12 +78,18 @@ from apps.channels.max.photo import (
     safe_hostname,
 )
 from apps.conversations.models import Conversation
-from apps.conversations.services import record_message, resolve_active_conversation
+from apps.conversations.services import (
+    record_global_message,
+    record_message,
+    resolve_active_conversation,
+    resolve_active_global_conversation,
+)
 from apps.events.services import emit
 from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
 )
+from apps.orchestrator.discovery import generate_discovery_reply
 from apps.orchestrator.memory import short_term
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -266,20 +272,27 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
 def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
     """Process one MAX webhook for the nationwide GLOBAL (tenant-less) bot.
 
-    #1019 / EPIC #1014. The sibling of :func:`handle_max_event` for the legacy
-    per-tenant path. Called by ``GlobalMaxHandler(requires_tenant=False)`` after
-    the consumer enters ``trace_id_scope`` + ``tenant_scope(None)`` — discovery
-    runs at ``current_tenant()=None`` and a tenant is selected only at booking.
+    #1019 + #1026 / EPIC #1014. The sibling of :func:`handle_max_event` for the
+    legacy per-tenant path. Called by ``GlobalMaxHandler(requires_tenant=False)``
+    after the consumer enters ``trace_id_scope`` + ``tenant_scope(None)`` —
+    discovery runs at ``current_tenant()=None`` and a tenant is selected only at
+    booking.
 
-    Scope of this function (P2 plumbing, per #1019): resolve the global user
-    identity under the sentinel tenant and emit telemetry. It deliberately does
-    **NOT** persist a Conversation / Message / short-term memory, because those
-    domains are per-tenant today (``resolve_active_conversation`` /
-    ``record_message`` raise ``ValueError`` at ``current_tenant()=None``) and a
-    commercial-model read here MUST raise ``CrossTenantError`` (the safety
-    invariant). The tenant-less discovery conversation + memory routing + the
-    outbound discovery reply are the explicit seam for #1016 (bot↔Ayla REST) and
-    #1018 (marketplace carve-out). Do NOT add per-tenant service calls here.
+    Pipeline (#1026 — mirrors the per-tenant handler, tenant-less):
+      parse → resolve global BotUser (sentinel) → resolve the global
+      Conversation (sentinel) → record the user turn → generate a discovery
+      reply through the AI runtime (``apps.orchestrator.discovery`` →
+      ``apps.llm.router`` with the frozen ``AYLA_MARKETPLACE_VOICE``) → record
+      the assistant turn → send to MAX.
+
+    Tenant-safety: persistence is sentinel-scoped via the ``*_global_*``
+    conversation services (``all_tenants`` + explicit ``tenant=sentinel``), so
+    ``current_tenant()`` stays ``None`` throughout and any commercial/catalog
+    read here still raises ``CrossTenantError`` (the invariant). This handler
+    performs NO commercial reads. Marketplace ``show_masters`` + the
+    ``tenant_scope(master.tenant)`` booking handoff remain the seam for P3
+    (#1020) / P0 (#1016/#1017). Do NOT call the per-tenant
+    ``resolve_active_conversation`` / ``record_message`` here.
     """
 
     # Tolerate-and-skip unsupported update types (same contract as the
@@ -294,26 +307,84 @@ def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = No
         )
         return
 
+    # Idempotency — mirror the per-tenant handler so PEL retries (consumer crash
+    # / handler exception) don't double-persist or double-send the discovery turn.
+    callback_id = (event.raw or {}).get("callback_id", "") if isinstance(event.raw, dict) else ""
+    if callback_id:
+        idempotency_key = f"webhook:max_global:callback:{callback_id}"
+    else:
+        idempotency_key = f"webhook:max_global:{event.channel_message_id or event.channel_user_id}"
+    try:
+        with with_idempotency(idempotency_key, ttl_seconds=86_400):
+            _handle_global_max_event_inner(event, trace_id)
+    except AlreadyClaimed:
+        logger.info(
+            "channels.max.global.dedup_short_circuit channel_message_id=%s",
+            event.channel_message_id,
+        )
+        emit(
+            "channels.max.global.dedup",
+            payload={
+                "channel_message_id": event.channel_message_id,
+                "idempotency_key": idempotency_key,
+            },
+        )
+        return
+
+
+def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
+    """Inner tenant-less discovery pipeline — parse-already-done. Side-effects only."""
+
     bot_user = resolve_or_create_global_bot_user(
         channel=event.channel,
         channel_user_id=event.channel_user_id,
         chat_id=event.chat_id,
     )
+    conversation = resolve_active_global_conversation(bot_user)
+    assert conversation is not None  # noqa: S101 — create_if_missing=True never returns None
+
+    # Prior short-term history (before this turn) feeds the discovery prompt.
+    history = short_term.recall(conversation.id)
+
+    # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
+    record_global_message(conversation, role="user", content=event.text, trace_id=trace_id)
+    short_term.append(conversation.id, role="user", content=event.text)
+
     logger.info(
-        "channels.max.global.received bot_user=%s channel_user_id=%s text_len=%d",
+        "channels.max.global.received bot_user=%s conversation=%s text_len=%d",
         bot_user.id,
-        event.channel_user_id,
+        conversation.id,
         len(event.text),
     )
     emit(
         "channels.max.global.received",
         payload={
             "bot_user_id": str(bot_user.id),
+            "conversation_id": str(conversation.id),
             "channel": event.channel,
             "text_len": len(event.text),
             "attachments": len(event.attachments),
+            "is_global_bot": True,
         },
     )
+
+    # Generate the discovery reply through the AI runtime (tenant-less).
+    reply_text = generate_discovery_reply(
+        event.text,
+        history=history,
+        trace_id=str(trace_id) if trace_id else None,
+    )
+
+    # Persist + remember the assistant turn, then send to MAX.
+    record_global_message(
+        conversation,
+        role="assistant",
+        content=reply_text,
+        rendered_text=reply_text,
+        trace_id=trace_id,
+    )
+    short_term.append(conversation.id, role="assistant", content=reply_text)
+    send_message(chat_id=event.chat_id, text=reply_text)
 
 
 def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
