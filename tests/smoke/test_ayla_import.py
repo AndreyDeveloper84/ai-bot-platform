@@ -70,6 +70,31 @@ class TestAylaAllowList:
 
         assert ActionType is not None
 
+    def test_ayla_marketplace_voice_importable(self) -> None:
+        """#1026 — the tenant-less discovery reply consumes the frozen
+        marketplace voice (apps/orchestrator/discovery.py). Sibling of the
+        already-consumed FORMULA_TELA_VOICE (apps/promptreg/voice_examples.py).
+        """
+        from ayla_ai_core import AYLA_MARKETPLACE_VOICE
+
+        assert AYLA_MARKETPLACE_VOICE.assistant_name == "Ayla"
+
+    def test_discovery_fallback_voice_matches_frozen_constant(self) -> None:
+        """The local fallback mirror in apps/orchestrator/discovery.py must not
+        drift from the frozen AYLA_MARKETPLACE_VOICE it copies (CR NIT, #1026).
+        Runs only when the extra is installed (this class is skipif-gated).
+        """
+        from ayla_ai_core import AYLA_MARKETPLACE_VOICE
+
+        from apps.orchestrator.discovery import _FALLBACK_VOICE_FIELDS
+
+        assert _FALLBACK_VOICE_FIELDS == {
+            "assistant_name": AYLA_MARKETPLACE_VOICE.assistant_name,
+            "business_name": AYLA_MARKETPLACE_VOICE.business_name,
+            "domain": AYLA_MARKETPLACE_VOICE.domain,
+            "off_topic_redirect": AYLA_MARKETPLACE_VOICE.off_topic_redirect,
+        }
+
     def test_package_version_pinned(self) -> None:
         """Pin: v0.8.1 SHA + [django] extra — additive RELEASING/LTS docs + drift gate."""
         import ayla_ai_core
