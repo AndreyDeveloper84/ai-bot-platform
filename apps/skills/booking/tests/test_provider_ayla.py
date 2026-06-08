@@ -81,22 +81,26 @@ class FakeAylaBooking:
         if self.raise_exc is not None:
             raise self.raise_exc
 
-    def get_services(self, *, master_id: int | None = None) -> list[AylaService]:
+    def get_services(self, *, specialist_id: str | None = None) -> list[AylaService]:
         self._maybe_raise()
         return list(self.services_rows)
 
-    def get_masters(self, *, master_id: int | None = None) -> list[AylaMaster]:
+    def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
         self._maybe_raise()
         return list(self.masters_rows)
 
     def get_available_dates(
-        self, *, master_id: int | None = None, service_ids: list[int] | None = None
+        self,
+        *,
+        specialist_id: str,
+        service_id: str | None = None,
+        window_days: int = 14,
     ) -> list[str]:
         self._maybe_raise()
         return list(self.dates)
 
     def get_available_times(
-        self, *, master_id: int, date: str, service_ids: list[int] | None = None
+        self, *, specialist_id: str, date: str, service_id: str | None = None
     ) -> list[AylaSlot]:
         self._maybe_raise()
         return list(self.times)
@@ -105,26 +109,25 @@ class FakeAylaBooking:
         self,
         *,
         external_user_id: str,
-        master_id: int,
-        service_ids: list[int],
-        datetime: str,
-        client_phone: str,
-        client_name: str,
-        comment: str | None = None,
+        client_id: str,
+        specialist_id: str,
+        service_id: str,
+        start_datetime: str,
         idempotency_key: str | None = None,
     ) -> AylaBookingRecord:
         self.calls.append(
             {
                 "op": "create",
                 "external_user_id": external_user_id,
-                "master_id": master_id,
-                "service_ids": service_ids,
-                "datetime": datetime,
+                "client_id": client_id,
+                "specialist_id": specialist_id,
+                "service_id": service_id,
+                "start_datetime": start_datetime,
                 "idempotency_key": idempotency_key,
             }
         )
         self._maybe_raise()
-        return self.create_response or AylaBookingRecord(appointment_id="999", raw={})
+        return self.create_response or AylaBookingRecord(appointment_id="appt-999", raw={})
 
     def cancel_appointment(
         self, *, external_user_id: str, appointment_id: str, idempotency_key: str | None = None
@@ -145,10 +148,17 @@ class FakeAylaBooking:
         *,
         external_user_id: str,
         appointment_id: str,
-        datetime: str,
+        new_start_datetime: str,
         idempotency_key: str | None = None,
     ) -> AylaBookingRecord:
-        self.calls.append({"op": "reschedule", "appointment_id": appointment_id})
+        self.calls.append(
+            {
+                "op": "reschedule",
+                "appointment_id": appointment_id,
+                "new_start_datetime": new_start_datetime,
+                "idempotency_key": idempotency_key,
+            }
+        )
         self._maybe_raise()
         return self.create_response or AylaBookingRecord(appointment_id=appointment_id, raw={})
 
@@ -157,8 +167,8 @@ class FakeAylaBooking:
         return list(self.user_records)
 
 
-def _adapter(fake: FakeAylaBooking) -> AylaYClientsAdapter:
-    return AylaYClientsAdapter(client=fake, external_user_id="bot:telegram:42")
+def _adapter(fake: FakeAylaBooking, *, client_id: str = "client-uuid") -> AylaYClientsAdapter:
+    return AylaYClientsAdapter(client=fake, external_user_id="bot:telegram:42", client_id=client_id)
 
 
 # ─── provider selection ───────────────────────────────────────────────────
@@ -185,82 +195,108 @@ class TestProviderSelection:
 # ─── DTO mapping ───────────────────────────────────────────────────────────
 
 
+_SVC_UUID = "1a2b3c4d-0000-0000-0000-000000000010"
+_SPEC_UUID = "7c9e0000-0000-0000-0000-000000000011"
+_APPT_UUID = "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34"
+
+
 class TestDTOMapping:
     def test_get_services_maps_to_yclients_service(self) -> None:
         fake = FakeAylaBooking()
         fake.services_rows = [
             AylaService(
-                id=10,
+                id=_SVC_UUID,
                 title="Массаж",
                 price_min=1500.0,
                 price_max=2500.0,
                 duration_s=3600,
-                category_id=3,
+                category_id="cat-uuid",
                 raw={"x": 1},
             )
         ]
         out = _adapter(fake).get_services()
         assert len(out) == 1
         assert isinstance(out[0], Service)
-        assert (out[0].id, out[0].title, out[0].duration_s) == (10, "Массаж", 3600)
+        assert (out[0].id, out[0].title, out[0].duration_s) == (_SVC_UUID, "Массаж", 3600)
 
     def test_get_staff_maps_to_yclients_staff(self) -> None:
         fake = FakeAylaBooking()
         fake.masters_rows = [
-            AylaMaster(id=11, name="Ольга", specialization="Массаж", rating=4.5, position="master")
+            AylaMaster(
+                id=_SPEC_UUID, name="Ольга", specialization="Массаж", rating=4.5, position="master"
+            )
         ]
         out = _adapter(fake).get_staff()
         assert isinstance(out[0], Staff)
-        assert (out[0].id, out[0].name, out[0].avatar) == (11, "Ольга", "")
+        assert (out[0].id, out[0].name, out[0].avatar) == (_SPEC_UUID, "Ольга", "")
 
     def test_get_available_times_maps_slot(self) -> None:
         fake = FakeAylaBooking()
         fake.times = [AylaSlot(time="14:00", datetime="2026-06-10T14:00:00", duration_s=3600)]
-        out = _adapter(fake).get_available_times(staff_id=11, date="2026-06-10")
+        out = _adapter(fake).get_available_times(staff_id=_SPEC_UUID, date="2026-06-10")
         assert out[0].time == "14:00"
         assert out[0].seance_length_s == 3600
 
-    def test_get_user_records_maps_numeric_id(self) -> None:
+    def test_get_user_records_carries_uuid_handle(self) -> None:
         fake = FakeAylaBooking()
         fake.user_records = [
             AylaUserRecord(
-                appointment_id="555",
-                services=[{"id": 10}],
-                master={"id": 11},
+                appointment_id=_APPT_UUID,
+                services=[{"id": _SVC_UUID}],
+                master={"id": _SPEC_UUID},
                 datetime="2026-06-10T14:00:00",
                 duration_s=3600,
                 raw={},
             )
         ]
         out = _adapter(fake).get_user_records()
-        assert out[0].id == 555
-        assert out[0].raw["ayla_appointment_id"] == "555"
+        # int handle is retired on the Ayla path; the UUID rides in raw and the
+        # tools resolve via RemoteBookingProxy.
+        assert out[0].id == 0
+        assert out[0].raw["ayla_appointment_id"] == _APPT_UUID
 
 
 # ─── writes ─────────────────────────────────────────────────────────────────
 
 
 class TestWrites:
-    def test_create_record_passes_user_and_idempotency(self) -> None:
+    def test_create_record_passes_uuids_user_and_idempotency(self) -> None:
         fake = FakeAylaBooking()
-        fake.create_response = AylaBookingRecord(appointment_id="12345", raw={})
+        fake.create_response = AylaBookingRecord(
+            appointment_id=_APPT_UUID,
+            raw={
+                "id": _APPT_UUID,
+                "start_datetime": "2026-06-10T14:00:00+03:00",
+                "end_datetime": "2026-06-10T15:00:00+03:00",
+                "service": {"id": _SVC_UUID},
+                "specialist": {"id": _SPEC_UUID},
+                "status": "confirmed",
+            },
+        )
         rec = _adapter(fake).create_record(
-            staff_id=11,
-            services=[10],
-            datetime="2026-06-10T14:00:00",
+            staff_id=_SPEC_UUID,
+            services=[_SVC_UUID],
+            datetime="2026-06-10T14:00:00+03:00",
             client_phone="79991234567",
             client_name="Anna",
         )
-        assert rec.record_id == 12345
+        # No int handle; canonical UUID + normalised mirror keys ride in raw.
+        assert rec.record_id == 0
+        assert rec.raw["ayla_appointment_id"] == _APPT_UUID
+        assert rec.raw["start_at"] == "2026-06-10T14:00:00+03:00"
+        assert rec.raw["service_id"] == _SVC_UUID
+        assert rec.raw["specialist_id"] == _SPEC_UUID
         call = fake.calls[0]
         assert call["external_user_id"] == "bot:telegram:42"
+        assert call["client_id"] == "client-uuid"
+        assert (call["specialist_id"], call["service_id"]) == (_SPEC_UUID, _SVC_UUID)
         assert call["idempotency_key"]  # non-empty deterministic key
 
     def test_create_record_idempotency_key_is_deterministic(self) -> None:
         fake1, fake2 = FakeAylaBooking(), FakeAylaBooking()
         kwargs: dict[str, Any] = dict(
-            staff_id=11,
-            services=[10],
+            staff_id=_SPEC_UUID,
+            services=[_SVC_UUID],
             datetime="2026-06-10T14:00:00",
             client_phone="79991234567",
             client_name="Anna",
@@ -269,28 +305,38 @@ class TestWrites:
         _adapter(fake2).create_record(**kwargs)
         assert fake1.calls[0]["idempotency_key"] == fake2.calls[0]["idempotency_key"]
 
-    def test_cancel_record_stringifies_id(self) -> None:
+    def test_create_record_without_client_id_raises(self) -> None:
+        # BotUser not linked to Ayla → no client_id → create fails loudly
+        # rather than 403-ing server-side.
         fake = FakeAylaBooking()
-        assert _adapter(fake).cancel_record(record_id=777) is True
-        assert fake.calls[0]["appointment_id"] == "777"
-
-    def test_non_numeric_appointment_id_raises_yclients_error(self) -> None:
-        # INTERIM placeholder behaviour: canonical Ayla appointment_id is a
-        # UUID (contract §8 cutover prerequisite #1). Until the bot side
-        # accepts UUIDs, a non-numeric id fails loudly rather than corrupting
-        # the int-keyed mirror. Uses a UUID to document the real shape.
-        fake = FakeAylaBooking()
-        fake.create_response = AylaBookingRecord(
-            appointment_id="3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34", raw={}
-        )
-        with pytest.raises(YClientsAPIError, match="not_numeric"):
-            _adapter(fake).create_record(
-                staff_id=11,
-                services=[10],
+        with pytest.raises(YClientsAPIError, match="ayla_client_id_missing"):
+            _adapter(fake, client_id="").create_record(
+                staff_id=_SPEC_UUID,
+                services=[_SVC_UUID],
                 datetime="2026-06-10T14:00:00",
                 client_phone="79991234567",
                 client_name="Anna",
             )
+
+    def test_cancel_record_stringifies_uuid_id(self) -> None:
+        fake = FakeAylaBooking()
+        assert _adapter(fake).cancel_record(record_id=_APPT_UUID) is True
+        assert fake.calls[0]["appointment_id"] == _APPT_UUID
+
+    def test_reschedule_record_native_preserves_uuid(self) -> None:
+        fake = FakeAylaBooking()
+        fake.create_response = AylaBookingRecord(
+            appointment_id=_APPT_UUID,
+            raw={"id": _APPT_UUID, "start_datetime": "2026-06-11T16:00:00+03:00"},
+        )
+        rec = _adapter(fake).reschedule_record(
+            record_id=_APPT_UUID, datetime="2026-06-11T16:00:00+03:00"
+        )
+        assert rec.raw["ayla_appointment_id"] == _APPT_UUID
+        call = fake.calls[0]
+        assert call["op"] == "reschedule"
+        assert call["appointment_id"] == _APPT_UUID
+        assert call["new_start_datetime"] == "2026-06-11T16:00:00+03:00"
 
 
 # ─── error translation ──────────────────────────────────────────────────────

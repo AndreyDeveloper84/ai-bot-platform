@@ -1,21 +1,26 @@
 """Ayla booking client unit tests (S1 / #1016).
 
-The HTTP client is a deliberate skeleton — the Ayla booking wire contract is
-not locked yet (#1016 pending S2 sign-off), so the public methods raise
-``NotImplementedError`` rather than hit an undefined endpoint. These tests
-therefore lock down what *is* real and must not regress when the live
-implementation lands:
+The HTTP client talks to the merged S2 surface (#193). These tests drive it
+through an ``httpx.MockTransport`` and lock down:
 
 * construction fail-fast on empty settings;
-* the Bearer auth shape per #1016 (and ``X-External-User-ID`` only on writes);
-* the inline circuit breaker lifecycle (ported from the nutrition client);
-* every public method failing loudly until the contract is locked;
-* the DTOs / Protocol the booking skill's provider-selector targets;
-* singleton lifecycle.
+* the Bearer auth shape per #1016 (and ``X-External-User-ID`` only on writes /
+  ``me`` reads, ``X-Idempotency-Key`` on writes);
+* the wire→DTO mapping for catalog/slots/appointments (UUID ids, ``{data}`` vs
+  raw envelopes, single-day slots, the ``get_available_dates`` fan-out);
+* request bodies for create/reschedule (singular ``service_id`` + ``client_id``);
+* the §6 error mapping — 5xx/network → ``BookingUnavailableError`` (trips the
+  breaker), 4xx → ``BookingBadRequestError`` (does not trip);
+* the inline circuit breaker lifecycle and singleton.
 """
 
 from __future__ import annotations
 
+import json
+import time
+from datetime import date, timedelta
+
+import httpx
 import pytest
 
 from apps.integrations.ayla import booking_client as bc
@@ -108,58 +113,277 @@ class TestCircuit:
         assert circuit.is_open(now=1000.0) is False
 
 
-# ─── skeleton: every method fails loudly until contract lock ───────────────
+# ─── HTTP round-trip via MockTransport ─────────────────────────────────────
 
 
-class TestSkeletonNotImplemented:
-    def _client(self) -> bc.AylaBookingHTTPClient:
-        return bc.AylaBookingHTTPClient(base_url="https://ayla.test", api_token="t")
+def _client_with(handler) -> bc.AylaBookingHTTPClient:
+    """Build a client whose wire is driven by ``handler`` (httpx.MockTransport)."""
+    return bc.AylaBookingHTTPClient(
+        base_url="https://ayla.test",
+        api_token="secret-tok",
+        transport=httpx.MockTransport(handler),
+    )
 
-    def test_get_services_pending(self) -> None:
-        with pytest.raises(NotImplementedError, match="#1016"):
-            self._client().get_services()
 
-    def test_get_masters_pending(self) -> None:
-        with pytest.raises(NotImplementedError, match="get_masters"):
-            self._client().get_masters()
+class TestReadRoundTrip:
+    def test_get_services_catalog_unwraps_data(self) -> None:
+        captured: list[httpx.Request] = []
 
-    def test_get_available_dates_pending(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self._client().get_available_dates(master_id=1)
-
-    def test_get_available_times_pending(self) -> None:
-        with pytest.raises(NotImplementedError):
-            self._client().get_available_times(master_id=1, date="2026-06-10")
-
-    def test_create_appointment_pending(self) -> None:
-        with pytest.raises(NotImplementedError, match="create_appointment"):
-            self._client().create_appointment(
-                external_user_id="bot:telegram:42",
-                master_id=1,
-                service_ids=[10],
-                datetime="2026-06-10T14:00:00",
-                client_phone="79991234567",
-                client_name="Anna",
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(req)
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "svc-uuid-1",
+                            "name": "Массаж",
+                            "price": "1500.00",
+                            "duration_minutes": 60,
+                            "category": "cat-uuid",
+                        }
+                    ]
+                },
             )
 
-    def test_cancel_appointment_pending(self) -> None:
-        with pytest.raises(NotImplementedError, match="cancel_appointment"):
-            self._client().cancel_appointment(
-                external_user_id="bot:telegram:42",
-                appointment_id="appt-1",
+        out = _client_with(handler).get_services()
+        assert captured[0].url.path == "/api/v1/internal/services/"
+        assert captured[0].headers["Authorization"] == "Bearer secret-tok"
+        assert "X-External-User-ID" not in captured[0].headers
+        assert len(out) == 1
+        svc = out[0]
+        assert (svc.id, svc.title, svc.duration_s) == ("svc-uuid-1", "Массаж", 3600)
+        assert svc.price_min == 1500.0 and svc.category_id == "cat-uuid"
+
+    def test_get_services_for_specialist_hits_nested_path_raw_list(self) -> None:
+        captured: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(req)
+            return httpx.Response(
+                200, json=[{"id": "s1", "name": "X", "price": "10", "duration_minutes": 30}]
             )
 
-    def test_reschedule_appointment_pending(self) -> None:
-        with pytest.raises(NotImplementedError, match="reschedule_appointment"):
-            self._client().reschedule_appointment(
-                external_user_id="bot:telegram:42",
-                appointment_id="appt-1",
-                datetime="2026-06-11T15:00:00",
+        out = _client_with(handler).get_services(specialist_id="spec-1")
+        assert captured[0].url.path == "/api/v1/internal/specialists/spec-1/services/"
+        assert out[0].id == "s1"
+
+    def test_get_masters_paginated_results(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "results": [{"id": "m1", "display_name": "Ольга", "rating": 4.5}],
+                        "count": 1,
+                    }
+                },
             )
 
-    def test_get_user_appointments_pending(self) -> None:
-        with pytest.raises(NotImplementedError, match="get_user_appointments"):
-            self._client().get_user_appointments(external_user_id="bot:telegram:42")
+        out = _client_with(handler).get_masters()
+        assert (out[0].id, out[0].name, out[0].rating) == ("m1", "Ольга", 4.5)
+
+    def test_get_available_times_parses_iso_slots(self) -> None:
+        captured: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(req)
+            return httpx.Response(
+                200,
+                json={
+                    "date": "2026-06-10",
+                    "slots": ["2026-06-10T14:00:00+03:00", "2026-06-10T15:30:00+03:00"],
+                },
+            )
+
+        out = _client_with(handler).get_available_times(
+            specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+        )
+        assert captured[0].url.path == "/api/v1/internal/specialists/spec-1/slots/"
+        assert captured[0].url.params.get("service_id") == "svc-1"
+        assert captured[0].url.params.get("date") == "2026-06-10"
+        assert [s.time for s in out] == ["14:00", "15:30"]
+        assert out[0].datetime == "2026-06-10T14:00:00+03:00"
+
+    def test_get_available_dates_fans_out_over_window(self) -> None:
+        today = date.today()
+        free = {today.isoformat(), (today + timedelta(days=2)).isoformat()}
+        calls: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            day = req.url.params.get("date")
+            calls.append(day)
+            return httpx.Response(200, json={"date": day, "slots": ["x"] if day in free else []})
+
+        out = _client_with(handler).get_available_dates(
+            specialist_id="spec-1", service_id="svc-1", window_days=3
+        )
+        assert len(calls) == 3  # one slots call per day in the window
+        assert out == [today.isoformat(), (today + timedelta(days=2)).isoformat()]
+
+
+class TestWriteRoundTrip:
+    def test_create_sends_body_and_headers(self) -> None:
+        captured: dict = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["req"] = req
+            captured["body"] = json.loads(req.content)
+            return httpx.Response(
+                201,
+                json={
+                    "data": {
+                        "id": "appt-uuid",
+                        "status": "confirmed",
+                        "start_datetime": "2026-06-10T14:00:00+03:00",
+                        "end_datetime": "2026-06-10T15:00:00+03:00",
+                        "service": {"id": "svc-1"},
+                        "specialist": {"id": "spec-1"},
+                    }
+                },
+            )
+
+        rec = _client_with(handler).create_appointment(
+            external_user_id="bot:telegram:42",
+            client_id="client-uuid",
+            specialist_id="spec-1",
+            service_id="svc-1",
+            start_datetime="2026-06-10T14:00:00+03:00",
+            idempotency_key="idem-1",
+        )
+        req = captured["req"]
+        assert (req.method, req.url.path) == ("POST", "/api/v1/internal/appointments/")
+        assert req.headers["X-External-User-ID"] == "bot:telegram:42"
+        assert req.headers["X-Idempotency-Key"] == "idem-1"
+        assert captured["body"] == {
+            "client_id": "client-uuid",
+            "specialist_id": "spec-1",
+            "service_id": "svc-1",
+            "start_datetime": "2026-06-10T14:00:00+03:00",
+        }
+        assert rec.appointment_id == "appt-uuid"
+        assert rec.raw["start_datetime"] == "2026-06-10T14:00:00+03:00"
+
+    def test_cancel_200_true_404_false(self) -> None:
+        def ok(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": {}})
+
+        def gone(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
+
+        assert (
+            _client_with(ok).cancel_appointment(
+                external_user_id="bot:telegram:42", appointment_id="a1"
+            )
+            is True
+        )
+        assert (
+            _client_with(gone).cancel_appointment(
+                external_user_id="bot:telegram:42", appointment_id="a1"
+            )
+            is False
+        )
+
+    def test_reschedule_preserves_appointment_id(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.path == "/api/v1/internal/appointments/a1/reschedule/"
+            assert json.loads(req.content) == {"new_start_datetime": "2026-06-11T16:00:00+03:00"}
+            return httpx.Response(
+                200, json={"data": {"id": "a1", "start_datetime": "2026-06-11T16:00:00+03:00"}}
+            )
+
+        rec = _client_with(handler).reschedule_appointment(
+            external_user_id="bot:telegram:42",
+            appointment_id="a1",
+            new_start_datetime="2026-06-11T16:00:00+03:00",
+        )
+        assert rec.appointment_id == "a1"
+
+    def test_reschedule_falls_back_to_passed_id(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": {}})
+
+        rec = _client_with(handler).reschedule_appointment(
+            external_user_id="x",
+            appointment_id="a1",
+            new_start_datetime="2026-06-11T16:00:00+03:00",
+        )
+        assert rec.appointment_id == "a1"
+
+    def test_me_bookings_groups_upcoming_and_history(self) -> None:
+        captured: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(req)
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "upcoming": [
+                            {
+                                "id": "a1",
+                                "start_datetime": "2026-06-10T14:00:00+03:00",
+                                "end_datetime": "2026-06-10T15:00:00+03:00",
+                                "service": {"id": "svc-1"},
+                                "specialist": {"id": "spec-1"},
+                            }
+                        ],
+                        "history": [],
+                    }
+                },
+            )
+
+        out = _client_with(handler).get_user_appointments(external_user_id="bot:telegram:42")
+        assert captured[0].url.path == "/api/v1/internal/me/bookings/"
+        assert captured[0].headers["X-External-User-ID"] == "bot:telegram:42"
+        assert out[0].appointment_id == "a1"
+        assert out[0].duration_s == 3600
+        assert out[0].master == {"id": "spec-1"}
+
+
+class TestErrorMapping:
+    def test_5xx_raises_unavailable_and_trips_breaker(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, json={})
+
+        client = _client_with(handler)
+        for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
+            with pytest.raises(bc.BookingUnavailableError):
+                client.get_services()
+        assert client._circuit.is_open(now=time.monotonic()) is True
+
+    def test_4xx_raises_bad_request_no_trip(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"code": "SLOT_TAKEN", "message": "x"}})
+
+        client = _client_with(handler)
+        for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD + 2):
+            with pytest.raises(bc.BookingBadRequestError):
+                client.get_services()
+        assert client._circuit.is_open(now=time.monotonic()) is False
+
+    def test_network_error_raises_unavailable(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("boom")
+
+        with pytest.raises(bc.BookingUnavailableError):
+            _client_with(handler).get_services()
+
+    def test_circuit_open_short_circuits_without_transport(self) -> None:
+        calls = {"n": 0}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(500, json={})
+
+        client = _client_with(handler)
+        for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
+            with pytest.raises(bc.BookingUnavailableError):
+                client.get_services()
+        before = calls["n"]
+        with pytest.raises(bc.BookingUnavailableError, match="circuit_open"):
+            client.get_services()
+        assert calls["n"] == before  # short-circuited, no new wire call
 
 
 # ─── DTOs / Protocol ────────────────────────────────────────────────────────

@@ -23,10 +23,11 @@ Ayla booking client in the YClients-shaped interface the tools already call
   bind the action to the consenting client; the YClients interface doesn't
   pass it through per-call).
 
-DEFAULT OFF: the real Ayla client is still a skeleton (methods raise
-``NotImplementedError``) and the endpoints are not live (contract pending S2
-sign-off). Flag ON is exercised only via ``FakeAylaBooking`` in tests until
-the contract is locked.
+DEFAULT OFF in config: the flag-ON path (real Ayla REST + ``RemoteBookingProxy``
+mirror) is fully implemented and tested here, but production flips the flag in a
+separate gated PR. Catalog ids on the Ayla path are UUID strings; the YClients
+DTOs are int-typed, so the adapter fills them with strings under flag-ON and the
+tools treat ids opaquely (anti-hallucination allow-sets branch on the flag).
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from django.conf import settings
 
 from apps.integrations.ayla.booking_client import (
     AylaBookingClient,
+    AylaBookingRecord,
     AylaMaster,
     AylaService,
     AylaSlot,
@@ -72,6 +74,10 @@ def get_booking_provider(*, bot_user: Any) -> Any:
         return AylaYClientsAdapter(
             client=get_ayla_booking_client(),
             external_user_id=external_user_id_for(bot_user),
+            # client_id = the Ayla user UUID the bearer + X-External-User-ID
+            # resolves to (must match server-side or create 403s). Empty when
+            # the BotUser isn't linked to Ayla yet → create fails gracefully.
+            client_id=str(getattr(bot_user, "ayla_user_id", "") or ""),
         )
 
     from apps.integrations.yclients import get_yclients_client
@@ -79,76 +85,75 @@ def get_booking_provider(*, bot_user: Any) -> Any:
     return get_yclients_client()
 
 
-def _appointment_id_to_int(appointment_id: str) -> int:
-    """Map an Ayla appointment id onto the int the tools expect — INTERIM.
-
-    The booking tools (and ``BookingRecord``/``UserRecord``/the mirror marker
-    ``yclients_record_id=<id>``) are int-keyed. The canonical Ayla
-    ``appointment_id`` is a **UUID** (event-contract / ``ayla-ai-core``), so
-    this numeric mapping is a deliberate placeholder for the flag-OFF skeleton
-    phase: it round-trips numeric ids and fails loudly on anything else rather
-    than silently corrupt the mirror.
-
-    **Before the httpx implementation + cutover** the bot side must accept a
-    UUID/string ``appointment_id`` (local mirror keeps its own int PK; the
-    Ayla-id column stores the UUID). Tracked as cutover prerequisite #1 in
-    ``docs/architecture/ayla-booking-rest-contract.md`` §8.
-    """
-    if not appointment_id.isdigit():
-        raise YClientsAPIError(
-            f"ayla_appointment_id_not_numeric: {appointment_id!r} — interim numeric "
-            "placeholder; UUID support is cutover prerequisite #1 (booking REST contract §8)"
-        )
-    return int(appointment_id)
-
-
 class AylaYClientsAdapter:
     """Adapts the Ayla booking client to the YClients-shaped tool interface.
 
-    Constructed per request (binds ``external_user_id``). Translates DTOs and
-    exceptions in both directions so the eight booking tools are unchanged.
+    Constructed per request (binds ``external_user_id`` + ``client_id``).
+    Translates DTOs and exceptions in both directions so the eight booking
+    tools are unchanged. The canonical Ayla ``appointment_id`` (UUID) rides in
+    ``raw["ayla_appointment_id"]``; ``record_id`` / ``UserRecord.id`` are set to
+    ``0`` because the tools resolve the handle off the ``RemoteBookingProxy``
+    mirror on the flag-ON path, not off an int id.
     """
 
-    def __init__(self, *, client: AylaBookingClient, external_user_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        client: AylaBookingClient,
+        external_user_id: str,
+        client_id: str = "",
+    ) -> None:
         self._client = client
         self._external_user_id = external_user_id
+        self._client_id = client_id
 
     # ── reads ──────────────────────────────────────────────────────────────
 
     def get_services(
         self,
         *,
-        staff_id: int | None = None,
-        category_id: int | None = None,
+        staff_id: int | str | None = None,
+        category_id: int | str | None = None,
     ) -> list[Service]:
         with _translate_errors():
-            rows = self._client.get_services(master_id=staff_id)
+            rows = self._client.get_services(
+                specialist_id=str(staff_id) if staff_id is not None else None
+            )
         return [_to_yc_service(r) for r in rows]
 
-    def get_staff(self, *, staff_id: int | None = None) -> list[Staff]:
+    def get_staff(self, *, staff_id: int | str | None = None) -> list[Staff]:
         with _translate_errors():
-            rows = self._client.get_masters(master_id=staff_id)
+            rows = self._client.get_masters(
+                specialist_id=str(staff_id) if staff_id is not None else None
+            )
         return [_to_yc_staff(r) for r in rows]
 
     def get_available_dates(
         self,
         *,
-        staff_id: int | None = None,
-        service_ids: list[int] | None = None,
+        staff_id: int | str | None = None,
+        service_ids: list[int] | list[str] | None = None,
     ) -> list[str]:
+        if staff_id is None:
+            return []
         with _translate_errors():
-            return self._client.get_available_dates(master_id=staff_id, service_ids=service_ids)
+            return self._client.get_available_dates(
+                specialist_id=str(staff_id),
+                service_id=_first_id(service_ids),
+            )
 
     def get_available_times(
         self,
         *,
-        staff_id: int,
+        staff_id: int | str,
         date: str,
-        service_ids: list[int] | None = None,
+        service_ids: list[int] | list[str] | None = None,
     ) -> list[AvailableTime]:
         with _translate_errors():
             rows = self._client.get_available_times(
-                master_id=staff_id, date=date, service_ids=service_ids
+                specialist_id=str(staff_id),
+                date=date,
+                service_id=_first_id(service_ids),
             )
         return [_to_yc_available_time(r) for r in rows]
 
@@ -157,8 +162,8 @@ class AylaYClientsAdapter:
     def create_record(
         self,
         *,
-        staff_id: int,
-        services: list[int],
+        staff_id: int | str,
+        services: list[int] | list[str],
         datetime: str,
         client_phone: str,
         client_name: str,
@@ -167,26 +172,27 @@ class AylaYClientsAdapter:
         notify_by_sms: int = 0,
         notify_by_email: int = 0,
     ) -> BookingRecord:
-        # ``notify_*`` are YClients-specific; Ayla owns notifications.
-        key = _idempotency_key(self._external_user_id, "create", staff_id, services, datetime)
+        # ``notify_*`` / phone / name are YClients-specific; Ayla owns
+        # notifications and resolves the client from client_id + X-External-User-ID.
+        if not self._client_id:
+            raise YClientsAPIError(
+                "ayla_client_id_missing: BotUser has no ayla_user_id — cannot "
+                "create on behalf of an Ayla-unlinked user"
+            )
+        service_id = _first_id(services) or ""
+        key = _idempotency_key(self._external_user_id, "create", staff_id, service_id, datetime)
         with _translate_errors():
             record = self._client.create_appointment(
                 external_user_id=self._external_user_id,
-                master_id=staff_id,
-                service_ids=services,
-                datetime=datetime,
-                client_phone=client_phone,
-                client_name=client_name,
-                comment=comment,
+                client_id=self._client_id,
+                specialist_id=str(staff_id),
+                service_id=service_id,
+                start_datetime=datetime,
                 idempotency_key=key,
             )
-        return BookingRecord(
-            record_id=_appointment_id_to_int(record.appointment_id),
-            record_hash=str(record.raw.get("record_hash") or ""),
-            raw={**record.raw, "ayla_appointment_id": record.appointment_id},
-        )
+        return BookingRecord(record_id=0, record_hash="", raw=_mirror_raw(record))
 
-    def cancel_record(self, *, record_id: int) -> bool:
+    def cancel_record(self, *, record_id: int | str) -> bool:
         key = _idempotency_key(self._external_user_id, "cancel", record_id)
         with _translate_errors():
             return self._client.cancel_appointment(
@@ -194,6 +200,23 @@ class AylaYClientsAdapter:
                 appointment_id=str(record_id),
                 idempotency_key=key,
             )
+
+    def reschedule_record(self, *, record_id: int | str, datetime: str) -> BookingRecord:
+        """Native Ayla reschedule — preserves the canonical ``appointment_id``.
+
+        The tools' YClients path reschedules as cancel+create (which would mint
+        a new appointment id); the Ayla path moves the same booking so the
+        mirror keeps one stable identity.
+        """
+        key = _idempotency_key(self._external_user_id, "reschedule", record_id, datetime)
+        with _translate_errors():
+            record = self._client.reschedule_appointment(
+                external_user_id=self._external_user_id,
+                appointment_id=str(record_id),
+                new_start_datetime=datetime,
+                idempotency_key=key,
+            )
+        return BookingRecord(record_id=0, record_hash="", raw=_mirror_raw(record))
 
     def get_user_records(self) -> list[UserRecord]:
         with _translate_errors():
@@ -230,20 +253,23 @@ class _translate_errors:
 
 
 def _to_yc_service(svc: AylaService) -> Service:
+    # Ayla catalog ids are UUID strings; the YClients ``Service`` DTO is
+    # int-typed (anti-touch). On the flag-ON path the tools treat ids opaquely
+    # (allow-sets branch on the flag), so the string flows through unchanged.
     return Service(
-        id=svc.id,
+        id=svc.id,  # type: ignore[arg-type]
         title=svc.title,
         price_min=svc.price_min,
         price_max=svc.price_max,
         duration_s=svc.duration_s,
-        category_id=svc.category_id,
+        category_id=svc.category_id,  # type: ignore[arg-type]
         raw=svc.raw,
     )
 
 
 def _to_yc_staff(master: AylaMaster) -> Staff:
     return Staff(
-        id=master.id,
+        id=master.id,  # type: ignore[arg-type]  # UUID string on the Ayla path
         name=master.name,
         specialization=master.specialization,
         rating=master.rating,
@@ -263,7 +289,7 @@ def _to_yc_available_time(slot: AylaSlot) -> AvailableTime:
 
 def _to_yc_user_record(rec: AylaUserRecord) -> UserRecord:
     return UserRecord(
-        id=_appointment_id_to_int(rec.appointment_id),
+        id=0,  # canonical UUID rides in raw; tools resolve via RemoteBookingProxy.
         services=rec.services,
         company={},  # Ayla is single canonical backend; company is YClients-only.
         staff=rec.master,
@@ -272,6 +298,31 @@ def _to_yc_user_record(rec: AylaUserRecord) -> UserRecord:
         seance_length=rec.duration_s,
         raw={**rec.raw, "ayla_appointment_id": rec.appointment_id},
     )
+
+
+def _first_id(ids: list[int] | list[str] | None) -> str | None:
+    """Ayla writes/slots take a single ``service_id``; the tools pass a list."""
+    if not ids:
+        return None
+    first = ids[0]
+    return str(first) if first is not None else None
+
+
+def _mirror_raw(record: AylaBookingRecord) -> dict[str, Any]:
+    """Normalise a create/reschedule result into the keys the booking tools
+    upsert onto ``RemoteBookingProxy`` (typed UUID columns + schedule window)."""
+    raw = dict(record.raw)
+    service = raw.get("service") if isinstance(raw.get("service"), dict) else {}
+    specialist = raw.get("specialist") if isinstance(raw.get("specialist"), dict) else {}
+    return {
+        **raw,
+        "ayla_appointment_id": record.appointment_id,
+        "start_at": raw.get("start_datetime") or raw.get("start_at"),
+        "end_at": raw.get("end_datetime") or raw.get("end_at"),
+        "service_id": (service or {}).get("id") or raw.get("service_id"),
+        "specialist_id": (specialist or {}).get("id") or raw.get("specialist_id"),
+        "status": raw.get("status"),
+    }
 
 
 def _idempotency_key(external_user_id: str, op: str, *parts: Any) -> str:
