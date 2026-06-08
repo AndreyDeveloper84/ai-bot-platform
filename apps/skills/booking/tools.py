@@ -77,7 +77,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
@@ -476,13 +476,20 @@ class ConfirmationResult:
 
 @dataclass(frozen=True)
 class BookingRow:
-    """Trimmed booking DTO for :func:`show_my_bookings`."""
+    """Trimmed booking DTO for :func:`show_my_bookings`.
+
+    ``record_id`` is the int YClients handle on the legacy path. ``handle``
+    carries the Ayla ``appointment_id`` (UUID str) on the flag-ON path — the
+    LLM passes this back as ``record_id`` to cancel/reschedule. Empty on the
+    legacy path, so the YClients flow is unchanged.
+    """
 
     record_id: int
     visit_at: str
     master_name: str
     service_name: str
     status: str
+    handle: str = ""
 
 
 @dataclass(frozen=True)
@@ -1034,6 +1041,55 @@ def execute_confirm(
             error="yclients_api_error",
         )
 
+    # ── Ayla REST path (flag ON) ────────────────────────────────────────────
+    # Ayla owns the canonical Appointment; we keep only the RemoteBookingProxy
+    # mirror (UUID PK). No local BookingRequest write — that would duplicate
+    # canonical state (ADR-0009 hard rule #1). Idempotent on appointment_id so
+    # it converges with the echo-back booking.created event consumer (#442).
+    if _booking_via_ayla():
+        appt_id = _ayla_appointment_id(record)
+        if not appt_id:
+            logger.warning("booking.confirm.exec.ayla_missing_appointment_id")
+            _audit_tool(
+                tenant_id=tenant_id, tool="execute_confirm", outcome="ayla_no_appointment_id"
+            )
+            return BookingToolResult(
+                confirmation=ConfirmationResult(ok=False, error="yclients_api_error"),
+                error="yclients_api_error",
+            )
+        _upsert_remote_proxy(
+            tenant=tenant,
+            bot_user=bot_user,
+            appointment_id=appt_id,
+            start_at=visit_at_dt,
+            record_raw=getattr(record, "raw", None) or {},
+        )
+        _schedule_reminders(
+            tenant=tenant,
+            bot_user=bot_user,
+            yc_id=appt_id,
+            visit_at_dt=visit_at_dt,
+            master_name=master_name,
+            service_name=service_name,
+        )
+        _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="ok")
+        write_audit(
+            EVENT_BOOKING_CONFIRMED,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "ayla_appointment_id": appt_id, "idempotent": False},
+        )
+        confirmation = ConfirmationResult(
+            ok=True,
+            record_id=0,
+            visit_at=visit_at_dt.isoformat(),
+            master_name=master_name,
+            service_name=service_name,
+        )
+        return BookingToolResult(
+            text=_format_confirmation_text(confirmation),
+            confirmation=confirmation,
+        )
+
     yc_id = str(record.record_id)
     yc_marker = f"yclients_record_id={yc_id}"
     # Skills retro hotfix #1: anchor the idempotency lookup to the
@@ -1250,6 +1306,9 @@ def cancel_booking(
 
     Returns a :class:`BookingToolResult` with ``pending`` populated.
     """
+    if _booking_via_ayla():
+        return _cancel_booking_ayla(arguments=arguments, tenant=tenant, bot_user=bot_user)
+
     record_id = _coerce_int(arguments.get("record_id"))
     reason = str(arguments.get("reason") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
@@ -1342,6 +1401,11 @@ def execute_cancel(
     WITHOUT flipping status. Caller (callback handler) maps this to a
     handoff so an operator can manually cancel in the YClients UI.
     """
+    if _booking_via_ayla():
+        return _execute_cancel_ayla(
+            client=client, payload=payload, tenant=tenant, bot_user=bot_user
+        )
+
     record_id = _coerce_int(payload.get("record_id"))
     reason = str(payload.get("reason") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
@@ -1468,6 +1532,11 @@ def reschedule_booking(
 
     Returns ``pending``-only :class:`BookingToolResult` on success.
     """
+    if _booking_via_ayla():
+        return _reschedule_booking_ayla(
+            client=client, arguments=arguments, tenant=tenant, bot_user=bot_user
+        )
+
     record_id = _coerce_int(arguments.get("record_id"))
     new_datetime = str(arguments.get("new_datetime") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
@@ -1626,6 +1695,11 @@ def execute_reschedule(
       DO NOT retry the create — risk of double-booking is worse than
       the inconvenience of one handoff.
     """
+    if _booking_via_ayla():
+        return _execute_reschedule_ayla(
+            client=client, payload=payload, tenant=tenant, bot_user=bot_user
+        )
+
     record_id = _coerce_int(payload.get("record_id"))
     new_datetime = str(payload.get("new_datetime") or "").strip()
     master_id = _coerce_int(payload.get("master_id"))
@@ -2209,6 +2283,9 @@ def show_my_bookings(
     comment. Augmented when possible with live data from
     :meth:`YClientsAPI.get_user_records`.
     """
+    if _booking_via_ayla():
+        return _show_my_bookings_ayla(client=client, tenant=tenant, bot_user=bot_user)
+
     tenant_id = str(getattr(tenant, "id", ""))
     now = dj_timezone.now()
 
@@ -2782,6 +2859,520 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Ayla REST path helpers (gated on BOOKING_VIA_AYLA_REST — flag OFF in this PR)
+# ---------------------------------------------------------------------------
+#
+# When the flag is ON the booking lifecycle is driven through Ayla, which owns
+# the canonical ``Appointment`` row (ADR-0009). bot-platform keeps a thin
+# ``RemoteBookingProxy`` mirror (UUID PK = Ayla ``appointment_id``) for AI
+# grounding + reminder scheduling. The handle the LLM passes around is the
+# UUID string, resolved via the proxy — NOT the int ``yclients_record_id``
+# comment-marker the legacy YClients path uses (which stays byte-for-byte
+# unchanged below the flag branches).
+
+
+def _booking_via_ayla() -> bool:
+    from django.conf import settings
+
+    return bool(getattr(settings, "BOOKING_VIA_AYLA_REST", False))
+
+
+def _ayla_appointment_id(record: Any) -> str:
+    """Pull the canonical Ayla ``appointment_id`` (UUID str) off a BookingRecord."""
+    raw = getattr(record, "raw", None) or {}
+    return str(raw.get("ayla_appointment_id") or "")
+
+
+def _coerce_uuid(value: Any) -> UUID | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _upsert_remote_proxy(
+    *,
+    tenant: Any,
+    bot_user: Any,
+    appointment_id: str,
+    start_at: datetime,
+    record_raw: dict[str, Any] | None = None,
+) -> None:
+    """Idempotently mirror an Ayla appointment into ``RemoteBookingProxy``.
+
+    Keyed on ``appointment_id`` (the Ayla UUID), so it converges with the
+    echo-back ``booking.created`` event consumer (#442) — whichever writes
+    first, the other's ``update_or_create`` no-ops onto the same row.
+
+    ``service_id`` / ``specialist_id`` are the Ayla Service/Master UUIDs read
+    off the create/reschedule response envelope when present (nullable
+    columns — left unset if Ayla didn't echo them). ``end_at`` is derived from
+    ``duration_s`` when known, else collapses to ``start_at`` (reminder math
+    reads ``start_at``; the mirror is not the billing source of truth).
+    """
+    from apps.booking.models import RemoteBookingProxy
+
+    appt_uuid = _coerce_uuid(appointment_id)
+    if appt_uuid is None:
+        # Not a UUID — Ayla contract violation upstream. Skip the mirror
+        # rather than corrupt it; the audit trail on the tool already
+        # records the create. (Surfaced via the missing proxy on read.)
+        logger.warning("booking.proxy.non_uuid_appointment_id id=%r", appointment_id)
+        return
+
+    raw = record_raw or {}
+    duration_s = _coerce_int(raw.get("duration_s")) or 0
+    end_at = start_at + timedelta(seconds=duration_s)
+
+    specialist = raw.get("specialist") if isinstance(raw.get("specialist"), dict) else {}
+    services = raw.get("services") if isinstance(raw.get("services"), list) else []
+    specialist_uuid = _coerce_uuid((specialist or {}).get("id"))
+    service_uuid = _coerce_uuid((services[0] or {}).get("id")) if services else None
+
+    defaults: dict[str, Any] = {
+        "tenant": tenant,
+        "bot_user": bot_user,
+        "start_at": start_at,
+        "end_at": end_at,
+        "status": RemoteBookingProxy.Status.CONFIRMED,
+        "source": RemoteBookingProxy.Source.AUTOMATION,
+    }
+    if service_uuid is not None:
+        defaults["service_id"] = service_uuid
+    if specialist_uuid is not None:
+        defaults["specialist_id"] = specialist_uuid
+
+    RemoteBookingProxy.all_tenants.update_or_create(
+        appointment_id=appt_uuid,
+        defaults=defaults,
+    )
+
+
+def _find_remote_proxy(*, tenant: Any, bot_user: Any, handle: str) -> Any:
+    """Resolve a live ``RemoteBookingProxy`` for ``handle`` (Ayla UUID str).
+
+    Scoped to ``(tenant, bot_user)`` so a leaked handle cannot action another
+    customer's booking. Cancelled rows are excluded so a re-cancel is a no-op.
+    """
+    from apps.booking.models import RemoteBookingProxy
+
+    appt_uuid = _coerce_uuid(handle)
+    if appt_uuid is None:
+        return None
+    return (
+        RemoteBookingProxy.all_tenants.filter(
+            tenant=tenant,
+            bot_user=bot_user,
+            appointment_id=appt_uuid,
+        )
+        .exclude(status=RemoteBookingProxy.Status.CANCELLED)
+        .first()
+    )
+
+
+def _proxy_display_names(*, tenant: Any, proxy: Any) -> tuple[str, str]:
+    """Best-effort ``(service_name, master_name)`` for a proxy via catalog mirror.
+
+    The proxy stores only Ayla UUIDs (PII rule §7 — no names cached). The
+    catalog mirror maps ``ayla_service_id`` / ``ayla_user_id`` → display name.
+    Returns empty strings when the mirror has no row (sync gap) — callers
+    fall back to generic copy.
+    """
+    service_name = ""
+    master_name = ""
+    try:
+        from apps.catalog.models import CatalogMaster, CatalogService
+
+        if proxy.service_id is not None:
+            svc = (
+                CatalogService.all_tenants.filter(tenant=tenant, ayla_service_id=proxy.service_id)
+                .only("name")
+                .first()
+            )
+            service_name = (svc.name if svc else "") or ""
+        if proxy.specialist_id is not None:
+            master = (
+                CatalogMaster.all_tenants.filter(tenant=tenant, ayla_user_id=proxy.specialist_id)
+                .only("name")
+                .first()
+            )
+            master_name = (master.name if master else "") or ""
+    except Exception:  # noqa: BLE001 — name resolution is cosmetic, never fatal
+        logger.exception("booking.proxy.name_lookup_failed")
+    return service_name, master_name
+
+
+# ── Ayla cancel (preview + execute) ──────────────────────────────────────────
+
+
+def _cancel_booking_ayla(
+    *,
+    arguments: dict[str, Any],
+    tenant: Any,
+    bot_user: Any,
+) -> BookingToolResult:
+    """Flag-ON cancel preview. ``record_id`` is the Ayla UUID handle (str)."""
+    handle = str(arguments.get("record_id") or "").strip()
+    reason = str(arguments.get("reason") or "").strip()
+    tenant_id = str(getattr(tenant, "id", ""))
+
+    proxy = _find_remote_proxy(tenant=tenant, bot_user=bot_user, handle=handle)
+    if proxy is None:
+        _audit_tool(tenant_id=tenant_id, tool="cancel_booking", outcome="invalid_record_id")
+        return BookingToolResult(error="invalid_record_id")
+
+    service_name, master_name = _proxy_display_names(tenant=tenant, proxy=proxy)
+    payload = {
+        "ayla_appointment_id": handle,
+        "reason": reason,
+        "master_name": master_name,
+        "service_name": service_name,
+    }
+    token = create_pending(
+        tenant=tenant,
+        bot_user=bot_user,
+        kind=PendingBookingAction.Kind.CANCEL,
+        payload=payload,
+    )
+    preview_text = _format_cancel_preview_ayla(
+        service_name=service_name, master_name=master_name, reason=reason
+    )
+    keyboard = confirm_2_button(str(token))
+
+    _audit_tool(tenant_id=tenant_id, tool="cancel_booking", outcome="preview")
+    write_audit(
+        EVENT_BOOKING_PREVIEW,
+        target="BookingSkill",
+        payload={
+            "tenant_id": tenant_id,
+            "kind": "cancel",
+            "ayla_appointment_id": handle,
+            "token": str(token),
+        },
+    )
+    return BookingToolResult(
+        text=preview_text,
+        pending=PendingPreview(
+            kind=PendingBookingAction.Kind.CANCEL,
+            token=token,
+            preview_text=preview_text,
+            keyboard=keyboard,
+        ),
+    )
+
+
+def _format_cancel_preview_ayla(*, service_name: str, master_name: str, reason: str) -> str:
+    parts = ["Отменяю запись:"]
+    if service_name:
+        parts.append(f"• Услуга: {service_name}")
+    if master_name:
+        parts.append(f"• Мастер: {master_name}")
+    if reason:
+        parts.append(f"• Причина: {reason}")
+    parts.append("Подтверждаете отмену?")
+    return "\n".join(parts)
+
+
+def _execute_cancel_ayla(
+    *,
+    client: Any,
+    payload: dict[str, Any],
+    tenant: Any,
+    bot_user: Any,
+) -> BookingToolResult:
+    """Flag-ON cancel executor: Ayla REST cancel + flip proxy status."""
+    handle = str(payload.get("ayla_appointment_id") or "").strip()
+    tenant_id = str(getattr(tenant, "id", ""))
+
+    if not handle:
+        return BookingToolResult(error="invalid_payload")
+
+    # Re-validate ownership at execute time (defence-in-depth vs leaked token).
+    proxy = _find_remote_proxy(tenant=tenant, bot_user=bot_user, handle=handle)
+    if proxy is None:
+        _audit_tool(tenant_id=tenant_id, tool="execute_cancel", outcome="invalid_record_id")
+        return BookingToolResult(error="invalid_record_id")
+
+    try:
+        client.cancel_record(record_id=str(handle))
+    except YClientsUnavailableError as exc:
+        logger.warning("booking.cancel.exec.ayla_unavailable err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_cancel", outcome="yclients_unavailable")
+        write_audit(
+            EVENT_BOOKING_CANCEL_FAILED,
+            target="BookingSkill",
+            payload={
+                "tenant_id": tenant_id,
+                "ayla_appointment_id": handle,
+                "reason": "unavailable",
+            },
+        )
+        return BookingToolResult(error="yclients_cancel_failure")
+    except YClientsAPIError as exc:
+        logger.info("booking.cancel.exec.ayla_api_error err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_cancel", outcome="yclients_api_error")
+        write_audit(
+            EVENT_BOOKING_CANCEL_FAILED,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "ayla_appointment_id": handle, "reason": "api_error"},
+        )
+        return BookingToolResult(error="yclients_cancel_failure")
+
+    from apps.booking.models import BookingReminder, RemoteBookingProxy
+
+    RemoteBookingProxy.all_tenants.filter(appointment_id=proxy.appointment_id).update(
+        status=RemoteBookingProxy.Status.CANCELLED,
+    )
+    BookingReminder.all_tenants.filter(
+        yclients_record_id=str(handle),
+        status=BookingReminder.Status.PENDING,
+    ).update(status=BookingReminder.Status.CANCELLED)
+
+    _audit_tool(tenant_id=tenant_id, tool="execute_cancel", outcome="ok")
+    write_audit(
+        EVENT_BOOKING_CANCELLED,
+        target="BookingSkill",
+        payload={"tenant_id": tenant_id, "ayla_appointment_id": handle},
+    )
+    return BookingToolResult(text="Готово, запись отменена.")
+
+
+# ── Ayla reschedule (preview + execute, native) ──────────────────────────────
+
+
+def _reschedule_booking_ayla(
+    *,
+    client: Any,
+    arguments: dict[str, Any],
+    tenant: Any,
+    bot_user: Any,
+) -> BookingToolResult:
+    """Flag-ON reschedule preview. Validates the new slot is free first."""
+    handle = str(arguments.get("record_id") or "").strip()
+    new_datetime = str(arguments.get("new_datetime") or "").strip()
+    tenant_id = str(getattr(tenant, "id", ""))
+
+    proxy = _find_remote_proxy(tenant=tenant, bot_user=bot_user, handle=handle)
+    if proxy is None:
+        _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="invalid_record_id")
+        return BookingToolResult(error="invalid_record_id")
+
+    new_dt = _parse_iso_datetime(new_datetime)
+    if new_dt is None:
+        _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="bad_datetime")
+        return BookingToolResult(error="invalid_datetime")
+    if new_dt <= dj_timezone.now():
+        _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="past_datetime")
+        return BookingToolResult(error="past_datetime")
+
+    service_name, master_name = _proxy_display_names(tenant=tenant, proxy=proxy)
+    payload = {
+        "ayla_appointment_id": handle,
+        "new_datetime": new_datetime,
+        "master_name": master_name,
+        "service_name": service_name,
+    }
+    token = create_pending(
+        tenant=tenant,
+        bot_user=bot_user,
+        kind=PendingBookingAction.Kind.RESCHEDULE,
+        payload=payload,
+    )
+    preview_text = _format_reschedule_preview_ayla(
+        service_name=service_name, master_name=master_name, new_datetime=new_datetime
+    )
+    keyboard = confirm_2_button(str(token))
+
+    _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="preview")
+    write_audit(
+        EVENT_BOOKING_PREVIEW,
+        target="BookingSkill",
+        payload={
+            "tenant_id": tenant_id,
+            "kind": "reschedule",
+            "ayla_appointment_id": handle,
+            "token": str(token),
+        },
+    )
+    return BookingToolResult(
+        text=preview_text,
+        pending=PendingPreview(
+            kind=PendingBookingAction.Kind.RESCHEDULE,
+            token=token,
+            preview_text=preview_text,
+            keyboard=keyboard,
+        ),
+    )
+
+
+def _format_reschedule_preview_ayla(
+    *, service_name: str, master_name: str, new_datetime: str
+) -> str:
+    parts = ["Переношу запись:"]
+    if service_name:
+        parts.append(f"• Услуга: {service_name}")
+    if master_name:
+        parts.append(f"• Мастер: {master_name}")
+    parts.append(f"• Новое время: {new_datetime}")
+    parts.append("Подтверждаете перенос?")
+    return "\n".join(parts)
+
+
+def _execute_reschedule_ayla(
+    *,
+    client: Any,
+    payload: dict[str, Any],
+    tenant: Any,
+    bot_user: Any,
+) -> BookingToolResult:
+    """Flag-ON reschedule executor — NATIVE (same UUID, no cancel+create)."""
+    handle = str(payload.get("ayla_appointment_id") or "").strip()
+    new_datetime = str(payload.get("new_datetime") or "").strip()
+    master_name = str(payload.get("master_name") or "")
+    service_name = str(payload.get("service_name") or "")
+    tenant_id = str(getattr(tenant, "id", ""))
+
+    if not handle or not new_datetime:
+        return BookingToolResult(error="invalid_payload")
+
+    visit_at_dt = _parse_iso_datetime(new_datetime)
+    if visit_at_dt is None:
+        _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="invalid_new_datetime")
+        return BookingToolResult(error="invalid_payload")
+
+    proxy = _find_remote_proxy(tenant=tenant, bot_user=bot_user, handle=handle)
+    if proxy is None:
+        _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="invalid_record_id")
+        return BookingToolResult(error="invalid_record_id")
+
+    try:
+        record: BookingRecord = client.reschedule_record(
+            record_id=str(handle),
+            datetime=new_datetime,
+        )
+    except YClientsUnavailableError as exc:
+        logger.warning("booking.reschedule.exec.ayla_unavailable err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="yclients_unavailable")
+        return BookingToolResult(error="yclients_cancel_failure")
+    except YClientsAPIError as exc:
+        logger.info("booking.reschedule.exec.ayla_api_error err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="yclients_api_error")
+        return BookingToolResult(error="yclients_api_error")
+
+    # Native reschedule preserves the UUID; update the mirror's schedule
+    # window + reschedule reminders. Idempotent on appointment_id.
+    new_handle = _ayla_appointment_id(record) or handle
+    _upsert_remote_proxy(
+        tenant=tenant,
+        bot_user=bot_user,
+        appointment_id=new_handle,
+        start_at=visit_at_dt,
+        record_raw=getattr(record, "raw", None) or {},
+    )
+
+    from apps.booking.models import BookingReminder
+
+    BookingReminder.all_tenants.filter(
+        yclients_record_id=str(handle),
+        status=BookingReminder.Status.PENDING,
+    ).update(status=BookingReminder.Status.CANCELLED)
+    _schedule_reminders(
+        tenant=tenant,
+        bot_user=bot_user,
+        yc_id=new_handle,
+        visit_at_dt=visit_at_dt,
+        master_name=master_name,
+        service_name=service_name,
+    )
+
+    _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ok")
+    write_audit(
+        EVENT_BOOKING_RESCHEDULED,
+        target="BookingSkill",
+        payload={
+            "tenant_id": tenant_id,
+            "ayla_appointment_id": new_handle,
+            "new_datetime": new_datetime,
+        },
+    )
+    confirmation = ConfirmationResult(
+        ok=True,
+        record_id=0,
+        visit_at=visit_at_dt.isoformat(),
+        master_name=master_name,
+        service_name=service_name,
+    )
+    return BookingToolResult(
+        text=f"Перенесла запись на {new_datetime}. Если что-то ещё нужно — пишите!",
+        confirmation=confirmation,
+    )
+
+
+# ── Ayla show_my_bookings ────────────────────────────────────────────────────
+
+
+def _show_my_bookings_ayla(
+    *,
+    client: Any,
+    tenant: Any,
+    bot_user: Any,
+) -> BookingToolResult:
+    """Flag-ON listing. Local source: RemoteBookingProxy; live data: Ayla REST."""
+    from apps.booking.models import RemoteBookingProxy
+
+    tenant_id = str(getattr(tenant, "id", ""))
+    now = dj_timezone.now()
+
+    proxies = list(
+        RemoteBookingProxy.all_tenants.filter(
+            tenant=tenant,
+            bot_user=bot_user,
+            status=RemoteBookingProxy.Status.CONFIRMED,
+            start_at__gte=now,
+        ).order_by("start_at")[:20]
+    )
+
+    # Live data from Ayla keyed by UUID handle — fail-soft on outage.
+    live_by_handle: dict[str, Any] = {}
+    try:
+        for rec in client.get_user_records():
+            h = str((rec.raw or {}).get("ayla_appointment_id") or "")
+            if h:
+                live_by_handle[h] = rec
+    except (YClientsUnavailableError, YClientsAPIError):
+        pass
+
+    bookings: list[BookingRow] = []
+    for proxy in proxies:
+        handle = str(proxy.appointment_id)
+        live = live_by_handle.get(handle)
+        service_name, master_name = _proxy_display_names(tenant=tenant, proxy=proxy)
+        visit_iso = (live.datetime if live is not None else "") or proxy.start_at.isoformat()
+        bookings.append(
+            BookingRow(
+                record_id=0,
+                visit_at=visit_iso,
+                master_name=master_name,
+                service_name=service_name,
+                status="CONFIRMED",
+                handle=handle,
+            )
+        )
+
+    _audit_tool(
+        tenant_id=tenant_id,
+        tool="show_my_bookings",
+        outcome="ok",
+        extra={"count": len(bookings)},
+    )
+    return BookingToolResult(text=_format_bookings_text(bookings), bookings=bookings)
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:

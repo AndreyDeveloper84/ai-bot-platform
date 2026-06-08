@@ -23,10 +23,19 @@ Ayla booking client in the YClients-shaped interface the tools already call
   bind the action to the consenting client; the YClients interface doesn't
   pass it through per-call).
 
-DEFAULT OFF: the real Ayla client is still a skeleton (methods raise
-``NotImplementedError``) and the endpoints are not live (contract pending S2
-sign-off). Flag ON is exercised only via ``FakeAylaBooking`` in tests until
-the contract is locked.
+DEFAULT OFF: the real Ayla client now issues live HTTP calls (contract
+LOCKED, #193), but the flag stays OFF until the separate gated cutover PR
+flips it and retires the direct-YClients path. Flag ON is exercised via
+``FakeAylaBooking`` in tests + the real client's own round-trip tests.
+
+### appointment_id is a UUID
+
+Ayla's canonical ``appointment_id`` is a UUID string (contract §4/§8). The
+YClients tool interface is int-keyed (``BookingRecord.record_id`` /
+``UserRecord.id``), so the adapter sets those numeric fields to ``0`` and
+threads the real UUID through ``raw["ayla_appointment_id"]``. The booking
+tools resolve the handle from the ``RemoteBookingProxy`` mirror (UUID PK)
+on the flag-ON path, not from the numeric placeholder.
 """
 
 from __future__ import annotations
@@ -77,29 +86,6 @@ def get_booking_provider(*, bot_user: Any) -> Any:
     from apps.integrations.yclients import get_yclients_client
 
     return get_yclients_client()
-
-
-def _appointment_id_to_int(appointment_id: str) -> int:
-    """Map an Ayla appointment id onto the int the tools expect — INTERIM.
-
-    The booking tools (and ``BookingRecord``/``UserRecord``/the mirror marker
-    ``yclients_record_id=<id>``) are int-keyed. The canonical Ayla
-    ``appointment_id`` is a **UUID** (event-contract / ``ayla-ai-core``), so
-    this numeric mapping is a deliberate placeholder for the flag-OFF skeleton
-    phase: it round-trips numeric ids and fails loudly on anything else rather
-    than silently corrupt the mirror.
-
-    **Before the httpx implementation + cutover** the bot side must accept a
-    UUID/string ``appointment_id`` (local mirror keeps its own int PK; the
-    Ayla-id column stores the UUID). Tracked as cutover prerequisite #1 in
-    ``docs/architecture/ayla-booking-rest-contract.md`` §8.
-    """
-    if not appointment_id.isdigit():
-        raise YClientsAPIError(
-            f"ayla_appointment_id_not_numeric: {appointment_id!r} — interim numeric "
-            "placeholder; UUID support is cutover prerequisite #1 (booking REST contract §8)"
-        )
-    return int(appointment_id)
 
 
 class AylaYClientsAdapter:
@@ -181,12 +167,19 @@ class AylaYClientsAdapter:
                 idempotency_key=key,
             )
         return BookingRecord(
-            record_id=_appointment_id_to_int(record.appointment_id),
+            # Ayla ``appointment_id`` is a UUID — there is no int record id.
+            # The numeric field is a placeholder; the real handle rides in
+            # ``raw["ayla_appointment_id"]`` and the proxy mirror (UUID PK)
+            # is the authoritative resolver on the flag-ON path.
+            record_id=0,
             record_hash=str(record.raw.get("record_hash") or ""),
             raw={**record.raw, "ayla_appointment_id": record.appointment_id},
         )
 
-    def cancel_record(self, *, record_id: int) -> bool:
+    def cancel_record(self, *, record_id: int | str) -> bool:
+        # ``record_id`` is the Ayla UUID (str) on the flag-ON path; accept int
+        # too for signature compatibility with the YClients client the tools
+        # type against. Stringify before the REST call.
         key = _idempotency_key(self._external_user_id, "cancel", record_id)
         with _translate_errors():
             return self._client.cancel_appointment(
@@ -194,6 +187,32 @@ class AylaYClientsAdapter:
                 appointment_id=str(record_id),
                 idempotency_key=key,
             )
+
+    def reschedule_record(
+        self,
+        *,
+        record_id: str,
+        datetime: str,
+    ) -> BookingRecord:
+        """Native reschedule — preserves the same Ayla ``appointment_id``.
+
+        Unlike the YClients cancel-and-recreate, Ayla owns a native reschedule
+        endpoint, so the appointment keeps its UUID. The tools that drive this
+        on the flag-ON path therefore never cancel+create.
+        """
+        key = _idempotency_key(self._external_user_id, "reschedule", record_id, datetime)
+        with _translate_errors():
+            record = self._client.reschedule_appointment(
+                external_user_id=self._external_user_id,
+                appointment_id=str(record_id),
+                datetime=datetime,
+                idempotency_key=key,
+            )
+        return BookingRecord(
+            record_id=0,
+            record_hash=str(record.raw.get("record_hash") or ""),
+            raw={**record.raw, "ayla_appointment_id": record.appointment_id},
+        )
 
     def get_user_records(self) -> list[UserRecord]:
         with _translate_errors():
@@ -263,7 +282,10 @@ def _to_yc_available_time(slot: AylaSlot) -> AvailableTime:
 
 def _to_yc_user_record(rec: AylaUserRecord) -> UserRecord:
     return UserRecord(
-        id=_appointment_id_to_int(rec.appointment_id),
+        # ``id`` is the YClients int handle — Ayla has no int id, so it's a
+        # placeholder. The UUID rides in ``raw["ayla_appointment_id"]`` and
+        # the tools match on it (not on this numeric field) under flag ON.
+        id=0,
         services=rec.services,
         company={},  # Ayla is single canonical backend; company is YClients-only.
         staff=rec.master,

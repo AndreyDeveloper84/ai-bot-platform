@@ -220,30 +220,34 @@ class TestDTOMapping:
         assert out[0].time == "14:00"
         assert out[0].seance_length_s == 3600
 
-    def test_get_user_records_maps_numeric_id(self) -> None:
+    def test_get_user_records_threads_uuid_handle(self) -> None:
         fake = FakeAylaBooking()
         fake.user_records = [
             AylaUserRecord(
-                appointment_id="555",
-                services=[{"id": 10}],
-                master={"id": 11},
+                appointment_id="3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34",
+                services=[{"id": "svc-uuid"}],
+                master={"id": "mst-uuid"},
                 datetime="2026-06-10T14:00:00",
                 duration_s=3600,
                 raw={},
             )
         ]
         out = _adapter(fake).get_user_records()
-        assert out[0].id == 555
-        assert out[0].raw["ayla_appointment_id"] == "555"
+        # No int handle for Ayla — UUID rides in raw.
+        assert out[0].id == 0
+        assert out[0].raw["ayla_appointment_id"] == "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34"
+        assert out[0].staff == {"id": "mst-uuid"}
+        assert out[0].services == [{"id": "svc-uuid"}]
 
 
 # ─── writes ─────────────────────────────────────────────────────────────────
 
 
 class TestWrites:
-    def test_create_record_passes_user_and_idempotency(self) -> None:
+    def test_create_record_threads_uuid_and_idempotency(self) -> None:
         fake = FakeAylaBooking()
-        fake.create_response = AylaBookingRecord(appointment_id="12345", raw={})
+        appt = "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34"
+        fake.create_response = AylaBookingRecord(appointment_id=appt, raw={})
         rec = _adapter(fake).create_record(
             staff_id=11,
             services=[10],
@@ -251,7 +255,9 @@ class TestWrites:
             client_phone="79991234567",
             client_name="Anna",
         )
-        assert rec.record_id == 12345
+        # Ayla appointment_id is a UUID — no int handle; UUID rides in raw.
+        assert rec.record_id == 0
+        assert rec.raw["ayla_appointment_id"] == appt
         call = fake.calls[0]
         assert call["external_user_id"] == "bot:telegram:42"
         assert call["idempotency_key"]  # non-empty deterministic key
@@ -269,28 +275,26 @@ class TestWrites:
         _adapter(fake2).create_record(**kwargs)
         assert fake1.calls[0]["idempotency_key"] == fake2.calls[0]["idempotency_key"]
 
-    def test_cancel_record_stringifies_id(self) -> None:
+    def test_cancel_record_stringifies_uuid_handle(self) -> None:
+        fake = FakeAylaBooking()
+        appt = "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34"
+        assert _adapter(fake).cancel_record(record_id=appt) is True
+        assert fake.calls[0]["appointment_id"] == appt
+
+    def test_cancel_record_accepts_int_for_signature_compat(self) -> None:
         fake = FakeAylaBooking()
         assert _adapter(fake).cancel_record(record_id=777) is True
         assert fake.calls[0]["appointment_id"] == "777"
 
-    def test_non_numeric_appointment_id_raises_yclients_error(self) -> None:
-        # INTERIM placeholder behaviour: canonical Ayla appointment_id is a
-        # UUID (contract §8 cutover prerequisite #1). Until the bot side
-        # accepts UUIDs, a non-numeric id fails loudly rather than corrupting
-        # the int-keyed mirror. Uses a UUID to document the real shape.
+    def test_reschedule_record_is_native_and_preserves_uuid(self) -> None:
         fake = FakeAylaBooking()
-        fake.create_response = AylaBookingRecord(
-            appointment_id="3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34", raw={}
-        )
-        with pytest.raises(YClientsAPIError, match="not_numeric"):
-            _adapter(fake).create_record(
-                staff_id=11,
-                services=[10],
-                datetime="2026-06-10T14:00:00",
-                client_phone="79991234567",
-                client_name="Anna",
-            )
+        appt = "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34"
+        rec = _adapter(fake).reschedule_record(record_id=appt, datetime="2026-06-11T15:00:00")
+        # Native reschedule returns the SAME appointment_id (no cancel+create).
+        assert rec.record_id == 0
+        assert rec.raw["ayla_appointment_id"] == appt
+        assert fake.calls[0]["op"] == "reschedule"
+        assert fake.calls[0]["appointment_id"] == appt
 
 
 # ─── error translation ──────────────────────────────────────────────────────

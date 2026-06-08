@@ -1038,7 +1038,10 @@ def _bookings_payload(result: BookingToolResult, tool_name: str) -> list[dict[st
         return None
     return [
         {
-            "record_id": b.record_id,
+            # ``handle`` (Ayla UUID) when present, else the int YClients
+            # record id. The LLM passes this value back as ``record_id`` to
+            # cancel/reschedule; the tools accept either shape under the flag.
+            "record_id": b.handle or b.record_id,
             "visit_at": b.visit_at,
             "master_name": b.master_name,
             "service_name": b.service_name,
