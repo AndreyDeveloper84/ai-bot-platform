@@ -1,12 +1,16 @@
 # Ayla ↔ bot-platform booking REST contract
 
-> **Status: DRAFT — pending S2 sign-off.** This is the spec-first artifact for
-> #1016. It is a *joint* S1 (bot-platform consumer) + S2 (Ayla canonical
-> backend) document. **No bot-platform code may rely on these endpoints as
-> live, and the real HTTP client must not be implemented, until S2 confirms
-> the paths, payloads, auth, and idempotency header below.** The bot-side
-> client (`apps/integrations/ayla/booking_client.py`) is currently a skeleton
-> whose methods raise `NotImplementedError` for exactly this reason.
+> **Status: LOCKED — S2 sign-off complete (2026-06-06).** The S2 internal
+> Bearer surface shipped and merged to `dev` in **#193** (commit `f2dde60`,
+> squashed as `d386df8`). The endpoints, auth, `appointment_id` type, and
+> idempotency header below are now **confirmed against the live implementation**
+> — see §3/§4/§5 (the two former MUST-lock items in §8 are resolved). S1 may
+> now replace the `apps/integrations/ayla/booking_client.py` skeleton (which
+> raises `NotImplementedError`) with the real HTTP client and, in a separate
+> gated change, flip `BOOKING_VIA_AYLA_REST` ON.
+>
+> This is a *joint* S1 (bot-platform consumer) + S2 (Ayla canonical backend)
+> document.
 
 - **Owner (this doc):** S1 + S2 jointly.
 - **Tickets:** #1016 (this bridge), #1014 (catalog/slot reads), #925 / #968
@@ -46,28 +50,34 @@ freezing the wrong wire format.
   (RS256 consent-bound tokens) is tracked separately and is a **TODO** on both
   sides. Until that ADR lands, Bearer-per-#1016 is authoritative for booking.
 
-## 3. Endpoints (DRAFT — to confirm with S2)
+## 3. Endpoints (LOCKED — confirmed against merged S2 surface, #193)
 
-> Paths, query params, and field names below are the bot-side *proposal*
-> derived from what the booking skill consumes today (the YClients DTOs in
-> `apps/integrations/yclients/client.py`). S2 confirms or amends.
+> Paths below are the **real** routes shipped in #193 (mounted under
+> `/api/v1/internal/` in `djangoProject/urls.py`). Note: there is **no
+> `booking/` path segment** — the earlier draft proposal used one; it was
+> dropped at sign-off. Field names in §4 are confirmed against the S2
+> serializers; the bot adapter still absorbs any DTO renames so the eight
+> booking tools are unaffected.
 
-### 3.1 Reads
+### 3.1 Reads (`IsInternalBearer`)
 
 | Method | Path | Purpose | Returns |
 |---|---|---|---|
-| GET | `/api/v1/internal/booking/specialists` | list specialists (filter `?service_id=`) | `[Specialist]` |
-| GET | `/api/v1/internal/booking/services` | service catalog (filter `?specialist_id=`) | `[Service]` |
-| GET | `/api/v1/internal/booking/specialists/{id}/slots` | bookable slots (`?service_ids=&from=&to=`) | `[Slot]` (or grouped by date) |
+| GET | `/api/v1/internal/specialists/` | list specialists (filter `?service_id=`) | `[Specialist]` |
+| GET | `/api/v1/internal/specialists/{id}/` | one specialist | `Specialist` |
+| GET | `/api/v1/internal/specialists/{id}/slots/` | bookable slots (`?service_ids=&from=&to=`) | `[Slot]` (or grouped by date) |
+| GET | `/api/v1/internal/specialists/{id}/services/` | services of a specialist | `[Service]` |
+| GET | `/api/v1/internal/services/` | service catalog | `[Service]` |
+| GET | `/api/v1/internal/services/categories/` | service categories | `[Category]` |
 
-### 3.2 Writes
+### 3.2 Writes (`IsBotServiceWithVerifiedClient` = Bearer + `X-External-User-ID`)
 
 | Method | Path | Purpose | Idempotent |
 |---|---|---|---|
-| POST | `/api/v1/internal/booking/appointments` | create appointment | yes (key required) |
-| POST | `/api/v1/internal/booking/appointments/{id}/cancel` | cancel | yes |
-| POST | `/api/v1/internal/booking/appointments/{id}/reschedule` | move to a new slot | yes |
-| GET | `/api/v1/internal/booking/appointments?external_user_id=` | the user's appointments | n/a |
+| POST | `/api/v1/internal/appointments/` | create appointment | yes (`X-Idempotency-Key` honoured) |
+| POST | `/api/v1/internal/appointments/{uuid}/cancel/` | cancel | yes |
+| POST | `/api/v1/internal/appointments/{uuid}/reschedule/` | move to a new slot | yes |
+| GET | `/api/v1/internal/me/bookings/` | the resolved user's appointments | n/a |
 
 ## 4. Payload shapes (DRAFT)
 
@@ -108,26 +118,26 @@ unaffected.
 
 `appointment_id` is Ayla's canonical id and becomes the bot-side mirror key.
 
-> **🔒 MUST lock with S2 (item #1, see §8): `appointment_id` is a UUID.**
-> Per the event-contract canon and the UUID-ready `ayla-ai-core` tooling,
-> Ayla's `Appointment.id` is a **UUID string**, not numeric. The current
-> adapter is an interim placeholder: it maps numeric ids onto the int-keyed
-> booking tools (`BookingRecord.record_id`, `UserRecord.id`, the mirror marker
-> `yclients_record_id=<id>`) and fails loudly on non-numeric. **Before the
-> httpx implementation + cutover**, the bot side must accept a UUID/string
+> **✅ LOCKED (item #1, §8): `appointment_id` is a UUID string.**
+> Confirmed against the merged S2 surface — `Appointment.id` is a
+> `UUIDField` and the write routes are `…/appointments/<uuid:booking_id>/…`.
+> The current bot adapter's numeric-id mapping (`BookingRecord.record_id`,
+> `UserRecord.id`, mirror marker `yclients_record_id=<id>`) is an **interim
+> placeholder**: the real `booking_client.py` must accept a UUID/string
 > `appointment_id` (the local mirror keeps its own int PK, but the Ayla-id
-> column stores the UUID). This is the canonical decision — captured here in
-> the spec, not in prod. Tracked as the first cutover prerequisite in §8.
+> column stores the UUID). This is now a cutover prerequisite **satisfied on
+> the S2 side**; the bot side implements it with the real client.
 
 ## 5. Idempotency
 
 Writes carry an idempotency key so a retried bot turn cannot double-book.
 
-- **🔒 MUST lock with S2 (item #2, see §8): exact header name.** bot-platform's
-  payment client uses `Idempotence-Key`; the nutrition client uses
-  `X-Idempotency-Key`. S2 picks one at sign-off and it is recorded here. The
-  bot client passes `idempotency_key` through to whichever header S2 names.
-- Key is required on `POST .../appointments` and recommended on cancel /
+- **✅ LOCKED (item #2, §8): header name is `X-Idempotency-Key`.** Confirmed
+  against the merged S2 surface (`appointments/infrastructure/idempotency.py`,
+  Stripe-style semantics; lookup tuple `(user, operation_name, key, target_id)`
+  — so the same key reused across different appointments does not cross-replay).
+  The bot client passes `idempotency_key` through as `X-Idempotency-Key`.
+- Key is required on `POST …/appointments/` and recommended on cancel /
   reschedule. Ayla returns the original result on a duplicate key (no new row).
 
 ## 6. Errors
@@ -152,25 +162,25 @@ Error body shape (code for mapping) — **confirm with S2**:
   trips the breaker — `BookingBadRequestError` is user input, not an outage.
 - bot fires once per turn; no caller-side retries beyond the idempotent write.
 
-## 8. Open items before lock (owners)
+## 8. Sign-off status (owners)
 
-**🔒 MUST lock with S2 at sign-off (block the httpx implementation + cutover):**
+**🔒 Former MUST-lock items — both RESOLVED at S2 sign-off (#193 merged):**
 
-1. [ ] **`appointment_id` = UUID** (§4). Canonical per event-contract +
-       `ayla-ai-core`. The bot side must accept a UUID/string id before
-       cutover; the current numeric placeholder adapter is interim only.
-2. [ ] **Idempotency header name** (§5) — S2 picks `Idempotence-Key` vs
-       `X-Idempotency-Key`; recorded here.
+1. [x] **`appointment_id` = UUID** (§4). Confirmed: `Appointment.id` is a
+       `UUIDField`; write routes are `…/appointments/<uuid:booking_id>/…`.
+       The bot side accepts a UUID/string id in the real client.
+2. [x] **Idempotency header name** (§5) — **`X-Idempotency-Key`** (confirmed
+       in `appointments/infrastructure/idempotency.py`).
 
-These two are caught in the spec now precisely so they never surface in prod —
-the value of spec-first. Neither blocks the current PRs (skeleton, flag OFF).
+**Other items:**
 
-**Other open items:**
-
-- [ ] **S2:** confirm/amend §3 paths, §4 field names, §6 error codes.
-- [ ] **S2:** stand up the endpoints in the Ayla canonical backend.
-- [ ] **Both:** s2s-auth convergence ADR (RS256) — supersedes §2's interim Bearer.
-- [ ] **S1 (follow-up, after lock):** replace the `booking_client.py` skeleton
-      with the real `requests`-based implementation; then a separate change
-      flips `BOOKING_VIA_AYLA_REST` ON and retires the direct-YClients path +
-      local-canonical write.
+- [x] **S2:** §3 paths confirmed (no `booking/` segment); reads `IsInternalBearer`,
+      writes `IsBotServiceWithVerifiedClient`. §4/§6 shapes track the S2 serializers
+      (the bot adapter absorbs renames).
+- [x] **S2:** endpoints stood up in the Ayla canonical backend (#193, in `dev`).
+- [ ] **Both (TODO, not a blocker):** s2s-auth convergence ADR (RS256) —
+      supersedes §2's interim Bearer. Interim Bearer is authoritative until then.
+- [ ] **S1 (follow-up, now unblocked):** replace the `booking_client.py` skeleton
+      with the real `requests`/httpx implementation against the §3 routes; then a
+      separate gated change flips `BOOKING_VIA_AYLA_REST` ON and retires the
+      direct-YClients path + local-canonical write.
