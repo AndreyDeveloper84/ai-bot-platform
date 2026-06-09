@@ -71,8 +71,12 @@ def fake_redis(monkeypatch):
 @pytest.fixture
 def mock_discovery(monkeypatch):
     """Stub the LLM discovery reply so the handler doesn't make a live call."""
+    from apps.orchestrator.discovery import DiscoveryReply
+
     monkeypatch.setattr(
-        max_handler, "generate_discovery_reply", lambda *a, **k: "Привет! Какая услуга интересует?"
+        max_handler,
+        "generate_discovery_reply",
+        lambda *a, **k: DiscoveryReply(text="Привет! Какая услуга интересует?"),
     )
 
 
