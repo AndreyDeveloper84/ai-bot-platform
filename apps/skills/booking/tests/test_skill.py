@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 from django.core.cache import cache
+from django.test import override_settings
 
 from apps.booking.models import BookingRequest
 from apps.conversations.models import Conversation
@@ -1033,3 +1034,94 @@ class TestE0RegressionGuards:
         )
         # Sanity — Phase 1 still gets the roster keyword (как list или []).
         assert "known_masters" in phase1_kwargs
+
+
+# ---------------------------------------------------------------------------
+# Health-check gating — fail-closed backstop under flag-ON (#1016 / PR-A)
+# ---------------------------------------------------------------------------
+
+
+class TestServiceRequiresHealthCheck:
+    """Direct coverage for ``_service_requires_health_check``.
+
+    PR-A safety backstop: under ``BOOKING_VIA_AYLA_REST`` we cannot yet
+    ground the Ayla UUID service id against the int-``external_id``-keyed
+    mirror, so the helper FAILS CLOSED (``True`` → human handoff) rather
+    than fail OPEN on a gated service. The flag-OFF path is unchanged.
+    """
+
+    def test_flag_on_fails_closed_with_no_catalog_row(self, tenant: Tenant) -> None:
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with tenant_scope(tenant):
+                assert (
+                    _service_requires_health_check(tenant, "11111111-1111-1111-1111-111111111111")
+                    is True
+                )
+
+    def test_flag_on_fails_closed_ignoring_mirror_flag(self, tenant: Tenant) -> None:
+        # Even if an int-keyed mirror row says it is NOT gated, flag-ON
+        # cannot trust that match (UUID ≠ external_id) — must fail closed.
+        from django.utils import timezone as dj_timezone
+
+        from apps.catalog.models import CatalogService
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="not-gated",
+                name="Not gated",
+                requires_health_check=False,
+            )
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, 22) is True
+
+    def test_flag_off_uses_mirror_true(self, tenant: Tenant) -> None:
+        from django.utils import timezone as dj_timezone
+
+        from apps.catalog.models import CatalogService
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="gated",
+                name="Gated",
+                requires_health_check=True,
+            )
+        with override_settings(BOOKING_VIA_AYLA_REST=False):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, 22) is True
+
+    def test_flag_off_missing_row_defaults_false(self, tenant: Tenant) -> None:
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(BOOKING_VIA_AYLA_REST=False):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, 9999) is False
+
+    def test_flag_off_mirror_false_returns_false(self, tenant: Tenant) -> None:
+        from django.utils import timezone as dj_timezone
+
+        from apps.catalog.models import CatalogService
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="not-gated",
+                name="Not gated",
+                requires_health_check=False,
+            )
+        with override_settings(BOOKING_VIA_AYLA_REST=False):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, 22) is False

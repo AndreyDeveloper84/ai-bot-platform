@@ -684,15 +684,23 @@ def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
 def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
     """Lookup :class:`CatalogService.requires_health_check` for ``service_id``.
 
-    Catalog mirror is the source of truth. If we can't find the service
-    row (e.g. catalog isn't synced yet), we DEFAULT to ``False`` — better
-    UX to attempt the booking than to dead-end every flow.
+    Catalog mirror is the source of truth.
+
+    **flag-OFF (legacy YClients path):** the mirror is keyed by the int
+    ``external_id``. If we can't find the service row (e.g. catalog isn't
+    synced yet) we DEFAULT to ``False`` — better UX to attempt the booking
+    than to dead-end every flow.
+
+    **flag-ON (Ayla REST path):** service ids are UUIDs that cannot match
+    the int ``external_id`` key, so we cannot yet ground the health-check
+    flag against the mirror. We FAIL CLOSED — return ``True`` so the confirm
+    gate routes to a human (``booking_health_check_required``) rather than
+    silently skipping contraindication screening on a gated service. The
+    real UUID grounding lands in the follow-up PR; until then this backstop
+    guarantees we never fail OPEN on a dangerous service.
     """
-    # The catalog mirror is keyed by the YClients int ``external_id``; flag-ON
-    # Ayla service ids are UUIDs that can't match it. Default to False (no
-    # gate) — Ayla-side health-check gating is a separate catalog reground.
     if _booking_via_ayla():
-        return False
+        return True
     try:
         from apps.catalog.models import CatalogService
     except ImportError:  # pragma: no cover — catalog always available
