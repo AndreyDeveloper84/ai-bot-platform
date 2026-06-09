@@ -340,7 +340,7 @@ class MasterAdminThread(models.Model):
             # constraint is defence-in-depth against future SQL paths
             # that bypass the service layer.
             models.CheckConstraint(
-                condition=(~Q(topic__in=list(SENSITIVE_TOPICS)) | Q(is_sensitive=True)),
+                condition=(~Q(topic__in=sorted(SENSITIVE_TOPICS)) | Q(is_sensitive=True)),
                 name="ck_internal_chat_sensitive_topics_flagged",
             ),
         ]
