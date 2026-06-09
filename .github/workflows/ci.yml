@@ -139,6 +139,12 @@ jobs:
       - name: Django manage.py check
         run: uv run python manage.py check
 
+      # Fail the build if a model change has no matching migration.
+      # Prevents the kind of drift (#1030) that accumulates silently
+      # because the suite doesn't otherwise exercise `makemigrations`.
+      - name: Migration drift guard (makemigrations --check)
+        run: uv run python manage.py makemigrations --check --dry-run
+
       - name: pytest tests/smoke/
         run: uv run pytest tests/smoke/ -v
 
