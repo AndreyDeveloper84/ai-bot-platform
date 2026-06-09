@@ -373,8 +373,10 @@ class TestToolsAcceptAdapter:
     def test_show_masters_works_with_adapter(self, tenant: Tenant) -> None:
         fake = FakeAylaBooking()
         fake.masters_rows = [
-            AylaMaster(id=11, name="Ольга", specialization="Массаж", rating=4.5, position="master"),
-            AylaMaster(id=12, name="Иван", specialization="СПА", rating=4.0, position="master"),
+            AylaMaster(
+                id="11", name="Ольга", specialization="Массаж", rating=4.5, position="master"
+            ),
+            AylaMaster(id="12", name="Иван", specialization="СПА", rating=4.0, position="master"),
         ]
         result = show_masters(
             client=_adapter(fake),
@@ -382,7 +384,7 @@ class TestToolsAcceptAdapter:
             tenant_id=str(tenant.id),
         )
         assert not result.error
-        assert {m.id for m in result.masters} == {11, 12}
+        assert {m.id for m in result.masters} == {"11", "12"}
 
     def test_show_slots_works_with_adapter(self, tenant: Tenant) -> None:
         fake = FakeAylaBooking()

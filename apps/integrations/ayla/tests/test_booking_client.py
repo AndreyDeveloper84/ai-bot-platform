@@ -392,7 +392,7 @@ class TestErrorMapping:
 class TestDTOsAndProtocol:
     def test_dtos_are_frozen(self) -> None:
         svc = bc.AylaService(
-            id=1,
+            id="svc-dto-1",
             title="Массаж",
             price_min=1500.0,
             price_max=2500.0,
