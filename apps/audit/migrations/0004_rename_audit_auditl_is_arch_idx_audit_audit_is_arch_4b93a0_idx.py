@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("audit", "0003_auditlog_payload_gin_concurrently"),
     ]

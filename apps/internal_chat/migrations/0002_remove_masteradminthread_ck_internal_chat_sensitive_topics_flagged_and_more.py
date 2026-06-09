@@ -4,7 +4,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("catalog", "0008_catalogmaster_cache_version"),
         ("identity", "0014_seed_global_bot_tenant"),
