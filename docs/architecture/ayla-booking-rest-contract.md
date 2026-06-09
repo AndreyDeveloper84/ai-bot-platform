@@ -63,9 +63,9 @@ freezing the wrong wire format.
 
 | Method | Path | Purpose | Returns |
 |---|---|---|---|
-| GET | `/api/v1/internal/specialists/` | list specialists (filter `?service_id=`) | `[Specialist]` |
+| GET | `/api/v1/internal/specialists/` | list specialists (filter `?service_id=<uuid>`) | `[Specialist]` |
 | GET | `/api/v1/internal/specialists/{id}/` | one specialist | `Specialist` |
-| GET | `/api/v1/internal/specialists/{id}/slots/` | bookable slots (`?service_ids=&from=&to=`) | `[Slot]` (or grouped by date) |
+| GET | `/api/v1/internal/specialists/{id}/slots/` | bookable slots — **single day** (`?service_id=<uuid>&date=<YYYY-MM-DD>`, defaults to today) | `{ "date", "slots": [<ISO-8601>] }` |
 | GET | `/api/v1/internal/specialists/{id}/services/` | services of a specialist | `[Service]` |
 | GET | `/api/v1/internal/services/` | service catalog | `[Service]` |
 | GET | `/api/v1/internal/services/categories/` | service categories | `[Category]` |
@@ -79,54 +79,66 @@ freezing the wrong wire format.
 | POST | `/api/v1/internal/appointments/{uuid}/reschedule/` | move to a new slot | yes |
 | GET | `/api/v1/internal/me/bookings/` | the resolved user's appointments | n/a |
 
-## 4. Payload shapes (DRAFT)
+## 4. Payload shapes
 
-Mapped onto the bot-side DTOs in `booking_client.py` (`AylaService`,
-`AylaMaster`, `AylaSlot`, `AylaBookingRecord`, `AylaUserRecord`). Field names
-TBD with S2; the bot adapter absorbs renames so the eight booking tools are
-unaffected.
+Confirmed against the merged S2 serializers (`appointments/serializers.py`,
+`services/serializers.py`, `users/specialists_api.py`, #193). All catalog +
+appointment ids are **UUIDs**. The bot maps these onto the DTOs in
+`booking_client.py` (`AylaService`, `AylaMaster`, `AylaSlot`,
+`AylaBookingRecord`, `AylaUserRecord`); the adapter absorbs the renames
+(`name`→`title`, `duration_minutes`→`duration_s`, `display_name`→`name`) so
+the eight booking tools are unaffected. Read responses use the `{ "data": … }`
+envelope except the inherited `slots` / `services` actions, which return the
+payload raw.
 
-**Specialist**
+**Specialist** (`SpecialistListSerializer`)
 ```json
-{ "id": 11, "name": "Ольга", "specialization": "Массаж", "rating": 4.5, "position": "master" }
+{ "id": "7c9e...", "display_name": "Ольга", "rating": 4.5,
+  "reviews_count": 32, "is_available": true, "services_preview": [ … ] }
 ```
 
-**Service**
+**Service** (`ServicePublicListSerializer` / `ServiceFullSerializer`)
 ```json
-{ "id": 10, "title": "Массаж спины", "price_min": 1500, "price_max": 2500,
-  "duration_s": 3600, "category_id": null }
+{ "id": "1a2b...", "name": "Массаж спины", "price": "1500.00",
+  "duration_minutes": 60, "category": "9f8e...", "category_name": "Массаж" }
 ```
 
-**Slot**
+**Slots** (`GET …/slots/?service_id=<uuid>&date=<YYYY-MM-DD>`, single day, raw)
 ```json
-{ "time": "14:00", "datetime": "2026-06-10T14:00:00+03:00", "duration_s": 3600 }
+{ "date": "2026-06-10", "slots": ["2026-06-10T14:00:00+03:00", "2026-06-10T15:00:00+03:00"] }
+```
+> No range endpoint exists. The bot's `get_available_dates` fans out one
+> `slots?date=` call per day across a window and keeps days with ≥1 slot.
+
+**Create appointment — request** (`InternalBookingCreateSerializer`)
+```json
+{ "client_id": "11111111-...", "specialist_id": "7c9e...",
+  "service_id": "1a2b...", "start_datetime": "2026-06-10T14:00:00+03:00" }
+```
+> Singular `service_id`. `client_id` is **required** and must equal the Ayla
+> user the bearer + `X-External-User-ID` resolved to, else `403 CLIENT_MISMATCH`.
+
+**Appointment — response** (`AppointmentDetailSerializer`; create / reschedule / `me/bookings` item)
+```json
+{ "id": "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34", "status": "confirmed",
+  "start_datetime": "2026-06-10T14:00:00+03:00",
+  "end_datetime": "2026-06-10T15:00:00+03:00",
+  "service": { "id": "1a2b...", "name": "Массаж спины" },
+  "specialist": { "id": "7c9e...", "display_name": "Ольга" },
+  "client_id": "11111111-..." }
 ```
 
-**Create appointment — request**
-```json
-{ "specialist_id": 11, "service_ids": [10], "datetime": "2026-06-10T14:00:00",
-  "client": { "name": "Anna", "phone": "79991234567" }, "comment": "..." }
-```
+The response `id` is Ayla's canonical appointment UUID and becomes the
+bot-side mirror key (`RemoteBookingProxy.appointment_id`).
 
-**Appointment — response** (create / reschedule / list item)
-```json
-{ "appointment_id": "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34",
-  "specialist": { "...": "..." }, "services": [ { "...": "..." } ],
-  "datetime": "2026-06-10T14:00:00+03:00", "duration_s": 3600,
-  "status": "confirmed" }
-```
-
-`appointment_id` is Ayla's canonical id and becomes the bot-side mirror key.
-
-> **✅ LOCKED (item #1, §8): `appointment_id` is a UUID string.**
+> **✅ LOCKED (item #1, §8): the appointment id is a UUID string.**
 > Confirmed against the merged S2 surface — `Appointment.id` is a
 > `UUIDField` and the write routes are `…/appointments/<uuid:booking_id>/…`.
-> The current bot adapter's numeric-id mapping (`BookingRecord.record_id`,
-> `UserRecord.id`, mirror marker `yclients_record_id=<id>`) is an **interim
-> placeholder**: the real `booking_client.py` must accept a UUID/string
-> `appointment_id` (the local mirror keeps its own int PK, but the Ayla-id
-> column stores the UUID). This is now a cutover prerequisite **satisfied on
-> the S2 side**; the bot side implements it with the real client.
+> Implemented on the bot side (S1): the real `booking_client.py` carries the
+> UUID end-to-end, and the flag-ON path mirrors the booking onto the existing
+> `RemoteBookingProxy` (typed `UUIDField` columns) — keyed by `appointment_id`,
+> not the legacy int `yclients_record_id=<id>` comment marker, which stays the
+> flag-OFF (YClients) mechanism.
 
 ## 5. Idempotency
 
