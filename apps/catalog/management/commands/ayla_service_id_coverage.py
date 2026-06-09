@@ -21,6 +21,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 
 from apps.catalog.models import CatalogService
+from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
 
@@ -46,9 +47,14 @@ class Command(BaseCommand):
         self.stdout.write("-" * 56)
 
         for tenant in tenants:
-            active_qs = CatalogService.all_tenants.filter(tenant=tenant, is_active=True)
-            active = active_qs.count()
-            grounded = active_qs.filter(ayla_service_id__isnull=False).count()
+            # MKT1: catalog uses the tenant-scoped ``objects`` manager inside a
+            # ``tenant_scope`` — ``all_tenants`` (cross-tenant) is reserved for
+            # the marketplace carve-out. An ops command looping tenants and
+            # scoping per-iteration is the sanctioned cross-tenant-stats pattern.
+            with tenant_scope(tenant):
+                active_qs = CatalogService.objects.filter(is_active=True)
+                active = active_qs.count()
+                grounded = active_qs.filter(ayla_service_id__isnull=False).count()
             total_active += active
             total_grounded += grounded
             pct = f"{(grounded / active * 100):.1f}%" if active else "n/a"
