@@ -79,6 +79,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from collections.abc import Set as AbstractSet
 from typing import Any, Literal
 from uuid import UUID
 
@@ -467,7 +468,7 @@ class ConfirmationResult:
     """
 
     ok: bool
-    record_id: int = 0
+    record_id: int | str = 0
     visit_at: str = ""
     master_name: str = ""
     service_name: str = ""
@@ -478,7 +479,7 @@ class ConfirmationResult:
 class BookingRow:
     """Trimmed booking DTO for :func:`show_my_bookings`."""
 
-    record_id: int
+    record_id: int | str
     visit_at: str
     master_name: str
     service_name: str
@@ -617,7 +618,7 @@ def show_masters(
     Empty list is a valid (non-error) result — the skill turns it into
     a handoff at the call site.
     """
-    service_id = _coerce_int(arguments.get("service_id"))
+    service_id = _coerce_id(arguments.get("service_id"))
     service_name = str(arguments.get("service_name") or "").strip()
 
     try:
@@ -658,7 +659,7 @@ def show_masters(
     return BookingToolResult(text=text, masters=scored)
 
 
-def _relevance_score(staff: Staff, needle: str, service_id: int | None) -> float:
+def _relevance_score(staff: Staff, needle: str, service_id: int | str | None) -> float:
     """Cheap textual relevance — keeps the LLM grounded without RAG.
 
     A real solution would join through ``CatalogService`` ↔ master
@@ -696,7 +697,7 @@ def show_slots(
     client: Any,
     arguments: dict[str, Any],
     tenant_id: str,
-    allowed_master_ids: set[int],
+    allowed_master_ids: AbstractSet[int | str],
 ) -> BookingToolResult:
     """List available time slots for ``master_id``.
 
@@ -704,7 +705,7 @@ def show_slots(
     populated by a prior :func:`show_masters` call). Returns
     ``error="invalid_master_id"`` when the LLM hallucinated.
     """
-    master_id = _coerce_int(arguments.get("master_id"))
+    master_id = _coerce_id(arguments.get("master_id"))
     if master_id is None or master_id not in allowed_master_ids:
         logger.info(
             "booking.show_slots.invalid_master_id master_id=%s allowed=%s",
@@ -714,7 +715,7 @@ def show_slots(
         _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="invalid_master_id")
         return BookingToolResult(error="invalid_master_id")
 
-    service_id = _coerce_int(arguments.get("service_id"))
+    service_id = _coerce_id(arguments.get("service_id"))
     service_ids = [service_id] if service_id is not None else None
 
     date_from = str(arguments.get("date_from") or "").strip()
@@ -808,10 +809,10 @@ def confirm_booking(
     arguments: dict[str, Any],
     tenant: Any,
     bot_user: Any,
-    allowed_master_ids: set[int],
-    allowed_service_ids: set[int],
-    master_lookup: dict[int, str],
-    service_lookup: dict[int, str],
+    allowed_master_ids: AbstractSet[int | str],
+    allowed_service_ids: AbstractSet[int | str],
+    master_lookup: dict[Any, str],
+    service_lookup: dict[Any, str],
 ) -> BookingToolResult:
     """Preview the booking, persist a :class:`PendingBookingAction`, return card.
 
@@ -836,8 +837,8 @@ def confirm_booking(
     just validates inputs, persists the pending action, and returns
     the preview card. :func:`execute_confirm` runs on the ✅ tap.
     """
-    master_id = _coerce_int(arguments.get("master_id"))
-    service_id = _coerce_int(arguments.get("service_id"))
+    master_id = _coerce_id(arguments.get("master_id"))
+    service_id = _coerce_id(arguments.get("service_id"))
     slot_datetime = str(arguments.get("slot_datetime") or "").strip()
     client_phone = str(arguments.get("client_phone") or "").strip()
 
@@ -956,8 +957,8 @@ def execute_confirm(
     pending-action CAS is the first line; this is the safety net for
     the impossible-but-not-truly-impossible double-execute scenario.
     """
-    master_id = _coerce_int(payload.get("master_id"))
-    service_id = _coerce_int(payload.get("service_id"))
+    master_id = _coerce_id(payload.get("master_id"))
+    service_id = _coerce_id(payload.get("service_id"))
     slot_datetime = str(payload.get("slot_datetime") or "").strip()
     phone = str(payload.get("client_phone") or "").strip()
     client_name = str(payload.get("client_name") or "Client")
@@ -1106,7 +1107,9 @@ def execute_confirm(
             )
             compensate_ok = False
             try:
-                client.cancel_record(record_id=int(yc_id))
+                # Flag OFF: YClients wants int (byte-for-byte). Flag ON: yc_id
+                # is the Ayla appointment UUID — pass through unchanged.
+                client.cancel_record(record_id=yc_id if _booking_via_ayla() else int(yc_id))
                 compensate_ok = True
             except Exception:  # noqa: BLE001 — compensate is best-effort
                 logger.exception(
@@ -1250,7 +1253,7 @@ def cancel_booking(
 
     Returns a :class:`BookingToolResult` with ``pending`` populated.
     """
-    record_id = _coerce_int(arguments.get("record_id"))
+    record_id = _coerce_id(arguments.get("record_id"))
     reason = str(arguments.get("reason") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
     _ = client
@@ -1342,7 +1345,7 @@ def execute_cancel(
     WITHOUT flipping status. Caller (callback handler) maps this to a
     handoff so an operator can manually cancel in the YClients UI.
     """
-    record_id = _coerce_int(payload.get("record_id"))
+    record_id = _coerce_id(payload.get("record_id"))
     reason = str(payload.get("reason") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
 
@@ -1468,7 +1471,7 @@ def reschedule_booking(
 
     Returns ``pending``-only :class:`BookingToolResult` on success.
     """
-    record_id = _coerce_int(arguments.get("record_id"))
+    record_id = _coerce_id(arguments.get("record_id"))
     new_datetime = str(arguments.get("new_datetime") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
 
@@ -1498,9 +1501,9 @@ def reschedule_booking(
         _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="record_not_found")
         return BookingToolResult(error="record_not_found")
 
-    staff_id = _coerce_int((user_record.staff or {}).get("id"))
+    staff_id = _coerce_id((user_record.staff or {}).get("id"))
     services_list = user_record.services or []
-    service_id = _coerce_int(services_list[0].get("id")) if services_list else None
+    service_id = _coerce_id(services_list[0].get("id")) if services_list else None
     if staff_id is None or service_id is None:
         _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="malformed_record")
         return BookingToolResult(error="record_not_found")
@@ -1626,10 +1629,10 @@ def execute_reschedule(
       DO NOT retry the create — risk of double-booking is worse than
       the inconvenience of one handoff.
     """
-    record_id = _coerce_int(payload.get("record_id"))
+    record_id = _coerce_id(payload.get("record_id"))
     new_datetime = str(payload.get("new_datetime") or "").strip()
-    master_id = _coerce_int(payload.get("master_id"))
-    service_id = _coerce_int(payload.get("service_id"))
+    master_id = _coerce_id(payload.get("master_id"))
+    service_id = _coerce_id(payload.get("service_id"))
     master_name = str(payload.get("master_name") or "")
     service_name = str(payload.get("service_name") or "")
     phone = str(payload.get("client_phone") or "")
@@ -2126,7 +2129,7 @@ def _find_user_booking(
     *,
     tenant: Any,
     bot_user: Any,
-    record_id: int,
+    record_id: int | str,
 ) -> BookingRequest | None:
     """Look up a :class:`BookingRequest` owned by ``bot_user`` for ``record_id``.
 
@@ -2149,7 +2152,10 @@ def _find_user_booking(
     via a free-text service_name / client_name. This closes the reader-
     side half of the spoof vector the previous PR closed for writers.
     """
-    marker = f" | yclients_record_id={int(record_id)}"
+    # Flag OFF: re-coerce to int (byte-for-byte YClients normalisation). Flag
+    # ON: the marker carries the Ayla appointment UUID written at confirm time.
+    rid = record_id if _booking_via_ayla() else int(record_id)
+    marker = f" | yclients_record_id={rid}"
     return (
         BookingRequest.all_tenants.filter(
             tenant=tenant,
@@ -2162,7 +2168,7 @@ def _find_user_booking(
     )
 
 
-def _find_yclients_user_record(*, client: Any, record_id: int) -> Any:
+def _find_yclients_user_record(*, client: Any, record_id: int | str) -> Any:
     """Look up a UserRecord from YClients ``get_user_records`` by id.
 
     Used by :func:`reschedule_booking` to retrieve the staff + service
@@ -2240,7 +2246,7 @@ def show_my_bookings(
     # We don't store visit_at on BookingRequest — pull live data
     # from YClients when available to know which bookings are still
     # upcoming. Fail-soft on network errors.
-    live_records: dict[int, Any] = {}
+    live_records: dict[int | str, Any] = {}
     try:
         for rec in client.get_user_records():
             live_records[rec.id] = rec
@@ -2300,8 +2306,8 @@ def calc_price(
     *,
     tenant: Any,
     arguments: dict[str, Any],
-    allowed_service_ids: set[int],
-    service_lookup: dict[int, str],
+    allowed_service_ids: AbstractSet[int | str],
+    service_lookup: dict[Any, str],
 ) -> BookingToolResult:
     """Quote a service price, optionally applying a promo code.
 
@@ -2328,7 +2334,7 @@ def calc_price(
     """
     from apps.catalog.models import CatalogService
 
-    service_id = _coerce_int(arguments.get("service_id"))
+    service_id = _coerce_id(arguments.get("service_id"))
     raw_promo = arguments.get("promo_code")
     promo_code = str(raw_promo).strip() if raw_promo else ""
 
@@ -2347,13 +2353,22 @@ def calc_price(
         )
         return BookingToolResult(error="price_invalid_service_id")
 
+    # The catalog mirror is keyed by the YClients int ``external_id``. Flag
+    # ON service ids are Ayla UUIDs, which can't match an int column — fall
+    # through to the catalog-miss path ("price by request") rather than
+    # crashing on ``int(<uuid>)``. Ayla-side catalog pricing is a separate
+    # reground (out of scope for the #1016 write-lifecycle bridge).
     catalog_row = (
-        CatalogService.all_tenants.filter(
-            tenant=tenant,
-            external_id=int(service_id),
+        None
+        if _booking_via_ayla()
+        else (
+            CatalogService.all_tenants.filter(
+                tenant=tenant,
+                external_id=int(service_id),
+            )
+            .only("id", "name", "price_from")
+            .first()
         )
-        .only("id", "name", "price_from")
-        .first()
     )
 
     if catalog_row is None:
@@ -2761,18 +2776,18 @@ def _coerce_decimal(value: Any) -> Decimal | None:
 # ---------------------------------------------------------------------------
 
 
-def build_master_lookup(masters: list[Service] | list[Staff]) -> dict[int, str]:
-    """``id → human name`` map for snapshot writes."""
-    out: dict[int, str] = {}
+def build_master_lookup(masters: list[Service] | list[Staff]) -> dict[int | str, str]:
+    """``id → human name`` map for snapshot writes (id type follows the flag)."""
+    out: dict[int | str, str] = {}
     for m in masters:
         name = getattr(m, "name", "") or getattr(m, "title", "")
-        out[int(m.id)] = str(name)
+        out[_id_key(m.id)] = str(name)
     return out
 
 
-def build_service_lookup(services: list[Service]) -> dict[int, str]:
-    """``id → title`` map for service display name lookup."""
-    return {int(s.id): s.title for s in services}
+def build_service_lookup(services: list[Service]) -> dict[int | str, str]:
+    """``id → title`` map for service display name lookup (id type follows the flag)."""
+    return {_id_key(s.id): s.title for s in services}
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -2782,6 +2797,45 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _booking_via_ayla() -> bool:
+    """True when the booking skill is routed through the Ayla REST bridge.
+
+    S1 / #1016 PR-2. Flag OFF (default): YClients, int catalog/record ids.
+    Flag ON: Ayla canonical REST, UUID-string ids. Every id-shaped helper
+    below branches on this so the flag-OFF path stays byte-for-byte YClients.
+    """
+    from django.conf import settings
+
+    return bool(getattr(settings, "BOOKING_VIA_AYLA_REST", False))
+
+
+def _id_key(value: Any) -> int | str:
+    """Normalise a *provider-supplied* id for allow-sets / lookup maps.
+
+    Flag OFF → ``int`` (YClients); flag ON → ``str`` (Ayla UUID). Provider
+    ids are well-formed, so unlike :func:`_coerce_id` this never returns
+    ``None``. Mirrors the old inline ``int(s.id)`` on the flag-OFF path.
+    """
+    if _booking_via_ayla():
+        return str(value)
+    return int(value)
+
+
+def _coerce_id(value: Any) -> int | str | None:
+    """Flag-aware coercion of an *LLM/payload-supplied* id.
+
+    Flag OFF: identical to :func:`_coerce_int` (``int | None``) — preserves
+    byte-for-byte YClients behaviour and the anti-hallucination semantics.
+    Flag ON: the trimmed UUID string, or ``None`` for empty/missing input.
+    """
+    if _booking_via_ayla():
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+    return _coerce_int(value)
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
@@ -2796,8 +2850,14 @@ def _parse_iso_datetime(value: str) -> datetime | None:
     return dt
 
 
-def _extract_yc_id(comment: str) -> int | None:
-    """Parse ``yclients_record_id=<digits>`` marker out of a free-text comment."""
+def _extract_yc_id(comment: str) -> int | str | None:
+    """Parse the ``yclients_record_id=<id>`` marker out of a comment.
+
+    Flag OFF: ``<id>`` is YClients digits → ``int``. Flag ON: ``<id>`` is the
+    Ayla appointment UUID written by :func:`execute_confirm` → ``str`` read up
+    to the next separator (space / pipe). The marker key name is retained
+    under flag ON for one reader/writer convention across both providers.
+    """
     if not comment:
         return None
     marker = "yclients_record_id="
@@ -2805,6 +2865,13 @@ def _extract_yc_id(comment: str) -> int | None:
     if idx < 0:
         return None
     rest = comment[idx + len(marker) :]
+    if _booking_via_ayla():
+        token = ""
+        for ch in rest:
+            if ch in " |\n\t":
+                break
+            token += ch
+        return token or None
     digits = ""
     for ch in rest:
         if ch.isdigit():

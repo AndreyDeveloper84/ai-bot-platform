@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Set as AbstractSet
 from typing import Any, ClassVar
 
 from apps.audit.services import write_audit
@@ -77,6 +78,9 @@ from apps.skills.booking.tools import (
     SHOW_MY_BOOKINGS_TOOL_SPEC,
     SHOW_SLOTS_TOOL_SPEC,
     BookingToolResult,
+    _booking_via_ayla,
+    _coerce_id,
+    _id_key,
     build_master_lookup,
     build_service_lookup,
     buy_certificate,
@@ -258,7 +262,7 @@ class BookingSkill:
                 tenant_id=tenant_id,
             )
 
-        allowed_service_ids = {int(s.id) for s in services}
+        allowed_service_ids = {_id_key(s.id) for s in services}
         service_lookup = build_service_lookup(services)
 
         # ── Master-pick callback short-circuit ──────────────────────
@@ -271,9 +275,10 @@ class BookingSkill:
         text = (context.message_text or "").strip()
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
             raw_id = text[len(CALLBACK_BOOK_PICK_MASTER_PREFIX) :].strip()
-            try:
-                master_id = int(raw_id)
-            except (TypeError, ValueError):
+            # Flag OFF: master id is a YClients int. Flag ON: an Ayla UUID —
+            # ``_coerce_id`` keeps it a string instead of crashing on int().
+            master_id = _coerce_id(raw_id)
+            if master_id is None:
                 logger.warning("booking.pick_master.bad_id raw=%r", raw_id)
                 return _build_skill_result(
                     text="Не удалось распознать выбор мастера. Напишите имя ещё раз?",
@@ -294,8 +299,16 @@ class BookingSkill:
             payload = text[len(CALLBACK_BOOK_PICK_DATE_PREFIX) :].strip()
             try:
                 raw_master, raw_date = payload.split(":", 1)
-                master_id = int(raw_master)
             except (TypeError, ValueError):
+                logger.warning("booking.pick_date.bad_payload raw=%r", payload)
+                return _build_skill_result(
+                    text="Не удалось распознать дату. Попробуйте ещё раз.",
+                    tool_calls_made=[],
+                    confidence=None,
+                )
+            # Flag OFF: int YClients id; flag ON: Ayla UUID string.
+            master_id = _coerce_id(raw_master)
+            if master_id is None:
                 logger.warning("booking.pick_date.bad_payload raw=%r", payload)
                 return _build_skill_result(
                     text="Не удалось распознать дату. Попробуйте ещё раз.",
@@ -445,7 +458,7 @@ class BookingSkill:
 
         # Health-check gate — only relevant for confirm_booking.
         if tool_name == CONFIRM_BOOKING_TOOL_SPEC["name"]:
-            service_id = _coerce_int(first_call.arguments.get("service_id"))
+            service_id = _coerce_id(first_call.arguments.get("service_id"))
             if service_id is not None and _service_requires_health_check(tenant, service_id):
                 return _handoff(
                     tool_calls_made=tool_calls_made,
@@ -518,8 +531,8 @@ def _execute_tool(
     tenant: Any,
     bot_user: Any,
     yclients: Any,
-    allowed_service_ids: set[int],
-    service_lookup: dict[int, str],
+    allowed_service_ids: AbstractSet[int | str],
+    service_lookup: dict[int | str, str],
     tenant_id: str,
 ) -> tuple[BookingToolResult, str]:
     """Run the chosen tool. Returns ``(result, handoff_reason_or_empty)``."""
@@ -649,14 +662,14 @@ def _execute_tool(
     return BookingToolResult(error="unknown_tool"), "booking_unknown_tool"
 
 
-def _fetch_master_ids(yclients: Any) -> set[int]:
+def _fetch_master_ids(yclients: Any) -> set[int | str]:
     try:
-        return {int(s.id) for s in yclients.get_staff(staff_id=None)}
+        return {_id_key(s.id) for s in yclients.get_staff(staff_id=None)}
     except Exception:  # noqa: BLE001 — defensive; caller handles handoff
         return set()
 
 
-def _fetch_master_lookup(yclients: Any) -> dict[int, str]:
+def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
     try:
         return build_master_lookup(yclients.get_staff(staff_id=None))
     except Exception:  # noqa: BLE001
@@ -668,13 +681,18 @@ def _fetch_master_lookup(yclients: Any) -> dict[int, str]:
 # ---------------------------------------------------------------------------
 
 
-def _service_requires_health_check(tenant: Any, service_id: int) -> bool:
+def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
     """Lookup :class:`CatalogService.requires_health_check` for ``service_id``.
 
     Catalog mirror is the source of truth. If we can't find the service
     row (e.g. catalog isn't synced yet), we DEFAULT to ``False`` — better
     UX to attempt the booking than to dead-end every flow.
     """
+    # The catalog mirror is keyed by the YClients int ``external_id``; flag-ON
+    # Ayla service ids are UUIDs that can't match it. Default to False (no
+    # gate) — Ayla-side health-check gating is a separate catalog reground.
+    if _booking_via_ayla():
+        return False
     try:
         from apps.catalog.models import CatalogService
     except ImportError:  # pragma: no cover — catalog always available
@@ -803,7 +821,7 @@ _RU_MONTHS_SHORT = (
 
 def _render_date_picker(
     *,
-    master_id: int,
+    master_id: int | str,
     yclients: Any,
     tenant_id: str,
 ) -> SkillResult:
@@ -850,7 +868,7 @@ def _render_date_picker(
     )
 
 
-def _action_data_for_date_pick(master_id: int, dates: list[str]) -> dict[str, Any]:
+def _action_data_for_date_pick(master_id: int | str, dates: list[str]) -> dict[str, Any]:
     """Build the date-cards keyboard from a YClients dates list.
 
     One button per date, callback ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>``.
