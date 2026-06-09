@@ -69,6 +69,15 @@ urlpatterns = [
         "api/v1/customer/",
         include("apps.miniapp_api.urls", namespace="miniapp_api"),
     ),
+    # Public marketplace directory (#249, #250 — EPIC #1014). Anonymous,
+    # nationwide browsing of bookable masters across ALL tenants, via the
+    # sole sanctioned cross-tenant carve-out (apps.marketplace.discovery,
+    # MKT1). Public-field MasterCard DTO only. /me/providers (#251) is
+    # deferred (needs TenantUserRelationship #246 + cross-tenant /me auth).
+    path(
+        "api/v1/providers/",
+        include("apps.marketplace.urls", namespace="marketplace"),
+    ),
     # PR 1.5 / ADR-0008 — unified identity surface. Today carries the
     # /api/v1/me endpoint used by every Mini App on launch to learn the
     # caller's role + capabilities. Mounted at the bare /api/v1/ prefix
