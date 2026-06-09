@@ -1035,7 +1035,20 @@ def execute_confirm(
             error="yclients_api_error",
         )
 
-    yc_id = str(record.record_id)
+    # Flag OFF: yc_id is the YClients int record id. Flag ON: the canonical
+    # Ayla appointment UUID (record.record_id is 0 on that path). The marker
+    # key name is kept across both providers so the reader convention is one.
+    yc_id = str(_confirm_record_handle(record))
+    if _booking_via_ayla() and not yc_id:
+        # Create reported success but carried no canonical id — malformed.
+        # Treat as an API error so the caller hands off rather than writing a
+        # marker-less ("yclients_record_id=") row we could never resolve.
+        logger.warning("booking.confirm.exec.ayla_no_appointment_id")
+        _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="ayla_no_appointment_id")
+        return BookingToolResult(
+            confirmation=ConfirmationResult(ok=False, error="yclients_api_error"),
+            error="yclients_api_error",
+        )
     yc_marker = f"yclients_record_id={yc_id}"
     # Skills retro hotfix #1: anchor the idempotency lookup to the
     # documented comment prefix instead of substring-matching a
@@ -1145,6 +1158,14 @@ def execute_confirm(
                 ),
                 error="booking_confirm_partial_failure",
             )
+        # Flag ON: mirror the canonical Ayla appointment locally (ADR-0009).
+        # No-op under flag OFF — the YClients path has no canonical mirror.
+        _upsert_remote_booking_proxy(
+            tenant=tenant,
+            bot_user=bot_user,
+            record=record,
+            start_at=visit_at_dt,
+        )
         _schedule_reminders(
             tenant=tenant,
             bot_user=bot_user,
@@ -1166,7 +1187,8 @@ def execute_confirm(
     )
     confirmation = ConfirmationResult(
         ok=True,
-        record_id=record.record_id,
+        # Flag ON: surface the canonical Ayla UUID; flag OFF: the int record id.
+        record_id=yc_id if _booking_via_ayla() else record.record_id,
         visit_at=visit_at_iso,
         master_name=master_name,
         service_name=service_name,
@@ -1399,6 +1421,10 @@ def execute_cancel(
         comment=new_comment,
     )
 
+    # Flag ON: flip the canonical mirror to CANCELLED too (ADR-0009). No-op
+    # under flag OFF (no mirror on the YClients path).
+    _mirror_cancel(tenant=tenant, record_id=record_id)
+
     # Cancel any still-pending reminders so the beat doesn't dispatch
     # for a row the user already cancelled. We only flip PENDING rows;
     # SENT_NO_REPLY / SENT / CONFIRMED / etc. are left alone (those
@@ -1493,17 +1519,22 @@ def reschedule_booking(
         _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="past_datetime")
         return BookingToolResult(error="past_datetime")
 
-    # Pull the original master/service from the YClients API so the
-    # cancel-and-recreate uses the same master + service. We rely on
-    # ``get_user_records`` for the staff/service link.
-    user_record = _find_yclients_user_record(client=client, record_id=record_id)
-    if user_record is None:
-        _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="record_not_found")
-        return BookingToolResult(error="record_not_found")
-
-    staff_id = _coerce_id((user_record.staff or {}).get("id"))
-    services_list = user_record.services or []
-    service_id = _coerce_id(services_list[0].get("id")) if services_list else None
+    # Pull the original master/service so the reschedule keeps the same pair.
+    # Flag OFF: YClients ``get_user_records`` (cancel-and-recreate path). Flag
+    # ON: the canonical mirror (``RemoteBookingProxy.specialist_id/service_id``)
+    # — the YClients records endpoint isn't the source of truth under Ayla.
+    staff_id: int | str | None
+    service_id: int | str | None
+    if _booking_via_ayla():
+        staff_id, service_id = _proxy_master_service(tenant=tenant, record_id=record_id)
+    else:
+        user_record = _find_yclients_user_record(client=client, record_id=record_id)
+        if user_record is None:
+            _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="record_not_found")
+            return BookingToolResult(error="record_not_found")
+        staff_id = _coerce_id((user_record.staff or {}).get("id"))
+        services_list = user_record.services or []
+        service_id = _coerce_id(services_list[0].get("id")) if services_list else None
     if staff_id is None or service_id is None:
         _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="malformed_record")
         return BookingToolResult(error="record_not_found")
@@ -1607,6 +1638,126 @@ def _format_reschedule_preview(
     return "\n".join(parts)
 
 
+def _execute_reschedule_ayla(
+    *,
+    client: Any,
+    tenant: Any,
+    bot_user: Any,
+    tenant_id: str,
+    booking: BookingRequest,
+    record_id: int | str,
+    master_id: int | str | None,
+    service_id: int | str | None,
+    new_datetime: str,
+    visit_at_dt: datetime,
+    master_name: str,
+    service_name: str,
+) -> BookingToolResult:
+    """Native Ayla reschedule (flag ON) — preserves the canonical appointment
+    id *and* duration, so there is no cancel-and-recreate.
+
+    Consequences vs the flag-OFF path: the BookingRequest billing row and its
+    ``yclients_record_id=<uuid>`` marker stay put (the id didn't change, so the
+    attribution chain is intact); only ``visit_at`` + the mirror move. Mirrors
+    the slot-recheck UX (a taken slot → ``slot_unavailable`` clarification)
+    before touching the canonical booking.
+    """
+    # Slot recheck (parity with the flag-OFF execute) — surfaces a taken slot
+    # as a clarification rather than letting the native call hard-fail.
+    if master_id is not None and service_id is not None:
+        try:
+            avail = client.get_available_times(
+                staff_id=master_id,
+                date=visit_at_dt.date().isoformat(),
+                service_ids=[service_id],
+            )
+        except YClientsUnavailableError:
+            _audit_tool(
+                tenant_id=tenant_id, tool="execute_reschedule", outcome="recheck_unavailable"
+            )
+            return BookingToolResult(error="yclients_unavailable")
+        except YClientsAPIError:
+            _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="recheck_api_error")
+            return BookingToolResult(error="yclients_api_error")
+        if not _slot_available(avail, visit_at_dt.strftime("%H:%M"), new_datetime):
+            _audit_tool(
+                tenant_id=tenant_id, tool="execute_reschedule", outcome="slot_taken_at_execute"
+            )
+            return BookingToolResult(error="slot_unavailable")
+
+    try:
+        record: BookingRecord = client.reschedule_record(
+            record_id=record_id,
+            datetime=new_datetime,
+        )
+    except YClientsUnavailableError as exc:
+        logger.warning("booking.reschedule.ayla.unavailable err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_unavailable")
+        return BookingToolResult(error="yclients_cancel_failure")
+    except YClientsAPIError as exc:
+        logger.info("booking.reschedule.ayla.api_error err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_api_error")
+        return BookingToolResult(error="yclients_api_error")
+
+    # Move the billing row's visit_at in place — status stays CONFIRMED, marker
+    # + attribution chain untouched (the canonical id is unchanged).
+    BookingRequest.all_tenants.filter(pk=booking.pk).update(visit_at=visit_at_dt)
+
+    # Refresh the mirror to the new window (Ayla preserves duration server-side;
+    # the native response carries the new end, so the upsert reflects it).
+    _upsert_remote_booking_proxy(
+        tenant=tenant,
+        bot_user=bot_user,
+        record=record,
+        start_at=visit_at_dt,
+    )
+
+    # Re-point reminders at the new time, same canonical id (best-effort).
+    from apps.booking.models import BookingReminder
+
+    BookingReminder.all_tenants.filter(
+        yclients_record_id=str(record_id),
+        status=BookingReminder.Status.PENDING,
+    ).update(status=BookingReminder.Status.CANCELLED)
+    _schedule_reminders(
+        tenant=tenant,
+        bot_user=bot_user,
+        yc_id=str(record_id),
+        visit_at_dt=visit_at_dt,
+        master_name=master_name or booking.master_name,
+        service_name=service_name or booking.service_name,
+    )
+
+    # Domain bus — booking.rescheduled.
+    try:
+        _old_visit_iso = booking.visit_at.isoformat() if booking.visit_at else ""
+        eventbus_services.emit_booking_rescheduled(
+            booking_id=str(booking.pk),
+            old_slot_start=_old_visit_iso,
+            new_slot_start=new_datetime,
+            rescheduled_by="customer",
+            actor_type="human",
+            actor_role="customer",
+            actor_id=str(bot_user.pk) if bot_user else None,
+            correlation_id=eventbus_services.new_correlation_id(),
+            tenant=tenant,
+        )
+    except Exception:  # noqa: BLE001 — domain telemetry never breaks the tool
+        logger.exception("booking.reschedule.ayla.eventbus_emit_failed booking=%s", booking.pk)
+
+    _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ok")
+    confirmation = ConfirmationResult(
+        ok=True,
+        record_id=str(record_id),
+        visit_at=visit_at_dt.isoformat(),
+        master_name=master_name or booking.master_name,
+        service_name=service_name or booking.service_name,
+    )
+    return BookingToolResult(
+        text=_format_confirmation_text(confirmation), confirmation=confirmation
+    )
+
+
 def execute_reschedule(
     *,
     client: Any,
@@ -1686,6 +1837,26 @@ def execute_reschedule(
             outcome="not_reschedulable_status",
         )
         return BookingToolResult(error="not_reschedulable")
+
+    # Flag ON: Ayla supports a NATIVE reschedule that preserves the canonical
+    # appointment id (and duration), so we don't cancel-and-recreate. This
+    # branch returns before the YClients cancel+create chain below, which
+    # stays byte-for-byte the flag-OFF path.
+    if _booking_via_ayla():
+        return _execute_reschedule_ayla(
+            client=client,
+            tenant=tenant,
+            bot_user=bot_user,
+            tenant_id=tenant_id,
+            booking=booking,
+            record_id=record_id,
+            master_id=master_id,
+            service_id=service_id,
+            new_datetime=new_datetime,
+            visit_at_dt=visit_at_dt,
+            master_name=master_name,
+            service_name=service_name,
+        )
 
     # Skills retro hotfix #4: re-check slot availability at execute time.
     # The preview-time check (reschedule_booking) is up to 10 min stale
@@ -2202,6 +2373,65 @@ def _find_yclients_user_record(*, client: Any, record_id: int | str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _show_my_bookings_ayla(
+    *,
+    tenant: Any,
+    bot_user: Any,
+    tenant_id: str,
+    now: datetime,
+) -> BookingToolResult:
+    """``show_my_bookings`` over the Ayla mirror (flag ON).
+
+    The CONFIRMED ``BookingRequest`` rows carry the display names + the
+    ``yclients_record_id=<uuid>`` marker; the matching ``RemoteBookingProxy``
+    row supplies the live ``start_at`` + status (so cancelled / past bookings
+    drop out). Same shape as the flag-OFF path, mirror in place of YClients.
+    """
+    from apps.booking.models import RemoteBookingProxy
+
+    rows = list(
+        BookingRequest.all_tenants.filter(
+            tenant=tenant,
+            bot_user=bot_user,
+            status=BookingRequest.Status.CONFIRMED,
+        ).order_by("-created_at")[:20]
+    )
+    proxies = {
+        str(p.appointment_id): p
+        for p in RemoteBookingProxy.all_tenants.filter(tenant=tenant, bot_user=bot_user)
+    }
+
+    bookings: list[BookingRow] = []
+    for row in rows:
+        appt = _extract_yc_id(row.comment)  # UUID string under flag ON
+        proxy = proxies.get(str(appt)) if appt else None
+        visit_iso = ""
+        if proxy is not None:
+            if proxy.status == RemoteBookingProxy.Status.CANCELLED:
+                continue
+            if proxy.start_at is not None:
+                if proxy.start_at < now:
+                    continue
+                visit_iso = proxy.start_at.isoformat()
+        bookings.append(
+            BookingRow(
+                record_id=str(appt) if appt else "",
+                visit_at=visit_iso,
+                master_name=row.master_name,
+                service_name=row.service_name,
+                status="CONFIRMED",
+            )
+        )
+
+    _audit_tool(
+        tenant_id=tenant_id,
+        tool="show_my_bookings",
+        outcome="ok",
+        extra={"count": len(bookings)},
+    )
+    return BookingToolResult(text=_format_bookings_text(bookings), bookings=bookings)
+
+
 def show_my_bookings(
     *,
     client: Any,
@@ -2217,6 +2447,14 @@ def show_my_bookings(
     """
     tenant_id = str(getattr(tenant, "id", ""))
     now = dj_timezone.now()
+
+    # Flag ON: the canonical mirror (RemoteBookingProxy) is the live source —
+    # the YClients records endpoint isn't populated under Ayla. Names still
+    # come from the BookingRequest billing row (the mirror is PII-free).
+    if _booking_via_ayla():
+        return _show_my_bookings_ayla(
+            tenant=tenant, bot_user=bot_user, tenant_id=tenant_id, now=now
+        )
 
     # Skills retro residual #10: exclude terminal-cancelled and
     # replaced-by-reschedule rows. Without this filter the LLM sees
@@ -2836,6 +3074,124 @@ def _coerce_id(value: Any) -> int | str | None:
         text = str(value).strip()
         return text or None
     return _coerce_int(value)
+
+
+def _ayla_handle(record: BookingRecord) -> str:
+    """Canonical Ayla appointment UUID carried in a create/reschedule result.
+
+    The provider adapter stows it in ``record.raw["ayla_appointment_id"]``
+    (``record_id`` itself is 0 on the Ayla path). Empty string when absent.
+    """
+    return str(record.raw.get("ayla_appointment_id") or "")
+
+
+def _confirm_record_handle(record: BookingRecord) -> int | str:
+    """The id the booking flow keys on for markers / reminders / lookups.
+
+    Flag OFF: the YClients int record id (unchanged). Flag ON: the canonical
+    Ayla appointment UUID string.
+    """
+    if _booking_via_ayla():
+        return _ayla_handle(record)
+    return record.record_id
+
+
+def _as_uuid(value: Any) -> Any:
+    """Coerce to ``uuid.UUID`` for the proxy's UUIDField, tolerating junk → None."""
+    if not value:
+        return None
+    import uuid as _uuid
+
+    try:
+        return _uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _upsert_remote_booking_proxy(
+    *,
+    tenant: Any,
+    bot_user: Any,
+    record: BookingRecord,
+    start_at: datetime | None,
+) -> None:
+    """Mirror a CONFIRMED Ayla appointment onto :class:`RemoteBookingProxy`.
+
+    ADR-0009: Ayla owns the canonical booking; bot-platform keeps this thin
+    mirror for reminder math + RFM/sentiment fan-out. Used by confirm and
+    (native) reschedule — both land the appointment in CONFIRMED. Best-effort:
+    the canonical row already exists in Ayla, so a mirror-write failure must
+    NOT fail the customer-facing action (the next ``booking.*`` event from
+    Ayla reconciles it). No-op on the flag-OFF (YClients) path.
+    """
+    if not _booking_via_ayla() or start_at is None:
+        return
+    appt = _ayla_handle(record)
+    if not appt:
+        return
+    raw = record.raw
+    end_at = _parse_iso_datetime(str(raw.get("end_at") or "")) or start_at
+    try:
+        from apps.booking.models import RemoteBookingProxy
+
+        RemoteBookingProxy.all_tenants.update_or_create(
+            appointment_id=_as_uuid(appt),
+            defaults={
+                "tenant": tenant,
+                "bot_user": bot_user,
+                "start_at": start_at,
+                "end_at": end_at,
+                "status": RemoteBookingProxy.Status.CONFIRMED,
+                "source": RemoteBookingProxy.Source.AUTOMATION,
+                "service_id": _as_uuid(raw.get("service_id")),
+                "specialist_id": _as_uuid(raw.get("specialist_id")),
+            },
+        )
+    except Exception:  # noqa: BLE001 — mirror write is best-effort (see docstring)
+        logger.exception("booking.proxy.upsert_failed appt=%s", appt)
+
+
+def _proxy_master_service(*, tenant: Any, record_id: int | str) -> tuple[str | None, str | None]:
+    """Resolve ``(specialist_id, service_id)`` from the mirror (flag ON).
+
+    Returns ``(None, None)`` when no mirror row exists — the caller maps that
+    to ``record_not_found`` so a reschedule can't proceed without the pair.
+    """
+    appt = _as_uuid(record_id)
+    if appt is None:
+        return None, None
+    try:
+        from apps.booking.models import RemoteBookingProxy
+
+        row = (
+            RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appt)
+            .only("service_id", "specialist_id")
+            .first()
+        )
+    except Exception:  # noqa: BLE001 — defensive; caller treats None as not-found
+        return None, None
+    if row is None:
+        return None, None
+    spec = str(row.specialist_id) if row.specialist_id else None
+    svc = str(row.service_id) if row.service_id else None
+    return spec, svc
+
+
+def _mirror_cancel(*, tenant: Any, record_id: int | str) -> None:
+    """Flip the mirror row for ``record_id`` to CANCELLED (flag ON, best-effort)."""
+    if not _booking_via_ayla():
+        return
+    appt = _as_uuid(record_id)
+    if appt is None:
+        return
+    try:
+        from apps.booking.models import RemoteBookingProxy
+
+        RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appt).update(
+            status=RemoteBookingProxy.Status.CANCELLED,
+        )
+    except Exception:  # noqa: BLE001 — mirror write is best-effort
+        logger.exception("booking.proxy.cancel_failed appt=%s", record_id)
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
