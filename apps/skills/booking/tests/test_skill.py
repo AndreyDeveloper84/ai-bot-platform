@@ -1044,39 +1044,63 @@ class TestE0RegressionGuards:
 class TestServiceRequiresHealthCheck:
     """Direct coverage for ``_service_requires_health_check``.
 
-    PR-A safety backstop: under ``BOOKING_VIA_AYLA_REST`` we cannot yet
-    ground the Ayla UUID service id against the int-``external_id``-keyed
-    mirror, so the helper FAILS CLOSED (``True`` → human handoff) rather
-    than fail OPEN on a gated service. The flag-OFF path is unchanged.
+    PR-B grounding: under ``BOOKING_VIA_AYLA_REST`` the helper grounds the
+    flag against the mirror's ``ayla_service_id`` (UUID) column. A matched
+    ``requires_health_check=False`` row lets the booking through; a UUID
+    miss OR a non-UUID id FAILS CLOSED (``True`` → human handoff) rather
+    than fail OPEN. The flag-OFF (int ``external_id``) path is unchanged.
     """
 
-    def test_flag_on_fails_closed_with_no_catalog_row(self, tenant: Tenant) -> None:
+    _AYLA_UUID = "11111111-1111-1111-1111-111111111111"
+
+    def _make_row(self, tenant: Tenant, *, ayla_service_id, gated: bool, external_id: int) -> None:
+        from django.utils import timezone as dj_timezone
+
+        from apps.catalog.models import CatalogService
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=external_id,
+                external_updated_at=dj_timezone.now(),
+                slug=f"svc-{external_id}",
+                name=f"Service {external_id}",
+                requires_health_check=gated,
+                ayla_service_id=ayla_service_id,
+            )
+
+    def test_flag_on_grounded_gated_returns_true(self, tenant: Tenant) -> None:
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._make_row(tenant, ayla_service_id=self._AYLA_UUID, gated=True, external_id=22)
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+
+    def test_flag_on_grounded_not_gated_passes(self, tenant: Tenant) -> None:
+        # The crux of PR-B: a matched, NOT-gated row must let the booking through.
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._make_row(tenant, ayla_service_id=self._AYLA_UUID, gated=False, external_id=22)
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is False
+
+    def test_flag_on_uuid_miss_fails_closed(self, tenant: Tenant) -> None:
+        # Valid UUID but no mirror row carries that ayla_service_id yet.
         from apps.skills.booking.skill import _service_requires_health_check
 
         with override_settings(BOOKING_VIA_AYLA_REST=True):
             with tenant_scope(tenant):
                 assert (
-                    _service_requires_health_check(tenant, "11111111-1111-1111-1111-111111111111")
+                    _service_requires_health_check(tenant, "22222222-2222-2222-2222-222222222222")
                     is True
                 )
 
-    def test_flag_on_fails_closed_ignoring_mirror_flag(self, tenant: Tenant) -> None:
-        # Even if an int-keyed mirror row says it is NOT gated, flag-ON
-        # cannot trust that match (UUID ≠ external_id) — must fail closed.
-        from django.utils import timezone as dj_timezone
-
-        from apps.catalog.models import CatalogService
+    def test_flag_on_non_uuid_fails_closed(self, tenant: Tenant) -> None:
+        # A non-UUID id (e.g. a stray legacy int) can't be grounded → fail closed.
         from apps.skills.booking.skill import _service_requires_health_check
 
-        with tenant_scope(tenant):
-            CatalogService.objects.create(
-                tenant=tenant,
-                external_id=22,
-                external_updated_at=dj_timezone.now(),
-                slug="not-gated",
-                name="Not gated",
-                requires_health_check=False,
-            )
         with override_settings(BOOKING_VIA_AYLA_REST=True):
             with tenant_scope(tenant):
                 assert _service_requires_health_check(tenant, 22) is True

@@ -78,6 +78,7 @@ from apps.skills.booking.tools import (
     SHOW_MY_BOOKINGS_TOOL_SPEC,
     SHOW_SLOTS_TOOL_SPEC,
     BookingToolResult,
+    _as_uuid,
     _booking_via_ayla,
     _coerce_id,
     _id_key,
@@ -691,20 +692,40 @@ def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
     synced yet) we DEFAULT to ``False`` — better UX to attempt the booking
     than to dead-end every flow.
 
-    **flag-ON (Ayla REST path):** service ids are UUIDs that cannot match
-    the int ``external_id`` key, so we cannot yet ground the health-check
-    flag against the mirror. We FAIL CLOSED — return ``True`` so the confirm
-    gate routes to a human (``booking_health_check_required``) rather than
-    silently skipping contraindication screening on a gated service. The
-    real UUID grounding lands in the follow-up PR; until then this backstop
-    guarantees we never fail OPEN on a dangerous service.
+    **flag-ON (Ayla REST path):** service ids are canonical Ayla UUIDs, so
+    we ground the flag against the mirror's ``ayla_service_id`` column. We
+    FAIL CLOSED — return ``True`` so the confirm gate routes to a human
+    (``booking_health_check_required``) — when EITHER the id isn't a UUID
+    OR no mirror row carries that ``ayla_service_id`` yet (the UUID column
+    isn't guaranteed back-filled for every live service). Only an explicit
+    ``requires_health_check=False`` on a matched row lets the booking
+    through. We never fail OPEN on a potentially gated service.
     """
-    if _booking_via_ayla():
-        return True
     try:
         from apps.catalog.models import CatalogService
     except ImportError:  # pragma: no cover — catalog always available
-        return False
+        # No catalog to ground against. flag-ON fails closed; flag-OFF
+        # keeps the legacy lenient default.
+        return _booking_via_ayla()
+
+    if _booking_via_ayla():
+        ayla_uuid = _as_uuid(service_id)
+        if ayla_uuid is None:
+            # Non-UUID service id under flag-ON — nothing to ground. Fail closed.
+            return True
+        row = (
+            CatalogService.all_tenants.filter(
+                tenant=tenant,
+                ayla_service_id=ayla_uuid,
+            )
+            .only("requires_health_check")
+            .first()
+        )
+        # Mirror miss → fail-closed backstop: ayla_service_id may not be
+        # back-filled for this service yet (see coverage management command).
+        if row is None:
+            return True
+        return bool(row.requires_health_check)
 
     row = (
         CatalogService.all_tenants.filter(
