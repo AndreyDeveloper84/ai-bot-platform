@@ -522,3 +522,52 @@ class TestCalcPriceResultDTO:
         )
         with pytest.raises(Exception):  # FrozenInstanceError
             result.service_name = "Other"  # type: ignore[misc]
+
+
+class TestCalcPriceAylaGrounding:
+    """PR-3: under flag-ON, price grounds on CatalogService.ayla_service_id."""
+
+    def test_flag_on_grounds_price_by_ayla_uuid(self, tenant: Tenant) -> None:
+        from django.test import override_settings
+
+        svc_uuid = uuid.uuid4()
+        CatalogService.all_tenants.create(
+            tenant=tenant,
+            external_id=303,
+            external_updated_at=timezone.now(),
+            slug="ayla-massage",
+            name="Массаж (Ayla)",
+            price_from=Decimal("2000.00"),
+            duration_min=60,
+            ayla_service_id=svc_uuid,
+        )
+        sid = str(svc_uuid)
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = calc_price(
+                tenant=tenant,
+                arguments={"service_id": sid},
+                allowed_service_ids={sid},
+                service_lookup={sid: "Массаж (Ayla)"},
+            )
+        assert result.error == ""
+        assert result.price is not None
+        assert result.price.original_price == Decimal("2000.00")
+        assert result.price.final_price == Decimal("2000.00")
+
+    def test_flag_on_uuid_miss_falls_back_to_by_request(self, tenant: Tenant) -> None:
+        from django.test import override_settings
+
+        # Valid UUID, allowed, but no mirror row carries that ayla_service_id.
+        sid = str(uuid.uuid4())
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = calc_price(
+                tenant=tenant,
+                arguments={"service_id": sid},
+                allowed_service_ids={sid},
+                service_lookup={sid: "Новая услуга"},
+            )
+        # Catalog miss → "price by request": no crash on int(<uuid>), no price.
+        assert result.error == ""
+        assert result.price is not None
+        assert result.price.final_price is None
+        assert result.price.service_name == "Новая услуга"

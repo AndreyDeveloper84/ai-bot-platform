@@ -2591,15 +2591,27 @@ def calc_price(
         )
         return BookingToolResult(error="price_invalid_service_id")
 
-    # The catalog mirror is keyed by the YClients int ``external_id``. Flag
-    # ON service ids are Ayla UUIDs, which can't match an int column — fall
-    # through to the catalog-miss path ("price by request") rather than
-    # crashing on ``int(<uuid>)``. Ayla-side catalog pricing is a separate
-    # reground (out of scope for the #1016 write-lifecycle bridge).
-    catalog_row = (
-        None
-        if _booking_via_ayla()
-        else (
+    # Resolve the catalog mirror row for pricing. The mirror carries two keys:
+    # the legacy YClients int ``external_id`` (flag OFF) and the canonical Ayla
+    # ``ayla_service_id`` UUID (flag ON, same key the health-check gate grounds
+    # on). Either path falls through to the "price by request" branch below on
+    # a miss — never crash on ``int(<uuid>)``.
+    if _booking_via_ayla():
+        ayla_uuid = _as_uuid(service_id)
+        catalog_row = (
+            None
+            if ayla_uuid is None
+            else (
+                CatalogService.all_tenants.filter(
+                    tenant=tenant,
+                    ayla_service_id=ayla_uuid,
+                )
+                .only("id", "name", "price_from")
+                .first()
+            )
+        )
+    else:
+        catalog_row = (
             CatalogService.all_tenants.filter(
                 tenant=tenant,
                 external_id=int(service_id),
@@ -2607,7 +2619,6 @@ def calc_price(
             .only("id", "name", "price_from")
             .first()
         )
-    )
 
     if catalog_row is None:
         # YClients knows the service but the catalog mirror doesn't.
@@ -3134,10 +3145,15 @@ def _upsert_remote_booking_proxy(
     try:
         from apps.booking.models import RemoteBookingProxy
 
+        # S5-LOW: scope the lookup by (appointment_id, tenant), not
+        # appointment_id alone. appointment_id is the PK (globally unique), so
+        # a cross-tenant appointment_id collision surfaces as an IntegrityError
+        # (caught by the best-effort guard below) instead of silently
+        # overwriting another tenant's mirror row.
         RemoteBookingProxy.all_tenants.update_or_create(
             appointment_id=_as_uuid(appt),
+            tenant=tenant,
             defaults={
-                "tenant": tenant,
                 "bot_user": bot_user,
                 "start_at": start_at,
                 "end_at": end_at,
