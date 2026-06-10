@@ -198,6 +198,54 @@ def test_remote_location_with_debug_false_passes(prod_env: None) -> None:
     _assert_production_cache_backend(debug=False, caches=caches)
 
 
+# ---------------------------------------------------------------------------
+# PRE_PILOT #1 opt-in — single-box deployments (host-local Redis on loopback).
+# ALLOW_LOCAL_REDIS=true is the deliberate assertion; default stays fail-closed.
+# ---------------------------------------------------------------------------
+
+_REDIS_LOCALHOST = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://127.0.0.1:6379/3",
+        "KEY_PREFIX": "ai_bot_platform:production",
+    },
+}
+
+
+def test_localhost_allowed_with_explicit_opt_in(
+    prod_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-box deploy: localhost LOCATION + ALLOW_LOCAL_REDIS=true passes."""
+
+    monkeypatch.setenv("ALLOW_LOCAL_REDIS", "true")
+    # Must not raise — the loopback Redis is a deliberate single-box choice.
+    _assert_production_cache_backend(debug=False, caches=_REDIS_LOCALHOST)
+
+
+def test_localhost_opt_in_is_case_insensitive(
+    prod_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The opt-in flag parse matches the env-var convention (``.lower()``)."""
+
+    monkeypatch.setenv("ALLOW_LOCAL_REDIS", "True")
+    _assert_production_cache_backend(debug=False, caches=_REDIS_LOCALHOST)
+
+
+def test_localhost_still_raises_when_opt_in_false(
+    prod_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed default: an explicit ALLOW_LOCAL_REDIS=false still aborts,
+    and the message points operators at the opt-in for the intentional case."""
+
+    monkeypatch.setenv("ALLOW_LOCAL_REDIS", "false")
+    with pytest.raises(ImproperlyConfigured) as exc_info:
+        _assert_production_cache_backend(debug=False, caches=_REDIS_LOCALHOST)
+
+    message = str(exc_info.value)
+    assert "127.0.0.1" in message
+    assert "ALLOW_LOCAL_REDIS" in message
+
+
 def test_local_keyspace_suffix_with_debug_false_raises(prod_env: None) -> None:
     """PRE_PILOT #2 — KEY_PREFIX ending in ``:local`` indicates DJANGO_ENV
     is unset or literally 'local'. On a shared Redis instance this collides
