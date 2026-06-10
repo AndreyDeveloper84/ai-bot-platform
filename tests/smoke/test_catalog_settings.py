@@ -123,9 +123,51 @@ class TestProductionFailFast:
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
+        # #1016 / PR-3 — booking bridge defaults ON in production; the Ayla
+        # creds must be present or the new fail-fast (below) trips.
+        monkeypatch.setenv("AYLA_BASE_URL", "https://ayla.internal")
+        monkeypatch.setenv("AYLA_INTERNAL_API_TOKEN", "ayla-tok-abc")  # noqa: S105
         module = importlib.import_module("config.settings.production")
         assert module.DEBUG is False
         assert module.CHROMA_AUTH_TOKEN == "chroma-token-abc"  # noqa: S105
         assert module.SENTRY_DSN == "https://public@sentry.example.com/1"
         expected_hmac = "hmac-secret-abc"  # noqa: S105  # pragma: allowlist secret
         assert module.MYSITE_WEBHOOK_HMAC_SECRET == expected_hmac
+        # The flip landed: production routes booking through Ayla by default.
+        assert module.BOOKING_VIA_AYLA_REST is True
+
+
+class TestBookingBridgeFlip:
+    """#1016 / PR-3 — production/staging flip BOOKING_VIA_AYLA_REST ON."""
+
+    def _set_other_required_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
+        monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
+        monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
+        monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
+
+    def test_flag_on_without_ayla_creds_fails_fast(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _restore_production_module: None,
+    ) -> None:
+        self._set_other_required_tokens(monkeypatch)
+        monkeypatch.delenv("BOOKING_VIA_AYLA_REST", raising=False)  # default ON
+        monkeypatch.delenv("AYLA_BASE_URL", raising=False)
+        monkeypatch.delenv("AYLA_INTERNAL_API_TOKEN", raising=False)
+        with pytest.raises(ImproperlyConfigured) as exc_info:
+            importlib.import_module("config.settings.production")
+        assert "BOOKING_VIA_AYLA_REST" in str(exc_info.value)
+
+    def test_flag_off_boots_without_ayla_creds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _restore_production_module: None,
+    ) -> None:
+        # Rollback path: explicitly OFF → no Ayla creds needed.
+        self._set_other_required_tokens(monkeypatch)
+        monkeypatch.setenv("BOOKING_VIA_AYLA_REST", "false")
+        monkeypatch.delenv("AYLA_BASE_URL", raising=False)
+        monkeypatch.delenv("AYLA_INTERNAL_API_TOKEN", raising=False)
+        module = importlib.import_module("config.settings.production")
+        assert module.BOOKING_VIA_AYLA_REST is False

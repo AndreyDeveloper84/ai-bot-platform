@@ -19,9 +19,18 @@ without ``tenant_scope`` raises ``CrossTenantError`` instead of just
 auditing. This is the desired terminal state.
 """
 
+import os
+
 from .base import *  # noqa: F401,F403
 
 DEBUG = False
 
 # Sprint 4 / D1 — IM-2 timing.
 STRICT_TENANT_SCOPE = "strict"
+
+# PR-3 (#1016) — staging mirrors the production booking-bridge flip so the
+# Ayla REST path gets pre-prod soak. Default ON; set BOOKING_VIA_AYLA_REST=
+# false to roll back. No boot-time fail-fast here (unlike production) so a
+# staging box without Ayla creds still boots — a missing client surfaces as
+# a per-booking handoff rather than blocking the whole environment.
+BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "true").lower() == "true"

@@ -495,10 +495,11 @@ AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
-# instead of direct YClients calls. DEFAULT OFF — the Ayla booking endpoints
-# are not live yet (contract pending S2 sign-off, see
-# docs/architecture/ayla-booking-rest-contract.md) and the real HTTP client is
-# still a skeleton. Flipping this ON before those land will fail loudly.
+# instead of direct YClients calls. The Ayla endpoints are live (S2 #193) and
+# the real HTTP client shipped (PR-1 #1031 / PR-2 #1032). production.py +
+# staging.py flip this ON by default (#1016 / PR-3); base stays OFF so local
+# dev + the test suite keep exercising the legacy YClients path unless a test
+# opts in. Override anywhere via the BOOKING_VIA_AYLA_REST env var.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
 # Wellness MVP scaled pilot (memory ``project_wellness_mvp_scaled_pilot``).

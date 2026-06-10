@@ -97,3 +97,22 @@ if not MYSITE_WEBHOOK_HMAC_SECRET:
 # docs/runbooks/eventbus-subscriber-activation.md.
 if not os.environ.get("DOMAIN_EVENT_SUBSCRIBERS"):
     DOMAIN_EVENT_SUBSCRIBERS = ["apps.eventbus.subscribers.AuditSubscriber"]
+
+
+# PR-3 (#1016) — flip the booking bridge ON in production. The Ayla
+# canonical REST endpoints are live (S2 #193) and the real HTTP client
+# shipped (PR-1 #1031 / PR-2 #1032). Read os.environ directly (like the
+# tokens above) so a test reload picks up the current env; default ON.
+# Rollback without a redeploy: set BOOKING_VIA_AYLA_REST=false to fall
+# back to the legacy direct-YClients path. Kept last so the other
+# required-token fail-fasts above report first.
+BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "true").lower() == "true"
+if BOOKING_VIA_AYLA_REST and not (
+    os.environ.get("AYLA_BASE_URL") and os.environ.get("AYLA_INTERNAL_API_TOKEN")
+):
+    raise ImproperlyConfigured(
+        "BOOKING_VIA_AYLA_REST is ON but AYLA_BASE_URL / "
+        "AYLA_INTERNAL_API_TOKEN are not set — the Ayla booking client "
+        "cannot start and every booking would dead-end. Set both, or set "
+        "BOOKING_VIA_AYLA_REST=false to use the legacy YClients path."
+    )
