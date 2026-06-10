@@ -328,4 +328,12 @@ def _mirror_raw(record: AylaBookingRecord) -> dict[str, Any]:
 def _idempotency_key(external_user_id: str, op: str, *parts: Any) -> str:
     """Deterministic idempotency key so a retried bot turn can't double-write."""
     seed = "|".join([external_user_id, op, *(str(p) for p in parts)])
-    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+    key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+    # S5-LOW1: a write must NEVER carry an empty idempotency key — that would
+    # defeat Ayla's server-side dedup and let a retried bot turn double-book.
+    # sha256 hex is always non-empty, so this is a defence-in-depth tripwire
+    # against a future refactor of the seed/digest (a real ``raise``, not an
+    # ``assert`` that ``python -O`` would strip in prod).
+    if not key:
+        raise ValueError(f"empty idempotency key for op={op!r} — refusing to write")
+    return key
