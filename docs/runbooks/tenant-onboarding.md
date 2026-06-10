@@ -90,20 +90,30 @@ platform settings module reads tenant-scoped env via the slug → file mapping
 
 #### 3a. MAX (primary for Phase 0)
 
+Register the webhook with the **management command — never a hand-rolled
+`curl`**. The command DELETE+re-POSTs (idempotent) and *always* sends
+`update_types`. A raw `POST /subscriptions` that omits `update_types` makes MAX
+deliver only a subset of events — `message_callback` updates are silently
+dropped, so inline-keyboard taps appear to do nothing (dev incident
+2026-05-21). It reads `MAX_BOT_TOKEN` (auth) + `MAX_WEBHOOK_SECRET` from the
+tenant's loaded env and refuses to run if either is empty.
+
 ```bash
-# On prod, with the tenant's MAX bot token
-curl -X POST "https://botapi.max.ru/me/webhook" \
-  -H "Authorization: Bearer ${MAX_BOT_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "url": "https://platform.ai-bot-platform.ru/webhook/max/'${SLUG}'/",
-        "secret_header_value": "'${MAX_WEBHOOK_SECRET}'"
-      }'
+# On the box, with the tenant's env loaded (MAX_BOT_TOKEN + MAX_WEBHOOK_SECRET).
+python manage.py max_subscribe_webhook \
+  --url https://api.gobeauty.site/api/v1/ingress/max/
+# dev box:   --url https://api-dev.gobeauty.site/api/v1/ingress/max/
+# --secret defaults to settings.MAX_WEBHOOK_SECRET; pass --secret to override.
+# default update_types: message_created, message_callback, bot_started.
 ```
 
-The webhook URL is **per-tenant** (the slug embedded in the path); nginx
-routes by slug to the same Django process but the request handler reads slug
-from the URL pattern, not from any token.
+Tenant resolution is by **secret, not URL path.** There is a single ingress
+endpoint, `/api/v1/ingress/max/` (no per-tenant slug in the path). MAX sends
+the `X-Max-Bot-Api-Secret` header on every webhook; `apps/ingress/views.py`
+matches it against `MAX_WEBHOOK_SECRET` and resolves the tenant from
+`CHANNEL_TOKEN_TO_TENANT_SLUG` (multi-bot map) or `MAX_BOT_TENANT_SLUG`
+(single-bot mode). So the per-tenant binding lives in the secret→slug map, not
+the webhook URL.
 
 #### 3b. Telegram (Phase 1 / DRF-848)
 
