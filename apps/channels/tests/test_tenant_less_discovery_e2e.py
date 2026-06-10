@@ -67,13 +67,15 @@ def fake_redis(monkeypatch):
 
 @pytest.fixture
 def mock_discovery(monkeypatch):
+    from apps.orchestrator.discovery import DiscoveryReply
+
     replies = iter(["Привет! Какая услуга интересует?", "Поняла — подберу мастера."])
 
     def fake_reply(message_text, *, history=None, trace_id=None):
         try:
-            return next(replies)
+            return DiscoveryReply(text=next(replies))
         except StopIteration:
-            return "…"
+            return DiscoveryReply(text="…")
 
     monkeypatch.setattr(max_handler, "generate_discovery_reply", fake_reply)
 

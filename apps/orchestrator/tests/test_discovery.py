@@ -52,7 +52,7 @@ def test_generate_discovery_reply_returns_llm_text(monkeypatch) -> None:
     monkeypatch.setattr(
         discovery, "get_router", lambda: _FakeRouter(_FakeProvider(text="Готова помочь!"))
     )
-    assert discovery.generate_discovery_reply("привет") == "Готова помочь!"
+    assert discovery.generate_discovery_reply("привет").text == "Готова помочь!"
 
 
 def test_generate_discovery_reply_falls_back_on_llm_error(monkeypatch) -> None:
@@ -62,10 +62,10 @@ def test_generate_discovery_reply_falls_back_on_llm_error(monkeypatch) -> None:
         lambda: _FakeRouter(_FakeProvider(err=LLMTransportError("provider down"))),
     )
     out = discovery.generate_discovery_reply("привет")
-    assert isinstance(out, str) and out  # non-empty fallback, no raise
+    assert out.text.strip() and out.action_data is None  # non-empty fallback, no raise
 
 
 def test_generate_discovery_reply_falls_back_on_empty_completion(monkeypatch) -> None:
     monkeypatch.setattr(discovery, "get_router", lambda: _FakeRouter(_FakeProvider(text="   ")))
     out = discovery.generate_discovery_reply("привет")
-    assert isinstance(out, str) and out.strip()
+    assert out.text.strip()

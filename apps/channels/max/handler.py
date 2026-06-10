@@ -89,7 +89,12 @@ from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
 )
-from apps.orchestrator.discovery import generate_discovery_reply
+from apps.orchestrator.discovery import (
+    CALLBACK_DISCOVER_BOOK_PREFIX,
+    DiscoveryReply,
+    generate_discovery_reply,
+)
+from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.memory import short_term
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -368,23 +373,61 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         },
     )
 
-    # Generate the discovery reply through the AI runtime (tenant-less).
-    reply_text = generate_discovery_reply(
-        event.text,
-        history=history,
-        trace_id=str(trace_id) if trace_id else None,
-    )
+    # Reply: either the discovery → booking handoff (the user tapped a master
+    # card → transition into tenant T's booking flow, #1020), or a normal
+    # tenant-less discovery turn (which may itself surface master cards).
+    if event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
+        reply = _discovery_handoff_reply(event, bot_user, trace_id)
+    else:
+        reply = generate_discovery_reply(
+            event.text,
+            history=history,
+            trace_id=str(trace_id) if trace_id else None,
+        )
 
-    # Persist + remember the assistant turn, then send to MAX.
+    # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     record_global_message(
         conversation,
         role="assistant",
-        content=reply_text,
-        rendered_text=reply_text,
+        content=reply.text,
+        rendered_text=reply.text,
         trace_id=trace_id,
     )
-    short_term.append(conversation.id, role="assistant", content=reply_text)
-    send_message(chat_id=event.chat_id, text=reply_text)
+    short_term.append(conversation.id, role="assistant", content=reply.text)
+    send_message(
+        chat_id=event.chat_id,
+        text=reply.text,
+        attachments=_build_attachments(reply.action_data),
+    )
+
+
+def _discovery_handoff_reply(
+    event: CanonicalEvent, global_bot_user, trace_id: str | uuid.UUID | None
+) -> DiscoveryReply:
+    """Parse the ``cb:discover:book:{tenant_id}:{master_id}`` callback and route
+    into tenant T's booking flow via the handoff layer (#1020).
+
+    Both ids are UUIDs (no ``:`` inside), so a single split after the prefix is
+    unambiguous. Malformed payloads degrade to a graceful reply.
+    """
+    payload = event.text[len(CALLBACK_DISCOVER_BOOK_PREFIX) :]
+    try:
+        tenant_part, master_part = payload.split(":", 1)
+        tenant_id = uuid.UUID(tenant_part)
+        master_id = uuid.UUID(master_part)
+    except (ValueError, AttributeError):
+        logger.warning("channels.max.global.handoff.bad_payload payload=%r", payload)
+        return DiscoveryReply(
+            text="Не удалось открыть запись — попробуйте выбрать мастера ещё раз."
+        )
+
+    return handoff_to_booking(
+        global_bot_user=global_bot_user,
+        tenant_id=tenant_id,
+        master_id=master_id,
+        chat_id=event.chat_id,
+        trace_id=trace_id,
+    )
 
 
 def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
