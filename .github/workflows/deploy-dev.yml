@@ -1,106 +1,127 @@
-# deploy-dev — push to `dev` branch → deploy to dev MAX-bot instance
+# deploy-dev — auto-deploy the dev MAX-bot instance on every GREEN `dev` build.
 #
-# Sprint 10 / DRF-891 — replaces the Sprint 0 placeholder.
+# Activated 2026-06 (was the DRF-891 skeleton). Runs ONLY after the `ci`
+# workflow succeeds on `dev`, so a red build never deploys.
 #
-# ### Trigger
-# - push to `dev` branch (after PR from feat/* merges into dev)
-# - manual via workflow_dispatch
+# ### Inert until configured
+# The first step is a guard: if `DEV_HOST` is unset the whole job is a clean
+# no-op (a green check, NOT a red pipeline). Nothing deploys until the
+# operator lands the repo secrets + bootstraps the box.
 #
-# ### What it does (when secrets configured)
-# 1. CI gate via `needs: ci` — won't deploy red builds.
-# 2. SSH to DEV_HOST as DEV_USER.
-# 3. git fetch + checkout dev + pull
-# 4. docker compose --env-file .env.dev up -d --force-recreate web worker
-# 5. Smoke: /readyz/ on the dev port (8013 not 8003)
-# 6. Telegram alert to dev-team channel via `python manage.py smoke_alert
-#    --severity=warning --title="dev deploy" --body="<sha>"`
+# ### Operator prerequisites (one-time, DRF-891)
+# Repo → Settings → Secrets and variables → Actions:
+#   DEV_HOST         dev box hostname/IP (decision A: same VPS as Ayla)
+#   DEV_USER         ssh user with docker rights
+#   DEV_SSH_KEY      private key contents for that user (read/deploy key)
+#   DEV_DEPLOY_PATH  repo checkout on the box (e.g. /home/ops/ai-bot-platform-dev)
+# On the box (bootstrap once, by hand — this workflow only does *updates*):
+#   - clone the repo at DEV_DEPLOY_PATH, checkout `dev`
+#   - /etc/ai-bot-platform-dev/.env populated (DB / Redis / ChromaDB / MinIO
+#     creds + MAX_BOT_TOKEN_DEV), scoped to dev, web on port +1000 (8013)
+#   - `docker compose -p ai-bot-platform-dev up -d` once + run the catalog sync
 #
-# ### Operator setup BEFORE first real deploy
-#
-# All steps are commented out below — uncomment after these are done:
-#
-# 1. DRF-891 task 1: create @ai_bot_platform_dev MAX-bot, token in 1Password
-# 2. DRF-891 task 5: deploy dev instance (decision A: same VPS port +1000)
-# 3. GitHub repo secrets:
-#    - DEV_HOST (e.g. app.penza.taxi if same VPS)
-#    - DEV_USER (e.g. ops)
-#    - DEV_SSH_KEY (private key contents — `cat ~/.ssh/id_rsa | clip`)
-#    - DEV_DEPLOY_PATH (e.g. /home/ops/ai-bot-platform-dev)
-# 4. dev box /etc/ai-bot-platform-dev/.env populated with MAX_BOT_TOKEN_DEV,
-#    DB / Redis / ChromaDB credentials scoped to dev
-#
-# Until then, the workflow is a skeleton that exercises the trigger graph
-# but performs no destructive ops.
+# ### What each deploy does
+#   1. only on a green `ci` run (workflow_run) — never deploys red builds
+#   2. ssh to the box, git pull --ff-only dev
+#   3. docker compose up -d --build --force-recreate --no-deps web worker
+#      (--no-deps keeps postgres/redis/chromadb/minio + their data untouched)
+#   4. smoke: /readyz/ on 8013 (5 retries) — fails the deploy if not green
+#   5. best-effort Telegram alert to the dev channel
 
 name: deploy-dev
 
 on:
-  push:
-    branches:
-      - dev
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+    branches: [dev]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-dev-${{ github.ref }}
+  group: deploy-dev
   cancel-in-progress: false
 
 jobs:
   deploy:
     name: deploy-dev
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    # Deploy only a green CI run (or a manual dispatch).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Print deploy plan
+      - name: Guard — no-op if deploy secrets are unset
+        id: guard
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
         run: |
-          echo "::notice::deploy-dev triggered for ${{ github.ref }} @ ${{ github.sha }}"
-          echo "Triggered by ${{ github.event_name }}"
+          if [ -z "${DEV_HOST}" ]; then
+            echo "::notice::DEV_HOST not set — deploy-dev is inert (secrets + bootstrap pending DRF-891). No-op."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      # ─── ACTIVATE AFTER DRF-891 SECRETS LAND ───
-      # - name: Configure SSH
-      #   env:
-      #     DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
-      #   run: |
-      #     mkdir -p ~/.ssh
-      #     echo "$DEV_SSH_KEY" > ~/.ssh/dev_deploy
-      #     chmod 600 ~/.ssh/dev_deploy
-      #     ssh-keyscan -H ${{ secrets.DEV_HOST }} >> ~/.ssh/known_hosts
-      #
-      # - name: Pull + restart dev services
-      #   env:
-      #     DEV_HOST: ${{ secrets.DEV_HOST }}
-      #     DEV_USER: ${{ secrets.DEV_USER }}
-      #     DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
-      #   run: |
-      #     ssh -i ~/.ssh/dev_deploy "$DEV_USER@$DEV_HOST" bash -lc "
-      #       set -e
-      #       cd $DEV_DEPLOY_PATH
-      #       git fetch origin
-      #       git checkout dev
-      #       git pull origin dev
-      #       sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
-      #         -p ai-bot-platform-dev up -d --force-recreate --no-deps web worker
-      #     "
-      #
-      # - name: Smoke /readyz/ on dev
-      #   env:
-      #     DEV_HOST: ${{ secrets.DEV_HOST }}
-      #     DEV_USER: ${{ secrets.DEV_USER }}
-      #   run: |
-      #     ssh -i ~/.ssh/dev_deploy "$DEV_USER@$DEV_HOST" \
-      #       'curl -fsS http://127.0.0.1:8013/readyz/' | head
-      #
-      # - name: Telegram smoke alert (informational)
-      #   env:
-      #     DEV_HOST: ${{ secrets.DEV_HOST }}
-      #     DEV_USER: ${{ secrets.DEV_USER }}
-      #   run: |
-      #     ssh -i ~/.ssh/dev_deploy "$DEV_USER@$DEV_HOST" bash -lc "
-      #       cd $DEV_DEPLOY_PATH
-      #       sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
-      #         -p ai-bot-platform-dev exec -T web \
-      #         python manage.py smoke_alert --severity=warning \
-      #         --title='dev deploy' --body='${{ github.sha }}'
-      #     "
+      - name: Configure SSH
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${DEV_SSH_KEY}" > ~/.ssh/dev_deploy
+          chmod 600 ~/.ssh/dev_deploy
+          ssh-keyscan -H "${DEV_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull + rebuild + restart dev services
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+          DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            set -euo pipefail
+            cd '${DEV_DEPLOY_PATH}'
+            git fetch origin
+            git checkout dev
+            git pull --ff-only origin dev
+            sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
+              -p ai-bot-platform-dev up -d --build --force-recreate --no-deps web worker
+            sudo docker compose -p ai-bot-platform-dev ps
+          "
+
+      - name: Smoke — /readyz/ on dev (port 8013)
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+        run: |
+          ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            for i in 1 2 3 4 5; do
+              if curl -fsS http://127.0.0.1:8013/readyz/ >/dev/null; then
+                echo '::notice::readyz green (attempt '\$i')'; exit 0
+              fi
+              echo 'readyz not ready (attempt '\$i'), retrying...'; sleep 6
+            done
+            echo '::error::readyz red after 5 attempts — investigate dev deploy'; exit 1
+          "
+
+      - name: Telegram smoke alert (informational)
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          DEV_HOST: ${{ secrets.DEV_HOST }}
+          DEV_USER: ${{ secrets.DEV_USER }}
+          DEV_DEPLOY_PATH: ${{ secrets.DEV_DEPLOY_PATH }}
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+            cd '${DEV_DEPLOY_PATH}'
+            sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
+              -p ai-bot-platform-dev exec -T web \
+              python manage.py smoke_alert --severity=warning \
+              --title='dev deploy' --body='${SHA}' || true
+          "
