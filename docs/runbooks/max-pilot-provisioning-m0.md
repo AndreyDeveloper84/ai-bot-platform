@@ -104,19 +104,28 @@ The MAX **DM** path needs `python -m apps.workers.consumer` draining the
 never processed — the bot goes silent. (The Mini App booking path is synchronous
 HTTP and does **not** need this.)
 
-**Verify on the box — do not assume.** `docker-compose.yml` defines a `worker`
-service running the consumer, but the prod box runs **systemd**, and the units
-are `web` / `worker` / `beat`. `beat` is Celery, so the `*-worker.service` unit
-may be a *Celery* worker, **not** the MAX consumer. Confirm what it runs:
+**Confirmed gap — verify on the box.** Under systemd the `*-worker.service` unit
+runs **Celery** (`celery -A config worker`) and `*-beat.service` is Celery beat —
+neither is the MAX DM drainer. The drainer has its own unit *template*
+(`infra/systemd/ai-bot-platform-consumer.service.template`, ExecStart
+`python -m apps.workers.consumer --forever`), **but `server-deployment.md`
+installs/enables only `web worker beat`** (`for svc in web worker beat`;
+`systemctl enable …-dev{,-worker,-beat}`) — the **`consumer` unit is not
+deployed**. On a box built per that runbook the DM path is dark.
 
 ```bash
-systemctl cat ai-bot-platform-prod-worker.service | grep ExecStart
-# Must show something running `apps.workers.consumer`. If it only runs a Celery
-# worker, the MAX DM drainer is NOT up → file/relink #1010: add a
-# `*-consumer.service` unit (ExecStart: python -m apps.workers.consumer --forever)
-# and `systemctl enable --now` it.
-ps -ef | grep -F 'apps.workers.consumer' | grep -v grep   # expect ≥1 process
+systemctl is-active ai-bot-platform-dev-consumer.service   # likely: not-found / inactive
+ps -ef | grep -F 'apps.workers.consumer' | grep -v grep    # expect ≥1; none → DM path dark
+# Fix: render infra/systemd/ai-bot-platform-consumer.service.template into
+#   /etc/systemd/system/ai-bot-platform-{ENV}-consumer.service and:
+#   sudo systemctl enable --now ai-bot-platform-{ENV}-consumer
 ```
+
+> **NB — deploy model affects which process is missing.** In the docker-compose
+> model the `worker` service *is* the consumer (so the consumer runs, but there's
+> no Celery worker/beat → reminders/scheduled tasks don't fire). Under systemd
+> it's the reverse. Confirm the box's actual model first (see Open items) and fix
+> whichever background process is absent.
 
 ## Step 5 — acceptance smoke
 
@@ -145,8 +154,16 @@ M0 is done when Steps 1–5 pass for every pilot tenant.
 
 ## Open items for the orchestrator
 
-- **#1010 cb2** — confirm the prod `*-worker.service` runs `apps.workers.consumer`
-  (Step 4). If it's Celery-only, the DM path is dark and needs a consumer unit.
-- The commented prod-deploy job in `.github/workflows/deploy.yml` is a disabled
-  template; the live mechanism is systemd (`server-deployment.md`). Left
-  untouched — re-enabling it is an infra-owner call, not M0.
+- **#1010 cb2 (confirmed gap).** The systemd `*-worker.service` is Celery; the
+  MAX consumer has a template (`infra/systemd/ai-bot-platform-consumer.service.template`)
+  but is **absent from `server-deployment.md`'s install/enable list** (`web worker
+  beat`). On a systemd box the DM drainer isn't running. Fix: add `consumer` to
+  the unit install + `systemctl enable` list (and to the deploy workflow).
+- **Deploy model conflict (vs #1039).** `server-deployment.md` + the full
+  `infra/systemd/*.template` set describe a **systemd** dev box (gunicorn, host
+  PG/Redis, "no new containers"). `deploy-dev.yml` (#1039) instead does
+  `docker compose -p ai-bot-platform-dev up -d … web worker` — a parallel compose
+  stack. The two models diverge on which background processes run (Celery vs
+  consumer). The box is the tiebreaker: `systemctl list-units 'ai-bot-platform-dev*'`
+  vs `docker compose -p ai-bot-platform-dev ps`. Resolve before activating
+  auto-deploy.
