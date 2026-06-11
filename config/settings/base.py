@@ -702,7 +702,9 @@ def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
       defaults to ``redis://localhost:6379/0`` when ``REDIS_URL`` is unset.
       In production this points at a Redis the host does not run; boot
       succeeds, the first cache write ``ConnectionError``s. Reject
-      ``localhost`` / ``127.0.0.1`` LOCATION when ``DEBUG=False``.
+      ``localhost`` / ``127.0.0.1`` LOCATION when ``DEBUG=False`` — unless
+      ``ALLOW_LOCAL_REDIS=true`` is set, the deliberate opt-in for single-box
+      deployments that intentionally run Redis on the loopback.
     * **DJANGO_ENV unset → keyspace collision.** ``KEY_PREFIX`` interpolates
       ``DJANGO_ENV`` (defaults to ``local``). On a shared Redis instance
       across dev/staging/prod, a prod boot with ``DJANGO_ENV`` unset
@@ -754,15 +756,26 @@ def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
             "(e.g. redis://redis.internal:6379/0)."
         )
     if "localhost" in location or "127.0.0.1" in location:
-        raise ImproperlyConfigured(
-            f"CACHES['default']['LOCATION']={location!r} points at localhost "
-            "in production. This is the silent fallback that triggers when "
-            "the REDIS_URL env var is unset (see CACHES config in "
-            "config/settings/base.py). Set REDIS_URL to the real Redis URL "
-            "(e.g. redis://redis.internal:6379/0). Boot would otherwise "
-            "succeed but the first cache.add/incr call would ConnectionError "
-            "at runtime."
-        )
+        # Single-box deployments intentionally run Redis on the loopback
+        # (host-local Redis with logical-DB isolation — see
+        # docs/runbooks/server-deployment.md, "no new containers"). For those
+        # the localhost LOCATION is correct, not the silent unset-fallback this
+        # guard targets. Require a deliberate, explicit opt-in so the default
+        # stays fail-closed for real multi-host prod — an accidental localhost
+        # there (REDIS_URL forgotten) still aborts boot.
+        allow_local = os.environ.get("ALLOW_LOCAL_REDIS", "false").lower() == "true"
+        if not allow_local:
+            raise ImproperlyConfigured(
+                f"CACHES['default']['LOCATION']={location!r} points at localhost "
+                "in production. This is the silent fallback that triggers when "
+                "the REDIS_URL env var is unset (see CACHES config in "
+                "config/settings/base.py). Set REDIS_URL to the real Redis URL "
+                "(e.g. redis://redis.internal:6379/0). For an intentional "
+                "single-box deployment where Redis runs on the loopback, set "
+                "ALLOW_LOCAL_REDIS=true to assert this is deliberate. Boot would "
+                "otherwise succeed but the first cache.add/incr call would "
+                "ConnectionError at runtime."
+            )
 
     # PRE_PILOT #2 — DJANGO_ENV unset → keyspace collision.
     # Two layers of defence: the KEY_PREFIX-suffix check catches whatever
