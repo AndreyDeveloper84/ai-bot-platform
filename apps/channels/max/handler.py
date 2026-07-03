@@ -99,6 +99,7 @@ from apps.orchestrator.discovery import (
 )
 from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,24 @@ def _build_attachments(action_data: dict[str, Any] | None) -> list[dict[str, Any
         columns = action_data.get("button_columns") or 1
         return [make_inline_keyboard_attachment(buttons, columns=int(columns))]
     return None
+
+
+def _emit_safety_shortcircuit(bot_user: Any, safety: Any, *, is_global: bool) -> None:
+    """Emit an observability event when the safety gate short-circuits a turn (#1053).
+
+    PII-safe: only the verdict + match count ship — never the raw user text or the
+    matched substrings, so a self-harm / suicide phrase never lands in the
+    analytics bus.
+    """
+    emit(
+        "channels.max.safety.pre_check_triggered",
+        payload={
+            "bot_user_id": str(getattr(bot_user, "id", "")),
+            "verdict": safety.verdict,
+            "matched_count": len(safety.matched_patterns),
+            "is_global_bot": is_global,
+        },
+    )
 
 
 def _echo_text(event: CanonicalEvent) -> str:
@@ -377,6 +396,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     )
 
     # Reply, in priority order:
+    #   0. Safety pre-check (#1053) — a red-flag phrase (suicide / self-harm /
+    #      emergency) or a BLOCK phrase (drugs / diagnosis / legal) short-circuits
+    #      to a canned reply BEFORE discovery. Variant A on the tenant-less path:
+    #      canned reply only, NO AdminTask (founder decision 2026-07-03, #1076).
     #   1. Onboarding (#1046, behind GLOBAL_BOT_ONBOARDING flag) — welcome + 152-ФЗ
     #      consent capture. Variant A «soft gate»: we greet + capture consent but
     #      do NOT block discovery on it. When onboarding runs we do NOT call
@@ -384,7 +407,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #   2. Discovery → booking handoff (the user tapped a master card → transition
     #      into tenant T's booking flow, #1020).
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
-    if getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(bot_user, event.text):
+    safety = evaluate_inbound(event.text)
+    if not safety.allowed:
+        _emit_safety_shortcircuit(bot_user, safety, is_global=True)
+        reply = DiscoveryReply(text=safety.reply_text)
+    elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
+        bot_user, event.text
+    ):
         reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
@@ -477,6 +506,33 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         role="user",
         content=event.text,
     )
+
+    # --- Safety pre-check (#1053) — BEFORE photo download + skill dispatch ---
+    # A red-flag (suicide / self-harm / acute emergency) or a BLOCK phrase (drugs
+    # / definitive diagnosis / legal advice) must never reach echo / FAQ /
+    # food_scanner. S1-B = detection + canned reply only; the AdminTask +
+    # HUMAN_HANDOFF flip on this per-tenant path is S1-C (#1047), deliberately NOT
+    # done here. We short-circuit before the photo download so a blocked turn
+    # doesn't waste a CDN fetch either.
+    safety = evaluate_inbound(event.text)
+    if not safety.allowed:
+        _emit_safety_shortcircuit(bot_user, safety, is_global=False)
+        record_message(
+            conversation,
+            role="assistant",
+            content=safety.reply_text,
+            rendered_text=safety.reply_text,
+            action_type="safety_pre_check",
+            trace_id=trace_id,
+        )
+        short_term.append(conversation.id, role="assistant", content=safety.reply_text)
+        send_message(chat_id=event.chat_id, text=safety.reply_text)
+        logger.info(
+            "channels.max.handler.safety_shortcircuit conversation=%s verdict=%s",
+            conversation.id,
+            safety.verdict,
+        )
+        return
 
     # Photo bytes path — Веха 2 of the photo adapter port.
     #
