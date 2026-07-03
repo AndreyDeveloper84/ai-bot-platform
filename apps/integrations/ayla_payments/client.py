@@ -54,6 +54,8 @@ from django.conf import settings
 from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 from urllib3.util.retry import Retry
 
+from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +188,11 @@ class AylaPaymentsClient:
         self.test_mode = bool(test_mode)
         self._timeout_s = timeout_s
         self._circuit = _Circuit()
+        # The URL seam (#1049) is built lazily inside ``create_payment`` — NOT
+        # here — so the dormant-boot contract holds: an empty OR malformed base
+        # must not raise at construction (test-mode / non-payments tenants boot
+        # clean). The live path validates + maps ``AylaUrlError`` to the
+        # payments domain error, consistent with the sibling clients.
 
         self._session = requests.Session()
         self._session.headers.update(
@@ -289,7 +296,16 @@ class AylaPaymentsClient:
             "Authorization": f"Bearer {self._api_token}",
             "Idempotence-Key": str(idempotence_key),
         }
-        url = f"{self.base_url}/api/v1/payments/create"
+        # Build the URL through the seam here (not __init__) so the dormant-boot
+        # contract holds. ``base_url`` is non-empty (checked above); a malformed
+        # base is a config error — map ``AylaUrlError`` to the payments domain
+        # error so the money path degrades consistently with its siblings rather
+        # than surfacing a raw ValueError. Endpoint has no trailing slash,
+        # matching Ayla's ``/api/v1/payments/create`` route.
+        try:
+            url = AylaUrlBuilder(self.base_url).build("payments/create")
+        except AylaUrlError as exc:
+            raise AylaPaymentsAPIError(f"invalid AYLA_BASE_URL: {exc}") from exc
 
         try:
             response = self._session.post(

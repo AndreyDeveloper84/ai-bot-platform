@@ -37,7 +37,7 @@ class TestConstructionFailFast:
             nc.NutritionClient(base_url="", service_token="t")
 
     def test_empty_token_raises(self) -> None:
-        with pytest.raises(ValueError, match="AYLA_SERVICE_TOKEN"):
+        with pytest.raises(ValueError, match="NUTRITION_SERVICE_TOKEN"):
             nc.NutritionClient(base_url="https://ayla", service_token="")
 
 
@@ -443,7 +443,7 @@ class TestSanitizeHint:
 class TestSingleton:
     def test_get_then_reset(self, settings: Any) -> None:
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = "t"
+        settings.NUTRITION_SERVICE_TOKEN = "t"
         nc.reset_nutrition_client()
         a = nc.get_nutrition_client()
         b = nc.get_nutrition_client()
@@ -454,7 +454,7 @@ class TestSingleton:
 
     def test_fails_loudly_when_env_empty(self, settings: Any) -> None:
         settings.AYLA_BASE_URL = ""
-        settings.AYLA_SERVICE_TOKEN = ""
+        settings.NUTRITION_SERVICE_TOKEN = ""
         nc.reset_nutrition_client()
         with pytest.raises(ValueError, match="AYLA_BASE_URL"):
             nc.get_nutrition_client()
