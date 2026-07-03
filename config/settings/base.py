@@ -511,19 +511,18 @@ AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 #    secret == whatever Ayla's nutrition endpoint validates as
 #    ``NUTRITION_SERVICE_TOKEN``). An explicit empty value is honoured as-is
 #    (does NOT resurrect the deprecated token during a rotation blank-out).
+#
+# The old ``AYLA_SERVICE_TOKEN`` *settings attribute* is gone (#1050 / S0-B —
+# all client code refs removed): it was a Bearer secret that never existed on
+# Ayla's side, conflated with the nutrition ``X-Service-Token``. The env var of
+# that name survives ONLY as the back-compat fallback source below, so
+# deploys mid-rotation keep working.
 _nutrition_service_token = os.environ.get("NUTRITION_SERVICE_TOKEN")
 NUTRITION_SERVICE_TOKEN = (
     _nutrition_service_token
     if _nutrition_service_token is not None
     else os.environ.get("AYLA_SERVICE_TOKEN", "")
 )
-
-# DEPRECATED (#1050): ``AYLA_SERVICE_TOKEN`` — a Bearer secret that does NOT
-# exist on Ayla's side and a conflated nutrition secret. Kept declared ONLY as
-# the backward-compat source for ``NUTRITION_SERVICE_TOKEN`` above and for the
-# not-yet-migrated recommendations/profile/nutrition clients (their code refs
-# are removed in S0-B). Do not add new readers. Remove once S0-B lands.
-AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
 # instead of direct YClients calls. DEFAULT OFF — the Ayla booking endpoints

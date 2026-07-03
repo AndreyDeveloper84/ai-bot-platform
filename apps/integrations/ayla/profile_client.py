@@ -5,10 +5,18 @@ bot-platform fetches the current profile to sync the PII subset
 (``display_name``, ``avatar_url`` ONLY — never phone/email/birthday/
 language). This module owns the HTTP call.
 
+Auth + URL (#978): ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}`` — the
+single s2s Bearer Ayla validates (the deprecated ``AYLA_SERVICE_TOKEN`` never
+existed on Ayla's side). The URL is built through
+:class:`apps.integrations.ayla.url_builder.AylaUrlBuilder` (#1049), which owns
+host-only validation of ``AYLA_BASE_URL`` and inserts the ``api/v1`` prefix, so
+this module never hand-builds an ``f"{base}/api/v1/..."`` string. The endpoint
+is ``/api/v1/internal/users/{user_id}/``.
+
 ### Why a separate client (not :mod:`nutrition_client`)
 
-* Different endpoint surface (``/api/v1/users/{user_id}`` is identity,
-  not nutrition).
+* Different endpoint surface (``/api/v1/internal/users/{user_id}/`` is
+  identity, not nutrition).
 * Different SLA — profile sync is not critical-path UI rendering, so a
   shorter timeout (5s) and a separate circuit breaker keep the
   identity-side failures from affecting the nutrition stack.
@@ -35,6 +43,8 @@ from uuid import UUID
 
 import httpx
 from django.conf import settings
+
+from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 
 
 logger = logging.getLogger(__name__)
@@ -144,15 +154,22 @@ def fetch_profile_fields(user_id: UUID) -> ProfileFields:
     characters. No injection surface.
     """
     base_url = getattr(settings, "AYLA_BASE_URL", "")
-    token = getattr(settings, "AYLA_SERVICE_TOKEN", "")
+    token = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "")
     if not base_url or not token:
-        raise ProfileFetchError("AYLA_BASE_URL or AYLA_SERVICE_TOKEN not configured")
+        raise ProfileFetchError("AYLA_BASE_URL or AYLA_INTERNAL_API_TOKEN not configured")
 
     now = time.monotonic()
     if _circuit.is_open(now=now):
         raise ProfileFetchError("ayla.profile circuit open")
 
-    url = f"{base_url.rstrip('/')}/api/v1/users/{user_id}"
+    # Single URL seam (#1049): the builder validates ``AYLA_BASE_URL`` is
+    # host-only and inserts the ``api/v1`` prefix. A malformed base is a config
+    # error, not a retryable outage — surface it as ProfileFetchError (the
+    # consumer dead-letters + ops investigates) rather than an opaque 500.
+    try:
+        url = AylaUrlBuilder(base_url).build(f"internal/users/{user_id}/")
+    except AylaUrlError as exc:
+        raise ProfileFetchError(f"invalid AYLA_BASE_URL: {exc}") from exc
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
