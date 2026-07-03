@@ -1,6 +1,7 @@
 # MVP_GAP_MAP_2026-07 — v1.2
 
-> **v1.2 (2026-07-02):** 2-е ревью founder — Stream 4 → «Pilot Discovery Ranking» (защита scope); `review_count` вынесен в тикет **#1060** (S4.0, linked #1044); Freeze rule дополнен правилом New-Scope-SP; PR sequencing/волны разбиты на 1A/1B/1C (S0-A разгружен, S0-B = единственное место правки прочих клиентов, S0-C после A/B, S1 = epic 3–4 PR).
+> **v1.2 (2026-07-03) — рефрейм #1044:** Stream 3 «Catalog bridge» → **«Catalog domain rebuild for Ayla booking»**. ServiceTemplate = таксономия ≠ bookable; bookable = SalonService+SpecialistService; #1043/mysite deprecated+retired; онбординг «Confirm, don't create» (external prefill→draft→confirm); сущности DraftSalonService/ExternalSourceMapping; новый gate **G-CalendarSync** (защита от двойной брони); декомпозиция S3A–S3D + S3-CAL; Stream 3 → **50–70 SP**; 15.08 committed но **At Risk**.
+> **v1.2 (2026-07-02):** 2-е ревью founder — Stream 4 → «Pilot Discovery Ranking»; `review_count` → #1060; Freeze rule + New-Scope-SP; волны 1A/1B/1C (S0-A разгружен, S1 = epic).
 > **v1.1 (2026-07-02):** ревью founder — Stream 0 → A/B/C, `event_id` → Stream 0.5, safety раньше booking, Freeze rule/PR sequencing/волны/DoD, номера тикетов. Сверено с роадмапом (PR #1015, G1–G10) и GitHub.
 > **Составлено:** 2026-07-02 по фактическому коду трёх репозиториев (не по Repomix).
 > **Метод:** 6 параллельных read-only аудитов доменов + перекрёстная сверка находок.
@@ -126,9 +127,9 @@
 
 6. **s2s-auth фрагментация.** `AYLA_SERVICE_TOKEN` не существует у Ayla; `nutrition_client` шлёт `X-Service-Token: AYLA_SERVICE_TOKEN`, Ayla ждёт `NUTRITION_SERVICE_TOKEN` — работает только если деплой выставит равными. Только `booking_client` полностью совпадает.
 
-7. **Мёртвые ключи-мосты каталога.** `ayla_service_id` и `CatalogMaster.ayla_user_id` **не пишутся** ни sync-ом, ни миграциями, ни consumer'ами (только `.filter()` по ним). Под `BOOKING_VIA_AYLA_REST` health-check grounding fail-closed на каждом miss → все gated-записи в manual handoff.
+7. **⚠️ Календарная рассинхронизация → двойная бронь (pilot-critical).** Если пилотный салон продолжает вести календарь в YClients/своей системе, а Ayla не получает событий занятости — bot предложит занятое окно → двойная бронь. **Митигируется новым gate `G-CalendarSync`** (Variant A: Ayla primary; Variant B: YClients inbound webhook → external busy intervals). Требует операционного решения по салону. Блокирует `G-Booking`.
 
-8. **Источник истины каталога = mysite, не Ayla.** `http_client.py` тянет `MYSITE_CATALOG_BASE_URL`; canonical endpoints Ayla существуют, но не используются → латентное ADR-0009 rule-1/2.
+8. **Каталог: таксономия ≠ bookable (рефрейм #1044).** 1223 `ServiceTemplate` = таксономия, НЕ прайс салона. Для брони нужны `SalonService`/`SpecialistService` с resolved price/duration. Прежние риски «мёртвые ключи-мосты» / «источник = mysite» / «health-check на шаблоне» **снимаются Stream 3 rebuild** (bot mirror по stable-id из Ayla; #1043/mysite-sync удаляются; internal API отдаёт resolved health-check/duration). Пока rebuild не сделан — booking реальных услуг невозможен.
 
 ### P2 — латентные / архитектурные
 
@@ -201,12 +202,33 @@ Allowed: `apps/booking/**`, `apps/bookings/**`, `apps/integrations/ayla/booking_
 - Подготовить flip-план `BOOKING_VIA_AYLA_REST` (grounding source consistency).
 - **DoD:** E2E-тест: bot читает слоты/каталог + create/cancel/reschedule через Ayla REST без YClients и без локальной canonical-записи; нет двойного бронирования с walk-in.
 
-### Stream 3 — Catalog bridge (после S0)
-Repo: оба. Allowed: `apps/catalog/**`, `apps/orchestrator/discovery.py`, тесты + Ayla `services/`. **Forbidden:** `apps/booking/services/create.py`, `apps/eventbus/**`.
-- Чистый ребилд каталога (#1044, заменяет #1043) — 4-слойная модель + `YClientsMapping`; Ayla-модель beautygo #200.
-- Убрать дубль поля `ayla_user_id` (#1052); заполнять stable-id/`ayla_service_id`; ретайр mysite-sync.
-- Ayla-side: canonical-дом `requires_health_check` на `Service`; publisher'ы `service.updated`/`master.schedule.updated`.
-- **DoD:** `ayla_service_id` coverage ≥ порога; sync с Ayla (не mysite); health-check grounding читает canonical.
+### Stream 3 — Catalog domain rebuild for Ayla booking (+ calendar sync)
+> **Рефрейм #1044 (founder 2026-07-03):** это НЕ «мост/coverage старого каталога», а **построение canonical bookable-каталога в Ayla**. 1223 залитых `ServiceTemplate` = **таксономия** («какие услуги бывают»), **НЕ** прайс пилотного салона. Для брони нужны bookable-сущности: `ServiceTemplate → SalonService → SpecialistService`. #1043 (fuzzy matcher / coverage gate / override CSV / link_ayla_service_ids / mysite sync) **устарел и удаляется из pilot-плана**. mysite ретайрим (тестовый незавершённый источник, не мигрируем).
+
+**Цель:** bot бронирует **реальные подтверждённые услуги** пилотного салона через Ayla REST — не таксономию, не mysite, не fuzzy.
+
+**Модель (Ayla owns):**
+- `ServiceTemplate` — справочник (stable_id/slug, synonyms, goals, requires_health_check, contraindications, optional default_duration, icon).
+- `SalonService` — салон реально оказывает услугу (price_from, default_duration, is_active, resolved health-check/contra, source/status).
+- `SpecialistService` — bookable-услуга мастера (price, **duration обязана быть resolved**, is_active, bookable, optional external refs).
+- `DraftSalonService` — черновик из внешнего источника (source, confidence, suggested_template, status: pending_confirmation/confirmed/needs_review/rejected).
+- `ExternalSourceMapping` (шире, чем `YClientsMapping`) — связь с внешними источниками (source, external_company/staff/service/record_id, linked_tenant/specialist/salon_service/specialist_service, last_synced_at).
+
+**Онбординг-принцип: «Confirm, don't create from scratch».** Ayla заранее собирает данные салона из разрешённых источников (Яндекс/2ГИС/VK/сайт/PDF/YClients-по-токену) → draft-каталог → салон подтверждает/исправляет → confirmed → bookable. Для пилота допустим **semi-automated/admin-assisted intake одного салона**; полная мульти-источниковая автоматизация — **post-MVP**.
+
+**Инварианты брони:** booking НЕЛЬЗЯ создать без resolved `duration` (из SpecialistService/SalonService; fallback запрещён → needs_review); internal API отдаёт **resolved** health-check (bot не гадает по шаблону); только confirmed/active попадают в slots/booking.
+
+**Декомпозиция (Repo · SP rough):**
+- **S3A — Ayla catalog domain rebuild** (beautygo_backend): расширить ServiceTemplate; ввести SalonService; SpecialistService/связка Service; select-only enforcement (новые типы через draft/governance); stable-id internal API (resolved duration + health-check + review_count); миграции+тесты. **20–30 SP.**
+- **S3B — bot catalog mirror from Ayla** (bot): CatalogService key = Ayla stable-id; sync из Ayla internal API; **удалить mysite-sync + весь #1043** (seed_from_mysite, C3, external_id-key, matcher/coverage/gate); убрать дубль `ayla_user_id` (#1052); `review_count` (#1060); resolved duration/health-check; KB/event consumers. **12–18 SP.**
+- **S3C — pilot salon intake + draft confirmation** (Ayla/admin, minimal): собрать данные пилотного салона из 1–2 источников → `DraftSalonService` → normalize к ServiceTemplate → confirm → bookable. **8–13 SP.**
+- **S3-CAL — G-CalendarSync** (Ayla + integration): Variant A (Ayla primary) или Variant B (YClients inbound webhook → Ayla external busy intervals; company_id→tenant, staff_id→specialist). MVP-min = inbound-only. **8–15 SP.**
+- **S3D — catalog contract/API tests**: stable-id; resolved duration/health; inactive/unconfirmed не в booking; mirror только из Ayla; mysite отсутствует. **8–13 SP.**
+
+**Итого Stream 3 ≈ 50–70 SP** (было 18–34). **Статус: At Risk until S3 design locked.**
+**DoD:** bot бронирует confirmed SpecialistService пилотного салона через Ayla REST; slots учитывают внешнюю занятость (G-CalendarSync закрыт); mysite отсутствует; contract-тесты зелёные.
+
+**⚠️ Не стартовать S3 (Wave 2), пока:** записано решение G-CalendarSync (Variant A/B по салону) · подтверждён источник данных Пензы · принят Ayla-side breakdown.
 
 ### Stream 4 — Pilot Discovery Ranking (после Stream 2 + Stream 3)
 > **Название намеренно НЕ «marketplace-light»:** в пилот входит только ранжирование дискавери (relevance+trust+geo+goal/price). Полноценный marketplace (фильтры, геолокация, персонализация, 3 слоя, история, Mini App) — post-pilot.
@@ -266,9 +288,10 @@ Allowed: `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrat
 4. Ayla эмитит `booking.created/confirmed` → **доставка включена по топику** → bot обновляет mirror + ставит reminder.
 5. Любой фейл/red-flag → **AdminTask** (не молчаливый дроп).
 
-**Критический путь (parallelised):** `S0 (контракты) → S0.5 (event_id) → Stream 1 (consent+safety+handoff) → Stream 3 (catalog bridge для health-check) → Stream 2 (booking flip) → пер-топик flip доставки → Stream 4 (marketplace E2E)`.
+**Критический путь (parallelised):** `S0 (контракты) → S0.5 (event_id) → Stream 1 (consent+safety+handoff) → Stream 3 (catalog domain rebuild + G-CalendarSync) → Stream 2 (booking flip) → пер-топик flip доставки → Stream 4 (discovery ranking)`.
 
-> **Решение founder 2026-07-02:** пилот на **Ayla REST = 15.08.2026** → FOUNDATION #1016 + P0 booking + event-delivery остаются pilot-critical. **15.07 НЕ фиксируется как Ayla-REST MVP** (P0/P1-блокеры) — если нужен показ 15.07, только демо/legacy YClients без заявления «MVP готов». Тело EPIC #1044 («пилот на легаси») надо переформулировать под это. План/сроки — в [`2026-07-02-MVP_DELIVERY_TRACKER.md`](2026-07-02-MVP_DELIVERY_TRACKER.md).
+> **Решение founder 2026-07-02:** пилот на **Ayla REST = 15.08.2026**; 15.07 — только демо/legacy YClients, не MVP.
+> **Рефрейм #1044 (founder 2026-07-03):** пилот бронирует **реальные подтверждённые услуги** салона через Ayla REST. #1044 = catalog **domain rebuild** (не bridge/coverage). Ключевые решения: ServiceTemplate = таксономия ≠ bookable; bookable = SalonService+SpecialistService; #1043 deprecated; mysite retired; онбординг = «Confirm, don't create» (external prefill → draft → confirm); YClients runtime integration optional, но **inbound availability sync обязателен, если салон продолжает вести календарь в YClients** → новый **G-CalendarSync**. Stream 3 → 50–70 SP. **15.08 остаётся committed target, статус At Risk until:** S3 design locked · G-CalendarSync decision recorded · pilot salon data source confirmed · Ayla-side breakdown accepted. План/сроки — в [`2026-07-02-MVP_DELIVERY_TRACKER.md`](2026-07-02-MVP_DELIVERY_TRACKER.md).
 
 ---
 
@@ -280,7 +303,8 @@ Allowed: `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrat
 | **G-Event** | `event_id` width согласован (#1058); `booking.no_show`/`tenant.relationship.revoked` вне allowlist или с consumer'ом | flip `OUTBOX_EXTERNAL_DELIVERY_TOPICS` |
 | **G-Safety** | глоб. путь через consent+safety; `should_handoff` создаёт AdminTask | запуск пилотного бота |
 | **G-Booking** | slots `service_id` fixed; cancel/reschedule idempotency; `ayla_user_id` провижининг | flip `BOOKING_VIA_AYLA_REST` |
-| **G-Catalog** | `ayla_service_id` coverage ≥ порога; sync с Ayla; health-check дом определён | health-check grounded booking под флагом ON |
+| **G-Catalog** | bot mirror по Ayla stable-id (не mysite); только confirmed/active bookable в booking; resolved duration + resolved health-check из internal API | booking реальных услуг под флагом ON |
+| **G-CalendarSync** | либо Ayla = primary calendar (Variant A), либо YClients inbound webhook → Ayla external busy intervals покрывает create/update/cancel (Variant B) | **G-Booking** (защита от двойной брони) |
 | **G-Notify** | де-конфликт двойного контакта per-event | flip топиков payment/booking доставки |
 
 ---

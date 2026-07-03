@@ -22,21 +22,21 @@
 **Exit criteria:** global path проходит consent + safety pre_check; should_handoff создаёт AdminTask; HUMAN_HANDOFF глушит бота; red-flag/complaint/human/bookingfail тесты green; allowlist без «эмитится-без-consumer'а».
 **Gate:** G-Safety ✅ (до запуска пилотного бота), G-Event ✅ (до flip топиков).
 
-## Week 3 — Catalog bridge + booking prep · 21.07–25.07 · ~35 SP
-**Фокус:** bot понимает canonical услуги/мастеров Ayla; подготовка booking.
-**Задачи:** S3.1 (Ayla #200), S3.2/S3.4/S3.5/S3.6 (#1044/#1052), **S4.0 `review_count` (#1060, prereq trust-score)**, S2.1 (#1051).
-**Параллель:** BE-agent-1 = catalog rebuild + review_count (bot+Ayla); BE-agent-2 = booking prep (slots service_id).
-**Milestone:** M4 Catalog green.
-**Exit criteria:** sync/rebuild из Ayla (не mysite); ayla_service_id заполнен; health-check дом на `Service`; coverage ≥ порога; slots работают с service_id.
-**Gate:** G-Catalog ✅ (до health-grounded booking под флагом ON).
+## Week 3–4 — Catalog domain rebuild + G-CalendarSync + booking prep · 21.07–01.08 · ~70 SP (2 недели, cross-repo)
+> **Рефрейм #1044:** Stream 3 вырос до 50–70 SP и стал cross-repo (тяжёлая Ayla-сторона) → растянут на W3+W4. **Не стартовать пока не закрыты 4 условия** (G-CalendarSync decision · данные Пензы · Ayla-side breakdown accepted · S3 design locked). Нужен **отдельный Ayla-агент** на S3A/S3C/S3-CAL.
+**Фокус:** построить canonical bookable-каталог Ayla (ServiceTemplate→SalonService→SpecialistService) + защита от двойной брони.
+**Задачи:** **S3A** Ayla domain (#200), **S3B** bot mirror re-key (#1044/#1052/#1060, удалить mysite+#1043), **S3C** pilot salon intake (draft→confirm), **S3-CAL** G-CalendarSync (Variant A/B), **S3D** contract tests; параллельно booking prep S2.1 (#1051).
+**Параллель:** **Ayla-agent** = S3A + S3C + S3-CAL (beautygo_backend); BE-agent = S3B (bot mirror) + S2.1; discovery Фаза 1 (S4.1a–d) стартует только после S3B (нужен review_count/stable-id).
+**Milestone:** M4 Catalog green + **M4-CAL CalendarSync green**.
+**Exit criteria:** bot mirror по Ayla stable-id (mysite удалён); confirmed SpecialistService bookable с resolved duration/health; slots учитывают внешнюю занятость.
+**Gate:** **G-Catalog ✅ + G-CalendarSync ✅** (оба до G-Booking).
 
-## Week 4 — Booking REST + marketplace E2E · 28.07–01.08 · ~35 SP
+## Week 4→5 — Booking REST + discovery · перекрытие с W4 · ~35 SP
 **Фокус:** запись создаётся в Ayla, bot хранит proxy; discovery подбирает ранжированно.
-**Задачи:** S2.2 (Ayla #203), S2.3/S2.4/S2.5/S2.6 (#1016), **S4.1a–d + S4.2a** (Pilot Discovery Ranking Фаза 1 core + скоринг, #1018).
-**Параллель:** BE-agent-1 = booking REST + flip-plan; BE-agent-2 = discovery ranking (trust/geo/diversity + scoring).
+**Задачи:** S2.2 (Ayla #203), S2.3/S2.4/S2.5/S2.6 (#1016), **S4.1a–d + S4.2a** (Pilot Discovery Ranking, #1018).
 **Milestone:** M5 Booking green.
-**Exit criteria:** cancel/reschedule идемпотентны; ayla_user_id провижинится; E2E confirm→Ayla REST→proxy проходит; discovery отдаёт ranked top-3.
-**Gate:** G-Booking ✅ (до flip `BOOKING_VIA_AYLA_REST`).
+**Exit criteria:** cancel/reschedule идемпотентны; ayla_user_id провижинится; E2E confirm→Ayla REST→proxy; нет двойной брони (G-CalendarSync); discovery отдаёт ranked top-3.
+**Gate:** G-Booking ✅ (до flip `BOOKING_VIA_AYLA_REST`; требует G-Catalog + G-CalendarSync).
 
 ## Week 5 — Discovery Фаза 1/2 финиш + gates + pilot smoke · 04.08–08.08 · ~20 SP
 **Фокус:** связать нить пилота end-to-end и пройти gates.
@@ -57,7 +57,9 @@
 ```
 W1 Contract(G-Contract) ─┬─► W2 Safety(G-Safety) ──► запуск пилотного бота
                          ├─► W2 Event(G-Event) ────► flip топиков доставки
-                         └─► W3 Catalog(G-Catalog) ─► W4 Booking(G-Booking) ─► flip BOOKING_VIA_AYLA_REST
-                                                       └─► W4-5 Marketplace ─► M7 Pilot-ready
+                         └─► W3-4 Catalog rebuild(G-Catalog) + CalendarSync(G-CalendarSync)
+                                   └─► W4-5 Booking(G-Booking) ─► flip BOOKING_VIA_AYLA_REST
+                                             └─► W5 Discovery ─► M7 Pilot-ready (15.08, At Risk)
+   ⚠ Wave 2/S3 gated: G-CalendarSync decision · данные Пензы · Ayla-side breakdown · S3 design locked
 ```
 Контроль: каждую пятницу — velocity-строка в трекере + еженедельный статус (шаблон §6 трекера).

@@ -9,7 +9,8 @@
 > - **Velocity:** 2 параллельных код-агента + ежедневное ревью ≈ **35 SP/нед** (база). 3-й агент **не в базовой скорости** — точечно на независимые задачи (docs/tests/eventbus/catalog audit).
 > - **New-scope правило:** любое увеличение pilot-scope сначала фиксируется здесь как New Scope SP, иначе задача не берётся (GAP MAP §10).
 >
-> **🟢 СТАТУС 2026-07-03: Волна 1A запущена.** Два worktree/окна: `agent-s0a` (`fix/s0a-ayla-url-auth`, S0A.1/2/4 — builder+auth+booking_client-эталон) · `agent-s05` (`fix/s05-event-id-width`, S05.1/2/3 — event_id + allowlist). S0-B/S0-C/S1 — не стартовали (1B/1C после merge 1A). **Открытые риски S3 (до старта Wave 2):** ⓐ эксклюзивность календаря пилотного салона в Ayla (иначе double-booking → YClients read-sync не опционален); ⓑ Ayla-сторона #1044/#200 недооценена (нужен отдельный breakdown/стрим); ⓒ источник данных Пензы. S3 SP → пересмотр 40–55 (pilot ~195–205), статус **At Risk until S3 design locked**.
+> **🟢 СТАТУС 2026-07-03: Волна 1A запущена.** `agent-s0a` (`fix/s0a-ayla-url-auth`, S0A.1/2/4) · `agent-s05` (`fix/s05-event-id-width`, S05.1/2/3). S0-B/S0-C/S1 — не стартовали.
+> **🔴 РЕФРЕЙМ #1044 (2026-07-03): Stream 3 = Catalog domain rebuild.** S3 → 50–70 SP; pilot scope ~205–225; **15.08 committed но At Risk**; 08.08 = aggressive candidate. **Wave 2 НЕ стартовать пока не закрыты 4 условия:** (1) S3 design locked; (2) **G-CalendarSync** decision записан (Variant A Ayla-primary / Variant B YClients webhook→busy) по пилотному салону; (3) источник данных Пензы подтверждён; (4) Ayla-side breakdown принят. Отдельный **Ayla-агент** (beautygo_backend) на S3A/S3C/S3-CAL — рекомендация.
 
 ---
 
@@ -50,7 +51,7 @@ SP важнее часов: агенты идут параллельно, но �
 | **M4** | Catalog green | W3 | sync/rebuild из Ayla; ayla_service_id заполнен; ayla_user_id заполнен; health-grounding работает; coverage ≥ порога |
 | **M5** | Booking REST green | W4 | slots с service_id; cancel/reschedule идемпотентны; ayla_user_id провижинится; flag готов к flip; E2E booking проходит |
 | **M6** | Marketplace-light green | W4–5 | intent → recs; top-3 в чате; recommendation → slots; confirm → booking; сложные → Mini App/handoff |
-| **M7** | Pilot ready → **launch** | W5 gates green · **launch 15.08** | закрыты все gates: G-Contract, G-Event, G-Safety, G-Booking, G-Catalog, G-Notify; smoke + rollback готовы |
+| **M7** | Pilot ready → **launch** | W5 gates green · **launch 15.08** | закрыты все gates: G-Contract, G-Event, G-Safety, **G-Catalog, G-CalendarSync**, G-Booking, G-Notify; smoke + rollback готовы |
 
 ## 4. Master task table
 
@@ -99,17 +100,18 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S1.7 | ConsentRecord → memory_writer | bot | #1054 | BE | 3 | W2 | D | Backlog |
 | S1.8 | DOB/is_adult endpoint (Ayla) | Ayla | #202 | BE | 3 | W6 | D | Backlog |
 
-### Этап 4 — Catalog bridge + health-grounding (37 SP; pilot 21) · G-Catalog
+### Этап 4 — Catalog domain rebuild for Ayla booking (50–70 SP) · G-Catalog + G-CalendarSync
+> **Рефрейм #1044 (2026-07-03):** не bridge/coverage, а построение canonical bookable-каталога (ServiceTemplate=таксономия → SalonService → SpecialistService). #1043/mysite удаляются. Онбординг «Confirm, don't create». **Статус: At Risk until S3 design locked.** ⚠️ **Не стартовать (Wave 2)** пока: G-CalendarSync decision (Variant A/B) записан · источник данных Пензы подтверждён · Ayla-side breakdown принят. **Owner:** S3A/S3C/S3-CAL — **Ayla-агент (beautygo_backend)**; S3B — bot; см. рекомендацию про отдельный Ayla-стрим.
+
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
-| S3.1 | catalog rebuild model (Ayla) | Ayla | #200 | BE | 8 | W3 | M | Ready |
-| S3.2 | заполнять ayla_service_id / stable-id | bot | #1044 | BE | 5 | W3 | M | Ready |
-| S3.3 | заполнять ayla_user_id (masters) | bot | #1044 | BE | 5 | W3 | D | Backlog |
-| S3.4 | убрать дубль CatalogMaster.ayla_user_id | bot | #1052 | BE | 3 | W3 | M | Ready |
-| S3.5 | canonical-дом requires_health_check | Ayla | #1044 | BE | 5 | W3 | M | Ready |
-| S3.6 | coverage check ayla_service_id ≥ threshold | bot | #1044 | BE | 3 | W3 | M | Ready |
-| **S4.0** | **`review_count` в CatalogMaster mirror** (prereq Stream 4 trust-score) | bot(+Ayla) | **#1060** (linked #1044) | BE | 3 | W3/W4 | **M** | **Ready** |
-| S3.7 | seed каталога Пензы (разово) | Ayla | #1044 | BE | 5 | W3 | D | Backlog |
+| **S3A** | Ayla catalog domain rebuild (ServiceTemplate+ · SalonService · SpecialistService · select-only · stable-id internal API resolved duration/health/review_count · миграции+тесты) | Ayla | #200 (+нов.) | Ayla-agent | 20–30 | W3 | M | Ready* |
+| **S3B** | bot catalog mirror from Ayla (key=stable-id; **удалить #1043 + mysite-sync**; #1052 дубль-поле; #1060 review_count; resolved duration/health; KB/event consumers) | bot | #1044 #1052 #1060 | BE | 12–18 | W3/W4 | M | Ready* |
+| **S3C** | pilot salon intake + draft confirmation (minimal, 1–2 источника → DraftSalonService → confirm → bookable) | Ayla/admin | (нов.) | Ayla-agent | 8–13 | W3/W4 | M | Blocked (данные Пензы) |
+| **S3-CAL** | G-CalendarSync (Variant A Ayla-primary ИЛИ Variant B YClients inbound webhook → external busy intervals; MVP-min inbound) | Ayla+integr | (нов.) | Ayla-agent | 8–15 | W4 | M | Blocked (решение A/B) |
+| **S3D** | catalog contract/API tests (stable-id · resolved duration/health · inactive/unconfirmed не в booking · mirror только из Ayla · mysite отсутствует) | оба | (нов.) | BE | 8–13 | W4 | M | Ready* |
+
+*Ready\* = готово к старту после снятия 3 блокеров Wave 2 (G-CalendarSync decision · данные Пензы · breakdown accepted). Полная мульти-источниковая автоматизация intake — **post-MVP**.
 
 ### Этап 5 — Booking via Ayla REST (29 SP; pilot 24) · G-Booking
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
@@ -178,10 +180,11 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | MEM-2 | Decide end-state A/B (default B) | — | — | 2 | post-pilot | Backlog |
 | MEM-3 | Rename / migrate if needed | оба | — | 8 | post-pilot | Backlog |
 
-**Итоги (SP-рамка v1.2):**
-- **Baseline pilot scope:** 155 SP · **New scope:** +16 SP (дискавери Stream 4 Фаза 1+2, 13→29) + review_count/мелочи → **Current pilot scope ≈ 171–177 SP**.
-- **08.08 (W5) = gates-green candidate** при ~155–162 SP core · **15.08 (W6) = committed launch** добирает хвост must-have до 177.
-- deferred ≈ **95 SP** · полный объём ≈ **255 SP**.
+**Итоги (SP-рамка v1.2, рефрейм #1044):**
+- **Baseline** 155 · **New scope дискавери** +16 · **New scope Stream 3 rebuild** +30–50 (S3 18–34 → 50–70) → **Current pilot scope ≈ 205–225 SP**.
+- **08.08 = aggressive gates-green candidate** (не обещание) · **15.08 = committed target, At Risk**.
+- ⚠️ **Слака практически нет:** 205–225 SP при 2 агентах ~35 SP/нед × 6 нед = 210. Лечится (а) отдельным устойчивым **Ayla-агентом** на S3A/S3C/S3-CAL/#1016-Ayla (это НЕ ad-hoc 3-й агент, а core-стрим), и/или (б) intake-minimal, и/или (в) сдвиг даты.
+- deferred ≈ **95 SP** · полный объём ≈ **285–300 SP**.
 
 ## 5. Velocity tracking (заполнять еженедельно)
 
@@ -208,7 +211,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 Не готово / перенос: <ID>
 Блокеры: <что и почему>
 Решение: <напр. не запускать Stream 2 до закрытия G-Contract>
-Gate-прогресс: G-Contract [ ] G-Event [ ] G-Safety [ ] G-Booking [ ] G-Catalog [ ] G-Notify [ ]
+Gate-прогресс: G-Contract [ ] G-Event [ ] G-Safety [ ] G-Catalog [ ] G-CalendarSync [ ] G-Booking [ ] G-Notify [ ]
 ```
 
 ## 7. Связанные документы

@@ -54,17 +54,33 @@
 
 ---
 
-## ВОЛНА 2 — booking + catalog bridge (после Волны 1)
+## ВОЛНА 2 — booking + catalog domain rebuild (после Волны 1; S3 gated на 4 условия)
 
 ### Agent S2 — Booking via Ayla REST · 24 SP · #1016 #1051 · Ayla #203
 - **Branch:** `feat/s2-booking-ayla-rest` · **Allowed:** `apps/booking/**`, `apps/bookings/**`, `apps/integrations/ayla/booking_client.py`, тесты (+Ayla `appointments/internal_api.py` для #203). **Forbidden:** `apps/catalog/**`, `apps/channels/max/**`, `apps/eventbus/**`.
 - **Кратко:** slots service_id fix (#1051); server-side idempotency cancel/reschedule (Ayla #203); auto-provision `ayla_user_id`; RemoteBookingProxy consistency; flip-план; E2E confirm→Ayla REST→proxy.
 - **DoD:** E2E-тест booking через Ayla REST без YClients/локальной canonical-записи; нет двойного бронирования с walk-in.
 
-### Agent S3 — Catalog bridge / rebuild + review_count · 21 SP · #1044 #1052 #1060 · Ayla #200
-- **Branch:** `feat/s3-catalog-rebuild` · **Allowed:** `apps/catalog/**`, `apps/orchestrator/discovery.py`, тесты (+Ayla `services/`). **Forbidden:** `apps/booking/services/create.py`, `apps/eventbus/**`.
-- **Кратко:** чистый ребилд каталога (4-слойная модель + YClientsMapping, Ayla #200); заполнять `ayla_service_id`/stable-id; убрать дубль поля (#1052); canonical-дом `requires_health_check`; coverage-check; **`review_count` в `CatalogMaster` mirror + populate на синке (#1060, prereq для Stream 4 trust-score)**.
-- **DoD:** sync/rebuild из Ayla (не mysite); `ayla_service_id` coverage ≥ порога; health-grounding читает canonical; `review_count` заполняется.
+### Stream 3 — Catalog domain rebuild for Ayla booking (рефрейм #1044) · 50–70 SP
+> **🚫 НЕ СТАРТОВАТЬ, пока не закрыты 4 условия:** (1) записано решение **G-CalendarSync** (Variant A Ayla-primary / Variant B YClients webhook→busy) по пилотному салону; (2) подтверждён источник данных Пензы; (3) принят Ayla-side breakdown; (4) S3 design locked. Модель: `ServiceTemplate`(таксономия) → `SalonService` → `SpecialistService`; `DraftSalonService`/`ExternalSourceMapping`. #1043/mysite удаляются. Онбординг = «Confirm, don't create».
+
+**Agent S3A — Ayla catalog domain rebuild** · beautygo_backend · **20–30 SP** · #200
+- **Отдельный Ayla-агент** (worktree на beautygo_backend). Расширить `ServiceTemplate` (goals/synonyms/icon/stable_slug); ввести `SalonService`; `SpecialistService`/связка `Service`; select-only enforcement (новые типы через draft/governance); stable-id internal API (отдаёт **resolved** duration + health-check + review_count); миграции+тесты.
+
+**Agent S3B — bot catalog mirror from Ayla** · ai-bot-platform · **12–18 SP** · #1044 #1052 #1060
+- **Branch:** `feat/s3b-bot-mirror-ayla` · **Allowed:** `apps/catalog/**`, тесты. **Forbidden:** `apps/booking/services/create.py`, `apps/eventbus/**`.
+- `CatalogService` key = Ayla stable-id; sync из Ayla internal API; **удалить mysite-sync + весь #1043** (seed_from_mysite, C3, external_id-key, matcher/coverage/gate); убрать дубль `ayla_user_id` (#1052); `review_count` (#1060); resolved duration/health; KB/event consumers.
+
+**Agent S3C — pilot salon intake + draft confirmation (minimal)** · beautygo_backend/admin · **8–13 SP**
+- Собрать данные пилотного салона из 1–2 источников → `DraftSalonService` (pending/needs_review/confirmed) → normalize к ServiceTemplate → confirm → bookable `SalonService`/`SpecialistService`. Полная мульти-источниковая автоматизация — **post-MVP**.
+
+**Agent S3-CAL — G-CalendarSync** · beautygo_backend + integration · **8–15 SP**
+- Variant A (Ayla primary) ИЛИ Variant B (YClients inbound webhook → Ayla external busy intervals; company_id→tenant, staff_id→specialist). MVP-min = inbound-only (bot не предлагает занятые окна). **Блокирует G-Booking.**
+
+**Agent S3D — catalog contract/API tests** · оба · **8–13 SP**
+- stable-id; resolved duration/health; inactive/unconfirmed не в booking; mirror только из Ayla; mysite отсутствует.
+
+**DoD Stream 3:** bot бронирует confirmed SpecialistService пилотного салона через Ayla REST; slots учитывают внешнюю занятость (G-CalendarSync); mysite удалён; contract-тесты зелёные.
 
 ---
 
