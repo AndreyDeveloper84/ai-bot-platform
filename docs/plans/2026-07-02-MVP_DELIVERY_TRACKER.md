@@ -86,16 +86,16 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S05.2 | миграция 0009 + тесты dedupe/DLQ/failure + guard→DLQ | bot | #1058 | agent-s05 | 5 | W1 | M | ✅ Done (PR #1067) |
 | S05.3 | allowlist check + no_show/revoked | bot | #946 | agent-s05 | 3 | W1 | M | ✅ Done (PR #1067) |
 | **S05.6** | **event_id 26→36 кросс-app** (RemoteBookingProxy.last_synced_event_id + Conversation.last_payment_event_id) — завершает #1058 end-to-end | bot | **#1066** | agent-s05 (cross-stream authz ✓) | 2 | W1 | **M (pilot-critical)** | ✅ Done (PR #1070 merged; #1058 + #1066 closed; CI mypy hotfix PR #1073 merged) |
-| S05.4 | retention cleanup beat | bot | #1056 | agent-s05 (ad-hoc 3rd, не в базе) | 5 | (наперёд) | D→pull-forward | **In Progress** |
+| S05.4 | retention cleanup beat (4 вторичных леджера 120d, chunked) | bot | #1056 | agent-s05 | 5 | (наперёд) | D→pull-forward | ✅ Done (PR #1080; follow-up #1085) |
 | S0B.e2e | e2e staging round-trip profile/recs (authenticated, nightly) | bot | **#1078** | agent-s0b | 3 | W2 | M (durable verify) | **In Progress** |
-| S05.5 | double-contact + MasterNotificationPrefs dispatcher | bot | #1057 | BE | 5 | W6 | D | Backlog |
+| S05.5 | double-contact + MasterNotificationPrefs dispatcher (G-Notify) | bot | #1057 | agent-s05 | 5 | (наперёд) | D→pull-forward | **In Progress** |
 
 ### Этап 3 — Global MAX safety/consent/handoff (45 SP; pilot 31) · G-Safety · P0
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
 | S1.1 (S1-A) | consent-гейт на global path (backend) | bot | #1046 | agent-s1 | 5 | W2 | M | ✅ Done (PR #1072) |
 | S1.FE | ~~Consent UI ShiroPy~~ → #1046 consent-гейт разговорный (backend) = **agent-s1 (S1-A)**; ShiroPy строго-фронт = **#949** SUPPORT_DEEPLINK | bot | #1046 / #949 | agent-s1 + FE #949 | — | W2 | M | Переназначено |
-| S1.2 (S1-B) | safety pre_check до discovery (оба хендлера; global=canned-only) | bot | #1053 | agent-s1 | 5 | W2 | M | **In Progress** (ветка feat/s1b-safety-precheck; кризис-копирайт → founder sign-off перед merge) |
+| S1.2 (S1-B) | safety pre_check до discovery (оба хендлера; global=canned-only) | bot | #1053 | agent-s1 | 5 | W2 | M | **In Review (PR #1084)** — merge gated: (1) founder sign-off кризис-копирайта, (2) **P0 #1081** (regex не ловит «хочу умереть» — сеть sole+live) |
 | S1.3 (S1-C) | should_handoff → AdminTask | bot | #1047 | agent-s1 | 5 | W2 | M | **In Progress** |
 | S1.4 (S1-C) | HUMAN_HANDOFF: бот молчит | bot | #1047 | agent-s1 | 3 | W2 | M | **In Progress** |
 | S1.5 (S1-D) | тесты suicide/red-flag/complaint/human/bookingfail | bot | — | agent-s1 | 8 | W2 | M | **In Progress** |
