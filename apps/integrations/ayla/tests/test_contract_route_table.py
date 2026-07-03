@@ -19,8 +19,22 @@ route-table. Any drift turns this test red:
 ``ROUTE_TABLE`` below is a **hand-maintained mirror** of Ayla's internal API —
 it is NOT auto-derived. When Ayla adds / renames / moves an internal route,
 update this table (and ``docs/architecture/contract-matrix.md``) in the same
-change. ``test_matcher_catches_drift`` proves the matcher actually rejects a
-tampered request, so the mirror can't rot into a rubber stamp.
+change. Likewise, a new client method needs BOTH a ``ROUTE_TABLE`` row AND an
+exerciser call below — the bijection assertion only guards the routes that
+appear in one or the other. ``test_matcher_catches_drift`` proves the matcher
+actually rejects a tampered request, so the mirror can't rot into a rubber
+stamp.
+
+**Scope + what green does NOT prove.** This test verifies each client's
+``(method, path, auth header + secret, required non-auth headers)`` against the
+table. It does NOT assert request bodies or query-param *values* (only that a
+query param isn't smuggled into the *path*). And crucially it proves
+client↔table *consistency*, NOT table↔Ayla *correctness*: a row that is wrong
+in a way the client is also wrong about passes here. The Ayla-side authority is
+the nightly staging round-trip (``tests/e2e``, #1079). Rows most worth a human
+cross-check against Ayla's ``urls.py`` before pilot: ``/api/v1/payments/create``
+(no trailing slash, unlike every other row), the ``cross_domain/{action}/{id}``
+segment order, and recommendations under ``/api/v1/internal/...``.
 
 Secret binding: each surface is given a **distinct sentinel token value** per
 setting, so a captured header proves the client read the *correct* setting —
@@ -32,6 +46,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Generator
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -65,6 +80,10 @@ class Route:
     method: str
     path: str  # normalised — ``{id}`` for dynamic id segments
     auth: Auth
+    # Non-auth headers the contract REQUIRES (lower-cased). E.g. payments'
+    # ``Idempotence-Key`` — the double-charge dedup guarantee, which the auth
+    # check alone would not catch if a client dropped it.
+    required_headers: frozenset[str] = frozenset()
 
 
 # ─── Ayla internal route-table mirror — KEEP IN SYNC WITH AYLA ──────────────
@@ -111,7 +130,7 @@ ROUTE_TABLE: tuple[Route, ...] = (
         Auth.SERVICE_EXT,
     ),
     # ayla_payments/client (#427) — Bearer + Idempotence-Key; NO trailing slash.
-    Route("POST", "/api/v1/payments/create", Auth.BEARER),
+    Route("POST", "/api/v1/payments/create", Auth.BEARER, frozenset({"idempotence-key"})),
 )
 
 
@@ -159,11 +178,16 @@ def _auth_violation(auth: Auth, headers: dict[str, str]) -> str | None:
 
 
 def _match(cap: Captured) -> tuple[Route | None, str | None]:
-    """Find the route for a captured request + any auth violation on it."""
+    """Find the route for a captured request + any auth/header violation on it."""
     npath = _normalise(cap.path)
     for route in ROUTE_TABLE:
         if route.path == npath and route.method == cap.method.upper():
-            return route, _auth_violation(route.auth, cap.headers)
+            err = _auth_violation(route.auth, cap.headers)
+            if err is None:
+                missing = sorted(h for h in route.required_headers if h not in cap.headers)
+                if missing:
+                    err = f"missing required header(s): {missing}"
+            return route, err
     return None, f"no route-table entry for {cap.method} {npath}"
 
 
@@ -185,7 +209,9 @@ def _recording_handler(sink: list[Captured]) -> Any:
 
 
 @pytest.fixture
-def captured(settings: Any, monkeypatch: pytest.MonkeyPatch) -> list[Captured]:
+def captured(
+    settings: Any, monkeypatch: pytest.MonkeyPatch
+) -> Generator[list[Captured], None, None]:
     """Settings + in-memory transport so every client's real HTTP call is
     recorded instead of hitting the network."""
     settings.AYLA_BASE_URL = _BASE
@@ -208,7 +234,20 @@ def captured(settings: Any, monkeypatch: pytest.MonkeyPatch) -> list[Captured]:
 
     monkeypatch.setattr(httpx, "Client", client_factory)
     monkeypatch.setattr(httpx, "AsyncClient", async_factory)
-    return sink
+    yield sink
+
+    # Teardown: drop the singletons/circuits built with sentinel config so no
+    # sentinel-tokened client leaks into another test's process state.
+    from apps.integrations.ayla import profile_client, reset_nutrition_client
+    from apps.integrations.ayla.booking_client import reset_ayla_booking_client
+    from apps.integrations.ayla.recommendations_client import reset_recommendations_circuit
+    from apps.integrations.ayla_payments import reset_ayla_payments_client
+
+    reset_ayla_booking_client()
+    reset_nutrition_client()
+    reset_ayla_payments_client()
+    reset_recommendations_circuit()
+    profile_client._circuit.record_success()
 
 
 def _swallow(fn: Any) -> None:
@@ -397,6 +436,9 @@ def test_matcher_catches_drift() -> None:
             "POST",
             "/api/v1/nutrition/internal/scan/",
             {"authorization": f"Bearer {_INTERNAL_TOKEN}", "x-external-user-id": "e"},
+        ),
+        "payments dropping the required Idempotence-Key": Captured(
+            "POST", "/api/v1/payments/create", {"authorization": f"Bearer {_INTERNAL_TOKEN}"}
         ),
     }
     for label, cap in drift.items():
