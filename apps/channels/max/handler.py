@@ -514,8 +514,15 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # HUMAN_HANDOFF flip on this per-tenant path is S1-C (#1047), deliberately NOT
     # done here. We short-circuit before the photo download so a blocked turn
     # doesn't waste a CDN fetch either.
+    #
+    # HUMAN_HANDOFF guard: when a human operator is already driving this
+    # conversation, the bot MUST stay silent (skills.registry.dispatch enforces
+    # this via should_send=False at state==HUMAN_HANDOFF). The safety short-circuit
+    # runs BEFORE dispatch, so without this guard it would barge a canned crisis
+    # reply over the operator — the worst moment to auto-inject. When in handoff we
+    # skip the short-circuit and fall through to dispatch, which mutes the turn.
     safety = evaluate_inbound(event.text)
-    if not safety.allowed:
+    if not safety.allowed and conversation.state != Conversation.State.HUMAN_HANDOFF:
         _emit_safety_shortcircuit(bot_user, safety, is_global=False)
         record_message(
             conversation,

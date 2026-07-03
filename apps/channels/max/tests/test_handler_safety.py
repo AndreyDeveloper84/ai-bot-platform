@@ -69,10 +69,10 @@ def _no_chat_action(monkeypatch):
     monkeypatch.setattr(outbound, "send_chat_action", lambda **kw: None)
 
 
-def _run(tenant, text):
+def _run(tenant, text, *, mid="m-1"):
     trace = uuid4()
     with tenant_scope(tenant), trace_id_scope(str(trace)):
-        max_handler.handle_max_event(_payload(text=text), trace_id=trace)
+        max_handler.handle_max_event(_payload(text=text, mid=mid), trace_id=trace)
 
 
 class TestRedFlagShortCircuit:
@@ -109,6 +109,27 @@ class TestRedFlagShortCircuit:
 
         assert len(mock_send) == 1
         assert mock_send[0]["text"] == BLOCK_REPLY_TEXT
+        assert AdminTask.all_tenants.count() == 0
+
+
+class TestHumanHandoffSilence:
+    def test_red_flag_stays_silent_when_operator_driving(
+        self, tenant_a, mock_send, fake_redis, settings
+    ):
+        # CR Finding 1: a conversation already in HUMAN_HANDOFF (a human operator
+        # is handling the distressed user) must NOT get a bot crisis barge-in — the
+        # gate must respect the silence contract and stay quiet.
+        settings.STRICT_TENANT_SCOPE = "strict"
+        # First contact stamps the BotUser + creates the conversation.
+        _run(tenant_a, "привет", mid="m-1")
+        mock_send.clear()
+        conv = Conversation.all_tenants.get(tenant=tenant_a)
+        Conversation.all_tenants.filter(pk=conv.pk).update(state=Conversation.State.HUMAN_HANDOFF)
+
+        _run(tenant_a, "я думаю о суициде", mid="m-2")
+
+        # Bot silent — no crisis reply sent over the operator.
+        assert mock_send == []
         assert AdminTask.all_tenants.count() == 0
 
 
