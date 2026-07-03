@@ -216,10 +216,36 @@ class TestPaymentEventIdempotency:
         conv.refresh_from_db()
         assert conv.last_payment_event_id == ulid
 
-    def test_last_payment_event_id_max_length_26(
+    def test_last_payment_event_id_accepts_uuid4_format(
         self, tenant_pay: Tenant, bot_user_pay: BotUser, settings
     ) -> None:
-        """Boundary: 26 chars OK, 27 chars fails ``full_clean`` validation."""
+        """#1058/#1066: a real 36-char Ayla uuid4 round-trips through
+        save/refetch — no DataError on the widened varchar(36) column.
+        This is the payment.* half of the end-to-end fix (#1067 widened
+        the eventbus dedupe tables; this widens the consumer's
+        idempotency-tail column).
+
+        NOTE: the DataError is Postgres-only; SQLite ignores max_length,
+        so this round-trip is a real guard only on CI-Postgres. The
+        backend-agnostic guard is test_last_payment_event_id_max_length_36
+        (full_clean + deconstruct)."""
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        conv = _make_conversation(tenant_pay, bot_user_pay)
+
+        uuid4 = "9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c"  # 36 chars
+        assert len(uuid4) == 36
+
+        with tenant_scope(tenant_pay):
+            conv.last_payment_event_id = uuid4
+            conv.save(update_fields=["last_payment_event_id"])
+            conv.refresh_from_db()
+            assert conv.last_payment_event_id == uuid4
+
+    def test_last_payment_event_id_max_length_36(
+        self, tenant_pay: Tenant, bot_user_pay: BotUser, settings
+    ) -> None:
+        """Boundary (#1066): 36 chars OK, 37 chars fails ``full_clean``."""
 
         from django.core.exceptions import ValidationError
 
@@ -227,17 +253,17 @@ class TestPaymentEventIdempotency:
         conv = _make_conversation(tenant_pay, bot_user_pay)
 
         with tenant_scope(tenant_pay):
-            # 26 chars — exactly at the limit, must round-trip.
-            boundary = "a" * 26
+            # 36 chars — exactly at the widened limit, must round-trip.
+            boundary = "a" * 36
             conv.last_payment_event_id = boundary
             conv.full_clean()
             conv.save(update_fields=["last_payment_event_id"])
             conv.refresh_from_db()
             assert conv.last_payment_event_id == boundary
-            assert len(conv.last_payment_event_id) == 26
+            assert len(conv.last_payment_event_id) == 36
 
-            # 27 chars — over the limit, full_clean must raise.
-            conv.last_payment_event_id = "a" * 27
+            # 37 chars — over the limit, full_clean must raise.
+            conv.last_payment_event_id = "a" * 37
             with pytest.raises(ValidationError):
                 conv.full_clean()
 
@@ -245,7 +271,7 @@ class TestPaymentEventIdempotency:
         field = Conversation._meta.get_field("last_payment_event_id")
         assert isinstance(field, Field)
         field_attrs = field.deconstruct()[3]
-        assert field_attrs.get("max_length") == 26
+        assert field_attrs.get("max_length") == 36
         assert field_attrs.get("blank") is True
         assert field_attrs.get("default") == ""
 

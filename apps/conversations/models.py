@@ -236,14 +236,15 @@ class Conversation(models.Model):
         ),
     )
     last_payment_event_id = models.CharField(
-        max_length=26,  # ULID
+        max_length=36,  # bare ULID 26 or Ayla uuid4 36 (#1058)
         blank=True,
         default="",
         help_text=(
-            "ULID of the last cross-service payment.* event that "
-            "touched this conversation. Handler-level idempotency "
-            "key: if envelope.event_id matches this, the handler "
-            "short-circuits before side-effects. Mirrors the "
+            "Cross-service event_id (bare ULID 26 chars or Ayla uuid4 "
+            "36 chars, #1058) of the last payment.* event that touched "
+            "this conversation. Handler-level idempotency key: if "
+            "envelope.event_id matches this, the handler short-circuits "
+            "before side-effects. Mirrors the "
             "RemoteBookingProxy.last_synced_event_id pattern from "
             "#442. Forensic trace, NOT the primary idempotency "
             "guard — that's IngestDedupe at the dispatcher layer."

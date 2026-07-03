@@ -864,12 +864,13 @@ class RemoteBookingProxy(models.Model):
 
     # ── Audit / observability ──────────────────────────────────────
     last_synced_event_id = models.CharField(
-        max_length=26,
+        max_length=36,
         blank=True,
         default="",
-        help_text="ULID of the last cross-service event that touched "
-        "this row. Forensic trace, not the primary idempotency key "
-        "(that's the IngestDedupe table on the ingest side).",
+        help_text="Cross-service event_id (bare ULID 26 chars or Ayla "
+        "uuid4 36 chars, #1058) of the last event that touched this row. "
+        "Forensic trace, not the primary idempotency key (that's the "
+        "IngestDedupe table on the ingest side).",
     )
     synced_at = models.DateTimeField(
         auto_now=True,
