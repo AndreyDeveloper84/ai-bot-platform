@@ -1,12 +1,13 @@
 # MVP_DELIVERY_TRACKER_2026-07
 
-> **Назначение:** управляющий контур поверх [`2026-07-02-MVP_GAP_MAP.md`](2026-07-02-MVP_GAP_MAP.md) (v1.1). Здесь — объём (SP), этапы, контрольные даты, milestones, velocity и еженедельный delta «обгоняем / по плану / запаздываем».
+> **Назначение:** управляющий контур поверх [`2026-07-02-MVP_GAP_MAP.md`](2026-07-02-MVP_GAP_MAP.md) (v1.2). Здесь — объём (SP), этапы, контрольные даты, milestones, velocity и еженедельный delta «обгоняем / по плану / запаздываем».
 >
-> **✅ BASELINE (утверждён founder 2026-07-02):**
-> - **Цель:** пилот на **Ayla REST = 2026-08-15**. Внутренний target «gates green / pilot-ready» = **08.08 (W5)**; **11–15.08 (W6)** — буфер/hardening перед запуском.
-> - **15.07 НЕ фиксируется как Ayla-REST MVP** (нереалистично: P0/P1-блокеры по contract, safety, event_id, catalog bridge, booking flip). Если нужен показ 15.07 — только **демо/legacy YClients path**, без заявления «MVP готов».
-> - **Velocity:** 2 параллельных код-агента + ежедневное ревью ≈ **35 SP/нед** (база). 3-й агент **не в базовой скорости** — подключается точечно на независимые задачи (docs / tests / eventbus / catalog audit), т.к. много пересечений bot ↔ Ayla; сначала стабилизируем контракты и safety.
-> - **Остаётся оформить:** реконсиляция #1044 (тело «пилот на легаси» → 15.07 = демо, MVP = 15.08 Ayla REST); ACK ownership `UserPersonalContext` (#1055).
+> **✅ BASELINE (утверждён founder 2026-07-02, SP-выравнивание v1.2):**
+> - **Даты (two-tier):** **08.08 (конец W5) = gates-green candidate / internal target** (≈155–162 SP «core must-have»); **15.08 = committed pilot-ready + launch** (до **177 SP**, хвост must-have добирается в W6).
+> - **SP-рамка:** Baseline pilot scope **155 SP** + New scope **+16 SP** (дискавери 13→29, Stream 4 Фаза 1+2) + мелочи = **Current pilot scope ≈ 171–177 SP**. W6 = **must-have tail + buffer** (не чистый буфер).
+> - **15.07 НЕ фиксируется как Ayla-REST MVP** (P0/P1-блокеры). Показ 15.07 — только **демо/legacy YClients path**, без заявления «MVP готов».
+> - **Velocity:** 2 параллельных код-агента + ежедневное ревью ≈ **35 SP/нед** (база). 3-й агент **не в базовой скорости** — точечно на независимые задачи (docs/tests/eventbus/catalog audit).
+> - **New-scope правило:** любое увеличение pilot-scope сначала фиксируется здесь как New Scope SP, иначе задача не берётся (GAP MAP §10).
 
 ---
 
@@ -96,7 +97,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S1.7 | ConsentRecord → memory_writer | bot | #1054 | BE | 3 | W2 | D | Backlog |
 | S1.8 | DOB/is_adult endpoint (Ayla) | Ayla | #202 | BE | 3 | W6 | D | Backlog |
 
-### Этап 4 — Catalog bridge + health-grounding (34 SP; pilot 18) · G-Catalog
+### Этап 4 — Catalog bridge + health-grounding (37 SP; pilot 21) · G-Catalog
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
 | S3.1 | catalog rebuild model (Ayla) | Ayla | #200 | BE | 8 | W3 | M | Ready |
@@ -105,6 +106,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S3.4 | убрать дубль CatalogMaster.ayla_user_id | bot | #1052 | BE | 3 | W3 | M | Ready |
 | S3.5 | canonical-дом requires_health_check | Ayla | #1044 | BE | 5 | W3 | M | Ready |
 | S3.6 | coverage check ayla_service_id ≥ threshold | bot | #1044 | BE | 3 | W3 | M | Ready |
+| **S4.0** | **`review_count` в CatalogMaster mirror** (prereq Stream 4 trust-score) | bot(+Ayla) | **#1060** (linked #1044) | BE | 3 | W3/W4 | **M** | **Ready** |
 | S3.7 | seed каталога Пензы (разово) | Ayla | #1044 | BE | 5 | W3 | D | Backlog |
 
 ### Этап 5 — Booking via Ayla REST (29 SP; pilot 24) · G-Booking
@@ -123,7 +125,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 **Фаза 1 — быстрые улучшения (в пилот):**
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
-| S4.0 | `review_count` в mirror (поле + событие синка) — prereq trust-score | bot(+Ayla) | — | BE | 3 | W4 | M | Backlog |
+| S4.0 | `review_count` в mirror — **prereq trust-score, вынесен в Этап 4 (Catalog)** | — | **#1060** | — | (3) | W3/W4 | M | → Этап 4 |
 | S4.1a | синоним-recall перед icontains | bot | #1018 | BE | 2 | W4 | M | Ready |
 | S4.1b | Bayesian trust-score | bot | #1018 | BE | 3 | W4 | M | Ready |
 | S4.1c | trust-floor (Guardian-lite) | bot | #1018 | BE | 2 | W4 | M | Ready |
@@ -174,18 +176,23 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | MEM-2 | Decide end-state A/B (default B) | — | — | 2 | post-pilot | Backlog |
 | MEM-3 | Rename / migrate if needed | оба | — | 8 | post-pilot | Backlog |
 
-**Итоги:** pilot must-have ≈ **177 SP** (дискавери-скоуп вырос +16: Stream 4 Фаза 1+2 детализированы) · deferred ≈ **95 SP** · полный объём ≈ **255 SP**.
+**Итоги (SP-рамка v1.2):**
+- **Baseline pilot scope:** 155 SP · **New scope:** +16 SP (дискавери Stream 4 Фаза 1+2, 13→29) + review_count/мелочи → **Current pilot scope ≈ 171–177 SP**.
+- **08.08 (W5) = gates-green candidate** при ~155–162 SP core · **15.08 (W6) = committed launch** добирает хвост must-have до 177.
+- deferred ≈ **95 SP** · полный объём ≈ **255 SP**.
 
 ## 5. Velocity tracking (заполнять еженедельно)
+
+**Scope baseline (фиксируем на старте):** Baseline 155 SP · New scope +16 (дискавери) · Current pilot 171–177 SP. Любой рост — новая строка в колонке New scope.
 
 | Week | Planned SP | Completed SP | Carried-over | New scope | Blocked | Delta (Compl−Plan) | Статус |
 |---|---|---|---|---|---|---|---|
 | W1 | 35 | — | — | — | — | — | — |
 | W2 | 30 | — | — | — | — | — | — |
-| W3 | 35 | — | — | — | — | — | — |
-| W4 | 35 | — | — | — | — | — | — |
+| W3 | 35 | — | — | +3 (S4.0 #1060) | — | — | — |
+| W4 | 35 | — | — | +13 (дискавери Фаза 1/2) | — | — | — |
 | W5 | 20 | — | — | — | — | — | — |
-| W6 | 15–25 | — | — | — | — | — | — |
+| W6 (tail+buffer) | 15–25 | — | — | — | — | — | — |
 
 **Delta-легенда:** Ahead (раньше плана) · On Track · At Risk (риск задержки) · Delayed (уже отстаём) · Blocked.
 `Schedule delta = Completed SP − Planned SP` (отрицательный = отстаём на N SP).

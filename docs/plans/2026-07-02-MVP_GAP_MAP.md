@@ -1,6 +1,7 @@
-# MVP_GAP_MAP_2026-07 — v1.1
+# MVP_GAP_MAP_2026-07 — v1.2
 
-> **v1.1 (2026-07-02):** учтено ревью founder — Stream 0 разбит на A/B/C, `event_id` → Stream 0.5, safety раньше booking, добавлены Freeze rule (§10), PR sequencing (§11), волновой запуск (§12), Definition of Done по стримам, проставлены номера заведённых тикетов. Сверено с authoritative-роадмапом (PR #1015, гэпы G1–G10) и GitHub.
+> **v1.2 (2026-07-02):** 2-е ревью founder — Stream 4 → «Pilot Discovery Ranking» (защита scope); `review_count` вынесен в тикет **#1060** (S4.0, linked #1044); Freeze rule дополнен правилом New-Scope-SP; PR sequencing/волны разбиты на 1A/1B/1C (S0-A разгружен, S0-B = единственное место правки прочих клиентов, S0-C после A/B, S1 = epic 3–4 PR).
+> **v1.1 (2026-07-02):** ревью founder — Stream 0 → A/B/C, `event_id` → Stream 0.5, safety раньше booking, Freeze rule/PR sequencing/волны/DoD, номера тикетов. Сверено с роадмапом (PR #1015, G1–G10) и GitHub.
 > **Составлено:** 2026-07-02 по фактическому коду трёх репозиториев (не по Repomix).
 > **Метод:** 6 параллельных read-only аудитов доменов + перекрёстная сверка находок.
 > **Репозитории:**
@@ -62,8 +63,8 @@
 | **Master bridge (`ayla_user_id`)** | `SpecialistProfile.id` | колонка есть (задвоена!), не пишется | 🔴 | Убрать дубль поля + заполнять |
 | **Catalog sync source** | canonical endpoints (не используются) | тянет из **mysite** | 🔴 | Перенацелить sync на Ayla internal catalog |
 | **Health-check grounding** | флаг на `ServiceTemplate`, **не на `Service`** | mirror из mysite | 🔴 | Определить canonical-дом флага на `Service` |
-| **Marketplace / умная дискавери** | full 3-layer ranking (`catalog_recommendations_api`) | proxy (Mini-App only), chat-discovery без ранжирования (order by name) | 🟡 | 4-фазный план в §7 Stream 4: Фаза 1+2 в пилот (trust/geo/goal/price, без личной истории), Фаза 3 fast-follow, Фаза 4 (персонализация) post-pilot |
-| **`review_count` в mirror** | есть в Ayla | **отсутствует** в `CatalogMaster` | 🔴 | Нужен для Bayesian trust-score (Фаза 1) — добавить поле + событие синка |
+| **Pilot Discovery Ranking** | full 3-layer ranking (`catalog_recommendations_api`) | proxy (Mini-App only), chat-discovery без ранжирования (order by name) | 🟡 | 4-фазный план в §7 Stream 4: Фаза 1+2 в пилот (trust/geo/goal/price, без личной истории), Фаза 3 fast-follow, Фаза 4 (персонализация) post-pilot |
+| **`review_count` в mirror** | есть в Ayla (`reviews_count`) | **отсутствует** в `CatalogMaster` | 🔴 | Тикет **#1060** (S4.0, linked #1044) — нужен для Bayesian trust-score (Фаза 1) |
 | **Search** | `GlobalSearchView` (icontains+PG rank+haversine) | нет | 🟢 (Ayla-only) | — |
 | **MAX parse/outbound/keyboards** | — | complete | 🟢 | — |
 | **Booking skill (E2E)** | — | complete (masters→slots→confirm) | 🟢 | — |
@@ -140,7 +141,7 @@
 15. **Дубль-контакт уведомлений** (один OutboxEvent → mobile push + MAX) при флипе топика.
 16. **Retention cleanup** dedupe/DLQ не собран (unbounded рост).
 17. **Два расходящихся MAX-хендлера** (per-tenant vs global) дублируют persistence/idempotency → дрейф.
-18. **`review_count` отсутствует в mirror** — блокирует Bayesian trust-score дискавери (Stream 4 Фаза 1); данных сейчас нет, нужно поле + событие синка.
+18. **`review_count` отсутствует в mirror** (#1060) — блокирует Bayesian trust-score дискавери (Stream 4 Фаза 1); данных сейчас нет, нужно поле + populate на синке (linked #1044).
 19. **DTO-утечка коммерческих полей** (Stream 4 Фаза 2) — расширение discovery-DTO = риск протащить price/commercial в cross-tenant выдачу; на каждое поле ручной `_to_card` + `test_dto` + MKT1-линт.
 20. **Availability fan-out** (Stream 4 Фаза 3) — дёрганье Ayla-слотов на выдачу = N запросов; нужен кэш + лимит топ-N, иначе латентность/нагрузка.
 
@@ -207,7 +208,9 @@ Repo: оба. Allowed: `apps/catalog/**`, `apps/orchestrator/discovery.py`, те
 - Ayla-side: canonical-дом `requires_health_check` на `Service`; publisher'ы `service.updated`/`master.schedule.updated`.
 - **DoD:** `ayla_service_id` coverage ≥ порога; sync с Ayla (не mysite); health-check grounding читает canonical.
 
-### Stream 4 — Marketplace-light «умная дискавери» (после Stream 2 + Stream 3)
+### Stream 4 — Pilot Discovery Ranking (после Stream 2 + Stream 3)
+> **Название намеренно НЕ «marketplace-light»:** в пилот входит только ранжирование дискавери (relevance+trust+geo+goal/price). Полноценный marketplace (фильтры, геолокация, персонализация, 3 слоя, история, Mini App) — post-pilot.
+
 Allowed: `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrations/ayla/recommendations_client.py`, `apps/catalog/**` (только для `review_count`), тесты. **Forbidden:** `apps/booking/services/create.py`, `apps/eventbus/**`.
 
 **Архитектурная развилка (принято):** полноценная персонализация на глобальном пути конфликтует с consent-гейтом (#1046) и требует памяти G2 → **post-pilot**. «Любимый мастер» сейчас считается в `ClientProfile` (per-tenant), на глобальном боте тенанта нет; кросс-тенантная история = часть G2. Для пилота: «умно, но **без личной истории**» = relevance + trust + geo + availability. Это честная граница, её принимаем.
@@ -216,7 +219,7 @@ Allowed: `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrat
 
 **Фаза 1 — быстрые улучшения (В ПИЛОТ, ~2–3 дня, без внешних зависимостей):**
 - синоним-recall перед `icontains` («бровист»→«брови»);
-- **Bayesian trust-score** `(rating·n + C·m)/(n+C)` — рейтинг 5.0 из 1 отзыва не обгоняет 4.8 из 200. **Требует `review_count` в mirror — сейчас его НЕТ** (добавить поле в каталог + событие синка из Ayla);
+- **Bayesian trust-score** `(rating·n + C·m)/(n+C)` — рейтинг 5.0 из 1 отзыва не обгоняет 4.8 из 200. **Требует `review_count` в mirror — сейчас его НЕТ** → отдельный тикет **#1060** (S4.0, linked #1044, pilot must-have; поле в mirror + populate на синке);
 - trust-floor (Guardian-lite) — прятать мастеров ниже порога при достаточном n;
 - diversity — не более 2 мастеров с одного салона в топе;
 - reasoning-текст (шаблон): «★ 4.9 · 120 отзывов · Пенза»;
@@ -292,38 +295,43 @@ Allowed: `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrat
 - флип booking / events / payment флагов;
 - изменения в `booking_client` без отдельного approval.
 
+**Правило new-scope:** любое увеличение pilot-scope должно СНАЧАЛА попасть в Delivery Tracker как **New Scope SP** (velocity baseline adjustment) — иначе задача не берётся в работу. Без этого delta через неделю будет врать (пример: дискавери 13→29 SP).
+
 **Жёсткое правило для агентов:** любой агент, создающий новый booking/catalog/user/payment transactional-домен в bot-platform, **делает неверную задачу** — блоки уже есть, задача = связать, не дублировать.
 
 ---
 
 ## 11. PR sequencing — первые PR
 
+> **v1.2:** S0-A разгружен (только builder+auth+booking_client-эталон); S0-B — единственное место, где трогаются profile/recommendations/nutrition/user_proxy/payments (перевод на builder + фиксы). S0-C после A/B. S1 — epic из 3–4 PR.
+
 | # | Задача | Тикет(ы) | Repo | Branch | Forbidden dirs |
 |---|---|---|---|---|---|
-| 1 | AylaUrlBuilder + `AYLA_BASE_URL` validator + auth unification | #1049, #1050 | ai-bot-platform | `fix/s0a-ayla-url-auth` | booking, channels, eventbus, catalog |
-| 2 | profile_client + recommendations_client path/token fix | #978, #1048 | ai-bot-platform | `fix/s0b-client-path-auth` | booking, channels, eventbus |
-| 3 | contract tests vs Ayla route-table | (S0-C) | ai-bot-platform (+Ayla) | `test/s0c-contract-tests` | — |
-| 4 | event_id 36 / ULID + validation | #1058, #946 | ai-bot-platform (/Ayla) | `fix/s05-event-id-width` | channels, admin_api |
-| 5 | global consent + safety + should_handoff | #1046, #1047, #1053 | ai-bot-platform | `feat/s1-global-safety-consent` | catalog, eventbus, booking/services/create |
-| 6 | catalog bridge / rebuild | #1044, #1052, beautygo #200 | оба | `feat/s3-catalog-rebuild` | booking/services/create |
-| 7 | booking REST flip plan | #1016, #1051, beautygo #203 | оба | `feat/s2-booking-ayla-rest` | catalog, channels/max, eventbus |
+| 1 | AylaUrlBuilder + `AYLA_BASE_URL` validator + auth-примитивы + booking_client как эталон | #1049, #1050 | ai-bot-platform | `fix/s0a-ayla-url-auth` | booking, channels, eventbus, catalog; **не трогать др. клиенты (это S0-B)** |
+| 2 | event_id 36 / ULID + validation + allowlist | #1058, #946 | ai-bot-platform (/Ayla) | `fix/s05-event-id-width` | channels, admin_api |
+| 3 | перевод profile/recommendations/nutrition/user_proxy/payments на builder + path/token фиксы | #978, #1048, #1050 | ai-bot-platform | `fix/s0b-client-migrate` | booking, channels, eventbus (**после PR #1**) |
+| 4 | S1-A global onboarding/consent gate | #1046 | ai-bot-platform | `feat/s1-global-safety-consent` (epic) | catalog, eventbus, booking/services/create |
+| 5 | S1-B safety pre_check (оба хендлера) · S1-C should_handoff→AdminTask+mute · S1-D регресс/дрейф | #1053, #1047 | ai-bot-platform | (тот же epic, отдельные PR) | как выше |
+| 6 | contract tests vs Ayla route-table | (S0-C) | ai-bot-platform (+Ayla) | `test/s0c-contract-tests` | — (**после PR #1+#3**) |
+| 7 | catalog rebuild + `review_count` | #1044, #1052, **#1060**, beautygo #200 | оба | `feat/s3-catalog-rebuild` | booking/services/create |
+| 8 | booking REST flip plan | #1016, #1051, beautygo #203 | оба | `feat/s2-booking-ayla-rest` | catalog, channels/max, eventbus |
 
 ---
 
-## 12. Волновой запуск агентов (≤3 параллельно)
+## 12. Волновой запуск агентов (база = 2 параллельных; 3-й точечно)
 
-**Волна 1 — стабилизация стыков и безопасности** (не переписывать, не флипать):
-- Agent **S0-A** — URL/Auth contract (#1049, #1050) → PR #1.
-- Agent **S0.5** — event_id width (#1058) → PR #4.
-- Agent **S1** — global consent/safety/handoff (#1046, #1047) → PR #5.
-- ShiroPy (фронт, 1 стрим, ревьюим): **Consent/Welcome UI под маркетплейс** (фронт-часть #1046 + #948/#949).
+> **v1.2:** Волна 1 разбита на под-волны по зависимостям (S0-B зависит от S0-A; S0-C — от S0-A/B; S1 не смешиваем с интеграционными правками).
 
-**Волна 2 — booking + catalog bridge** (после Волны 1):
+**Волна 1A (W1):** Agent **S0-A** (builder+auth, #1049/#1050 → PR #1) ‖ Agent **S0.5** (event_id, #1058 → PR #2).
+**Волна 1B (конец W1 / W2):** Agent **S0-B** (перевод клиентов, #978/#1048 → PR #3, после S0-A) ‖ Agent **S1** (epic safety/consent/handoff, #1046/#1047/#1053 → PR #4–5) ‖ **ShiroPy** Consent/Welcome UI (#1046 фронт + #948/#949, ревьюим).
+**Волна 1C (W2):** Agent **S0-C** (contract tests → PR #6, после S0-A/B).
+
+**Волна 2 — booking + catalog bridge (W3–W4):**
+- Agent **S3** — Catalog rebuild + `review_count` (#1044, #1052, #1060, beautygo #200).
 - Agent **S2** — Booking via Ayla REST (#1016, #1051, beautygo #203).
-- Agent **S3** — Catalog bridge (#1044, #1052, beautygo #200).
 
-**Волна 3 — marketplace-light** (после S2 + S3):
-- Agent **S4** — chat discovery → ranked top-3 → slots → booking (#1018/#1019/#1020).
+**Волна 3 — Pilot Discovery Ranking (W4–W5, после S2+S3):**
+- Agent **S4** — Фаза 1+2: trust/geo/goal/price ranking → slots → booking (#1018, #1020, #1060). Фаза 3/4 — fast-follow/post-pilot.
 
 ---
 

@@ -10,50 +10,47 @@
 
 ---
 
-## ВОЛНА 1 — стабилизация стыков и безопасности
+## ВОЛНА 1 — стабилизация стыков и безопасности (под-волны 1A/1B/1C · база 2 агента)
 
-### Agent S0-A — AylaUrlBuilder + auth contract (PR #1) · 16 SP · #1049 #1050
+> Зависимости: **S0-B зависит от S0-A** (builder); **S0-C — от S0-A+S0-B**; S1 не смешивать с интеграционными правками. Поэтому НЕ запускать S0-A и S0-B параллельно.
+
+### 1A · Agent S0-A — AylaUrlBuilder + auth-примитивы (PR #1) · ~8 SP · #1049 #1050
 - **Repo:** ai-bot-platform · **Branch:** `fix/s0a-ayla-url-auth`
-- **Allowed:** `apps/integrations/ayla/**`, `apps/integrations/ayla_payments/**`, `config/settings/**`, `docs/architecture/contract-matrix.md`, тесты интеграций.
-- **Forbidden:** `apps/booking/**`, `apps/channels/**`, `apps/conversations/**`, `apps/eventbus/**`, `apps/catalog/**`.
-- **Prompt:** «Портируй `AylaUrlBuilder` из Ayla `core/ayla_urls.py` в `apps/integrations/ayla/`. Требования: `AYLA_BASE_URL` трактуется host-only; builder сам вставляет `/api/v1`, отвергает scheme-in-path и двойной префикс, нормализует trailing slash. Проведи все 5 клиентов (booking/nutrition/profile/recommendations/user_proxy + ayla_payments) через builder — убери ручные f-строки. Унифицируй s2s-auth: Bearer на `AYLA_INTERNAL_API_TOKEN`; для nutrition — `X-Service-Token` с секретом, равным Ayla `NUTRITION_SERVICE_TOKEN` (переименовать переменную или задокументировать invariant). `AYLA_SERVICE_TOKEN` не существует у Ayla — удалить ссылки. Обнови `contract-matrix.md`.»
-- **DoD:** нет `f"{AYLA_BASE_URL}/api..."` в `integrations/ayla`; все клиенты через builder; все Bearer'ы = `AYLA_INTERNAL_API_TOKEN` кроме nutrition; `contract-matrix.md` обновлён.
-- **Tests:** unit на builder (host-only, double-prefix reject, trailing slash); проверка, что каждый клиент строит ожидаемый путь.
-- **Risk:** MED — трогает все клиенты сразу; митигируется тем, что booking_client уже эталон (не менять контракт, только источник URL).
+- **Allowed:** новый `apps/integrations/ayla/url_builder.py` + `__init__.py`, `apps/integrations/ayla/booking_client.py` (**как эталон**), `config/settings/**`, `docs/architecture/contract-matrix.md`, тесты builder'а.
+- **Forbidden:** `profile_client.py`/`recommendations_client.py`/`nutrition_client.py`/`user_proxy.py`/`ayla_payments/**` (**это S0-B — не трогать**); `apps/booking/**`, `apps/channels/**`, `apps/eventbus/**`, `apps/catalog/**`.
+- **Prompt:** «Портируй `AylaUrlBuilder` из Ayla `core/ayla_urls.py` в `apps/integrations/ayla/`. Host-only `AYLA_BASE_URL`; builder вставляет `/api/v1`, отвергает scheme-in-path и двойной префикс, нормализует trailing slash. Проведи через builder ТОЛЬКО `booking_client` (эталон-пример). Настрой auth-примитивы/settings: единый Bearer `AYLA_INTERNAL_API_TOKEN`; удали ссылки на несуществующий `AYLA_SERVICE_TOKEN`; для nutrition зафиксируй `X-Service-Token`=`NUTRITION_SERVICE_TOKEN` (переменная/invariant). **НЕ трогай остальные клиенты — их переводит S0-B.** Обнови `contract-matrix.md`.»
+- **DoD:** builder + тесты (host-only, double-prefix reject, trailing slash); `booking_client` через builder; auth-settings готовы к использованию S0-B; `contract-matrix.md` обновлён.
+- **Risk:** LOW-MED (узкий scope, booking_client уже эталон).
 
-### Agent S0-B — client path/token fixes (PR #2) · 9 SP · #978 #1048 #1050
-- **Repo:** ai-bot-platform · **Branch:** `fix/s0b-client-path-auth`
-- **Allowed:** `apps/integrations/ayla/profile_client.py`, `apps/integrations/ayla/recommendations_client.py`, `apps/integrations/ayla/nutrition_client.py`, тесты.
-- **Forbidden:** `apps/booking/**`, `apps/channels/**`, `apps/eventbus/**`, `apps/catalog/**`.
-- **Prompt:** «Почини `profile_client`: путь → `/api/v1/internal/users/{user_id}/`, токен → `AYLA_INTERNAL_API_TOKEN` (#978 + комментарий про токен). Почини `recommendations_client`: путь → `/api/v1/internal/me/catalog/recommendations/`, токен → `AYLA_INTERNAL_API_TOKEN` (X-External-User-ID уже шлётся), добавь circuit breaker. Вырави nutrition-секрет (#1050). Используй `AylaUrlBuilder` из S0-A (координация ветки).»
-- **DoD:** оба клиента резолвятся 200 против route-table Ayla (или мок); recs имеет circuit breaker.
-- **Tests:** мок Ayla-роута; проверка заголовков auth + пути.
-- **Risk:** LOW. Зависит от S0-A (builder) — мержить после/поверх.
+### 1A · Agent S0.5 — event_id compatibility (PR #2) · 13 SP · #1058 #946
+- **Repo:** ai-bot-platform (+Ayla если ULID) · **Branch:** `fix/s05-event-id-width`
+- **Allowed:** `apps/eventbus/**`, тесты. **Forbidden:** `apps/channels/**`, `apps/admin_api/**`, `apps/integrations/**`.
+- **Prompt:** «Расширь `event_id` в `IngestDedupe`/`IngestDLQ`/`HandlerFailureTracker` до `max_length=36` (миграция) ИЛИ ULID-agreement — предпочтительно расширение (Ayla эмитит `uuid4()` 36). Валидация длины в `ingest_envelope` (fail-fast → DLQ вместо 500). Allowlist: `booking.no_show` + `tenant.relationship.revoked` эмитятся без consumer'а — держать вне external-delivery allowlist или добавить consumer (#946).»
+- **DoD:** Ayla-событие UUID-36 проходит dedupe без DataError; регресс на длину; эмитируемые-без-consumer'а не в allowlist.
+- **Risk:** MED (миграция; доставка OFF → безопасно сейчас).
 
-### Agent S0-C — contract tests (PR #3) · 11 SP
+### 1B · Agent S0-B — перевод клиентов на builder + path/token фиксы (PR #3, ПОСЛЕ S0-A) · ~12 SP · #978 #1048 #1050
+- **Repo:** ai-bot-platform · **Branch:** `fix/s0b-client-migrate`
+- **Allowed:** `profile_client.py`, `recommendations_client.py`, `nutrition_client.py`, `user_proxy.py`, `ayla_payments/client.py`, тесты.
+- **Forbidden:** `url_builder.py` (готов в S0-A — только использовать); `booking_client.py`; booking, channels, eventbus, catalog.
+- **Prompt:** «Переведи profile/recommendations/nutrition/user_proxy/payments на `AylaUrlBuilder` (из S0-A). Фиксы: `profile_client` путь `/api/v1/internal/users/{user_id}/` + токен `AYLA_INTERNAL_API_TOKEN` (#978, путь+токен ВМЕСТЕ); `recommendations_client` путь `/api/v1/internal/me/catalog/recommendations/` + токен `AYLA_INTERNAL_API_TOKEN` + circuit breaker (#1048); nutrition секрет alignment (#1050). Убери все ручные f-строки.»
+- **DoD:** нет `f"{AYLA_BASE_URL}/api..."` во всех клиентах; profile/recs резолвятся 200 против route-table; recs с circuit breaker.
+- **Risk:** LOW (после S0-A). Единственное место, где трогаются эти 5 клиентов.
+
+### 1B · Agent S1 — global safety/consent/handoff (EPIC, PR #4–5) · 26 SP · #1046 #1047 #1053
+- **Repo:** ai-bot-platform · **Branch:** `feat/s1-global-safety-consent` (**epic, 3–4 PR — не один большой**)
+- **Дробление PR:** **S1-A** global onboarding/consent gate (#1046, `global_onboarding.py` + ветка в `handle_global_max_event`); **S1-B** safety pre_check в оба хендлера (#1053); **S1-C** `should_handoff`→`create_admin_task`+HUMAN_HANDOFF mute (#1047); **S1-D** регресс-тесты + убрать дрейф двух хендлеров.
+- **Allowed:** `apps/channels/max/**`, `apps/orchestrator/**`, `apps/conversations/**`, `apps/handoff/**`, `apps/consent/**`, тесты. **Forbidden:** `apps/catalog/**`, `apps/eventbus/**`, `apps/booking/services/create.py`, `apps/integrations/**`.
+- **DoD:** global path через consent-гейт + safety pre_check; should_handoff → AdminTask + бот молчит при HUMAN_HANDOFF; `current_tenant() is None` в онбординге; регресс per-tenant пути.
+- **Tests:** suicide/red-flag → handoff; complaint; «оператор»; booking failure → AdminTask; consent truth-table; повторный consent идемпотентен.
+- **Risk:** HIGH (P0 safety). **FE (ShiroPy) параллельно:** consent/welcome UI — ревьюим.
+
+### 1C · Agent S0-C — contract tests (PR #6, ПОСЛЕ S0-A+S0-B) · 11 SP
 - **Repo:** ai-bot-platform (+Ayla route dump) · **Branch:** `test/s0c-contract-tests`
 - **Allowed:** `apps/integrations/ayla/tests/**`, `docs/architecture/**`, CI-конфиг.
-- **Prompt:** «Собери контракт-тест, диффящий пути+методы+auth всех Ayla-клиентов против route-table/OpenAPI Ayla. Падает при любом расхождении путь/метод/токен. Включи в CI.»
+- **Prompt:** «Контракт-тест, диффящий пути+методы+auth всех Ayla-клиентов против route-table/OpenAPI Ayla. Падает при любом расхождении. В CI.»
 - **DoD:** тест в CI зелёный и ловит искусственное расхождение.
 - **Risk:** LOW.
-
-### Agent S0.5 — event_id compatibility (PR #4) · 13 SP · #1058 #946
-- **Repo:** ai-bot-platform (+Ayla если ULID) · **Branch:** `fix/s05-event-id-width`
-- **Allowed:** `apps/eventbus/**`, тесты.
-- **Forbidden:** `apps/channels/**`, `apps/admin_api/**`, `apps/integrations/**`.
-- **Prompt:** «Расширь `event_id` в `IngestDedupe`/`IngestDLQ`/`HandlerFailureTracker` до `max_length=36` (миграция) ИЛИ согласуй ULID с Ayla — выбери минимально рискованное (Ayla эмитит `uuid4()` 36 симв., так что расширение колонок предпочтительно). Добавь валидацию длины в `ingest_envelope` (fail-fast → DLQ вместо 500). Проверь allowlist: `booking.no_show` и `tenant.relationship.revoked` эмитятся Ayla, но без consumer'а — держи вне external-delivery allowlist или добавь consumer (#946).»
-- **DoD:** реальное Ayla-событие (UUID-36) проходит dedupe без DataError; регресс-тест на длину; эмитируемые-без-consumer'а топики не в allowlist.
-- **Tests:** dedupe/DLQ/failure-tracker с 36-симв. id; тест на невалидную длину → DLQ.
-- **Risk:** MED — миграция на проде (данных cross-service пока нет, доставка OFF → безопасно сейчас).
-
-### Agent S1 — global safety/consent/handoff (PR #5) · 26 SP · #1046 #1047 #1053
-- **Repo:** ai-bot-platform · **Branch:** `feat/s1-global-safety-consent`
-- **Allowed:** `apps/channels/max/**`, `apps/orchestrator/**`, `apps/conversations/**`, `apps/handoff/**`, `apps/consent/**`, тесты.
-- **Forbidden:** `apps/catalog/**`, `apps/eventbus/**`, `apps/booking/services/create.py`, `apps/integrations/**`.
-- **Prompt:** «Проведи `handle_global_max_event` через consent-гейт (Variant A soft gate, #1046: гейтим только память G2 + проактив, разрешаем discovery/chat/one-off) и safety pre_check ДО discovery. Реализуй `apps/channels/max/global_onboarding.py` (`needs_onboarding`, `run_onboarding_turn` поверх WelcomeSkill, тексты `GLOBAL_WELCOME_TEXT`/`GLOBAL_S5` под маркетплейс) за флагом `GLOBAL_BOT_ONBOARDING`. Обработай `SkillResult.should_handoff` в `handle_max_event` И глобальном хендлере → `apps/handoff/services.py::create_admin_task` + заглуши бота. Реши судьбу `pipeline.turn()`: портируй safety pre_check + should_handoff в оба хендлера (или вкрути turn()), убери дрейф. Не ломай старый per-tenant путь (регресс).»
-- **DoD:** global path вызывает consent-гейт и safety pre_check; should_handoff → AdminTask + бот молчит при HUMAN_HANDOFF; `current_tenant() is None` во всём онбординге; регресс per-tenant пути.
-- **Tests:** suicide/red-flag → handoff; complaint; «оператор»; booking failure → AdminTask; consent truth-table; повторный consent идемпотентен.
-- **Risk:** HIGH (P0 safety, доверие). Один стрим, тщательное ревью. **FE (ShiroPy) параллельно:** consent/welcome UI — ревьюим.
 
 ---
 
@@ -64,19 +61,20 @@
 - **Кратко:** slots service_id fix (#1051); server-side idempotency cancel/reschedule (Ayla #203); auto-provision `ayla_user_id`; RemoteBookingProxy consistency; flip-план; E2E confirm→Ayla REST→proxy.
 - **DoD:** E2E-тест booking через Ayla REST без YClients/локальной canonical-записи; нет двойного бронирования с walk-in.
 
-### Agent S3 — Catalog bridge / rebuild · 18 SP · #1044 #1052 · Ayla #200
+### Agent S3 — Catalog bridge / rebuild + review_count · 21 SP · #1044 #1052 #1060 · Ayla #200
 - **Branch:** `feat/s3-catalog-rebuild` · **Allowed:** `apps/catalog/**`, `apps/orchestrator/discovery.py`, тесты (+Ayla `services/`). **Forbidden:** `apps/booking/services/create.py`, `apps/eventbus/**`.
-- **Кратко:** чистый ребилд каталога (4-слойная модель + YClientsMapping, Ayla #200); заполнять `ayla_service_id`/stable-id; убрать дубль поля (#1052); canonical-дом `requires_health_check`; coverage-check.
-- **DoD:** sync/rebuild из Ayla (не mysite); `ayla_service_id` coverage ≥ порога; health-grounding читает canonical.
+- **Кратко:** чистый ребилд каталога (4-слойная модель + YClientsMapping, Ayla #200); заполнять `ayla_service_id`/stable-id; убрать дубль поля (#1052); canonical-дом `requires_health_check`; coverage-check; **`review_count` в `CatalogMaster` mirror + populate на синке (#1060, prereq для Stream 4 trust-score)**.
+- **DoD:** sync/rebuild из Ayla (не mysite); `ayla_service_id` coverage ≥ порога; health-grounding читает canonical; `review_count` заполняется.
 
 ---
 
-## ВОЛНА 3 — marketplace-light (после S2 + S3)
+## ВОЛНА 3 — Pilot Discovery Ranking (после S2 + S3)
 
-### Agent S4 — умная дискавери (фазовый) · pilot ≈29 SP · #1018 #1020
-- **Branch:** `feat/s4-marketplace-light` · **Allowed:** `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrations/ayla/recommendations_client.py`, `apps/catalog/**` (только `review_count`), тесты. **Forbidden:** `apps/booking/services/create.py`, `apps/eventbus/**`.
-- **Развилка (в prompt):** персонализация/личная история = post-pilot (конфликт с consent #1046 + зависит от G2). Пилот = relevance+trust+geo+goal/price, БЕЗ личной истории.
-- **Фаза 1 (в пилот):** `review_count` в mirror (S4.0, prereq) → синоним-recall → Bayesian trust-score → trust-floor → diversity ≤2/салон → reasoning-шаблон → fallback пустого результата.
+### Agent S4 — Pilot Discovery Ranking (фазовый) · pilot ≈26 SP · #1018 #1020
+- **Branch:** `feat/s4-discovery-ranking` · **Allowed:** `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrations/ayla/recommendations_client.py`, тесты. **Forbidden:** `apps/catalog/**` (`review_count` делает S3/#1060), `apps/booking/services/create.py`, `apps/eventbus/**`.
+- **Prereq:** S4.0 `review_count` (#1060) уже сделан в S3 (Волна 2). Без него trust-score не считается.
+- **Развилка (в prompt):** персонализация/личная история = post-pilot (конфликт с consent #1046 + зависит от G2). Пилот = relevance+trust+geo+goal/price, БЕЗ личной истории. **Название НЕ «marketplace» — не лезть в фильтры/гео-координаты/3 слоя/персонализацию.**
+- **Фаза 1 (в пилот):** синоним-recall → Bayesian trust-score (использует `review_count` из #1060) → trust-floor → diversity ≤2/салон → reasoning-шаблон → fallback пустого результата.
 - **Фаза 2 (в пилот):** единая функция скоринга; goal/price через `MasterServiceOffering→CatalogService.goals/price_from`; `show_masters` (goal/price_max/sort); нить recommendation→slots→booking. **⚠️ КАЖДОЕ новое DTO-поле = ручной `_to_card` + пин `test_dto` + MKT1-линт (не протащить коммерческое поле cross-tenant).**
 - **Фаза 3 (fast-follow):** availability-буст только для топ-N + кэш слотов; availability в reasoning.
 - **Фаза 4 (post-pilot):** 3 слоя (Твои/Ayla/Исследовать); персональный буст (память+согласие); кросс-тенантная история (G2); ИИ-reasoning.
