@@ -989,6 +989,16 @@ CELERY_BEAT_SCHEDULE = {
         # DLQ task.
         "schedule": crontab(hour="4", minute="50"),
     },
+    # #1056 — bound the consumer-side second-layer dedupe guards
+    # (PaymentTerminalDedupe / ReviewProcessedDedupe /
+    # NotificationDispatchDedupe) + the #433 HandlerFailureTracker.
+    # All share the 120d window (§5.3); chunked delete so a backlog
+    # doesn't hold a long lock. Daily 04:55 UTC — after the dedupe
+    # sweep, own transaction.
+    "eventbus.cleanup_ingest_secondary_ledgers": {
+        "task": "apps.eventbus.cleanup_ingest_secondary_ledgers",
+        "schedule": crontab(hour="4", minute="55"),
+    },
     # PR #535 follow-up Blocker #5 Layer 2 — AI draft retention sweep.
     # Hard-deletes terminal AiDraft rows (SENT_AS_MASTER / RELEASED_TO_AI
     # / REPLACED / DISMISSED) older than 30 days. Layer 1 (immediate
