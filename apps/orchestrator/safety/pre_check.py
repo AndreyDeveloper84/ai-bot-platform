@@ -76,28 +76,48 @@ class SafetyResult:
 # Pinned default safety patterns. Tenant overrides MERGE on top via settings.
 # Verdicts encode the action — patterns map to specific verdicts.
 _DEFAULT_PATTERNS: dict[str, list[str]] = {
+    # ── Suicidal ideation / self-harm (#1081) ─────────────────────────────
+    # Coverage-first (founder 2026-07-03): a MISS is a safety failure; a
+    # false-positive crisis reply is only a UX cost on a beauty marketplace.
+    # This is the LIVE, SOLE net (no LLM fallback), so patterns lean toward
+    # recall. Russian morphology via \w* stems; reflexive `себя`/`себе` matched
+    # in BOTH word orders (Russian reorders freely — «убью себя» AND «себя
+    # убью»). EN verb stems keep a leading \b so «send it» / «change myself» /
+    # «haircut myself» don't false-trigger. Known accepted over-triggers
+    # («умираю как хочу…», «убьюсь если…», «cut myself shaving») are in the PR
+    # #1081 review table.
     SafetyVerdict.HANDOFF.value: [
-        # Suicidal ideation / self-harm — base stems (RU + EN). Stems without a
-        # trailing \b (Russian suffix chars are word-chars, so \b at stem-end
-        # would never match). `\bsuicid` (stem) catches suicide + suicidal;
-        # `kill\w*\s+my\s?self` catches kill/killing myself + "my self".
-        r"(?i)(\bсамоубийств|\bсуицид|убить себя|убью\s+себя|убьюсь|kill\w*\s+my\s?self"
-        r"|\bsuicid|self[\s-]?harm)",
-        # Suicidal ideation — RU intent phrases (#1081). Coverage-first: a
-        # false-positive crisis reply is a UX cost on a beauty marketplace, a
-        # MISS is a safety failure. Morphology via \w* stems. Borderline idioms
-        # («умираю как хочу…», «убьюсь если…») are accepted as over-triggers —
-        # see the PR #1081 review table.
-        r"(?i)(хоч\w*\s+умереть|хоч\w*\s+сдохнуть|поконч\w*\s+с\s+собой|сч[её]ты\s+с\s+жизнью)",
-        r"(?i)(не\s+хоч\w*\s+(больше\s+)?жить|жить\s+(больше\s+)?не\s+хоч"
-        r"|(нет|не\s+вижу)\s+смысла\s+жить)",
-        r"(?i)(лучше\s+бы\s+я\s+(не\s+жил|умер)|причин\w*\s+себе\s+вред|навред\w*\s+себе)",
-        r"(?i)((реж|рез|порез)\w*\s+себя|вскр\w*\s+вены|(реж|рез)\w*\s+вены"
-        r"|повеш\w*сь|повеси\w*ся|наглота\w*\s+таблеток|исчезнуть\s+навсегда)",
-        # Suicidal ideation / self-harm — EN intent phrases (#1081).
-        r"(?i)(wan(t\w*|na)\s+(to\s+)?die|(don'?t|do\s+not)\s+want\s+to\s+live"
-        r"|no\s+reason\s+to\s+live|better\s+off\s+dead)",
-        r"(?i)(end\s+(my\s+life|it\s+all)|(hurt|harm|cut)\w*\s+my\s?self)",
+        # RU — base stems + idioms «наложить на себя руки» / «счёты с жизнью».
+        r"(?i)(\bсамоубийств|\bсуицид|налож\w*\s+на\s+себя\s+руки|сч[её]ты\s+с\s+жизнью)",
+        # RU — kill-self, either word order.
+        r"(?i)(убить\s+себя|себя\s+убить|убь[юё]\s+себя|себя\s+убь\w*|\bубьюсь\b"
+        r"|поконч\w*\s+(с\s+собой|со\s+всем))",
+        # RU — want-to-die / not-want-to-live / tired-of-life.
+        r"(?i)(хоч\w*\s+(умереть|умирать|сдохнуть|исчезнуть)|лучше\s+(мне\s+)?умереть"
+        r"|не\s+хоч\w*\s+(больше\s+)?(жить|существовать)|жить\s+(больше\s+)?не\s+хоч"
+        r"|надоело\s+жить|устал\w*\s+(жить|от\s+жизни))",
+        # RU — no-meaning-in-life (both «нет смысла жить» and «смысла в жизни нет»).
+        r"(?i)((нет|не\s+вижу|какой)\s+смысла?\s+(в\s+)?жи(ть|зни)|зачем\s+(мне\s+)?жить"
+        r"|жизнь\s+не\s+имеет\s+смысла|смысла?\s+в\s+жизни\s+нет|в\s+жизни\s+нет\s+смысла)",
+        # RU — burden / better-off-gone ideation.
+        r"(?i)(лучше\s+бы\s+(я\s+(не\s+жил|не\s+родил|умер)|меня\s+не\s+было)"
+        r"|(всем\s+)?(будет\s+)?лучше\s+без\s+меня|без\s+меня\s+(всем\s+)?лучше)",
+        # RU — self-harm acts, either word order.
+        r"(?i)((реж|рез|порез)\w*\s+себя|себя\s+(реж|рез|порез)\w*"
+        r"|причин\w*\s+себе\s+(вред|боль)|себе\s+(вред|боль|больно|причин\w*|навред\w*)"
+        r"|навред\w*\s+себе)",
+        # RU — method statements. Reflexive endings vary (вскроюСЬ / вскрытьСЯ).
+        r"(?i)(вскр\w*\s+вены|(реж|рез)\w*\s+вены|вскр(о|ы)\w*с[ья]|повеш\w*сь|повеси\w*ся"
+        r"|наглота\w*\s+таблеток|горсть\s+таблеток|таблеток\s+и\s+усну"
+        r"|(прыгн|спрыгн|шагн)\w*\s+с\s+(крыши|моста|балкона|окна)|исчезнуть\s+навсегда)",
+        # EN — want-to-die / not-want-to-live / no-point.
+        r"(?i)(wan(t\w*|na)\s+(to\s+)?die|(don'?t|do\s+not)\s+want\s+to\s+(live|be\s+alive)"
+        r"|no\s+reason\s+to\s+live|no\s+point\s+(in\s+)?living|nothing\s+to\s+live\s+for"
+        r"|better\s+off\s+dead)",
+        # EN — method / self-harm verbs (leading \b guards against send/change/haircut).
+        r"(?i)(\bkill\w*\s+my\s?self|\bhang\w*\s+my\s?self|\b(hurt|harm|cut)\w*\s+my\s?self"
+        r"|\bslit\w*\s+my\s+wrist|take\s+my\s+own\s+life|\bend\s+(my\s+life|it(\s+all)?)\b"
+        r"|\bsuicid|self[\s-]?harm|\boverdos)",
         # Acute medical emergency
         r"(?i)(\bскорая\b|\bemergency\b|\bумираю\b|\bdying\b|сердечный приступ|heart attack)",
         # Abuse / domestic violence — stems
