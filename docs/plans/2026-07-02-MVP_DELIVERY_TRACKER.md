@@ -9,7 +9,7 @@
 > - **Velocity:** 2 параллельных код-агента + ежедневное ревью ≈ **35 SP/нед** (база). 3-й агент **не в базовой скорости** — точечно на независимые задачи (docs/tests/eventbus/catalog audit).
 > - **New-scope правило:** любое увеличение pilot-scope сначала фиксируется здесь как New Scope SP, иначе задача не берётся (GAP MAP §10).
 >
-> **🟢 СТАТУС 2026-07-03: Волна 1A запущена.** `agent-s0a` (`fix/s0a-ayla-url-auth`, S0A.1/2/4) · `agent-s05` (`fix/s05-event-id-width`, S05.1/2/3). S0-B/S0-C/S1 — не стартовали.
+> **🟢 СТАТУС 2026-07-03: Волна 1A запущена.** `agent-s0a` (`fix/s0a-ayla-url-auth`, S0A.1/2/4) · `agent-s05` — **event_id 26→36 закрыт end-to-end** (S05.1/2/3 PR #1067 + S05.6 кросс-app PR #1070 + mypy CI hotfix PR #1073, все merged; #1058 + #1066 closed). S0-B/S0-C/S1 — не стартовали.
 > **🔴 РЕФРЕЙМ #1044 (2026-07-03): Stream 3 = Catalog domain rebuild.** S3 → 50–70 SP; pilot scope ~205–225; **15.08 committed но At Risk**; 08.08 = aggressive candidate. **Wave 2 НЕ стартовать пока не закрыты 4 условия:** (1) S3 design locked; (2) **G-CalendarSync** decision записан (Variant A Ayla-primary / Variant B YClients webhook→busy) по пилотному салону; (3) источник данных Пензы подтверждён; (4) Ayla-side breakdown принят. Отдельный **Ayla-агент** (beautygo_backend) на S3A/S3C/S3-CAL — рекомендация.
 
 ---
@@ -84,7 +84,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S05.1 | event_id 26→36 (eventbus, 6 колонок) | bot | #1058 | agent-s05 | 5 | W1 | M | ✅ Done (PR #1067) |
 | S05.2 | миграция 0009 + тесты dedupe/DLQ/failure + guard→DLQ | bot | #1058 | agent-s05 | 5 | W1 | M | ✅ Done (PR #1067) |
 | S05.3 | allowlist check + no_show/revoked | bot | #946 | agent-s05 | 3 | W1 | M | ✅ Done (PR #1067) |
-| **S05.6** | **event_id 26→36 кросс-app** (RemoteBookingProxy.last_synced_event_id + Conversation.last_payment_event_id) — завершает #1058 end-to-end | bot | **#1066** | agent-s05 (cross-stream authz ✓) | 2 | W1 | **M (pilot-critical)** | ✅ Done (PR #1070; #1058 closed) |
+| **S05.6** | **event_id 26→36 кросс-app** (RemoteBookingProxy.last_synced_event_id + Conversation.last_payment_event_id) — завершает #1058 end-to-end | bot | **#1066** | agent-s05 (cross-stream authz ✓) | 2 | W1 | **M (pilot-critical)** | ✅ Done (PR #1070 merged; #1058 + #1066 closed; CI mypy hotfix PR #1073 merged) |
 | S05.4 | retention cleanup beat | bot | #1056 | BE | 5 | W6 | D | Backlog |
 | S05.5 | double-contact + MasterNotificationPrefs dispatcher | bot | #1057 | BE | 5 | W6 | D | Backlog |
 
