@@ -87,7 +87,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S05.3 | allowlist check + no_show/revoked | bot | #946 | agent-s05 | 3 | W1 | M | ✅ Done (PR #1067) |
 | **S05.6** | **event_id 26→36 кросс-app** (RemoteBookingProxy.last_synced_event_id + Conversation.last_payment_event_id) — завершает #1058 end-to-end | bot | **#1066** | agent-s05 (cross-stream authz ✓) | 2 | W1 | **M (pilot-critical)** | ✅ Done (PR #1070 merged; #1058 + #1066 closed; CI mypy hotfix PR #1073 merged) |
 | S05.4 | retention cleanup beat (4 вторичных леджера 120d, chunked) | bot | #1056 | agent-s05 | 5 | (наперёд) | D→pull-forward | ✅ Done (PR #1080; follow-up #1085) |
-| S0B.e2e | e2e staging round-trip profile/recs (authenticated, nightly) | bot | **#1078** | agent-s0b | 3 | W2 | M (durable verify) | **In Progress** |
+| S0B.e2e | e2e staging round-trip profile/recs (authenticated, nightly) | bot | #1078 | agent-s0b | 3 | W2 | M | ✅ Done (PR #1079; ops secrets → nightly) |
 | S05.5 | double-contact + MasterNotificationPrefs dispatcher (G-Notify) | bot | #1057 | agent-s05 | 5 | (наперёд) | D→pull-forward | **In Progress** |
 
 ### Этап 3 — Global MAX safety/consent/handoff (45 SP; pilot 31) · G-Safety · P0
