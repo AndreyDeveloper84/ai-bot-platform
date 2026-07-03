@@ -71,10 +71,10 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S0A.1 | AylaUrlBuilder в bot-platform | bot | #1049 | agent-s0a | 5 | W1 | M | ✅ Done (PR #1065) |
 | S0A.2 | AYLA_BASE_URL host-only validator | bot | #1049 | agent-s0a | 3 | W1 | M | ✅ Done (PR #1065) |
 | S0A.4 | s2s-auth settings foundation (INTERNAL/NUTRITION token, AYLA_SERVICE_TOKEN deprecated) | bot | #1050 | agent-s0a | 3 | W1 | M | ✅ Done (PR #1065) |
-| S0A.3 | Убрать ad-hoc URL f-строки во всех клиентах → **S0-B** | bot | #1049 | BE | 5 | W1/W2 | M | **Ready (unblocked)** |
-| S0B.1 | fix profile_client path+token (+builder) | bot | #978 | BE | 3 | W1/W2 | M | **Ready (unblocked)** |
-| S0B.2 | fix recommendations_client path+token (+builder) | bot | #1048 | BE | 3 | W1/W2 | M | **Ready (unblocked)** |
-| S0B.3 | nutrition token alignment + remove AYLA_SERVICE_TOKEN refs | bot | #1050 | BE | 3 | W1/W2 | M | **Ready (unblocked)** |
+| S0A.3 | Убрать ad-hoc URL f-строки во всех клиентах → **S0-B** | bot | #1049 | agent-s0b | 5 | W1/W2 | M | **In Progress** |
+| S0B.1 | fix profile_client path+token (+builder) | bot | #978 | agent-s0b | 3 | W1/W2 | M | **In Progress** |
+| S0B.2 | fix recommendations_client path+token (+builder) | bot | #1048 | agent-s0b | 3 | W1/W2 | M | **In Progress** |
+| S0B.3 | nutrition token alignment + remove AYLA_SERVICE_TOKEN refs | bot | #1050 | agent-s0b | 3 | W1/W2 | M | **In Progress** |
 | S0C.1 | contract tests vs Ayla route-table | bot(+Ayla) | — | BE | 8 | W2 | M | Ready (после S0-A+B) |
 | S0C.2 | обновить contract docs/ADR | bot | #1050 | BE | 3 | W2 | M | Ready |
 
@@ -91,12 +91,12 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 ### Этап 3 — Global MAX safety/consent/handoff (45 SP; pilot 31) · G-Safety · P0
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
-| S1.1 | consent-гейт на global path (backend) | bot | #1046 | BE | 5 | W2 | M | Ready |
-| S1.FE | Consent/Welcome UI под маркетплейс | bot | #1046 | FE | 5 | W2 | M | Ready |
-| S1.2 | safety pre_check до discovery | bot | #1053 | BE | 5 | W2 | M | Ready |
-| S1.3 | should_handoff → AdminTask | bot | #1047 | BE | 5 | W2 | M | Ready |
-| S1.4 | HUMAN_HANDOFF: бот молчит | bot | #1047 | BE | 3 | W2 | M | Ready |
-| S1.5 | тесты suicide/red-flag/complaint/human/bookingfail | bot | — | BE | 8 | W2 | M | Ready |
+| S1.1 (S1-A) | consent-гейт на global path (backend) | bot | #1046 | agent-s1 | 5 | W2 | M | **In Progress** |
+| S1.FE | Consent/Welcome UI под маркетплейс | bot | #1046 | FE (ShiroPy) | 5 | W2 | M | Ready (передать ShiroPy) |
+| S1.2 (S1-B) | safety pre_check до discovery | bot | #1053 | agent-s1 | 5 | W2 | M | **In Progress** |
+| S1.3 (S1-C) | should_handoff → AdminTask | bot | #1047 | agent-s1 | 5 | W2 | M | **In Progress** |
+| S1.4 (S1-C) | HUMAN_HANDOFF: бот молчит | bot | #1047 | agent-s1 | 3 | W2 | M | **In Progress** |
+| S1.5 (S1-D) | тесты suicide/red-flag/complaint/human/bookingfail | bot | — | agent-s1 | 8 | W2 | M | **In Progress** |
 | S1.6 | de-drift двух MAX-хендлеров | bot | #1053 | BE | 8 | W6 | D | Backlog |
 | S1.7 | ConsentRecord → memory_writer | bot | #1054 | BE | 3 | W2 | D | Backlog |
 | S1.8 | DOB/is_adult endpoint (Ayla) | Ayla | #202 | BE | 3 | W6 | D | Backlog |
