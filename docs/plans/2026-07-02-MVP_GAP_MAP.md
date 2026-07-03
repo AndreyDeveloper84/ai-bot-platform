@@ -75,7 +75,7 @@
 | **Handoff service** | — | create/resolve/transcript (PII-aware) | 🟢 | — |
 | **Eventbus ingest (HMAC/dedupe/DLQ)** | — | complete, 13 consumers | 🟢 | — |
 | **Event delivery (Ayla→bot)** | outbox + publisher + HMAC | ingest ready | 🟡 | double-gated OFF; сначала фикс event_id |
-| **event_id формат** | UUID 36 симв. | колонки `varchar(26)` (ULID) | 🔴 | Расширить колонки до 36 (или Ayla→ULID) |
+| **event_id формат** | UUID 36 симв. | колонки 36 ✅ (#1067+#1070) | 🟢 РЕШЕНО | #1058 closed; guard→DLQ; end-to-end 36 |
 | **Payments ownership** | canonical + YooKassa | наблюдает, НЕ создаёт | 🟢 | подтверждено |
 | **payment.failed DM (N=3)** | эмитит payment.failed | exactly-once DM через dedupe | 🟢 | — |
 | **Notifications channel split** | mobile push (in-proc) | MAX DM + reminders | 🟡 | Риск двойного контакта; prefs-dispatcher не собран |
@@ -117,7 +117,7 @@
 
 2. **Эскалации теряются молча.** `handle_max_event` не читает `SkillResult.should_handoff` (`handler.py:540-579` vs `pipeline.py:792`). Booking-фейл пишет «переключаю на менеджера», но AdminTask не создаётся и бот продолжает отвечать.
 
-3. **`event_id` width mismatch (latent).** Ayla эмитит UUID 36 симв. (`envelope.py:230`), bot-колонки `varchar(26)` (`eventbus/models.py:195,236,333`). Первый dedupe-INSERT → Postgres DataError → 500 → Ayla ретраит до dead-letter. Замаскировано только выключенной доставкой. **Чинить до любого флипа топика.**
+3. ~~**`event_id` width mismatch.**~~ ✅ **РЕШЕНО (2026-07-03):** все cross-service колонки расширены 26→36 (eventbus 6 колонок #1067 + cross-app RemoteBookingProxy/Conversation #1070) + fail-fast guard `event_id_too_long`→DLQ + mypy hotfix #1073. **#1058 closed, dev зелёный.** Приём Ayla→bot совместим по 36-симв. uuid4 end-to-end.
 
 ### P1 — must-fix pre-pilot (стыки контрактов)
 
