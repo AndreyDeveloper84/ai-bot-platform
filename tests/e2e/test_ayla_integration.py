@@ -1,16 +1,26 @@
 """End-to-end smoke against the Ayla staging backend.
 
-Sprint 9 / Q3 (DRF-830). Activated when:
+Sprint 9 / Q3 (DRF-830); extended S0-B (#978/#1048) with profile + catalog
+recommendations coverage. Activated when ``AYLA_BASE_URL`` is set (typically
+``https://dev.gobeauty.site``) plus **at least one** Ayla credential — each
+client surface authenticates differently and gates on its own secret:
 
-* ``AYLA_BASE_URL`` is set (typically ``https://dev.gobeauty.site``)
-* ``AYLA_SERVICE_TOKEN`` is set (load from 1Password before run)
+* nutrition — ``X-Service-Token`` from ``AYLA_SERVICE_TOKEN``.
+* profile + recommendations — ``Authorization: Bearer`` from
+  ``AYLA_INTERNAL_API_TOKEN`` (the S0-B-unified s2s Bearer).
 
-Without those env vars the whole module is skipped — CI default. Run
-locally with::
+Load the token(s) from 1Password before running. Without any of them the whole
+module is skipped — CI default. Run locally with::
 
     AYLA_BASE_URL=https://dev.gobeauty.site \\
     AYLA_SERVICE_TOKEN=<from 1password> \\
+    AYLA_INTERNAL_API_TOKEN=<from 1password> \\
     uv run pytest tests/e2e/test_ayla_integration.py -v
+
+Optional: set ``AYLA_E2E_PROFILE_USER_ID`` to a real staging user UUID to
+exercise the full profile 200-body-shape round-trip (otherwise the profile
+test only asserts the Bearer is accepted + the route resolves to a clean 404
+for an unknown user).
 
 The tests hit a **disposable test user** (``bot:test:e2e-${RUN_ID}``) so
 re-runs do not pile up data on staging. Each test cleans up after
@@ -36,13 +46,32 @@ from apps.integrations.ayla import (
 )
 
 
-# Module-level gate: skip everything when env unset. CI default = skip.
+_BASE_URL = os.environ.get("AYLA_BASE_URL")
+_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN")
+_INTERNAL_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN")
+_PROFILE_USER_ID = os.environ.get("AYLA_E2E_PROFILE_USER_ID")
+
+# Module-level gate: skip everything unless a base URL + at least one Ayla
+# credential is present. Each test class below adds a skipif for the specific
+# secret its surface authenticates with, so a Bearer-only or Service-Token-only
+# run exercises exactly the surfaces it can reach. CI default = skip.
 pytestmark = pytest.mark.skipif(
-    not (os.environ.get("AYLA_BASE_URL") and os.environ.get("AYLA_SERVICE_TOKEN")),
+    not (_BASE_URL and (_SERVICE_TOKEN or _INTERNAL_TOKEN)),
     reason=(
-        "Ayla E2E suite needs AYLA_BASE_URL + AYLA_SERVICE_TOKEN env vars. "
+        "Ayla E2E suite needs AYLA_BASE_URL + at least one of AYLA_SERVICE_TOKEN "
+        "(nutrition) / AYLA_INTERNAL_API_TOKEN (profile+recs). "
         "See docs/qa/ayla-e2e-setup.md."
     ),
+)
+
+# Per-surface credential gates.
+_needs_service_token = pytest.mark.skipif(
+    not _SERVICE_TOKEN,
+    reason="Needs AYLA_SERVICE_TOKEN (nutrition X-Service-Token).",
+)
+_needs_internal_token = pytest.mark.skipif(
+    not _INTERNAL_TOKEN,
+    reason="Needs AYLA_INTERNAL_API_TOKEN (Bearer for profile + recommendations).",
 )
 
 
@@ -66,6 +95,7 @@ def external_user_id() -> str:
 # ─── nutrition_client ────────────────────────────────────────────────────
 
 
+@_needs_service_token
 class TestNutritionClient:
     """I1 (DRF-825) — direct client smokes."""
 
@@ -134,6 +164,7 @@ class TestNutritionClient:
 # ─── breaker (I3) ────────────────────────────────────────────────────────
 
 
+@_needs_service_token
 class TestBreakerOpenClose:
     """I3 (DRF-827) — circuit breaker against a forced-failure host.
 
@@ -168,3 +199,101 @@ class TestBreakerOpenClose:
         # ``circuit_open``.
         with pytest.raises(NutritionUnavailableError, match="circuit_open"):
             await client.get_water_today(external_user_id=external_user_id)
+
+
+# ─── profile_client (S0-B / #978) ─────────────────────────────────────────
+
+
+@_needs_internal_token
+class TestProfileClient:
+    """#978 — ``GET /api/v1/internal/users/{user_id}/`` with
+    ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}``.
+
+    Guards the exact route + auth wiring the S0-B migration shipped: a wrong
+    path would 404 at the URL resolver and a wrong token would 401/403, both of
+    which the assertions below distinguish from the healthy 'unknown user' 404.
+    """
+
+    def test_unknown_user_is_not_found_not_auth_error(self) -> None:
+        """Round-trip with a random UUID: the Bearer is ACCEPTED (not 401/403)
+        and the route resolves to a clean 404 'not found', NOT an auth failure.
+
+        Proves the route is present + the token is valid without needing a
+        seeded staging user. ``profile_client`` maps 404 → ``not_found`` and
+        401/403 → ``auth`` — asserting on the message pins which one Ayla
+        actually returned.
+        """
+        from apps.integrations.ayla.profile_client import (
+            ProfileFetchError,
+            fetch_profile_fields,
+        )
+
+        with pytest.raises(ProfileFetchError) as exc:
+            fetch_profile_fields(uuid.uuid4())
+        msg = str(exc.value)
+        assert "not_found" in msg, (
+            f"expected a 404 'not_found' (route + Bearer OK, user absent); "
+            f"got {msg!r} — 'auth' would mean the token was rejected (401/403)."
+        )
+
+    @pytest.mark.skipif(
+        not _PROFILE_USER_ID,
+        reason=(
+            "Set AYLA_E2E_PROFILE_USER_ID to a real staging user UUID for the "
+            "full 200 body-shape round-trip."
+        ),
+    )
+    def test_known_user_returns_pii_subset(self) -> None:
+        """Full 200 round-trip against a seeded user: Ayla's body parses into
+        the closed PII shape (``display_name`` + ``avatar_url``, both ``str``)
+        the #446 consumer persists — the 'body matches client parsing' check.
+        """
+        from apps.integrations.ayla.profile_client import fetch_profile_fields
+
+        fields = fetch_profile_fields(uuid.UUID(_PROFILE_USER_ID))
+        assert isinstance(fields.display_name, str)
+        assert isinstance(fields.avatar_url, str)
+
+
+# ─── recommendations_client (S0-B / #1048) ────────────────────────────────
+
+
+@_needs_internal_token
+class TestRecommendationsClient:
+    """#1048 — ``POST /api/v1/internal/me/catalog/recommendations/`` with
+    ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}`` +
+    ``X-External-User-ID``.
+    """
+
+    def test_recommendations_round_trip(self, external_user_id: str) -> None:
+        """200 round-trip: Ayla auto-creates a ProxyUser for the disposable
+        ``external_user_id`` and returns a JSON object the client passes
+        through. Proves route + Bearer + ``X-External-User-ID`` resolution end
+        to end, and that the parsed body is the ``dict`` the client contract
+        promises.
+
+        A 4xx is tolerated ONLY if it is a business validation (e.g. Ayla
+        rejects the sample payload) — an auth rejection (401/403) fails the
+        test, because that means the Bearer was not accepted.
+        """
+        from apps.integrations.ayla.recommendations_client import (
+            RecommendationsBadRequest,
+            fetch_recommendations,
+        )
+
+        try:
+            body = fetch_recommendations(
+                external_user_id=external_user_id,
+                payload={"lat": 55.75, "lon": 37.61, "goal": "relax", "tenant_history": []},
+            )
+        except RecommendationsBadRequest as exc:
+            assert exc.status_code not in (401, 403), (
+                f"Bearer rejected: HTTP {exc.status_code} — the s2s token is not "
+                f"accepted by Ayla's recommendations endpoint."
+            )
+            pytest.skip(
+                f"Ayla rejected the sample payload (HTTP {exc.status_code}); "
+                f"route + Bearer are healthy — tune the payload for a 200 body check."
+            )
+        else:
+            assert isinstance(body, dict)
