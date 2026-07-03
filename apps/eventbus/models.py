@@ -193,9 +193,11 @@ class IngestDedupe(models.Model):
     _IGNORE_TENANT_MANAGER_CHECK = True
 
     event_id = models.CharField(
-        max_length=26,
+        max_length=36,
         primary_key=True,
-        help_text="ULID from the cross-service envelope §2.event_id. "
+        help_text="Cross-service envelope §2.event_id. varchar(36) holds "
+        "both a bare ULID (26 chars) and Ayla's uuid4() (36 chars) — the "
+        "spec says ULID but the outbox emits uuid4 in practice (#1058). "
         "PK so concurrent inserts hit a uniqueness constraint "
         "rather than racing in application code.",
     )
@@ -234,9 +236,14 @@ class IngestDLQ(models.Model):
 
     id = models.BigAutoField(primary_key=True)
     event_id = models.CharField(
-        max_length=26,
+        max_length=36,
         db_index=True,
-        help_text="ULID from envelope §2.event_id. Indexed for replay lookups.",
+        help_text="Cross-service envelope §2.event_id (bare ULID 26 chars or "
+        "Ayla uuid4 36 chars, #1058). Indexed for replay lookups. Over-length "
+        "ids are rejected fail-fast before reaching this table (see "
+        "ingest_dispatcher event_id_too_long guard); the DLQ writer truncates "
+        "defensively so a contract-violating id cannot turn the DLQ write "
+        "itself into a DataError.",
     )
     event_name = models.CharField(max_length=120, db_index=True)
     event_version = models.IntegerField()
@@ -331,8 +338,9 @@ class HandlerFailureTracker(models.Model):
 
     id = models.BigAutoField(primary_key=True)
     event_id = models.CharField(
-        max_length=26,
-        help_text="ULID from envelope §2.event_id.",
+        max_length=36,
+        help_text="Cross-service envelope §2.event_id (bare ULID 26 chars or "
+        "Ayla uuid4 36 chars, #1058).",
     )
     handler_name = models.CharField(
         max_length=140,
@@ -445,11 +453,12 @@ class PaymentTerminalDedupe(models.Model):
         "this payment_id. A row's existence is the dedupe signal.",
     )
     event_id = models.CharField(
-        max_length=26,
-        help_text="ULID of the event that first reached this terminal "
-        "state. Forensic trace — distinct events with the same "
-        "(tenant_id, payment_id, terminal_state) tuple after this row "
-        "exists are no-op'd at the handler layer.",
+        max_length=36,
+        help_text="Cross-service event_id (ULID 26 or Ayla uuid4 36, #1058) "
+        "of the event that first reached this terminal state. Forensic "
+        "trace — distinct events with the same (tenant_id, payment_id, "
+        "terminal_state) tuple after this row exists are no-op'd at the "
+        "handler layer.",
     )
     processed_at = models.DateTimeField(auto_now_add=True)
 
@@ -506,10 +515,11 @@ class ReviewProcessedDedupe(models.Model):
         help_text="Canonical Ayla Review.id from the event payload.",
     )
     event_id = models.CharField(
-        max_length=26,
-        help_text="ULID of the event that first processed this review. "
-        "Forensic trace — distinct events with the same "
-        "(tenant_id, review_id) after this row exists are no-op'd.",
+        max_length=36,
+        help_text="Cross-service event_id (ULID 26 or Ayla uuid4 36, #1058) "
+        "of the event that first processed this review. Forensic trace — "
+        "distinct events with the same (tenant_id, review_id) after this "
+        "row exists are no-op'd.",
     )
     processed_at = models.DateTimeField(auto_now_add=True)
 
@@ -572,9 +582,10 @@ class NotificationDispatchDedupe(models.Model):
         "(not FK): system-level ledger, cleaned by retention sweeps.",
     )
     event_id = models.CharField(
-        max_length=26,
-        help_text="ULID of the cross-service event that triggered the "
-        "notification. Part of the exactly-once key.",
+        max_length=36,
+        help_text="Cross-service event_id (ULID 26 or Ayla uuid4 36, #1058) "
+        "of the event that triggered the notification. Part of the "
+        "exactly-once key.",
     )
     recipient_id = models.UUIDField(
         help_text="Canonical Ayla User.id the notification is sent to.",

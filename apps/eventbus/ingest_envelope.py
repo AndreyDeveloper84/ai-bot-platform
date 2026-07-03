@@ -49,6 +49,17 @@ ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
 ActorEnum = Literal["system", "user", "admin"]
 ALLOWED_ACTORS: Final[frozenset[str]] = frozenset({"system", "user", "admin"})
 
+# event-contract.md §2 — event_id upper bound. The spec calls it a bare
+# ULID (26 chars) but Ayla's outbox emits uuid4() (36 chars) in practice
+# (#1058); the dedupe/DLQ/tracker columns are varchar(36) to hold both.
+# An id LONGER than this is a contract violation: the dispatcher rejects
+# it fail-fast into the DLQ (reason ``event_id_too_long``) BEFORE the
+# dedupe INSERT, so an over-length id can never reach Postgres and raise
+# a DataError (which would surface as a 500 the publisher would retry
+# forever). Kept here — next to ALLOWED_EVENT_NAMES — because event_id
+# shape is an envelope concern; the dispatcher imports it for the guard.
+MAX_EVENT_ID_LENGTH: Final[int] = 36
+
 # event-contract.md §2 — the only event_name where tenant_id MAY be null.
 TENANT_NULLABLE_EVENT_NAMES: Final[frozenset[str]] = frozenset({"user.profile.updated"})
 

@@ -158,3 +158,17 @@ class TestDriftNamesAreRefused:
         with pytest.raises(IngestEnvelopeError) as exc:
             parse_envelope(body)
         assert exc.value.reason == "invalid_event_name"
+
+    def test_tenant_relationship_revoked_is_not_a_cross_service_event(self) -> None:
+        # #946: Ayla emits tenant.relationship.revoked, but the bot has no
+        # consumer for it. For the pilot the minimally-risky choice is to
+        # keep it OUT of the ingest allowlist (rather than ship an
+        # unexercised consumer): an incoming event is refused at the parse
+        # layer (400 invalid_event_name) instead of being silently
+        # accepted and dropped. This guard fails loudly if a future edit
+        # adds the name to ALLOWED_EVENT_NAMES without a matching handler.
+        body = load_contract("booking.confirmed.v1.json")
+        body["event_name"] = "tenant.relationship.revoked"
+        with pytest.raises(IngestEnvelopeError) as exc:
+            parse_envelope(body)
+        assert exc.value.reason == "invalid_event_name"
