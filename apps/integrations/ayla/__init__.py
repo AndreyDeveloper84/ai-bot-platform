@@ -4,6 +4,10 @@ The nutrition client is the only public surface — handlers compose it with
 their own state machines. See ``nutrition_client`` for the API.
 """
 
+from apps.integrations.ayla.url_builder import (
+    AylaUrlBuilder,
+    AylaUrlError,
+)
 from apps.integrations.ayla.user_proxy import (
     external_user_id_for,
     parse_external_user_id,
@@ -46,6 +50,8 @@ __all__ = [
     "AylaMaster",
     "AylaService",
     "AylaSlot",
+    "AylaUrlBuilder",
+    "AylaUrlError",
     "AylaUserRecord",
     "BookingAPIError",
     "BookingBadRequestError",
