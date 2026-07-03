@@ -8,6 +8,8 @@
 > - **15.07 НЕ фиксируется как Ayla-REST MVP** (P0/P1-блокеры). Показ 15.07 — только **демо/legacy YClients path**, без заявления «MVP готов».
 > - **Velocity:** 2 параллельных код-агента + ежедневное ревью ≈ **35 SP/нед** (база). 3-й агент **не в базовой скорости** — точечно на независимые задачи (docs/tests/eventbus/catalog audit).
 > - **New-scope правило:** любое увеличение pilot-scope сначала фиксируется здесь как New Scope SP, иначе задача не берётся (GAP MAP §10).
+>
+> **🟢 СТАТУС 2026-07-03: Волна 1A запущена.** Два worktree/окна: `agent-s0a` (`fix/s0a-ayla-url-auth`, S0A.1/2/4 — builder+auth+booking_client-эталон) · `agent-s05` (`fix/s05-event-id-width`, S05.1/2/3 — event_id + allowlist). S0-B/S0-C/S1 — не стартовали (1B/1C после merge 1A). **Открытые риски S3 (до старта Wave 2):** ⓐ эксклюзивность календаря пилотного салона в Ayla (иначе double-booking → YClients read-sync не опционален); ⓑ Ayla-сторона #1044/#200 недооценена (нужен отдельный breakdown/стрим); ⓒ источник данных Пензы. S3 SP → пересмотр 40–55 (pilot ~195–205), статус **At Risk until S3 design locked**.
 
 ---
 
@@ -65,22 +67,22 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 ### Этап 1 — Contract Stabilization (36 SP) · G-Contract
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
-| S0A.1 | AylaUrlBuilder в bot-platform | bot | #1049 | BE | 5 | W1 | M | Ready |
-| S0A.2 | AYLA_BASE_URL host-only validator | bot | #1049 | BE | 3 | W1 | M | Ready |
-| S0A.3 | Убрать ad-hoc URL f-строки | bot | #1049 | BE | 5 | W1 | M | Ready |
-| S0A.4 | Унификация s2s-auth/token | bot | #1050 | BE | 3 | W1 | M | Ready |
-| S0B.1 | fix profile_client path+token | bot | #978 | BE | 3 | W1 | M | Ready |
-| S0B.2 | fix recommendations_client path+token | bot | #1048 | BE | 3 | W1 | M | Ready |
-| S0B.3 | nutrition token alignment | bot | #1050 | BE | 3 | W1 | M | Ready |
-| S0C.1 | contract tests vs Ayla route-table | bot(+Ayla) | — | BE | 8 | W1 | M | Ready |
-| S0C.2 | обновить contract docs/ADR | bot | #1050 | BE | 3 | W1 | M | Ready |
+| S0A.1 | AylaUrlBuilder в bot-platform | bot | #1049 | agent-s0a | 5 | W1 | M | **In Progress** |
+| S0A.2 | AYLA_BASE_URL host-only validator | bot | #1049 | agent-s0a | 3 | W1 | M | **In Progress** |
+| S0A.4 | Унификация s2s-auth/token (примитивы + booking_client-эталон) | bot | #1050 | agent-s0a | 3 | W1 | M | **In Progress** |
+| S0A.3 | Убрать ad-hoc URL f-строки во всех клиентах → **перенесено в S0-B** | bot | #1049 | BE | 5 | W1/W2 | M | Ready (S0-B) |
+| S0B.1 | fix profile_client path+token | bot | #978 | BE | 3 | W1/W2 | M | Ready |
+| S0B.2 | fix recommendations_client path+token | bot | #1048 | BE | 3 | W1/W2 | M | Ready |
+| S0B.3 | nutrition token alignment | bot | #1050 | BE | 3 | W1/W2 | M | Ready |
+| S0C.1 | contract tests vs Ayla route-table | bot(+Ayla) | — | BE | 8 | W2 | M | Ready (после S0-A+B) |
+| S0C.2 | обновить contract docs/ADR | bot | #1050 | BE | 3 | W2 | M | Ready |
 
 ### Этап 2 — Event compatibility (23 SP; pilot 13) · G-Event
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
-| S05.1 | event_id 26→36 / ULID agreement | bot(/Ayla) | #1058 | BE | 5 | W1 | M | Ready |
-| S05.2 | миграции + тесты dedupe/DLQ/failure | bot | #1058 | BE | 5 | W1 | M | Ready |
-| S05.3 | allowlist check + no_show/revoked | bot | #946 | BE | 3 | W2 | M | Ready |
+| S05.1 | event_id 26→36 / ULID agreement | bot(/Ayla) | #1058 | agent-s05 | 5 | W1 | M | **In Progress** |
+| S05.2 | миграции + тесты dedupe/DLQ/failure | bot | #1058 | agent-s05 | 5 | W1 | M | **In Progress** |
+| S05.3 | allowlist check + no_show/revoked | bot | #946 | agent-s05 | 3 | W1 | M | **In Progress** |
 | S05.4 | retention cleanup beat | bot | #1056 | BE | 5 | W6 | D | Backlog |
 | S05.5 | double-contact + MasterNotificationPrefs dispatcher | bot | #1057 | BE | 5 | W6 | D | Backlog |
 
@@ -187,7 +189,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 
 | Week | Planned SP | Completed SP | Carried-over | New scope | Blocked | Delta (Compl−Plan) | Статус |
 |---|---|---|---|---|---|---|---|
-| W1 | 35 | — | — | — | — | — | — |
+| W1 | 35 | — | — | — | — | — | In Progress (1A: S0-A, S0.5) |
 | W2 | 30 | — | — | — | — | — | — |
 | W3 | 35 | — | — | +3 (S4.0 #1060) | — | — | — |
 | W4 | 35 | — | — | +13 (дискавери Фаза 1/2) | — | — | — |
