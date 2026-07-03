@@ -9,7 +9,7 @@
 4. **Строго allowed/forbidden dirs** своего стрима. Тронул чужой файл — неверная задача.
 5. **Freeze rule:** нет новых transactional-доменов в bot-platform; нет новых фич; **нет флипов флагов** (`BOOKING_VIA_AYLA_REST`, `OUTBOX_EXTERNAL_DELIVERY_TOPICS`, `CERTIFICATE_PAYMENT_ENABLED`, `GLOBAL_BOT_ONBOARDING` остаются default); нет изменений контракта `booking_client` без approval.
 6. **New-scope правило:** любое увеличение pilot-scope сначала фиксируется в `MVP_DELIVERY_TRACKER` как New Scope SP, иначе не берётся.
-7. **mypy:** на любом novel-вызове внешних либ (redis-py/httpx/celery) прогнать `uv run mypy <touched files>` локально перед PR (CI fail-fast маскирует mypy).
+7. **mypy:** прогнать `uv run mypy` локально перед PR на ВСЕХ изменённых/добавленных файлах — **включая тесты** (CI гоняет `mypy apps config tests` по всему дереву; проверка только source маскирует ошибки в тестах). Ловили дважды: #1067 добавил контракт-тест с `get_field(...).max_length` (`ForeignObjectRel` не имеет `max_length` → `union-attr`) — покраснил dev и ВСЕ ветки от него, пока #1073 не пофиксил. Особое внимание: novel-вызовы внешних либ (redis-py/httpx/celery) и Django `_meta`/`get_field()` (union-типы → `getattr(field, "attr", None)`).
 8. **Не обходить pre-commit** (`--no-verify`) без явного разрешения tech-lead.
 
 ## B. Git / ветки (parallel-agent safe)
