@@ -65,6 +65,9 @@ import logging
 import uuid
 from typing import Any
 
+from django.conf import settings
+
+from apps.channels.max.global_onboarding import needs_onboarding, run_onboarding_turn
 from apps.channels.max.outbound import (
     make_inline_keyboard_attachment_rows,
     send_message,
@@ -373,10 +376,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         },
     )
 
-    # Reply: either the discovery → booking handoff (the user tapped a master
-    # card → transition into tenant T's booking flow, #1020), or a normal
-    # tenant-less discovery turn (which may itself surface master cards).
-    if event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
+    # Reply, in priority order:
+    #   1. Onboarding (#1046, behind GLOBAL_BOT_ONBOARDING flag) — welcome + 152-ФЗ
+    #      consent capture. Variant A «soft gate»: we greet + capture consent but
+    #      do NOT block discovery on it. When onboarding runs we do NOT call
+    #      generate_discovery_reply this turn.
+    #   2. Discovery → booking handoff (the user tapped a master card → transition
+    #      into tenant T's booking flow, #1020).
+    #   3. A normal tenant-less discovery turn (which may itself surface cards).
+    if getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(bot_user, event.text):
+        reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
+    elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
     else:
         reply = generate_discovery_reply(

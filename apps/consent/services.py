@@ -143,6 +143,89 @@ def grant(
     return record
 
 
+def record_global_consent(
+    bot_user: "BotUser",
+    *,
+    consent_type: str = ConsentRecord.ConsentType.PERSONAL_DATA.value,
+    source: str,
+    document_version: str = "",
+) -> ConsentRecord:
+    """Append a ConsentRecord on the tenant-less GLOBAL marketplace path (#1046).
+
+    The global path runs at ``current_tenant() is None`` by design, so
+    :func:`grant` (which requires a tenant in scope) cannot be used. We write the
+    row via ``all_tenants`` with the explicit sentinel tenant the global
+    ``BotUser`` is parked under — the SAME pattern as ``record_global_message`` /
+    ``resolve_or_create_global_bot_user`` — so ``current_tenant()`` stays ``None``
+    throughout. This is the server-side proof-of-consent the regulator needs for
+    the general chat, extending the food-scanner server journal (#956) to the
+    marketplace welcome flow.
+
+    Unlike :func:`grant` this does NOT emit the ``customer.consent.changed`` domain
+    event: that eventbus helper is tenant-scoped and the sentinel tenant is not a
+    real salon. The local ``consent_granted`` analytics event + audit row are
+    enough for the pilot proof-of-consent; the domain-bus mirror is post-pilot
+    (S1.7 memory wiring, #1054).
+
+    Args:
+      bot_user: the global (sentinel-tenant) BotUser granting consent.
+      consent_type: one of ConsentRecord.ConsentType values. Defaults to
+                    PERSONAL_DATA (152-ФЗ baseline).
+      source: where the grant came from (free-form; conventional forms in the
+              model docstring).
+      document_version: privacy-policy version snapshot at grant time.
+
+    Returns:
+      The newly created ConsentRecord.
+    """
+
+    # bot_user.tenant is the ``global_bot`` sentinel (Tenant is not tenant-scoped,
+    # so this FK read does not require / trip a tenant scope).
+    sentinel = bot_user.tenant
+
+    with transaction.atomic():
+        record = ConsentRecord.all_tenants.create(
+            tenant=sentinel,
+            bot_user=bot_user,
+            consent_type=consent_type,
+            granted=True,
+            source=source,
+            document_version=document_version,
+        )
+
+    def _emit_grant() -> None:
+        emit(
+            CONSENT_GRANTED,
+            payload={
+                "bot_user_id": str(bot_user.id),
+                "consent_type": consent_type,
+                "document_version": document_version,
+                "global": True,
+            },
+        )
+        write_audit(
+            "consent.granted",
+            target="ConsentRecord",
+            target_id=record.id,
+            payload={
+                "bot_user_id": str(bot_user.id),
+                "consent_type": consent_type,
+                "source": source[:80],  # truncate, no PII
+                "document_version": document_version,
+                "global": True,
+            },
+        )
+
+    transaction.on_commit(_emit_grant)
+    logger.info(
+        "consent.granted(global) bot_user=%s type=%s tenant=%s(sentinel)",
+        bot_user.id,
+        consent_type,
+        sentinel.id,
+    )
+    return record
+
+
 def withdraw(
     bot_user: "BotUser",
     *,
