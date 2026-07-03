@@ -1047,6 +1047,15 @@ CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", ""
 # current single-secret gate is unchanged by #1019.)
 GLOBAL_BOT_TOKENS = os.environ.get("GLOBAL_BOT_TOKENS", "")
 
+# #1046 — welcome + 152-ФЗ consent capture on the tenant-less global marketplace
+# path (`_handle_global_max_event_inner`). Default OFF so enabling is an explicit,
+# reviewed rollout. Variant A «soft gate»: onboarding greets + captures consent
+# but does NOT block discovery / one-off booking — only long-term memory +
+# proactive messaging are gated (that gate lives in the memory writer, S1.7, not
+# here). The A→B move (consent required BEFORE any foreign-LLM send, pending the
+# #947 lawyer verdict) is a one-line change behind this same flag.
+GLOBAL_BOT_ONBOARDING = os.environ.get("GLOBAL_BOT_ONBOARDING", "false").lower() == "true"
+
 # Sprint 8 / T1 (DRF-705) — OpenTelemetry configuration.
 # Empty endpoint = no-op exporter (local dev + tests).
 # Sample rate is Decision 3 from sprint-8-observability-shadow.md.
