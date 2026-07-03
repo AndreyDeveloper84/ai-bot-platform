@@ -2,6 +2,8 @@
 
 > Недельная разбивка пути до пилота. Источник объёма — [`2026-07-02-MVP_DELIVERY_TRACKER.md`](2026-07-02-MVP_DELIVERY_TRACKER.md). **Утверждено:** пилот на Ayla REST = **15.08.2026** (committed launch); **08.08 (W5) = gates-green candidate**. Velocity = 2 агента ~35 SP/нед (3-й точечно, не в базе). **SP-рамка:** baseline 155 + new scope +16 (дискавери) = current pilot **~171–177**; W6 = must-have tail + buffer.
 >
+> **🔴 ПАМЯТЬ В ПИЛОТ (2026-07-03): Stream 5 Memory Foundation (+32 SP, ров).** Ayla владеет всей памятью; bot=API-клиент по ayla_user_id. M-A (Ayla ~16 SP) идёт в W3–W5 и **конкурирует за Ayla-агента с catalog S3A** → нужно решение (2-й Ayla-агент / scope-cut / date). M-B/M-C (bot/ai-core) в W4–W5. Старт гейтит §8 дизайн-дока. Детали — трекер Этап 8, GAP MAP Stream 5.
+>
 > Правило: **не открывать следующий stream, пока не закрыт его gate-предшественник** (Freeze rule, GAP MAP §10). Safety закрывается ДО живого booking-пути.
 
 ---

@@ -99,6 +99,23 @@
 
 ---
 
+## STREAM 5 — Memory Foundation (⚠️ pilot-critical, ров · gated на §8 дизайн-дока)
+> **🚫 НЕ СТАРТОВАТЬ, пока не закрыт §8** `2026-07-03-MEMORY_FOUNDATION_DESIGN.md`: EncryptedField-подход · green consent implicit vs light-opt-in · fill-rate метрика+порог · global-identity (один ayla_user_id vs per-tenant merge). **Ownership:** Ayla владеет ВСЕЙ памятью (зоны 🟢🟡🔴 + шифрование); bot = read/write API-клиент по ayla_user_id (152-ФЗ: одно место хранения/удаления). BUILD фундамент → ACTIVATE узко (green+surfacing) → PLUG-IN post-pilot.
+
+**Agent M-A — Ayla memory domain** · beautygo_backend · ~16 SP · #187
+- **Отдельный Ayla-агент** (⚠️ конкурирует с catalog S3A за Ayla-capacity). zone-тэги+EncryptedField(yellow/red)+миграция (M-A1); skip/delete/wipe + RedZoneAccessLog 152-ФЗ (M-A2); internal read/write API по ayla_user_id, сервис-токен (M-A3, #187); behavioral-beat + метрики (M-A4).
+
+**Agent M-B — bot concierge memory** · ai-bot-platform · ~13 SP · #1055 #1046
+- **Branch:** `feat/m-b-concierge-memory` · **Allowed:** `apps/identity/**`, `apps/persona/**`/concierge, `apps/consent/**`, `apps/integrations/ayla/**` (новый memory-клиент), тесты. **Forbidden:** catalog, eventbus, booking/services/create.
+- sentinel-tenant ayla_user_id resolve + Ayla personal-context клиент (M-B1, после M-A3); concierge read→инъекция + should_ask→write (M-B2); memory_* consent-типы + гейт green (M-B3).
+
+**Agent M-C — ai-core surfacing** · ayla-ai-core · 3 SP
+- context_builder принимает personal-context → surfacing в системный промпт concierge (M-C1). M-C2 contextual WRITE — post-pilot.
+
+**DoD Stream 5:** зоны+шифрование в проде; бот органично спрашивает 1 green-поле и применяет; surfacing («помню…»); 152-ФЗ skip/delete/wipe + red не в GET; контекст на ayla_user_id переживает сессию; fill-rate считается.
+
+---
+
 ## Deferred / буфер (W6+ или post-pilot)
 S05.4 retention beat (#1056) · S05.5 double-contact dispatcher (#1057) · S1.6 de-drift handlers (#1053) · S1.7 ConsentRecord→memory (#1054) · S1.8 DOB endpoint (Ayla #202) · G.6 G-Notify · S4 Фаза 3 (availability) · S4 Фаза 4 (персонализация, 3 слоя) — зависит от G2.
 **Arch ACK #1055 — РЕШЕНО (ACK latent, Вариант B):** declared prefs = Ayla `users.UserPersonalContext` (не трогать), inferred memory = bot. Pre-pilot разрешён только cross-ref docstring в bot-модели (ACK.1). Rename/migrate/unified — post-pilot MEM (MEM-1/2/3).

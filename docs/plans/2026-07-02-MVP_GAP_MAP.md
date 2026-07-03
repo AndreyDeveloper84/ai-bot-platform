@@ -1,5 +1,6 @@
-# MVP_GAP_MAP_2026-07 — v1.2
+# MVP_GAP_MAP_2026-07 — v1.3
 
+> **v1.3 (2026-07-03) — память В ПИЛОТ:** добавлен **Stream 5 — Memory Foundation** (~32 SP, pilot-critical, ров). Ownership памяти изменён: **Ayla владеет ВСЕЙ памятью** (green/yellow/red), bot = read/write API-клиент по `ayla_user_id` — supersedes прежний #1055 «ACK latent / post-pilot Вариант B». Новый gate **G-Memory**. Источник: `2026-07-03-MEMORY_FOUNDATION_DESIGN.md`. ⚠️ Delivery: +32 SP, Ayla-агент конкурирует catalog(S3A)↔memory(M-A).
 > **v1.2 (2026-07-03) — рефрейм #1044:** Stream 3 «Catalog bridge» → **«Catalog domain rebuild for Ayla booking»**. ServiceTemplate = таксономия ≠ bookable; bookable = SalonService+SpecialistService; #1043/mysite deprecated+retired; онбординг «Confirm, don't create» (external prefill→draft→confirm); сущности DraftSalonService/ExternalSourceMapping; новый gate **G-CalendarSync** (защита от двойной брони); декомпозиция S3A–S3D + S3-CAL; Stream 3 → **50–70 SP**; 15.08 committed но **At Risk**.
 > **v1.2 (2026-07-02):** 2-е ревью founder — Stream 4 → «Pilot Discovery Ranking»; `review_count` → #1060; Freeze rule + New-Scope-SP; волны 1A/1B/1C (S0-A разгружен, S1 = epic).
 > **v1.1 (2026-07-02):** ревью founder — Stream 0 → A/B/C, `event_id` → Stream 0.5, safety раньше booking, Freeze rule/PR sequencing/волны/DoD, номера тикетов. Сверено с роадмапом (PR #1015, G1–G10) и GitHub.
@@ -134,7 +135,7 @@
 ### P2 — латентные / архитектурные
 
 9. **ADR latent violation booking.** Флаг OFF → локальный `BookingRequest` де-факто canonical в пилоте (согласуется с памятью про yclients-shrink deferred).
-10. **`UserPersonalContext` name collision (#1055) — РЕШЕНО ACK latent (P2).** Не «плохой дубль», а два разных понятия под одним именем: declared prefs (Ayla, wired мобильный чат — не трогаем) vs inferred memory (bot, G2/MEM). End-state Вариант B, конвергенция post-pilot MEM. Не pilot-blocker.
+10. **`UserPersonalContext` / память (#1055) — ⚠️ РЕШЕНИЕ ИЗМЕНЕНО (2026-07-03): память В ПИЛОТ как ров.** Прежний ACK-latent/post-pilot СНЯТ. Новая рамка (`docs/plans/2026-07-03-MEMORY_FOUNDATION_DESIGN.md`): **Ayla — единственный владелец ВСЕЙ памяти** (green/yellow/red зоны, шифрование, explicit+behavioral+contextual источники); bot — read/write API-клиент по `ayla_user_id` (152-ФЗ: одно место хранения/удаления). Это **supersedes прежний Вариант B** (declared=Ayla/inferred=bot) → теперь всё в Ayla. Новый **Stream 5 (Memory Foundation, ~32 SP)** — pilot-critical. #1055 из «latent» → **pilot-blocker** (bridge sentinel-tenant `ayla_user_id` ↔ Ayla context).
 11. **`Service.requires_health_check` живёт на `ServiceTemplate`, не на bookable `Service`** — даже с рабочим мостом флаг не прочитать из canonical.
 12. **`booking.no_show` + `tenant.relationship.revoked`** эмитятся Ayla, но нет consumer'а → 422+DLQ если внести в allowlist.
 13. **Нет server-side idempotency** на internal cancel/reschedule; reschedule не идемпотентен натурально.
@@ -268,13 +269,28 @@ Allowed: `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrat
 **В пилот:** Фаза 1 целиком + Фаза 2 (без availability). **Fast-follow:** Фаза 3. **Post-pilot:** Фаза 4.
 **DoD (пилот):** «хочу массаж завтра» → релевантный ранжированный список (trust+geo+goal/price, без личной истории) → слоты → booking в Ayla — один связный путь; коммерческие поля не текут в cross-tenant DTO (MKT1 green).
 
-### Arch ACK — #1055 UserPersonalContext (РЕШЕНО 2026-07-02, ACK latent, НЕ pilot-blocker)
-Два разных понятия под одинаковым именем класса (не «плохой дубль», а плохое именование двух сущностей):
-- **Ayla `users.UserPersonalContext` = declared preferences** (юзер сам выбрал/подтвердил в UI/мобильном чате: районы, время, диета, timezone/city). Ближе к профилю → **canonical в Ayla**. Wired + tested + обслуживает мобильный in-app AI-чат (`ai/personal_context_hint.py`, DRF-174/DRF-230) — **не трогаем и не ретайрим до пилота**.
-- **bot `UserPersonalContext`/`MemoryEntry` = inferred conversational memory** (что AI вывел из диалога, cross-channel, zones, minor_lock). → **bot-platform / ayla-ai-core**. Это gap **G2 / MEM**, fast-follow post-pilot; в ①Technical Pilot MAX-бот от unified memory НЕ зависит.
-- **End-state = Вариант B** (по умолчанию): declared остаётся в Ayla; inferred — в bot; мобильный чат читает inferred через proxy/service boundary на MEM. Вариант A («всё в bot») **не берём** — большой cross-repo трек + риск для живого мобильного чата.
-- **Разрешено pre-pilot (дёшево/безопасно):** ACK в #1055; cross-ref docstring в bot-модели; заметка в этом документе. **Запрещено pre-pilot:** удалять/переименовывать Ayla-модель, переносить declared prefs, unified memory service, менять mobile onboarding write-path, делать bot-memory обязательной зависимостью пилота.
-- Приоритет: **P2 / latent**. Дальнейшее — `MEM-1` (граница declared/inferred), `MEM-2` (end-state A/B), `MEM-3` (rename/migrate) — всё **post-pilot MEM**.
+### Stream 5 — Memory Foundation (⚠️ pilot-critical, 2026-07-03 — supersedes прежний «#1055 ACK latent / post-pilot»)
+> **Решение founder:** память = **единственный ров пилота** (окно 12–18 мес до Яндекса; B2B, клиент бесплатен → удержание через накопленный контекст). Строим **фундамент, не заглушку** (все источники/зоны/шифрование/кросс-поверхностность подключаются без переделки), АКТИВИРУЕМ узко (explicit green-zone + surfacing). Источник: `docs/plans/2026-07-03-MEMORY_FOUNDATION_DESIGN.md`.
+
+**Ownership (изменено):** **Ayla — единственный владелец ВСЕЙ памяти** (green/yellow/red зоны, шифрование at-rest, источники explicit/behavioral/contextual). Bot **НЕ хранит user-факты локально** — только read/write через Ayla internal API по `ayla_user_id` (152-ФЗ: одно место хранения = одно место удаления). Это supersedes прежний Вариант B (declared=Ayla/inferred=bot).
+
+**Что есть (на чём строим):** Ayla `UserPersonalContext` (green-зона, поля, `last_asked_at`), `personalization_engine.should_ask_question` (8 anti-spam правил), behavioral-инференс (Celery), `GET/PATCH /users/me/personal-context/`. Bot: `BotUser.ayla_user_id` bridge, `ConsentRecord`. ai-core: `context.py` builder. **Нет:** зон yellow/red, шифрования, internal read/write API для бота, инъекции памяти в промпт concierge.
+
+**Scope (BUILD / ACTIVATE / PLUG-IN):**
+- 🔨 **BUILD (фундамент):** zone-тэги на поля + `EncryptedField` (yellow/red) с день-1; identity-bridge (sentinel-tenant `ayla_user_id` → Ayla context, read/write internal API #187); 152-ФЗ endpoints (skip/delete-field/wipe + `RedZoneAccessLog`); consent-типы `memory_green/yellow/red`; surfacing-контракт (ai-core context_builder → промпт).
+- ▶️ **ACTIVATE (в пилоте, консервативно):** explicit green-зона (`should_ask_question` → 1 вопрос/сессия → PATCH → применение в подборе); surfacing («помню, любишь Анну»); 152-ФЗ прозрачность как УТП; behavioral-инференс (green/yellow).
+- 🔌 **PLUG-IN (post-pilot):** contextual-extraction WRITE из чата; активный сбор red-зоны за явным consent; кросс-тенантная персонализация (полный G2).
+
+**Декомпозиция (~32 SP пилот, cross-repo):**
+- **M-A (Ayla, beautygo_backend — критпуть):** M-A1 zone+EncryptedField+миграция (5) · M-A2 skip/delete/wipe + RedZoneAccessLog (3) · M-A3 internal API read/write по ayla_user_id (#187, 5) · M-A4 behavioral-beat + метрики (3). **≈16 SP.**
+- **M-B (bot):** M-B1 sentinel-tenant ayla_user_id resolve + Ayla context-клиент (5) · M-B2 concierge: read→инъекция + should_ask→write (5) · M-B3 memory_* consent-типы + гейт green (3). **≈13 SP.**
+- **M-C (ai-core):** M-C1 context_builder → surfacing в промпт (3). M-C2 contextual WRITE — post-pilot.
+
+**Зависимости → в пилот-критпуть:** #1055 (bridge для sentinel-tenant личности) · #1046 (consent-тип `memory_green` light в пилот) · Ayla #187 (internal user API read/write).
+**Открытые вопросы (гейтят старт, §8 дизайн-дока):** EncryptedField-подход (django-cryptography/pgcrypto/app-level) · green consent implicit-в-ToS vs явный light opt-in · fill-rate метрика+порог · глобальная личность (один ayla_user_id vs per-tenant merge).
+**DoD:** модель с зонами+шифрованием в проде; бот органично спрашивает 1 green-поле и применяет; surfacing («помню, что…»); 152-ФЗ skip/delete/wipe + red не в GET; контекст живёт на `ayla_user_id` через сессии; fill-rate считается.
+
+**⚠️ Delivery-флаг:** +32 SP в pilot-scope; Ayla-сторона (M-A ~16 SP) **конкурирует за того же Ayla-агента, что и catalog rebuild S3A (~20–30 SP)** — один Ayla-агент не закроет оба к 15.08. См. трекер (пересмотр даты/scope/capacity).
 
 ---
 
@@ -306,6 +322,7 @@ Allowed: `apps/marketplace/**`, `apps/orchestrator/discovery.py`, `apps/integrat
 | **G-Catalog** | bot mirror по Ayla stable-id (не mysite); только confirmed/active bookable в booking; resolved duration + resolved health-check из internal API | booking реальных услуг под флагом ON |
 | **G-CalendarSync** | либо Ayla = primary calendar (Variant A), либо YClients inbound webhook → Ayla external busy intervals покрывает create/update/cancel (Variant B) | **G-Booking** (защита от двойной брони) |
 | **G-Notify** | де-конфликт двойного контакта per-event | flip топиков payment/booking доставки |
+| **G-Memory** | зоны+шифрование yellow/red в проде; bridge `ayla_user_id`; green explicit ask+apply+surfacing; 152-ФЗ skip/delete/wipe + red не в GET; fill-rate считается | активацию памяти в пилоте (Stream 5) |
 
 ---
 

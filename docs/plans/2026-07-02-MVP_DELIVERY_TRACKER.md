@@ -11,6 +11,7 @@
 >
 > **🟢 СТАТУС 2026-07-03 (обновл.).** **Смержено в dev:** S0-A (PR #1065) · **S0.5 event_id 26→36 end-to-end** (#1067 + #1070 + hotfix #1073; #1058/#1066 closed) · **S0-B** клиенты→builder (#1071) · **S1-A** global onboarding+consent (#1072, флаг OFF). **dev зелёный.** **Разблокировано/next:** S0-C contract tests (после S0-A+B) · **S1-B** safety pre_check (в окне S1 от dev-с-S1-A; кризис-копирайт → founder sign-off) · ShiroPy #949. **Не стартовали:** S1-C/D, Wave 2/S3 (gated).
 > **🔴 РЕФРЕЙМ #1044 (2026-07-03): Stream 3 = Catalog domain rebuild.** S3 → 50–70 SP; pilot scope ~205–225; **15.08 committed но At Risk**; 08.08 = aggressive candidate. **Wave 2 НЕ стартовать пока не закрыты 4 условия:** (1) S3 design locked; (2) **G-CalendarSync** decision записан (Variant A Ayla-primary / Variant B YClients webhook→busy) по пилотному салону; (3) источник данных Пензы подтверждён; (4) Ayla-side breakdown принят. Отдельный **Ayla-агент** (beautygo_backend) на S3A/S3C/S3-CAL — рекомендация.
+> **🔴 ПАМЯТЬ В ПИЛОТ (2026-07-03): Stream 5 Memory Foundation (+32 SP) — ров.** Ayla владеет всей памятью (зоны+шифрование), bot = API-клиент по ayla_user_id. Pilot scope → **~237–257 SP**. **Capacity-конфликт:** Ayla-сторона ≈ 50–70 SP (catalog + memory на одном агенте) → **нужно решение: 2-й Ayla-агент / scope-cut / date move.** Старт Stream 5 гейтит §8 дизайн-дока (EncryptedField / green-consent / fill-rate / global-identity). См. Этап 8.
 
 ---
 
@@ -173,20 +174,29 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | G.7 | Pilot smoke test script | — | — | BE | 5 | W5 | M | Backlog |
 | G.8 | Rollback plan | — | — | BE | 3 | W5 | M | Backlog |
 
-### ACK / Post-pilot MEM (не в пилоте, P2)
-| ID | Задача | Repo | Issue | SP | Когда | Status |
-|---|---|---|---|---|---|---|
-| #1055 | UserPersonalContext ownership/name collision — declared(Ayla)/inferred(bot), Вариант B | — | #1055 | — | ACK | **ACK latent** |
-| ACK.1 | cross-ref docstring в bot-модели (разрешено pre-pilot) | bot | #1055 | 1 | W1–2 | Ready |
-| MEM-1 | Define declared vs inferred memory boundary | — | — | 3 | post-pilot | Backlog |
-| MEM-2 | Decide end-state A/B (default B) | — | — | 2 | post-pilot | Backlog |
-| MEM-3 | Rename / migrate if needed | оба | — | 8 | post-pilot | Backlog |
+### Этап 8 — Memory Foundation (⚠️ pilot-critical, ~32 SP) · G-Memory
+> **Решение founder 2026-07-03: память = ров пилота** (`docs/plans/2026-07-03-MEMORY_FOUNDATION_DESIGN.md`). Ayla владеет ВСЕЙ памятью (зоны 🟢🟡🔴 + шифрование); bot = read/write API-клиент по `ayla_user_id`. BUILD фундамент / ACTIVATE узко (green + surfacing) / PLUG-IN post-pilot. **Supersedes #1055 «post-pilot Вариант B».** ⚠️ **M-A (Ayla) конкурирует за Ayla-агента с catalog S3A.** **Старт гейтит §8 дизайн-дока** (EncryptedField / green-consent / fill-rate / global-identity).
 
-**Итоги (SP-рамка v1.2, рефрейм #1044):**
-- **Baseline** 155 · **New scope дискавери** +16 · **New scope Stream 3 rebuild** +30–50 (S3 18–34 → 50–70) → **Current pilot scope ≈ 205–225 SP**.
-- **08.08 = aggressive gates-green candidate** (не обещание) · **15.08 = committed target, At Risk**.
-- ⚠️ **Слака практически нет:** 205–225 SP при 2 агентах ~35 SP/нед × 6 нед = 210. Лечится (а) отдельным устойчивым **Ayla-агентом** на S3A/S3C/S3-CAL/#1016-Ayla (это НЕ ad-hoc 3-й агент, а core-стрим), и/или (б) intake-minimal, и/или (в) сдвиг даты.
-- deferred ≈ **95 SP** · полный объём ≈ **285–300 SP**.
+| ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
+|---|---|---|---|---|---|---|---|---|
+| M-A1 | zone-тэги на поля + EncryptedField (yellow/red) + миграция | Ayla | (нов.) | Ayla-agent | 5 | W3/W4 | M | Blocked (§8) |
+| M-A2 | skip/delete-field/wipe endpoints + RedZoneAccessLog (152-ФЗ) | Ayla | (нов.) | Ayla-agent | 3 | W4 | M | Blocked (§8) |
+| M-A3 | internal API read/write personal-context по ayla_user_id (#187, сервис-токен) | Ayla | #187 | Ayla-agent | 5 | W4 | M | Blocked (§8) |
+| M-A4 | behavioral-beat (Celery) + метрики fill/answer/usage/skip | Ayla | (нов.) | Ayla-agent | 3 | W5 | M | Blocked (§8) |
+| M-B1 | sentinel-tenant ayla_user_id resolve + Ayla context-клиент | bot | #1055 | BE | 5 | W4 | M | Ready (после M-A3) |
+| M-B2 | concierge: read→инъекция; конец сессии should_ask→write | bot | (нов.) | BE | 5 | W4/W5 | M | Ready (после M-A3, M-C1) |
+| M-B3 | consent-типы memory_green/yellow/red + гейт green | bot | #1046 | BE | 3 | W4 | M | Ready |
+| M-C1 | ai-core context_builder → surfacing personal-context в промпт | ai-core | (нов.) | BE | 3 | W4 | M | Ready |
+| M-C2 | contextual-extraction WRITE из чата | ai-core | (нов.) | BE | 5 | post | D | Backlog |
+
+### ACK (закрыто)
+| ACK.1 | cross-ref docstring #1055 в bot-модели | bot | #1055 | 1 | W1 | ✅ Done (48e078f) |
+
+**Итоги (SP-рамка v1.3 — память в пилот):**
+- **Baseline** 155 · **дискавери** +16 · **Stream 3 rebuild** +30–50 · **Stream 5 memory** +32 → **Current pilot scope ≈ 237–257 SP**.
+- **08.08 candidate** · **15.08 committed — теперь ВЫСОКИЙ риск** (см. capacity ниже).
+- 🔴 **Capacity-конфликт (критично):** Ayla-сторона теперь = catalog S3A (~20–30) + S3C + S3-CAL + #1016-Ayla + **M-A memory (~16)** ≈ **50–70 SP на Ayla**. Один Ayla-агент физически не закроет это к 15.08. **Нужно решение founder:** (а) 2-й Ayla-агент, ИЛИ (б) что режем/двигаем (catalog-minimal? memory ACTIVATE-only без части BUILD? date move?).
+- deferred ≈ **100 SP** · полный объём ≈ **320–340 SP**.
 
 ## 5. Velocity tracking (заполнять еженедельно)
 
