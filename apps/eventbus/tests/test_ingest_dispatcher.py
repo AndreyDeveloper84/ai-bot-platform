@@ -206,10 +206,16 @@ class TestEventIdWidth:
             ReviewProcessedDedupe,
             NotificationDispatchDedupe,
         ]
-        too_narrow = {
-            model.__name__: model._meta.get_field("event_id").max_length
+        # getattr (not attribute access) so mypy doesn't flag the
+        # ``Field | ForeignObjectRel`` union return of get_field() —
+        # event_id is always a concrete CharField, but the type stub
+        # can't know that. Returns Any → union-attr clean.
+        widths = {
+            model.__name__: getattr(model._meta.get_field("event_id"), "max_length", None)
             for model in cross_service_models
-            if (model._meta.get_field("event_id").max_length or 0) < MAX_EVENT_ID_LENGTH
+        }
+        too_narrow = {
+            name: width for name, width in widths.items() if (width or 0) < MAX_EVENT_ID_LENGTH
         }
         assert not too_narrow, (
             "Cross-service event_id column(s) too narrow for Ayla uuid4 "
