@@ -482,17 +482,48 @@ IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = _parse_idle_active_draft_suppress_wi
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
 # than silently 500ing on a misconfigured prod box.
+#
+# ``AYLA_BASE_URL`` is **host-only** (``scheme://host[:port]``, no ``/api/v1``)
+# — the :class:`apps.integrations.ayla.url_builder.AylaUrlBuilder` inserts the
+# version prefix (#1049). A base with a path fails loudly at client start.
 AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
-AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
-# S1 / #1016 — Ayla canonical booking REST bridge (ADR-0009).
-# Auth model is Bearer per the #1016 ground-truth: shipped Ayla internal
-# endpoints authenticate with ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}``
-# (reads → IsInternalBearer; writes → IsBotServiceWithVerifiedClient, which
-# also requires ``X-External-User-ID``). Distinct from the nutrition client's
-# legacy ``X-Service-Token`` shared-secret. Empty default keeps the booking
-# bridge dormant until configured.
+# ── s2s auth secrets (#1050 — auth unification) ─────────────────────────────
+#
+# Two named secrets serve the Ayla REST seam; each has ONE canonical role.
+# The audit-era ``AYLA_SERVICE_TOKEN`` conflated both (used as a Bearer by
+# recommendations/profile AND as ``X-Service-Token`` by nutrition), and the
+# Bearer half never existed on Ayla's side — Ayla validates
+# ``AYLA_INTERNAL_API_TOKEN``. S0-A declares the canonical pair below; the
+# client-migration stream (S0-B, #978/#1048/#1050) rewires the clients onto it.
+#
+# 1. ``AYLA_INTERNAL_API_TOKEN`` — the single s2s Bearer. Shipped Ayla internal
+#    endpoints authenticate with ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}``
+#    (reads → IsInternalBearer; writes → IsBotServiceWithVerifiedClient, which
+#    also requires ``X-External-User-ID``). Used by payments + booking today;
+#    recommendations + profile move onto it in S0-B.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
+
+# 2. ``NUTRITION_SERVICE_TOKEN`` — the nutrition ``X-Service-Token`` shared
+#    secret, named to match what Ayla validates. Falls back to the legacy
+#    ``AYLA_SERVICE_TOKEN`` env var ONLY when unset, so a mid-migration deploy
+#    that sets only the old name keeps working (invariant: nutrition's header
+#    secret == whatever Ayla's nutrition endpoint validates as
+#    ``NUTRITION_SERVICE_TOKEN``). An explicit empty value is honoured as-is
+#    (does NOT resurrect the deprecated token during a rotation blank-out).
+_nutrition_service_token = os.environ.get("NUTRITION_SERVICE_TOKEN")
+NUTRITION_SERVICE_TOKEN = (
+    _nutrition_service_token
+    if _nutrition_service_token is not None
+    else os.environ.get("AYLA_SERVICE_TOKEN", "")
+)
+
+# DEPRECATED (#1050): ``AYLA_SERVICE_TOKEN`` — a Bearer secret that does NOT
+# exist on Ayla's side and a conflated nutrition secret. Kept declared ONLY as
+# the backward-compat source for ``NUTRITION_SERVICE_TOKEN`` above and for the
+# not-yet-migrated recommendations/profile/nutrition clients (their code refs
+# are removed in S0-B). Do not add new readers. Remove once S0-B lands.
+AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
 # instead of direct YClients calls. DEFAULT OFF — the Ayla booking endpoints

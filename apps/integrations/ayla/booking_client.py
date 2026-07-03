@@ -41,6 +41,8 @@ from typing import Any, Protocol, runtime_checkable
 import httpx
 from django.conf import settings
 
+from apps.integrations.ayla.url_builder import AylaUrlBuilder
+
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +408,10 @@ class AylaBookingHTTPClient:
             raise ValueError("AYLA_BASE_URL is empty — booking client cannot start")
         if not api_token:
             raise ValueError("AYLA_INTERNAL_API_TOKEN is empty — booking client cannot start")
-        self._base_url = base_url.rstrip("/")
+        # Single URL seam (#1049): the builder owns host-only validation + the
+        # ``/api/v1`` prefix so this client never hand-builds an f-string URL.
+        self._urls = AylaUrlBuilder(base_url)
+        self._base_url = self._urls.origin
         self._token = api_token
         self._timeout_s = timeout_s
         self._transport = transport
@@ -444,7 +449,7 @@ class AylaBookingHTTPClient:
         if self._circuit.is_open(now=now):
             raise BookingUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/internal/{endpoint.lstrip('/')}"
+        url = self._urls.build(f"internal/{endpoint.lstrip('/')}")
         headers = self._headers(external_user_id=external_user_id)
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
