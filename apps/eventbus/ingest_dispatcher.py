@@ -66,7 +66,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 
-from apps.eventbus.ingest_envelope import IngestEnvelope
+from apps.eventbus.ingest_envelope import MAX_EVENT_ID_LENGTH, IngestEnvelope
 from apps.eventbus.ingest_redaction import redact_data_for_dlq
 from apps.eventbus.models import HandlerFailureTracker, IngestDedupe, IngestDLQ
 
@@ -94,6 +94,7 @@ class DispatchOutcome(str, Enum):
     DUPLICATE = "duplicate"  # Dedupe hit; handler did NOT run. 200 (§8.7).
     UNKNOWN_EVENT_NAME = "unknown_event_name"  # §8.5 — 422 + DLQ.
     UNKNOWN_EVENT_VERSION = "unknown_event_version"  # §8.4 — 422 + DLQ.
+    INVALID_EVENT_ID = "invalid_event_id"  # #1058 — event_id too long. 422 + DLQ.
     HANDLER_EXCEPTION = "handler_exception"  # §8.1 — 500, NO dedupe.
     SATURATED = "saturated"  # Round-2 AS5/AS6 — 503 + Retry-After.
 
@@ -198,7 +199,26 @@ def dispatch_envelope(envelope: IngestEnvelope) -> DispatchResult:
     On handler exception: rollback (no dedupe row), return
     ``HANDLER_EXCEPTION`` so the view can return 500 and Ayla can
     retry per §6.3.
+
+    Step 0 (#1058): if ``event_id`` exceeds ``MAX_EVENT_ID_LENGTH`` the
+    dedupe/DLQ columns cannot hold it — writing it would raise a Postgres
+    DataError, caught below as ``HANDLER_EXCEPTION`` → 500 → Ayla retries
+    a permanently-broken event forever. Reject fail-fast into the DLQ
+    (reason ``event_id_too_long``) and return ``INVALID_EVENT_ID`` (422,
+    no retry). This runs BEFORE any other check so every downstream DB
+    write is guaranteed a within-limit event_id.
     """
+    if len(envelope.event_id) > MAX_EVENT_ID_LENGTH:
+        logger.warning(
+            "eventbus.ingest.event_id_too_long name=%s version=%d length=%d max=%d",
+            envelope.event_name,
+            envelope.event_version,
+            len(envelope.event_id),
+            MAX_EVENT_ID_LENGTH,
+        )
+        _write_dlq(envelope, reason="event_id_too_long")
+        return DispatchResult(outcome=DispatchOutcome.INVALID_EVENT_ID)
+
     if envelope.event_name not in _KNOWN_NAMES:
         _write_dlq(envelope, reason="unknown_event_name")
         return DispatchResult(outcome=DispatchOutcome.UNKNOWN_EVENT_NAME)
@@ -300,9 +320,27 @@ def _write_dlq(envelope: IngestEnvelope, *, reason: str) -> None:
       ``settings.EVENTBUS_HANDLER_EXCEPTION_DLQ_THRESHOLD``.
     * The view layer for early-validation rejects (HMAC/timestamp).
     """
+    # Defensive truncation (#1058): the DLQ event_id column is
+    # varchar(MAX_EVENT_ID_LENGTH). For the ``event_id_too_long`` reject
+    # path the envelope's id is BY DEFINITION over that limit, so writing
+    # it verbatim would turn the DLQ write — our last-resort forensic
+    # capture — into the very DataError we're trying to avoid. Slice to
+    # the column width for the indexed lookup key; the full untruncated
+    # id is preserved in raw_body below. A no-op for the ≤36 common path
+    # (the other callers — unknown_event_name/version, handler_exception
+    # threshold — only reach here AFTER the length guard, so their ids
+    # are already ≤36 and the slice never changes them).
+    #
+    # ACCEPTED trade-off: two DISTINCT over-length ids sharing the same
+    # first 36 chars + same reason collapse onto one (event_id, reason)
+    # row, so the later update_or_create overwrites the earlier
+    # raw_body. Only reachable with adversarial (never real ULID/uuid4)
+    # ids that are ALREADY rejected — forensic-only loss, no corruption.
+    # A hash-keyed DLQ is the follow-up if it ever matters.
+    dlq_event_id = envelope.event_id[:MAX_EVENT_ID_LENGTH]
     try:
         IngestDLQ.objects.update_or_create(
-            event_id=envelope.event_id,
+            event_id=dlq_event_id,
             reason=reason,
             defaults={
                 "event_name": envelope.event_name,

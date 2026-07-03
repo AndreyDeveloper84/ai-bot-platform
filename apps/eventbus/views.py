@@ -53,6 +53,7 @@ AUDIT_SIGNATURE_FAILED = "eventbus.ingest.signature_failed"
 AUDIT_MALFORMED = "eventbus.ingest.malformed"
 AUDIT_UNKNOWN_EVENT_NAME = "eventbus.ingest.unknown_event_name"
 AUDIT_UNKNOWN_EVENT_VERSION = "eventbus.ingest.unknown_event_version"
+AUDIT_INVALID_EVENT_ID = "eventbus.ingest.invalid_event_id"
 AUDIT_HANDLER_EXCEPTION = "eventbus.ingest.handler_exception"
 AUDIT_DUPLICATE = "eventbus.ingest.duplicate"
 AUDIT_PROCESSED = "eventbus.ingest.processed"
@@ -108,6 +109,7 @@ class InternalEventsIngestView(View):
     | Malformed JSON / missing field   | 400    | No             | No    |
     | Unknown event_name               | 422    | No             | Yes   |
     | Unknown event_version            | 422    | No             | Yes   |
+    | event_id too long (#1058)        | 422    | No             | Yes   |
     | Handler raised                   | 500    | Yes (§6.3)     | No*   |
     | Duplicate delivery (dedupe hit)  | 200    | n/a (§8.7)     | No    |
     | OK                               | 200    | n/a            | No    |
@@ -286,6 +288,26 @@ class InternalEventsIngestView(View):
             )
             return JsonResponse(
                 {"status": "unprocessable", "reason": "unknown_event_version"},
+                status=422,
+            )
+
+        if outcome is DispatchOutcome.INVALID_EVENT_ID:
+            # #1058 — event_id exceeds MAX_EVENT_ID_LENGTH. The event is
+            # DLQ'd (reason event_id_too_long) and unprocessable-permanent:
+            # 422, no retry (mirrors unknown_event_name). event_id itself
+            # is over-length + possibly attacker-shaped, so we record only
+            # its length in the audit payload — never the raw value.
+            write_audit(
+                action=AUDIT_INVALID_EVENT_ID,
+                target="eventbus.ingest",
+                payload={
+                    "event_name": envelope.event_name,
+                    "event_version": envelope.event_version,
+                    "event_id_length": len(envelope.event_id),
+                },
+            )
+            return JsonResponse(
+                {"status": "unprocessable", "reason": "event_id_too_long"},
                 status=422,
             )
 
