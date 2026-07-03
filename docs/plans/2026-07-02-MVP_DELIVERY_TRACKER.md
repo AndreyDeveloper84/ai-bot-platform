@@ -71,12 +71,12 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S0A.1 | AylaUrlBuilder в bot-platform | bot | #1049 | agent-s0a | 5 | W1 | M | ✅ Done (PR #1065) |
 | S0A.2 | AYLA_BASE_URL host-only validator | bot | #1049 | agent-s0a | 3 | W1 | M | ✅ Done (PR #1065) |
 | S0A.4 | s2s-auth settings foundation (INTERNAL/NUTRITION token, AYLA_SERVICE_TOKEN deprecated) | bot | #1050 | agent-s0a | 3 | W1 | M | ✅ Done (PR #1065) |
-| S0A.3 | Убрать ad-hoc URL f-строки во всех клиентах → **S0-B** | bot | #1049 | agent-s0b | 5 | W1/W2 | M | **In Progress** |
-| S0B.1 | fix profile_client path+token (+builder) | bot | #978 | agent-s0b | 3 | W1/W2 | M | **In Progress** |
-| S0B.2 | fix recommendations_client path+token (+builder) | bot | #1048 | agent-s0b | 3 | W1/W2 | M | **In Progress** |
-| S0B.3 | nutrition token alignment + remove AYLA_SERVICE_TOKEN refs | bot | #1050 | agent-s0b | 3 | W1/W2 | M | **In Progress** |
-| S0C.1 | contract tests vs Ayla route-table | bot(+Ayla) | — | BE | 8 | W2 | M | Ready (после S0-A+B) |
-| S0C.2 | обновить contract docs/ADR | bot | #1050 | BE | 3 | W2 | M | Ready |
+| S0A.3 | Убрать ad-hoc URL f-строки во всех клиентах → S0-B | bot | #1049 | agent-s0b | 5 | W1/W2 | M | ✅ Done (PR #1071) |
+| S0B.1 | fix profile_client path+token (+builder) | bot | #978 | agent-s0b | 3 | W1/W2 | M | ✅ Done (PR #1071) |
+| S0B.2 | fix recommendations_client path+token (+builder) | bot | #1048 | agent-s0b | 3 | W1/W2 | M | ✅ Done (PR #1071) |
+| S0B.3 | nutrition token alignment + remove AYLA_SERVICE_TOKEN refs | bot | #1050 | agent-s0b | 3 | W1/W2 | M | ✅ Done (PR #1071) |
+| S0C.1 | contract tests vs Ayla route-table | bot(+Ayla) | — | BE | 8 | W2 | M | **Ready (unblocked — S0-A+B в dev)** |
+| S0C.2 | обновить contract docs/ADR | bot | #1050 | BE | 3 | W2 | M | **Ready (unblocked)** |
 
 ### Этап 2 — Event compatibility (23 SP; pilot 13) · G-Event
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
