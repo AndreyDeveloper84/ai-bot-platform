@@ -538,6 +538,17 @@ class UserPersonalContext(models.Model):
     `soft_deleted_at` + tombstone retention; hard-delete is forbidden).
 
     See spec `docs/specs/memory-entry-schema.md` §1 for canonical schema.
+
+    NAME COLLISION NOTE (#1055, ACK 2026-07-02 — NOT a duplicate):
+    Ayla `users.UserPersonalContext` (beautygo_backend) shares this class
+    name but is a DIFFERENT concept — *declared* preferences the user
+    explicitly set in the mobile UI / in-app chat (districts, time slots,
+    diet, timezone/city), canonical Ayla profile data, wired into Ayla's
+    own in-app AI chat. THIS model is *inferred* cross-channel conversational
+    memory (what the AI deduced from dialogue; zones; minor_lock) — owned by
+    the bot AI runtime per ADR-0009 #1 + roadmap G2/MEM. Boundary = Variant B:
+    declared→Ayla, inferred→bot. Convergence (rename/migrate/unified memory
+    service) is POST-PILOT MEM; do NOT touch/retire the Ayla model pre-pilot.
     """
 
     user_id = models.UUIDField(
