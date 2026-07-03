@@ -54,6 +54,14 @@ from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
 
+# Any ``cb:discover:*`` callback (today: the ``cb:discover:book:{tenant}:{master}``
+# booking handoff, #1020) is NEVER onboarding — it must reach the booking flow
+# even for a user whose ``welcomed_at`` is still NULL. Every global BotUser that
+# predates this feature has ``welcomed_at IS NULL`` (the global path never stamped
+# it), so without this guard the first post-flag-flip booking tap of an existing
+# user would be swallowed by the welcome greeting.
+_DISCOVER_CALLBACK_PREFIX = "cb:discover:"
+
 
 # Marketplace-framed welcome. WelcomeSkill.WELCOME_TEXT names the «Формула тела»
 # salon and a wellness menu — wrong for the nationwide discovery bot. Neutral
@@ -87,6 +95,12 @@ _S5_KIND = "welcome_s5_first_action"
 # Source slug stamped on the server consent journal row for the global welcome.
 _CONSENT_SOURCE = "global_onboarding:welcome_s2"
 
+# Disclosure-version snapshot stamped on the consent journal (152-ФЗ informed
+# consent: the row must prove WHICH text the user accepted, not just that they
+# tapped «Да»). Tracks the WelcomeSkill S2 consent copy (S2_CONSENT_TEXT /
+# S2A_DETAILS_TEXT); bump this slug whenever that copy changes materially.
+CONSENT_DOCUMENT_VERSION = "welcome-s2-v1"
+
 
 def needs_onboarding(bot_user: Any, text: str) -> bool:
     """Decide whether this global turn should run onboarding instead of discovery.
@@ -102,8 +116,17 @@ def needs_onboarding(bot_user: Any, text: str) -> bool:
     ``cb:discover:book:*`` handoff tap) flows straight to discovery. This is what
     makes the gate «soft»: after a greeting (or a consent refusal) the user can
     keep searching without re-entering onboarding.
+
+    A ``cb:discover:*`` callback (the booking handoff, #1020) is explicitly NOT
+    onboarding even when ``welcomed_at IS NULL`` — a booking tap must reach the
+    booking flow, never the welcome greeting. This matters at flag flip: every
+    pre-existing global BotUser has ``welcomed_at IS NULL``, so without this guard
+    their first booking tap after enabling the flag would be swallowed.
     """
     stripped = (text or "").strip()
+    # Booking handoff wins over onboarding, unconditionally.
+    if stripped.startswith(_DISCOVER_CALLBACK_PREFIX):
+        return False
     if stripped == "/start" or stripped.startswith("/start "):
         return True
     if stripped.startswith("cb:welcome:"):
@@ -136,8 +159,6 @@ def run_onboarding_turn(
     from apps.skills.base import SkillContext
     from apps.skills.welcome.skill import WelcomeSkill
 
-    had_consent_before = getattr(bot_user, "consent_at", None) is not None
-
     ctx = SkillContext(
         conversation=conversation,
         bot_user=bot_user,
@@ -146,15 +167,23 @@ def run_onboarding_turn(
     )
     result = WelcomeSkill().handle(ctx)
 
-    # Consent newly granted this turn (WelcomeSkill stamps consent_at idempotently
-    # on consent_yes / consent_yes_via_s2a). Journal it exactly once — re-tapping
-    # «Да, продолжим» leaves consent_at set, so had_consent_before is True and we
-    # do not append a duplicate row.
-    consent_now = getattr(bot_user, "consent_at", None) is not None
-    if consent_now and not had_consent_before:
+    # Journal consent on the grant turn. WelcomeSkill renders the S5 first-action
+    # surface ONLY after stamping consent_at (both consent_yes and
+    # consent_yes_via_s2a funnel through ``_render_consent_granted``), so the S5
+    # reply_kind is the reliable «consent granted this turn» signal — more robust
+    # than reading the in-memory ``consent_at`` delta (WelcomeSkill swallows a
+    # failed ``consent_at`` DB save, which would desync that delta). The journal
+    # write is idempotent (get_or_create), so re-tapping «Да» never duplicates and
+    # a repeat tap backfills a row a prior transient failure dropped.
+    if _is_consent_grant_turn(result):
         _record_consent_journal(bot_user)
 
     return _to_discovery_reply(result)
+
+
+def _is_consent_grant_turn(result: Any) -> bool:
+    """True when this WelcomeSkill turn is the one that grants consent (S5 render)."""
+    return (getattr(result, "meta", None) or {}).get("reply_kind", "") == _S5_KIND
 
 
 def _to_discovery_reply(result: Any) -> DiscoveryReply:
@@ -192,7 +221,11 @@ def _record_consent_journal(bot_user: Any) -> None:
     try:
         from apps.consent.services import record_global_consent
 
-        record_global_consent(bot_user, source=_CONSENT_SOURCE)
+        record_global_consent(
+            bot_user,
+            source=_CONSENT_SOURCE,
+            document_version=CONSENT_DOCUMENT_VERSION,
+        )
     except Exception:  # noqa: BLE001 — journal failure must not break the reply
         logger.exception(
             "global_onboarding.consent_journal_failed bot_user_id=%s",

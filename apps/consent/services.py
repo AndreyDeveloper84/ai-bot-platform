@@ -167,6 +167,13 @@ def record_global_consent(
     enough for the pilot proof-of-consent; the domain-bus mirror is post-pilot
     (S1.7 memory wiring, #1054).
 
+    **Idempotent.** Uses ``get_or_create`` keyed on the active grant
+    ``(bot_user, consent_type, granted=True, withdrawn_at=None)`` so a repeated
+    consent tap never appends a duplicate row, and a repeat tap backfills a row a
+    prior transient failure dropped. The event + audit fire only on actual create.
+    (Withdrawal still appends a fresh row via :func:`withdraw`/:func:`grant`; this
+    helper is the append-once welcome-consent path only.)
+
     Args:
       bot_user: the global (sentinel-tenant) BotUser granting consent.
       consent_type: one of ConsentRecord.ConsentType values. Defaults to
@@ -176,7 +183,7 @@ def record_global_consent(
       document_version: privacy-policy version snapshot at grant time.
 
     Returns:
-      The newly created ConsentRecord.
+      The ConsentRecord for this active grant (created or pre-existing).
     """
 
     # bot_user.tenant is the ``global_bot`` sentinel (Tenant is not tenant-scoped,
@@ -184,45 +191,51 @@ def record_global_consent(
     sentinel = bot_user.tenant
 
     with transaction.atomic():
-        record = ConsentRecord.all_tenants.create(
-            tenant=sentinel,
+        record, created = ConsentRecord.all_tenants.get_or_create(
             bot_user=bot_user,
             consent_type=consent_type,
             granted=True,
-            source=source,
-            document_version=document_version,
-        )
-
-    def _emit_grant() -> None:
-        emit(
-            CONSENT_GRANTED,
-            payload={
-                "bot_user_id": str(bot_user.id),
-                "consent_type": consent_type,
+            withdrawn_at=None,
+            defaults={
+                "tenant": sentinel,
+                "source": source,
                 "document_version": document_version,
-                "global": True,
-            },
-        )
-        write_audit(
-            "consent.granted",
-            target="ConsentRecord",
-            target_id=record.id,
-            payload={
-                "bot_user_id": str(bot_user.id),
-                "consent_type": consent_type,
-                "source": source[:80],  # truncate, no PII
-                "document_version": document_version,
-                "global": True,
             },
         )
 
-    transaction.on_commit(_emit_grant)
-    logger.info(
-        "consent.granted(global) bot_user=%s type=%s tenant=%s(sentinel)",
-        bot_user.id,
-        consent_type,
-        sentinel.id,
-    )
+        def _emit_grant() -> None:
+            emit(
+                CONSENT_GRANTED,
+                payload={
+                    "bot_user_id": str(bot_user.id),
+                    "consent_type": consent_type,
+                    "document_version": document_version,
+                    "global": True,
+                },
+            )
+            write_audit(
+                "consent.granted",
+                target="ConsentRecord",
+                target_id=record.id,
+                payload={
+                    "bot_user_id": str(bot_user.id),
+                    "consent_type": consent_type,
+                    "source": source[:80],  # truncate, no PII
+                    "document_version": document_version,
+                    "global": True,
+                },
+            )
+
+        if created:
+            transaction.on_commit(_emit_grant)
+
+    if created:
+        logger.info(
+            "consent.granted(global) bot_user=%s type=%s tenant=%s(sentinel)",
+            bot_user.id,
+            consent_type,
+            sentinel.id,
+        )
     return record
 
 

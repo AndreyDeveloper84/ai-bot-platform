@@ -73,6 +73,10 @@ def spy_discovery(monkeypatch):
 @pytest.fixture(autouse=True)
 def _onboarding_on(settings):
     settings.GLOBAL_BOT_ONBOARDING = True
+    # Make the tenant-less invariant load-bearing: TenantScopedManager reads
+    # STRICT_TENANT_SCOPE (default "audit" only logs); "strict" raises
+    # CrossTenantError on any TenantScoped read at current_tenant() is None.
+    settings.STRICT_TENANT_SCOPE = "strict"
     settings.STRICT_TENANT_REFUSE = True
 
 
@@ -140,6 +144,13 @@ class TestNeedsOnboarding:
         u = SimpleNamespace(welcomed_at=object())
         assert needs_onboarding(u, "cb:discover:book:t:m") is False
 
+    def test_unwelcomed_discover_book_callback_false(self):
+        # Regression (CR Finding 1): even for a NEVER-welcomed user (welcomed_at
+        # IS NULL — every pre-flag global user), a booking handoff tap must reach
+        # the booking flow, not be swallowed by the welcome greeting.
+        u = SimpleNamespace(welcomed_at=None)
+        assert needs_onboarding(u, "cb:discover:book:t:m") is False
+
 
 # --------------------------------------------------------------------------- #
 # run_onboarding_turn — wrapping + consent journal + invariant                #
@@ -186,11 +197,34 @@ class TestRunOnboardingTurn:
         assert rows.count() == 1
         assert rows.first().tenant == bot_user.tenant  # sentinel
 
+    def test_consent_yes_journal_stamps_document_version(self):
+        from apps.channels.max.global_onboarding import CONSENT_DOCUMENT_VERSION
+
+        bot_user, conv = _global_user_and_conv()
+        run_onboarding_turn(conv, bot_user, "/start")
+        run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
+
+        row = ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True).first()
+        # 152-ФЗ informed consent — the row must prove WHICH disclosure was shown.
+        assert row.document_version == CONSENT_DOCUMENT_VERSION
+
+    def test_consent_yes_via_s2a_also_journals(self):
+        # The S2a-fold path (cb:welcome:consent_yes_via_s2a) also stamps consent
+        # + renders S5, so it too must write the server journal.
+        bot_user, conv = _global_user_and_conv()
+        run_onboarding_turn(conv, bot_user, "/start")
+
+        reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes_via_s2a")
+
+        assert reply.text == GLOBAL_S5_TEXT
+        assert ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True).count() == 1
+
     def test_repeat_consent_yes_is_idempotent_no_duplicate_journal(self):
         bot_user, conv = _global_user_and_conv()
         run_onboarding_turn(conv, bot_user, "/start")
         run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
-        # Second tap — consent_at already set → no second journal row.
+        # Second tap re-renders S5 → journal is attempted again, but get_or_create
+        # keeps it to a single active-grant row.
         run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
 
         rows = ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True)
@@ -287,6 +321,31 @@ class TestHandlerIntegration:
 
         bot_user = resolve_or_create_global_bot_user(channel="max", channel_user_id=str(uid))
         assert bot_user.consent_at is None
+
+    def test_unwelcomed_booking_tap_reaches_handoff_not_welcome(
+        self, monkeypatch, mock_send, fake_redis, spy_discovery
+    ):
+        # CR Finding 1 regression: a brand-new (welcomed_at IS NULL) user taps a
+        # master card at flag flip → must enter the booking handoff, NOT get the
+        # welcome greeting.
+        from apps.orchestrator.discovery import DiscoveryReply
+
+        handoff_spy = MagicMock(return_value=DiscoveryReply(text="Открываю запись…"))
+        monkeypatch.setattr(max_handler, "_discovery_handoff_reply", handoff_spy)
+
+        tenant_id, master_id = uuid.uuid4(), uuid.uuid4()
+        max_handler.handle_global_max_event(
+            _callback_payload(
+                payload=f"cb:discover:book:{tenant_id}:{master_id}",
+                user_id=6161,
+                callback_id="bk1",
+            ),
+            trace_id=str(uuid.uuid4()),
+        )
+
+        handoff_spy.assert_called_once()
+        assert mock_send[-1]["text"] == "Открываю запись…"
+        assert mock_send[-1]["text"] != GLOBAL_WELCOME_TEXT
 
     def test_flag_off_goes_straight_to_discovery(
         self, settings, mock_send, fake_redis, spy_discovery
