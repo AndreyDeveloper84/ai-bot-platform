@@ -23,8 +23,10 @@ test only asserts the Bearer is accepted + the route resolves to a clean 404
 for an unknown user).
 
 The tests hit a **disposable test user** (``bot:test:e2e-${RUN_ID}``) so
-re-runs do not pile up data on staging. Each test cleans up after
-itself where the API supports it.
+each run's writes are isolated to a fresh ProxyUser. Rows are NOT reaped
+afterward (no cleanup API is called) — acceptable on a disposable-id staging
+box; do not point this suite at an environment where accreted test rows
+matter.
 
 See ``docs/qa/ayla-e2e-setup.md`` for the operator-side procedure
 (token rotation, nightly schedule wiring).
@@ -47,7 +49,12 @@ from apps.integrations.ayla import (
 
 
 _BASE_URL = os.environ.get("AYLA_BASE_URL")
-_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN")
+# Nutrition's ``X-Service-Token`` secret is ``NUTRITION_SERVICE_TOKEN`` after
+# S0-B (#1050); ``AYLA_SERVICE_TOKEN`` is the deprecated fallback name (mirrors
+# the settings fallback in ``config/settings/base.py``). Gate on the canonical
+# name first so an operator who sets only ``NUTRITION_SERVICE_TOKEN`` still runs
+# the nutrition surface.
+_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN") or os.environ.get("AYLA_SERVICE_TOKEN")
 _INTERNAL_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN")
 _PROFILE_USER_ID = os.environ.get("AYLA_E2E_PROFILE_USER_ID")
 
@@ -58,16 +65,16 @@ _PROFILE_USER_ID = os.environ.get("AYLA_E2E_PROFILE_USER_ID")
 pytestmark = pytest.mark.skipif(
     not (_BASE_URL and (_SERVICE_TOKEN or _INTERNAL_TOKEN)),
     reason=(
-        "Ayla E2E suite needs AYLA_BASE_URL + at least one of AYLA_SERVICE_TOKEN "
-        "(nutrition) / AYLA_INTERNAL_API_TOKEN (profile+recs). "
-        "See docs/qa/ayla-e2e-setup.md."
+        "Ayla E2E suite needs AYLA_BASE_URL + at least one of "
+        "NUTRITION_SERVICE_TOKEN (nutrition) / AYLA_INTERNAL_API_TOKEN "
+        "(profile+recs). See docs/qa/ayla-e2e-setup.md."
     ),
 )
 
 # Per-surface credential gates.
 _needs_service_token = pytest.mark.skipif(
     not _SERVICE_TOKEN,
-    reason="Needs AYLA_SERVICE_TOKEN (nutrition X-Service-Token).",
+    reason="Needs NUTRITION_SERVICE_TOKEN (nutrition X-Service-Token).",
 )
 _needs_internal_token = pytest.mark.skipif(
     not _INTERNAL_TOKEN,
@@ -77,12 +84,24 @@ _needs_internal_token = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _fresh_singleton() -> Generator[None, None, None]:
-    """Each test rebuilds the singleton so changes to env vars
-    between tests are reflected. Cheap — just clears a module-global.
+    """Reset per-process client state between tests: the nutrition singleton
+    and the module-level profile/recommendations circuit breakers.
+
+    Settings are read once at import (``django.conf.settings``), so this does
+    NOT re-read env vars mid-run — env is fixed before the suite launches. Its
+    job is state isolation: a breaker left open by one test must not
+    short-circuit the next. Cheap — just clears module-globals.
     """
+    from apps.integrations.ayla import profile_client
+    from apps.integrations.ayla.recommendations_client import reset_recommendations_circuit
+
     reset_nutrition_client()
+    profile_client._circuit.record_success()
+    reset_recommendations_circuit()
     yield
     reset_nutrition_client()
+    profile_client._circuit.record_success()
+    reset_recommendations_circuit()
 
 
 @pytest.fixture
@@ -189,7 +208,7 @@ class TestBreakerOpenClose:
 
         client = NutritionClient(
             base_url=os.environ["AYLA_BASE_URL_BREAKER"],
-            service_token=os.environ.get("AYLA_SERVICE_TOKEN", "test"),
+            service_token=_SERVICE_TOKEN or "test",
         )
         # 5 failures → open.
         for _ in range(5):
@@ -231,6 +250,10 @@ class TestProfileClient:
         with pytest.raises(ProfileFetchError) as exc:
             fetch_profile_fields(uuid.uuid4())
         msg = str(exc.value)
+        # Assumption: Ayla's internal by-id lookup returns 404 for an unknown
+        # user (not a 403 existence-hiding response). If a future Ayla build
+        # 403s here instead, this asserts 'auth' and fails loudly — which is
+        # itself worth investigating, so the assumption fails safe.
         assert "not_found" in msg, (
             f"expected a 404 'not_found' (route + Bearer OK, user absent); "
             f"got {msg!r} — 'auth' would mean the token was rejected (401/403)."
