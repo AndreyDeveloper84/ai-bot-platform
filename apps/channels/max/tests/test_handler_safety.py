@@ -111,6 +111,16 @@ class TestRedFlagShortCircuit:
         assert mock_send[0]["text"] == BLOCK_REPLY_TEXT
         assert AdminTask.all_tenants.count() == 0
 
+    def test_expanded_phrase_reaches_crisis_end_to_end(
+        self, tenant_a, mock_send, fake_redis, settings
+    ):
+        # #1081: a newly-covered phrasing («хочу умереть») → crisis reply on the
+        # live per-tenant path, not echo/FAQ.
+        settings.STRICT_TENANT_SCOPE = "strict"
+        _run(tenant_a, "я больше не хочу жить")
+        assert len(mock_send) == 1
+        assert mock_send[0]["text"] == CRISIS_REPLY_TEXT
+
 
 class TestHumanHandoffSilence:
     def test_red_flag_stays_silent_when_operator_driving(

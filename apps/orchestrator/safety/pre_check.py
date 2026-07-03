@@ -77,9 +77,27 @@ class SafetyResult:
 # Verdicts encode the action — patterns map to specific verdicts.
 _DEFAULT_PATTERNS: dict[str, list[str]] = {
     SafetyVerdict.HANDOFF.value: [
-        # Suicidal ideation / self-harm — stems without trailing \b (Russian
-        # suffix chars are word-chars, so \b at stem-end would never match).
-        r"(?i)(\bсамоубийств|\bсуицид|убить себя|kill myself|\bsuicide\b)",
+        # Suicidal ideation / self-harm — base stems (RU + EN). Stems without a
+        # trailing \b (Russian suffix chars are word-chars, so \b at stem-end
+        # would never match). `\bsuicid` (stem) catches suicide + suicidal;
+        # `kill\w*\s+my\s?self` catches kill/killing myself + "my self".
+        r"(?i)(\bсамоубийств|\bсуицид|убить себя|убью\s+себя|убьюсь|kill\w*\s+my\s?self"
+        r"|\bsuicid|self[\s-]?harm)",
+        # Suicidal ideation — RU intent phrases (#1081). Coverage-first: a
+        # false-positive crisis reply is a UX cost on a beauty marketplace, a
+        # MISS is a safety failure. Morphology via \w* stems. Borderline idioms
+        # («умираю как хочу…», «убьюсь если…») are accepted as over-triggers —
+        # see the PR #1081 review table.
+        r"(?i)(хоч\w*\s+умереть|хоч\w*\s+сдохнуть|поконч\w*\s+с\s+собой|сч[её]ты\s+с\s+жизнью)",
+        r"(?i)(не\s+хоч\w*\s+(больше\s+)?жить|жить\s+(больше\s+)?не\s+хоч"
+        r"|(нет|не\s+вижу)\s+смысла\s+жить)",
+        r"(?i)(лучше\s+бы\s+я\s+(не\s+жил|умер)|причин\w*\s+себе\s+вред|навред\w*\s+себе)",
+        r"(?i)((реж|рез|порез)\w*\s+себя|вскр\w*\s+вены|(реж|рез)\w*\s+вены"
+        r"|повеш\w*сь|повеси\w*ся|наглота\w*\s+таблеток|исчезнуть\s+навсегда)",
+        # Suicidal ideation / self-harm — EN intent phrases (#1081).
+        r"(?i)(wan(t\w*|na)\s+(to\s+)?die|(don'?t|do\s+not)\s+want\s+to\s+live"
+        r"|no\s+reason\s+to\s+live|better\s+off\s+dead)",
+        r"(?i)(end\s+(my\s+life|it\s+all)|(hurt|harm|cut)\w*\s+my\s?self)",
         # Acute medical emergency
         r"(?i)(\bскорая\b|\bemergency\b|\bумираю\b|\bdying\b|сердечный приступ|heart attack)",
         # Abuse / domestic violence — stems

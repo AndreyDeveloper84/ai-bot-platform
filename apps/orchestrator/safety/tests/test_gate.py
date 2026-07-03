@@ -34,6 +34,79 @@ class TestCrisisHandoff:
         assert outcome.matched_patterns
 
 
+# #1081 — expanded self-harm / suicidal-ideation coverage. Coverage-first: a
+# MISS here is a safety failure; a false-positive is only a UX cost.
+_RU_CRISIS = [
+    "хочу умереть",
+    "не хочу жить",
+    "не хочу больше жить",
+    "жить больше не хочу",
+    "покончу с собой",
+    "покончить с собой",
+    "убью себя",
+    "убьюсь",
+    "свести счёты с жизнью",
+    "нет смысла жить",
+    "не вижу смысла жить",
+    "лучше бы я умер",
+    "лучше бы я умерла",
+    "причиню себе вред",
+    "навредить себе",
+    "режу себя",
+    "резать себя",
+    "вскрою вены",
+    "повешусь",
+    "повеситься",
+    "наглотаюсь таблеток",
+    "хочу исчезнуть навсегда",
+    "хочу сдохнуть",
+]
+_EN_CRISIS = [
+    "I want to die",
+    "wanna die",
+    "kill myself",
+    "killing myself",
+    "end my life",
+    "end it all",
+    "suicide",
+    "suicidal",
+    "self-harm",
+    "self harm",
+    "hurt myself",
+    "cut myself",
+    "no reason to live",
+    "don't want to live",
+    "better off dead",
+]
+
+
+class TestExpandedCrisisCoverage:
+    @pytest.mark.parametrize("text", _RU_CRISIS + _EN_CRISIS)
+    def test_new_phrase_routes_to_crisis(self, text):
+        outcome = evaluate_inbound(text)
+        assert outcome.allowed is False, f"MISS (safety fail): {text!r} not caught"
+        assert outcome.verdict == "handoff"
+        assert outcome.reply_text == CRISIS_REPLY_TEXT
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "хочу записаться на массаж",
+            "маникюр в Пензе завтра",
+            "сколько стоит окрашивание",
+            "убить время за чашкой кофе",
+            "порезала палец, есть пластырь?",
+            "хочу подстричься коротко",
+            "запишите меня к мастеру",
+        ],
+    )
+    def test_happy_beauty_phrase_not_crisis(self, text):
+        # Regression: ordinary beauty traffic must not trip the crisis net.
+        outcome = evaluate_inbound(text)
+        assert outcome.allowed is True
+        assert outcome.verdict != "handoff"
+
+
 class TestBlock:
     @pytest.mark.parametrize(
         "text",

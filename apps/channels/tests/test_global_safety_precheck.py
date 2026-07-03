@@ -95,6 +95,16 @@ class TestGlobalSafety:
         spy_discovery.assert_not_called()
         assert AdminTask.all_tenants.count() == 0
 
+    def test_expanded_phrase_reaches_crisis_end_to_end(self, mock_send, fake_redis, spy_discovery):
+        # #1081: a newly-covered phrasing («покончу с собой») → crisis reply on
+        # the live global path, not discovery.
+        max_handler.handle_global_max_event(
+            _payload(text="я хочу покончить с собой"), trace_id=str(uuid.uuid4())
+        )
+        assert mock_send[0]["text"] == CRISIS_REPLY_TEXT
+        spy_discovery.assert_not_called()
+        assert AdminTask.all_tenants.count() == 0
+
     def test_normal_message_reaches_discovery(self, mock_send, fake_redis, spy_discovery):
         # Onboarding flag OFF (default) → normal discovery path, unaffected by the gate.
         max_handler.handle_global_max_event(
