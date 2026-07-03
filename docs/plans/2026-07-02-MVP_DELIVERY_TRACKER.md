@@ -84,7 +84,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S05.1 | event_id 26→36 (eventbus, 6 колонок) | bot | #1058 | agent-s05 | 5 | W1 | M | ✅ Done (PR #1067) |
 | S05.2 | миграция 0009 + тесты dedupe/DLQ/failure + guard→DLQ | bot | #1058 | agent-s05 | 5 | W1 | M | ✅ Done (PR #1067) |
 | S05.3 | allowlist check + no_show/revoked | bot | #946 | agent-s05 | 3 | W1 | M | ✅ Done (PR #1067) |
-| **S05.6** | **event_id 26→36 кросс-app** (RemoteBookingProxy.last_synced_event_id + Conversation.last_payment_event_id) — завершает #1058 end-to-end | bot | **#1066** | agent-s05 (cross-stream authz ✓) | 2 | W1 | **M (pilot-critical)** | **In Review (PR #1070)** |
+| **S05.6** | **event_id 26→36 кросс-app** (RemoteBookingProxy.last_synced_event_id + Conversation.last_payment_event_id) — завершает #1058 end-to-end | bot | **#1066** | agent-s05 (cross-stream authz ✓) | 2 | W1 | **M (pilot-critical)** | ✅ Done (PR #1070; #1058 closed) |
 | S05.4 | retention cleanup beat | bot | #1056 | BE | 5 | W6 | D | Backlog |
 | S05.5 | double-contact + MasterNotificationPrefs dispatcher | bot | #1057 | BE | 5 | W6 | D | Backlog |
 
