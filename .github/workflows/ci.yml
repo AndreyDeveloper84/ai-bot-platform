@@ -148,6 +148,14 @@ jobs:
       - name: pytest tests/smoke/
         run: uv run pytest tests/smoke/ -v
 
+      # Static Ayla client↔route-table contract (S0-C / G-Contract). Pure,
+      # network-free: exercises every bot Ayla client through its real code and
+      # asserts (method, path, auth+secret) matches Ayla's internal route-table.
+      # Complements the live nightly e2e round-trip (#1079) — this one gates
+      # every push so a client path/method/token drift can never merge silently.
+      - name: Ayla client contract (route-table)
+        run: uv run pytest apps/integrations/ayla/tests/test_contract_route_table.py -v
+
       # mypy is blocking. `strict=False` keeps the bar reasonable while
       # apps/ are mostly empty AppConfigs; tighten to strict per-package
       # as real code lands. New untyped imports must add stubs or
