@@ -1,0 +1,214 @@
+"""Unit tests for the MAX safety gate (#1053, S1-B).
+
+The gate wraps :func:`apps.orchestrator.safety.pre_check.pre_check` for the live
+MAX handlers: HANDOFF/BLOCK short-circuit with a canned reply; CLARIFY/ALLOW
+proceed.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from apps.orchestrator.safety.gate import (
+    BLOCK_REPLY_TEXT,
+    CRISIS_REPLY_TEXT,
+    evaluate_inbound,
+)
+
+
+class TestCrisisHandoff:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "я думаю о суициде",
+            "хочу убить себя",
+            "мне так плохо, что умираю",
+        ],
+    )
+    def test_red_flag_returns_crisis_reply(self, text):
+        outcome = evaluate_inbound(text)
+        assert outcome.allowed is False
+        assert outcome.verdict == "handoff"
+        assert outcome.reply_text == CRISIS_REPLY_TEXT
+        # Observability carries the match provenance; never user-facing.
+        assert outcome.matched_patterns
+
+    def test_crisis_reply_carries_approved_resources(self):
+        # Founder-approved copy (PR #1084) must surface the helpline + 112. Assert
+        # presence, not the full literal text, so a future wording tweak that keeps
+        # the resources doesn't churn this test.
+        assert "8-800-2000-122" in CRISIS_REPLY_TEXT
+        assert "112" in CRISIS_REPLY_TEXT
+
+
+class TestUmirayuNarrowing:
+    """`умираю` hyperbole vs real emergency (#1081 FP narrowing)."""
+
+    @pytest.mark.parametrize(
+        "text",
+        ["умираю как хочу этот маникюр", "умираю хочу кофе", "умираю как хочу на массаж"],
+    )
+    def test_hyperbole_not_crisis(self, text):
+        assert evaluate_inbound(text).allowed is True
+
+    @pytest.mark.parametrize(
+        "text",
+        ["умираю от боли в груди", "помогите, умираю", "кажется, умираю"],
+    )
+    def test_real_emergency_still_caught(self, text):
+        # Guard: narrowing must NOT drop a genuine «умираю»/«умираю от…» emergency.
+        assert evaluate_inbound(text).allowed is False
+        assert evaluate_inbound(text).verdict == "handoff"
+
+
+# #1081 — expanded self-harm / suicidal-ideation coverage. Coverage-first: a
+# MISS here is a safety failure; a false-positive is only a UX cost.
+_RU_CRISIS = [
+    "хочу умереть",
+    "хочу умирать",
+    "лучше умереть",
+    "не хочу жить",
+    "не хочу больше жить",
+    "жить больше не хочу",
+    "не хочу существовать",
+    "надоело жить",
+    "устал от жизни",
+    "покончу с собой",
+    "покончить с собой",
+    "покончить со всем этим",
+    "убью себя",
+    "я себя убью",
+    "хочу себя убить",
+    "убьюсь",
+    "наложу на себя руки",
+    "хочу наложить на себя руки",
+    "свести счёты с жизнью",
+    "нет смысла жить",
+    "не вижу смысла жить",
+    "нет смысла в жизни",
+    "смысла в жизни нет",
+    "зачем мне жить",
+    "жизнь не имеет смысла",
+    "лучше бы я умер",
+    "лучше бы я умерла",
+    "лучше бы меня не было",
+    "всем будет лучше без меня",
+    "причиню себе вред",
+    "хочу себе причинить вред",
+    "причиняю себе боль",
+    "делаю себе больно",
+    "навредить себе",
+    "режу себя",
+    "я себя режу",
+    "резать себя",
+    "вскрою вены",
+    "вскроюсь",
+    "хочу вскрыться",
+    "повешусь",
+    "повеситься",
+    "наглотаюсь таблеток",
+    "прыгну с крыши",
+    "спрыгнуть с моста",
+    "хочу исчезнуть навсегда",
+    "хочу сдохнуть",
+]
+_EN_CRISIS = [
+    "I want to die",
+    "wanna die",
+    "kill myself",
+    "killing myself",
+    "hang myself",
+    "take my own life",
+    "slit my wrists",
+    "overdose",
+    "end my life",
+    "end it all",
+    "I want to end it",
+    "suicide",
+    "suicidal",
+    "self-harm",
+    "self harm",
+    "hurt myself",
+    "cut myself",
+    "no reason to live",
+    "no point in living",
+    "nothing to live for",
+    "don't want to live",
+    "i dont want to be alive",
+    "better off dead",
+]
+
+
+class TestExpandedCrisisCoverage:
+    @pytest.mark.parametrize("text", _RU_CRISIS + _EN_CRISIS)
+    def test_new_phrase_routes_to_crisis(self, text):
+        outcome = evaluate_inbound(text)
+        assert outcome.allowed is False, f"MISS (safety fail): {text!r} not caught"
+        assert outcome.verdict == "handoff"
+        assert outcome.reply_text == CRISIS_REPLY_TEXT
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "хочу записаться на массаж",
+            "маникюр в Пензе завтра",
+            "сколько стоит окрашивание",
+            "убить время за чашкой кофе",
+            "порезала палец, есть пластырь?",
+            "хочу подстричься коротко",
+            "запишите меня к мастеру",
+            "хочу изменить себя к лучшему",
+            "сделала себе маникюр",
+            "наложить макияж",
+            # EN word-boundary guards (send/change/haircut must not trip verbs).
+            "can you send it",
+            "i want to change myself",
+            "haircut myself please",
+        ],
+    )
+    def test_happy_beauty_phrase_not_crisis(self, text):
+        # Regression: ordinary beauty traffic must not trip the crisis net.
+        outcome = evaluate_inbound(text)
+        assert outcome.allowed is True
+        assert outcome.verdict != "handoff"
+
+
+class TestBlock:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "посоветуйте ибупрофен от боли",
+            "хочу подать в суд на салон",
+            "поставьте диагноз пожалуйста",
+        ],
+    )
+    def test_block_phrase_returns_block_reply(self, text):
+        outcome = evaluate_inbound(text)
+        assert outcome.allowed is False
+        assert outcome.verdict == "block"
+        assert outcome.reply_text == BLOCK_REPLY_TEXT
+
+
+class TestProceeds:
+    def test_happy_message_allowed(self):
+        outcome = evaluate_inbound("хочу массаж завтра в Пензе")
+        assert outcome.allowed is True
+        assert outcome.verdict == "allow"
+        assert outcome.reply_text == ""
+
+    def test_clarify_proceeds_not_short_circuited(self):
+        # «почему болит» → CLARIFY; on a beauty marketplace we deliberately let it
+        # proceed to normal handling rather than interrupt with a canned reply.
+        outcome = evaluate_inbound("почему болит спина после массажа")
+        assert outcome.allowed is True
+        assert outcome.verdict == "clarify"
+
+    def test_empty_text_allowed(self):
+        outcome = evaluate_inbound("")
+        assert outcome.allowed is True
+        assert outcome.verdict == "allow"
+
+    def test_callback_payload_allowed(self):
+        # Button taps (folded into text) must not trip the gate.
+        outcome = evaluate_inbound("cb:welcome:consent_yes")
+        assert outcome.allowed is True
