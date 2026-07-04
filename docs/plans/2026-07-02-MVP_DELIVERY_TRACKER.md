@@ -95,8 +95,8 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 |---|---|---|---|---|---|---|---|---|
 | S1.1 (S1-A) | consent-гейт на global path (backend) | bot | #1046 | agent-s1 | 5 | W2 | M | ✅ Done (PR #1072) |
 | S1.FE | ~~Consent UI ShiroPy~~ → #1046 consent-гейт разговорный (backend) = **agent-s1 (S1-A)**; ShiroPy строго-фронт = **#949** SUPPORT_DEEPLINK | bot | #1046 / #949 | agent-s1 + FE #949 | — | W2 | M | Переназначено |
-| S1.2 (S1-B) | safety pre_check до discovery (оба хендлера; global=canned-only) | bot | #1053 | agent-s1 | 5 | W2 | M | **In Review (PR #1084)** — merge gated: (1) founder sign-off кризис-копирайта, (2) **P0 #1081** (regex не ловит «хочу умереть» — сеть sole+live) |
-| S1.3 (S1-C) | should_handoff → AdminTask | bot | #1047 | agent-s1 | 5 | W2 | M | **In Progress** |
+| S1.2 (S1-B) | safety pre_check до discovery (оба хендлера; global=canned-only) | bot | #1053 | agent-s1 | 5 | W2 | M | ✅ Done (PR #1084 — copy sign-off + #1081 patterns 30/30; safety-сеть ЖИВАЯ) |
+| S1.3 (S1-C) | should_handoff → AdminTask | bot | #1047 | agent-s1 | 5 | W2 | M | **In Progress** | **In Review (PR #1089)** — логика ✓ (per-tenant AdminTask; global canned-only); нужен rebase на S1-B перед merge |
 | S1.4 (S1-C) | HUMAN_HANDOFF: бот молчит | bot | #1047 | agent-s1 | 3 | W2 | M | **In Progress** |
 | S1.5 (S1-D) | тесты suicide/red-flag/complaint/human/bookingfail | bot | — | agent-s1 | 8 | W2 | M | **In Progress** |
 | S1.6 | de-drift двух MAX-хендлеров | bot | #1053 | BE | 8 | W6 | D | Backlog |
