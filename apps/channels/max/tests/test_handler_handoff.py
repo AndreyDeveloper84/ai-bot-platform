@@ -128,6 +128,32 @@ class TestShouldHandoff:
         assert mock_send == []  # bot silent while operator drives
 
 
+class TestHandoffBeatsSilence:
+    def test_should_handoff_with_should_send_false_still_escalates(
+        self, tenant_a, mock_send, fake_redis, monkeypatch, settings
+    ):
+        # CR: the handoff check runs BEFORE the D3 silence check, so a skill that
+        # sets should_handoff=True + should_send=False is NOT silently dropped.
+        settings.STRICT_TENANT_SCOPE = "strict"
+        import apps.skills.registry as registry
+
+        monkeypatch.setattr(
+            registry,
+            "dispatch",
+            lambda ctx: SkillResult(
+                reply_text="",
+                should_handoff=True,
+                should_send=False,
+                handoff_reason="silent_escalation",
+            ),
+        )
+        _run(tenant_a, "проблема")
+
+        assert AdminTask.all_tenants.filter(tenant=tenant_a).count() == 1
+        conv = Conversation.all_tenants.get(tenant=tenant_a)
+        assert conv.state == Conversation.State.HUMAN_HANDOFF
+
+
 class TestNoRegression:
     def test_normal_reply_creates_no_task(self, tenant_a, mock_send, fake_redis, settings):
         settings.STRICT_TENANT_SCOPE = "strict"

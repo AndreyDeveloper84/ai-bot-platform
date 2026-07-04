@@ -100,6 +100,8 @@ def test_handoff_should_handoff_creates_admin_task(settings, monkeypatch) -> Non
     assert task is not None
     assert task.task_type == AdminTask.TaskType.HANDOFF
     assert task.reason == "booking_gate_failed"
+    # Operator's snapshot must carry the booking-pick context, not be empty (CR).
+    assert task.transcript_snapshot["messages"], "handoff task transcript is empty"
     assert current_tenant() is None  # scope released after the handoff
 
 

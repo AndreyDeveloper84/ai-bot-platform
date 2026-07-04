@@ -658,6 +658,21 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         )
     )
 
+    # Post-dispatch handoff (#1047): a skill (e.g. booking) requested escalation to
+    # a human via should_handoff. Create the AdminTask + flip HUMAN_HANDOFF + send
+    # the skill's line once, then stop.
+    #
+    # Checked BEFORE the D3 silence path so an escalation is NEVER swallowed: the
+    # HUMAN_HANDOFF mute returns should_send=False AND should_handoff=False (see
+    # skills.registry.dispatch), so it still falls through to the silence branch
+    # below — but a skill that sets should_handoff=True with should_send=False
+    # would otherwise be silently dropped here (the exact silent-drop this ticket
+    # fixes). Re-escalation of an already-handed-off turn can't happen because the
+    # mute result carries should_handoff=False.
+    if skill_result is not None and skill_result.should_handoff:
+        _dispatch_skill_handoff(conversation, skill_result, event.chat_id, trace_id)
+        return
+
     # Silent path (Sprint 3 / D3): conversation is mid-handoff. Dispatcher
     # returns SkillResult(should_send=False) → we record nothing, send
     # nothing, log the silence + return. Operator drives until
@@ -668,16 +683,6 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             conversation.id,
             (skill_result.meta or {}).get("silenced_by", "skill_request"),
         )
-        return
-
-    # Post-dispatch handoff (#1047): a skill (e.g. booking) requested escalation to
-    # a human via should_handoff. Create the AdminTask + flip HUMAN_HANDOFF + send
-    # the skill's line once, then stop — every subsequent turn is muted by the D3
-    # silence path above while state == HUMAN_HANDOFF. Runs AFTER the silence check
-    # so an already-handed-off conversation (dispatch returns should_send=False)
-    # can't double-create a task.
-    if skill_result is not None and skill_result.should_handoff:
-        _dispatch_skill_handoff(conversation, skill_result, event.chat_id, trace_id)
         return
 
     reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
