@@ -185,8 +185,8 @@ class IngestDedupe(models.Model):
     re-processes cleanly).
 
     Retention: §5.3 says ≥120 days (max of DLQ retention 90d + dedupe
-    safety margin 30d). Cleanup is a Celery beat (out of scope for
-    #432 itself; filed as a follow-up).
+    safety margin 30d). Swept daily by
+    ``cleanup_tasks.cleanup_ingest_dedupe``.
     """
 
     # Same opt-out as DomainEvent above — system reads cross-tenant.
@@ -226,7 +226,8 @@ class IngestDLQ(models.Model):
     after retries OR carry an unknown ``event_name`` / unknown
     ``event_version`` are persisted here for operator investigation.
 
-    Retention: §6.4 says 90 days. Cleanup is a Celery beat (follow-up).
+    Retention: §6.4 says 90 days. Swept daily by
+    ``cleanup_tasks.cleanup_ingest_dlq``.
     Manual replay tooling: §5.3 mentions an ``X-Ayla-Force-Process``
     header; that's a follow-up ticket — the table shape is fixed now
     so replay tooling can land separately without a migration.
@@ -323,8 +324,9 @@ class HandlerFailureTracker(models.Model):
 
     ### Retention
 
-    Same 120-day window as IngestDedupe (§5.3). Cleanup is a Celery
-    beat (FOLLOW_UP).
+    Same 120-day window as IngestDedupe (§5.3). Swept daily by
+    ``cleanup_tasks.cleanup_ingest_secondary_ledgers`` (#1056), aging on
+    ``last_attempt_at`` so a still-retrying row is retained until quiet.
 
     ### Forensic trace
 
@@ -423,8 +425,8 @@ class PaymentTerminalDedupe(models.Model):
     can be re-issued) or ``payment.failed`` (intentionally counts
     repeat failures via ``consecutive_payment_failures``).
 
-    Retention: same 120-day window as IngestDedupe (§5.3). Cleanup is
-    a Celery beat (follow-up).
+    Retention: same 120-day window as IngestDedupe (§5.3). Swept daily
+    by ``cleanup_tasks.cleanup_ingest_secondary_ledgers`` (#1056).
     """
 
     _IGNORE_TENANT_MANAGER_CHECK = True
@@ -499,8 +501,8 @@ class ReviewProcessedDedupe(models.Model):
     specifically protects the review fan-out (ClientProfile sentiment
     bump) where double-application would distort RFM-adjacent state.
 
-    Retention: same 120-day window as IngestDedupe (§5.3). Cleanup is
-    a Celery beat (follow-up).
+    Retention: same 120-day window as IngestDedupe (§5.3). Swept daily
+    by ``cleanup_tasks.cleanup_ingest_secondary_ledgers`` (#1056).
     """
 
     _IGNORE_TENANT_MANAGER_CHECK = True
@@ -570,7 +572,8 @@ class NotificationDispatchDedupe(models.Model):
     ``apps.channels.max.outbound`` (exactly-once for ALL notification
     kinds) is the post-pilot target — see #927.
 
-    Retention: same sweep family as the other dedupe ledgers (follow-up).
+    Retention: same sweep family as the other dedupe ledgers — swept
+    daily by ``cleanup_tasks.cleanup_ingest_secondary_ledgers`` (#1056).
     """
 
     _IGNORE_TENANT_MANAGER_CHECK = True
