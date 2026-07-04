@@ -33,6 +33,33 @@ class TestCrisisHandoff:
         # Observability carries the match provenance; never user-facing.
         assert outcome.matched_patterns
 
+    def test_crisis_reply_carries_approved_resources(self):
+        # Founder-approved copy (PR #1084) must surface the helpline + 112. Assert
+        # presence, not the full literal text, so a future wording tweak that keeps
+        # the resources doesn't churn this test.
+        assert "8-800-2000-122" in CRISIS_REPLY_TEXT
+        assert "112" in CRISIS_REPLY_TEXT
+
+
+class TestUmirayuNarrowing:
+    """`умираю` hyperbole vs real emergency (#1081 FP narrowing)."""
+
+    @pytest.mark.parametrize(
+        "text",
+        ["умираю как хочу этот маникюр", "умираю хочу кофе", "умираю как хочу на массаж"],
+    )
+    def test_hyperbole_not_crisis(self, text):
+        assert evaluate_inbound(text).allowed is True
+
+    @pytest.mark.parametrize(
+        "text",
+        ["умираю от боли в груди", "помогите, умираю", "кажется, умираю"],
+    )
+    def test_real_emergency_still_caught(self, text):
+        # Guard: narrowing must NOT drop a genuine «умираю»/«умираю от…» emergency.
+        assert evaluate_inbound(text).allowed is False
+        assert evaluate_inbound(text).verdict == "handoff"
+
 
 # #1081 — expanded self-harm / suicidal-ideation coverage. Coverage-first: a
 # MISS here is a safety failure; a false-positive is only a UX cost.

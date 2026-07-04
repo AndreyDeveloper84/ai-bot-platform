@@ -27,12 +27,13 @@ FAQ / discovery instead of a safe response. This module wires the SAME
 * No new safety patterns — this consumes the existing
   :mod:`apps.orchestrator.safety.pre_check` verdicts unchanged.
 
-### ⚠️ CRISIS COPY IS A DRAFT
+### Crisis copy
 
-:data:`CRISIS_REPLY_TEXT` and the hotline in :data:`CRISIS_HOTLINE` are
-placeholders pending **founder sign-off** (self-harm response wording is not an
-engineering default). Do not treat as final. The gate mechanism is production-
-ready; the words are not.
+:data:`CRISIS_REPLY_TEXT` and :data:`BLOCK_REPLY_TEXT` are the **founder-approved**
+user-facing responses (sign-off on PR #1084, 2026-07-04). This is the sole live
+crisis reply, so the text is authoritative — change it only via a new founder
+sign-off. :data:`CRISIS_HOTLINE` (8-800-2000-122, the all-Russia free 24/7
+psychological helpline) is referenced by the crisis reply.
 """
 
 from __future__ import annotations
@@ -41,26 +42,26 @@ from dataclasses import dataclass, field
 
 from apps.orchestrator.safety.pre_check import SafetyResult, SafetyVerdict, pre_check
 
-# ── DRAFT crisis copy — FOUNDER SIGN-OFF REQUIRED before merge ──────────────
-# The hotline below is a placeholder. 8-800-2000-122 is the all-Russia free 24/7
-# psychological helpline, included so the flow is functional in review, but the
-# founder must confirm the correct line(s) + final wording. Do NOT treat as final.
-CRISIS_HOTLINE = "8-800-2000-122"  # DRAFT placeholder — founder to confirm.
+# All-Russia free 24/7 psychological helpline, referenced by the crisis reply.
+CRISIS_HOTLINE = "8-800-2000-122"
 
+# Founder-approved crisis reply (sign-off PR #1084, 2026-07-04). Sole live
+# self-harm response — change only via a new founder sign-off.
 CRISIS_REPLY_TEXT = (
-    "Мне очень жаль, что тебе сейчас так тяжело. Ты не один(одна), и о таком "
-    "важно поговорить с человеком, который может поддержать.\n\n"
-    f"☎️ Телефон доверия: {CRISIS_HOTLINE} — бесплатно, круглосуточно, анонимно.\n"
-    "Если есть угроза жизни — позвони 112.\n\n"
-    "Я рядом и помогу с записью к специалисту, когда будешь готов(а)."
-)  # DRAFT — founder sign-off required.
+    "Спасибо, что написал(а) мне это. Мне не всё равно, и я хочу, "
+    "чтобы ты был(а) в безопасности.\n\n"
+    "Я — AI и не заменю живого человека, но рядом есть те, кто может "
+    "поддержать прямо сейчас — бесплатно, круглосуточно и анонимно:\n\n"
+    f"📞 {CRISIS_HOTLINE} — телефон доверия, психологическая помощь.\n"
+    "🚑 112 — если жизни угрожает опасность прямо сейчас.\n\n"
+    "Пожалуйста, позвони. Ты не один(одна)."
+)
 
-# ── BLOCK copy — canned refusal for out-of-domain risk (drugs / diagnosis /
-# legal). Neutral, redirects to a professional. Lower sensitivity than crisis;
-# still worth a founder glance but not the gating concern.
+# Founder-approved block reply (sign-off PR #1084, 2026-07-04) — out-of-domain
+# risk (drugs / diagnosis / legal), redirects to a professional.
 BLOCK_REPLY_TEXT = (
-    "Это лучше обсудить с профильным специалистом — я не могу давать медицинские "
-    "или юридические советы. Помогу с подбором мастера и записью, если нужно."
+    "Здесь я не помощник — это вопрос к специалисту, и я не хочу навредить советом.\n\n"
+    "С красотой и записью помогу с радостью 💛"
 )
 
 

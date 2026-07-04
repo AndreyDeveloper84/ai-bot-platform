@@ -118,8 +118,11 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
         r"(?i)(\bkill\w*\s+my\s?self|\bhang\w*\s+my\s?self|\b(hurt|harm|cut)\w*\s+my\s?self"
         r"|\bslit\w*\s+my\s+wrist|take\s+my\s+own\s+life|\bend\s+(my\s+life|it(\s+all)?)\b"
         r"|\bsuicid|self[\s-]?harm|\boverdos)",
-        # Acute medical emergency
-        r"(?i)(\bскорая\b|\bemergency\b|\bумираю\b|\bdying\b|сердечный приступ|heart attack)",
+        # Acute medical emergency. `умираю` excludes the hyperbole «умираю (как)
+        # хочу…» (common on a beauty bot) via negative lookahead — but NOT
+        # «умираю от…», because «умираю от боли» is a real emergency we must catch.
+        r"(?i)(\bскорая\b|\bemergency\b|\bумираю\b(?!\s+(как\s+)?хочу)|\bdying\b"
+        r"|сердечный приступ|heart attack)",
         # Abuse / domestic violence — stems
         r"(?i)(\bизбива|\bнасили|\babuse\b|\bbattered\b)",
     ],
