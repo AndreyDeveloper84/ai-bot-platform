@@ -12,6 +12,7 @@
 > **🟢 СТАТУС (обновл. 2026-07-04): Stream 0 (Contract) ЗАКРЫТ — G-Contract ✅** (S0-A #1065 · S0-B #1071 · e2e #1079 · S0-C #1087; окно S0-B на паузе). **Окно S05 на паузе.** — **Окно S05 на паузе** (ad-hoc-мандат исчерпан: #1056 retention Done; #1057 defer→flip-window).  **Смержено в dev:** S0-A (PR #1065) · **S0.5 event_id 26→36 end-to-end** (#1067 + #1070 + hotfix #1073; #1058/#1066 closed) · **S0-B** клиенты→builder (#1071) · **S1-A** global onboarding+consent (#1072, флаг OFF). **dev зелёный.** **Разблокировано/next:** S0-C contract tests (после S0-A+B) · **S1-B** safety pre_check (в окне S1 от dev-с-S1-A; кризис-копирайт → founder sign-off) · ShiroPy #949. **Не стартовали:** S1-C/D, Wave 2/S3 (gated).
 > **🔴 РЕФРЕЙМ #1044 (2026-07-03): Stream 3 = Catalog domain rebuild.** S3 → 50–70 SP; pilot scope ~205–225; **15.08 committed но At Risk**; 08.08 = aggressive candidate. **Wave 2 НЕ стартовать пока не закрыты 4 условия:** (1) S3 design locked; (2) **G-CalendarSync** decision записан (Variant A Ayla-primary / Variant B YClients webhook→busy) по пилотному салону; (3) источник данных Пензы подтверждён; (4) Ayla-side breakdown принят. Отдельный **Ayla-агент** (beautygo_backend) на S3A/S3C/S3-CAL — рекомендация.
 > **🔴 ПАМЯТЬ В ПИЛОТ (2026-07-03): Stream 5 Memory Foundation (+32 SP) — ров.** Ayla владеет всей памятью (зоны+шифрование), bot = API-клиент по ayla_user_id. Pilot scope → **~237–257 SP**. **Capacity-конфликт:** Ayla-сторона ≈ 50–70 SP (catalog + memory на одном агенте) → **нужно решение: 2-й Ayla-агент / scope-cut / date move.** Старт Stream 5 гейтит §8 дизайн-дока (EncryptedField / green-consent / fill-rate / global-identity). См. Этап 8.
+> **✅ v1.4 (2026-07-04): §8 закрыт, Stream 5 разблокирован.** Дата **мягкая** (пилот=1 салон, сдвиг допустим). **2-й Ayla-агент** (я absorb первый tech-lead проход, founder — финальный sign-off критичного). Каталог: **полный домен #1044 строится параллельно** (Ayla-agent-1), пилот-нить засевается 1 салоном напрямую. Решения §8: Fernet-шифрование · green под общим PERSONAL_DATA (текст→юрист #947) · fill-rate observe-only · один ayla_user_id (телефон=merge-ключ). Тикеты EPIC #1093 / M-A #1094-1097 / M-B #1098-1100 / M-C #1101.
 
 ---
 
@@ -96,7 +97,7 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S1.1 (S1-A) | consent-гейт на global path (backend) | bot | #1046 | agent-s1 | 5 | W2 | M | ✅ Done (PR #1072) |
 | S1.FE | ~~Consent UI ShiroPy~~ → #1046 consent-гейт разговорный (backend) = **agent-s1 (S1-A)**; ShiroPy строго-фронт = **#949** SUPPORT_DEEPLINK | bot | #1046 / #949 | agent-s1 + FE #949 | — | W2 | M | Переназначено |
 | S1.2 (S1-B) | safety pre_check до discovery (оба хендлера; global=canned-only) | bot | #1053 | agent-s1 | 5 | W2 | M | ✅ Done (PR #1084 — copy sign-off + #1081 patterns 30/30; safety-сеть ЖИВАЯ) |
-| S1.3 (S1-C) | should_handoff → AdminTask | bot | #1047 | agent-s1 | 5 | W2 | M | **In Progress** | **In Review (PR #1089)** — логика ✓ (per-tenant AdminTask; global canned-only); нужен rebase на S1-B перед merge |
+| S1.3 (S1-C) | should_handoff → AdminTask | bot | #1047 | agent-s1 | 5 | W2 | M | **In Progress** | ✅ Done (PR #1089, 136936c — per-tenant AdminTask; global canned-only; safety-контур S1-A/B/C ЖИВОЙ). G-Safety близко (остался S1-D) |
 | S1.4 (S1-C) | HUMAN_HANDOFF: бот молчит | bot | #1047 | agent-s1 | 3 | W2 | M | **In Progress** |
 | S1.5 (S1-D) | тесты suicide/red-flag/complaint/human/bookingfail | bot | — | agent-s1 | 8 | W2 | M | **In Progress** |
 | S1.6 | de-drift двух MAX-хендлеров | bot | #1053 | BE | 8 | W6 | D | Backlog |
@@ -179,14 +180,14 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
 |---|---|---|---|---|---|---|---|---|
-| M-A1 | zone-тэги на поля + EncryptedField (yellow/red) + миграция | Ayla | (нов.) | Ayla-agent | 5 | W3/W4 | M | Blocked (§8) |
-| M-A2 | skip/delete-field/wipe endpoints + RedZoneAccessLog (152-ФЗ) | Ayla | (нов.) | Ayla-agent | 3 | W4 | M | Blocked (§8) |
-| M-A3 | internal API read/write personal-context по ayla_user_id (#187, сервис-токен) | Ayla | #187 | Ayla-agent | 5 | W4 | M | Blocked (§8) |
-| M-A4 | behavioral-beat (Celery) + метрики fill/answer/usage/skip | Ayla | (нов.) | Ayla-agent | 3 | W5 | M | Blocked (§8) |
-| M-B1 | sentinel-tenant ayla_user_id resolve + Ayla context-клиент | bot | #1055 | BE | 5 | W4 | M | Ready (после M-A3) |
-| M-B2 | concierge: read→инъекция; конец сессии should_ask→write | bot | (нов.) | BE | 5 | W4/W5 | M | Ready (после M-A3, M-C1) |
-| M-B3 | consent-типы memory_green/yellow/red + гейт green | bot | #1046 | BE | 3 | W4 | M | Ready |
-| M-C1 | ai-core context_builder → surfacing personal-context в промпт | ai-core | (нов.) | BE | 3 | W4 | M | Ready |
+| M-A1 | zone-тэги + EncryptedField (Fernet, yellow/red) + миграция | Ayla | #1094 | Ayla-agent-2 | 5 | — | M | **Ready** (§8 закрыт) |
+| M-A2 | skip/delete/wipe + RedZoneAccessLog (152-ФЗ) | Ayla | #1095 | Ayla-agent-2 | 3 | — | M | **Ready** |
+| M-A3 | internal read/write API по ayla_user_id (#187) | Ayla | #1096 | Ayla-agent-2 | 5 | — | M | **Ready** |
+| M-A4 | behavioral-beat + метрики (fill observe-only) | Ayla | #1097 | Ayla-agent-2 | 3 | — | M | **Ready** |
+| M-B1 | ayla_user_id resolve + context-клиент (+телефон=merge-ключ) | bot | #1098 | BE | 5 | — | M | **Ready** (после M-A3) |
+| M-B2 | concierge read→inject; should_ask→write (≤1 green-вопрос/сессия) | bot | #1099 | BE | 5 | — | M | **Ready** (после M-A3,M-C1) |
+| M-B3 | consent-типы memory_* + green-гейт (формулировка→юрист #947) | bot | #1100 | BE | 3 | — | M | **Ready** (текст→#947) |
+| M-C1 | context_builder → surfacing в промпт | ai-core | #1101 | BE | 3 | — | M | **Ready** |
 | M-C2 | contextual-extraction WRITE из чата | ai-core | (нов.) | BE | 5 | post | D | Backlog |
 
 ### ACK (закрыто)

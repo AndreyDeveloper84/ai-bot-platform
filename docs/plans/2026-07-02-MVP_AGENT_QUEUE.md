@@ -100,7 +100,7 @@
 ---
 
 ## STREAM 5 — Memory Foundation (⚠️ pilot-critical, ров · gated на §8 дизайн-дока)
-> **🚫 НЕ СТАРТОВАТЬ, пока не закрыт §8** `2026-07-03-MEMORY_FOUNDATION_DESIGN.md`: EncryptedField-подход · green consent implicit vs light-opt-in · fill-rate метрика+порог · global-identity (один ayla_user_id vs per-tenant merge). **Ownership:** Ayla владеет ВСЕЙ памятью (зоны 🟢🟡🔴 + шифрование); bot = read/write API-клиент по ayla_user_id (152-ФЗ: одно место хранения/удаления). BUILD фундамент → ACTIVATE узко (green+surfacing) → PLUG-IN post-pilot.
+> **✅ РАЗБЛОКИРОВАНО (§8 закрыт 2026-07-04): Fernet · green под PERSONAL_DATA (текст→#947) · fill observe-only · один ayla_user_id (телефон=merge-ключ).** 2-й Ayla-агент: agent-2=память M-A (#1094-1097). Тикеты M-B #1098-1100 / M-C #1101. ~~НЕ СТАРТОВАТЬ, пока не закрыт §8~~ `2026-07-03-MEMORY_FOUNDATION_DESIGN.md`: EncryptedField-подход · green consent implicit vs light-opt-in · fill-rate метрика+порог · global-identity (один ayla_user_id vs per-tenant merge). **Ownership:** Ayla владеет ВСЕЙ памятью (зоны 🟢🟡🔴 + шифрование); bot = read/write API-клиент по ayla_user_id (152-ФЗ: одно место хранения/удаления). BUILD фундамент → ACTIVATE узко (green+surfacing) → PLUG-IN post-pilot.
 
 **Agent M-A — Ayla memory domain** · beautygo_backend · ~16 SP · #187
 - **Отдельный Ayla-агент** (⚠️ конкурирует с catalog S3A за Ayla-capacity). zone-тэги+EncryptedField(yellow/red)+миграция (M-A1); skip/delete/wipe + RedZoneAccessLog 152-ФЗ (M-A2); internal read/write API по ayla_user_id, сервис-токен (M-A3, #187); behavioral-beat + метрики (M-A4).
