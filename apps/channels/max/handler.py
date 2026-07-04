@@ -119,6 +119,12 @@ _WELCOME_TEXT = (
 _FALLBACK_NO_ECHO = "(нечем эхом) 🙂"
 _FALLBACK_EMPTY = "?"
 
+# #1047 — user-facing line when a skill escalates to a human but doesn't set its
+# own reply_text. Booking's _handoff always sets one («переключаю на менеджера…»),
+# so this is only the defensive fallback. Operational copy (low sensitivity vs the
+# crisis copy) — founder may tweak.
+_HANDOFF_FALLBACK_TEXT = "Передаю ваш вопрос менеджеру — он ответит здесь в ближайшее время."
+
 
 def _build_attachments(action_data: dict[str, Any] | None) -> list[dict[str, Any]] | None:
     """Pull the channel-agnostic keyboard from ``SkillResult.action_data``.
@@ -196,6 +202,60 @@ def _emit_safety_shortcircuit(bot_user: Any, safety: Any, *, is_global: bool) ->
             "matched_count": len(safety.matched_patterns),
             "is_global_bot": is_global,
         },
+    )
+
+
+def _dispatch_skill_handoff(
+    conversation: Any,
+    skill_result: Any,
+    chat_id: str,
+    trace_id: str | uuid.UUID | None,
+) -> None:
+    """Escalate to a human when a skill returns ``should_handoff`` (#1047).
+
+    The MAX handler previously ignored ``SkillResult.should_handoff``, so booking's
+    ``_handoff`` (and any KB-driven escalation) wrote an audit line + a «переключаю
+    на менеджера» reply but NEVER created an AdminTask or flipped state — the
+    operator got no task and the bot kept answering. This creates the AdminTask
+    atomically (state → HUMAN_HANDOFF + emit + audit, via
+    ``handoff.services.create_admin_task``), sends the skill's user-facing line
+    once, then returns; the D3 silence path (dispatch returns ``should_send=False``
+    at ``state == HUMAN_HANDOFF``) mutes every subsequent turn until an operator
+    resolves the task.
+
+    Requires ``current_tenant()`` — the consumer enters ``tenant_scope`` before
+    dispatching to this handler (module contract), which ``create_admin_task``
+    needs.
+    """
+    from apps.handoff.models import AdminTask
+    from apps.handoff.services import create_admin_task
+
+    reason = skill_result.handoff_reason or "skill_requested_handoff"
+    create_admin_task(conversation, task_type=AdminTask.TaskType.HANDOFF, reason=reason)
+
+    handoff_text = skill_result.reply_text or _HANDOFF_FALLBACK_TEXT
+    record_message(
+        conversation,
+        role="assistant",
+        content=handoff_text,
+        rendered_text=handoff_text,
+        action_type=skill_result.action_type or "handoff",
+        trace_id=trace_id,
+    )
+    short_term.append(conversation.id, role="assistant", content=handoff_text)
+    send_message(
+        chat_id=chat_id,
+        text=handoff_text,
+        attachments=_build_attachments(skill_result.action_data),
+    )
+    emit(
+        "channels.max.handler.handoff",
+        payload={"conversation_id": str(conversation.id), "reason": reason[:200]},
+    )
+    logger.info(
+        "channels.max.handler.handoff conversation=%s reason=%s",
+        conversation.id,
+        reason,
     )
 
 
@@ -597,6 +657,21 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             has_attachments=bool(event.attachments),
         )
     )
+
+    # Post-dispatch handoff (#1047): a skill (e.g. booking) requested escalation to
+    # a human via should_handoff. Create the AdminTask + flip HUMAN_HANDOFF + send
+    # the skill's line once, then stop.
+    #
+    # Checked BEFORE the D3 silence path so an escalation is NEVER swallowed: the
+    # HUMAN_HANDOFF mute returns should_send=False AND should_handoff=False (see
+    # skills.registry.dispatch), so it still falls through to the silence branch
+    # below — but a skill that sets should_handoff=True with should_send=False
+    # would otherwise be silently dropped here (the exact silent-drop this ticket
+    # fixes). Re-escalation of an already-handed-off turn can't happen because the
+    # mute result carries should_handoff=False.
+    if skill_result is not None and skill_result.should_handoff:
+        _dispatch_skill_handoff(conversation, skill_result, event.chat_id, trace_id)
+        return
 
     # Silent path (Sprint 3 / D3): conversation is mid-handoff. Dispatcher
     # returns SkillResult(should_send=False) → we record nothing, send
