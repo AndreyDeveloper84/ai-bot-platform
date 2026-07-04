@@ -57,6 +57,30 @@ tenant in scope; that's our loud-failure path for a consumer bug.
 The handler **does not** swallow exceptions. The consumer's
 handler_failed flag governs PEL retention; the right place to decide
 "retry vs DLQ" is there, not here.
+
+### Two-handler safety contract (#1053 de-drift)
+
+There are two live inbound paths — per-tenant :func:`_handle_max_event_inner`
+(skill dispatch) and global :func:`_handle_global_max_event_inner` (discovery).
+They evolved separately; #1053 removed the *functional* drift by routing BOTH
+through the SAME shared helpers so safety can't diverge:
+
+* :func:`apps.orchestrator.safety.gate.evaluate_inbound` — the single verdict
+  source (which phrases short-circuit + the canned reply text). Change the safety
+  policy in ONE place.
+* :func:`_emit_safety_shortcircuit` — the single PII-safe observability emit.
+* :func:`_dispatch_skill_handoff` — the single should_handoff→AdminTask path
+  (per-tenant; the global booking handoff mirrors it in
+  ``apps.orchestrator.handoff``).
+
+Two divergences are INTENTIONAL (and pinned by
+``apps/channels/tests/test_handler_safety_parity.py``): the global tenant-less
+path creates NO AdminTask on a red-flag (Variant A, #1076), and only the
+per-tenant gate carries the HUMAN_HANDOFF barge-guard (the global path has no
+operator state). The remaining structural split — per-tenant ``record_message``
+vs sentinel ``record_global_message`` — is intrinsic to tenant vs tenant-less
+persistence and is deliberately NOT merged. The parity test fails CI if the two
+paths ever drift on the shared safety verdict.
 """
 
 from __future__ import annotations
