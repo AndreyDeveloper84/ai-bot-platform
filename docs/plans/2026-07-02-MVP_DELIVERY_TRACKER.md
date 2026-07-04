@@ -9,7 +9,7 @@
 > - **Velocity:** 2 параллельных код-агента + ежедневное ревью ≈ **35 SP/нед** (база). 3-й агент **не в базовой скорости** — точечно на независимые задачи (docs/tests/eventbus/catalog audit).
 > - **New-scope правило:** любое увеличение pilot-scope сначала фиксируется здесь как New Scope SP, иначе задача не берётся (GAP MAP §10).
 >
-> **🟢 СТАТУС 2026-07-03 (обновл.).** **Окно S05 на паузе** (ad-hoc-мандат исчерпан: #1056 retention Done; #1057 defer→flip-window).  **Смержено в dev:** S0-A (PR #1065) · **S0.5 event_id 26→36 end-to-end** (#1067 + #1070 + hotfix #1073; #1058/#1066 closed) · **S0-B** клиенты→builder (#1071) · **S1-A** global onboarding+consent (#1072, флаг OFF). **dev зелёный.** **Разблокировано/next:** S0-C contract tests (после S0-A+B) · **S1-B** safety pre_check (в окне S1 от dev-с-S1-A; кризис-копирайт → founder sign-off) · ShiroPy #949. **Не стартовали:** S1-C/D, Wave 2/S3 (gated).
+> **🟢 СТАТУС (обновл. 2026-07-04): Stream 0 (Contract) ЗАКРЫТ — G-Contract ✅** (S0-A #1065 · S0-B #1071 · e2e #1079 · S0-C #1087; окно S0-B на паузе). **Окно S05 на паузе.** — **Окно S05 на паузе** (ad-hoc-мандат исчерпан: #1056 retention Done; #1057 defer→flip-window).  **Смержено в dev:** S0-A (PR #1065) · **S0.5 event_id 26→36 end-to-end** (#1067 + #1070 + hotfix #1073; #1058/#1066 closed) · **S0-B** клиенты→builder (#1071) · **S1-A** global onboarding+consent (#1072, флаг OFF). **dev зелёный.** **Разблокировано/next:** S0-C contract tests (после S0-A+B) · **S1-B** safety pre_check (в окне S1 от dev-с-S1-A; кризис-копирайт → founder sign-off) · ShiroPy #949. **Не стартовали:** S1-C/D, Wave 2/S3 (gated).
 > **🔴 РЕФРЕЙМ #1044 (2026-07-03): Stream 3 = Catalog domain rebuild.** S3 → 50–70 SP; pilot scope ~205–225; **15.08 committed но At Risk**; 08.08 = aggressive candidate. **Wave 2 НЕ стартовать пока не закрыты 4 условия:** (1) S3 design locked; (2) **G-CalendarSync** decision записан (Variant A Ayla-primary / Variant B YClients webhook→busy) по пилотному салону; (3) источник данных Пензы подтверждён; (4) Ayla-side breakdown принят. Отдельный **Ayla-агент** (beautygo_backend) на S3A/S3C/S3-CAL — рекомендация.
 > **🔴 ПАМЯТЬ В ПИЛОТ (2026-07-03): Stream 5 Memory Foundation (+32 SP) — ров.** Ayla владеет всей памятью (зоны+шифрование), bot = API-клиент по ayla_user_id. Pilot scope → **~237–257 SP**. **Capacity-конфликт:** Ayla-сторона ≈ 50–70 SP (catalog + memory на одном агенте) → **нужно решение: 2-й Ayla-агент / scope-cut / date move.** Старт Stream 5 гейтит §8 дизайн-дока (EncryptedField / green-consent / fill-rate / global-identity). См. Этап 8.
 
@@ -76,8 +76,8 @@ Owner: **BE** = бэкенд (ты / код-агенты) · **FE** = ShiroPy (�
 | S0B.1 | fix profile_client path+token (+builder) | bot | #978 | agent-s0b | 3 | W1/W2 | M | ✅ Done (PR #1071) |
 | S0B.2 | fix recommendations_client path+token (+builder) | bot | #1048 | agent-s0b | 3 | W1/W2 | M | ✅ Done (PR #1071) |
 | S0B.3 | nutrition token alignment + remove AYLA_SERVICE_TOKEN refs | bot | #1050 | agent-s0b | 3 | W1/W2 | M | ✅ Done (PR #1071) |
-| S0C.1 | contract tests vs Ayla route-table | bot(+Ayla) | — | agent-s0b | 8 | W2 | M | **In Progress** (закрывает G-Contract) |
-| S0C.2 | обновить contract docs/ADR | bot | #1050 | agent-s0b | 3 | W2 | M | **In Progress** |
+| S0C.1 | contract tests vs Ayla route-table | bot | #1087 | agent-s0b | 8 | W2 | M | ✅ Done (PR #1087 — **G-Contract ✅**) |
+| S0C.2 | обновить contract docs/ADR | bot | #1050 | agent-s0b | 3 | W2 | M | ✅ Done (PR #1087) |
 
 ### Этап 2 — Event compatibility (23 SP; pilot 13) · G-Event
 | ID | Задача | Repo | Issue | Owner | SP | Week | Pilot | Status |
