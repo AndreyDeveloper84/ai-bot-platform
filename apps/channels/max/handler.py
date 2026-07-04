@@ -73,14 +73,19 @@ through the SAME shared helpers so safety can't diverge:
   (per-tenant; the global booking handoff mirrors it in
   ``apps.orchestrator.handoff``).
 
+The safety turn is tagged ``action_type="safety_pre_check"`` on BOTH paths
+(``record_message`` and ``record_global_message`` both carry it) so a crisis turn
+is distinguishable in the Message table regardless of path.
+
 Two divergences are INTENTIONAL (and pinned by
 ``apps/channels/tests/test_handler_safety_parity.py``): the global tenant-less
 path creates NO AdminTask on a red-flag (Variant A, #1076), and only the
 per-tenant gate carries the HUMAN_HANDOFF barge-guard (the global path has no
-operator state). The remaining structural split — per-tenant ``record_message``
-vs sentinel ``record_global_message`` — is intrinsic to tenant vs tenant-less
-persistence and is deliberately NOT merged. The parity test fails CI if the two
-paths ever drift on the shared safety verdict.
+operator state). The remaining split — the per-tenant ``record_message`` vs
+sentinel ``record_global_message`` FUNCTIONS themselves — is intrinsic to tenant
+vs tenant-less persistence and is deliberately NOT merged, but they now emit
+parity rows (same ``action_type``). The parity test fails CI if the two paths
+ever drift on the shared safety verdict, reply, or marker.
 """
 
 from __future__ import annotations
@@ -491,10 +496,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #   2. Discovery → booking handoff (the user tapped a master card → transition
     #      into tenant T's booking flow, #1020).
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
+    assistant_action_type = ""
     safety = evaluate_inbound(event.text)
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
         reply = DiscoveryReply(text=safety.reply_text)
+        # Tag the safety turn so it is distinguishable in the Message table on the
+        # global path too — parity with the per-tenant handler (#1053 de-drift).
+        assistant_action_type = "safety_pre_check"
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text
     ):
@@ -514,6 +523,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         role="assistant",
         content=reply.text,
         rendered_text=reply.text,
+        action_type=assistant_action_type,
         trace_id=trace_id,
     )
     short_term.append(conversation.id, role="assistant", content=reply.text)

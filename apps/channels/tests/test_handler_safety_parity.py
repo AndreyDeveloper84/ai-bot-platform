@@ -141,8 +141,39 @@ class TestSafetyParity:
         # Neither path ran discovery on a blocked turn.
         spy_discovery.assert_not_called()
 
+    def test_safety_turn_action_type_parity(self, mock_send, fake_redis, spy_discovery):
+        # De-drift (CR F1): the safety turn must be tagged action_type=
+        # "safety_pre_check" on BOTH paths, else a global crisis turn is invisible
+        # to a Message.filter(action_type="safety_pre_check") analytics query.
+        from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
+
+        tenant = Tenant.objects.create(slug="parity-at", name="AT")
+        _run_per_tenant(tenant, "я думаю о суициде")
+        _run_global("я думаю о суициде")
+
+        pt = (
+            Message.all_tenants.filter(tenant=tenant, role="assistant")
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        gl = (
+            Message.all_tenants.filter(
+                role="assistant", conversation__tenant__slug=GLOBAL_BOT_TENANT_SLUG
+            )
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        assert pt.action_type == "safety_pre_check"
+        assert gl.action_type == "safety_pre_check"
+
     @pytest.mark.parametrize(
-        "text", ["хочу записаться на массаж", "маникюр в Пензе", "сколько стоит стрижка"]
+        "text",
+        [
+            "хочу записаться на массаж",
+            "маникюр в Пензе",
+            "сколько стоит стрижка",
+            "почему болит спина после массажа",  # CLARIFY verdict — must proceed, not block
+        ],
     )
     def test_happy_phrase_blocked_on_neither(
         self, text, mock_send, fake_redis, spy_discovery, monkeypatch
@@ -176,6 +207,8 @@ class TestIntentionalDivergence:
     def test_global_red_flag_creates_no_admin_task(self, mock_send, fake_redis, spy_discovery):
         # Variant A (#1076): the tenant-less path never creates an AdminTask.
         _run_global("я думаю о суициде")
+        # Assert the safety reply DID fire (else "no task" would pass trivially).
+        assert mock_send[-1]["text"] == CRISIS_REPLY_TEXT
         assert AdminTask.all_tenants.count() == 0
         assert current_tenant() is None
 
@@ -188,7 +221,11 @@ class TestIntentionalDivergence:
         assert AdminTask.all_tenants.count() == 0
         conv = Conversation.all_tenants.get(tenant=tenant)
         # Detection reply persisted with the safety action_type.
-        last = Message.all_tenants.filter(conversation=conv).order_by("-created_at").first()
+        last = (
+            Message.all_tenants.filter(conversation=conv, role="assistant")
+            .order_by("-created_at", "-id")
+            .first()
+        )
         assert last.action_type == "safety_pre_check"
 
     def test_per_tenant_gate_does_not_barge_operator(self, mock_send, fake_redis):

@@ -539,6 +539,7 @@ def record_global_message(
     role: str,
     content: str,
     rendered_text: str = "",
+    action_type: str = "",
     trace_id: uuid.UUID | str | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
@@ -550,6 +551,11 @@ def record_global_message(
     ``Message.all_tenants`` / ``Conversation.all_tenants`` with explicit
     ``tenant=sentinel`` so ``current_tenant()`` stays None. Re-asserts the
     ``Message.tenant == Conversation.tenant == sentinel`` invariant.
+
+    ``action_type`` mirrors :func:`record_message` so a tagged assistant turn
+    (e.g. ``"safety_pre_check"``) is distinguishable in the Message table on the
+    global path too — without it, a global safety reply would be indistinguishable
+    from a discovery turn (#1053 de-drift, CR).
     """
 
     from apps.identity.services.global_tenant import get_global_bot_tenant
@@ -577,6 +583,7 @@ def record_global_message(
             role=role,
             content=content,
             rendered_text=rendered_text,
+            action_type=action_type,
             trace_id=trace_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
