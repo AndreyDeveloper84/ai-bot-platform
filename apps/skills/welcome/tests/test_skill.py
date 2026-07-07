@@ -402,6 +402,22 @@ class TestS2ConsentFlow:
         assert S5_PROMPT_TEXT in result.reply_text
 
     @pytest.mark.django_db
+    def test_consent_yes_does_not_stamp_on_global_path(self, unwelcomed_bot_user):
+        """#1074 — at ``current_tenant() is None`` (tenant-less GLOBAL path)
+        WelcomeSkill does NOT stamp consent_at itself; record_global_consent stamps
+        it ATOMICALLY with the ConsentRecord. Locks the guard's skip branch."""
+        skill = WelcomeSkill()
+        assert unwelcomed_bot_user.consent_at is None
+
+        # No tenant_scope entered → current_tenant() is None → guard skips the stamp.
+        result = skill.handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        unwelcomed_bot_user.refresh_from_db()
+        assert unwelcomed_bot_user.consent_at is None  # NOT stamped on the global path
+        assert result.meta["reply_kind"] == "welcome_s5_first_action"  # S5 still renders
+
+    @pytest.mark.django_db
     def test_consent_yes_idempotent_does_not_overwrite(self, unwelcomed_bot_user):
         """Double-tap (или S2 → S2a → consent_yes) НЕ overwrites
         original consent_at timestamp. Audit-trail integrity:
