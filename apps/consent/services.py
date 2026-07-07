@@ -203,6 +203,17 @@ def record_global_consent(
             },
         )
 
+        # #1074 — stamp consent_at ATOMICALLY with the ConsentRecord (same
+        # transaction). On the global path WelcomeSkill no longer stamps it
+        # separately (it defers to this call when current_tenant() is None), so
+        # consent_at is set IFF a ConsentRecord exists: a transient failure rolls
+        # back BOTH, never leaving consent_at set with no proof-of-consent row.
+        # Idempotent — only stamp when currently unset (never overwrite an earlier
+        # consent timestamp; also reconciles a legacy row whose consent_at is None).
+        if getattr(bot_user, "consent_at", None) is None:
+            bot_user.consent_at = record.captured_at
+            bot_user.save(update_fields=["consent_at"])
+
         def _emit_grant() -> None:
             emit(
                 CONSENT_GRANTED,

@@ -18,6 +18,7 @@ from apps.skills.welcome.skill import (
     WELCOME_TEXT,
     WelcomeSkill,
 )
+from apps.tenancy.context import tenant_scope
 
 
 def _ctx(text: str) -> SkillContext:
@@ -386,9 +387,13 @@ class TestS2ConsentFlow:
         skill = WelcomeSkill()
         assert unwelcomed_bot_user.consent_at is None
 
-        result = skill.handle(
-            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
-        )
+        # #1074 — the per-tenant dispatch runs inside tenant_scope; WelcomeSkill
+        # stamps consent_at only when a tenant is in scope (on the global path
+        # record_global_consent stamps it atomically instead).
+        with tenant_scope(unwelcomed_bot_user.tenant):
+            result = skill.handle(
+                _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+            )
         unwelcomed_bot_user.refresh_from_db()
         assert unwelcomed_bot_user.consent_at is not None
         assert result.meta["reply_kind"] == "welcome_s5_first_action"
@@ -408,7 +413,8 @@ class TestS2ConsentFlow:
         unwelcomed_bot_user.consent_at = original_consent_at
         unwelcomed_bot_user.save(update_fields=["consent_at"])
 
-        skill.handle(_ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user))
+        with tenant_scope(unwelcomed_bot_user.tenant):
+            skill.handle(_ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user))
         unwelcomed_bot_user.refresh_from_db()
         assert unwelcomed_bot_user.consent_at == original_consent_at
 
@@ -448,7 +454,10 @@ class TestS2ConsentFlow:
 
         monkeypatch.setattr(unwelcomed_bot_user, "save", _explode)
         skill = WelcomeSkill()
-        with caplog.at_level(_logging.ERROR, logger="apps.skills.welcome.skill"):
+        with (
+            tenant_scope(unwelcomed_bot_user.tenant),
+            caplog.at_level(_logging.ERROR, logger="apps.skills.welcome.skill"),
+        ):
             result = skill.handle(
                 _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
             )
@@ -497,9 +506,10 @@ class TestS3S5Flow:
         """Same idempotent stamping helper для обоих consent paths."""
         skill = WelcomeSkill()
         assert unwelcomed_bot_user.consent_at is None
-        skill.handle(
-            _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
-        )
+        with tenant_scope(unwelcomed_bot_user.tenant):
+            skill.handle(
+                _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
+            )
         unwelcomed_bot_user.refresh_from_db()
         assert unwelcomed_bot_user.consent_at is not None
 
@@ -519,9 +529,10 @@ class TestS3S5Flow:
         unwelcomed_bot_user.consent_at = original_consent_at
         unwelcomed_bot_user.save(update_fields=["consent_at"])
 
-        skill.handle(
-            _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
-        )
+        with tenant_scope(unwelcomed_bot_user.tenant):
+            skill.handle(
+                _ctx_with_botuser("cb:welcome:consent_yes_via_s2a", unwelcomed_bot_user),
+            )
         unwelcomed_bot_user.refresh_from_db()
         assert unwelcomed_bot_user.consent_at == original_consent_at
 

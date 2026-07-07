@@ -6,10 +6,17 @@ import pytest
 
 from apps.audit.models import AuditLog
 from apps.consent.models import ConsentRecord
-from apps.consent.services import get_consents, grant, has_consent, withdraw
+from apps.consent.services import (
+    get_consents,
+    grant,
+    has_consent,
+    record_global_consent,
+    withdraw,
+)
 from apps.events.models import Event
 from apps.identity.models import BotUser
-from apps.tenancy.context import tenant_scope
+from apps.identity.services import resolve_or_create_global_bot_user
+from apps.tenancy.context import current_tenant, tenant_scope
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -189,3 +196,75 @@ class TestCrossTenantIsolation:
             grant(bot_user_a, consent_type="marketing", source="x")
         with pytest.raises(ValueError, match="tenant in scope"):
             has_consent(bot_user_a, "marketing")
+
+
+class TestRecordGlobalConsentAtomicity:
+    """#1074 — on the tenant-less global path, consent_at + ConsentRecord are
+    written in ONE transaction, so a transient failure can never leave consent_at
+    set with no proof-of-consent row (or vice versa)."""
+
+    def _global_bot_user(self, uid: str = "mb-1074") -> BotUser:
+        # Runs at current_tenant()=None (sentinel-scoped), like the global path.
+        return resolve_or_create_global_bot_user(channel="max", channel_user_id=uid)
+
+    def test_stamps_consent_at_atomically_with_record(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        bu = self._global_bot_user()
+        assert bu.consent_at is None
+
+        rec = record_global_consent(bu, source="global_onboarding:welcome_s2")
+
+        assert ConsentRecord.all_tenants.filter(bot_user=bu, granted=True).count() == 1
+        bu_db = BotUser.all_tenants.get(pk=bu.pk)
+        assert bu_db.consent_at is not None
+        assert bu_db.consent_at == rec.captured_at  # aligned to the record
+        assert current_tenant() is None
+
+    def test_transient_failure_rolls_back_both(self, settings, monkeypatch):
+        # THE #1074 guarantee: a write failure rolls back BOTH — never consent_at
+        # set with no ConsentRecord.
+        settings.STRICT_TENANT_SCOPE = "strict"
+        bu = self._global_bot_user("mb-1074-fail")
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("transient DB blip")
+
+        monkeypatch.setattr(bu, "save", _boom)  # the consent_at stamp explodes
+
+        with pytest.raises(RuntimeError):
+            record_global_consent(bu, source="global_onboarding:welcome_s2")
+
+        bu_db = BotUser.all_tenants.get(pk=bu.pk)
+        assert bu_db.consent_at is None  # rolled back
+        assert ConsentRecord.all_tenants.filter(bot_user=bu).count() == 0  # rolled back
+
+    def test_does_not_overwrite_existing_consent_at(self, settings):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        bu = self._global_bot_user("mb-1074-keep")
+        original = timezone.now() - timedelta(hours=2)
+        BotUser.all_tenants.filter(pk=bu.pk).update(consent_at=original)
+        bu.consent_at = original
+
+        record_global_consent(bu, source="x")
+
+        bu_db = BotUser.all_tenants.get(pk=bu.pk)
+        assert bu_db.consent_at == original  # earlier consent timestamp preserved
+
+    def test_reconciles_none_consent_at_on_repeat(self, settings):
+        # Residual/legacy: a ConsentRecord exists but consent_at is None → a repeat
+        # (idempotent) call backfills consent_at without duplicating the row.
+        settings.STRICT_TENANT_SCOPE = "strict"
+        bu = self._global_bot_user("mb-1074-reconcile")
+        record_global_consent(bu, source="x")  # creates record + stamps consent_at
+        BotUser.all_tenants.filter(pk=bu.pk).update(consent_at=None)  # simulate residual
+        bu.consent_at = None
+
+        record_global_consent(bu, source="x")  # repeat tap
+
+        bu_db = BotUser.all_tenants.get(pk=bu.pk)
+        assert bu_db.consent_at is not None
+        assert ConsentRecord.all_tenants.filter(bot_user=bu, granted=True).count() == 1
