@@ -167,12 +167,15 @@ def record_global_consent(
     enough for the pilot proof-of-consent; the domain-bus mirror is post-pilot
     (S1.7 memory wiring, #1054).
 
-    **Idempotent.** Uses ``get_or_create`` keyed on the active grant
-    ``(bot_user, consent_type, granted=True, withdrawn_at=None)`` so a repeated
-    consent tap never appends a duplicate row, and a repeat tap backfills a row a
-    prior transient failure dropped. The event + audit fire only on actual create.
-    (Withdrawal still appends a fresh row via :func:`withdraw`/:func:`grant`; this
-    helper is the append-once welcome-consent path only.)
+    **Idempotent for sequential re-taps.** Uses ``get_or_create`` keyed on the
+    active grant ``(bot_user, consent_type, granted=True, withdrawn_at=None)`` so a
+    repeated consent tap never appends a duplicate row, and a repeat tap backfills
+    a ``consent_at`` a prior transient failure dropped. The event + audit fire only
+    on actual create. NOTE: this is NOT race-safe against truly concurrent taps —
+    there is no DB unique constraint on the key, so two simultaneous grants could
+    both miss-then-create (pre-existing; a partial unique index is a post-pilot
+    follow-up). (Withdrawal still appends a fresh row via :func:`withdraw`/
+    :func:`grant`; this helper is the append-once welcome-consent path only.)
 
     Args:
       bot_user: the global (sentinel-tenant) BotUser granting consent.
@@ -202,6 +205,17 @@ def record_global_consent(
                 "document_version": document_version,
             },
         )
+
+        # #1074 — stamp consent_at ATOMICALLY with the ConsentRecord (same
+        # transaction). On the global path WelcomeSkill no longer stamps it
+        # separately (it defers to this call when current_tenant() is None), so
+        # consent_at is set IFF a ConsentRecord exists: a transient failure rolls
+        # back BOTH, never leaving consent_at set with no proof-of-consent row.
+        # Idempotent — only stamp when currently unset (never overwrite an earlier
+        # consent timestamp; also reconciles a legacy row whose consent_at is None).
+        if getattr(bot_user, "consent_at", None) is None:
+            bot_user.consent_at = record.captured_at
+            bot_user.save(update_fields=["consent_at"])
 
         def _emit_grant() -> None:
             emit(
