@@ -206,6 +206,16 @@ class CatalogMaster(_MirrorBase):
     bio = models.TextField(blank=True, default="")
     experience = models.CharField(max_length=255, blank=True, default="")
     rating = models.DecimalField(max_digits=3, decimal_places=2, null=True, blank=True)
+    review_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Number of reviews backing ``rating``, mirrored from Ayla's "
+            "``reviews_count``. Feeds the discovery Bayesian trust-score "
+            "(#1060) so a 5.0 from 1 review can't outrank a 4.8 from 200. "
+            "Populated by catalog sync once retargeted to Ayla (#1044); "
+            "defaults to 0 until then."
+        ),
+    )
     is_active = models.BooleanField(default=True)
     yclients_staff_id = models.IntegerField(
         null=True,
@@ -225,24 +235,6 @@ class CatalogMaster(_MirrorBase):
         ),
     )
     raw = models.JSONField(default=dict, blank=True)
-
-    # Canonical Ayla user_id for master. Added on dev via 0007
-    # migration (parallel work). Used by the #445 master.schedule.
-    # updated consumer + the #443 booking consumer's master_user_id
-    # bridge. Symmetric with BotUser.ayla_user_id (#442) +
-    # CatalogService.ayla_service_id (#444).
-    ayla_user_id = models.UUIDField(
-        null=True,
-        blank=True,
-        db_index=True,
-        help_text=(
-            "Canonical Ayla user_id (UUID) for this master. Bridge "
-            "for event-payload master_user_id → CatalogMaster ORM "
-            "JOIN. Nullable because legacy mysite-synced rows lack "
-            "this — back-filled by catalog-sync service or master "
-            "event consumer."
-        ),
-    )
 
     # #445 — slot cache staleness counter. Bumped on every
     # master.schedule.updated event. Forward-compatible signal for
