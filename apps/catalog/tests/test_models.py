@@ -164,6 +164,34 @@ class TestCatalogMasterAylaUserId:
         assert match.external_id == 13
 
 
+class TestCatalogMasterReviewCount:
+    """#1060 — ``CatalogMaster.review_count`` for the discovery Bayesian
+    trust-score. Mirrors Ayla's ``reviews_count`` so a 5.0 from 1 review
+    can't outrank a 4.8 from 200. Defaults to 0 until sync is retargeted
+    to Ayla (#1044).
+    """
+
+    def test_review_count_default_zero(self, tenant: Tenant) -> None:
+        m = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=20,
+            external_updated_at=_ts(),
+            name="Без отзывов",
+        )
+        assert m.review_count == 0
+
+    def test_review_count_persists(self, tenant: Tenant) -> None:
+        m = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=21,
+            external_updated_at=_ts(),
+            name="С отзывами",
+            review_count=200,
+        )
+        m.refresh_from_db()
+        assert m.review_count == 200
+
+
 class TestCatalogFaq:
     def test_unique_per_tenant(self, tenant: Tenant) -> None:
         CatalogFaq.all_tenants.create(
