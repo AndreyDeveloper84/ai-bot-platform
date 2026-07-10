@@ -400,6 +400,36 @@ def has_consent(
     return qs.exists()
 
 
+def has_global_consent(
+    bot_user: "BotUser",
+    consent_type: str,
+    *,
+    document_version: str | None = None,
+) -> bool:
+    """Read-side consent check for the tenant-less GLOBAL path (#1046 / memory #1100).
+
+    Mirror of :func:`has_consent` for the global marketplace path, where
+    ``current_tenant()`` is None by design (the discovery contract) so
+    :func:`has_consent` would raise. Reads via ``all_tenants`` anchored on
+    ``bot_user`` — whose FK already pins the sentinel tenant — so no tenant scope
+    is required and no cross-tenant row is reachable (bot_user belongs to exactly
+    one tenant). Same predicate as :func:`has_consent`: the latest active grant,
+    ``granted=True AND withdrawn_at IS NULL`` (+ optional document_version match).
+
+    This is the symmetric read for :func:`record_global_consent`.
+    """
+
+    qs = ConsentRecord.all_tenants.filter(
+        bot_user=bot_user,
+        consent_type=consent_type,
+        granted=True,
+        withdrawn_at__isnull=True,
+    )
+    if document_version is not None:
+        qs = qs.filter(document_version=document_version)
+    return qs.exists()
+
+
 def get_consents(bot_user: "BotUser") -> list[ConsentRecord]:
     """Return every active consent for `bot_user` under current tenant.
 
