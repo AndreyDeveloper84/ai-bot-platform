@@ -48,6 +48,53 @@ def test_build_discovery_prompt_structure() -> None:
     assert msgs[-1] == {"role": "user", "content": "хочу маникюр"}
 
 
+def test_build_discovery_prompt_injects_personal_context() -> None:
+    msgs = discovery.build_discovery_prompt(
+        "хочу маникюр", personal_context="Что ты уже знаешь: придерживается веганского питания."
+    )
+    assert "придерживается веганского питания" in msgs[0]["content"]
+
+
+def test_build_discovery_prompt_without_personal_context_unchanged() -> None:
+    msgs = discovery.build_discovery_prompt("хочу маникюр")
+    # No surfacing block — the system message is only the base voice.
+    assert "уже знаешь" not in msgs[0]["content"]
+
+
+class _CapturingProvider(_FakeProvider):
+    def __init__(self, *, text: str = "ok") -> None:
+        super().__init__(text=text)
+        self.messages: list[dict[str, str]] = []
+
+    async def complete(self, messages, model: str = "", tools=None):  # noqa: ANN001
+        self.messages = messages
+        return await super().complete(messages, model=model, tools=tools)
+
+
+def test_generate_discovery_reply_surfaces_personal_context(monkeypatch) -> None:
+    from apps.identity.services.memory_reader import GreenFact, PersonalContextView
+
+    provider = _CapturingProvider(text="Готова помочь!")
+    monkeypatch.setattr(discovery, "get_router", lambda: _FakeRouter(provider))
+    view = PersonalContextView(
+        summary="Ищет маникюр",
+        green_facts=[GreenFact(kind="lifestyle", content={"key": "diet", "value": "vegan"})],
+    )
+    discovery.generate_discovery_reply("привет", personal_context=view)
+    system = provider.messages[0]["content"]
+    assert "Ищет маникюр" in system
+    assert "веганского питания" in system
+
+
+def test_generate_discovery_reply_empty_context_no_block(monkeypatch) -> None:
+    from apps.identity.services.memory_reader import PersonalContextView
+
+    provider = _CapturingProvider(text="Готова помочь!")
+    monkeypatch.setattr(discovery, "get_router", lambda: _FakeRouter(provider))
+    discovery.generate_discovery_reply("привет", personal_context=PersonalContextView())
+    assert "уже знаешь" not in provider.messages[0]["content"]
+
+
 def test_generate_discovery_reply_returns_llm_text(monkeypatch) -> None:
     monkeypatch.setattr(
         discovery, "get_router", lambda: _FakeRouter(_FakeProvider(text="Готова помочь!"))

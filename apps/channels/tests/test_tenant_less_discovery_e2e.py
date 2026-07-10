@@ -71,7 +71,7 @@ def mock_discovery(monkeypatch):
 
     replies = iter(["Привет! Какая услуга интересует?", "Поняла — подберу мастера."])
 
-    def fake_reply(message_text, *, history=None, trace_id=None):
+    def fake_reply(message_text, *, history=None, personal_context=None, trace_id=None):
         try:
             return DiscoveryReply(text=next(replies))
         except StopIteration:

@@ -8,9 +8,16 @@ bot-platform does not use anywhere).
 
 Tenant-independent by construction: ``get_provider(None, ...)`` short-circuits
 to the per-skill / org-wide provider tier, and the prompt reads NO
-tenant-scoped / commercial / ``UserPersonalContext`` data — only the frozen
-brand voice + the short per-turn history. Any LLM failure degrades to a safe
-fallback line, never a 500.
+tenant-scoped / commercial data. Any LLM failure degrades to a safe fallback
+line, never a 500.
+
+Memory surfacing (M-C1 / #1101): the caller MAY pass an optional
+``personal_context`` block — the user's GREEN cross-channel memory + UPC summary
+(read via ``apps.identity.services.memory_reader``, rendered by
+``apps.persona.memory_surface``). ``UserPersonalContext`` is cross-tenant by
+design (ADR-0011) and carries no commercial/tenant-scoped state, so surfacing it
+on the tenant-less path is consistent with the discovery contract. When absent
+the prompt is unchanged (happy-path intact).
 """
 
 from __future__ import annotations
@@ -18,12 +25,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from apps.llm.router import get_router
 from apps.marketplace.discovery import discover_masters
 from apps.marketplace.dto import MasterCard
 from apps.orchestrator.llm.templates import get_fallback
+from apps.persona.memory_surface import render_personal_context
+
+if TYPE_CHECKING:
+    from apps.identity.services.memory_reader import PersonalContextView
 
 logger = logging.getLogger(__name__)
 
@@ -116,29 +127,33 @@ def build_discovery_prompt(
     message_text: str,
     *,
     history: list[dict[str, Any]] | None = None,
+    personal_context: str | None = None,
 ) -> list[dict[str, str]]:
     """Render the ChatML messages for a discovery turn.
 
     System message is composed manually from the marketplace voice fields (NOT
     ``ayla_ai_core.render_system_prompt`` — that is booking-domain coupled and
     forbidden by the import allow-list). ``history`` is the short per-turn
-    memory (``short_term.recall``); no long-term ``UserPersonalContext``.
+    memory (``short_term.recall``). ``personal_context`` is the optional
+    surfacing block (M-C1) — a pre-rendered paragraph of the user's GREEN
+    memory; appended to the system message when present, omitted otherwise.
     """
     voice = _discovery_voice_fields()
-    system_text = "\n\n".join(
-        [
-            f"Ты — {voice['assistant_name']}, AI-помощник «{voice['business_name']}».",
-            "Ты помогаешь клиенту по всей стране подобрать подходящего "
-            f"{voice['domain']}-мастера и записаться — конкретный салон выбирается "
-            "только в момент записи.",
-            "Это разговор-знакомство (discovery): отвечай тепло и кратко, "
-            "задавай уточняющие вопросы про услугу, город и предпочтения. НЕ "
-            "называй конкретный салон, цену или адрес — этих данных пока нет.",
-            f"Если вопрос не про запись к мастеру — мягко верни в тему: "
-            f"«{voice['off_topic_redirect']}»",
-            f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
-        ]
-    )
+    system_parts = [
+        f"Ты — {voice['assistant_name']}, AI-помощник «{voice['business_name']}».",
+        "Ты помогаешь клиенту по всей стране подобрать подходящего "
+        f"{voice['domain']}-мастера и записаться — конкретный салон выбирается "
+        "только в момент записи.",
+        "Это разговор-знакомство (discovery): отвечай тепло и кратко, "
+        "задавай уточняющие вопросы про услугу, город и предпочтения. НЕ "
+        "называй конкретный салон, цену или адрес — этих данных пока нет.",
+        f"Если вопрос не про запись к мастеру — мягко верни в тему: "
+        f"«{voice['off_topic_redirect']}»",
+        f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
+    ]
+    if personal_context:
+        system_parts.append(personal_context)
+    system_text = "\n\n".join(system_parts)
     messages: list[dict[str, str]] = [{"role": "system", "content": system_text}]
     for item in history or []:
         role = item.get("role")
@@ -180,6 +195,7 @@ def generate_discovery_reply(
     message_text: str,
     *,
     history: list[dict[str, Any]] | None = None,
+    personal_context: "PersonalContextView | None" = None,
     trace_id: str | None = None,
 ) -> DiscoveryReply:
     """Generate a discovery reply via the tenant-less LLM path (tool-capable).
@@ -190,8 +206,12 @@ def generate_discovery_reply(
     ``show_masters`` tool, which we execute via the sanctioned marketplace
     carve-out (``discover_masters``) and render as a master-card keyboard. On any
     ``LLMError`` (or an empty completion) returns a safe fallback line.
+
+    ``personal_context`` (M-C1 / #1101) is the user's surfaceable GREEN memory;
+    rendered into a system-prompt block when non-empty, ignored otherwise.
     """
-    messages = build_discovery_prompt(message_text, history=history)
+    context_block = render_personal_context(personal_context) if personal_context else None
+    messages = build_discovery_prompt(message_text, history=history, personal_context=context_block)
     try:
         provider = get_router().get_provider(None, skill=DISCOVERY_SKILL, op="complete")
         model = getattr(provider, "default_completion_model", None) or ""
