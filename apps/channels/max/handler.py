@@ -117,10 +117,12 @@ from apps.conversations.services import (
     resolve_active_global_conversation,
 )
 from apps.events.services import emit
+from apps.consent.memory import can_store_green_memory
 from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
 )
+from apps.identity.services.memory_reader import read_personal_context
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
@@ -128,6 +130,7 @@ from apps.orchestrator.discovery import (
 )
 from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.memory.personal_context import record_explicit_green_facts
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -511,9 +514,24 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
     else:
+        # Memory surfacing (M-C1 / #1101): read the user's GREEN cross-channel
+        # memory when we have a canonical identity AND an active PERSONAL_DATA
+        # consent (green's 152-ФЗ basis). No ayla_user_id / no consent → no
+        # surfacing (happy-path unchanged); a withdrawal stops surfacing here.
+        # Best-effort: these DB reads run BEFORE the reply is sent, so a transient
+        # error must degrade to «no memory», never abort the turn (the idempotency
+        # key is already claimed — a raised error would lose the reply on retry).
+        personal_context = None
+        try:
+            if bot_user.ayla_user_id and can_store_green_memory(bot_user):
+                personal_context = read_personal_context(bot_user.ayla_user_id)
+        except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
+            logger.exception("channels.max.global.memory_surface_failed bot_user=%s", bot_user.id)
+            personal_context = None
         reply = generate_discovery_reply(
             event.text,
             history=history,
+            personal_context=personal_context,
             trace_id=str(trace_id) if trace_id else None,
         )
 
@@ -532,6 +550,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         text=reply.text,
         attachments=_build_attachments(reply.action_data),
     )
+
+    # Memory write (M-B2 / #1099): learn explicit green facts the user stated
+    # this turn (e.g. «я веган»). Best-effort + consent-gated inside; never
+    # affects the reply already sent. No active questioning in the pilot.
+    record_explicit_green_facts(bot_user, event.text)
 
 
 def _discovery_handoff_reply(
