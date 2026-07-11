@@ -27,19 +27,33 @@ _FACT_RENDERERS = {
 }
 
 
-def _render_fact(fact: GreenFact) -> str | None:
-    """Render one green fact to a phrase, or None if it can't be phrased."""
+def describe_green_content(content: dict) -> str | None:
+    """Render a green fact's ``content`` dict to a natural phrase, or None.
 
-    key = fact.content.get("key")
-    value = fact.content.get("value")
+    Shared by prompt surfacing (M-C1) and the chat memory commands (M-B4) so
+    «помню, что ты…» reads identically wherever it appears. Known (key, value)
+    → a fixed phrase; otherwise a writer-stored ``display`` string; else None
+    (an unrenderable fact is never surfaced as raw JSON).
+    """
+
+    if not isinstance(content, dict):
+        return None
+    key = content.get("key")
+    value = content.get("value")
     renderer = _FACT_RENDERERS.get(key) if isinstance(key, str) else None
     if renderer is not None and isinstance(value, str):
         phrase = renderer(value)
         if phrase:
             return phrase
     # Fallback: a writer may store a ready-made human display string.
-    display = fact.content.get("display")
+    display = content.get("display")
     return display if isinstance(display, str) and display.strip() else None
+
+
+def _render_fact(fact: GreenFact) -> str | None:
+    """Render one green fact to a phrase, or None if it can't be phrased."""
+
+    return describe_green_content(fact.content)
 
 
 def render_personal_context(view: PersonalContextView) -> str | None:
