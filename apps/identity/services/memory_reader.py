@@ -81,6 +81,31 @@ def get_or_create_personal_context(user_id: uuid.UUID) -> UserPersonalContext:
     return upc
 
 
+def read_green_entries(user_id: uuid.UUID) -> list[MemoryEntry]:
+    """Return the user's live 🟢 green MemoryEntry rows (model instances).
+
+    Same read-gate as :func:`read_personal_context` (not soft-deleted, no
+    pending delete request) but returns the ORM rows — the management path
+    (152-ФЗ «forget {X}») needs each row's ``id`` to soft-delete it. Returns
+    ``[]`` when the UPC is absent or forgotten. Never yellow/red.
+
+    Iterates model instances (NOT ``.values()``) so the EncryptedJSONField
+    ``content`` decrypts via the field descriptor.
+    """
+
+    if get_personal_context(user_id) is None:
+        return []
+
+    return list(
+        MemoryEntry.objects.filter(
+            user_id=user_id,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+            soft_deleted_at__isnull=True,
+            delete_requested_at__isnull=True,
+        ).order_by("created_at")
+    )
+
+
 def read_personal_context(user_id: uuid.UUID) -> PersonalContextView:
     """Read the surfaceable (summary + green) context for `user_id`.
 
@@ -92,21 +117,9 @@ def read_personal_context(user_id: uuid.UUID) -> PersonalContextView:
     if upc is None:
         return PersonalContextView()
 
-    # Iterate model instances (NOT .values()) so the EncryptedJSONField
-    # `content` decrypts via the field descriptor.
-    green = (
-        MemoryEntry.objects.filter(
-            user_id=user_id,
-            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
-            soft_deleted_at__isnull=True,
-            delete_requested_at__isnull=True,
-        )
-        .only("kind", "content")
-        .order_by("created_at")
-    )
     facts = [
         GreenFact(kind=entry.kind, content=entry.content if isinstance(entry.content, dict) else {})
-        for entry in green
+        for entry in read_green_entries(user_id)
     ]
     summary = (upc.summary or "").strip() or None
     return PersonalContextView(summary=summary, green_facts=facts)
