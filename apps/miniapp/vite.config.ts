@@ -6,12 +6,16 @@ import path from "node:path";
 // every route — the Mini App platform doesn't do server-side routing.
 // Backend (Django) runs on :8000 in dev; Vite proxies /api/v1/customer/*
 // so the frontend can use relative URLs identical to prod.
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   // #949: pilot 152-ФЗ export/delete + R5 notification requests route
   // through the Profile support deeplink. An unset URL ships a silent
-  // 404 to the customer, so a production build must fail fast instead.
+  // 404 to the customer, so any build must fail fast instead. Keyed on
+  // `command`, not `mode`: every `vite build` produces a deployable
+  // dist/ regardless of --mode (so a custom mode must not bypass the
+  // guard), while dev server and `vite preview` (command "serve",
+  // preview's default mode is also "production") stay unaffected.
   const env = loadEnv(mode, __dirname, "");
-  if (mode === "production" && !env.VITE_SUPPORT_DEEPLINK) {
+  if (command === "build" && !env.VITE_SUPPORT_DEEPLINK) {
     throw new Error(
       "VITE_SUPPORT_DEEPLINK is not set. Production builds require the real " +
         "MAX support channel URL (see docs/runbooks/server-deployment.md §2.6 " +
