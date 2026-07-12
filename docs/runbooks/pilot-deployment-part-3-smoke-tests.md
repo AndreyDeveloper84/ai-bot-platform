@@ -34,6 +34,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
   - 1 test customer (MAX account, не связан с tenant).
   - Тест-tenant создан через Django admin OR существует в Пензе с подсадными `is_test=True` (verify в DB перед launch).
 - [ ] **MAX channel verified:** test MAX DM от `@ai_bot` arrives within 5 секунд of trigger. Verify через `manage.py shell` + `send_message(test_master.linked_bot_user.max_chat_id, "smoke test")`.
+- [ ] **Support-канал Mini App wired (#949):** miniapp собран с реальным `VITE_SUPPORT_DEEPLINK` (см. server-deployment.md §2.6; production build без переменной падает намеренно). Проверка: в customer Mini App → Профиль → «Запросить данные» → «Написать в поддержку» открывает живой MAX-канал (не 404). Оператор этого канала обрабатывает входящие запросы «export данных» (152-ФЗ право на доступ), «удалить аккаунт» (ручной dual-system delete) и «изменить настройки уведомлений» вручную — процедуры per `docs/screens/customer-profile-flow.md` §4.3/§4.4/§7.1.
 
 Без любого из этих prerequisites — НЕ запускать smoke tests. Зафиксируй gap в incident-response.md, дозаполнить prerequisites, потом возвращаться сюда.
 
@@ -479,6 +480,7 @@ N/A otherwise (single-role staff only).
 ## Changelog
 
 - _2026-05-25_ — W1 (Delta) — initial draft PART 3.1 + 3.2 with 6 master tests + 7 admin tests (4 mandatory + 2 extras для каждой части; 3 marked N/A pending feature build OR Django-admin-only).
+- _2026-07-12_ — ShiroPy (FE) — prerequisite «Support-канал Mini App wired» (#949): `VITE_SUPPORT_DEEPLINK` обязателен для production build; operator-side handling export/delete/notification запросов.
 
 ## Cross-reference
 
