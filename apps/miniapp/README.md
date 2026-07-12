@@ -99,6 +99,12 @@ npm run preview     # serve dist/ on :4173 for smoke
 npm run typecheck   # tsc --noEmit
 ```
 
+Production builds require `VITE_SUPPORT_DEEPLINK` — the real MAX
+support channel URL rendered by the Profile support-entry sheets
+(152-ФЗ export/delete + notification prefs). The build fails fast
+without it (guard in `vite.config.ts`, #949); dev mode falls back to a
+placeholder. See `docs/runbooks/server-deployment.md` §2.6.
+
 ## What this scaffold does NOT do
 
 - No state mgmt library (Zustand / Redux) — Phase 1 decides when needed

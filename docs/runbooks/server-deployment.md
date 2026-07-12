@@ -121,7 +121,10 @@ set -a; source /etc/ai-bot-platform/dev.env; set +a
 ```bash
 cd /home/taximeter/ai-bot-platform-dev/apps/miniapp
 npm ci
-npm run build
+# VITE_SUPPORT_DEEPLINK = реальный MAX support-канал пилота (#949):
+# через него идут 152-ФЗ запросы (export/удаление) + notification prefs.
+# Без переменной production build падает намеренно (guard в vite.config.ts).
+VITE_SUPPORT_DEEPLINK="<real MAX support channel URL>" npm run build
 # Produces dist/. nginx serves directly.
 ```
 
@@ -221,7 +224,7 @@ sudo systemctl restart ai-bot-platform-dev{,-worker,-beat}
 # Frontend
 cd apps/miniapp
 npm ci  # if package-lock changed
-npm run build
+VITE_SUPPORT_DEEPLINK="<real MAX support channel URL>" npm run build  # см. §2.6 (#949)
 # dist/ is served live by nginx — no nginx restart needed
 ```
 

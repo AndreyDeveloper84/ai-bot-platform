@@ -94,17 +94,26 @@ export interface ProactivePrefsResponse {
 }
 
 /**
- * Support deeplink placeholder (Q5 ambiguity per Phase A recon).
+ * Support deeplink (P-7 / #949).
  *
- * FOLLOW_UP issue P-7 (pilot): file in deployment runbook + Phase J
- * follow-up to wire real support channel URL from
- * `apps/channels/max/` config. For pilot we render `https://max.me/aylasupport`
- * placeholder; both R2 deferred sheets (export + delete) and R5
- * notification-prefs entry route to the same deeplink to keep the
- * pilot truthful — Profile NEVER promises an in-app action it cannot
- * complete.
+ * Real support channel URL comes from build-time config:
+ * `VITE_SUPPORT_DEEPLINK` — set it to the MAX support channel the
+ * pilot operator staffs (same channel the `apps/channels/max/` side
+ * coordinates on). Production builds FAIL without it (guard in
+ * `vite.config.ts`) — 152-ФЗ export/delete requests and R5
+ * notification-prefs route through this URL, so an unset value would
+ * be a silent 404 for the customer.
+ *
+ * Dev builds fall back to the historical placeholder so local
+ * `npm run dev` needs no extra env. Both R2 deferred sheets
+ * (export + delete) and R5 notification-prefs entry route to the same
+ * deeplink to keep the pilot truthful — Profile NEVER promises an
+ * in-app action it cannot complete.
  */
-export const SUPPORT_DEEPLINK = "https://max.me/aylasupport";
+export const SUPPORT_DEEPLINK: string =
+  // `||` (not `??`): .env.local.example ships the var empty, and Vite
+  // exposes that as "" — an empty href must still fall back in dev.
+  import.meta.env.VITE_SUPPORT_DEEPLINK || "https://max.me/aylasupport";
 
 // ---------------------------------------------------------------------------
 // Stub variant picker — dev-only QA hook (mirror customer-records.ts).

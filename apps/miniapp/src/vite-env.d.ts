@@ -7,6 +7,12 @@ interface ImportMetaEnv {
    * against — see `apps/miniapp/README.md`.
    */
   readonly VITE_DEV_INIT_DATA?: string;
+  /**
+   * Real MAX support channel URL for Profile support-entry sheets
+   * (152-ФЗ export/delete + R5 notification prefs). REQUIRED for
+   * production builds — see the guard in `vite.config.ts` (#949).
+   */
+  readonly VITE_SUPPORT_DEEPLINK?: string;
 }
 
 interface ImportMeta {
