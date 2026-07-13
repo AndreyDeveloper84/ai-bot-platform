@@ -12,6 +12,7 @@ from apps.catalog.models import (
     CatalogHelpArticle,
     CatalogMaster,
     CatalogService,
+    MasterService,
 )
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
@@ -263,6 +264,110 @@ class TestCatalogMasterReviewCount:
         )
         m.refresh_from_db()
         assert m.review_count == 200
+
+
+class TestCatalogMasterAylaRekey:
+    """S3B PR-2: CatalogMaster keyed on the Ayla stable-id (ayla_user_id =
+    User.id). Partial UniqueConstraint (WHERE ayla_user_id IS NOT NULL) so
+    Ayla-fed masters can't duplicate per tenant; legacy NULL rows exempt.
+    """
+
+    def test_ayla_user_id_unique_per_tenant(self, tenant: Tenant) -> None:
+        import uuid
+
+        uid = uuid.uuid4()
+        CatalogMaster.all_tenants.create(
+            tenant=tenant, external_updated_at=_ts(), name="A", ayla_user_id=uid
+        )
+        with pytest.raises(IntegrityError):
+            CatalogMaster.all_tenants.create(
+                tenant=tenant, external_updated_at=_ts(), name="Dup", ayla_user_id=uid
+            )
+
+    def test_null_ayla_user_id_not_constrained(self, tenant: Tenant) -> None:
+        CatalogMaster.all_tenants.create(
+            tenant=tenant, external_id=1, external_updated_at=_ts(), name="A"
+        )
+        CatalogMaster.all_tenants.create(
+            tenant=tenant, external_id=2, external_updated_at=_ts(), name="B"
+        )
+        assert (
+            CatalogMaster.all_tenants.filter(tenant=tenant, ayla_user_id__isnull=True).count() == 2
+        )
+
+
+class TestMasterServiceBookable:
+    """S3B PR-2: MasterService (the master×service edge) carries the Ayla
+    bookable identity + resolved fields from ``specialist-services``.
+    """
+
+    def _master(self, tenant: Tenant, **kw) -> CatalogMaster:
+        import uuid
+
+        kw.setdefault("ayla_user_id", uuid.uuid4())
+        return CatalogMaster.all_tenants.create(
+            tenant=tenant, external_updated_at=_ts(), name="M", **kw
+        )
+
+    def _service(self, tenant: Tenant, **kw) -> CatalogService:
+        import uuid
+
+        kw.setdefault("ayla_service_id", uuid.uuid4())
+        return CatalogService.all_tenants.create(
+            tenant=tenant, external_updated_at=_ts(), slug="s", name="S", **kw
+        )
+
+    def test_bookable_fields_persist(self, tenant: Tenant) -> None:
+        import uuid
+        from decimal import Decimal
+
+        bookable = uuid.uuid4()
+        ms = MasterService.all_tenants.create(
+            tenant=tenant,
+            master=self._master(tenant),
+            service=self._service(tenant),
+            ayla_specialist_service_id=bookable,
+            resolved_duration=45,
+            resolved_requires_health_check=True,
+            price=Decimal("1500.00"),
+            is_active=False,
+        )
+        ms.refresh_from_db()
+        assert ms.ayla_specialist_service_id == bookable
+        assert ms.resolved_duration == 45
+        assert ms.resolved_requires_health_check is True
+        assert ms.price == Decimal("1500.00")
+        assert ms.is_active is False
+
+    def test_bookable_defaults(self, tenant: Tenant) -> None:
+        ms = MasterService.all_tenants.create(
+            tenant=tenant, master=self._master(tenant), service=self._service(tenant)
+        )
+        assert ms.ayla_specialist_service_id is None
+        assert ms.resolved_duration is None
+        assert ms.resolved_requires_health_check is False
+        assert ms.price is None
+        assert ms.is_active is True
+
+    def test_bookable_id_unique_per_tenant(self, tenant: Tenant) -> None:
+        import uuid
+
+        bookable = uuid.uuid4()
+        MasterService.all_tenants.create(
+            tenant=tenant,
+            master=self._master(tenant),
+            service=self._service(tenant),
+            ayla_specialist_service_id=bookable,
+        )
+        with pytest.raises(IntegrityError):
+            # A different (master, service) pair but the same bookable id —
+            # the partial UniqueConstraint must reject it.
+            MasterService.all_tenants.create(
+                tenant=tenant,
+                master=self._master(tenant),
+                service=self._service(tenant),
+                ayla_specialist_service_id=bookable,
+            )
 
 
 class TestCatalogFaq:

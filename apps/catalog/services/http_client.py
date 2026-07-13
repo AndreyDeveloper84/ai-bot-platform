@@ -87,6 +87,54 @@ class CatalogSalonServiceDTO:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CatalogSpecialistServiceDTO:
+    """One row of ``GET /api/v1/internal/catalog/specialist-services/``.
+
+    The **bookable** unit = (specialist × salon_service). ``id`` is the stable
+    booking key; ``salon_service`` maps to a mirrored ``CatalogService`` via
+    its ``ayla_service_id``. ``resolved_*`` are taken as-is (never recomputed).
+
+    Per the contract (#207), the edge carries the master **identity** directly
+    — ``user_id`` (=User.id → ``CatalogMaster.ayla_user_id``), ``rating``,
+    ``reviews_count`` — so the bot needs no second call to
+    ``/internal/specialists/`` for those. That endpoint (availability-filtered)
+    is used only for ``display_name``/``bio`` enrichment; keying master
+    identity off the edge avoids dropping a bookable when its specialist is
+    momentarily ``is_available=False``.
+    """
+
+    ayla_specialist_service_id: str
+    salon_service: str
+    specialist: str
+    ayla_user_id: str
+    external_updated_at: datetime
+    resolved_duration: int | None = None
+    resolved_requires_health_check: bool = False
+    price: Decimal | None = None
+    is_active: bool = True
+    rating: Decimal | None = None
+    review_count: int = 0
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CatalogSpecialistDTO:
+    """One row of ``GET /api/v1/internal/specialists/{id}/`` (#1016).
+
+    **Name/bio enrichment only.** The master identity (user_id/rating/
+    reviews_count) comes from the specialist-services edge, not here — this
+    endpoint is availability-filtered, so relying on it for identity would
+    drop a bookable whose specialist is ``is_available=False``. ``display_name``
+    and ``bio`` are the only fields absent from the edge payload.
+    """
+
+    specialist_id: str
+    name: str
+    bio: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -101,7 +149,13 @@ class CatalogAuthError(CatalogError):
 
 
 class CatalogClientError(CatalogError):
-    """4xx other than auth. Misshapen request — operator/code bug."""
+    """4xx other than auth/404. Misshapen request — operator/code bug."""
+
+
+class CatalogNotFoundError(CatalogClientError):
+    """404 — the resource isn't exposed (e.g. a specialist that's not in the
+    active/available queryset). Detail fetches treat this as "skip", not a bug.
+    """
 
 
 class CatalogTransportError(CatalogError):
@@ -166,15 +220,36 @@ class CatalogHttpClient:
         )
         return [_parse_salon_service(row) for row in rows]
 
+    def fetch_specialist_services(self, *, tenant_id: str) -> list[CatalogSpecialistServiceDTO]:
+        """Bookable specialist-services for one tenant (→ ``MasterService``)."""
+        rows = self._fetch_all(
+            "internal/catalog/specialist-services/",
+            params={"tenant": tenant_id},
+        )
+        return [_parse_specialist_service(row) for row in rows]
+
+    def fetch_specialists(self, *, specialist_ids: list[str]) -> list[CatalogSpecialistDTO]:
+        """Enrich the given SpecialistProfile ids via ``/internal/specialists/
+        {id}/`` (#1016 — nationwide, so fetched by id, not tenant-filtered).
+
+        A specialist that isn't active/available 404s → skipped (its edges get
+        no CatalogMaster; the upserter logs the gap). Deduplicates ids.
+        """
+        out: list[CatalogSpecialistDTO] = []
+        for sid in dict.fromkeys(specialist_ids):  # dedupe, preserve order
+            row = self._fetch_detail(f"internal/specialists/{sid}/")
+            if row is not None:
+                out.append(_parse_specialist(row))
+        return out
+
     # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
 
-    def _fetch_all(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
-        """Walk the pagination chain. Returns a flat list of raw row dicts."""
-        rows: list[dict[str, Any]] = []
+    def _build_url(self, path: str) -> str:
+        """Validated absolute URL for ``path`` + fail-closed config checks."""
         try:
-            url: str | None = AylaUrlBuilder(self._base_url).build(path)
+            url = AylaUrlBuilder(self._base_url).build(path)
         except AylaUrlError as exc:
             # A malformed / empty AYLA_BASE_URL is a config gap, not an Ayla
             # outage. Surface as transport-error so the orchestrator records
@@ -182,7 +257,12 @@ class CatalogHttpClient:
             raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
         if not self._token:
             raise CatalogTransportError("AYLA_INTERNAL_API_TOKEN not configured")
+        return url
 
+    def _fetch_all(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Walk the pagination chain. Returns a flat list of raw row dicts."""
+        rows: list[dict[str, Any]] = []
+        url: str | None = self._build_url(path)
         request_params: dict[str, Any] | None = params
         # After the first hop, `next` is an absolute URL with its own query
         # string (tenant + page) baked in — pass no params.
@@ -192,6 +272,18 @@ class CatalogHttpClient:
             url = payload.get("next") or None
             request_params = None
         return rows
+
+    def _fetch_detail(self, path: str) -> dict[str, Any] | None:
+        """GET a single detail object. Returns None on 404 (not in the
+        active-available queryset) so the caller can skip it. Other 4xx
+        (a malformed id = code bug), auth, and 5xx still propagate.
+        """
+        url = self._build_url(path)
+        try:
+            return self._get_with_retry(url, params=None)
+        except CatalogNotFoundError:
+            logger.warning("catalog.http.detail_skipped url=%s", url)
+            return None
 
     def _get_with_retry(self, url: str, *, params: dict[str, Any] | None) -> dict[str, Any]:
         last_exc: Exception | None = None
@@ -213,6 +305,8 @@ class CatalogHttpClient:
                         f"Ayla catalog auth failed: HTTP {response.status_code} "
                         f"(token prefix={self._token[:4]!r}…)"
                     )
+                if response.status_code == 404:
+                    raise CatalogNotFoundError(f"Ayla catalog 404: url={url}")
                 if 400 <= response.status_code < 500:
                     raise CatalogClientError(
                         f"Ayla catalog 4xx: HTTP {response.status_code} url={url} "
@@ -292,5 +386,31 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
         duration_min=_parse_int(row.get("duration_minutes")),
         template=row.get("template"),
         category=row.get("category"),
+        raw=row,
+    )
+
+
+def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDTO:
+    return CatalogSpecialistServiceDTO(
+        ayla_specialist_service_id=str(row["id"]),
+        salon_service=str(row["salon_service"]),
+        specialist=str(row["specialist"]),
+        ayla_user_id=str(row["user_id"]),
+        external_updated_at=_parse_dt(row["updated_at"]),
+        resolved_duration=_parse_int(row.get("resolved_duration")),
+        resolved_requires_health_check=bool(row.get("resolved_requires_health_check", False)),
+        price=_parse_decimal(row.get("price")),
+        is_active=bool(row.get("is_active", True)),
+        rating=_parse_decimal(row.get("rating")),
+        review_count=int(row.get("reviews_count", 0) or 0),
+        raw=row,
+    )
+
+
+def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
+    return CatalogSpecialistDTO(
+        specialist_id=str(row["id"]),
+        name=row.get("display_name", "") or "",
+        bio=row.get("bio", "") or "",
         raw=row,
     )

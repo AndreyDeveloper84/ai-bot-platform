@@ -39,7 +39,12 @@ from django.core.cache import cache
 
 from apps.audit.services import write_audit
 from apps.catalog.services.http_client import CatalogHttpClient
-from apps.catalog.services.upserter import UpsertResult, upsert_salon_services
+from apps.catalog.services.upserter import (
+    UpsertResult,
+    upsert_master_services,
+    upsert_masters,
+    upsert_salon_services,
+)
 from apps.events.services import emit
 
 if TYPE_CHECKING:
@@ -75,6 +80,8 @@ class SyncResult:
       skipped: True when the lock was held by another beat — we returned
                without doing work.
       services: CatalogService (salon-services) mirror counters.
+      masters: CatalogMaster (/internal/specialists/ #1016) counters.
+      master_services: MasterService (specialist-services) bookable counters.
       cursor_advanced_to: the new ``last_catalog_sync_at`` value (None when
                           ran=False or no rows touched).
     """
@@ -82,6 +89,8 @@ class SyncResult:
     ran: bool = False
     skipped: bool = False
     services: MirrorCounts = field(default_factory=MirrorCounts)
+    masters: MirrorCounts = field(default_factory=MirrorCounts)
+    master_services: MirrorCounts = field(default_factory=MirrorCounts)
     cursor_advanced_to: datetime | None = None
     error: str = ""
 
@@ -125,12 +134,21 @@ class CatalogSyncService:
     # ------------------------------------------------------------------
 
     def _run_locked(self, tenant: "Tenant") -> SyncResult:
-        """Salon-services pull + upsert within the lock window."""
+        """3-endpoint pull + upsert within the lock window.
+
+        salon-services → CatalogService; specialist-services → MasterService
+        (bookable edge); /internal/specialists/{id}/ → CatalogMaster
+        enrichment (fetched by the specialist ids the edges reference).
+        """
         http = self._http if self._http is not None else CatalogHttpClient()
 
         try:
             with http:
                 salon_dtos = http.fetch_salon_services(tenant_id=str(tenant.id))
+                spec_svc_dtos = http.fetch_specialist_services(tenant_id=str(tenant.id))
+                specialist_dtos = http.fetch_specialists(
+                    specialist_ids=[d.specialist for d in spec_svc_dtos]
+                )
         except Exception as exc:  # noqa: BLE001 — orchestrator boundary
             logger.exception("catalog.sync.fetch_failed tenant_id=%s", tenant.id)
             return SyncResult(ran=True, error=str(exc))
@@ -150,10 +168,15 @@ class CatalogSyncService:
                 tenant.id,
             )
 
+        # Order matters: CatalogService + CatalogMaster must exist before the
+        # MasterService edge can resolve its FKs. Master identity comes from
+        # the edge; #1016 (specialist_dtos) only enriches name/bio.
         services_res = upsert_salon_services(tenant, salon_dtos)
+        masters_res = upsert_masters(tenant, spec_svc_dtos, specialist_dtos)
+        master_services_res = upsert_master_services(tenant, spec_svc_dtos)
 
         # Freshness signal only — not a fetch cursor (Ayla has no ?since=).
-        new_cursor = _max_upstream_ts(salon_dtos)
+        new_cursor = _max_upstream_ts([*salon_dtos, *spec_svc_dtos])
         if new_cursor is not None:
             tenant.last_catalog_sync_at = new_cursor
             tenant.save(update_fields=["last_catalog_sync_at"])
@@ -161,16 +184,25 @@ class CatalogSyncService:
         result = SyncResult(
             ran=True,
             services=_to_counts(services_res),
+            masters=_to_counts(masters_res),
+            master_services=_to_counts(master_services_res),
             cursor_advanced_to=new_cursor,
         )
 
         _audit_and_emit(tenant, result)
         logger.info(
-            "catalog.sync.completed tenant_id=%s services=%s/%s/%s cursor=%s",
+            "catalog.sync.completed tenant_id=%s services=%s/%s/%s masters=%s/%s/%s "
+            "master_services=%s/%s/%s cursor=%s",
             tenant.id,
             result.services.created,
             result.services.updated,
             result.services.skipped,
+            result.masters.created,
+            result.masters.updated,
+            result.masters.skipped,
+            result.master_services.created,
+            result.master_services.updated,
+            result.master_services.skipped,
             new_cursor.isoformat() if new_cursor else "unchanged",
         )
         return result
@@ -201,7 +233,11 @@ def _max_upstream_ts(dtos: list[Any]) -> datetime | None:
 
 
 def _audit_and_emit(tenant: "Tenant", result: SyncResult) -> None:
-    counts_payload = {"services": _counts_dict(result.services)}
+    counts_payload = {
+        "services": _counts_dict(result.services),
+        "masters": _counts_dict(result.masters),
+        "master_services": _counts_dict(result.master_services),
+    }
     write_audit(
         EVENT_CATALOG_SYNCED,
         target="Tenant",

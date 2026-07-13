@@ -344,6 +344,17 @@ class CatalogMaster(_MirrorBase):
         verbose_name_plural = "Catalog: masters"
         ordering = ["name"]
         unique_together = (("tenant", "external_id"),)
+        constraints = [
+            # S3B PR-2 re-key: Ayla-fed masters key on ayla_user_id (=User.id).
+            # Partial (WHERE ayla_user_id IS NOT NULL) so legacy NULL rows are
+            # exempt; instant-validate while the column is all-NULL. DB backstop
+            # over the per-tenant sync lock (ADR-0011 §3.5).
+            models.UniqueConstraint(
+                fields=["tenant", "ayla_user_id"],
+                condition=models.Q(ayla_user_id__isnull=False),
+                name="uq_catalog_master_tenant_ayla_user_id",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "-external_updated_at"]),
             models.Index(fields=["tenant", "yclients_staff_id"]),
@@ -351,7 +362,9 @@ class CatalogMaster(_MirrorBase):
         ]
 
     def __str__(self) -> str:
-        return f"CatalogMaster[{self.name}@{self.external_id}]"
+        # Ayla-fed masters have no integer external_id — fall back to the
+        # stable user_id for readable admin/log output.
+        return f"CatalogMaster[{self.name}@{self.ayla_user_id or self.external_id}]"
 
 
 class MasterService(models.Model):
@@ -388,6 +401,52 @@ class MasterService(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # S3B PR-2 (#1044) — Ayla `specialist-services` is exactly this edge
+    # (specialist × salon_service). These fields mirror the bookable unit so
+    # the booking flip (S2 / #1016) can key on the stable id and read the
+    # resolved health gate without a live round-trip.
+    ayla_specialist_service_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla SpecialistService.id (UUID) — the **bookable** "
+            "unit the bot books against (S2). Nullable for legacy/admin rows; "
+            "partial-unique per tenant when set."
+        ),
+    )
+    resolved_duration = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Effective duration (min) resolved Ayla-side (specialist → salon "
+            "→ template). Stored as-is — never recomputed here."
+        ),
+    )
+    resolved_requires_health_check = models.BooleanField(
+        default=False,
+        help_text=(
+            "Effective health gate resolved Ayla-side (OR of template floor, "
+            "salon, specialist). The booking gate (#1034) reads THIS, not the "
+            "salon-level CatalogService.requires_health_check."
+        ),
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Specialist price for this service (Ayla specialist-services).",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text=(
+            "Bookability of this edge (Ayla specialist-services.is_active). The "
+            "S2 booking flip must exclude is_active=False edges — a deactivated "
+            "bookable stays mirrored (upsert-only, no tombstone) but not bookable."
+        ),
+    )
+
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
@@ -396,6 +455,16 @@ class MasterService(models.Model):
         verbose_name_plural = "Catalog: master-service mappings"
         ordering = ["master_id", "service_id"]
         unique_together = (("master", "service"),)
+        constraints = [
+            # The bookable id is the stable S2 booking key — a duplicate would
+            # be data corruption (ambiguous booking target). Partial-unique so
+            # legacy NULL rows are exempt; instant-validate while all-NULL.
+            models.UniqueConstraint(
+                fields=["tenant", "ayla_specialist_service_id"],
+                condition=models.Q(ayla_specialist_service_id__isnull=False),
+                name="uq_master_service_tenant_ayla_specialist_service_id",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "master"]),
             models.Index(fields=["tenant", "service"]),

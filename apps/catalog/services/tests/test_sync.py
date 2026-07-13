@@ -9,8 +9,12 @@ import pytest
 from django.core.cache import cache
 
 from apps.audit.models import AuditLog
-from apps.catalog.models import CatalogService
-from apps.catalog.services.http_client import CatalogSalonServiceDTO
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.catalog.services.http_client import (
+    CatalogSalonServiceDTO,
+    CatalogSpecialistDTO,
+    CatalogSpecialistServiceDTO,
+)
 from apps.catalog.services.sync import (
     EVENT_CATALOG_SYNCED,
     CatalogSyncService,
@@ -50,17 +54,29 @@ class FakeHttpClient:
         self,
         *,
         services: list[CatalogSalonServiceDTO] | None = None,
+        spec_svcs: list[CatalogSpecialistServiceDTO] | None = None,
+        specialists: list[CatalogSpecialistDTO] | None = None,
         raise_on_fetch: type[Exception] | None = None,
     ) -> None:
         self._services = services or []
+        self._spec_svcs = spec_svcs or []
+        self._specialists = specialists or []
         self._raise = raise_on_fetch
         self.tenant_ids_seen: list[str] = []
+        self.specialist_ids_seen: list[str] = []
 
     def fetch_salon_services(self, *, tenant_id: str) -> list[CatalogSalonServiceDTO]:
         if self._raise is not None:
             raise self._raise("synthetic")
         self.tenant_ids_seen.append(tenant_id)
         return self._services
+
+    def fetch_specialist_services(self, *, tenant_id: str) -> list[CatalogSpecialistServiceDTO]:
+        return self._spec_svcs
+
+    def fetch_specialists(self, *, specialist_ids: list[str]) -> list[CatalogSpecialistDTO]:
+        self.specialist_ids_seen = list(specialist_ids)
+        return self._specialists
 
     def close(self) -> None: ...
 
@@ -69,6 +85,46 @@ class FakeHttpClient:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+
+def _spec(pid: str) -> CatalogSpecialistDTO:
+    return CatalogSpecialistDTO(specialist_id=pid, name="M", bio="")
+
+
+def _spec_svc(
+    bid: str, *, specialist: str, salon_service: str, user_id: str
+) -> CatalogSpecialistServiceDTO:
+    return CatalogSpecialistServiceDTO(
+        ayla_specialist_service_id=bid,
+        salon_service=salon_service,
+        specialist=specialist,
+        ayla_user_id=user_id,
+        external_updated_at=_ts(),
+        resolved_duration=45,
+        resolved_requires_health_check=True,
+        review_count=5,
+    )
+
+
+class TestThreeEndpointFlow:
+    def test_masters_and_bookable_edges_synced(self, tenant: Tenant) -> None:
+        sid, pid, uid, bid = (str(uuid.uuid4()) for _ in range(4))
+        http = FakeHttpClient(
+            services=[_salon(sid)],
+            spec_svcs=[_spec_svc(bid, specialist=pid, salon_service=sid, user_id=uid)],
+            specialists=[_spec(pid)],
+        )
+        result = CatalogSyncService(http_client=http).run(tenant)
+        assert result.services.created == 1
+        assert result.masters.created == 1
+        assert result.master_services.created == 1
+        # The bot passed the specialist ids the edges referenced.
+        assert http.specialist_ids_seen == [pid]
+        ms = MasterService.all_tenants.get(tenant=tenant, ayla_specialist_service_id=bid)
+        assert str(ms.master.ayla_user_id) == uid
+        assert str(ms.service.ayla_service_id) == sid
+        assert ms.resolved_requires_health_check is True
+        assert CatalogMaster.all_tenants.filter(tenant=tenant, ayla_user_id=uid).exists()
 
 
 class TestHappyPath:

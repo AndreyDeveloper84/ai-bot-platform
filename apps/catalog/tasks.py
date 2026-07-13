@@ -99,9 +99,7 @@ def _accumulate(counters: dict[str, int], result: SyncResult) -> None:
         counters["tenants_failed"] += 1
         return
     counters["tenants_run"] += 1
-    # PR-1 syncs only CatalogService (salon-services). PR-2 re-adds the
-    # master/bookable mirrors to this fan-out.
-    for mirror in (result.services,):
+    for mirror in (result.services, result.masters, result.master_services):
         counters["total_created"] += mirror.created
         counters["total_updated"] += mirror.updated
         counters["total_skipped"] += mirror.skipped

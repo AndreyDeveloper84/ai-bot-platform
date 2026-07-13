@@ -25,6 +25,51 @@ _BASE = "https://ayla.test"
 _TOKEN = "internal-token-abc"  # noqa: S105
 _TID = "b0a1c2d3-0000-4000-8000-000000000001"
 _SALON_URL = f"{_BASE}/api/v1/internal/catalog/salon-services/"
+_SPEC_SVC_URL = f"{_BASE}/api/v1/internal/catalog/specialist-services/"
+
+
+def _specialist_service_row(
+    bid: str,
+    *,
+    specialist: str,
+    salon_service: str,
+    user_id: str = "9c000000-0000-4000-8000-000000000009",
+) -> dict[str, Any]:
+    return {
+        "id": bid,
+        "salon_service": salon_service,
+        "specialist": specialist,
+        "user_id": user_id,
+        "tenant": _TID,
+        "template": "9d3f0000-0000-4000-8000-000000000002",
+        "duration_minutes": 45,
+        "resolved_duration": 45,
+        "requires_health_check": False,
+        "resolved_requires_health_check": True,
+        "price": "1500.00",
+        "buffer_after_minutes": 0,
+        "is_active": True,
+        "yclients_staff_id": "9001",
+        "reviews_count": 200,
+        "rating": "4.8",
+        "created_at": "2026-07-09T18:31:00Z",
+        "updated_at": "2026-07-09T18:31:00Z",
+    }
+
+
+def _specialist_row(sid: str, *, user_id: str) -> dict[str, Any]:
+    return {
+        "id": sid,
+        "user_id": user_id,
+        "display_name": "Анна Иванова",
+        "avatar": "",
+        "bio": "8 лет в эстетике тела.",
+        "experience_years": 8,
+        "status": "active",
+        "rating": "4.80",
+        "reviews_count": 200,
+        "is_available": True,
+    }
 
 
 def _client(**kwargs: Any) -> CatalogHttpClient:
@@ -188,6 +233,76 @@ class TestRetry5xx:
             )
         with _client() as c, pytest.raises(CatalogTransportError):
             c.fetch_salon_services(tenant_id=_TID)
+
+
+class TestSpecialistServices:
+    def test_parses_bookable_fields(self, httpx_mock: HTTPXMock) -> None:
+        bid = "a4e00000-0000-4000-8000-000000000001"
+        spec = "77aa0000-0000-4000-8000-000000000002"
+        salon = "6f1c0000-0000-4000-8000-000000000003"
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}",
+            json={
+                "count": 1,
+                "next": None,
+                "previous": None,
+                "results": [_specialist_service_row(bid, specialist=spec, salon_service=salon)],
+            },
+        )
+        with _client() as c:
+            [ss] = c.fetch_specialist_services(tenant_id=_TID)
+        assert ss.ayla_specialist_service_id == bid
+        assert ss.specialist == spec
+        assert ss.salon_service == salon
+        assert ss.resolved_duration == 45
+        assert ss.resolved_requires_health_check is True
+        assert ss.price == Decimal("1500.00")
+        # Master identity rides on the edge (contract #207) — no #1016 call.
+        assert ss.ayla_user_id == "9c000000-0000-4000-8000-000000000009"
+        assert ss.review_count == 200
+        assert ss.rating == Decimal("4.8")
+
+
+class TestSpecialists:
+    def test_fetch_by_id_parses_name_bio(self, httpx_mock: HTTPXMock) -> None:
+        sid = "77aa0000-0000-4000-8000-000000000002"
+        httpx_mock.add_response(
+            url=f"{_BASE}/api/v1/internal/specialists/{sid}/",
+            json=_specialist_row(sid, user_id="9c000000-0000-4000-8000-000000000009"),
+        )
+        with _client() as c:
+            [sp] = c.fetch_specialists(specialist_ids=[sid])
+        # #1016 is name/bio enrichment only now.
+        assert sp.specialist_id == sid
+        assert sp.name == "Анна Иванова"
+        assert sp.bio == "8 лет в эстетике тела."
+
+    def test_404_specialist_skipped(self, httpx_mock: HTTPXMock) -> None:
+        ok = "77aa0000-0000-4000-8000-000000000002"
+        gone = "77aa0000-0000-4000-8000-000000000003"
+        httpx_mock.add_response(
+            url=f"{_BASE}/api/v1/internal/specialists/{ok}/",
+            json=_specialist_row(ok, user_id="9c000000-0000-4000-8000-000000000009"),
+        )
+        httpx_mock.add_response(
+            url=f"{_BASE}/api/v1/internal/specialists/{gone}/",
+            status_code=404,
+            json={"detail": "not found"},
+        )
+        with _client() as c:
+            out = c.fetch_specialists(specialist_ids=[ok, gone])
+        assert [s.specialist_id for s in out] == [ok]
+
+    def test_dedupes_ids(self, httpx_mock: HTTPXMock) -> None:
+        sid = "77aa0000-0000-4000-8000-000000000002"
+        # Only ONE response queued — a duplicate id must not fire a 2nd GET.
+        httpx_mock.add_response(
+            url=f"{_BASE}/api/v1/internal/specialists/{sid}/",
+            json=_specialist_row(sid, user_id="9c000000-0000-4000-8000-000000000009"),
+        )
+        with _client() as c:
+            out = c.fetch_specialists(specialist_ids=[sid, sid])
+        assert len(out) == 1
 
 
 class TestConfigGap:
