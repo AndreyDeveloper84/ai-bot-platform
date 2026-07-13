@@ -251,6 +251,54 @@ def _emit_safety_shortcircuit(bot_user: Any, safety: Any, *, is_global: bool) ->
     )
 
 
+def _deliver_crisis_reply(
+    *,
+    chat_id: str,
+    text: str,
+    bot_user: Any,
+    trace_id: str | uuid.UUID | None,
+    is_global: bool,
+    attachments: list[dict[str, Any]] | None = None,
+) -> None:
+    """Send a safety/crisis reply, alerting LOUDLY if delivery fails (#1082).
+
+    A crisis reply that fails to send is categorically worse than a normal one:
+    ``with_idempotency`` has already claimed the key, so a PEL retry hits
+    ``AlreadyClaimed`` and never resends — a person in crisis silently gets
+    nothing, while the DB shows a «delivered» reply. We can't guarantee delivery
+    here, but we MUST make the failure loud so ops follow up out-of-band.
+
+    On failure: a high-priority ERROR log (the durable, alerting-hooked signal —
+    survives even if the re-raised exception rolls a surrounding transaction
+    back) plus a distinct ``channels.max.safety.crisis_delivery_failed`` event
+    (analytics; separate from the PII-safe ``pre_check_triggered``). Both are
+    PII-safe — never the crisis text or the matched phrase. The exception is
+    re-raised: propagation / idempotency semantics are unchanged, the alert is
+    the only addition.
+    """
+    try:
+        send_message(chat_id=chat_id, text=text, attachments=attachments)
+    except Exception:
+        logger.error(
+            "channels.max.safety.crisis_delivery_failed bot_user=%s is_global=%s trace=%s",
+            getattr(bot_user, "id", "?"),
+            is_global,
+            trace_id,
+        )
+        try:
+            emit(
+                "channels.max.safety.crisis_delivery_failed",
+                payload={
+                    "bot_user_id": str(getattr(bot_user, "id", "")),
+                    "is_global_bot": is_global,
+                    "trace_id": str(trace_id) if trace_id else "",
+                },
+            )
+        except Exception:  # noqa: BLE001 — the alert event must not mask the send failure
+            logger.exception("channels.max.safety.crisis_delivery_alert_emit_failed")
+        raise
+
+
 def _dispatch_skill_handoff(
     conversation: Any,
     skill_result: Any,
@@ -598,11 +646,22 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         trace_id=trace_id,
     )
     short_term.append(conversation.id, role="assistant", content=reply.text)
-    send_message(
-        chat_id=event.chat_id,
-        text=reply.text,
-        attachments=_build_attachments(reply.action_data),
-    )
+    if assistant_action_type == "safety_pre_check":
+        # Crisis reply — alert loudly on delivery failure (#1082).
+        _deliver_crisis_reply(
+            chat_id=event.chat_id,
+            text=reply.text,
+            bot_user=bot_user,
+            trace_id=trace_id,
+            is_global=True,
+            attachments=_build_attachments(reply.action_data),
+        )
+    else:
+        send_message(
+            chat_id=event.chat_id,
+            text=reply.text,
+            attachments=_build_attachments(reply.action_data),
+        )
 
     # Memory write (M-B2 / #1099): learn explicit green facts the user stated
     # this turn (e.g. «я веган»). Best-effort + consent-gated inside; never
@@ -709,7 +768,13 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             trace_id=trace_id,
         )
         short_term.append(conversation.id, role="assistant", content=safety.reply_text)
-        send_message(chat_id=event.chat_id, text=safety.reply_text)
+        _deliver_crisis_reply(
+            chat_id=event.chat_id,
+            text=safety.reply_text,
+            bot_user=bot_user,
+            trace_id=trace_id,
+            is_global=False,
+        )
         logger.info(
             "channels.max.handler.safety_shortcircuit conversation=%s verdict=%s",
             conversation.id,
