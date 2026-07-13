@@ -221,6 +221,36 @@ class TestReadRoundTrip:
         assert len(calls) == 3  # one slots call per day in the window
         assert out == [today.isoformat(), (today + timedelta(days=2)).isoformat()]
 
+    def test_times_without_service_id_raises_before_any_http(self) -> None:
+        # #1051: a service-less slots call must fail fast — no HTTP, so it can't
+        # become a 400 MISSING_PARAM from Ayla.
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(400, json={"error": {"code": "MISSING_PARAM"}})
+
+        with pytest.raises(bc.BookingBadRequestError, match="service_id_required"):
+            _client_with(handler).get_available_times(
+                specialist_id="spec-1", date="2026-06-10", service_id=""
+            )
+        assert calls == []  # never hit the wire
+
+    def test_dates_without_service_id_raises_without_fanout(self) -> None:
+        # #1051 core: a service-less availability request must NOT fan out into a
+        # per-day 400 cascade — one clean BookingBadRequestError, zero HTTP.
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(400, json={"error": {"code": "MISSING_PARAM"}})
+
+        with pytest.raises(bc.BookingBadRequestError, match="service_id_required"):
+            _client_with(handler).get_available_dates(
+                specialist_id="spec-1", service_id="", window_days=14
+            )
+        assert calls == []  # no 14× fan-out
+
 
 class TestWriteRoundTrip:
     def test_create_sends_body_and_headers(self) -> None:

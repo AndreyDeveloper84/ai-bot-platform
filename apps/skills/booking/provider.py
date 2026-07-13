@@ -137,9 +137,12 @@ class AylaYClientsAdapter:
         if staff_id is None:
             return []
         with _translate_errors():
+            # #1051: service_id is mandatory on the Ayla slots path. Pass the
+            # selected service through ("" when absent → the client raises a
+            # clear BookingBadRequestError, not a 14-day 400 cascade).
             return self._client.get_available_dates(
                 specialist_id=str(staff_id),
-                service_id=_first_id(service_ids),
+                service_id=_first_id(service_ids) or "",
             )
 
     def get_available_times(
@@ -153,7 +156,7 @@ class AylaYClientsAdapter:
             rows = self._client.get_available_times(
                 specialist_id=str(staff_id),
                 date=date,
-                service_id=_first_id(service_ids),
+                service_id=_first_id(service_ids) or "",  # #1051: mandatory
             )
         return [_to_yc_available_time(r) for r in rows]
 

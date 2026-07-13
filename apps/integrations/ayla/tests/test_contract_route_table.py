@@ -274,7 +274,9 @@ def _exercise_booking() -> None:
     _swallow(lambda: c.get_services(specialist_id="SPECID"))
     _swallow(lambda: c.get_masters())
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
-    _swallow(lambda: c.get_available_times(specialist_id="SPECID", date="2026-07-03"))
+    _swallow(
+        lambda: c.get_available_times(specialist_id="SPECID", date="2026-07-03", service_id="SVCID")
+    )
     _swallow(
         lambda: c.create_appointment(
             external_user_id=_EXT_USER,
