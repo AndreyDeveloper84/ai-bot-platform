@@ -890,11 +890,11 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(hour="5", minute="0"),
     },
     "catalog_sync_every_15min": {
-        # Sprint 7 / C5 (DRF-579) — fan-out catalog sync across every
-        # active tenant. Cadence matched to apps.catalog.services.sync
-        # advisory-lock TTL (1.5x). The task carries a 12-min soft time
-        # limit so an overrun fires before the next beat fires a
-        # parallel run.
+        # Fan-out catalog sync across every active tenant. Since S3B (#1044)
+        # the task pulls Ayla's internal salon-services (mysite retired).
+        # Cadence matched to apps.catalog.services.sync advisory-lock TTL
+        # (1.5x). The task carries a 12-min soft time limit so an overrun
+        # fires before the next beat fires a parallel run.
         "task": "apps.catalog.tasks.sync_catalog_for_all_tenants",
         "schedule": crontab(minute="*/15"),
     },
@@ -1103,14 +1103,13 @@ CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "")
 CHROMA_HTTP_PORT = int(os.environ.get("CHROMA_HTTP_PORT", "8001"))
 CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
 
-# Sprint 7 / C8 (DRF-578) — Catalog sync (mysite → platform mirror).
-# Sync service (C4 / DRF-575) pulls Service/Master/FAQ/HelpArticle from
-# `mysite/api/v1/catalog/*` via HTTP and upserts into apps.catalog
-# mirrors. Per-tenant Redis advisory lock guards against concurrent
-# runs; the TTL is intentionally ≥ 1.5× the 15-minute beat cadence so
-# a slow run can't race itself.
-MYSITE_CATALOG_BASE_URL = os.environ.get("MYSITE_CATALOG_BASE_URL", "https://formulatela58.ru")
-MYSITE_CATALOG_SERVICE_TOKEN = os.environ.get("MYSITE_CATALOG_SERVICE_TOKEN", "")
+# Catalog sync (Ayla internal catalog → CatalogService mirror). S3B (#1044):
+# the sync service pulls `salon-services` from Ayla's internal Bearer catalog
+# (AYLA_BASE_URL + AYLA_INTERNAL_API_TOKEN, above) and upserts the
+# CatalogService mirror keyed on the Ayla stable-id. mysite is retired
+# (ADR-0009 strangler-fig — MYSITE_CATALOG_* removed). Per-tenant Redis
+# advisory lock guards against concurrent runs; the TTL is intentionally
+# ≥ 1.5× the 15-minute beat cadence so a slow run can't race itself.
 CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECONDS", str(25 * 60)))
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
