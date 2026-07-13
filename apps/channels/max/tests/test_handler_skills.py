@@ -69,11 +69,12 @@ def fake_redis(monkeypatch):
 
 class TestHandoffTrigger:
     def test_operator_phrase_creates_admin_task_flips_state(
-        self, tenant, mock_send, fake_redis, settings
+        self, tenant, mock_send, fake_redis, settings, mark_welcomed
     ):
         settings.STRICT_TENANT_SCOPE = "strict"
         trace = uuid4()
         with tenant_scope(tenant), trace_id_scope(str(trace)):
+            mark_welcomed(user_id=10001, chat_id=20001)  # isolate from #85 auto-welcome
             max_handler.handle_max_event(_payload(text="оператор"), trace_id=trace)
 
         # AdminTask materialised.
@@ -90,10 +91,11 @@ class TestHandoffTrigger:
 
 class TestSilenceUnderHandoff:
     def test_followup_message_in_handoff_state_silent(
-        self, tenant, mock_send, fake_redis, settings
+        self, tenant, mock_send, fake_redis, settings, mark_welcomed
     ):
         settings.STRICT_TENANT_SCOPE = "strict"
         with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            mark_welcomed(user_id=10001, chat_id=20001)  # isolate from #85 auto-welcome
             # Trigger handoff first.
             max_handler.handle_max_event(_payload(text="оператор", mid="m1"))
             assert len(mock_send) == 1
@@ -118,9 +120,12 @@ class TestSilenceUnderHandoff:
 
 
 class TestResumeAfterResolve:
-    def test_bot_resumes_after_resolve_admin_task(self, tenant, mock_send, fake_redis, settings):
+    def test_bot_resumes_after_resolve_admin_task(
+        self, tenant, mock_send, fake_redis, settings, mark_welcomed
+    ):
         settings.STRICT_TENANT_SCOPE = "strict"
         with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            mark_welcomed(user_id=10001, chat_id=20001)  # isolate from #85 auto-welcome
             max_handler.handle_max_event(_payload(text="оператор", mid="r1"))
             bu = BotUser.all_tenants.get(channel="max", channel_user_id="10001")
             conv = Conversation.all_tenants.get(bot_user=bu)
