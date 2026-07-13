@@ -35,9 +35,10 @@
 - `docs/design/handoffs/2026-05-18-schedule-management-handoff.md` — где живёт редактирование графика (MM3 линкует, не дублирует; §H).
 - `docs/adr/ADR-0008-role-detection-and-staff-model.md` — модель ролей/staff.
 - `docs/design/policies/solo-provider-ux.md §6` — team surface (комплемент solo).
-- Permission-контракт — **два слоя, не путать:**
-  - **Enforced (канон для реализации):** backend-декоратор `apps/admin_api/auth.py` (пускает `owner|admin`, всё прочее 403) + тесты `admin_api/tests/`, `internal_chat/tests/`. Это единственный действующий контракт.
-  - **Design-intent (высокоуровневый):** `tenant-as-provider-model §2.10` даёт лишь 4 буллета ролей (Owner / Admin / Receptionist / Master) и **сам отсылает** к `master-mobile-handoff §8` + `master-management-handoff` matrix. §2.10 — НЕ детальная матрица; deprecated `conversation-ownership-policy §4` заменён именно этими handoff-матрицами, а не §2.10.
+- Permission-контракт — **ТРИ слоя, строго не путать:**
+  - **(1) Conversation capabilities** (переписка — receptionist/master/admin/owner): канон = **`conversation-ownership-policy §4` матрица.** ⚠️ Сам tier-док deprecated 2026-05-19, **но его §4-матрица СОХРАНЕНА как authoritative** (`apps/identity/services/role_resolver.py:107-109`; зеркалится row-by-row в `CAPABILITIES`, ADR-0008). §4 здесь **НЕ заменён** — это канон для conversations, не для admin-management.
+  - **(2) Management enforcement** (team-management admin-поверхность MM1–MM5): канон = backend-декоратор `apps/admin_api/auth.py` (пускает `owner|admin`, прочее 403) + тесты. Единственный действующий гейт этой поверхности.
+  - **(3) Management UX / role-design** (кто какие management-экраны/операции видит): design-канон = handoff-матрицы (`master-management-handoff` MM1/MM3 permission-tables, `master-mobile-handoff §8`). `tenant-as-provider §2.10` — лишь высокоуровневый указатель на них (4 буллета ролей), НЕ детальная матрица; именно этот слой (management-role), а не §4-матрица переписок, — то, что `§2.10 «replaces conversation-ownership §4»` в шапке handoff имеет в виду.
 
 ---
 
@@ -95,7 +96,7 @@ Handoffs верны по существу, но содержат устарев�
 | Устаревшая ссылка в handoff | Актуально |
 |---|---|
 | master-management §2 → `project_single_assistant_identity` («master's identity is still the single assistant») | **DEPRECATED 2026-05-19** → `[[project_ayla_personal_ai]]`. Суть сохраняется: admin-UI **внутренний**, клиент не видит «Master X joined»; но формулировка «single assistant» неактуальна. |
-| master-management «permission matrix → `conversation-ownership-policy §4`» | §4 deprecated 2026-05-19. Design-матрица переехала в `master-mobile-handoff §8` + `master-management-handoff` (`tenant-as-provider §2.10` — лишь высокоуровневый указатель на них, см. §2). **Действующий** гейт — `admin_api/auth.py` = `owner|admin` только. ⚠️ Receptionist «read-only» из handoffs бэкендом НЕ реализован (§2a). |
+| master-management «permission matrix → `conversation-ownership-policy §4`» | ⚠️ **Не путать два среза §4** (см. §2 трёхслойную модель): **(a) conversation-capability матрица §4 — СОХРАНЕНА как канон** (`role_resolver.py:107`), НЕ устарела; **(b) management-role описания** — их высокоуровневый преемник `tenant-as-provider §2.10`, детальный design = handoff-матрицы, **enforced** = `admin_api/auth.py` (`owner\|admin`). Deprecated 2026-05-19 — только окружающий tier-док, не §4-матрица переписок. Receptionist «read-only management» бэкендом НЕ реализован (§2a). |
 | Общий тон «admin = Ayla Pro provider tool» | Соответствует ADR-0009: это AI/runtime-поверхность bot-platform, не транзакционный домен Ayla. Никаких прямых записей в booking/payment/catalog Ayla — admin-мутации идут через bot-platform admin-эндпоинты (`/api/v1/admin/*`), не в таблицы Ayla. |
 
 **Вывод:** дизайн-решения остаются в силе; правки — только косметические foundation-ссылки в handoffs (оставляю владельцам handoff-доков, anti-touch), но screen-спек фиксирует актуальную матрицу как канон.
@@ -210,7 +211,7 @@ Solo/YClients-пилот, Пенза. `isSolo = me.is_solo_provider === true` и
 | Settings | rich settings — **web-only**; Mini App ≤ account/notifications; полный parity — **отдельный эпик**, не build-пункт (§5.1). |
 | Код-баг | AvailabilityRequests conditional `useMemo` §6 → FOLLOW_UP код-тикет. |
 | Долг-гигиена | skeleton-консистентность MM1–MM4 §7 → NICE post-pilot. |
-| Drift | handoff foundation-ссылки (single-assistant / conversation-ownership §4) устарели. Enforced permission-канон = `admin_api/auth.py` (owner\|admin); design-intent = handoff-матрицы (`tenant-as-provider §2.10` — лишь указатель). (§2, §3) |
+| Drift | Устарела только `single-assistant`-ссылка + **окружающий tier-док** conversation-ownership (05-19). **§4-матрица переписок СОХРАНЕНА** как канон conversation-capabilities (`role_resolver.py:107`). Три слоя прав (§2): (1) conversation-caps = §4-матрица; (2) management enforced = `admin_api/auth.py` owner\|admin; (3) management-UX design = handoff-матрицы (§2.10 = указатель). |
 
 ---
 
