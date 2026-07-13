@@ -1,27 +1,21 @@
-"""Catalog upserter tests (DRF-574 / Sprint 7 / C3)."""
+"""Catalog upserter tests — Ayla salon-services → CatalogService (S3B / #1044).
+
+PR-1 re-keys the mirror onto the Ayla stable-id: ``upsert_salon_services``
+does an ``update_or_create`` on ``(tenant, ayla_service_id)``. Ayla-fed rows
+leave ``external_id`` NULL.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
-from apps.catalog.models import (
-    CatalogFaq,
-    CatalogMaster,
-    CatalogService,
-)
-from apps.catalog.services.http_client import (
-    CatalogFaqDTO,
-    CatalogMasterDTO,
-    CatalogServiceDTO,
-)
-from apps.catalog.services.upserter import (
-    UpsertResult,
-    upsert_faqs,
-    upsert_masters,
-    upsert_services,
-)
+from apps.catalog.models import CatalogService
+from apps.catalog.services.http_client import CatalogSalonServiceDTO
+from apps.catalog.services.upserter import UpsertResult, upsert_salon_services
 from apps.tenancy.models import Tenant
 
 
@@ -35,136 +29,88 @@ def tenant_b(db) -> Tenant:
     return Tenant.objects.create(slug="cat-up-b", name="Cat Up B")
 
 
-def _svc(external_id: int, *, name: str = "S", ts: datetime | None = None) -> CatalogServiceDTO:
-    return CatalogServiceDTO(
-        external_id=external_id,
-        external_updated_at=ts or datetime(2026, 5, 12, 10, 0, tzinfo=timezone.utc),
-        slug=f"slug-{external_id}",
+def _dto(
+    ayla_service_id: str | None = None,
+    *,
+    name: str = "Маникюр",
+    is_active: bool = True,
+    requires_health_check: bool = False,
+    price_from: Decimal | None = Decimal("1500.00"),
+    duration_min: int | None = 45,
+) -> CatalogSalonServiceDTO:
+    return CatalogSalonServiceDTO(
+        ayla_service_id=ayla_service_id or str(uuid.uuid4()),
+        external_updated_at=datetime(2026, 7, 9, 18, 31, tzinfo=timezone.utc),
         name=name,
+        is_active=is_active,
+        requires_health_check=requires_health_check,
+        price_from=price_from,
+        duration_min=duration_min,
+        template="9d3f0000-0000-4000-8000-000000000002",
+        raw={"id": ayla_service_id, "source": "manual"},
     )
 
 
-class TestCreateAndUpdate:
-    def test_first_run_inserts(self, tenant: Tenant) -> None:
-        result = upsert_services(tenant, [_svc(1), _svc(2)])
-        assert isinstance(result, UpsertResult)
-        assert result.created == 2
-        assert result.updated == 0
-        assert result.skipped == 0
-        assert CatalogService.all_tenants.filter(tenant=tenant).count() == 2
+class TestCreate:
+    def test_creates_row_keyed_on_ayla_service_id(self, tenant: Tenant) -> None:
+        aid = str(uuid.uuid4())
+        res = upsert_salon_services(tenant, [_dto(aid, name="LPG")])
+        assert isinstance(res, UpsertResult)
+        assert (res.created, res.updated, res.skipped) == (1, 0, 0)
+        svc = CatalogService.all_tenants.get(tenant=tenant, ayla_service_id=aid)
+        assert svc.name == "LPG"
+        assert svc.price_from == Decimal("1500.00")
+        assert svc.duration_min == 45
+        # Ayla-fed rows carry no integer external_id.
+        assert svc.external_id is None
 
-    def test_re_run_with_newer_ts_updates(self, tenant: Tenant) -> None:
-        upsert_services(tenant, [_svc(1, name="Old")])
-        result = upsert_services(
-            tenant,
-            [
-                _svc(
-                    1,
-                    name="New",
-                    ts=datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc),
-                )
-            ],
-        )
-        assert result.updated == 1
-        assert result.created == 0
-        row = CatalogService.all_tenants.get(tenant=tenant, external_id=1)
-        assert row.name == "New"
+    def test_maps_health_check_and_active(self, tenant: Tenant) -> None:
+        aid = str(uuid.uuid4())
+        upsert_salon_services(tenant, [_dto(aid, requires_health_check=True, is_active=False)])
+        svc = CatalogService.all_tenants.get(ayla_service_id=aid)
+        assert svc.requires_health_check is True
+        assert svc.is_active is False
 
-
-class TestLastWriterWins:
-    """Decision 10 — upstream `external_updated_at` decides, NOT wall clock."""
-
-    def test_stale_dto_skipped(self, tenant: Tenant) -> None:
-        fresh = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
-        stale = fresh - timedelta(hours=1)
-        upsert_services(tenant, [_svc(1, name="Fresh", ts=fresh)])
-
-        # Race: a second beat with an older timestamp arrives.
-        result = upsert_services(tenant, [_svc(1, name="Stale", ts=stale)])
-        assert result.skipped == 1
-        assert result.updated == 0
-        row = CatalogService.all_tenants.get(tenant=tenant, external_id=1)
-        # Stale name didn't overwrite.
-        assert row.name == "Fresh"
-
-    def test_equal_ts_treated_as_skip(self, tenant: Tenant) -> None:
-        same = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
-        upsert_services(tenant, [_svc(1, ts=same)])
-        result = upsert_services(tenant, [_svc(1, ts=same)])
-        assert result.skipped == 1
-        assert result.updated == 0
+    def test_raw_payload_retained(self, tenant: Tenant) -> None:
+        aid = str(uuid.uuid4())
+        upsert_salon_services(tenant, [_dto(aid)])
+        svc = CatalogService.all_tenants.get(ayla_service_id=aid)
+        assert svc.raw["source"] == "manual"
 
 
-class TestPerRowErrorIsolation:
-    """One malformed DTO must not poison the rest of the batch."""
+class TestUpdate:
+    def test_second_upsert_updates_same_row(self, tenant: Tenant) -> None:
+        aid = str(uuid.uuid4())
+        upsert_salon_services(tenant, [_dto(aid, name="Old", price_from=Decimal("1000.00"))])
+        res = upsert_salon_services(tenant, [_dto(aid, name="New", price_from=Decimal("2000.00"))])
+        assert (res.created, res.updated) == (0, 1)
+        assert CatalogService.all_tenants.filter(tenant=tenant, ayla_service_id=aid).count() == 1
+        svc = CatalogService.all_tenants.get(ayla_service_id=aid)
+        assert svc.name == "New"
+        assert svc.price_from == Decimal("2000.00")
 
-    def test_bad_row_logged_others_committed(
-        self, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+
+class TestTenantIsolation:
+    def test_same_ayla_id_different_tenants_two_rows(
+        self, tenant: Tenant, tenant_b: Tenant
     ) -> None:
-        good = _svc(1, name="Good")
-        # Patch the field mapper to raise on a specific external_id.
-        from apps.catalog.services import upserter
+        aid = str(uuid.uuid4())
+        upsert_salon_services(tenant, [_dto(aid)])
+        upsert_salon_services(tenant_b, [_dto(aid)])
+        assert CatalogService.all_tenants.filter(ayla_service_id=aid).count() == 2
 
-        original = upserter._service_fields
 
-        def boom(dto: CatalogServiceDTO) -> dict:
-            if dto.external_id == 2:
-                raise ValueError("synthetic")
-            return original(dto)
-
-        monkeypatch.setattr(upserter, "_service_fields", boom)
-
-        result = upsert_services(
-            tenant,
-            [good, _svc(2, name="Bad"), _svc(3, name="Good3")],
+class TestErrorIsolation:
+    def test_bad_row_does_not_abort_batch(self, tenant: Tenant) -> None:
+        good = _dto(name="Good")
+        # A malformed DTO: external_updated_at None violates the NOT NULL
+        # column → row fails, batch continues.
+        bad = CatalogSalonServiceDTO(
+            ayla_service_id=str(uuid.uuid4()),
+            external_updated_at=None,  # type: ignore[arg-type]
+            name="Bad",
         )
-        # The boom row didn't land.
-        assert result.created == 2
-        assert len(result.errors) == 1
-        assert result.errors[0]["external_id"] == 2
-        assert "synthetic" in result.errors[0]["reason"]
-        # Other two committed.
-        ids = sorted(
-            CatalogService.all_tenants.filter(tenant=tenant).values_list("external_id", flat=True)
-        )
-        assert ids == [1, 3]
-
-
-class TestCrossTenant:
-    def test_same_external_id_two_tenants(self, tenant: Tenant, tenant_b: Tenant) -> None:
-        upsert_services(tenant, [_svc(1, name="A")])
-        upsert_services(tenant_b, [_svc(1, name="B")])
-        assert CatalogService.all_tenants.filter(external_id=1).count() == 2
-
-
-class TestAllMirrors:
-    def test_master_upsert(self, tenant: Tenant) -> None:
-        dto = CatalogMasterDTO(
-            external_id=10,
-            external_updated_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
-            name="Анна",
-            specialization="Массаж",
-        )
-        result = upsert_masters(tenant, [dto])
-        assert result.created == 1
-        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
-
-    def test_faq_upsert(self, tenant: Tenant) -> None:
-        dto = CatalogFaqDTO(
-            external_id=99,
-            external_updated_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
-            question="Q",
-            answer="A",
-        )
-        result = upsert_faqs(tenant, [dto])
-        assert result.created == 1
-        assert CatalogFaq.all_tenants.filter(tenant=tenant).count() == 1
-
-
-class TestEmptyBatch:
-    def test_no_rows_no_op(self, tenant: Tenant) -> None:
-        result = upsert_services(tenant, [])
-        assert result.created == 0
-        assert result.updated == 0
-        assert result.skipped == 0
-        assert result.errors == []
+        res = upsert_salon_services(tenant, [good, bad])
+        assert res.created == 1
+        assert len(res.errors) == 1
+        assert res.errors[0]["ayla_service_id"] == bad.ayla_service_id

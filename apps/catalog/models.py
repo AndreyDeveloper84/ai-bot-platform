@@ -62,8 +62,12 @@ class _MirrorBase(models.Model):
         "mysite via catalog sync; tenant delete also drops them.",
     )
     external_id = models.IntegerField(
-        help_text="Primary key of the upstream mysite row. Stable; "
-        "the sync upserter (C3 / DRF-574) matches on (tenant, external_id).",
+        null=True,
+        blank=True,
+        help_text="Legacy mysite integer PK. Nullable since S3B re-keyed "
+        "the mirror onto the Ayla stable-id (UUID): Ayla-fed rows leave this "
+        "NULL and key on (tenant, ayla_service_id / ayla_user_id). Kept for "
+        "legacy rows — unique_together (tenant, external_id) stays NULL-safe.",
     )
     external_updated_at = models.DateTimeField(
         help_text="Upstream `updated_at` at last sync. Drives the "
@@ -156,13 +160,30 @@ class CatalogService(_MirrorBase):
         verbose_name_plural = "Catalog: services"
         ordering = ["name"]
         unique_together = (("tenant", "external_id"),)
+        constraints = [
+            # S3B re-key: Ayla-fed rows are keyed on the stable UUID. Partial
+            # (WHERE ayla_service_id IS NOT NULL) so legacy NULL rows are
+            # exempt. DB-level backstop over the per-tenant sync lock +
+            # update_or_create (ADR-0011 §3.5 — constraints are the unkillable
+            # line over app-level convention). Applied while the column is
+            # all-NULL → instant validate, zero conflict.
+            models.UniqueConstraint(
+                fields=["tenant", "ayla_service_id"],
+                condition=models.Q(ayla_service_id__isnull=False),
+                name="uq_catalog_service_tenant_ayla_service_id",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "-external_updated_at"]),
             models.Index(fields=["tenant", "slug"]),
         ]
 
     def __str__(self) -> str:
-        return f"CatalogService[{self.slug}@{self.external_id}]"
+        # Ayla-fed rows have no slug / integer external_id — fall back to the
+        # stable UUID + name so admin/log output stays readable.
+        label = self.slug or self.name
+        key = self.ayla_service_id or self.external_id
+        return f"CatalogService[{label}@{key}]"
 
 
 class _MasterManager(TenantScopedManager):
