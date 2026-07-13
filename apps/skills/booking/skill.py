@@ -105,7 +105,6 @@ from apps.skills.booking.tools import (
     SHOW_SLOTS_TOOL_SPEC,
     BookingToolResult,
     PendingPreview,
-    _as_uuid,
     _booking_via_ayla,
     _coerce_id,
     _format_confirm_preview,
@@ -922,40 +921,25 @@ def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
     synced yet) we DEFAULT to ``False`` — better UX to attempt the booking
     than to dead-end every flow.
 
-    **flag-ON (Ayla REST path):** service ids are canonical Ayla UUIDs, so
-    we ground the flag against the mirror's ``ayla_service_id`` column. We
-    FAIL CLOSED — return ``True`` so the confirm gate routes to a human
-    (``booking_health_check_required``) — when EITHER the id isn't a UUID
-    OR no mirror row carries that ``ayla_service_id`` yet (the UUID column
-    isn't guaranteed back-filled for every live service). Only an explicit
-    ``requires_health_check=False`` on a matched row lets the booking
-    through. We never fail OPEN on a potentially gated service.
+    **flag-ON (Ayla REST path): FAIL CLOSED unconditionally (#1034 / #1121).**
+    The correct source is the RESOLVED (master×service) requires-health-check
+    that S3B PR-2 populates on the catalog mirror (``CatalogMaster`` /
+    ``MasterService``). Until that source exists we must NOT trust the
+    service-level ``CatalogService.requires_health_check``: a service flagged
+    ``False`` can still need screening for a specific master, so trusting it is a
+    fail-OPEN risk (#1121). So every Ayla-path booking routes to a human health
+    check. Swap this stub for the ``resolved_requires_health_check`` read the
+    moment S3B PR-2 lands the resolved column.
     """
+    if _booking_via_ayla():
+        # No resolved (master×service) source yet → fail closed. See #1034.
+        return True
+
     try:
         from apps.catalog.models import CatalogService
     except ImportError:  # pragma: no cover — catalog always available
-        # No catalog to ground against. flag-ON fails closed; flag-OFF
-        # keeps the legacy lenient default.
-        return _booking_via_ayla()
-
-    if _booking_via_ayla():
-        ayla_uuid = _as_uuid(service_id)
-        if ayla_uuid is None:
-            # Non-UUID service id under flag-ON — nothing to ground. Fail closed.
-            return True
-        row = (
-            CatalogService.all_tenants.filter(
-                tenant=tenant,
-                ayla_service_id=ayla_uuid,
-            )
-            .only("requires_health_check")
-            .first()
-        )
-        # Mirror miss → fail-closed backstop: ayla_service_id may not be
-        # back-filled for this service yet (see coverage management command).
-        if row is None:
-            return True
-        return bool(row.requires_health_check)
+        # No catalog to ground the legacy YClients path against → lenient default.
+        return False
 
     row = (
         CatalogService.all_tenants.filter(
