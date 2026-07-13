@@ -70,11 +70,32 @@ def fake_redis(monkeypatch):
     return fake
 
 
+def _mark_welcomed(*, user_id="12345", chat_id="67890"):
+    """Pre-create the BotUser as already-welcomed (must run inside tenant_scope).
+
+    WelcomeSkill's task-#85 auto-trigger fires on the FIRST message from any
+    BotUser with ``welcomed_at IS NULL``, intercepting every skill below it. The
+    tests below pre-date that behaviour and exercise the POST-welcome pipeline
+    (echo / food_scanner / empty-fallback / outbound error). Stamping
+    ``welcomed_at`` up front isolates them from the auto-welcome so they test
+    what they were written to test — not the welcome interception.
+    """
+    from django.utils import timezone
+
+    from apps.identity.services import resolve_or_create_bot_user
+
+    bu = resolve_or_create_bot_user(channel="max", channel_user_id=user_id, chat_id=chat_id)
+    bu.welcomed_at = timezone.now()
+    bu.save(update_fields=["welcomed_at"])
+    return bu
+
+
 class TestHappyPath:
     def test_echo_text_creates_full_chain(self, tenant_a, mock_send, fake_redis, settings):
         settings.STRICT_TENANT_SCOPE = "strict"
         trace = uuid4()
         with tenant_scope(tenant_a), trace_id_scope(str(trace)):
+            _mark_welcomed()  # isolate from the #85 auto-welcome → exercise echo
             max_handler.handle_max_event(_payload(text="Привет"), trace_id=trace)
 
         # 1 BotUser created.
@@ -136,6 +157,11 @@ class TestAttachmentOnly:
         self, tenant_a, mock_send, fake_redis, settings, monkeypatch
     ):
         settings.STRICT_TENANT_SCOPE = "strict"
+        # food_scanner Веха-1 gate (NUTRITION_ENABLED → FOOD_PHOTO_SCAN_ENABLED →
+        # per-user consent) must pass to reach the no-bytes path; without it the
+        # skill returns a feature-off/consent refusal instead of PHOTO_NO_BYTES.
+        settings.NUTRITION_ENABLED = True
+        settings.FOOD_PHOTO_SCAN_ENABLED = True
 
         # Веха 2 of photo adapter port now wires the download — mock it
         # to raise so this test continues to exercise the «no bytes
@@ -151,6 +177,11 @@ class TestAttachmentOnly:
         monkeypatch.setattr(_h, "download_photo", _raise_download)
 
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            from django.utils import timezone
+
+            bu = _mark_welcomed()  # isolate from the #85 auto-welcome → reach food_scanner
+            bu.food_scanner_consent_at = timezone.now()  # pass the feature-consent gate
+            bu.save(update_fields=["food_scanner_consent_at"])
             max_handler.handle_max_event(
                 _payload(
                     text="",
@@ -171,6 +202,7 @@ class TestEmptyMessage:
     ):
         settings.STRICT_TENANT_SCOPE = "strict"
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            _mark_welcomed()  # isolate from the #85 auto-welcome → exercise empty→"?"
             max_handler.handle_max_event(_payload(text="", attachments=[]))
         assert mock_send[0]["text"] == "?"
 
@@ -400,14 +432,18 @@ class TestKeyboardPassThrough:
         att = attachments[0]
         assert att["type"] == "inline_keyboard"
         buttons = att["payload"]["buttons"]
-        # 7 rows (default columns=1): 3 salon link + 4 wellness/FAQ callback.
-        assert len(buttons) == 7
+        # 8 rows (default columns=1): 3 salon link + 4 wellness/FAQ callback
+        # + 1 «▶️ Начать» S1→S2 ack button (task #85).
+        assert len(buttons) == 8
         # First button is the link to /catalog.
         assert buttons[0][0]["type"] == "link"
         assert buttons[0][0]["url"] == "https://miniapp-dev.example/catalog"
-        # Last button is the callback ask prompt.
-        assert buttons[-1][0]["type"] == "callback"
-        assert buttons[-1][0]["payload"] == "cb:welcome:ask"
+        # The «❓ Задать вопрос» callback — now second-to-last (the #85 «Начать»
+        # ack button was appended after the wellness/FAQ block).
+        assert buttons[-2][0]["type"] == "callback"
+        assert buttons[-2][0]["payload"] == "cb:welcome:ask"
+        # Last button is the S1→S2 ack «▶️ Начать» (task #85).
+        assert buttons[-1][0]["payload"] == "cb:welcome:start_s2"
 
     def test_callback_tap_runs_welcome_ask_prompt(self, tenant_a, mock_send, fake_redis, settings):
         """User taps «❓ Задать вопрос» — bot replies with the prompt text
@@ -484,6 +520,7 @@ class TestOutboundFailure:
         monkeypatch.setattr(max_handler, "send_message", fake_send_raises)
 
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
+            _mark_welcomed()  # isolate from the #85 auto-welcome → exercise echo path
             with pytest.raises(MaxAPIError):
                 max_handler.handle_max_event(_payload(text="hi"))
 
