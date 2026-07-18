@@ -525,10 +525,11 @@ NUTRITION_SERVICE_TOKEN = (
 )
 
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
-# instead of direct YClients calls. DEFAULT OFF — the Ayla booking endpoints
-# are not live yet (contract pending S2 sign-off, see
-# docs/architecture/ayla-booking-rest-contract.md) and the real HTTP client is
-# still a skeleton. Flipping this ON before those land will fail loudly.
+# instead of direct YClients calls. DEFAULT OFF — the flip (#1041) is gated on
+# the ayla_service_id coverage report (#1016/#1034, command:
+# link_ayla_service_ids) and is executed by the orchestrator. The flag-ON path
+# (real HTTP client + RemoteBookingProxy mirror) is implemented and tested;
+# production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
 # Wellness MVP scaled pilot (memory ``project_wellness_mvp_scaled_pilot``).
