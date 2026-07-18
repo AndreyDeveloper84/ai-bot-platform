@@ -99,9 +99,26 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/specialists/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/slots/", Auth.BEARER),
-    Route("POST", "/api/v1/internal/appointments/", Auth.BEARER_EXT),
-    Route("POST", "/api/v1/internal/appointments/{id}/cancel/", Auth.BEARER_EXT),
-    Route("POST", "/api/v1/internal/appointments/{id}/reschedule/", Auth.BEARER_EXT),
+    # Writes pin X-Idempotency-Key — the double-booking dedup guarantee
+    # (В2.4), same rationale as payments' Idempotence-Key row below.
+    Route(
+        "POST",
+        "/api/v1/internal/appointments/",
+        Auth.BEARER_EXT,
+        frozenset({"x-idempotency-key"}),
+    ),
+    Route(
+        "POST",
+        "/api/v1/internal/appointments/{id}/cancel/",
+        Auth.BEARER_EXT,
+        frozenset({"x-idempotency-key"}),
+    ),
+    Route(
+        "POST",
+        "/api/v1/internal/appointments/{id}/reschedule/",
+        Auth.BEARER_EXT,
+        frozenset({"x-idempotency-key"}),
+    ),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
     # profile_client (#978).
     Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
@@ -294,14 +311,22 @@ def _exercise_booking() -> None:
             specialist_id="SPECID",
             service_id="SVCID",
             start_datetime="2026-07-03T10:00:00+03:00",
+            idempotency_key="IDEM-CREATE",
         )
     )
-    _swallow(lambda: c.cancel_appointment(external_user_id=_EXT_USER, appointment_id="APPTID"))
+    _swallow(
+        lambda: c.cancel_appointment(
+            external_user_id=_EXT_USER,
+            appointment_id="APPTID",
+            idempotency_key="IDEM-CANCEL",
+        )
+    )
     _swallow(
         lambda: c.reschedule_appointment(
             external_user_id=_EXT_USER,
             appointment_id="APPTID",
             new_start_datetime="2026-07-03T11:00:00+03:00",
+            idempotency_key="IDEM-RESCHEDULE",
         )
     )
     _swallow(lambda: c.get_user_appointments(external_user_id=_EXT_USER))
