@@ -105,6 +105,12 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
     # profile_client (#978).
     Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
+    # personal_context_client (M-B1, frozen contract v1.0 2026-07-09).
+    Route("GET", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
+    Route("PATCH", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/users/{id}/personal-context/ask-eligibility/", Auth.BEARER),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER),
     # recommendations_client (#1048).
     Route("POST", "/api/v1/internal/me/catalog/recommendations/", Auth.BEARER_EXT),
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
@@ -302,6 +308,22 @@ def _exercise_profile() -> None:
     _swallow(lambda: profile_client.fetch_profile_fields(_PROFILE_UUID))
 
 
+def _exercise_personal_context() -> None:
+    from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
+
+    uid = str(_PROFILE_UUID)
+    c = PersonalContextHttpClient()  # reads settings.AYLA_*; httpx.Client is patched
+    _swallow(lambda: c.get_context(ayla_user_id=uid))
+    _swallow(
+        lambda: c.patch_context(
+            ayla_user_id=uid, updates=[{"field": "diet_type", "value": "vegan"}]
+        )
+    )
+    _swallow(lambda: c.get_ask_eligibility(ayla_user_id=uid))
+    _swallow(lambda: c.mark_asked(ayla_user_id=uid, field="diet_type"))
+    _swallow(lambda: c.skip(ayla_user_id=uid, field="diet_type"))
+
+
 def _exercise_recommendations() -> None:
     from apps.integrations.ayla.recommendations_client import (
         fetch_recommendations,
@@ -380,6 +402,7 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     row must be produced by some client (bijection — no drift, no stale rows)."""
     _exercise_booking()
     _exercise_profile()
+    _exercise_personal_context()
     _exercise_recommendations()
     _exercise_payments(captured)
     await _exercise_nutrition()
