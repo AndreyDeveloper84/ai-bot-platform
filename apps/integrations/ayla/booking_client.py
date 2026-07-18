@@ -138,7 +138,23 @@ class BookingBadRequestError(BookingAPIError):
 
     4xx other than the handled 404s. A business/input error the caller
     surfaces to the user, NOT an outage — does **not** trip the breaker.
+
+    Carries structured ``status_code`` / ``code`` (the wire ``error.code``,
+    e.g. C1's ``SUBSCRIPTION_PAST_DUE``) so callers can branch on the
+    reason without parsing the message string. Both default to None for
+    legacy raise sites.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
 
 
 # ─── DTOs ──────────────────────────────────────────────────────────────────
@@ -477,7 +493,11 @@ class AylaBookingHTTPClient:
             self._circuit.record_failure(now=now)
             logger.warning("booking_client.5xx status=%d", resp.status_code)
             raise BookingUnavailableError(f"http_{resp.status_code}")
-        raise BookingBadRequestError(f"http_{resp.status_code}_{_err_code(resp)}")
+        raise BookingBadRequestError(
+            f"http_{resp.status_code}_{_err_code(resp)}",
+            status_code=resp.status_code,
+            code=_err_code(resp),
+        )
 
     # ── reads ────────────────────────────────────────────────────────────────
 
@@ -588,7 +608,11 @@ class AylaBookingHTTPClient:
         if resp.status_code >= 500:
             self._circuit.record_failure(now=now)
             raise BookingUnavailableError(f"http_{resp.status_code}")
-        raise BookingBadRequestError(f"http_{resp.status_code}_{_err_code(resp)}")
+        raise BookingBadRequestError(
+            f"http_{resp.status_code}_{_err_code(resp)}",
+            status_code=resp.status_code,
+            code=_err_code(resp),
+        )
 
     def reschedule_appointment(
         self,

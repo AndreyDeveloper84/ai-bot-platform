@@ -107,6 +107,7 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
+from apps.skills.booking.provider import YClientsSpecialistUnavailableError
 from apps.promotions.formatting import format_rub
 from apps.promotions.services import validate_promo
 
@@ -1021,6 +1022,23 @@ def execute_confirm(
         return BookingToolResult(
             confirmation=ConfirmationResult(ok=False, error="yclients_unavailable"),
             error="yclients_unavailable",
+        )
+    except YClientsSpecialistUnavailableError as exc:
+        # C1 (PILOT_CONTRACTS §2): Ayla rejected the NEW booking with 409
+        # SUBSCRIPTION_PAST_DUE. The customer sees a NEUTRAL slug — the
+        # debt reason must never leak to the client surface; the concierge
+        # offers another master/time instead. Internal code stays in logs
+        # + audit (allowed by C1 — internal/backend may hold the reason).
+        logger.info("booking.confirm.exec.specialist_unavailable err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="specialist_unavailable")
+        write_audit(
+            EVENT_BOOKING_CONFIRM_FAILED,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "reason": "specialist_unavailable"},
+        )
+        return BookingToolResult(
+            confirmation=ConfirmationResult(ok=False, error="specialist_unavailable"),
+            error="specialist_unavailable",
         )
     except YClientsAPIError as exc:
         logger.info("booking.confirm.exec.api_error err=%s", exc)

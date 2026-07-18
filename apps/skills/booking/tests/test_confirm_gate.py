@@ -201,6 +201,40 @@ class TestExecuteConfirm:
             execute_confirm(client=client, payload=payload, tenant=tenant, bot_user=bot_user)
         assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user).count() == 1
 
+    def test_c1_specialist_unavailable_neutral_slug(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """C1: Ayla 409 SUBSCRIPTION_PAST_DUE surfaces as the NEUTRAL
+        specialist_unavailable slug — the debt reason never reaches the
+        client surface (PILOT_CONTRACTS_2026-08-15 §2)."""
+        from apps.skills.booking.provider import YClientsSpecialistUnavailableError
+
+        client = FakeClient()
+        exc = YClientsSpecialistUnavailableError("http_409_subscription_past_due")
+        client.create_record = lambda **kwargs: (_ for _ in ()).throw(exc)
+        with tenant_scope(tenant):
+            result = execute_confirm(
+                client=client,
+                payload={
+                    "master_id": 11,
+                    "service_id": 22,
+                    "slot_datetime": "2026-05-20T14:00:00",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "specialist_unavailable"
+        assert result.confirmation is not None
+        assert result.confirmation.ok is False
+        assert result.confirmation.error == "specialist_unavailable"
+        # The slug carries no debt semantics.
+        assert "past_due" not in result.error
+        assert "subscription" not in result.error
+
     def test_invalid_payload(self, tenant: Tenant, bot_user: BotUser) -> None:
         client = FakeClient()
         with tenant_scope(tenant):
