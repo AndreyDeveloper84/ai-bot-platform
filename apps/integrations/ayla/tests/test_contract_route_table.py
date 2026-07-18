@@ -111,6 +111,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/users/{id}/personal-context/ask-eligibility/", Auth.BEARER),
     Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER),
     Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER),
+    # personal_context_client C5 legs (PILOT_CONTRACTS §6; upstream = W2 S3.1).
+    Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER),
+    Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER),
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
@@ -325,6 +328,8 @@ def _exercise_personal_context() -> None:
     _swallow(lambda: c.get_ask_eligibility(ayla_user_id=uid))
     _swallow(lambda: c.mark_asked(ayla_user_id=uid, field="diet_type"))
     _swallow(lambda: c.skip(ayla_user_id=uid, field="diet_type"))
+    _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid))
+    _swallow(lambda: c.delete_personal_data(ayla_user_id=uid))
 
 
 def _exercise_recommendations() -> None:

@@ -250,6 +250,37 @@ class PersonalContextHttpClient:
             return 0
 
     # ------------------------------------------------------------------
+    # C5 — personal-data export/delete (152-ФЗ, pilot 2026-08-15)
+    #
+    # Frozen by PILOT_CONTRACTS_2026-08-15 §6. The Ayla-side endpoints
+    # are W2's S3.1 wiring (personal_context_views exists upstream, not
+    # yet connected at the time of writing) — this client is built to
+    # the contract paths ahead of the upstream landing.
+    # ------------------------------------------------------------------
+
+    def get_personal_data_export(self, *, ayla_user_id: str) -> dict[str, Any]:
+        """C5.1: ``GET /internal/users/{id}/personal-data/export/``.
+
+        Synchronous JSON (profile subset + full declared-prefs
+        catalogue). Returns the ``data`` payload verbatim. Retried —
+        read-only.
+        """
+        payload = self._send_with_retry(
+            "GET", f"internal/users/{ayla_user_id}/personal-data/export/"
+        )
+        return _unwrap_data(payload)
+
+    def delete_personal_data(self, *, ayla_user_id: str) -> None:
+        """C5.2: ``DELETE /internal/users/{id}/personal-data/``.
+
+        Idempotent server-side per C5 (repeat → 200/204), so transport
+        retries are safe. NOTE: the literal delete path follows the
+        export path's symmetry — it is the one contract point awaiting
+        W2 confirmation (escalated 2026-07-18).
+        """
+        self._send_with_retry("DELETE", f"internal/users/{ayla_user_id}/personal-data/")
+
+    # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
 
@@ -341,6 +372,9 @@ class PersonalContextHttpClient:
             )
         if response.status_code >= 500:
             raise PersonalContextTransportError(f"http_{response.status_code} on {path}")
+        if response.status_code == 204 or not response.content:
+            # 204 No Content / empty 200 — valid for DELETE; nothing to parse.
+            return {}
         try:
             return response.json()
         except ValueError as exc:

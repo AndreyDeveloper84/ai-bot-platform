@@ -51,6 +51,17 @@ urlpatterns = [
     # Phase 3 / F4 — profile read / update / data deletion
     path("me", views.me, name="me"),
     path("me/delete", views.delete_me, name="delete_me"),
+    # C5 personal-data export/delete (152-ФЗ, pilot 2026-08-15)
+    path(
+        "me/personal-data/export/",
+        views.personal_data_export,
+        name="personal_data_export",
+    ),
+    path(
+        "me/personal-data/",
+        views.personal_data_delete,
+        name="personal_data_delete",
+    ),
     # Phase 4 / F5 — post-visit feedback
     path(
         "bookings/<uuid:booking_id>/feedback",

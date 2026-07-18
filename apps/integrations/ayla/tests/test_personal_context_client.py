@@ -259,3 +259,57 @@ class TestErrorMapping:
         )
         with pytest.raises(PersonalContextTransportError, match="TOKEN"):
             client.get_context(ayla_user_id=_UID)
+
+
+class TestPersonalDataExportDelete:
+    """C5 legs (PILOT_CONTRACTS_2026-08-15 §6)."""
+
+    def test_export_get(self) -> None:
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["method"] = request.method
+            return httpx.Response(
+                200, json={"data": {"profile": {"display_name": "М"}, "context": {}}}
+            )
+
+        out = _client(handler).get_personal_data_export(ayla_user_id=_UID)
+
+        assert seen["method"] == "GET"
+        assert seen["url"] == f"{_BASE}/api/v1/internal/users/{_UID}/personal-data/export/"
+        assert out == {"profile": {"display_name": "М"}, "context": {}}
+
+    def test_delete_204_no_content(self) -> None:
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["method"] = request.method
+            return httpx.Response(204)
+
+        _client(handler).delete_personal_data(ayla_user_id=_UID)
+
+        assert seen["method"] == "DELETE"
+        assert seen["url"] == f"{_BASE}/api/v1/internal/users/{_UID}/personal-data/"
+
+    def test_delete_retried_on_5xx(self) -> None:
+        """Server-side idempotent delete (C5) → transport retry is safe."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(500, json={})
+            return httpx.Response(204)
+
+        _client(handler, retries=2).delete_personal_data(ayla_user_id=_UID)
+
+        assert calls["n"] == 2
+
+    def test_delete_404_raises_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"code": "USER_NOT_FOUND"}})
+
+        with pytest.raises(PersonalContextNotFoundError):
+            _client(handler).delete_personal_data(ayla_user_id=_UID)
