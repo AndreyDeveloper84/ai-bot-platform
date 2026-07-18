@@ -74,6 +74,12 @@ from apps.master_api.services.conversation_detail import (
 from apps.master_api.services.catalog import list_master_services
 from apps.master_api.services.customers import list_master_customers
 from apps.master_api.services.dashboard import build_dashboard
+from apps.master_api.services.billing import (
+    BillingProxyResult,
+    ProxyStatus,
+    billing_status_for_master,
+    payout_preview_for_master,
+)
 from apps.master_api.services.notification_prefs import (
     NotificationPrefsError,
     get_or_create_prefs,
@@ -1472,3 +1478,59 @@ def catalog_list(request: HttpRequest) -> HttpResponse:
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     items = list_master_services(master=master)
     return JsonResponse({"services": items})
+
+
+# --- Billing status (C2) + payout preview (C3) proxies (pilot 2026-08-15) ---
+
+
+def _billing_proxy_response(result: BillingProxyResult) -> JsonResponse:
+    """Map a :class:`BillingProxyResult` onto HTTP.
+
+    OK passes the contract ``data`` through verbatim (C2/C3 frozen
+    field set — the proxy adds and reshapes nothing). Failure slugs:
+
+    * ``specialist_mapping_unavailable`` → 503 (mirror carries no
+      SpecialistProfile id yet — open contract gap, see
+      :mod:`apps.master_api.services.billing`);
+    * ``specialist_not_found`` → 404 (upstream contract 404);
+    * ``billing_upstream_unavailable`` → 502 (5xx / network / auth).
+    """
+    if result.status is ProxyStatus.OK:
+        return JsonResponse({"data": result.payload})
+    if result.status is ProxyStatus.MAPPING_UNAVAILABLE:
+        return _error(
+            "specialist_mapping_unavailable",
+            "specialist id mapping is not synced yet",
+            503,
+        )
+    if result.status is ProxyStatus.NOT_FOUND:
+        return _error(
+            "specialist_not_found",
+            "specialist not found or not accessible",
+            404,
+        )
+    return _error(
+        "billing_upstream_unavailable",
+        "billing upstream is temporarily unavailable",
+        502,
+    )
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def billing_status(request: HttpRequest) -> HttpResponse:
+    """C2 proxy — subscription status / fees / last invoice for the
+    session master (frozen contract PILOT_CONTRACTS §3)."""
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    return _billing_proxy_response(billing_status_for_master(master))
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def payout_preview(request: HttpRequest) -> HttpResponse:
+    """C3 proxy — pending payout amount + per-appointment breakdown
+    for the session master (frozen contract PILOT_CONTRACTS §4)."""
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    return _billing_proxy_response(payout_preview_for_master(master))

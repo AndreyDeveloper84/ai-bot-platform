@@ -111,6 +111,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/users/{id}/personal-context/ask-eligibility/", Auth.BEARER),
     Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER),
     Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER),
+    # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
+    Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
     # recommendations_client (#1048).
     Route("POST", "/api/v1/internal/me/catalog/recommendations/", Auth.BEARER_EXT),
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
@@ -334,6 +337,15 @@ def _exercise_recommendations() -> None:
     _swallow(lambda: fetch_recommendations(external_user_id=_EXT_USER, payload={"goal": "relax"}))
 
 
+def _exercise_billing() -> None:
+    from apps.integrations.ayla.billing_client import AylaBillingClient
+
+    sid = str(_PROFILE_UUID)
+    c = AylaBillingClient()  # reads settings.AYLA_*; httpx.Client is patched
+    _swallow(lambda: c.get_billing_status(specialist_id=sid))
+    _swallow(lambda: c.get_payout_preview(specialist_id=sid))
+
+
 def _exercise_payments(sink: list[Captured]) -> None:
     # ayla_payments uses ``requests``, not httpx — capture via the session mock.
     from apps.integrations.ayla_payments import (
@@ -403,6 +415,7 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     _exercise_booking()
     _exercise_profile()
     _exercise_personal_context()
+    _exercise_billing()
     _exercise_recommendations()
     _exercise_payments(captured)
     await _exercise_nutrition()
