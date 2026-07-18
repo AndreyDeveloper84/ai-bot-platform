@@ -102,7 +102,10 @@ from apps.channels.max.outbound import MaxAPIError, send_message
 # не подтвердил" DMs for bookings the client had ALREADY cancelled
 # through Ayla. Especially relevant during pilot's A2 dual-source
 # state window (memory: adr_0009_yclients_webhook_shrink_post_pilot).
-from apps.bookings.tasks import (  # noqa: E501
+# Imported from `recheck` (not `tasks`) — `tasks` re-exports this
+# module's task for Celery autodiscover, so importing from `tasks`
+# here closed a module-level import cycle.
+from apps.bookings.recheck import (  # noqa: E501
     _ACTION_DEFER,
     _ACTION_DROP,
     _recheck_booking_state,
