@@ -1195,6 +1195,15 @@ ALERTS_DEDUP_TTL_SECONDS = int(os.environ.get("ALERTS_DEDUP_TTL_SECONDS", "300")
 # deliveries.
 MYSITE_WEBHOOK_HMAC_SECRET = os.environ.get("MYSITE_WEBHOOK_HMAC_SECRET", "")
 
+# Eventbus cross-service ingest (event-contract.md §6.2, ADR-0009) — shared
+# HMAC-SHA256 secret for inbound event envelopes from Ayla. Ayla's outbox
+# publisher signs with its ``AYLA_OUTBOUND_HMAC_SECRET``; the two values MUST
+# match. Empty default fails closed: ``verify_signature`` rejects everything
+# with 401 ``no_secret`` (never silently accepts unsigned deliveries). Was
+# getattr-only until the pilot staging smoke (O1/S4) — now env-wired like the
+# sibling webhook secrets above.
+EVENT_INGEST_HMAC_SECRET = os.environ.get("EVENT_INGEST_HMAC_SECRET", "")
+
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [

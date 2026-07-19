@@ -13,6 +13,7 @@ class EventBusConfig(AppConfig):
         from apps.eventbus.ingest_ip import warn_if_proxy_trust_unconfigured
         from apps.eventbus.startup_checks import (
             warn_if_atomic_requests_true,
+            warn_if_event_ingest_hmac_missing,
             warn_if_tenant_verify_fail_open,
         )
 
@@ -31,6 +32,10 @@ class EventBusConfig(AppConfig):
         # fail-open flag is set. Surfaces the pre-#246 exposure
         # window in the ops dashboard at first deploy.
         warn_if_tenant_verify_fail_open()
+
+        # O1/S4 — log a startup WARNING when the ingest HMAC secret is
+        # empty (every envelope would be rejected with 401 no_secret).
+        warn_if_event_ingest_hmac_missing()
 
         # #442 — Register booking.* consumer family handlers with the
         # ingest dispatcher. Each consumer module exposes a

@@ -72,3 +72,21 @@ def warn_if_tenant_verify_fail_open() -> None:
             "(Sprint 1 #246) is unavailable. Flip this OFF once "
             "#246 ships in your environment. See PR #524 round-3 NEW-5."
         )
+
+
+def warn_if_event_ingest_hmac_missing() -> None:
+    """O1/S4 — surface an empty ``EVENT_INGEST_HMAC_SECRET`` at boot.
+
+    Without the secret the ingest endpoint rejects EVERY envelope with
+    401 ``no_secret`` — a staging deploy that forgets the var looks
+    "up" but is dead to Ayla's outbox publisher. Log a high-severity
+    WARNING at app ready time so the misconfig hits the ops dashboard
+    at first deploy (fail-closed by design, but loud about it).
+    """
+    if not getattr(settings, "EVENT_INGEST_HMAC_SECRET", ""):
+        logger.warning(
+            "eventbus.ingest.hmac_secret_missing "
+            "EVENT_INGEST_HMAC_SECRET is empty — every ingest request "
+            "will be rejected with 401 no_secret. Set it to the shared "
+            "value of Ayla's AYLA_OUTBOUND_HMAC_SECRET."
+        )
