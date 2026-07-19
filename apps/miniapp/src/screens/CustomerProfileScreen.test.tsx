@@ -6,11 +6,11 @@
  * so no network mocking is needed. Module state (consent stubs) is
  * per-module-instance — `vi.resetModules()` per test keeps them isolated.
  *
- * NOTE (pilot phase 2a): the «Запросить данные» / «Удалить аккаунт»
- * buttons currently route to support deeplink sheets (deferred Variant 3).
- * When the C5 personal-data endpoints are wired, this suite is updated to
- * the real export/delete sheets — keep the support-route assertions until
- * then so the swap is a deliberate, reviewed change.
+ * NOTE (pilot phase 2a): «Запросить данные» / «Удалить аккаунт» open the
+ * in-app C5 sheets (`PersonalDataSheets.tsx`) wired to the frozen
+ * 152-ФЗ endpoints; the sheets' own suite mocks `lib/personal-data`.
+ * The support deeplink remains as the error-state fallback (#949) and
+ * for the notifications preset.
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -60,7 +60,7 @@ describe("CustomerProfileScreen", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens the export support sheet with the support deeplink (phase 1 routing)", async () => {
+  it("opens the in-app C5 export sheet from «Запросить данные»", async () => {
     const user = userEvent.setup();
     await renderFresh();
     await user.click(
@@ -68,23 +68,20 @@ describe("CustomerProfileScreen", () => {
     );
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByText("Скачать мои данные")).toBeInTheDocument();
+    expect(screen.getByText(/один файл/i)).toBeInTheDocument();
     expect(
-      screen.getByText("Нужна копия твоих данных?"),
+      screen.getByRole("button", { name: "Скачать данные" }),
     ).toBeInTheDocument();
-    const deeplink = screen.getByRole("link", { name: "Написать в поддержку" });
-    expect(deeplink).toHaveAttribute("href", "https://max.me/aylasupport");
-    expect(deeplink).toHaveAttribute("target", "_blank");
   });
 
-  it("opens the delete support sheet and closes it on Escape", async () => {
+  it("opens the in-app C5 delete sheet and closes it on Escape", async () => {
     const user = userEvent.setup();
     await renderFresh();
     await user.click(
       await screen.findByRole("button", { name: "Удалить аккаунт" }),
     );
-    expect(
-      await screen.findByText("Хочешь удалить аккаунт?"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Удалить мои данные?")).toBeInTheDocument();
     await user.keyboard("{Escape}");
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
