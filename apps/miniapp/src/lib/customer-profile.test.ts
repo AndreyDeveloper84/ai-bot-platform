@@ -1,10 +1,9 @@
 /**
  * Unit tests for the pure helpers of `customer-profile.ts`
- * (pluralisation, consent-date formatting, avatar initials) plus the
- * booking-flow client wrappers of `customer-booking.ts` with the HTTP
- * layer (`./api`) mocked — booking-flow "on mocks" per pilot phase 1.
+ * (pluralisation, consent-date formatting, avatar initials).
+ * Booking-flow lib tests live in `customer-booking.test.ts`.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   additionalSalonsLabel,
@@ -57,88 +56,5 @@ describe("formatConsentDate", () => {
 
   it("passes through unparseable input unchanged", () => {
     expect(formatConsentDate("not-a-date")).toBe("not-a-date");
-  });
-});
-
-// --- customer-booking with mocked HTTP layer --------------------------------
-
-vi.mock("./api", async (importOriginal) => {
-  const original = await importOriginal<typeof import("./api")>();
-  return {
-    ...original,
-    fetchMaster: vi.fn(),
-    fetchSlots: vi.fn(),
-    createBooking: vi.fn(),
-  };
-});
-
-import { createBooking, fetchSlots } from "./api";
-import { createCustomerBooking, getCustomerSlots } from "./customer-booking";
-
-const mockedFetchSlots = vi.mocked(fetchSlots);
-const mockedCreateBooking = vi.mocked(createBooking);
-
-beforeEach(() => {
-  vi.clearAllMocks();
-});
-
-describe("getCustomerSlots", () => {
-  it("requests a 14-day window by default with YYYY-MM-DD dates", async () => {
-    mockedFetchSlots.mockResolvedValue({ slots: [] });
-    await getCustomerSlots({ masterId: "mst-1", serviceId: "svc-1" });
-    expect(mockedFetchSlots).toHaveBeenCalledTimes(1);
-    const arg = mockedFetchSlots.mock.calls[0]![0];
-    expect(arg.masterId).toBe("mst-1");
-    expect(arg.serviceId).toBe("svc-1");
-    expect(arg.dateFrom).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(arg.dateTo).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    const from = new Date(`${arg.dateFrom}T00:00:00`);
-    const to = new Date(`${arg.dateTo}T00:00:00`);
-    const diffDays = Math.round((to.getTime() - from.getTime()) / 86_400_000);
-    expect(diffDays).toBe(14);
-  });
-
-  it("honours an explicit days override", async () => {
-    mockedFetchSlots.mockResolvedValue({ slots: [] });
-    await getCustomerSlots({ masterId: "mst-1", serviceId: "svc-1", days: 7 });
-    const arg = mockedFetchSlots.mock.calls[0]![0];
-    const from = new Date(`${arg.dateFrom}T00:00:00`);
-    const to = new Date(`${arg.dateTo}T00:00:00`);
-    expect(Math.round((to.getTime() - from.getTime()) / 86_400_000)).toBe(7);
-  });
-});
-
-describe("createCustomerBooking", () => {
-  it("passes the payload through to the API layer verbatim", async () => {
-    const created = {
-      booking: {
-        id: "b-1",
-        service_name: "Маникюр",
-        master_name: "Анна",
-        visit_at: "2026-08-01T16:00:00+03:00",
-        duration_min: 60,
-        status: "confirmed",
-      },
-    };
-    mockedCreateBooking.mockResolvedValue(created);
-    const payload = {
-      service_id: "svc-1",
-      master_id: "mst-1",
-      visit_at: "2026-08-01T16:00:00+03:00",
-    };
-    const result = await createCustomerBooking(payload);
-    expect(mockedCreateBooking).toHaveBeenCalledWith(payload);
-    expect(result).toBe(created);
-  });
-
-  it("propagates API errors to the caller (screen renders the error state)", async () => {
-    mockedCreateBooking.mockRejectedValue(new Error("[409] unavailable: slot taken"));
-    await expect(
-      createCustomerBooking({
-        service_id: "svc-1",
-        master_id: "mst-1",
-        visit_at: "2026-08-01T16:00:00+03:00",
-      }),
-    ).rejects.toThrow("[409]");
   });
 });

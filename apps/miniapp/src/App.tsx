@@ -916,17 +916,18 @@ function CustomerRoutes() {
       {/*
         Customer booking flow F1-F5 — Tier 1 Priority 3 Phase B
         (Ayla-first reskin per docs/screens/customer-booking-flow.md).
-        Runs alongside the legacy /catalog + /book/* routes; F1
-        surfaces 3-layer trust hierarchy (against stub until Alpha
-        ships /catalog/recommendations per TL Q1). The legacy routes
+        Runs alongside the legacy /catalog + /book/* routes; F1 reads
+        the real mirror catalog since pilot phase 3.1. The legacy routes
         stay reachable for deep-links from bot DMs and reschedule
         flows.
       */}
-      {/* Tier 1 Priority 2 Phase B — wellness dashboard (ACTIVE_REGULAR
-          Home per founder pivot 2026-05-25). Stub-mode against W4
-          backend; canonical route is /customer/main. */}
+      {/* Home = «Мои записи» (pilot phase 3.2, orchestrator decision):
+          records on real data is the pilot home. The wellness dashboard
+          (stub surface, gated) moves to /customer/wellness until
+          S4/post-pilot. */}
+      <Route path="/customer/main" element={<CustomerRecordsScreen />} />
       <Route
-        path="/customer/main"
+        path="/customer/wellness"
         element={<CustomerWellnessDashboardScreen />}
       />
       <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
