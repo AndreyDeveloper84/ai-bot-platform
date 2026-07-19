@@ -174,3 +174,18 @@ describe("getBookingDetail", () => {
     expect(detail).toEqual(row);
   });
 });
+
+describe("payment read model passthrough (C7.3)", () => {
+  it("carries capture_state onto the list item when present", async () => {
+    mockedList.mockResolvedValue({
+      items: [
+        booking({ id: "b-1", payment: { capture_state: "authorized" } }),
+        booking({ id: "b-2" }),
+      ],
+      next_cursor: null,
+    });
+    const page = await getMyBookings("upcoming");
+    expect(page.items[0]!.paymentState).toBe("authorized");
+    expect(page.items[1]!.paymentState).toBeNull();
+  });
+});

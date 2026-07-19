@@ -197,11 +197,23 @@ export interface CreatedBooking {
   duration_min: number;
   status: string;
 }
+/**
+ * Payment contour fields on the create response (C7.4). Absent until the
+ * W3 passthrough ships — the frontend checks presence tolerantly; when
+ * `confirmation_url` appears, the payment page opens in the webview.
+ */
+export interface CreatedBookingPayment {
+  confirmation_url?: string | null;
+  capture_state?: string | null;
+}
 export const createBooking = (body: {
   service_id: string;
   master_id: string;
   visit_at: string;
-}): Promise<{ booking: CreatedBooking }> =>
+  /** AMD-002: user-chosen online payment (C7). Optional — pre-C7
+   * backends simply ignore the field. */
+  payment_required?: boolean;
+}): Promise<{ booking: CreatedBooking; payment?: CreatedBookingPayment | null }> =>
   request("/bookings", { method: "POST", body: JSON.stringify(body) });
 
 // --- bookings: list / detail / cancel / reschedule ---
@@ -230,6 +242,12 @@ export interface BookingItem {
   // Phase 4 — post-visit feedback. NULL until customer rates.
   rating: number | null;
   can_rate: boolean;
+  /**
+   * C7.3 payment read model — present only once the W3 passthrough
+   * ships payment fields on bookings. Checked tolerantly: absent /
+   * hidden states render no badge (see `PaymentStatusBadge`).
+   */
+  payment?: { capture_state?: string | null } | null;
 }
 
 export const fetchMyBookings = (params?: {
