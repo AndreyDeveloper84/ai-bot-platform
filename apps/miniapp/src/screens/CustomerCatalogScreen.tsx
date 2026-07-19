@@ -32,7 +32,9 @@ import {
   type CatalogRecommendations,
   type CatalogLayer2Item,
 } from "../lib/customer-booking";
+import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 import { formatMoney } from "../lib/format";
+import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
 
 type State =
   | { kind: "loading" }
@@ -40,6 +42,13 @@ type State =
   | { kind: "error"; err: unknown };
 
 export function CustomerCatalogScreen() {
+  // Pilot commit 4 (orchestrator): hardcoded fake salons are
+  // unacceptable in prod for the pilot — the stub surface is gated off;
+  // real customer endpoints land as phase 3 item 1. Build-time constant
+  // flag, so the early return is hooks-safe.
+  if (!STUB_SURFACES_ENABLED) {
+    return <PilotComingSoonScreen surface="catalog" />;
+  }
   const navigate = useNavigate();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [search, setSearch] = useState("");
