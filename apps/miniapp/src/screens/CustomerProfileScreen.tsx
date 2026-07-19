@@ -4,13 +4,16 @@
  * Route: `/customer/profile`
  *
  * Spec: `docs/screens/customer-profile-flow.md` (deferred Variant 3,
- * post commit `376784e`). Six sections R1-R6 with R2 export/delete +
- * R3 memory deferred per §0 «Pilot scope & backend reality» recon.
+ * post commit `376784e`). Sections R1-R6; R2 export/delete are wired
+ * to the C5 152-ФЗ endpoints since pilot phase 2a (PILOT_CONTRACTS
+ * §6); only R3 memory stays deferred per §0 «Pilot scope & backend
+ * reality» recon.
  *
  * # Section order (per spec §11.1 selected variant)
  *   R1 — header (avatar initials fallback + name + handle + scope)
  *   R2 — consent: 3 locked rows + marketing toggle + §4.2 accordion
- *        + «Запросить данные» / «Удалить аккаунт» → support sheets
+ *        + «Запросить данные» / «Удалить аккаунт» → C5 sheets
+ *        (PersonalDataSheets.tsx; support deeplink = error fallback)
  *   R3 — memory transparency: coming-soon card (no data, no clear)
  *   R4 — proactive AI toggle + transactional-always note
  *   R5 — notifications: MAX channel + soft timing + entry → support
@@ -39,10 +42,14 @@ import { ComingSoonCard } from "../components/ComingSoonCard";
 import { ConsentRow } from "../components/ConsentRow";
 import { DisclosureSheet } from "../components/DisclosureSheet";
 import { NotificationCard } from "../components/NotificationCard";
+import {
+  PersonalDataDeleteSheet,
+  PersonalDataExportSheet,
+} from "../components/PersonalDataSheets";
 import { Skeleton } from "../components/Skeleton";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
-import { SupportEntrySheet, type SupportPreset } from "../components/SupportEntrySheet";
+import type { SupportPreset } from "../components/SupportEntrySheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import {
   additionalSalonsLabel,
@@ -88,8 +95,8 @@ export function CustomerProfileScreen() {
   const [toast, setToast] = useState<ToastState>(EMPTY_TOAST);
   const [marketingBusy, setMarketingBusy] = useState(false);
   const [proactiveBusy, setProactiveBusy] = useState(false);
-  const [exportSheet, setExportSheet] = useState<SupportPreset | null>(null);
-  const [deleteSheet, setDeleteSheet] = useState<SupportPreset | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [notificationsSheet, setNotificationsSheet] =
     useState<SupportPreset | null>(null);
   const exportTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -296,16 +303,16 @@ export function CustomerProfileScreen() {
                     <>
                       Полный отзыв согласия означает, что{" "}
                       <span lang="en">Ayla</span> больше не сможет работать
-                      с твоим профилем. Для этого можно запросить удаление
-                      аккаунта через поддержку.
+                      с твоим профилем. Для этого можно удалить свои данные
+                      кнопкой ниже.
                     </>
                   }
                 />
               </dl>
               <p className="profile-section__caption">
-                Твои данные защищены. Здесь можно посмотреть, что хранится.
-                Чтобы скачать данные или удалить аккаунт — напиши в
-                поддержку, мы всё сделаем вручную.
+                Твои данные защищены. Здесь можно посмотреть, что хранится,
+                скачать копию своих данных или удалить их — прямо в
+                приложении.
               </p>
               <DisclosureSheet />
               <div className="profile-section__cta-row">
@@ -313,7 +320,7 @@ export function CustomerProfileScreen() {
                   ref={exportTriggerRef}
                   type="button"
                   className="btn-secondary"
-                  onClick={() => setExportSheet("export")}
+                  onClick={() => setExportOpen(true)}
                 >
                   Запросить данные
                 </button>
@@ -321,7 +328,7 @@ export function CustomerProfileScreen() {
                   ref={deleteTriggerRef}
                   type="button"
                   className="btn-secondary profile-section__cta--cautious"
-                  onClick={() => setDeleteSheet("delete")}
+                  onClick={() => setDeleteOpen(true)}
                 >
                   Удалить аккаунт
                 </button>
@@ -436,17 +443,17 @@ export function CustomerProfileScreen() {
         </button>
       </nav>
 
-      {/* R2 deferred export sheet */}
-      <SupportEntrySheet
-        preset={exportSheet}
+      {/* C5 export sheet (152-ФЗ) */}
+      <PersonalDataExportSheet
+        open={exportOpen}
         triggerRef={exportTriggerRef}
-        onClose={() => setExportSheet(null)}
+        onClose={() => setExportOpen(false)}
       />
-      {/* R2 deferred delete sheet */}
-      <SupportEntrySheet
-        preset={deleteSheet}
+      {/* C5 delete sheet (152-ФЗ) */}
+      <PersonalDataDeleteSheet
+        open={deleteOpen}
         triggerRef={deleteTriggerRef}
-        onClose={() => setDeleteSheet(null)}
+        onClose={() => setDeleteOpen(false)}
       />
 
       {/* Toggle confirmation toast (R6 §8.3 + marketing change). */}
