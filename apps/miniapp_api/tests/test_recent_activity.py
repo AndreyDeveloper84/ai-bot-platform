@@ -142,16 +142,23 @@ class TestRecentActivityNextBooking:
 
 class TestRecentActivityWeekCount:
     def test_counts_only_this_week_confirmed(self, client: Client, bot_user: BotUser):
-        now = datetime.now(dt_timezone.utc)
-        # Two within ~this week (forward a day or two), one 20 days out.
-        _make_booking(bot_user, visit_at=now + timedelta(hours=2))
-        _make_booking(bot_user, visit_at=now + timedelta(days=1))
-        _make_booking(bot_user, visit_at=now + timedelta(days=20))
+        # Deterministic window anchoring: build visits relative to the
+        # tenant-TZ week window itself, not to now()+hours — the naive
+        # version time-bombed near the Mon 00:00 MSK boundary (Sunday
+        # evenings the +2h booking slipped out of the window).
+        from zoneinfo import ZoneInfo
+
+        tenant = bot_user.tenant
+        tz = ZoneInfo(tenant.timezone or "Europe/Moscow")
+        local_now = datetime.now(dt_timezone.utc).astimezone(tz)
+        week_start = (local_now - timedelta(days=local_now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        _make_booking(bot_user, visit_at=week_start + timedelta(days=1, hours=12))
+        _make_booking(bot_user, visit_at=week_start + timedelta(days=3))
+        _make_booking(bot_user, visit_at=week_start + timedelta(days=9))
         data = _get(client, bot_user).json()
-        # The far-future one is excluded; the count reflects only the
-        # current Mon-Sun window (exact value depends on weekday, so we
-        # assert it's >= 1 and < 3).
-        assert 1 <= data["this_week_booking_count"] <= 2
+        assert data["this_week_booking_count"] == 2
 
 
 class TestRecentActivityWeeklyProgress:
