@@ -64,6 +64,7 @@ import {
   type MeProfileResponse,
   type ProactivePrefsResponse,
 } from "../lib/customer-profile";
+import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 
 // ---------------------------------------------------------------------------
 // Stub-backed sections flag (pilot phase 2a, commit 3). R1 identity
@@ -72,12 +73,12 @@ import {
 // BY DESIGN (`StubNotWiredError` — the 152-ФЗ truthfulness gate: no
 // fake identity / fake consent date in prod). Until the backing
 // endpoints ship (post-pilot backlog, W3), those sections render only
-// in DEV builds: hidden UI is more honest than a crashing screen.
+// when STUB_SURFACES_ENABLED (lib/feature-flags.ts — the same gate as
+// the wellness / catalog stub surfaces): hidden UI is more honest than
+// a crashing screen.
 // Everything else — C5 export/delete (152-ФЗ), R3 memory coming-soon,
 // R5 notifications via support — shows in all builds.
 // ---------------------------------------------------------------------------
-
-const STUB_SECTIONS_ENABLED = import.meta.env.DEV;
 
 // ---------------------------------------------------------------------------
 // Loading / error / offline state machine.
@@ -118,7 +119,7 @@ export function CustomerProfileScreen() {
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async () => {
-    if (!STUB_SECTIONS_ENABLED) {
+    if (!STUB_SURFACES_ENABLED) {
       // Prod build: stub-backed endpoints don't exist — skip the fetches
       // entirely (the stub lib would throw by design) and render only
       // the real sections below.

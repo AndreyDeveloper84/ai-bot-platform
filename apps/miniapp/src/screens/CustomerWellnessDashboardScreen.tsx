@@ -76,6 +76,8 @@ import {
   type CatalogLayer2Item,
   type CatalogRecommendations,
 } from "../lib/customer-booking";
+import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
+import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -98,6 +100,14 @@ function isOnline(): boolean {
 // ---------------------------------------------------------------------------
 
 export function CustomerWellnessDashboardScreen() {
+  // Pilot commit 4 (orchestrator): the wellness dashboard is a stub
+  // surface — hidden in prod builds until S4/post-pilot. The flag is a
+  // build-time constant, so the early return never violates the rules
+  // of hooks (consistent for the component's lifetime). Phase 3 target:
+  // home becomes «Мои записи» on real data — see lib/feature-flags.ts.
+  if (!STUB_SURFACES_ENABLED) {
+    return <PilotComingSoonScreen surface="home" />;
+  }
   const navigate = useNavigate();
 
   const [today, setToday] = useState<Slice<WellnessToday>>({ kind: "loading" });

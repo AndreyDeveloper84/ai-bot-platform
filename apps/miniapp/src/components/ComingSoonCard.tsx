@@ -14,16 +14,34 @@
  * («Скоро…», не «Уже умею всё!»).
  */
 
-export function ComingSoonCard() {
+interface ComingSoonCardProps {
+  /**
+   * Optional copy override (defaults: the R3 memory-transparency copy
+   * below). Used by `PilotComingSoonScreen` for gated stub surfaces —
+   * same calm coming-soon pattern, surface-specific wording.
+   */
+  primary?: string;
+  secondary?: string;
+}
+
+export function ComingSoonCard({ primary, secondary }: ComingSoonCardProps = {}) {
   return (
     <div className="profile-coming-soon" role="note">
       <p className="profile-coming-soon__primary">
-        Скоро я смогу показать тебе здесь, что я о тебе помню — любимые
-        услуги, удобное время, настройки — и дать это очистить.
+        {primary ?? (
+          <>
+            Скоро я смогу показать тебе здесь, что я о тебе помню — любимые
+            услуги, удобное время, настройки — и дать это очистить.
+          </>
+        )}
       </p>
       <p className="profile-coming-soon__secondary">
-        Пока этот раздел готовится. Я не показываю лишнего и не делаю
-        вид, что уже всё умею.
+        {secondary ?? (
+          <>
+            Пока этот раздел готовится. Я не показываю лишнего и не делаю
+            вид, что уже всё умею.
+          </>
+        )}
       </p>
     </div>
   );
