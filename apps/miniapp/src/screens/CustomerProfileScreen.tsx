@@ -66,6 +66,20 @@ import {
 } from "../lib/customer-profile";
 
 // ---------------------------------------------------------------------------
+// Stub-backed sections flag (pilot phase 2a, commit 3). R1 identity
+// header, R2 consent rows + marketing toggle and R4 proactive toggle
+// read DEV-only stubs (`customer-profile.ts`) whose prod guard throws
+// BY DESIGN (`StubNotWiredError` — the 152-ФЗ truthfulness gate: no
+// fake identity / fake consent date in prod). Until the backing
+// endpoints ship (post-pilot backlog, W3), those sections render only
+// in DEV builds: hidden UI is more honest than a crashing screen.
+// Everything else — C5 export/delete (152-ФЗ), R3 memory coming-soon,
+// R5 notifications via support — shows in all builds.
+// ---------------------------------------------------------------------------
+
+const STUB_SECTIONS_ENABLED = import.meta.env.DEV;
+
+// ---------------------------------------------------------------------------
 // Loading / error / offline state machine.
 // ---------------------------------------------------------------------------
 
@@ -74,9 +88,10 @@ type Status =
   | { kind: "error"; err: unknown }
   | {
       kind: "ready";
-      me: MeProfileResponse;
-      consents: ConsentsResponse;
-      proactive: ProactivePrefsResponse;
+      /** Null in prod builds — stub-backed sections stay hidden. */
+      me: MeProfileResponse | null;
+      consents: ConsentsResponse | null;
+      proactive: ProactivePrefsResponse | null;
     };
 
 interface ToastState {
@@ -103,6 +118,13 @@ export function CustomerProfileScreen() {
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const load = useCallback(async () => {
+    if (!STUB_SECTIONS_ENABLED) {
+      // Prod build: stub-backed endpoints don't exist — skip the fetches
+      // entirely (the stub lib would throw by design) and render only
+      // the real sections below.
+      setStatus({ kind: "ready", me: null, consents: null, proactive: null });
+      return;
+    }
     setStatus({ kind: "loading" });
     try {
       const [me, consents, proactive] = await Promise.all([
@@ -241,8 +263,8 @@ export function CustomerProfileScreen() {
         )}
         {status.kind === "ready" && (
           <>
-            {/* R1 — Header */}
-            <ProfileHeader me={status.me} />
+            {/* R1 — Header (stub-backed: DEV builds only) */}
+            {status.me && <ProfileHeader me={status.me} />}
 
             {/* R2 — Consent & Privacy */}
             <section
@@ -254,6 +276,8 @@ export function CustomerProfileScreen() {
               <h2 id="profile-r2-h2" className="profile-section__heading">
                 Согласия и приватность
               </h2>
+              {/* Consent rows — stub-backed, DEV builds only. */}
+              {status.consents && (
               <dl className="profile-consent-list">
                 <ConsentRow
                   variant="info"
@@ -309,6 +333,7 @@ export function CustomerProfileScreen() {
                   }
                 />
               </dl>
+              )}
               <p className="profile-section__caption">
                 Твои данные защищены. Здесь можно посмотреть, что хранится,
                 скачать копию своих данных или удалить их — прямо в
@@ -346,7 +371,8 @@ export function CustomerProfileScreen() {
               <ComingSoonCard />
             </section>
 
-            {/* R4 — Proactive AI */}
+            {/* R4 — Proactive AI (stub-backed: DEV builds only) */}
+            {status.proactive && (
             <section
               className="profile-section"
               aria-labelledby="profile-r4-h2"
@@ -373,6 +399,7 @@ export function CustomerProfileScreen() {
                 </p>
               </div>
             </section>
+            )}
 
             {/* R5 — Notifications */}
             <NotificationCard
