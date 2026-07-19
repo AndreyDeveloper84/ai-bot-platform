@@ -52,11 +52,19 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
-# `event-contract.md` §2 — the only event_name where tenant_id MAY be
-# null (user-global change like display_name / avatar). Duplicated from
+# `event-contract.md` §2 + AMD-015 — event_names where tenant_id MAY be
+# null (user-global change like display_name / avatar; solo-master billing
+# events whose subscription has tenant=NULL). Duplicated from
 # ingest_envelope.TENANT_NULLABLE_EVENT_NAMES to keep this module
 # import-cycle-free with the dispatcher.
-_TENANT_NULLABLE_EVENT_NAMES: frozenset[str] = frozenset({"user.profile.updated"})
+_TENANT_NULLABLE_EVENT_NAMES: frozenset[str] = frozenset(
+    {
+        "user.profile.updated",
+        "subscription.activated",
+        "subscription.past_due",
+        "billing.fee_charged",
+    }
+)
 
 
 class TenantAuthorizationError(Exception):

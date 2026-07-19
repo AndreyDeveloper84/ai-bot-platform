@@ -211,3 +211,65 @@ class TestProducerShapePin:
         assert result.outcome == DispatchOutcome.OK
         # Replay of the same UUID4 event_id dedupes.
         assert dispatch_envelope(env).outcome == DispatchOutcome.DUPLICATE
+
+
+class TestTenantNullableAmd015:
+    """AMD-015: solo-master billing events arrive with tenant_id=None.
+
+    Parse accepts them, and the handler's tenant check passes by
+    user-scope (the master key IS the Ayla User UUID). Salon rows keep
+    tenant set and verify by tenant as before."""
+
+    @pytest.mark.parametrize("event_name", sorted(_PAYLOADS))
+    def test_null_tenant_dispatches_ok(self, event_name: str) -> None:
+        env = IngestEnvelope(
+            event_id="4a6b8f0e-9a2c-4b1d-8e5f-7c2a9d4e6b1b",
+            event_name=event_name,
+            event_version=1,
+            occurred_at=dt.datetime(2026, 7, 19, 12, 0, tzinfo=dt.timezone.utc),
+            tenant_id=None,  # solo master — AMD-015
+            user_id=AYLA_USER_ID,
+            actor="system",
+            correlation_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            causation_id=None,
+            data=_PAYLOADS[event_name],
+        )
+        assert dispatch_envelope(env).outcome == DispatchOutcome.OK
+
+    @pytest.mark.parametrize("event_name", sorted(_PAYLOADS))
+    def test_null_tenant_parses(self, event_name: str) -> None:
+        env = parse_envelope(
+            {
+                "event_id": "5b7c9f1f-0b3d-4c2e-9f6a-8d3b0e5f7c2b",
+                "event_name": event_name,
+                "event_version": 1,
+                "occurred_at": "2026-07-19T12:00:00Z",
+                "tenant_id": None,
+                "user_id": AYLA_USER_ID,
+                "actor": "system",
+                "correlation_id": "c1",
+                "causation_id": None,
+                "data": _PAYLOADS[event_name],
+            }
+        )
+        assert env.tenant_id is None
+
+    def test_other_names_still_reject_null_tenant(self) -> None:
+        from apps.eventbus.ingest_envelope import IngestEnvelopeError
+
+        with pytest.raises(IngestEnvelopeError) as exc_info:
+            parse_envelope(
+                {
+                    "event_id": "6c8d0a2a-1c4e-4d3f-0a7b-9e4c1f6a8d3c",
+                    "event_name": "booking.created",
+                    "event_version": 1,
+                    "occurred_at": "2026-07-19T12:00:00Z",
+                    "tenant_id": None,
+                    "user_id": AYLA_USER_ID,
+                    "actor": "system",
+                    "correlation_id": "c1",
+                    "causation_id": None,
+                    "data": {},
+                }
+            )
+        assert exc_info.value.reason == "invalid_tenant_id"
