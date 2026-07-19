@@ -62,6 +62,11 @@ urlpatterns = [
         views.personal_data_delete,
         name="personal_data_delete",
     ),
+    # C7 client payments passthrough (PILOT_CONTRACTS §7.5)
+    path("me/payments/", views.create_payment, name="create_payment"),
+    path("me/cards/setup/", views.cards_setup, name="cards_setup"),
+    path("me/cards/", views.cards_list, name="cards_list"),
+    path("me/cards/<uuid:card_id>/", views.card_delete, name="card_delete"),
     # Phase 4 / F5 — post-visit feedback
     path(
         "bookings/<uuid:booking_id>/feedback",

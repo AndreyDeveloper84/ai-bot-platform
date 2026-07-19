@@ -206,6 +206,46 @@ def _resolve_conversation(
 # ─── handlers ──────────────────────────────────────────────────────────────
 
 
+def upsert_payment_mirror(
+    *,
+    tenant,
+    appointment_id,
+    payment_id=None,
+    capture_state: str,
+    amount=None,
+    event_id: str = "",
+) -> None:
+    """Upsert the C7.3 read-model row for one appointment's payment.
+
+    Idempotent by the (tenant, appointment_id) unique key — replays
+    re-stamp the same row. Called right after tenant resolution in the
+    payment.* handlers AND from the booking.confirmed handler (the hold
+    signal, payment_id may be absent there). Never raises on a malformed
+    amount: the mirror is a read model, not a ledger.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from apps.booking.models import PaymentMirror
+
+    parsed_amount = None
+    if amount not in (None, ""):
+        try:
+            parsed_amount = Decimal(str(amount))
+        except InvalidOperation:
+            parsed_amount = None
+
+    PaymentMirror.all_tenants.update_or_create(
+        tenant=tenant,
+        appointment_id=appointment_id,
+        defaults={
+            "payment_id": payment_id,
+            "capture_state": capture_state,
+            "amount": parsed_amount,
+            "last_synced_event_id": event_id,
+        },
+    )
+
+
 def handle_payment_authorized(envelope: IngestEnvelope) -> None:
     """``payment.authorized`` — event-contract.md §3.5.
 
@@ -274,6 +314,17 @@ def handle_payment_captured(envelope: IngestEnvelope) -> None:
             envelope.tenant_id,
         )
         return
+
+    # C7.3 read model — before any conversation short-circuit: BookingItem
+    # shows capture state even when the user has no conversation row.
+    upsert_payment_mirror(
+        tenant=tenant,
+        appointment_id=appointment_id,
+        payment_id=payment_id,
+        capture_state="captured",
+        amount=data.get("amount"),
+        event_id=envelope.event_id,
+    )
 
     conversation = _resolve_conversation(tenant=tenant, user_id=envelope.user_id)
 
@@ -370,6 +421,16 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
             envelope.tenant_id,
         )
         return
+
+    # C7.3 read model — before any conversation short-circuit.
+    upsert_payment_mirror(
+        tenant=tenant,
+        appointment_id=appointment_id,
+        payment_id=payment_id,
+        capture_state="failed",
+        amount=data.get("amount"),
+        event_id=envelope.event_id,
+    )
 
     conversation = _resolve_conversation(tenant=tenant, user_id=envelope.user_id)
     if conversation is None:
@@ -574,6 +635,16 @@ def handle_payment_refunded(envelope: IngestEnvelope) -> None:
             envelope.tenant_id,
         )
         return
+
+    # C7.3 read model — before any conversation short-circuit.
+    upsert_payment_mirror(
+        tenant=tenant,
+        appointment_id=appointment_id,
+        payment_id=payment_id,
+        capture_state="refunded",
+        amount=data.get("amount"),
+        event_id=envelope.event_id,
+    )
 
     conversation = _resolve_conversation(tenant=tenant, user_id=envelope.user_id)
 

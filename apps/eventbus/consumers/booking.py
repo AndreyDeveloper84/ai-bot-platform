@@ -615,6 +615,22 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
         last_synced_event_id=envelope.event_id,
     )
 
+    # C7.3: booking.confirmed carrying a payment_id is the pilot's HOLD
+    # signal (no separate payment.authorized event) — stamp the read
+    # model so customer BookingItem can show «зарезервировано». Without
+    # a payment_id the booking is prepay-free: no payment row at all.
+    if data.get("payment_id"):
+        from apps.eventbus.consumers.payment import upsert_payment_mirror
+
+        upsert_payment_mirror(
+            tenant=tenant,
+            appointment_id=appointment_id,
+            payment_id=data.get("payment_id"),
+            capture_state="authorized",
+            amount=data.get("amount"),
+            event_id=envelope.event_id,
+        )
+
     emit_internal_event(
         "booking_confirmed",
         properties={

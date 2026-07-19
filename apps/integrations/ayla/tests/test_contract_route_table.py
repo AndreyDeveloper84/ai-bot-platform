@@ -134,6 +134,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
+    # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
+    Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER),
+    Route("POST", "/api/v1/internal/users/{id}/cards/setup/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/users/{id}/cards/", Auth.BEARER),
+    Route("DELETE", "/api/v1/internal/users/{id}/cards/{id}/", Auth.BEARER),
     # recommendations_client (#1048).
     Route("POST", "/api/v1/internal/me/catalog/recommendations/", Auth.BEARER_EXT),
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
@@ -174,7 +179,7 @@ class Captured:
 
 
 # id args passed into client methods; normalised back to ``{id}`` for matching.
-_ID_SENTINELS = {"SPECID", "APPTID", "ENTRYID", "SHOWNID"}
+_ID_SENTINELS = {"SPECID", "APPTID", "ENTRYID", "SHOWNID", "CARDID"}
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -379,6 +384,17 @@ def _exercise_billing() -> None:
     _swallow(lambda: c.get_payout_preview(specialist_id=sid))
 
 
+def _exercise_client_payments() -> None:
+    from apps.integrations.ayla.payments_client import AylaClientPaymentsClient
+
+    uid = str(_PROFILE_UUID)
+    c = AylaClientPaymentsClient()  # reads settings.AYLA_*; httpx.Client is patched
+    _swallow(lambda: c.create_payment(appointment_id="APPTID"))
+    _swallow(lambda: c.cards_setup(ayla_user_id=uid))
+    _swallow(lambda: c.list_cards(ayla_user_id=uid))
+    _swallow(lambda: c.delete_card(ayla_user_id=uid, card_id="CARDID"))
+
+
 def _exercise_payments(sink: list[Captured]) -> None:
     # ayla_payments uses ``requests``, not httpx — capture via the session mock.
     from apps.integrations.ayla_payments import (
@@ -449,6 +465,7 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     _exercise_profile()
     _exercise_personal_context()
     _exercise_billing()
+    _exercise_client_payments()
     _exercise_recommendations()
     _exercise_payments(captured)
     await _exercise_nutrition()
