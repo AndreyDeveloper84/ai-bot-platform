@@ -151,6 +151,23 @@ export const fetchMasters = (params?: {
 export const fetchMaster = (id: string): Promise<{ master: MasterDetail }> =>
   request(`/masters/${id}`, { method: "GET" });
 
+// --- catalog: recommendations (Ayla scorer proxy) ---
+/**
+ * POST /recommendations — proxies onto Ayla's catalog scoring
+ * (`apps/miniapp_api/views.py::customer_recommendations`). Empty body →
+ * Ayla's default ranking. The Ayla response is passed through verbatim;
+ * the pilot consumes only `service_id` + `score` and joins them onto
+ * the mirror services client-side. Failures (502/503) are the caller's
+ * to isolate — picks are optional chrome, never an error screen.
+ */
+export interface RecommendationScore {
+  service_id: string;
+  score: number;
+}
+export const fetchRecommendations = (): Promise<{
+  recommendations: RecommendationScore[];
+}> => request("/recommendations", { method: "POST" });
+
 // --- slots ---
 export interface FreeSlot {
   date: string;
