@@ -12,6 +12,10 @@ from apps.orchestrator.health import (
     pipeline_health,
 )
 
+# Sprint 8/G4 (DRF-735) added the audit_cleanup probe to pipeline_health() —
+# it reads AuditLog, so every test in this module needs DB access.
+pytestmark = pytest.mark.django_db
+
 
 class TestCheckIntentRouter:
     def test_breaker_closed_returns_ok(self):

@@ -124,14 +124,17 @@ from apps.identity.services import (
 )
 from apps.identity.services.memory_reader import read_personal_context
 from apps.persona.memory_commands import handle_memory_command
+from apps.persona.memory_surface import render_personal_context
+from apps.orchestrator.concierge import generate_concierge_reply
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
-    generate_discovery_reply,
 )
 from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
+from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
+from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -528,7 +531,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     history = short_term.recall(conversation.id)
 
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    record_global_message(conversation, role="user", content=event.text, trace_id=trace_id)
+    user_msg = record_global_message(
+        conversation, role="user", content=event.text, trace_id=trace_id
+    )
     short_term.append(conversation.id, role="user", content=event.text)
 
     logger.info(
@@ -615,36 +620,81 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         if mem_reply is not None:
             reply = mem_reply
         else:
-            # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
-            # the discovery prompt. Best-effort: these DB reads run BEFORE the reply
-            # is sent, so a transient error must degrade to «no memory», never abort
-            # the turn (the idempotency key is already claimed — a raise would lose
-            # the reply on retry).
-            personal_context = None
+            # W5 (S3.5): a pending memory question treats this message as its
+            # answer BEFORE the concierge turn runs. Best-effort — a failure
+            # degrades to a normal concierge turn, never aborts it.
+            ask_reply: DiscoveryReply | None = None
             try:
-                if ayla_user_id is not None:
-                    personal_context = read_personal_context(ayla_user_id)
-            except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
-                logger.exception(
-                    "channels.max.global.memory_surface_failed bot_user=%s", bot_user.id
-                )
+                ask_reply = try_handle_answer(conversation, bot_user, event.text)
+            except Exception:  # noqa: BLE001
+                logger.exception("channels.max.global.memory_ask_failed bot_user=%s", bot_user.id)
+                ask_reply = None
+            if ask_reply is not None:
+                reply = ask_reply
+            else:
+                # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
+                # the discovery prompt. Best-effort: these DB reads run BEFORE the reply
+                # is sent, so a transient error must degrade to «no memory», never abort
+                # the turn (the idempotency key is already claimed — a raise would lose
+                # the reply on retry).
                 personal_context = None
-            reply = generate_discovery_reply(
-                event.text,
-                history=history,
-                personal_context=personal_context,
-                trace_id=str(trace_id) if trace_id else None,
-            )
+                try:
+                    if ayla_user_id is not None:
+                        personal_context = read_personal_context(ayla_user_id)
+                except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
+                    logger.exception(
+                        "channels.max.global.memory_surface_failed bot_user=%s", bot_user.id
+                    )
+                    personal_context = None
+                # W5 task 2: consent-gated ai-core memory block (declared prefs +
+                # inferred green). "" when the memory_green gate is closed —
+                # not a single fact reaches the prompt then. Fail-closed.
+                memory_block = ""
+                try:
+                    memory_block = build_concierge_memory_block(bot_user)
+                except Exception:  # noqa: BLE001 — belt-and-braces; the module is fail-closed
+                    logger.exception(
+                        "channels.max.global.memory_block_failed bot_user=%s", bot_user.id
+                    )
+                    memory_block = ""
+                # W5 task 1: the concierge DM runs on ayla-ai-core AIConcierge
+                # (apps.orchestrator.concierge) — history from the Message table,
+                # assistant turn persisted by its store (reply.persisted=True).
+                reply = generate_concierge_reply(
+                    event.text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    user_message_id=user_msg.id,
+                    memory_block=memory_block,
+                    extra_system=(
+                        render_personal_context(personal_context) if personal_context else ""
+                    )
+                    or "",
+                    trace_id=str(trace_id) if trace_id else None,
+                )
+                # W5 (S3.5): organically weave ONE memory question when the Ayla
+                # anti-spam engine allows asking. Best-effort.
+                try:
+                    reply = maybe_weave_question(conversation, bot_user, reply)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "channels.max.global.memory_ask_weave_failed bot_user=%s",
+                        bot_user.id,
+                    )
 
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
-    record_global_message(
-        conversation,
-        role="assistant",
-        content=reply.text,
-        rendered_text=reply.text,
-        action_type=assistant_action_type,
-        trace_id=trace_id,
-    )
+    # W5: the AIConcierge store already persisted concierge turns
+    # (reply.persisted=True) — skip here to avoid a double row; every other
+    # branch records as before.
+    if not reply.persisted:
+        record_global_message(
+            conversation,
+            role="assistant",
+            content=reply.text,
+            rendered_text=reply.text,
+            action_type=assistant_action_type,
+            trace_id=trace_id,
+        )
     short_term.append(conversation.id, role="assistant", content=reply.text)
     if assistant_action_type == "safety_pre_check":
         # Crisis reply — alert loudly on delivery failure (#1082).

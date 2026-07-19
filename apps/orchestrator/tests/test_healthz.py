@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.test import AsyncClient
 
-pytestmark = pytest.mark.asyncio
+# django_db: readyz aggregates the Sprint-8/G4 audit_cleanup probe,
+# which reads AuditLog.
+pytestmark = [pytest.mark.asyncio, pytest.mark.django_db]
 
 
 class TestHealthz:
@@ -45,8 +47,18 @@ class TestReadyzAllHealthy:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "ok"
-        # Sprint 6 / G3 added pipeline component checks alongside the service probes.
-        expected = {"postgres", "redis", "chromadb", "minio", "intent_router", "skill_registry"}
+        # Sprint 6 / G3 added pipeline component checks alongside the service probes;
+        # Sprint 8 / G4 (DRF-735) added chromadb_auth + audit_cleanup.
+        expected = {
+            "postgres",
+            "redis",
+            "chromadb",
+            "minio",
+            "intent_router",
+            "skill_registry",
+            "chromadb_auth",
+            "audit_cleanup",
+        }
         assert set(body["checks"].keys()) == expected
         for check in body["checks"].values():
             assert check["ok"] is True

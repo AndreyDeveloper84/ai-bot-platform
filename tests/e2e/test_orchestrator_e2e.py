@@ -20,13 +20,13 @@ are real.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 import pytest
 from asgiref.sync import sync_to_async
 
-from apps.orchestrator.llm.openai_provider import LLMResponse
+from apps.llm.protocol import CompletionResult
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
 
@@ -38,11 +38,18 @@ pytestmark = [
 ]
 
 
-def _fake_intent_provider() -> AsyncMock:
-    """LLM that returns a pinned FAQ IntentDecision JSON."""
+def _fake_router() -> Mock:
+    """Router stub for the #975 production intent path.
+
+    ``_classify_production_path`` resolves its provider via
+    ``apps.llm.router.get_router()`` — patch THAT seam (the Sprint-1
+    ``intent_router.OpenAIProvider`` symbol is the legacy path; pipeline
+    turns never consult it). The fake provider pins the FAQ IntentDecision
+    JSON as a production CompletionResult.
+    """
     provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=json.dumps(
+    provider.complete.return_value = CompletionResult(
+        text=json.dumps(
             {
                 "intent": "faq",
                 "skill": "faq",
@@ -54,12 +61,10 @@ def _fake_intent_provider() -> AsyncMock:
                 "needs_tool": False,
             }
         ),
-        model="gpt-4o-mini-mock",
-        is_fallback=False,
-        tokens_in=10,
-        tokens_out=20,
     )
-    return provider
+    router = Mock()
+    router.get_provider.return_value = provider
+    return router
 
 
 @pytest.fixture
@@ -79,13 +84,29 @@ def e2e_tenant(settings):
 def _stub_external():
     """Mock the only two external dependencies — LLM + MAX API."""
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=_fake_intent_provider(),
-        ),
+        patch("apps.llm.router.get_router", return_value=_fake_router()),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tracer_provider():
+    """Neutralise the process-global OTel provider for the duration of each test.
+
+    OTel's ``set_tracer_provider`` is one-shot: the first SDK provider
+    installed by ANY test module stays active for the rest of the process.
+    While one is active, ``apps.replay.recorder._prefer_otel_trace_id``
+    binds ``ReplayTrace.trace_id`` to the OTel span id instead of the
+    message trace_id and the ReplayTrace assertion below can't find its
+    row. Force the no-op proxy here and restore afterwards.
+    """
+    from opentelemetry import trace as otel_trace
+
+    original = otel_trace._TRACER_PROVIDER
+    otel_trace._TRACER_PROVIDER = None
+    yield
+    otel_trace._TRACER_PROVIDER = original
 
 
 def _message(text: str) -> ChannelMessage:

@@ -71,13 +71,13 @@ def mock_discovery(monkeypatch):
 
     replies = iter(["Привет! Какая услуга интересует?", "Поняла — подберу мастера."])
 
-    def fake_reply(message_text, *, history=None, personal_context=None, trace_id=None):
+    def fake_reply(message_text, **_kwargs):
         try:
             return DiscoveryReply(text=next(replies))
         except StopIteration:
             return DiscoveryReply(text="…")
 
-    monkeypatch.setattr(max_handler, "generate_discovery_reply", fake_reply)
+    monkeypatch.setattr(max_handler, "generate_concierge_reply", fake_reply)
 
 
 def test_discovery_turn_persists_under_sentinel_and_rereads(
