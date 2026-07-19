@@ -3,8 +3,11 @@
 The nationwide bot answers a discovery turn at ``current_tenant()=None`` using
 the frozen ayla-ai-core marketplace voice (``AYLA_MARKETPLACE_VOICE``) and
 bot-platform's OWN LLM runtime (``apps.llm.router``) — the same mechanism the
-per-tenant skills use, NOT ayla-ai-core's ``AIConcierge`` class (which
-bot-platform does not use anywhere).
+per-tenant skills use. Since W5 (pilot 2026-08-15) the concierge DM itself
+runs on ayla-ai-core's ``AIConcierge`` — see
+:mod:`apps.orchestrator.concierge`. This module keeps the shared building
+blocks (prompt builder, ``SHOW_MASTERS_TOOL_SPEC``, card renderer) plus the
+hand-rolled reply generator as the tested fallback.
 
 Tenant-independent by construction: ``get_provider(None, ...)`` short-circuits
 to the per-skill / org-wide provider tier, and the prompt reads NO
@@ -86,10 +89,16 @@ class DiscoveryReply:
     """A discovery turn's outcome: the reply text + optional channel action_data
     (e.g. the master-card keyboard). ``action_data`` mirrors the per-tenant
     SkillResult shape so the MAX handler renders it via ``_build_attachments``.
+
+    ``persisted`` (W5): True when the assistant turn was already persisted
+    by the producer (the AIConcierge store in
+    :mod:`apps.orchestrator.concierge`) — the handler must NOT record it
+    again. Legacy producers leave it False.
     """
 
     text: str
     action_data: dict[str, Any] | None = None
+    persisted: bool = False
 
 
 # Local mirror of ayla-ai-core's AYLA_MARKETPLACE_VOICE (v0.8.1) for envs where
