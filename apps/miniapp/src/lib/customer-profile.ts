@@ -305,16 +305,33 @@ export function additionalSalonsLabel(extraCount: number): string {
  * `datetime_relative_label` (server side normally pre-formats), but
  * for the consent timestamp the server returns ISO and the row needs
  * a calm calendar date.
+ *
+ * Built from a hardcoded month table (same discipline as
+ * `lib/format.ts`) — NOT `toLocaleDateString("ru-RU")`, whose output
+ * depends on the runtime's ICU data (small-icu builds render English
+ * and made this an env-dependent test failure, 114-vs-115).
  */
+const RU_MONTHS_GENITIVE = [
+  "января",
+  "февраля",
+  "марта",
+  "апреля",
+  "мая",
+  "июня",
+  "июля",
+  "августа",
+  "сентября",
+  "октября",
+  "ноября",
+  "декабря",
+];
+
 export function formatConsentDate(iso: string): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleDateString("ru-RU", {
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-    });
+    const month = RU_MONTHS_GENITIVE[d.getMonth()] ?? "";
+    return `${d.getDate()} ${month} ${d.getFullYear()}`;
   } catch {
     return iso;
   }
