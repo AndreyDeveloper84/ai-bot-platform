@@ -8,7 +8,10 @@ specialist-id mapping seam is exercised both in its current (None →
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
+from django.test import Client as DjangoClient
 
 from apps.catalog.models import CatalogMaster
 from apps.integrations.ayla.billing_client import (
@@ -64,7 +67,7 @@ class _StubClient:
 
 
 class TestMappingGap:
-    """Today the mirror carries no SpecialistProfile id → fail-closed."""
+    """Master without an Ayla link (ayla_user_id NULL) → fail-closed."""
 
     def test_status_mapping_unavailable(self, master) -> None:
         result = billing_status_for_master(master)
@@ -79,38 +82,56 @@ class TestMappingGap:
         assert billing_svc.specialist_id_for_master(master) is None
 
 
-class TestResolvedMapping:
-    """With the seam patched (post W1 enrichment), the proxy forwards."""
+class TestLinkedMaster:
+    """AMD-005: the mirror's ayla_user_id IS the billing key — no seam patch."""
 
-    @pytest.fixture(autouse=True)
-    def _resolve(self, monkeypatch) -> None:
-        monkeypatch.setattr(billing_svc, "specialist_id_for_master", lambda master: _SID)
+    @pytest.fixture
+    def linked_master(self, master) -> CatalogMaster:
+        master.ayla_user_id = uuid.UUID(_SID)
+        master.save(update_fields=["ayla_user_id"])
+        return master
 
-    def test_status_ok_verbatim(self, master) -> None:
+    def test_resolver_returns_ayla_user_id(self, linked_master) -> None:
+        assert billing_svc.specialist_id_for_master(linked_master) == _SID
+
+    def test_status_ok_verbatim(self, linked_master) -> None:
         payload = {"specialist_id": _SID, "subscription": {"status": "active"}}
         client = _StubClient(payload=payload)
-        result = billing_status_for_master(master, client=client)  # type: ignore[arg-type]
+        result = billing_status_for_master(linked_master, client=client)  # type: ignore[arg-type]
         assert result.status is ProxyStatus.OK
         assert result.payload is payload
         assert client.calls == [("get_billing_status", _SID)]
 
-    def test_payout_ok_verbatim(self, master) -> None:
+    def test_payout_ok_verbatim(self, linked_master) -> None:
         payload = {"pending_amount": "5730.00", "currency": "RUB", "items": []}
         client = _StubClient(payload=payload)
-        result = payout_preview_for_master(master, client=client)  # type: ignore[arg-type]
+        result = payout_preview_for_master(linked_master, client=client)  # type: ignore[arg-type]
         assert result.status is ProxyStatus.OK
         assert result.payload is payload
         assert client.calls == [("get_payout_preview", _SID)]
 
-    def test_upstream_404(self, master) -> None:
+    def test_upstream_404(self, linked_master) -> None:
         client = _StubClient(exc=BillingNotFoundError("nope"))
-        result = billing_status_for_master(master, client=client)  # type: ignore[arg-type]
+        result = billing_status_for_master(linked_master, client=client)  # type: ignore[arg-type]
         assert result.status is ProxyStatus.NOT_FOUND
 
-    def test_upstream_transport_error(self, master) -> None:
+    def test_upstream_transport_error(self, linked_master) -> None:
         client = _StubClient(exc=BillingTransportError("http_500"))
-        result = payout_preview_for_master(master, client=client)  # type: ignore[arg-type]
+        result = payout_preview_for_master(linked_master, client=client)  # type: ignore[arg-type]
         assert result.status is ProxyStatus.UPSTREAM_ERROR
+
+    def test_status_view_ok(self, client: DjangoClient, linked_master, monkeypatch) -> None:
+        payload = {"specialist_id": _SID, "subscription": {"status": "trial"}}
+        monkeypatch.setattr(
+            "apps.master_api.views.billing_status_for_master",
+            lambda master: billing_svc.BillingProxyResult(status=ProxyStatus.OK, payload=payload),
+        )
+        resp = client.get(
+            "/api/v1/master/billing/status",
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"data": payload}
 
 
 class TestViews:
