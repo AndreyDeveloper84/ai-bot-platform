@@ -227,6 +227,41 @@ class TestConfirmFlagOn:
         assert str(proxy.specialist_id) == _SPEC
         assert proxy.end_at > proxy.start_at  # duration carried from the response
 
+    def test_proxy_upsert_scopes_lookup_by_tenant(self, tenant: Tenant, bot_user: BotUser) -> None:
+        # S5-LOW: the mirror upsert must scope its lookup by (appointment_id,
+        # tenant), not appointment_id alone, so a cross-tenant id collision
+        # surfaces (IntegrityError) instead of silently overwriting another
+        # tenant's row. Assert tenant is a LOOKUP kwarg, not in defaults.
+        from unittest.mock import patch
+
+        fake = FakeAyla()
+        fake.create_response = AylaBookingRecord(
+            appointment_id=_APPT,
+            raw=_appt_raw(start="2026-07-01T16:00:00+03:00", end="2026-07-01T17:00:00+03:00"),
+        )
+        with patch("apps.booking.models.RemoteBookingProxy.all_tenants") as mgr:
+            mgr.update_or_create.return_value = (object(), True)
+            with tenant_scope(tenant):
+                execute_confirm(
+                    client=_adapter(fake),
+                    payload={
+                        "master_id": _SPEC,
+                        "service_id": _SVC,
+                        "slot_datetime": "2026-07-01T16:00:00+03:00",
+                        "client_phone": "79991234567",
+                        "client_name": "Anna",
+                        "master_name": "Ольга",
+                        "service_name": "Массаж",
+                    },
+                    tenant=tenant,
+                    bot_user=bot_user,
+                )
+        assert mgr.update_or_create.called
+        kwargs = mgr.update_or_create.call_args.kwargs
+        assert kwargs.get("tenant") is tenant  # tenant is part of the lookup
+        assert "appointment_id" in kwargs
+        assert "tenant" not in kwargs["defaults"]  # moved out of defaults
+
     def test_missing_appointment_id_is_api_error(self, tenant: Tenant, bot_user: BotUser) -> None:
         fake = FakeAyla()
         fake.create_response = AylaBookingRecord(appointment_id="", raw={})
