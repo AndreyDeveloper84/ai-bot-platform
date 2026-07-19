@@ -1,105 +1,83 @@
 /**
- * Booking card — 3 variants per Tau §4.
+ * Booking card — 3 variants per Tau §4 (real data, phase 3.2).
  *
- *   §4.1 «nearest» (is_nearest=true)        — full actions (4 buttons:
- *                                              open / message /
+ *   §4.1 «nearest» (isNearest=true)         — full actions (open /
  *                                              reschedule / cancel)
- *   §4.2 «future»  (upcoming non-nearest)   — limited actions
- *                                              (open / message)
+ *   §4.2 «future»  (upcoming non-nearest)   — limited actions (open)
  *   §4.3 «past»    (history)                — repeat + optional review
  *
  * Spec: `docs/screens/customer-records-flow.md` §4.
  *
- * NOTE: «Маршрут» button dropped from list card (round-1 amendment
- * 2026-05-27) — drift class same as PR #834 / #892. Real route deeplink
- * lives on detail screen («Маршрут до салона» button under address
- * section). Tapping «Открыть» → detail surfaces the real maps link.
+ * Phase 3.2 (stub removal): the card renders `RecordItem` — real
+ * `BookingItem` rows with derivations from `lib/customer-records.ts`.
+ * Gone with the stub: «Сообщить по записи» (AMM endpoint does not
+ * exist), «Маршрут» and tenant name (no source), price (no source).
+ * Every remaining action maps to a real endpoint/screen.
  *
  * WCAG 2.5.8 — every action button ≥44dp via padding (handled in CSS).
  * WCAG 1.4.1 — status icon paired with text (StatusBadge).
  * WCAG 1.3.1 — card uses semantic `<article>` and a label-y header.
  *
- * Voice rules (memory `project_records_voice_principles`):
- *   - «Сообщить по записи» (NOT «Написать» per founder F1 lock)
- *   - «ты» canonical (F2 lock)
- *   - no exclamation marks
- *   - no selling tone
+ * Voice rules (memory `project_records_voice_principles`): «ты»
+ * canonical, no exclamation marks, no selling tone.
  */
 
-import type { BookingListItem } from "../lib/customer-records";
+import type { RecordItem } from "../lib/customer-records";
 import { renderStatus } from "../lib/customer-records";
 import { StatusBadge, tintColourVar } from "./StatusBadge";
 
 export type BookingCardVariant = "nearest" | "future" | "past";
 
 interface Props {
-  item: BookingListItem;
+  item: RecordItem;
   variant: BookingCardVariant;
   onOpen: () => void;
-  onMessage?: () => void;
   onReschedule?: () => void;
   onCancel?: () => void;
   onRepeat?: () => void;
   onReview?: () => void;
-  /** Show «Можно оставить отзыв» badge — past variant only. */
-  reviewPending?: boolean;
 }
 
 export function BookingCard({
   item,
   variant,
   onOpen,
-  onMessage,
   onReschedule,
   onCancel,
   onRepeat,
   onReview,
-  reviewPending,
 }: Props) {
   const { rendering } = renderStatus(item.status);
   const accent = tintColourVar(rendering.tint);
-  const formattedPrice =
-    typeof item.price_approx === "number"
-      ? `${item.price_approx.toLocaleString("ru-RU")} ₽`
-      : null;
-  const actions = new Set(item.actions_available);
+  const actions = new Set(item.actions);
+  const reviewPending = variant === "past" && actions.has("review");
 
   return (
     <article
       className={`records-card records-card--${variant}`}
       style={{ borderLeftColor: accent }}
-      aria-labelledby={`rc-${item.booking_id}-title`}
+      aria-labelledby={`rc-${item.bookingId}-title`}
     >
       <div className="records-card__status-row">
         <StatusBadge rendering={rendering} />
       </div>
 
-      <div className="records-card__when">{item.datetime_relative_label}</div>
+      <div className="records-card__when">{item.datetimeLabel}</div>
 
       <div
-        id={`rc-${item.booking_id}-title`}
+        id={`rc-${item.bookingId}-title`}
         className="records-card__what"
       >
-        {item.service_name}
-        {variant !== "past" && (
+        {item.serviceName}
+        {variant !== "past" && item.durationMin != null && (
           <span className="records-card__duration">
             {" · "}
-            {item.duration_min} мин
+            {item.durationMin} мин
           </span>
         )}
       </div>
 
-      <div className="records-card__who">
-        у {item.master_first_name}
-        {" · "}
-        {item.tenant_name}
-      </div>
-
-      {variant !== "future" && formattedPrice && (
-        <div className="records-card__price">
-          {variant === "past" ? formattedPrice : `~${formattedPrice}`}
-        </div>
-      )}
+      <div className="records-card__who">у {item.masterName}</div>
 
       {reviewPending && (
         <p className="records-card__review-hint" aria-live="polite">
@@ -113,29 +91,12 @@ export function BookingCard({
           type="button"
           className="btn-secondary records-card__action records-card__action--primary"
           onClick={onOpen}
-          aria-label={
-            variant === "nearest" ? "Открыть запись" : "Открыть запись"
-          }
+          aria-label="Открыть запись"
         >
           {variant === "nearest" ? "Открыть запись" : "Открыть"}
         </button>
 
-        {/* Message — upcoming variants only (past bookings excluded per
-            AMM §11.1). */}
-        {(variant === "nearest" || variant === "future") &&
-          actions.has("message") &&
-          onMessage && (
-            <button
-              type="button"
-              className="btn-secondary records-card__action"
-              onClick={onMessage}
-            >
-              Сообщить по записи
-            </button>
-          )}
-
-        {/* Nearest-only — reschedule / cancel. Маршрут lives on detail
-            screen — see file header note. */}
+        {/* Nearest-only — reschedule / cancel (real endpoints). */}
         {variant === "nearest" &&
           actions.has("reschedule") &&
           onReschedule && (
@@ -157,7 +118,7 @@ export function BookingCard({
           </button>
         )}
 
-        {/* Past — repeat + optional review. */}
+        {/* Past — repeat (real catalog) + optional review (real feedback). */}
         {variant === "past" && actions.has("repeat") && onRepeat && (
           <button
             type="button"

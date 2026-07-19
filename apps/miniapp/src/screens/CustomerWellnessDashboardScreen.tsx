@@ -21,7 +21,8 @@
  *   Block 4 — Цели сегодня (text actions, no progress bars) — Tau §3
  *   Block 5 — Ближайшая запись (multi-record indicator) — Tau §3 + §11.3
  *   Block 6 — Прогресс недели (cold-start ≥3 days) — Tau §3 + §11.4
- *   Block 7 — Recommendations embed (TL extension; reuses Phase B stub)
+ *   Block 7 — Recommendations embed (TL extension; phase 3.1: real
+ *     scorer picks onto mirror services, no reasoning_text)
  *   Bottom nav — 5 tabs (🏠 Главная / ☀ День / 📅 Записи / 💅 Услуги / 👤 Я)
  *
  * NOTE: Tau's literal Block 7 is the bottom nav. TL re-numbering treats
@@ -57,7 +58,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError } from "../lib/api";
+import { ApiError, type Service } from "../lib/api";
+import { formatDuration, formatMoney } from "../lib/format";
 import {
   enqueueWaterLog,
   flushWaterQueue,
@@ -72,9 +74,8 @@ import {
   type WellnessToday,
 } from "../lib/customer-wellness";
 import {
-  getCatalogRecommendations,
-  type CatalogLayer2Item,
-  type CatalogRecommendations,
+  getCatalogBrowse,
+  type CatalogBrowseData,
 } from "../lib/customer-booking";
 import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
 import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
@@ -114,7 +115,7 @@ export function CustomerWellnessDashboardScreen() {
   const [activity, setActivity] = useState<Slice<RecentActivity>>({
     kind: "loading",
   });
-  const [recs, setRecs] = useState<Slice<CatalogRecommendations>>({
+  const [recs, setRecs] = useState<Slice<CatalogBrowseData>>({
     kind: "loading",
   });
 
@@ -139,7 +140,7 @@ export function CustomerWellnessDashboardScreen() {
     const [todayRes, activityRes, recsRes] = await Promise.allSettled([
       getWellnessToday(),
       getRecentActivity(),
-      getCatalogRecommendations(),
+      getCatalogBrowse(),
     ]);
 
     if (todayRes.status === "fulfilled") {
@@ -272,6 +273,17 @@ export function CustomerWellnessDashboardScreen() {
   const todayData = today.kind === "ok" ? today.data : null;
   const activityData = activity.kind === "ok" ? activity.data : null;
   const recsData = recs.kind === "ok" ? recs.data : null;
+  // Block 7 picks — top-3 services by Ayla scorer rank (phase 3.1:
+  // scorer service_ids joined onto mirror services; no reasoning_text
+  // exists upstream, so cards render factual fields only).
+  const pickServices: Service[] = (() => {
+    if (!recsData) return [];
+    const byId = new Map(recsData.services.map((s) => [s.id, s]));
+    return recsData.pickServiceIds
+      .map((id) => byId.get(id))
+      .filter((s): s is Service => s != null)
+      .slice(0, 3);
+  })();
 
   const now = new Date();
   const greeting = pickGreeting(now);
@@ -658,10 +670,10 @@ export function CustomerWellnessDashboardScreen() {
           </section>
         )}
 
-        {/* Block 7 — Recommendations embed (TL extension; Phase B stub).
-            Hide silently on error / empty (spec: no error UI). */}
-        {recsData &&
-          recsData.layer_2_ayla_picks.length > 0 && (
+        {/* Block 7 — Recommendations embed (TL extension; phase 3.1:
+            real scorer picks onto mirror services). Hide silently on
+            error / empty (spec: no error UI). */}
+        {pickServices.length > 0 && (
             <section
               className="wellness-dash__recos"
               aria-labelledby="recos-header"
@@ -671,12 +683,12 @@ export function CustomerWellnessDashboardScreen() {
                 <span lang="en">Ayla</span> подобрала тебе
               </h2>
               <ul className="wellness-dash__reco-list">
-                {recsData.layer_2_ayla_picks.slice(0, 3).map((item) => (
-                  <li key={item.id}>
+                {pickServices.map((service) => (
+                  <li key={service.id}>
                     <RecoCard
-                      item={item}
+                      service={service}
                       onOpen={() =>
-                        navigate(`/customer/masters/${item.id}`)
+                        navigate(`/catalog/${service.id}`)
                       }
                     />
                   </li>
@@ -991,14 +1003,14 @@ function BookingCard({
 }
 
 function RecoCard({
-  item,
+  service,
   onOpen,
 }: {
-  item: CatalogLayer2Item;
+  service: Service;
   onOpen: () => void;
 }) {
-  const titleId = `wd-reco-title-${item.id}`;
-  const reasoningId = `wd-reco-reason-${item.id}`;
+  const titleId = `wd-reco-title-${service.id}`;
+  const metaId = `wd-reco-meta-${service.id}`;
   return (
     <article className="wellness-dash__reco-card">
       <button
@@ -1006,20 +1018,18 @@ function RecoCard({
         className="wellness-dash__reco-btn"
         onClick={onOpen}
         aria-labelledby={titleId}
-        aria-describedby={reasoningId}
+        aria-describedby={metaId}
       >
         <div id={titleId} className="wellness-dash__reco-title">
-          {item.title}
+          {service.name}
         </div>
-        <div id={reasoningId} className="wellness-dash__reco-reasoning">
-          {/* reasoning_text rendered VERBATIM from backend stub —
-              anti-pattern audit at the stub layer (customer-booking.ts
-              comments §10.3). */}
-          {item.reasoning_text}
-        </div>
-        <div className="wellness-dash__reco-meta">
-          от {item.starting_price.toLocaleString("ru-RU")} ₽ ·{" "}
-          {item.next_available_slot}
+        <div id={metaId} className="wellness-dash__reco-meta">
+          {/* Phase 3.1: factual fields only — no reasoning_text exists
+              upstream and fabricating it is forbidden (pilot honesty
+              rule; lib/customer-booking.ts header). */}
+          {formatDuration(service.duration_min)}
+          {service.duration_min && service.price_from ? " · " : ""}
+          {service.price_from ? `от ${formatMoney(service.price_from)}` : ""}
         </div>
       </button>
     </article>
