@@ -96,11 +96,11 @@ class TestAylaAllowList:
         }
 
     def test_package_version_pinned(self) -> None:
-        """Pin: v0.8.1 SHA + [django] extra — additive RELEASING/LTS docs + drift gate."""
+        """Pin: v0.9.0 SHA + [django] extra — memory block export."""
         import ayla_ai_core
 
-        assert ayla_ai_core.__version__ == "0.8.1", (
-            f"ayla-ai-core version drift: expected '0.8.1', got "
+        assert ayla_ai_core.__version__ == "0.9.0", (
+            f"ayla-ai-core version drift: expected '0.9.0', got "
             f"{ayla_ai_core.__version__!r}. Check pyproject.toml [ai-core] "
             "extra + uv.lock. Bump procedure in pyproject.toml header."
         )

@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import timedelta
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NoReturn, Protocol, runtime_checkable
 
 import httpx
 from django.conf import settings
@@ -58,6 +58,11 @@ _BREAKER_NAME = "ayla.booking"
 # out over this many days from today to derive the "which days are free"
 # calendar the booking tools expect (S1 decision — no range endpoint exists).
 AVAILABLE_DATES_WINDOW_DAYS = 14
+
+# S5-LOW2: hard ceiling on the fan-out. ``get_available_dates`` issues one
+# HTTP call per day, so an oversized ``window_days`` (caller bug, future
+# config drift) would hammer Ayla and stall the user. Clamp defensively.
+MAX_AVAILABLE_DATES_WINDOW_DAYS = 31
 
 
 def _fire_breaker_alert(transition: str, failures: int) -> None:
@@ -432,6 +437,24 @@ class AylaBookingHTTPClient:
         self._timeout_s = timeout_s
         self._transport = transport
         self._circuit = _Circuit()
+        # CR-SF1: one persistent httpx.Client reused across calls so the
+        # ``get_available_dates`` fan-out (one request per day) shares a
+        # connection pool instead of building/tearing one client per HTTP
+        # call. The client is a singleton (``get_ayla_booking_client``), so
+        # the pool lives for the process lifetime.
+        self._http: httpx.Client | None = None
+
+    def _client(self) -> httpx.Client:
+        """Lazily build + reuse the connection-pooled HTTP client (CR-SF1)."""
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.Client(timeout=self._timeout_s, transport=self._transport)
+        return self._http
+
+    def close(self) -> None:
+        """Close the pooled client. Optional — for tests / graceful shutdown."""
+        if self._http is not None and not self._http.is_closed:
+            self._http.close()
+        self._http = None
 
     def _headers(self, *, external_user_id: str | None = None) -> dict[str, str]:
         """Build auth headers per #1016.
@@ -471,13 +494,33 @@ class AylaBookingHTTPClient:
             headers["X-Idempotency-Key"] = idempotency_key
 
         try:
-            with httpx.Client(timeout=self._timeout_s, transport=self._transport) as http:
-                resp = http.request(method, url, headers=headers, params=params, json=json_body)
+            http = self._client()
+            resp = http.request(method, url, headers=headers, params=params, json=json_body)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._circuit.record_failure(now=now)
             logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
             raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
         return resp
+
+    def _fail_status(self, resp: httpx.Response, *, now: float) -> NoReturn:
+        """Map a non-success status to an error (CR-SF2 — single source).
+
+        5xx → :class:`BookingUnavailableError` (trips the breaker); any other
+        (4xx) → :class:`BookingBadRequestError` (no trip). Shared by
+        :meth:`_ok` and :meth:`cancel_appointment` so the mapping can't drift.
+        """
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            logger.warning("booking_client.5xx status=%d", resp.status_code)
+            raise BookingUnavailableError(f"http_{resp.status_code}")
+        # Structured status_code/code ride along (dev C1 — the provider
+        # maps 409 SUBSCRIPTION_PAST_DUE to the neutral
+        # specialist_unavailable surface without string-parsing).
+        raise BookingBadRequestError(
+            f"http_{resp.status_code}_{_err_code(resp)}",
+            status_code=resp.status_code,
+            code=_err_code(resp),
+        )
 
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
         """Validate status + unwrap the body. Maps 5xx→Unavailable (trips),
@@ -489,15 +532,7 @@ class AylaBookingHTTPClient:
                 return _unwrap(resp.json())
             except ValueError:
                 return {}
-        if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
-            logger.warning("booking_client.5xx status=%d", resp.status_code)
-            raise BookingUnavailableError(f"http_{resp.status_code}")
-        raise BookingBadRequestError(
-            f"http_{resp.status_code}_{_err_code(resp)}",
-            status_code=resp.status_code,
-            code=_err_code(resp),
-        )
+        self._fail_status(resp, now=now)
 
     # ── reads ────────────────────────────────────────────────────────────────
 
@@ -544,7 +579,8 @@ class AylaBookingHTTPClient:
         """
         today = date_cls.today()
         out: list[str] = []
-        for offset in range(max(window_days, 0)):
+        clamped_window = min(max(window_days, 0), MAX_AVAILABLE_DATES_WINDOW_DAYS)
+        for offset in range(clamped_window):
             day = (today + timedelta(days=offset)).isoformat()
             if self.get_available_times(
                 specialist_id=specialist_id, date=day, service_id=service_id
@@ -605,14 +641,7 @@ class AylaBookingHTTPClient:
             # Already gone — idempotent from the caller's perspective.
             self._circuit.record_success()
             return False
-        if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
-            raise BookingUnavailableError(f"http_{resp.status_code}")
-        raise BookingBadRequestError(
-            f"http_{resp.status_code}_{_err_code(resp)}",
-            status_code=resp.status_code,
-            code=_err_code(resp),
-        )
+        self._fail_status(resp, now=now)
 
     def reschedule_appointment(
         self,

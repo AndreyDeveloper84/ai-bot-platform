@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import date, timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -435,3 +436,96 @@ class TestSingleton:
             second = bc.get_ayla_booking_client()
             assert first is not second
         bc.reset_ayla_booking_client()
+
+
+# ─── hardening (PR-3: CR-SF1 / CR-SF2 / S5-LOW2) ────────────────────────────
+
+
+class TestClientReuse:
+    """CR-SF1: one pooled httpx.Client is reused across the fan-out."""
+
+    def test_single_client_built_for_date_fanout(self, monkeypatch) -> None:
+        real_cls = bc.httpx.Client
+        built: list[Any] = []
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            inst = real_cls(*args, **kwargs)
+            built.append(inst)
+            return inst
+
+        monkeypatch.setattr(bc.httpx, "Client", spy)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"slots": []})
+
+        client = _client_with(handler)
+        client.get_available_dates(specialist_id="spec-1", service_id="svc-1", window_days=5)
+        # Previously one client was built per HTTP call (5); now exactly one.
+        assert len(built) == 1
+
+    def test_client_accessor_is_idempotent(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"slots": []})
+
+        client = _client_with(handler)
+        assert client._client() is client._client()
+
+    def test_close_drops_client(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"slots": []})
+
+        client = _client_with(handler)
+        first = client._client()
+        client.close()
+        assert client._http is None
+        assert client._client() is not first
+
+
+class TestWindowClamp:
+    """S5-LOW2: get_available_dates clamps an oversized window."""
+
+    def test_oversized_window_clamped(self) -> None:
+        calls: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req.url.params.get("date"))
+            return httpx.Response(200, json={"slots": []})
+
+        _client_with(handler).get_available_dates(
+            specialist_id="spec-1", service_id="svc-1", window_days=1000
+        )
+        assert len(calls) == bc.MAX_AVAILABLE_DATES_WINDOW_DAYS
+
+
+class TestCancelStatusMapping:
+    """CR-SF2: cancel shares the consolidated status mapping (_fail_status)."""
+
+    def test_cancel_204_true(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(204)
+
+        assert (
+            _client_with(handler).cancel_appointment(
+                external_user_id="bot:telegram:42", appointment_id="a1"
+            )
+            is True
+        )
+
+    def test_cancel_5xx_trips_breaker(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, json={})
+
+        client = _client_with(handler)
+        for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
+            with pytest.raises(bc.BookingUnavailableError):
+                client.cancel_appointment(external_user_id="x", appointment_id="a1")
+        assert client._circuit.is_open(now=time.monotonic()) is True
+
+    def test_cancel_4xx_bad_request_no_trip(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"code": "BAD", "message": "x"}})
+
+        client = _client_with(handler)
+        with pytest.raises(bc.BookingBadRequestError):
+            client.cancel_appointment(external_user_id="x", appointment_id="a1")
+        assert client._circuit.is_open(now=time.monotonic()) is False

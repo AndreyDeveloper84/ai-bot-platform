@@ -144,14 +144,12 @@ dependencies = [
 #     - `apps/orchestrator/tests/test_apps_boot_log.py::test_boot_log_emits_version`
 #       reads the live version via importlib.metadata — no manual edit needed.
 #
-# Current: v0.8.1 — additive only. Adds RELEASING.md + LTS_POLICY.md +
-# tests/test_public_api_surface.py drift gate. Zero behavioural changes;
-# infrastructure for an eventual v1.0.0 API freeze (deliberately deferred
-# until prod adoption traffic confirms v0.8.0 stable — 2-4 wk observation
-# period in progress).
+# Current: v0.9.0 — memory context builder: exports ``build_memory_block``
+# from the package root (S3.5 concierge memory injection, W5). Snapshot-tested
+# upstream; additive against the v0.8.x allow-list.
 # CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@e73a1b4784c150493c300b316d7a62cd423c8377",
+    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@f773e7dcbd27f03befd11dd3aee6fb6f9327d535",
 ]
 
 dev = [
