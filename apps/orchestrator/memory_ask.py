@@ -16,6 +16,9 @@ Flow (acceptance #7: «вопрос → ответ → память обнови
    text abandons the pending question quietly (helpful restraint —
    the cooldown already prevents an immediate re-ask).
 
+Concierge Mode rollback (runbook §7): ``CONCIERGE_MEMORY_ENABLED=false``
+bypasses both public functions — no eligibility read, no marks, no writes.
+
 Contract discipline (PERSONAL_CONTEXT_INTERNAL_API_CONTRACT v1.0): all
 wire calls go through the W3 gated services (memory_green enforced
 inside; exception-free GatedResult). ``favorite_masters`` is NOT asked
@@ -41,6 +44,7 @@ from apps.identity.services.personal_context import (
 )
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.memory_block import concierge_memory_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +118,8 @@ def maybe_weave_question(
     unsupported field, hint missing, gate closed, any error).
     """
     try:
+        if not concierge_memory_enabled():
+            return reply
         if read_pending(conversation.id) is not None:
             return reply
         elig = get_ask_eligibility(bot_user)
@@ -161,6 +167,8 @@ def try_handle_answer(
     cooldown already blocks an immediate re-ask).
     """
     try:
+        if not concierge_memory_enabled():
+            return None
         pending = read_pending(conversation.id)
         if pending is None:
             return None
