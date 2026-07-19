@@ -1,58 +1,57 @@
 /**
- * Customer records screen — Tier 1 Priority 5 Phase B (R1 main list).
+ * Customer records screen — REAL bookings (pilot phase 3.2).
  *
- * Spec: `docs/screens/customer-records-flow.md` §3 (R1 main records list,
- * 2-section structure + Variant C smart grouping + filter chips on
- * history) + §7 (R5 empty states) + §9 (states matrix).
+ * Spec: `docs/screens/customer-records-flow.md` §3 (R1 main records
+ * list) + §7 (R5 empty states) + §9 (states matrix).
  *
- * # Tab structure
+ * Phase 3.2 (stub removal, orchestrator GO): data comes from the real
+ * `GET /bookings/list` (upcoming / `?status=past` history) via
+ * `lib/customer-records.ts`. Gone with the stub: multi-tenant groupings
+ * (single-tenant pilot — the field doesn't exist upstream), «Сообщить
+ * по записи» AMM modal (no endpoint), repeat-intent prefill (no
+ * endpoint — «Записаться ещё» opens the real catalog), invented
+ * prices/addresses. Home = records: this screen is the tab root at
+ * `/customer/main` (also mounted at `/customer/records`).
  *
- * Per Tau §3.1 — 2 top-level tabs «Ближайшие (N)» / «История (N)». Default
- * landing «Ближайшие» (Q-R-10 verdict). Filter chips appear on the
- * «История» tab when total past >= 5 (Tau §13 implementer note #8).
+ * # Tab structure (unchanged)
+ *
+ * Two top-level tabs «Ближайшие (N)» / «История (N)», default
+ * «Ближайшие». Filter chips on «История» when total past >= 5 (Tau
+ * §13 implementer note #8) — unique masters from the loaded data.
  *
  * # 5-state matrix (Wellness pattern reuse)
  *
  *   loading  → 3 skeleton cards
- *   ok       → render groupings
- *   empty    → EmptyRecordsState (2 cases: never had OR upcoming empty
- *               but has past)
+ *   ok       → render time buckets
+ *   empty    → EmptyRecordsState
  *   error    → generic copy + retry
  *   offline  → banner «Записи могут быть устаревшими»
  *
  * # Voice locks
  *
- *   - «Записи» (NOT «Bookings»)
- *   - «Сообщить по записи» (F1 lock)
- *   - «ты» canonical (F2 lock)
- *   - no exclamation marks anywhere
+ *   - «Записи» (NOT «Bookings»), «ты» canonical, no exclamation marks
  *
  * # WCAG (§13 inline)
  *
  *   - Tab strip uses role="tablist" / role="tab" / aria-controls.
  *   - Skip link «К списку записей» so SR users can bypass the header.
- *   - Tenant + time group headers use <h2> / <h3> semantics.
- *   - Tab switch focuses first card (focus order = WCAG 2.4.3).
- *   - prefers-reduced-motion respected via existing .skeleton class.
+ *   - Time group headers use heading semantics.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BookingCard, BookingCardSkeleton } from "../components/BookingCard";
-import { BookingMessageModal } from "../components/BookingMessageModal";
 import { EmptyRecordsState } from "../components/EmptyRecordsState";
-import { TenantGroupHeader } from "../components/TenantGroupHeader";
 import { TimeGroupHeader } from "../components/TimeGroupHeader";
-import {
-  annotateGroupings,
-  getMyBookings,
-  getRepeatIntent,
-  type AnnotatedGrouping,
-  type BookingListItem,
-  type BookingSection,
-  type BookingsListResponse,
-} from "../lib/customer-records";
 import { ApiError } from "../lib/api";
+import {
+  annotateItems,
+  getMyBookings,
+  type AnnotatedRecordItem,
+  type BookingSection,
+  type RecordItem,
+  type RecordsPage,
+} from "../lib/customer-records";
 
 // ---------------------------------------------------------------------------
 // State model — per-section isolation so flipping tabs doesn't blank the
@@ -69,18 +68,7 @@ function isOnline(): boolean {
   return navigator.onLine !== false;
 }
 
-// ---------------------------------------------------------------------------
-// Filter chip vocabulary — Tau §3.4 ("Все" / by service / by master).
-// MVP cut: only «Все» + dynamically-generated unique-master chips.
-// The «У {master}» chips come from the actual data — no hardcoded list.
-// ---------------------------------------------------------------------------
-
 const FILTER_ALL = "__all__";
-
-interface FilterState {
-  /** Active filter key — either FILTER_ALL or a master_first_name. */
-  active: string;
-}
 
 // ---------------------------------------------------------------------------
 // Main screen.
@@ -90,23 +78,19 @@ export function CustomerRecordsScreen() {
   const navigate = useNavigate();
 
   const [activeTab, setActiveTab] = useState<BookingSection>("upcoming");
-  const [upcoming, setUpcoming] = useState<Slice<BookingsListResponse>>({
+  const [upcoming, setUpcoming] = useState<Slice<RecordsPage>>({
     kind: "loading",
   });
-  const [history, setHistory] = useState<Slice<BookingsListResponse>>({
+  const [history, setHistory] = useState<Slice<RecordsPage>>({
     kind: "loading",
   });
   const [online, setOnline] = useState<boolean>(isOnline());
-  const [filter, setFilter] = useState<FilterState>({ active: FILTER_ALL });
-  const [messageBooking, setMessageBooking] = useState<BookingListItem | null>(
-    null,
-  );
-  const [toast, setToast] = useState<string | null>(null);
+  const [filter, setFilter] = useState<{ active: string }>({ active: FILTER_ALL });
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // ── data fetch ────────────────────────────────────────────────────────
   const fetchSection = useCallback(async (section: BookingSection) => {
-    const setSlice =
-      section === "upcoming" ? setUpcoming : setHistory;
+    const setSlice = section === "upcoming" ? setUpcoming : setHistory;
     setSlice({ kind: "loading" });
     try {
       const data = await getMyBookings(section);
@@ -129,6 +113,35 @@ export function CustomerRecordsScreen() {
     void fetchSection("history");
   }, [fetchSection]);
 
+  // «Показать ещё» — real cursor pagination (`before` = next_cursor).
+  const loadMore = useCallback(async () => {
+    const slice = activeTab === "upcoming" ? upcoming : history;
+    if (slice.kind !== "ok" || !slice.data.nextCursor) return;
+    const cursor = slice.data.nextCursor;
+    setLoadingMore(true);
+    try {
+      const page = await getMyBookings(activeTab, cursor);
+      const setSlice = activeTab === "upcoming" ? setUpcoming : setHistory;
+      setSlice((s) =>
+        s.kind === "ok"
+          ? {
+              kind: "ok",
+              data: {
+                ...s.data,
+                items: [...s.data.items, ...page.items],
+                totalCount: s.data.totalCount + page.items.length,
+                nextCursor: page.nextCursor,
+              },
+            }
+          : s,
+      );
+    } catch {
+      /* load-more failure is silent — the button stays for a retry */
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [activeTab, upcoming, history]);
+
   // ── online / offline transitions ─────────────────────────────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -147,133 +160,97 @@ export function CustomerRecordsScreen() {
     setFilter({ active: FILTER_ALL });
   }, [activeTab]);
 
-  // Toast auto-clear after 3s.
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 3000);
-    return () => clearTimeout(t);
-  }, [toast]);
-
   // ── derived state ────────────────────────────────────────────────────
   const upcomingData = upcoming.kind === "ok" ? upcoming.data : null;
   const historyData = history.kind === "ok" ? history.data : null;
 
-  const upcomingCount = upcomingData?.total_count ?? 0;
-  const historyCount = historyData?.total_count ?? 0;
+  const upcomingCount = upcomingData?.totalCount ?? 0;
+  const historyCount = historyData?.totalCount ?? 0;
 
   // Filter chip eligibility — Tau §13 #8: show only when history has >=5.
-  const filterChipsEnabled =
-    activeTab === "history" && historyCount >= 5;
+  const filterChipsEnabled = activeTab === "history" && historyCount >= 5;
 
-  // Unique master names extracted from current section for filter chips.
+  // Unique master names from the loaded history — no hardcoded list.
   const masterFilterOptions = useMemo(() => {
     if (!filterChipsEnabled || !historyData) return [];
     const seen = new Set<string>();
     const ordered: string[] = [];
-    for (const g of historyData.groupings) {
-      for (const b of g.bookings) {
-        if (!seen.has(b.master_first_name)) {
-          seen.add(b.master_first_name);
-          ordered.push(b.master_first_name);
-        }
+    for (const b of historyData.items) {
+      if (!seen.has(b.masterName)) {
+        seen.add(b.masterName);
+        ordered.push(b.masterName);
       }
     }
     return ordered;
   }, [filterChipsEnabled, historyData]);
 
-  // Apply filter to the active section's groupings.
-  const annotatedGroupings: AnnotatedGrouping[] = useMemo(() => {
+  // Apply the master filter to the active section's items.
+  const annotatedItems: AnnotatedRecordItem[] = useMemo(() => {
     const data = activeTab === "upcoming" ? upcomingData : historyData;
     if (!data) return [];
-    const annotated = annotateGroupings(data.groupings, activeTab);
-    if (filter.active === FILTER_ALL) return annotated;
-    // Master-name filter.
-    return annotated
-      .map((g) => ({
-        ...g,
-        bookings: g.bookings.filter(
-          (b) => b.master_first_name === filter.active,
-        ),
-      }))
-      .filter((g) => g.bookings.length > 0);
+    const items =
+      filter.active === FILTER_ALL
+        ? data.items
+        : data.items.filter((b) => b.masterName === filter.active);
+    return annotateItems(items, activeTab);
   }, [activeTab, historyData, upcomingData, filter.active]);
 
   const slice = activeTab === "upcoming" ? upcoming : history;
-  const sectionCount =
-    activeTab === "upcoming" ? upcomingCount : historyCount;
-
-  const isMultiTenant = annotatedGroupings.length > 1;
+  const sectionCount = activeTab === "upcoming" ? upcomingCount : historyCount;
 
   // Empty-state branching — Tau §9.1.
-  const emptyVariant: "no_bookings_ever" | "no_upcoming_has_past" | "no_history_has_upcoming" | null = (() => {
+  const emptyVariant:
+    | "no_bookings_ever"
+    | "no_upcoming_has_past"
+    | "no_history_has_upcoming"
+    | null = (() => {
     if (slice.kind !== "ok" || sectionCount > 0) return null;
     if (activeTab === "upcoming") {
       if (historyCount === 0) return "no_bookings_ever";
       return "no_upcoming_has_past";
     }
-    // history empty
     if (upcomingCount > 0) return "no_history_has_upcoming";
     return "no_bookings_ever";
   })();
 
   // ── handlers ─────────────────────────────────────────────────────────
   const handleOpenBooking = useCallback(
-    (b: BookingListItem) => {
-      navigate(`/customer/records/${b.booking_id}`);
+    (b: RecordItem) => {
+      navigate(`/customer/records/${b.bookingId}`);
     },
     [navigate],
   );
 
-  const handleMessage = useCallback((b: BookingListItem) => {
-    setMessageBooking(b);
-  }, []);
-
-  // handleRoute dropped (round-1 amendment 2026-05-27) — «Маршрут»
-  // button removed from list card to fix lying CTA. Real route deeplink
-  // lives on detail screen.
-
   const handleReschedule = useCallback(
-    (b: BookingListItem) => {
-      // Reuses existing reschedule flow under /my-visits.
-      navigate(`/my-visits/${b.booking_id}/reschedule`);
+    (b: RecordItem) => {
+      // Real reschedule flow (existing screen, /my-visits namespace).
+      navigate(`/my-visits/${b.bookingId}/reschedule`);
     },
     [navigate],
   );
 
   const handleCancel = useCallback(
-    (b: BookingListItem) => {
-      // Cancel flow lives on the detail screen per existing pattern.
-      navigate(`/customer/records/${b.booking_id}`);
+    (b: RecordItem) => {
+      // Cancel flow lives on the detail screen (real 2-step + undo).
+      navigate(`/customer/records/${b.bookingId}`);
     },
     [navigate],
   );
 
-  const handleRepeat = useCallback(
-    async (b: BookingListItem) => {
-      try {
-        const intent = await getRepeatIntent(b.booking_id);
-        if (intent.prefill_available && intent.booking_flow_url) {
-          navigate(intent.booking_flow_url);
-          return;
-        }
-        // Fallback — graceful degradation to catalog.
-        navigate("/customer/catalog");
-      } catch {
-        navigate("/customer/catalog");
-      }
-    },
-    [navigate],
-  );
+  const handleRepeat = useCallback(() => {
+    // No prefill endpoint in the pilot — the real catalog is the honest
+    // repeat path (phase 3.1 made it real).
+    navigate("/customer/catalog");
+  }, [navigate]);
 
   const handleReview = useCallback(
-    (b: BookingListItem) => {
-      navigate(`/feedback/${b.booking_id}`);
+    (b: RecordItem) => {
+      navigate(`/feedback/${b.bookingId}`);
     },
     [navigate],
   );
 
   const handleAskAyla = useCallback(() => {
-    // Customer chat lives on the root. Navigate there.
     navigate("/");
   }, [navigate]);
 
@@ -290,14 +267,6 @@ export function CustomerRecordsScreen() {
       </a>
 
       <header className="records-screen__header" role="banner">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={() => navigate("/customer/main")}
-        >
-          <span aria-hidden="true">←</span>
-        </button>
         <h1 className="records-screen__title">Записи</h1>
       </header>
 
@@ -413,11 +382,7 @@ export function CustomerRecordsScreen() {
             variant={emptyVariant}
             onFindService={handleFindService}
             onAskAyla={handleAskAyla}
-            onRepeatLast={() => {
-              // From the «no upcoming, has past» state — switch to history
-              // tab and surface the «Записаться ещё» CTAs there.
-              setActiveTab("history");
-            }}
+            onRepeatLast={() => setActiveTab("history")}
             onGoToHistory={() => setActiveTab("history")}
           />
         )}
@@ -425,7 +390,7 @@ export function CustomerRecordsScreen() {
         {/* Filter active but produced 0 items. */}
         {slice.kind === "ok" &&
           !emptyVariant &&
-          annotatedGroupings.length === 0 && (
+          annotatedItems.length === 0 && (
             <div
               className="records-screen__filter-empty"
               role="status"
@@ -442,75 +407,35 @@ export function CustomerRecordsScreen() {
             </div>
           )}
 
-        {/* Render groupings. */}
-        {slice.kind === "ok" && annotatedGroupings.length > 0 && (
+        {/* Render time buckets. */}
+        {slice.kind === "ok" && annotatedItems.length > 0 && (
           <div className="records-screen__list">
-            {annotatedGroupings.map((g) => {
-              return (
-                <section
-                  key={g.tenant_id}
-                  className="records-screen__group"
-                  aria-label={isMultiTenant ? g.tenant_name : undefined}
-                >
-                  {isMultiTenant && (
-                    <TenantGroupHeader tenantName={g.tenant_name} />
-                  )}
-
-                  {/* Bucket by _timeGroup within the tenant. */}
-                  {renderTimeBuckets({
-                    bookings: g.bookings,
-                    activeTab,
-                    isMultiTenant,
-                    onOpen: handleOpenBooking,
-                    onMessage: handleMessage,
-                    onReschedule: handleReschedule,
-                    onCancel: handleCancel,
-                    onRepeat: (b) => void handleRepeat(b),
-                    onReview: handleReview,
-                  })}
-                </section>
-              );
+            {renderTimeBuckets({
+              items: annotatedItems,
+              activeTab,
+              onOpen: handleOpenBooking,
+              onReschedule: handleReschedule,
+              onCancel: handleCancel,
+              onRepeat: handleRepeat,
+              onReview: handleReview,
             })}
 
-            {/* Pagination — Tau §3.4 «Показать ещё (N)». */}
-            {slice.data.has_more && (
+            {/* Real cursor pagination. */}
+            {slice.data.nextCursor && (
               <button
                 type="button"
                 className="btn-secondary records-screen__load-more"
-                onClick={() => {
-                  /* TODO W4: wire next_cursor pagination. Stub MVP
-                   * returns has_more=false, so this branch is unreached
-                   * in stub mode. */
-                }}
+                disabled={loadingMore}
+                onClick={() => void loadMore()}
               >
-                Показать ещё
+                {loadingMore ? "Загружаю…" : "Показать ещё"}
               </button>
             )}
           </div>
         )}
       </main>
 
-      {/* AMM modal. */}
-      {messageBooking && (
-        <BookingMessageModal
-          open={!!messageBooking}
-          booking={messageBooking}
-          onClose={() => setMessageBooking(null)}
-          onSent={(r) =>
-            setToast(`Передала ${r.masterFirstName} из ${r.tenantName}.`)
-          }
-        />
-      )}
-
-      {/* Toast. */}
-      {toast && (
-        <div className="records-screen__toast" role="status" aria-live="polite">
-          {toast}
-        </div>
-      )}
-
-      {/* Bottom nav — mirror wellness dashboard nav so the «Записи» tab
-          is selected. Reuses the wellness-dash__nav styles. */}
+      {/* Bottom nav — records is home, the «Записи» tab is selected. */}
       <nav className="wellness-dash__nav" aria-label="Основная навигация">
         <button
           type="button"
@@ -573,72 +498,53 @@ export function CustomerRecordsScreen() {
 }
 
 // ---------------------------------------------------------------------------
-// Render helper — time-bucket the bookings within a tenant group.
+// Render helper — time-bucket the items.
 // ---------------------------------------------------------------------------
 
 interface BucketProps {
-  bookings: import("../lib/customer-records").AnnotatedBookingItem[];
+  items: AnnotatedRecordItem[];
   activeTab: BookingSection;
-  isMultiTenant: boolean;
-  onOpen: (b: BookingListItem) => void;
-  onMessage: (b: BookingListItem) => void;
-  onReschedule: (b: BookingListItem) => void;
-  onCancel: (b: BookingListItem) => void;
-  onRepeat: (b: BookingListItem) => void;
-  onReview: (b: BookingListItem) => void;
+  onOpen: (b: RecordItem) => void;
+  onReschedule: (b: RecordItem) => void;
+  onCancel: (b: RecordItem) => void;
+  onRepeat: () => void;
+  onReview: (b: RecordItem) => void;
 }
 
 function renderTimeBuckets(props: BucketProps) {
-  const {
-    bookings,
-    activeTab,
-    isMultiTenant,
-    onOpen,
-    onMessage,
-    onReschedule,
-    onCancel,
-    onRepeat,
-    onReview,
-  } = props;
+  const { items, activeTab, onOpen, onReschedule, onCancel, onRepeat, onReview } =
+    props;
 
   // Stable bucket order — preserves the order in which buckets first
-  // appear in the data. (Backend already returns items sorted by
-  // visit_at; we just group consecutive items by label.)
-  const buckets = new Map<
-    string,
-    import("../lib/customer-records").AnnotatedBookingItem[]
-  >();
-  for (const b of bookings) {
+  // appear in the data (backend already sorted rows by visit_at).
+  const buckets = new Map<string, AnnotatedRecordItem[]>();
+  for (const b of items) {
     const arr = buckets.get(b._timeGroup) ?? [];
     arr.push(b);
     buckets.set(b._timeGroup, arr);
   }
 
-  return Array.from(buckets.entries()).map(([label, items]) => (
+  return Array.from(buckets.entries()).map(([label, bucketItems]) => (
     <div key={label} className="records-screen__time-bucket">
-      <TimeGroupHeader label={label} level={isMultiTenant ? 3 : 2} />
+      <TimeGroupHeader label={label} level={2} />
       <ul className="records-screen__items" role="list">
-        {items.map((b) => {
+        {bucketItems.map((b) => {
           const variant: "nearest" | "future" | "past" =
             activeTab === "history"
               ? "past"
-              : b.is_nearest
+              : b.isNearest
                 ? "nearest"
                 : "future";
           return (
-            <li key={b.booking_id}>
+            <li key={b.bookingId}>
               <BookingCard
                 item={b}
                 variant={variant}
                 onOpen={() => onOpen(b)}
-                onMessage={() => onMessage(b)}
                 onReschedule={() => onReschedule(b)}
                 onCancel={() => onCancel(b)}
-                onRepeat={() => onRepeat(b)}
+                onRepeat={onRepeat}
                 onReview={() => onReview(b)}
-                reviewPending={
-                  variant === "past" && b.actions_available.includes("review")
-                }
               />
             </li>
           );
