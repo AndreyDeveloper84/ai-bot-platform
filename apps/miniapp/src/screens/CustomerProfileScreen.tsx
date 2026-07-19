@@ -402,6 +402,24 @@ export function CustomerProfileScreen() {
             </section>
             )}
 
+            {/* Cards (C7.2 skeleton) — real screen, honest empty state
+                until the W3 passthrough ships. */}
+            <section
+              className="profile-section"
+              aria-labelledby="profile-cards-h2"
+            >
+              <h2 id="profile-cards-h2" className="profile-section__heading">
+                Оплата
+              </h2>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => navigate("/customer/cards")}
+              >
+                Мои карты
+              </button>
+            </section>
+
             {/* R5 — Notifications */}
             <NotificationCard
               supportPreset={notificationsSheet}

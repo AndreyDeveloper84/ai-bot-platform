@@ -24,6 +24,7 @@
 
 import type { RecordItem } from "../lib/customer-records";
 import { renderStatus } from "../lib/customer-records";
+import { PaymentStatusBadge } from "./PaymentStatusBadge";
 import { StatusBadge, tintColourVar } from "./StatusBadge";
 
 export type BookingCardVariant = "nearest" | "future" | "past";
@@ -60,6 +61,9 @@ export function BookingCard({
     >
       <div className="records-card__status-row">
         <StatusBadge rendering={rendering} />
+        {/* C7.3 — payment badge only when the passthrough ships a
+            capture_state; hidden/unknown states render nothing. */}
+        <PaymentStatusBadge state={item.paymentState} />
       </div>
 
       <div className="records-card__when">{item.datetimeLabel}</div>

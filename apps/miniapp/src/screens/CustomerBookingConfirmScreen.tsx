@@ -62,7 +62,7 @@ import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { formatMoney, formatVisitFull } from "../lib/format";
-import { getInitData } from "../lib/max-sdk";
+import { getInitData, openPaymentConfirmation } from "../lib/max-sdk";
 import {
   restorePendingIntent,
   savePendingIntent,
@@ -77,10 +77,23 @@ import {
 
 type ErrState =
   | { kind: "slot_unavailable"; substituteName?: string; substituteTime?: string }
+  | { kind: "master_unavailable" }
   | { kind: "salon_suspended" }
   | { kind: "server" }
   | { kind: "network" }
   | { kind: "other"; detail: string };
+
+/**
+ * C1 (billing eligibility) → client-facing slug. Frozen contract
+ * (PILOT_CONTRACTS §2): the debt reason NEVER reaches the customer API —
+ * the refusal arrives as generic UNAVAILABLE. W3 maps the seam refusal
+ * onto this slug; this constant is the single point to adjust when the
+ * mapping lands. The UI must stay neutral (no debt wording) regardless.
+ */
+const C1_UNAVAILABLE_SLUG = "unavailable";
+
+/** Payment choice per C7.4 / AMD-002 — online is optional (D6). */
+type PaymentChoice = "onsite" | "online";
 
 /**
  * Anonymous == no MAX initData available. In dev mode with a VITE
@@ -99,6 +112,7 @@ export function CustomerBookingConfirmScreen() {
   const [err, setErr] = useState<ErrState | null>(null);
   const [notesOpen, setNotesOpen] = useState(false);
   const [note, setNote] = useState("");
+  const [paymentChoice, setPaymentChoice] = useState<PaymentChoice>("onsite");
   const [anonymous] = useState<boolean>(() => isAnonymous());
 
   useBackButton({ onBack: () => navigate(-1) });
@@ -184,11 +198,19 @@ export function CustomerBookingConfirmScreen() {
     setSubmitting(true);
     setErr(null);
     try {
-      const { booking } = await createCustomerBooking({
+      const { booking, payment } = await createCustomerBooking({
         service_id: draft.serviceId,
         master_id: draft.masterId,
         visit_at: draft.visitAt,
+        // AMD-002 / C7.4 — user's payment choice rides the create call.
+        payment_required: paymentChoice === "online",
       });
+      // C7.4 — the contour returns a confirmation_url once the W3
+      // passthrough is live; open it in the webview before the success
+      // screen. Absent today (pre-passthrough) → straight to success.
+      if (paymentChoice === "online" && payment?.confirmation_url) {
+        openPaymentConfirmation(payment.confirmation_url);
+      }
       haptics.notify("success");
       resetBooking();
       navigate(`/customer/booking/success/${booking.id}`, {
@@ -207,6 +229,10 @@ export function CustomerBookingConfirmScreen() {
         // render the generic «выберите другое время» fallback (no
         // «Карина лучше» / «рекомендуем» — anti-pattern forbidden).
         setErr({ kind: "slot_unavailable" });
+      } else if (e instanceof ApiError && e.slug === C1_UNAVAILABLE_SLUG) {
+        // C1 refusal (contract §2) — neutral message only; the backend
+        // never sends the debt reason to the customer API.
+        setErr({ kind: "master_unavailable" });
       } else if (e instanceof ApiError && e.slug === "tenant_suspended") {
         setErr({ kind: "salon_suspended" });
       } else if (e instanceof ApiError && e.status >= 500) {
@@ -347,6 +373,48 @@ export function CustomerBookingConfirmScreen() {
         </dl>
       </div>
 
+      {/* 1b. Payment choice (C7.4 / AMD-002) — rides the create call as
+          `payment_required`. The contour itself (webview + statuses)
+          activates with the W3 passthrough; the choice is real today. */}
+      <fieldset className="customer-confirm__payment">
+        <legend className="customer-confirm__payment-title">
+          Как оплатишь?
+        </legend>
+        <label className="customer-confirm__payment-option">
+          <input
+            type="radio"
+            name="payment-choice"
+            checked={paymentChoice === "onsite"}
+            onChange={() => setPaymentChoice("onsite")}
+          />
+          <span>
+            <span className="customer-confirm__payment-label">
+              Оплатить на месте
+            </span>
+            <span className="customer-confirm__payment-hint">
+              Наличными или картой в салоне.
+            </span>
+          </span>
+        </label>
+        <label className="customer-confirm__payment-option">
+          <input
+            type="radio"
+            name="payment-choice"
+            checked={paymentChoice === "online"}
+            onChange={() => setPaymentChoice("online")}
+          />
+          <span>
+            <span className="customer-confirm__payment-label">
+              Оплатить онлайн
+            </span>
+            <span className="customer-confirm__payment-hint">
+              Сумма будет зарезервирована при записи и спишется после
+              подтверждения визита.
+            </span>
+          </span>
+        </label>
+      </fieldset>
+
       {/* 3. Cancellation policy — compact */}
       <p className="customer-confirm__policy">
         Можно отменить за 4 часа до визита.
@@ -408,6 +476,41 @@ export function CustomerBookingConfirmScreen() {
           >
             Выбрать другое время
           </button>
+        </div>
+      )}
+      {err?.kind === "master_unavailable" && (
+        <div className="callout" role="alert">
+          {/* C1 §2 — neutral wording only, the debt reason stays
+              server-side by contract. */}
+          <p style={{ margin: 0 }}>
+            Сейчас запись к этому специалисту недоступна. Можно выбрать
+            другое время или посмотреть других мастеров.
+          </p>
+          <div
+            style={{
+              display: "flex",
+              gap: "var(--s-2)",
+              marginTop: "var(--s-3)",
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() =>
+                navigate(`/customer/masters/${draft.masterId}/slots`)
+              }
+            >
+              Выбрать другое время
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/customer/catalog")}
+            >
+              Посмотреть других мастеров
+            </button>
+          </div>
         </div>
       )}
       {err?.kind === "salon_suspended" && (

@@ -177,6 +177,24 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     expect(screen.queryByRole("button", { name: "Оценить визит" })).not.toBeInTheDocument();
   });
 
+  it("shows the C7.3 payment badge when the booking carries a capture_state", async () => {
+    mockedFetch.mockResolvedValue({
+      booking: { ...FUTURE, payment: { capture_state: "authorized" } },
+    });
+    renderScreen("b-1");
+    expect(await screen.findByText("Зарезервировано")).toBeInTheDocument();
+  });
+
+  it("never shows waiting_for_capture to the customer (ADR)", async () => {
+    mockedFetch.mockResolvedValue({
+      booking: { ...FUTURE, payment: { capture_state: "waiting_for_capture" } },
+    });
+    renderScreen("b-1");
+    await screen.findByText("Маникюр");
+    expect(screen.queryByText(/capture/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Зарезервировано")).not.toBeInTheDocument();
+  });
+
   it("404 renders an honest «booking is gone» state", async () => {
     mockedFetch.mockRejectedValue(new ApiError(404, "not_found", "booking not found"));
     renderScreen("b-gone");

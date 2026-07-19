@@ -82,6 +82,8 @@ export interface RecordItem {
   isNearest: boolean;
   actions: BookingAction[];
   rating: number | null;
+  /** C7.3 — raw capture_state when the passthrough ships it; else null. */
+  paymentState?: string | null;
 }
 
 export interface RecordsPage {
@@ -146,6 +148,7 @@ function toRecordItem(
     isNearest,
     actions: actionsFor(item, section),
     rating: item.rating,
+    paymentState: item.payment?.capture_state ?? null,
   };
 }
 

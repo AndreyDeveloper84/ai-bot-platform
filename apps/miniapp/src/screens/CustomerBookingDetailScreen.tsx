@@ -28,6 +28,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
+import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
 import { StatusBadge } from "../components/StatusBadge";
 import {
   ApiError,
@@ -199,6 +200,8 @@ export function CustomerBookingDetailScreen() {
       <main className="records-screen__main">
         <div className="records-card__status-row">
           <StatusBadge rendering={rendering} />
+          {/* C7.3 — payment status when the passthrough ships it. */}
+          <PaymentStatusBadge state={b.payment?.capture_state} />
         </div>
 
         <div className="confirm-card">

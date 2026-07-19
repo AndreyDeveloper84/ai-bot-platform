@@ -225,6 +225,27 @@ export function removeDeviceStorage(key: string): void {
 }
 
 /**
+ * Open the payment confirmation page (C7.4) — YooKassa checkout URL
+ * returned by the payment-create passthrough. In MAX we hand the URL
+ * to the wrapper's openLink (webview overlay); in a plain browser we
+ * open a new tab. Inert until the W3 passthrough returns the field.
+ */
+export function openPaymentConfirmation(url: string): void {
+  const b = maxBridge();
+  if (b?.openLink) {
+    try {
+      b.openLink(url);
+      return;
+    } catch (err) {
+      console.warn("[max-sdk] openLink failed, falling back to window.open", err);
+    }
+  }
+  if (typeof window !== "undefined") {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+/**
  * Ask MAX to close the Mini App. Falls back to ``history.back()`` when
  * the bridge isn't available — at least navigates the dev browser away.
  */
