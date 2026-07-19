@@ -114,6 +114,7 @@ class FakeAylaBooking:
         service_id: str,
         start_datetime: str,
         idempotency_key: str | None = None,
+        payment_required: bool = True,
     ) -> AylaBookingRecord:
         self.calls.append(
             {
@@ -124,6 +125,7 @@ class FakeAylaBooking:
                 "service_id": service_id,
                 "start_datetime": start_datetime,
                 "idempotency_key": idempotency_key,
+                "payment_required": payment_required,
             }
         )
         self._maybe_raise()
@@ -304,6 +306,25 @@ class TestWrites:
         _adapter(fake1).create_record(**kwargs)
         _adapter(fake2).create_record(**kwargs)
         assert fake1.calls[0]["idempotency_key"] == fake2.calls[0]["idempotency_key"]
+
+    def test_create_record_payment_required_passed_through(self) -> None:
+        """AMD-002: the adapter forwards payment_required verbatim and folds
+        it into the idempotency seed — same intent dedups, flipped intent
+        (online pay → no prepay) mints a NEW key."""
+        fake = FakeAylaBooking()
+        base: dict[str, Any] = dict(
+            staff_id=_SPEC_UUID,
+            services=[_SVC_UUID],
+            datetime="2026-06-10T14:00:00",
+            client_phone="79991234567",
+            client_name="Anna",
+        )
+        _adapter(fake).create_record(**base, payment_required=False)
+        _adapter(fake).create_record(**base)  # default True
+        call_false, call_true = fake.calls
+        assert call_false["payment_required"] is False
+        assert call_true["payment_required"] is True
+        assert call_false["idempotency_key"] != call_true["idempotency_key"]
 
     def test_create_record_without_client_id_raises(self) -> None:
         # BotUser not linked to Ayla → no client_id → create fails loudly

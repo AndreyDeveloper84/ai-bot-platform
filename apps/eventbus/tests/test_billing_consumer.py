@@ -163,3 +163,51 @@ class TestPayloadValidation:
         billing_records = [r for r in caplog.records if r.name == "apps.eventbus.consumers.billing"]
         assert billing_records
         assert all("690.00" not in r.getMessage() for r in billing_records)
+
+
+class TestProducerShapePin:
+    """Contract pin vs the REAL W2 producer (beautygo_backend
+    billing/events.py, verified on origin/dev 2026-07-19): UUID4
+    event_id (AMD-008), actor='system', payload shapes exactly as
+    emitted. Deviations on either side turn this red."""
+
+    UUID4_EVENT_ID = "3f6b8f0e-9a2c-4b1d-8e5f-7c2a9d4e6b1a"
+
+    @pytest.mark.parametrize(
+        ("event_name", "data"),
+        [
+            (
+                "subscription.activated",
+                {
+                    # emit_subscription_activated: tariff code, date-or-None.
+                    "specialist_id": SPECIALIST_ID,
+                    "tariff": "solo",
+                    "period_end": "2026-08-31",
+                },
+            ),
+            (
+                "subscription.past_due",
+                {
+                    "specialist_id": SPECIALIST_ID,
+                    "debt_amount": "690.00",  # f"{debt:.2f}" — строка
+                    "failed_attempts": 3,  # int
+                },
+            ),
+            (
+                "billing.fee_charged",
+                {
+                    # emit_fee_charged: period = period_start.isoformat() (дата).
+                    "specialist_id": SPECIALIST_ID,
+                    "appointment_id": APPOINTMENT_ID,
+                    "amount": "90.00",
+                    "period": "2026-08-01",
+                },
+            ),
+        ],
+    )
+    def test_uuid4_event_and_producer_payload_accepted(self, event_name: str, data: dict) -> None:
+        env = _envelope(event_name, data=data, event_id=self.UUID4_EVENT_ID)
+        result = dispatch_envelope(env)
+        assert result.outcome == DispatchOutcome.OK
+        # Replay of the same UUID4 event_id dedupes.
+        assert dispatch_envelope(env).outcome == DispatchOutcome.DUPLICATE

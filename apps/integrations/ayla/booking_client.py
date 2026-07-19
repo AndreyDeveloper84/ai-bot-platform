@@ -270,6 +270,7 @@ class AylaBookingClient(Protocol):
         service_id: str,
         start_datetime: str,
         idempotency_key: str | None = ...,
+        payment_required: bool = ...,
     ) -> AylaBookingRecord: ...
 
     def cancel_appointment(
@@ -599,12 +600,17 @@ class AylaBookingHTTPClient:
         service_id: str,
         start_datetime: str,
         idempotency_key: str | None = None,
+        payment_required: bool = True,
     ) -> AylaBookingRecord:
+        # AMD-002 (D6): payment_required=false → запись без предоплаты,
+        # Ayla подтверждает сразу (CONFIRMED + booking.confirmed), Payment
+        # не создаётся. default true — обратная совместимость контракта.
         body = {
             "client_id": client_id,
             "specialist_id": specialist_id,
             "service_id": service_id,
             "start_datetime": start_datetime,
+            "payment_required": payment_required,
         }
         resp = self._request(
             "POST",

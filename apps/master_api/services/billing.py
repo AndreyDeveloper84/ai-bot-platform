@@ -13,18 +13,15 @@ field set (money as Decimal strings with exactly two places, RUB, ISO
 dates), and W4 consumes only the approved schema. This layer adds
 nothing and reshapes nothing; additive upstream fields ride through.
 
-### The specialist-id seam (OPEN CONTRACT GAP)
+### The specialist-id seam (resolved by AMD-005)
 
-C2/C3 key on Ayla ``SpecialistProfile.id``. The bot's
-:class:`~apps.catalog.models.CatalogMaster` mirror keys masters on the
-Ayla **User** UUID (``ayla_user_id``) — a *different* id
-(``SpecialistProfile.id`` is its own uuid4, verified against
-``beautygo_backend/users/models.py`` 2026-07-18). The bot stores no
-SpecialistProfile id today, so :func:`specialist_id_for_master` returns
-``None`` and the endpoints answer **503 ``specialist_mapping_unavailable``**
-(fail-closed, observable) instead of guessing a wrong id. Escalated to
-the orchestrator; closes when W1's specialist-enrichment sync lands the
-mapping on the mirror (or the contract is amended to key on user id).
+C2/C3 key on the Ayla **User UUID** (AMD-005 — ``specialist_id`` in the
+contracts is the User id, NOT ``SpecialistProfile.id``; resolution into
+the profile happens inside W1/W2). The mirror carries exactly that id
+as ``CatalogMaster.ayla_user_id``, so
+:func:`specialist_id_for_master` is a plain field read. Masters without
+an Ayla link yet get a fail-closed **503
+``specialist_mapping_unavailable``** — never a guessed id.
 """
 
 from __future__ import annotations
@@ -63,12 +60,15 @@ class BillingProxyResult:
 
 
 def specialist_id_for_master(master: CatalogMaster) -> str | None:
-    """Resolve the Ayla ``SpecialistProfile.id`` for a session master.
+    """Resolve the master key for Ayla billing/payout calls (AMD-005).
 
-    Returns ``None`` today — see the module docstring (open contract
-    gap). The mirror field that will carry it lands with W1's
-    specialist-enrichment sync; this is the ONE function to update then.
-    """
+    C2/C3/C4 key on the Ayla **User UUID**, which the mirror already
+    carries as ``CatalogMaster.ayla_user_id`` — no specialist-enrichment
+    sync needed (the variant rejected by the orchestrator in AMD-005).
+    Returns ``None`` for an unlinked master (no Ayla id yet) — callers
+    fail closed (503) rather than guess."""  # noqa: E501
+    if master.ayla_user_id:
+        return str(master.ayla_user_id)
     return None
 
 

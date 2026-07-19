@@ -170,6 +170,7 @@ class Captured:
     method: str
     path: str
     headers: dict[str, str]  # lower-cased keys
+    body: str = ""
 
 
 # id args passed into client methods; normalised back to ``{id}`` for matching.
@@ -230,6 +231,7 @@ def _recording_handler(sink: list[Captured]) -> Any:
                 method=request.method,
                 path=request.url.path,
                 headers={k.lower(): v for k, v in request.headers.items()},
+                body=request.content.decode(errors="replace"),
             )
         )
         return httpx.Response(200, json={})
@@ -312,6 +314,7 @@ def _exercise_booking() -> None:
             service_id="SVCID",
             start_datetime="2026-07-03T10:00:00+03:00",
             idempotency_key="IDEM-CREATE",
+            payment_required=False,
         )
     )
     _swallow(
@@ -509,3 +512,49 @@ def test_matcher_catches_drift() -> None:
     }
     for label, cap in drift.items():
         assert _rejects(cap), f"matcher FAILED to reject drift: {label}"
+
+
+# ─── request-body contract: payment_required on create (AMD-002) ─────────────
+
+
+def test_create_appointment_body_carries_payment_required(captured: list[Captured]) -> None:
+    """AMD-002: the create body MUST carry ``payment_required`` verbatim —
+    false for a no-prepay booking (D6), default true otherwise. Route-table
+    historically pinned only method/path/headers; the body's money-relevant
+    flag is pinned here explicitly."""
+    import json as _json
+
+    from apps.integrations.ayla.booking_client import (
+        get_ayla_booking_client,
+        reset_ayla_booking_client,
+    )
+
+    reset_ayla_booking_client()
+    c = get_ayla_booking_client()
+    _swallow(
+        lambda: c.create_appointment(
+            external_user_id=_EXT_USER,
+            client_id="CLIENTID",
+            specialist_id="SPECID",
+            service_id="SVCID",
+            start_datetime="2026-07-03T10:00:00+03:00",
+            payment_required=False,
+        )
+    )
+    _swallow(
+        lambda: c.create_appointment(
+            external_user_id=_EXT_USER,
+            client_id="CLIENTID",
+            specialist_id="SPECID",
+            service_id="SVCID",
+            start_datetime="2026-07-03T11:00:00+03:00",
+        )
+    )
+
+    creates = [
+        cap for cap in captured if cap.method == "POST" and cap.path.endswith("appointments/")
+    ]
+    assert len(creates) == 2
+    bodies = [_json.loads(cap.body) for cap in creates]
+    assert bodies[0]["payment_required"] is False
+    assert bodies[1]["payment_required"] is True  # default — обратная совместимость

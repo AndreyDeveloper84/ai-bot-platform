@@ -172,6 +172,7 @@ class AylaYClientsAdapter:
         comment: str | None = None,
         notify_by_sms: int = 0,
         notify_by_email: int = 0,
+        payment_required: bool = True,
     ) -> BookingRecord:
         # ``notify_*`` / phone / name are YClients-specific; Ayla owns
         # notifications and resolves the client from client_id + X-External-User-ID.
@@ -181,7 +182,12 @@ class AylaYClientsAdapter:
                 "create on behalf of an Ayla-unlinked user"
             )
         service_id = _first_id(services) or ""
-        key = _idempotency_key(self._external_user_id, "create", staff_id, service_id, datetime)
+        # AMD-002: payment_required rides the create body AND the idempotency
+        # seed — a retry with the same intent dedups; a deliberate intent flip
+        # (online pay → no prepay) is a NEW appointment, never swallowed.
+        key = _idempotency_key(
+            self._external_user_id, "create", staff_id, service_id, datetime, payment_required
+        )
         with _translate_errors():
             record = self._client.create_appointment(
                 external_user_id=self._external_user_id,
@@ -190,6 +196,7 @@ class AylaYClientsAdapter:
                 service_id=service_id,
                 start_datetime=datetime,
                 idempotency_key=key,
+                payment_required=payment_required,
             )
         return BookingRecord(record_id=0, record_hash="", raw=_mirror_raw(record))
 
