@@ -1029,10 +1029,11 @@ def execute_confirm(
         )
     except YClientsSpecialistUnavailableError as exc:
         # C1 (PILOT_CONTRACTS §2): Ayla rejected the NEW booking with 409
-        # SUBSCRIPTION_PAST_DUE. The customer sees a NEUTRAL slug — the
-        # debt reason must never leak to the client surface; the concierge
-        # offers another master/time instead. Internal code stays in logs
-        # + audit (allowed by C1 — internal/backend may hold the reason).
+        # SUBSCRIPTION_PAST_DUE. The customer sees the NEUTRAL slug
+        # ``unavailable`` (frozen with W4 as C1_UNAVAILABLE_SLUG — the
+        # single adjust point); the debt reason must never leak to the
+        # client surface. Internal code stays in logs + audit (allowed
+        # by C1 — internal/backend may hold the reason).
         logger.info("booking.confirm.exec.specialist_unavailable err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="specialist_unavailable")
         write_audit(
@@ -1041,8 +1042,8 @@ def execute_confirm(
             payload={"tenant_id": tenant_id, "reason": "specialist_unavailable"},
         )
         return BookingToolResult(
-            confirmation=ConfirmationResult(ok=False, error="specialist_unavailable"),
-            error="specialist_unavailable",
+            confirmation=ConfirmationResult(ok=False, error="unavailable"),
+            error="unavailable",
         )
     except YClientsAPIError as exc:
         logger.info("booking.confirm.exec.api_error err=%s", exc)
