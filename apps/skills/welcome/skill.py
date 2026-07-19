@@ -221,6 +221,14 @@ class WelcomeSkill:
         # return False (this branch), and the normal dispatcher walks
         # other skills for the user's actual intent.
         if getattr(context.bot_user, "welcomed_at", None) is None:
+            # Regression guard (#85): never hijack a user who is ALREADY
+            # inside a flow — a resolved/in-progress human handoff or any
+            # prior conversation. The current conversation's own messages
+            # are deliberately excluded: the channel records the inbound
+            # text BEFORE dispatch, so counting it would disable the
+            # auto-welcome for genuinely first-contact users too.
+            if _flow_already_established(context):
+                return False
             return True
         return False
 
@@ -605,3 +613,33 @@ def _join(base: str, route: str) -> str:
     have to think about it.
     """
     return f"{base.rstrip('/')}/{route.lstrip('/')}"
+
+
+def _flow_already_established(context: SkillContext) -> bool:
+    """True when the user already has a live/established flow the
+    auto-welcome must not interrupt.
+
+    Two markers, both checked cross-tenant (the global path runs
+    tenant-less):
+
+    * messages in any OTHER conversation of this bot_user (the current
+      conversation's rows are excluded — the channel records the inbound
+      text before dispatch, so a first-contact user legitimately has one
+      message in the current conversation at this point);
+    * any AdminTask ever created for this bot_user — a handoff in
+      progress or resolved means the support flow owns the turn.
+    """
+    from apps.conversations.models import Message
+    from apps.handoff.models import AdminTask
+
+    current_pk = getattr(context.conversation, "pk", None)
+    other_messages = Message.all_tenants.filter(conversation__bot_user=context.bot_user)
+    # Test contexts may carry a MagicMock conversation — exclude only when
+    # the pk is a real key value.
+    import uuid as _uuid
+
+    if isinstance(current_pk, (int, _uuid.UUID)):
+        other_messages = other_messages.exclude(conversation_id=current_pk)
+    if other_messages.exists():
+        return True
+    return AdminTask.all_tenants.filter(conversation__bot_user=context.bot_user).exists()
