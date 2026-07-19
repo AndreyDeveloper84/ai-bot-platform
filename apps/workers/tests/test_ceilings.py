@@ -56,13 +56,18 @@ class _FakeRedis:
 def _flush_real_ceiling_counters():
     """Flush the REAL Redis ceiling counters before each test.
 
-    The suite is not hermetic: tests elsewhere in the repo call
-    ``should_emit_tenant_missing`` against a real Redis (when one is
-    reachable — CI services / local docker), pushing ``MaxHandler``'s
-    hourly bucket over the limit. The transition-log tests here then
-    never see the exact 1→limit+1 transition they assert. Best-effort
-    no-op when no Redis is reachable (unit envs).
+    Suite-level hermeticity rot, exposed when a real Redis is reachable
+    (CI services / local docker): tests elsewhere drive MaxHandler's
+    hourly bucket over the limit, and the transition-log assertions here
+    never see the exact 1->limit+1 transition. Best-effort no-op when no
+    Redis is reachable (unit envs). ALSO resets the module-global Lua
+    script cache: once any earlier test registers the script against the
+    REAL client, the cached Script is reused even when the client is
+    monkeypatched to the fake — silently bypassing it.
     """
+    from apps.workers.ceilings import _invalidate_incr_and_expire_script
+
+    _invalidate_incr_and_expire_script()
     try:
         from apps.ingress.streams import _client
 
