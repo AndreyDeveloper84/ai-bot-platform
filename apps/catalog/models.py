@@ -62,8 +62,12 @@ class _MirrorBase(models.Model):
         "mysite via catalog sync; tenant delete also drops them.",
     )
     external_id = models.IntegerField(
-        help_text="Primary key of the upstream mysite row. Stable; "
-        "the sync upserter (C3 / DRF-574) matches on (tenant, external_id).",
+        null=True,
+        blank=True,
+        help_text="Legacy mysite integer PK. Nullable since S3B re-keyed "
+        "the mirror onto the Ayla stable-id (UUID): Ayla-fed rows leave this "
+        "NULL and key on (tenant, ayla_service_id / ayla_user_id). Kept for "
+        "legacy rows — unique_together (tenant, external_id) stays NULL-safe.",
     )
     external_updated_at = models.DateTimeField(
         help_text="Upstream `updated_at` at last sync. Drives the "
@@ -156,13 +160,30 @@ class CatalogService(_MirrorBase):
         verbose_name_plural = "Catalog: services"
         ordering = ["name"]
         unique_together = (("tenant", "external_id"),)
+        constraints = [
+            # S3B re-key: Ayla-fed rows are keyed on the stable UUID. Partial
+            # (WHERE ayla_service_id IS NOT NULL) so legacy NULL rows are
+            # exempt. DB-level backstop over the per-tenant sync lock +
+            # update_or_create (ADR-0011 §3.5 — constraints are the unkillable
+            # line over app-level convention). Applied while the column is
+            # all-NULL → instant validate, zero conflict.
+            models.UniqueConstraint(
+                fields=["tenant", "ayla_service_id"],
+                condition=models.Q(ayla_service_id__isnull=False),
+                name="uq_catalog_service_tenant_ayla_service_id",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "-external_updated_at"]),
             models.Index(fields=["tenant", "slug"]),
         ]
 
     def __str__(self) -> str:
-        return f"CatalogService[{self.slug}@{self.external_id}]"
+        # Ayla-fed rows have no slug / integer external_id — fall back to the
+        # stable UUID + name so admin/log output stays readable.
+        label = self.slug or self.name
+        key = self.ayla_service_id or self.external_id
+        return f"CatalogService[{label}@{key}]"
 
 
 class _MasterManager(TenantScopedManager):
@@ -206,6 +227,16 @@ class CatalogMaster(_MirrorBase):
     bio = models.TextField(blank=True, default="")
     experience = models.CharField(max_length=255, blank=True, default="")
     rating = models.DecimalField(max_digits=3, decimal_places=2, null=True, blank=True)
+    review_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Number of reviews backing ``rating``, mirrored from Ayla's "
+            "``reviews_count``. Feeds the discovery Bayesian trust-score "
+            "(#1060) so a 5.0 from 1 review can't outrank a 4.8 from 200. "
+            "Populated by catalog sync once retargeted to Ayla (#1044); "
+            "defaults to 0 until then."
+        ),
+    )
     is_active = models.BooleanField(default=True)
     yclients_staff_id = models.IntegerField(
         null=True,
@@ -225,24 +256,6 @@ class CatalogMaster(_MirrorBase):
         ),
     )
     raw = models.JSONField(default=dict, blank=True)
-
-    # Canonical Ayla user_id for master. Added on dev via 0007
-    # migration (parallel work). Used by the #445 master.schedule.
-    # updated consumer + the #443 booking consumer's master_user_id
-    # bridge. Symmetric with BotUser.ayla_user_id (#442) +
-    # CatalogService.ayla_service_id (#444).
-    ayla_user_id = models.UUIDField(
-        null=True,
-        blank=True,
-        db_index=True,
-        help_text=(
-            "Canonical Ayla user_id (UUID) for this master. Bridge "
-            "for event-payload master_user_id → CatalogMaster ORM "
-            "JOIN. Nullable because legacy mysite-synced rows lack "
-            "this — back-filled by catalog-sync service or master "
-            "event consumer."
-        ),
-    )
 
     # #445 — slot cache staleness counter. Bumped on every
     # master.schedule.updated event. Forward-compatible signal for

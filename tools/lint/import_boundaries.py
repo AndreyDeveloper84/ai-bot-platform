@@ -260,7 +260,6 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         "apps/booking/services/transitions.py",
         # catalog sync / seed (mirror write path + dev bootstrap)
         "apps/catalog/management/commands/seed_dev_formula_tela.py",
-        "apps/catalog/management/commands/seed_from_mysite.py",
         # event consumers — payload carries explicit tenant_id (not context)
         "apps/eventbus/consumers/catalog.py",
         "apps/eventbus/consumers/schedule.py",

@@ -182,6 +182,46 @@ class TestUnknownEvent:
         assert IngestDLQ.objects.filter(event_id=VALID_BODY["event_id"]).count() == 1
 
 
+class TestEventIdWidth:
+    """#1058 — end-to-end HTTP coverage of the widened event_id column
+    and the over-length fail-fast guard."""
+
+    def test_uuid4_event_id_returns_200(self, client: Client) -> None:
+        """A 36-char Ayla uuid4 event_id ingests cleanly through the full
+        HTTP path — no DataError on the varchar(36) dedupe column."""
+        calls: list[IngestEnvelope] = []
+        register("booking.created", 1, calls.append)
+
+        body = dict(VALID_BODY)
+        body["event_id"] = "9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c"  # 36 chars
+        response = _post(client, json.dumps(body).encode())
+
+        assert response.status_code == 200, response.content
+        assert len(calls) == 1
+        assert IngestDedupe.objects.filter(event_id=body["event_id"]).count() == 1
+
+    def test_over_length_event_id_returns_422_and_dlq_not_500(self, client: Client) -> None:
+        """An event_id longer than the column width fails fast to the DLQ
+        with 422 — NOT a 500 from a Postgres DataError the publisher would
+        retry forever."""
+        from apps.eventbus.ingest_envelope import MAX_EVENT_ID_LENGTH
+
+        calls: list[IngestEnvelope] = []
+        register("booking.created", 1, calls.append)
+
+        too_long = "z" * (MAX_EVENT_ID_LENGTH + 4)
+        body = dict(VALID_BODY)
+        body["event_id"] = too_long
+        response = _post(client, json.dumps(body).encode())
+
+        assert response.status_code == 422, response.content
+        assert json.loads(response.content)["reason"] == "event_id_too_long"
+        assert calls == []  # handler never ran
+        # DLQ row keyed by the truncated id; no dedupe row.
+        assert IngestDLQ.objects.filter(reason="event_id_too_long").count() == 1
+        assert IngestDedupe.objects.filter(event_id=too_long[:MAX_EVENT_ID_LENGTH]).count() == 0
+
+
 class TestHandlerException:
     def test_handler_raises_returns_500_no_dedupe(self, client: Client) -> None:
         def _boom(env: IngestEnvelope) -> None:

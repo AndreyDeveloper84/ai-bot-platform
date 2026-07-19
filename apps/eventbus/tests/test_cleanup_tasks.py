@@ -8,19 +8,31 @@ Pins the retention windows: DLQ 90d (replayed 30d) per §6.4, dedupe
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 
 import pytest
+from django.db import models
 from django.utils import timezone
 
 from apps.eventbus.cleanup_tasks import (
     DEDUPE_RETENTION_DAYS,
     DLQ_RETENTION_DAYS,
     DLQ_REPLAYED_RETENTION_DAYS,
+    SECONDARY_LEDGER_RETENTION_DAYS,
+    _chunked_delete_older_than,
     cleanup_ingest_dedupe,
     cleanup_ingest_dlq,
+    cleanup_ingest_secondary_ledgers,
 )
-from apps.eventbus.models import IngestDedupe, IngestDLQ
+from apps.eventbus.models import (
+    HandlerFailureTracker,
+    IngestDedupe,
+    IngestDLQ,
+    NotificationDispatchDedupe,
+    PaymentTerminalDedupe,
+    ReviewProcessedDedupe,
+)
 
 
 pytestmark = pytest.mark.django_db
@@ -146,3 +158,178 @@ class TestCleanupIngestDedupe:
 
     def test_empty_table_runs_clean(self) -> None:
         assert cleanup_ingest_dedupe() == {"deleted": 0}
+
+
+# ─── Secondary ledger cleanup (#1056) ────────────────────────────────────────
+
+
+def _backdate(model: type[models.Model], pk: object, field: str, days_ago: int) -> None:
+    """Push a timestamp field into the past via update() (bypasses
+    auto_now / auto_now_add which block direct insertion of past dates)."""
+    model._base_manager.filter(pk=pk).update(**{field: timezone.now() - timedelta(days=days_ago)})
+
+
+def _make_payment_terminal(*, processed_days_ago: int) -> PaymentTerminalDedupe:
+    row = PaymentTerminalDedupe.objects.create(
+        tenant_id=uuid.uuid4(),
+        payment_id=uuid.uuid4(),
+        terminal_state=PaymentTerminalDedupe.TerminalState.CAPTURED,
+        event_id=str(uuid.uuid4()),
+    )
+    _backdate(PaymentTerminalDedupe, row.pk, "processed_at", processed_days_ago)
+    return row
+
+
+def _make_review(*, processed_days_ago: int) -> ReviewProcessedDedupe:
+    row = ReviewProcessedDedupe.objects.create(
+        tenant_id=uuid.uuid4(),
+        review_id=uuid.uuid4(),
+        event_id=str(uuid.uuid4()),
+    )
+    _backdate(ReviewProcessedDedupe, row.pk, "processed_at", processed_days_ago)
+    return row
+
+
+def _make_notification(*, dispatched_days_ago: int) -> NotificationDispatchDedupe:
+    row = NotificationDispatchDedupe.objects.create(
+        tenant_id=uuid.uuid4(),
+        event_id=str(uuid.uuid4()),
+        recipient_id=uuid.uuid4(),
+        channel="max",
+        kind="payment_failed",
+    )
+    _backdate(NotificationDispatchDedupe, row.pk, "dispatched_at", dispatched_days_ago)
+    return row
+
+
+def _make_failure(
+    *, last_attempt_days_ago: int, first_attempt_days_ago: int | None = None
+) -> HandlerFailureTracker:
+    row = HandlerFailureTracker.objects.create(
+        event_id=str(uuid.uuid4()),
+        handler_name="booking.created@v1",
+        attempt_count=1,
+    )
+    _backdate(HandlerFailureTracker, row.pk, "last_attempt_at", last_attempt_days_ago)
+    if first_attempt_days_ago is not None:
+        _backdate(HandlerFailureTracker, row.pk, "first_attempt_at", first_attempt_days_ago)
+    return row
+
+
+_ALL_ZERO = {
+    "PaymentTerminalDedupe": 0,
+    "ReviewProcessedDedupe": 0,
+    "NotificationDispatchDedupe": 0,
+    "HandlerFailureTracker": 0,
+}
+
+
+class TestCleanupSecondaryLedgers:
+    def test_deletes_all_four_ledgers_past_120_days(self) -> None:
+        """Old rows (130d) go; fresh (60d) stay — across all four models."""
+        _make_payment_terminal(processed_days_ago=130)
+        _make_payment_terminal(processed_days_ago=60)
+        _make_review(processed_days_ago=130)
+        _make_review(processed_days_ago=60)
+        _make_notification(dispatched_days_ago=130)
+        _make_notification(dispatched_days_ago=60)
+        _make_failure(last_attempt_days_ago=130)
+        _make_failure(last_attempt_days_ago=60)
+
+        result = cleanup_ingest_secondary_ledgers()
+
+        assert result == {
+            "PaymentTerminalDedupe": 1,
+            "ReviewProcessedDedupe": 1,
+            "NotificationDispatchDedupe": 1,
+            "HandlerFailureTracker": 1,
+        }
+        assert PaymentTerminalDedupe.objects.count() == 1
+        assert ReviewProcessedDedupe.objects.count() == 1
+        assert NotificationDispatchDedupe.objects.count() == 1
+        assert HandlerFailureTracker.objects.count() == 1
+
+    def test_retention_boundary_pins_to_contract(self) -> None:
+        """§5.3 = 120 days, same window as IngestDedupe."""
+        assert SECONDARY_LEDGER_RETENTION_DAYS == 120
+
+    def test_boundary_just_over_vs_just_under(self) -> None:
+        """121d deleted, 119d kept — the cutoff is `now - 120d` exclusive."""
+        _make_review(processed_days_ago=121)
+        _make_review(processed_days_ago=119)
+
+        result = cleanup_ingest_secondary_ledgers()
+
+        assert result["ReviewProcessedDedupe"] == 1
+        assert ReviewProcessedDedupe.objects.count() == 1
+
+    def test_still_retrying_failure_is_retained(self) -> None:
+        """HandlerFailureTracker ages on last_attempt_at: a row first seen
+        long ago (130d) but retried recently (5d) MUST be kept — otherwise
+        an event still inside Ayla's retry budget loses its counter."""
+        row = _make_failure(last_attempt_days_ago=5, first_attempt_days_ago=130)
+
+        result = cleanup_ingest_secondary_ledgers()
+
+        assert result["HandlerFailureTracker"] == 0
+        assert HandlerFailureTracker.objects.filter(pk=row.pk).exists()
+
+    def test_idempotent_second_run_deletes_nothing(self) -> None:
+        _make_review(processed_days_ago=130)
+
+        cleanup_ingest_secondary_ledgers()
+        second = cleanup_ingest_secondary_ledgers()
+
+        assert second == _ALL_ZERO
+
+    def test_empty_tables_run_clean(self) -> None:
+        assert cleanup_ingest_secondary_ledgers() == _ALL_ZERO
+
+    def test_chunked_delete_loops_over_multiple_pages(self) -> None:
+        """The chunked helper deletes the whole backlog even when it
+        exceeds one page — proves the loop, not a single bounded DELETE."""
+        for _ in range(5):
+            _make_review(processed_days_ago=130)
+        cutoff = timezone.now() - timedelta(days=SECONDARY_LEDGER_RETENTION_DAYS)
+
+        deleted = _chunked_delete_older_than(
+            ReviewProcessedDedupe, "processed_at", cutoff, chunk_size=2
+        )
+
+        assert deleted == 5
+        assert ReviewProcessedDedupe.objects.count() == 0
+
+    def test_sets_beat_heartbeat_marker(self) -> None:
+        from django.core.cache import cache
+
+        from apps.eventbus.cleanup_tasks import _SECONDARY_BEAT_LAST_RUN_CACHE_KEY
+
+        cache.delete(_SECONDARY_BEAT_LAST_RUN_CACHE_KEY)
+        cleanup_ingest_secondary_ledgers()
+        assert cache.get(_SECONDARY_BEAT_LAST_RUN_CACHE_KEY) is not None
+
+    def test_one_model_failure_isolated_and_marker_withheld(self, monkeypatch) -> None:
+        """A poisoned ledger records -1 but MUST NOT starve the others,
+        and the beat heartbeat is withheld so the health check flags it."""
+        from django.core.cache import cache
+
+        from apps.eventbus import cleanup_tasks as ct
+
+        cache.delete(ct._SECONDARY_BEAT_LAST_RUN_CACHE_KEY)
+
+        def _fake_sweep(model, ts_field, cutoff, **kwargs):  # type: ignore[no-untyped-def]
+            if model is PaymentTerminalDedupe:
+                raise RuntimeError("simulated ledger sweep failure")
+            return 0
+
+        monkeypatch.setattr(ct, "_chunked_delete_older_than", _fake_sweep)
+
+        result = cleanup_ingest_secondary_ledgers()
+
+        assert result["PaymentTerminalDedupe"] == -1  # failed → sentinel
+        # The other three still swept despite the first one failing.
+        assert result["ReviewProcessedDedupe"] == 0
+        assert result["NotificationDispatchDedupe"] == 0
+        assert result["HandlerFailureTracker"] == 0
+        # Marker withheld → health check reports the miss.
+        assert cache.get(ct._SECONDARY_BEAT_LAST_RUN_CACHE_KEY) is None

@@ -21,20 +21,21 @@ from .base import *  # noqa: F401,F403
 DEBUG = False
 
 
-# Sprint 7 / C8 (DRF-578) — Catalog sync requires a service-token to
-# auth against `mysite/api/v1/catalog/*`. Missing token → sync silently
-# 401s every 15 minutes, the catalog mirrors drift from source, and the
-# FAQ skill (DRF-589) starts retrieving stale chunks. Fail fast instead.
+# S3B (#1044) — Catalog sync now pulls Ayla's internal Bearer catalog
+# (`/api/v1/internal/catalog/salon-services/`) with AYLA_INTERNAL_API_TOKEN.
+# Missing token → sync silently 403s every 15 minutes and the CatalogService
+# mirror drifts from source. Fail fast instead (re-points the retired
+# MYSITE_CATALOG_SERVICE_TOKEN guard onto the Ayla s2s token).
 #
-# Reading os.environ directly (instead of importing the resolved
-# `MYSITE_CATALOG_SERVICE_TOKEN` symbol from .base) so test reloads of
-# this module pick up the current env without also reloading base.py.
-MYSITE_CATALOG_SERVICE_TOKEN = os.environ.get("MYSITE_CATALOG_SERVICE_TOKEN", "")
-if not MYSITE_CATALOG_SERVICE_TOKEN:
+# Reading os.environ directly (instead of importing the resolved symbol from
+# .base) so test reloads of this module pick up the current env without also
+# reloading base.py.
+AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
+if not AYLA_INTERNAL_API_TOKEN:
     raise ImproperlyConfigured(
-        "MYSITE_CATALOG_SERVICE_TOKEN is required in production. "
-        "Set it in the environment (matching the token configured on "
-        "mysite via M2 / DRF-593)."
+        "AYLA_INTERNAL_API_TOKEN is required in production. Set it to the "
+        "shared service-to-service Bearer token Ayla validates (catalog sync "
+        "+ the profile/recommendations/booking internal clients need it)."
     )
 
 

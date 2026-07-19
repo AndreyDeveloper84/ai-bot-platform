@@ -482,23 +482,54 @@ IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = _parse_idle_active_draft_suppress_wi
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
 # than silently 500ing on a misconfigured prod box.
+#
+# ``AYLA_BASE_URL`` is **host-only** (``scheme://host[:port]``, no ``/api/v1``)
+# — the :class:`apps.integrations.ayla.url_builder.AylaUrlBuilder` inserts the
+# version prefix (#1049). A base with a path fails loudly at client start.
 AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
-AYLA_SERVICE_TOKEN = os.environ.get("AYLA_SERVICE_TOKEN", "")
 
-# S1 / #1016 — Ayla canonical booking REST bridge (ADR-0009).
-# Auth model is Bearer per the #1016 ground-truth: shipped Ayla internal
-# endpoints authenticate with ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}``
-# (reads → IsInternalBearer; writes → IsBotServiceWithVerifiedClient, which
-# also requires ``X-External-User-ID``). Distinct from the nutrition client's
-# legacy ``X-Service-Token`` shared-secret. Empty default keeps the booking
-# bridge dormant until configured.
+# ── s2s auth secrets (#1050 — auth unification) ─────────────────────────────
+#
+# Two named secrets serve the Ayla REST seam; each has ONE canonical role.
+# The audit-era ``AYLA_SERVICE_TOKEN`` conflated both (used as a Bearer by
+# recommendations/profile AND as ``X-Service-Token`` by nutrition), and the
+# Bearer half never existed on Ayla's side — Ayla validates
+# ``AYLA_INTERNAL_API_TOKEN``. S0-A declares the canonical pair below; the
+# client-migration stream (S0-B, #978/#1048/#1050) rewires the clients onto it.
+#
+# 1. ``AYLA_INTERNAL_API_TOKEN`` — the single s2s Bearer. Shipped Ayla internal
+#    endpoints authenticate with ``Authorization: Bearer {AYLA_INTERNAL_API_TOKEN}``
+#    (reads → IsInternalBearer; writes → IsBotServiceWithVerifiedClient, which
+#    also requires ``X-External-User-ID``). Used by payments + booking today;
+#    recommendations + profile move onto it in S0-B.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
+# 2. ``NUTRITION_SERVICE_TOKEN`` — the nutrition ``X-Service-Token`` shared
+#    secret, named to match what Ayla validates. Falls back to the legacy
+#    ``AYLA_SERVICE_TOKEN`` env var ONLY when unset, so a mid-migration deploy
+#    that sets only the old name keeps working (invariant: nutrition's header
+#    secret == whatever Ayla's nutrition endpoint validates as
+#    ``NUTRITION_SERVICE_TOKEN``). An explicit empty value is honoured as-is
+#    (does NOT resurrect the deprecated token during a rotation blank-out).
+#
+# The old ``AYLA_SERVICE_TOKEN`` *settings attribute* is gone (#1050 / S0-B —
+# all client code refs removed): it was a Bearer secret that never existed on
+# Ayla's side, conflated with the nutrition ``X-Service-Token``. The env var of
+# that name survives ONLY as the back-compat fallback source below, so
+# deploys mid-rotation keep working.
+_nutrition_service_token = os.environ.get("NUTRITION_SERVICE_TOKEN")
+NUTRITION_SERVICE_TOKEN = (
+    _nutrition_service_token
+    if _nutrition_service_token is not None
+    else os.environ.get("AYLA_SERVICE_TOKEN", "")
+)
+
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
-# instead of direct YClients calls. DEFAULT OFF — the Ayla booking endpoints
-# are not live yet (contract pending S2 sign-off, see
-# docs/architecture/ayla-booking-rest-contract.md) and the real HTTP client is
-# still a skeleton. Flipping this ON before those land will fail loudly.
+# instead of direct YClients calls. DEFAULT OFF — the flip (#1041) is gated on
+# the ayla_service_id coverage report (#1016/#1034, command:
+# link_ayla_service_ids) and is executed by the orchestrator. The flag-ON path
+# (real HTTP client + RemoteBookingProxy mirror) is implemented and tested;
+# production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
 # Wellness MVP scaled pilot (memory ``project_wellness_mvp_scaled_pilot``).
@@ -702,7 +733,9 @@ def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
       defaults to ``redis://localhost:6379/0`` when ``REDIS_URL`` is unset.
       In production this points at a Redis the host does not run; boot
       succeeds, the first cache write ``ConnectionError``s. Reject
-      ``localhost`` / ``127.0.0.1`` LOCATION when ``DEBUG=False``.
+      ``localhost`` / ``127.0.0.1`` LOCATION when ``DEBUG=False`` — unless
+      ``ALLOW_LOCAL_REDIS=true`` is set, the deliberate opt-in for single-box
+      deployments that intentionally run Redis on the loopback.
     * **DJANGO_ENV unset → keyspace collision.** ``KEY_PREFIX`` interpolates
       ``DJANGO_ENV`` (defaults to ``local``). On a shared Redis instance
       across dev/staging/prod, a prod boot with ``DJANGO_ENV`` unset
@@ -754,15 +787,26 @@ def _assert_production_cache_backend(*, debug: bool, caches: dict) -> None:
             "(e.g. redis://redis.internal:6379/0)."
         )
     if "localhost" in location or "127.0.0.1" in location:
-        raise ImproperlyConfigured(
-            f"CACHES['default']['LOCATION']={location!r} points at localhost "
-            "in production. This is the silent fallback that triggers when "
-            "the REDIS_URL env var is unset (see CACHES config in "
-            "config/settings/base.py). Set REDIS_URL to the real Redis URL "
-            "(e.g. redis://redis.internal:6379/0). Boot would otherwise "
-            "succeed but the first cache.add/incr call would ConnectionError "
-            "at runtime."
-        )
+        # Single-box deployments intentionally run Redis on the loopback
+        # (host-local Redis with logical-DB isolation — see
+        # docs/runbooks/server-deployment.md, "no new containers"). For those
+        # the localhost LOCATION is correct, not the silent unset-fallback this
+        # guard targets. Require a deliberate, explicit opt-in so the default
+        # stays fail-closed for real multi-host prod — an accidental localhost
+        # there (REDIS_URL forgotten) still aborts boot.
+        allow_local = os.environ.get("ALLOW_LOCAL_REDIS", "false").lower() == "true"
+        if not allow_local:
+            raise ImproperlyConfigured(
+                f"CACHES['default']['LOCATION']={location!r} points at localhost "
+                "in production. This is the silent fallback that triggers when "
+                "the REDIS_URL env var is unset (see CACHES config in "
+                "config/settings/base.py). Set REDIS_URL to the real Redis URL "
+                "(e.g. redis://redis.internal:6379/0). For an intentional "
+                "single-box deployment where Redis runs on the loopback, set "
+                "ALLOW_LOCAL_REDIS=true to assert this is deliberate. Boot would "
+                "otherwise succeed but the first cache.add/incr call would "
+                "ConnectionError at runtime."
+            )
 
     # PRE_PILOT #2 — DJANGO_ENV unset → keyspace collision.
     # Two layers of defence: the KEY_PREFIX-suffix check catches whatever
@@ -847,11 +891,11 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(hour="5", minute="0"),
     },
     "catalog_sync_every_15min": {
-        # Sprint 7 / C5 (DRF-579) — fan-out catalog sync across every
-        # active tenant. Cadence matched to apps.catalog.services.sync
-        # advisory-lock TTL (1.5x). The task carries a 12-min soft time
-        # limit so an overrun fires before the next beat fires a
-        # parallel run.
+        # Fan-out catalog sync across every active tenant. Since S3B (#1044)
+        # the task pulls Ayla's internal salon-services (mysite retired).
+        # Cadence matched to apps.catalog.services.sync advisory-lock TTL
+        # (1.5x). The task carries a 12-min soft time limit so an overrun
+        # fires before the next beat fires a parallel run.
         "task": "apps.catalog.tasks.sync_catalog_for_all_tenants",
         "schedule": crontab(minute="*/15"),
     },
@@ -946,6 +990,16 @@ CELERY_BEAT_SCHEDULE = {
         # DLQ task.
         "schedule": crontab(hour="4", minute="50"),
     },
+    # #1056 — bound the consumer-side second-layer dedupe guards
+    # (PaymentTerminalDedupe / ReviewProcessedDedupe /
+    # NotificationDispatchDedupe) + the #433 HandlerFailureTracker.
+    # All share the 120d window (§5.3); chunked delete so a backlog
+    # doesn't hold a long lock. Daily 04:55 UTC — after the dedupe
+    # sweep, own transaction.
+    "eventbus.cleanup_ingest_secondary_ledgers": {
+        "task": "apps.eventbus.cleanup_ingest_secondary_ledgers",
+        "schedule": crontab(hour="4", minute="55"),
+    },
     # PR #535 follow-up Blocker #5 Layer 2 — AI draft retention sweep.
     # Hard-deletes terminal AiDraft rows (SENT_AS_MASTER / RELEASED_TO_AI
     # / REPLACED / DISMISSED) older than 30 days. Layer 1 (immediate
@@ -1004,6 +1058,15 @@ CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", ""
 # current single-secret gate is unchanged by #1019.)
 GLOBAL_BOT_TOKENS = os.environ.get("GLOBAL_BOT_TOKENS", "")
 
+# #1046 — welcome + 152-ФЗ consent capture on the tenant-less global marketplace
+# path (`_handle_global_max_event_inner`). Default OFF so enabling is an explicit,
+# reviewed rollout. Variant A «soft gate»: onboarding greets + captures consent
+# but does NOT block discovery / one-off booking — only long-term memory +
+# proactive messaging are gated (that gate lives in the memory writer, S1.7, not
+# here). The A→B move (consent required BEFORE any foreign-LLM send, pending the
+# #947 lawyer verdict) is a one-line change behind this same flag.
+GLOBAL_BOT_ONBOARDING = os.environ.get("GLOBAL_BOT_ONBOARDING", "false").lower() == "true"
+
 # Sprint 8 / T1 (DRF-705) — OpenTelemetry configuration.
 # Empty endpoint = no-op exporter (local dev + tests).
 # Sample rate is Decision 3 from sprint-8-observability-shadow.md.
@@ -1041,14 +1104,13 @@ CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "")
 CHROMA_HTTP_PORT = int(os.environ.get("CHROMA_HTTP_PORT", "8001"))
 CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
 
-# Sprint 7 / C8 (DRF-578) — Catalog sync (mysite → platform mirror).
-# Sync service (C4 / DRF-575) pulls Service/Master/FAQ/HelpArticle from
-# `mysite/api/v1/catalog/*` via HTTP and upserts into apps.catalog
-# mirrors. Per-tenant Redis advisory lock guards against concurrent
-# runs; the TTL is intentionally ≥ 1.5× the 15-minute beat cadence so
-# a slow run can't race itself.
-MYSITE_CATALOG_BASE_URL = os.environ.get("MYSITE_CATALOG_BASE_URL", "https://formulatela58.ru")
-MYSITE_CATALOG_SERVICE_TOKEN = os.environ.get("MYSITE_CATALOG_SERVICE_TOKEN", "")
+# Catalog sync (Ayla internal catalog → CatalogService mirror). S3B (#1044):
+# the sync service pulls `salon-services` from Ayla's internal Bearer catalog
+# (AYLA_BASE_URL + AYLA_INTERNAL_API_TOKEN, above) and upserts the
+# CatalogService mirror keyed on the Ayla stable-id. mysite is retired
+# (ADR-0009 strangler-fig — MYSITE_CATALOG_* removed). Per-tenant Redis
+# advisory lock guards against concurrent runs; the TTL is intentionally
+# ≥ 1.5× the 15-minute beat cadence so a slow run can't race itself.
 CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECONDS", str(25 * 60)))
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))

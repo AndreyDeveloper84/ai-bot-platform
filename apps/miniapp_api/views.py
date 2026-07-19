@@ -128,7 +128,8 @@ def require_init_data(view_func: Callable[..., HttpResponse]) -> Callable[..., H
     (pure proxies) run without a scope.
 
     On failure: 401 (bad signature / stale / not configured), 400
-    (malformed), 404 (user not yet registered with any tenant).
+    (malformed), 500 (bot tenant not configured). Unknown users are
+    LAZY-CREATED on first verified contact (pre-cutover design).
     """
 
     @wraps(view_func)
@@ -1184,6 +1185,59 @@ def delete_me(request: HttpRequest) -> HttpResponse:
             400,
         )
     return JsonResponse({"deleted": True}, status=200)
+
+
+# --- C5 personal-data export/delete (152-ФЗ, pilot 2026-08-15) --------------
+#
+# Frozen contract PILOT_CONTRACTS_2026-08-15 §6. The aggregation/cascade
+# lives in apps.identity.services.privacy; these are thin HTTP shells.
+
+
+@require_http_methods(["GET"])
+@require_init_data
+@with_request_tenant
+def personal_data_export(request: HttpRequest) -> HttpResponse:
+    """C5.1 — aggregate Ayla export + bot memory + consents into one JSON.
+
+    Delivered as an attachment (per contract). 502 when the Ayla leg
+    fails — a silently-incomplete export is a compliance lie.
+    """
+    from apps.identity.services.privacy import PrivacyUpstreamError, export_personal_data
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        payload = export_personal_data(bot_user)
+    except PrivacyUpstreamError:
+        return _error(
+            "upstream_unavailable",
+            "personal-data export is temporarily unavailable, try again later",
+            502,
+        )
+    response = JsonResponse(payload)
+    response["Content-Disposition"] = 'attachment; filename="personal-data-export.json"'
+    return response
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+@require_init_data
+@with_request_tenant
+def personal_data_delete(request: HttpRequest) -> HttpResponse:
+    """C5.2 — delete cascade: Ayla delete + memory erasure + consent withdraw.
+
+    Idempotent per contract: a repeat request returns the same 200.
+    A failed step yields an honest 502 + failed_steps for retry.
+    """
+    from apps.identity.services.privacy import delete_personal_data
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    result = delete_personal_data(bot_user)
+    if result.all_ok:
+        return JsonResponse({"status": "deleted"}, status=200)
+    return JsonResponse(
+        {"status": "partial", "failed_steps": result.failed_steps},
+        status=502,
+    )
 
 
 def _profile_to_dict(snap) -> dict:

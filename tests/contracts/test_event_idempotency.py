@@ -29,6 +29,7 @@ covers the full HTTP round-trip if needed.
 | ``user.profile.updated`` | #446 | ✅ Active replay-3× |
 | ``master.schedule.updated`` | #445 | ✅ Active replay-3× |
 | ``review.created`` | #445 | ✅ Active replay-3× |
+| ``billing.*`` (C4, 3 events) | pilot 2026-08-15 | ✅ Active replay-3× |
 
 **All 12 §3 events covered.** The DLQ-smoke harness is retired (one
 negative test remains for «unknown event_name» dispatcher contract).
@@ -673,6 +674,45 @@ class TestReviewsIdempotency:
 
 
 # ─── All consumer families shipped — DLQ smoke retired ─────────────────────
+
+
+class TestBillingIdempotency:
+    """C4 billing family (pilot 2026-08-15, frozen contract §5).
+
+    The v1 handlers are observe-only (tenant-verify + payload-validate +
+    structured log — the master-notification side-effect waits on the
+    specialist→master mapping contract), so the dispatcher's
+    ``IngestDedupe`` row IS the side-effect pinned here."""
+
+    @pytest.mark.parametrize(
+        "event_name",
+        ["subscription.activated", "subscription.past_due", "billing.fee_charged"],
+    )
+    def test_billing_event_idempotent(self, event_name: str, tenant: Tenant) -> None:
+        payloads: dict[str, dict[str, Any]] = {
+            "subscription.activated": {
+                "specialist_id": SPECIALIST_ID,
+                "tariff": "solo",
+                "period_end": "2026-08-31",
+            },
+            "subscription.past_due": {
+                "specialist_id": SPECIALIST_ID,
+                "debt_amount": "690.00",
+                "failed_attempts": 3,
+            },
+            "billing.fee_charged": {
+                "specialist_id": SPECIALIST_ID,
+                "appointment_id": APPOINTMENT_ID,
+                "amount": "90.00",
+                "period": "2026-08",
+            },
+        }
+        env = _envelope(event_name=event_name, data=payloads[event_name])
+
+        def check() -> None:
+            assert IngestDedupe.objects.filter(event_id=env.event_id).count() == 1
+
+        _dispatch_3x_and_assert(env, side_effect_check=check)
 
 
 class TestUnshippedConsumerNamesDeadLetter:

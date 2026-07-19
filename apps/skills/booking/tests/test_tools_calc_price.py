@@ -11,7 +11,7 @@ import uuid
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -108,11 +108,13 @@ def catalog_service_no_price(tenant: Tenant) -> CatalogService:
 
 
 def _allowed_ids(*services: CatalogService) -> set[int]:
-    return {int(s.external_id) for s in services}
+    # external_id is nullable since the S3B re-key; these test services all
+    # set it, so guard the None for mypy and skip any unset row.
+    return {int(s.external_id) for s in services if s.external_id is not None}
 
 
 def _service_lookup(*services: CatalogService) -> dict[int, str]:
-    return {int(s.external_id): s.name for s in services}
+    return {int(s.external_id): s.name for s in services if s.external_id is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +437,7 @@ class TestCalcPriceSkillIntegration:
         )
         # YClients knows the service (external id 101) — matches catalog.
         yc_service = Service(
-            id=int(catalog_service.external_id),
+            id=cast(int, catalog_service.external_id),
             title=catalog_service.name,
             price_min=1500.0,
             price_max=1500.0,
@@ -448,7 +450,7 @@ class TestCalcPriceSkillIntegration:
         tc = ToolCall(
             id="c1",
             name="calc_price",
-            arguments={"service_id": int(catalog_service.external_id), "promo_code": "MAY10"},
+            arguments={"service_id": cast(int, catalog_service.external_id), "promo_code": "MAY10"},
         )
         completions = [
             _completion(tool_calls=[tc]),
@@ -473,7 +475,7 @@ class TestCalcPriceSkillIntegration:
         self, tenant: Tenant, bot_user: BotUser, catalog_service: CatalogService
     ) -> None:
         yc_service = Service(
-            id=int(catalog_service.external_id),
+            id=cast(int, catalog_service.external_id),
             title=catalog_service.name,
             price_min=1500.0,
             price_max=1500.0,

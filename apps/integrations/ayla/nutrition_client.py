@@ -3,16 +3,21 @@
 Sprint 9 / I1 (DRF-825). Ported from ``mysite/maxbot/services/nutrition_client.py``
 (production-validated 30+ days). Adjustments for the platform:
 
-* Settings names: ``AYLA_BASE_URL`` + ``AYLA_SERVICE_TOKEN`` (was
-  ``NUTRITION_SERVICE_TOKEN``).
+* Settings names: ``AYLA_BASE_URL`` + ``NUTRITION_SERVICE_TOKEN`` (#1050 — the
+  ``X-Service-Token`` shared secret, named to match what Ayla's nutrition
+  endpoint validates; the audit-era ``AYLA_SERVICE_TOKEN`` conflated this with
+  a non-existent Bearer and is gone).
 * Logger namespace: ``apps.integrations.ayla.nutrition_client``.
 * Circuit breaker: stays inline (``_Circuit``) — Sprint 9 / I3 (DRF-827) will
   decide whether to replace with the platform CR-3 breaker; doing both is
   redundant and was deferred per ticket.
 
-Service-to-service auth via ``X-Service-Token`` (shared secret) +
-``X-External-User-ID`` (e.g. ``bot:12345``). All endpoints sit under
-``AYLA_BASE_URL/api/v1/nutrition/internal/``.
+Service-to-service auth via ``X-Service-Token`` (shared secret,
+``NUTRITION_SERVICE_TOKEN``) + ``X-External-User-ID`` (e.g. ``bot:12345``). All
+endpoints sit under ``AYLA_BASE_URL/api/v1/nutrition/internal/``; the URL is
+built through :class:`apps.integrations.ayla.url_builder.AylaUrlBuilder`
+(#1049), which owns host-only validation of ``AYLA_BASE_URL`` and the ``api/v1``
+prefix, so no endpoint hand-builds an ``f"{base}/api/v1/..."`` string.
 
 Resilience:
 
@@ -42,6 +47,8 @@ from typing import Any
 
 import httpx
 from django.conf import settings
+
+from apps.integrations.ayla.url_builder import AylaUrlBuilder
 
 
 logger = logging.getLogger(__name__)
@@ -293,8 +300,10 @@ class NutritionClient:
         if not base_url:
             raise ValueError("AYLA_BASE_URL is empty — nutrition client cannot start")
         if not service_token:
-            raise ValueError("AYLA_SERVICE_TOKEN is empty — nutrition client cannot start")
-        self._base_url = base_url.rstrip("/")
+            raise ValueError("NUTRITION_SERVICE_TOKEN is empty — nutrition client cannot start")
+        # Single URL seam (#1049): the builder owns host-only validation + the
+        # ``api/v1`` prefix so no endpoint below hand-builds an f-string URL.
+        self._urls = AylaUrlBuilder(base_url)
         self._token = service_token
         self._timeout_s = timeout_s
         self._circuit = _Circuit()
@@ -320,7 +329,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/scan/"
+        url = self._urls.build("nutrition/internal/scan/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -412,7 +421,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/food-log/"
+        url = self._urls.build("nutrition/internal/food-log/")
         headers: dict[str, str] = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -488,7 +497,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/summary/"
+        url = self._urls.build("nutrition/internal/summary/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -552,7 +561,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/deficits/"
+        url = self._urls.build("nutrition/internal/deficits/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -600,7 +609,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/profile/"
+        url = self._urls.build("nutrition/internal/profile/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -630,7 +639,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/profile/"
+        url = self._urls.build("nutrition/internal/profile/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -724,7 +733,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/water/"
+        url = self._urls.build("nutrition/internal/water/")
         headers: dict[str, str] = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -789,7 +798,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/water/{entry_id}/"
+        url = self._urls.build(f"nutrition/internal/water/{entry_id}/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -822,7 +831,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/water/today/"
+        url = self._urls.build("nutrition/internal/water/today/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -871,7 +880,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/nutrition/internal/insights/cross_domain/"
+        url = self._urls.build("nutrition/internal/insights/cross_domain/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -968,9 +977,7 @@ class NutritionClient:
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
-        url = (
-            f"{self._base_url}/api/v1/nutrition/internal/insights/cross_domain/{action}/{shown_id}/"
-        )
+        url = self._urls.build(f"nutrition/internal/insights/cross_domain/{action}/{shown_id}/")
         headers = {
             "X-Service-Token": self._token,
             "X-External-User-ID": external_user_id,
@@ -1059,7 +1066,7 @@ def get_nutrition_client() -> NutritionClient:
     if _SINGLETON is None:
         _SINGLETON = NutritionClient(
             base_url=getattr(settings, "AYLA_BASE_URL", ""),
-            service_token=getattr(settings, "AYLA_SERVICE_TOKEN", ""),
+            service_token=getattr(settings, "NUTRITION_SERVICE_TOKEN", ""),
         )
     return _SINGLETON
 

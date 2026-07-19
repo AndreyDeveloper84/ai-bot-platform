@@ -68,6 +68,43 @@ def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypat
     assert current_tenant() is None  # scope released after the handoff
 
 
+def test_handoff_should_handoff_creates_admin_task(settings, monkeypatch) -> None:
+    """#1047: if the booking entrypoint escalates (should_handoff) on the global
+    booking path, an AdminTask must be created (operator notified) inside
+    tenant_scope(T) — it was previously dropped."""
+    from apps.handoff.models import AdminTask
+
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = False
+    t = _tenant()
+    master = _master(t, staff_id=888)
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="501", chat_id="501")
+
+    def fake_dispatch(ctx):
+        return SkillResult(
+            reply_text="Секунду, переключаю на менеджера.",
+            should_handoff=True,
+            handoff_reason="booking_gate_failed",
+        )
+
+    monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
+
+    reply = handoff_to_booking(
+        global_bot_user=gbu, tenant_id=t.id, master_id=master.id, chat_id="501"
+    )
+
+    assert reply.text == "Секунду, переключаю на менеджера."
+    tasks = AdminTask.all_tenants.filter(tenant=t)
+    assert tasks.count() == 1
+    task = tasks.first()
+    assert task is not None
+    assert task.task_type == AdminTask.TaskType.HANDOFF
+    assert task.reason == "booking_gate_failed"
+    # Operator's snapshot must carry the booking-pick context, not be empty (CR).
+    assert task.transcript_snapshot["messages"], "handoff task transcript is empty"
+    assert current_tenant() is None  # scope released after the handoff
+
+
 def test_handoff_nullable_staff_id_is_graceful_no_dispatch(settings, monkeypatch) -> None:
     settings.STRICT_TENANT_SCOPE = "strict"
     settings.BOOKING_VIA_AYLA_REST = False

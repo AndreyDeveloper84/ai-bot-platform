@@ -16,7 +16,7 @@ from apps.eventbus.ingest_dispatcher import (
     register,
     registered_handlers,
 )
-from apps.eventbus.ingest_envelope import IngestEnvelope
+from apps.eventbus.ingest_envelope import MAX_EVENT_ID_LENGTH, IngestEnvelope
 from apps.eventbus.models import IngestDedupe, IngestDLQ
 
 
@@ -115,6 +115,112 @@ class TestIdempotency:
         assert result3.outcome is DispatchOutcome.DUPLICATE
         assert len(calls) == 1
         assert IngestDedupe.objects.filter(event_id=env.event_id).count() == 1
+
+
+class TestEventIdWidth:
+    """#1058 — Ayla emits uuid4() (36 chars); the dedupe/DLQ/tracker
+    columns must hold both a bare ULID (26) and a uuid4 (36). The
+    dispatcher rejects anything LONGER fail-fast into the DLQ so a
+    Postgres DataError never surfaces as a retried-forever 500."""
+
+    def test_uuid4_event_id_passes_dedupe_without_dataerror(self) -> None:
+        """A real 36-char Ayla event_id runs the handler + writes a
+        dedupe row — no DataError on the varchar column (the core #1058
+        regression).
+
+        NOTE: the DataError this guards against is Postgres-only. SQLite
+        ignores CharField max_length, so under the local SQLite backend
+        this passes even against an un-widened varchar(26). CI runs on
+        postgres:16 (POSTGRES_HOST set) where it is a real guard against
+        reverting migration 0009."""
+        calls: list[IngestEnvelope] = []
+        register("booking.created", 1, calls.append)
+
+        # uuid4 canonical form is exactly 36 chars (32 hex + 4 hyphens).
+        uuid4_id = "9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c"
+        assert len(uuid4_id) == 36
+        env = _envelope(event_id=uuid4_id)
+
+        result = dispatch_envelope(env)
+
+        assert result.outcome is DispatchOutcome.OK
+        assert len(calls) == 1
+        assert IngestDedupe.objects.filter(event_id=uuid4_id).count() == 1
+
+    def test_over_length_event_id_dlqs_and_skips_handler(self) -> None:
+        """An event_id longer than the column width is DLQ'd
+        (``event_id_too_long``) and the handler never runs — no dedupe
+        row, no DataError, no 500."""
+        calls: list[IngestEnvelope] = []
+        register("booking.created", 1, calls.append)
+
+        too_long = "z" * (MAX_EVENT_ID_LENGTH + 4)
+        env = _envelope(event_id=too_long)
+
+        result = dispatch_envelope(env)
+
+        assert result.outcome is DispatchOutcome.INVALID_EVENT_ID
+        assert calls == []  # handler short-circuited before running
+        # No dedupe row — the guard runs before the dedupe INSERT.
+        assert IngestDedupe.objects.filter(event_id=too_long).count() == 0
+        # DLQ row exists, keyed by the TRUNCATED id (column is varchar(36));
+        # the full id survives in raw_body for forensics.
+        dlq_row = IngestDLQ.objects.get(reason="event_id_too_long")
+        assert dlq_row.event_id == too_long[:MAX_EVENT_ID_LENGTH]
+        assert dlq_row.raw_body["event_id"] == too_long
+
+    def test_boundary_length_event_id_is_accepted(self) -> None:
+        """Exactly MAX_EVENT_ID_LENGTH chars is valid (boundary is
+        inclusive) — only STRICTLY longer ids are rejected."""
+        register("booking.created", 1, lambda e: None)
+
+        boundary_id = "b" * MAX_EVENT_ID_LENGTH
+        env = _envelope(event_id=boundary_id)
+
+        result = dispatch_envelope(env)
+
+        assert result.outcome is DispatchOutcome.OK
+        assert IngestDedupe.objects.filter(event_id=boundary_id).count() == 1
+
+    def test_every_cross_service_event_id_column_holds_max_length(self) -> None:
+        """Guard (#1058): every cross-service ingest event_id column must
+        be wide enough for a real Ayla uuid4. A future dedupe table that
+        silently ships varchar(26) would DataError on a 36-char id — this
+        test fails loudly instead. DomainEvent.event_id is deliberately
+        EXCLUDED: it's the IN-PROCESS bus, self-generating a bare ULID
+        (26), never a cross-service uuid4."""
+        from apps.eventbus.models import (
+            HandlerFailureTracker,
+            IngestDedupe,
+            IngestDLQ,
+            NotificationDispatchDedupe,
+            PaymentTerminalDedupe,
+            ReviewProcessedDedupe,
+        )
+
+        cross_service_models = [
+            IngestDedupe,
+            IngestDLQ,
+            HandlerFailureTracker,
+            PaymentTerminalDedupe,
+            ReviewProcessedDedupe,
+            NotificationDispatchDedupe,
+        ]
+        # getattr (not attribute access) so mypy doesn't flag the
+        # ``Field | ForeignObjectRel`` union return of get_field() —
+        # event_id is always a concrete CharField, but the type stub
+        # can't know that. Returns Any → union-attr clean.
+        widths = {
+            model.__name__: getattr(model._meta.get_field("event_id"), "max_length", None)
+            for model in cross_service_models
+        }
+        too_narrow = {
+            name: width for name, width in widths.items() if (width or 0) < MAX_EVENT_ID_LENGTH
+        }
+        assert not too_narrow, (
+            "Cross-service event_id column(s) too narrow for Ayla uuid4 "
+            f"(need >= {MAX_EVENT_ID_LENGTH}): {too_narrow}"
+        )
 
 
 class TestUnknownName:

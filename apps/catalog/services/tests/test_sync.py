@@ -1,7 +1,8 @@
-"""CatalogSyncService tests (DRF-575 / Sprint 7 / C4)."""
+"""CatalogSyncService tests — Ayla salon-services (S3B / #1044)."""
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -9,12 +10,7 @@ from django.core.cache import cache
 
 from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogService
-from apps.catalog.services.http_client import (
-    CatalogFaqDTO,
-    CatalogHelpArticleDTO,
-    CatalogMasterDTO,
-    CatalogServiceDTO,
-)
+from apps.catalog.services.http_client import CatalogSalonServiceDTO
 from apps.catalog.services.sync import (
     EVENT_CATALOG_SYNCED,
     CatalogSyncService,
@@ -39,39 +35,32 @@ def _ts(hour: int = 10) -> datetime:
     return datetime(2026, 5, 13, hour, 0, tzinfo=timezone.utc)
 
 
+def _salon(aid: str, *, name: str = "S", ts: datetime | None = None) -> CatalogSalonServiceDTO:
+    return CatalogSalonServiceDTO(
+        ayla_service_id=aid,
+        external_updated_at=ts or _ts(),
+        name=name,
+    )
+
+
 class FakeHttpClient:
     """Mocks CatalogHttpClient — captures calls + returns canned DTOs."""
 
     def __init__(
         self,
         *,
-        services: list[CatalogServiceDTO] | None = None,
-        masters: list[CatalogMasterDTO] | None = None,
-        faqs: list[CatalogFaqDTO] | None = None,
-        help_articles: list[CatalogHelpArticleDTO] | None = None,
+        services: list[CatalogSalonServiceDTO] | None = None,
         raise_on_fetch: type[Exception] | None = None,
     ) -> None:
         self._services = services or []
-        self._masters = masters or []
-        self._faqs = faqs or []
-        self._help = help_articles or []
         self._raise = raise_on_fetch
-        self.since_seen: list[datetime | None] = []
+        self.tenant_ids_seen: list[str] = []
 
-    def fetch_services(self, *, since: datetime | None = None) -> list[CatalogServiceDTO]:
+    def fetch_salon_services(self, *, tenant_id: str) -> list[CatalogSalonServiceDTO]:
         if self._raise is not None:
             raise self._raise("synthetic")
-        self.since_seen.append(since)
+        self.tenant_ids_seen.append(tenant_id)
         return self._services
-
-    def fetch_masters(self, *, since: datetime | None = None) -> list[CatalogMasterDTO]:
-        return self._masters
-
-    def fetch_faqs(self, *, since: datetime | None = None) -> list[CatalogFaqDTO]:
-        return self._faqs
-
-    def fetch_help_articles(self, *, since: datetime | None = None) -> list[CatalogHelpArticleDTO]:
-        return self._help
 
     def close(self) -> None: ...
 
@@ -84,44 +73,23 @@ class FakeHttpClient:
 
 class TestHappyPath:
     def test_first_run_pulls_and_creates(self, tenant: Tenant) -> None:
-        http = FakeHttpClient(
-            services=[
-                CatalogServiceDTO(
-                    external_id=1,
-                    external_updated_at=_ts(),
-                    slug="s1",
-                    name="Service 1",
-                )
-            ],
-            masters=[
-                CatalogMasterDTO(
-                    external_id=10,
-                    external_updated_at=_ts(),
-                    name="Анна",
-                )
-            ],
-        )
+        http = FakeHttpClient(services=[_salon(str(uuid.uuid4()), name="Service 1")])
         result = CatalogSyncService(http_client=http).run(tenant)
         assert isinstance(result, SyncResult)
         assert result.ran is True
         assert result.skipped is False
         assert result.services.created == 1
-        assert result.masters.created == 1
         assert result.cursor_advanced_to == _ts()
-        # Cursor persisted.
         tenant.refresh_from_db()
         assert tenant.last_catalog_sync_at == _ts()
 
-    def test_subsequent_run_passes_since(self, tenant: Tenant) -> None:
-        tenant.last_catalog_sync_at = _ts(10)
-        tenant.save()
+    def test_passes_tenant_id_to_fetch(self, tenant: Tenant) -> None:
         http = FakeHttpClient()
         CatalogSyncService(http_client=http).run(tenant)
-        # The first since= seen by fetch_services should be the cursor.
-        assert http.since_seen == [_ts(10)]
+        assert http.tenant_ids_seen == [str(tenant.id)]
 
     def test_cursor_unchanged_on_empty_pull(self, tenant: Tenant) -> None:
-        http = FakeHttpClient()  # all empty lists
+        http = FakeHttpClient()  # empty
         before = tenant.last_catalog_sync_at
         result = CatalogSyncService(http_client=http).run(tenant)
         assert result.ran is True
@@ -129,31 +97,36 @@ class TestHappyPath:
         tenant.refresh_from_db()
         assert tenant.last_catalog_sync_at == before
 
+    def test_cursor_takes_max_across_rows(self, tenant: Tenant) -> None:
+        http = FakeHttpClient(
+            services=[
+                _salon(str(uuid.uuid4()), ts=_ts(10)),
+                _salon(str(uuid.uuid4()), ts=_ts(14)),  # newer
+            ]
+        )
+        result = CatalogSyncService(http_client=http).run(tenant)
+        assert result.cursor_advanced_to == _ts(14)
+
 
 class TestLock:
     def test_lock_held_returns_skipped(self, tenant: Tenant) -> None:
-        # Pre-acquire the lock to simulate another beat already running.
         cache.add(f"catalog_sync_lock:{tenant.id}", "1", timeout=60)
         http = FakeHttpClient()
         result = CatalogSyncService(http_client=http).run(tenant)
         assert result.ran is False
         assert result.skipped is True
-        # No fetcher work happened.
-        assert http.since_seen == []
+        assert http.tenant_ids_seen == []  # no fetch happened
 
     def test_lock_released_on_completion(self, tenant: Tenant) -> None:
         http = FakeHttpClient()
         CatalogSyncService(http_client=http).run(tenant)
-        # Second run on same tenant should NOT be skipped — lock got
-        # released in the `finally` block.
         result = CatalogSyncService(http_client=http).run(tenant)
         assert result.ran is True
 
     def test_lock_released_on_fetch_error(self, tenant: Tenant) -> None:
         http = FakeHttpClient(raise_on_fetch=RuntimeError)
         CatalogSyncService(http_client=http).run(tenant)
-        # Lock released even though fetch threw — next run can proceed.
-        http2 = FakeHttpClient()  # OK this time
+        http2 = FakeHttpClient()
         result = CatalogSyncService(http_client=http2).run(tenant)
         assert result.ran is True
         assert result.error == ""
@@ -167,7 +140,6 @@ class TestFetchError:
         result = CatalogSyncService(http_client=http).run(tenant)
         assert result.ran is True
         assert "synthetic" in result.error
-        # No mirrors written, cursor unchanged.
         tenant.refresh_from_db()
         assert tenant.last_catalog_sync_at == _ts(8)
         assert CatalogService.all_tenants.filter(tenant=tenant).count() == 0
@@ -175,16 +147,7 @@ class TestFetchError:
 
 class TestAuditAndEvent:
     def test_audit_row_on_success(self, tenant: Tenant) -> None:
-        http = FakeHttpClient(
-            services=[
-                CatalogServiceDTO(
-                    external_id=1,
-                    external_updated_at=_ts(),
-                    slug="s",
-                    name="S",
-                )
-            ]
-        )
+        http = FakeHttpClient(services=[_salon(str(uuid.uuid4()))])
         CatalogSyncService(http_client=http).run(tenant)
         rows = AuditLog.all_tenants.filter(action=EVENT_CATALOG_SYNCED)
         assert rows.exists()
@@ -193,93 +156,13 @@ class TestAuditAndEvent:
         assert row.payload["counts"]["services"]["created"] == 1
 
 
-class TestCursorAdvanceMax:
-    def test_cursor_takes_max_across_all_mirrors(self, tenant: Tenant) -> None:
-        # Different upstream timestamps across mirror types — cursor
-        # must land on the MAX across the bundle so a row that arrives
-        # in the next minute on a less-updated mirror still gets picked
-        # up.
-        http = FakeHttpClient(
-            services=[
-                CatalogServiceDTO(
-                    external_id=1,
-                    external_updated_at=_ts(10),
-                    slug="s",
-                    name="S",
-                )
-            ],
-            faqs=[
-                CatalogFaqDTO(
-                    external_id=1,
-                    external_updated_at=_ts(14),  # newer than services
-                    question="Q",
-                    answer="A",
-                )
-            ],
-        )
-        result = CatalogSyncService(http_client=http).run(tenant)  # type: ignore[arg-type]
-        assert result.cursor_advanced_to == _ts(14)
-
-
-class TestPerMirrorCounts:
-    def test_all_four_mirrors_counted(self, tenant: Tenant) -> None:
-        http = FakeHttpClient(
-            services=[
-                CatalogServiceDTO(
-                    external_id=1,
-                    external_updated_at=_ts(),
-                    slug="s",
-                    name="S",
-                )
-            ],
-            masters=[
-                CatalogMasterDTO(
-                    external_id=10,
-                    external_updated_at=_ts(),
-                    name="M",
-                )
-            ],
-            faqs=[
-                CatalogFaqDTO(
-                    external_id=20,
-                    external_updated_at=_ts(),
-                    question="Q",
-                    answer="A",
-                )
-            ],
-            help_articles=[
-                CatalogHelpArticleDTO(
-                    external_id=30,
-                    external_updated_at=_ts(),
-                    question="H",
-                    answer="A",
-                )
-            ],
-        )
-        result = CatalogSyncService(http_client=http).run(tenant)  # type: ignore[arg-type]
-        assert result.services.created == 1
-        assert result.masters.created == 1
-        assert result.faqs.created == 1
-        assert result.help_articles.created == 1
-
-
-class TestStaleSkip:
-    def test_re_run_with_same_data_skips_all(self, tenant: Tenant) -> None:
-        ts = _ts()
-        http = FakeHttpClient(
-            services=[
-                CatalogServiceDTO(
-                    external_id=1,
-                    external_updated_at=ts,
-                    slug="s",
-                    name="S",
-                )
-            ]
-        )
-        CatalogSyncService(http_client=http).run(tenant)  # type: ignore[arg-type]
-        # Second run — same data → upserter sees existing rows + equal
-        # timestamp → all skipped.
-        result = CatalogSyncService(http_client=http).run(tenant)  # type: ignore[arg-type]
-        assert result.services.skipped == 1
+class TestIdempotent:
+    def test_re_run_same_data_updates_not_duplicates(self, tenant: Tenant) -> None:
+        aid = str(uuid.uuid4())
+        http = FakeHttpClient(services=[_salon(aid, name="S")])
+        CatalogSyncService(http_client=http).run(tenant)
+        result = CatalogSyncService(http_client=http).run(tenant)
+        # update_or_create on the stable UUID → same row updated, no dupe.
         assert result.services.created == 0
-        assert result.services.updated == 0
+        assert result.services.updated == 1
+        assert CatalogService.all_tenants.filter(tenant=tenant, ayla_service_id=aid).count() == 1

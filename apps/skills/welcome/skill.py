@@ -105,6 +105,7 @@ from django.utils import timezone
 
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.registry import register
+from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -360,7 +361,13 @@ class WelcomeSkill:
         infrastructure. Strict two-bubble может revisit post-pilot.
         """
         bot_user = context.bot_user
-        if getattr(bot_user, "consent_at", None) is None:
+        # #1074 — on the GLOBAL (tenant-less) path we do NOT stamp consent_at here.
+        # global_onboarding calls ``consent.services.record_global_consent`` right
+        # after this render, and that stamps consent_at ATOMICALLY with the
+        # ConsentRecord (proof-of-consent) — so on the global path consent_at can
+        # never be set without the record. On the per-tenant path
+        # (``current_tenant()`` set) we stamp as before.
+        if current_tenant() is not None and getattr(bot_user, "consent_at", None) is None:
             try:
                 bot_user.consent_at = timezone.now()
                 bot_user.save(update_fields=["consent_at"])

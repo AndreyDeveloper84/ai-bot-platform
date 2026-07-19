@@ -24,6 +24,19 @@ class _Visit:
 _AS_OF = datetime(2026, 5, 12, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _frozen_now():
+    """Pin «now» to _AS_OF — the visits/expectations in this module are
+    computed against it (recency_days, RFM bands). Without the freeze the
+    whole module time-bombs as real time moves past 2026-05-12.
+    ``tick=True`` keeps per-call ordering (idempotency test asserts
+    last_recomputed_at advances between recomputes)."""
+    from freezegun import freeze_time
+
+    with freeze_time(_AS_OF, tick=True):
+        yield
+
+
 pytestmark = pytest.mark.django_db
 
 

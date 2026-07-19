@@ -68,6 +68,13 @@ class ConsentRecord(models.Model):
         MARKETING = "marketing", "Marketing"
         PHOTO_BIOMETRIC = "photo_biometric", "Photo / biometric"
         HEALTH = "health", "Health"
+        # Memory zones (MEMORY_CONSENT_SPEC, founder 2026-07-03). Global per
+        # ayla_user_id — checked cross-tenant via has_memory_consent(), not the
+        # tenant-scoped has_consent(). green активна в пилоте; yellow/red —
+        # фундамент, активный сбор за отдельным flow.
+        MEMORY_GREEN = "memory_green", "Memory — green zone"
+        MEMORY_YELLOW = "memory_yellow", "Memory — yellow zone"
+        MEMORY_RED = "memory_red", "Memory — red zone (special category)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(

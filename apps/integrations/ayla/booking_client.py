@@ -41,6 +41,8 @@ from typing import Any, NoReturn, Protocol, runtime_checkable
 import httpx
 from django.conf import settings
 
+from apps.integrations.ayla.url_builder import AylaUrlBuilder
+
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +143,23 @@ class BookingBadRequestError(BookingAPIError):
 
     4xx other than the handled 404s. A business/input error the caller
     surfaces to the user, NOT an outage — does **not** trip the breaker.
+
+    Carries structured ``status_code`` / ``code`` (the wire ``error.code``,
+    e.g. C1's ``SUBSCRIPTION_PAST_DUE``) so callers can branch on the
+    reason without parsing the message string. Both default to None for
+    legacy raise sites.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
 
 
 # ─── DTOs ──────────────────────────────────────────────────────────────────
@@ -411,7 +429,10 @@ class AylaBookingHTTPClient:
             raise ValueError("AYLA_BASE_URL is empty — booking client cannot start")
         if not api_token:
             raise ValueError("AYLA_INTERNAL_API_TOKEN is empty — booking client cannot start")
-        self._base_url = base_url.rstrip("/")
+        # Single URL seam (#1049): the builder owns host-only validation + the
+        # ``/api/v1`` prefix so this client never hand-builds an f-string URL.
+        self._urls = AylaUrlBuilder(base_url)
+        self._base_url = self._urls.origin
         self._token = api_token
         self._timeout_s = timeout_s
         self._transport = transport
@@ -467,7 +488,7 @@ class AylaBookingHTTPClient:
         if self._circuit.is_open(now=now):
             raise BookingUnavailableError("circuit_open")
 
-        url = f"{self._base_url}/api/v1/internal/{endpoint.lstrip('/')}"
+        url = self._urls.build(f"internal/{endpoint.lstrip('/')}")
         headers = self._headers(external_user_id=external_user_id)
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
@@ -492,7 +513,14 @@ class AylaBookingHTTPClient:
             self._circuit.record_failure(now=now)
             logger.warning("booking_client.5xx status=%d", resp.status_code)
             raise BookingUnavailableError(f"http_{resp.status_code}")
-        raise BookingBadRequestError(f"http_{resp.status_code}_{_err_code(resp)}")
+        # Structured status_code/code ride along (dev C1 — the provider
+        # maps 409 SUBSCRIPTION_PAST_DUE to the neutral
+        # specialist_unavailable surface without string-parsing).
+        raise BookingBadRequestError(
+            f"http_{resp.status_code}_{_err_code(resp)}",
+            status_code=resp.status_code,
+            code=_err_code(resp),
+        )
 
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
         """Validate status + unwrap the body. Maps 5xx→Unavailable (trips),

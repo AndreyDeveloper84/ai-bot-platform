@@ -148,6 +148,34 @@ def handoff_to_booking(
             )
         )
 
+        # Post-dispatch handoff (#1047): the booking entrypoint may escalate to a
+        # human (should_handoff). We are inside tenant_scope(T) here, which
+        # create_admin_task requires — so the operator is notified even on the
+        # global path. NOTE: the user is on the GLOBAL bot, so MUTING their
+        # subsequent turns is the multi-turn-session follow-up (see module
+        # docstring); this only guarantees the escalation task is created, matching
+        # the per-tenant fix in apps/channels/max/handler.py.
+        if result is not None and getattr(result, "should_handoff", False):
+            from apps.conversations.services import record_message
+            from apps.handoff.models import AdminTask
+            from apps.handoff.services import create_admin_task
+
+            # Record the booking-pick context BEFORE packaging the transcript —
+            # this per-tenant conversation is freshly resolved on the global path
+            # and otherwise holds no messages, so the operator's AdminTask snapshot
+            # would be empty. Give them the "what did the user want" line.
+            record_message(
+                conversation,
+                role="user",
+                content=f"[глобальный бот] Запрос записи к мастеру {master_name}.",
+                trace_id=trace_id,
+            )
+            create_admin_task(
+                conversation,
+                task_type=AdminTask.TaskType.HANDOFF,
+                reason=result.handoff_reason or "booking_handoff",
+            )
+
     reply_text = (result.reply_text if result is not None else "") or (
         f"Отлично! Записываю вас к мастеру {master_name}. Какая услуга интересует?"
     )

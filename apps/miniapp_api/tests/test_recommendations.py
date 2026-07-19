@@ -21,11 +21,13 @@ from django.test import Client
 from django.urls import reverse
 
 from apps.identity.models import BotUser
+from apps.integrations.ayla import recommendations_client as rc
 from apps.integrations.ayla.recommendations_client import (
     RecommendationsBadRequest,
     RecommendationsConfigError,
     RecommendationsUnavailable,
     fetch_recommendations,
+    reset_recommendations_circuit,
 )
 from apps.tenancy.models import Tenant
 
@@ -52,7 +54,15 @@ def _init_data_header(user_id: str) -> str:
 def _bot_token(settings):
     settings.MAX_BOT_TOKEN = BOT_TOKEN
     settings.AYLA_BASE_URL = "https://ayla.test"
-    settings.AYLA_SERVICE_TOKEN = "test-service-token"  # noqa: S105  # pragma: allowlist secret
+    settings.AYLA_INTERNAL_API_TOKEN = "test-service-token"  # noqa: S105  # pragma: allowlist secret
+
+
+@pytest.fixture(autouse=True)
+def _reset_rec_circuit():
+    """Isolate the module-level recommendations breaker between cases (#1048)."""
+    reset_recommendations_circuit()
+    yield
+    reset_recommendations_circuit()
 
 
 @pytest.fixture
@@ -173,10 +183,10 @@ class TestRecommendationsView:
         assert data["ayla_error"] == {"detail": "lat/lon out of range"}
 
     def test_config_error_returns_503(self, client: Client, bot_user: BotUser):
-        """Missing AYLA_SERVICE_TOKEN → 503 not_configured."""
+        """Missing AYLA_INTERNAL_API_TOKEN → 503 not_configured."""
         with patch(
             "apps.integrations.ayla.recommendations_client.fetch_recommendations",
-            side_effect=RecommendationsConfigError("AYLA_SERVICE_TOKEN missing"),
+            side_effect=RecommendationsConfigError("AYLA_INTERNAL_API_TOKEN missing"),
         ):
             resp = client.post(
                 self._url(),
@@ -246,7 +256,7 @@ class _FakeHttpxClient:
 class TestFetchRecommendations:
     def test_happy_path_returns_body(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
         fake = _FakeHttpxClient(
             response=_FakeResponse(status_code=200, payload={"recommendations": []})
         )
@@ -259,20 +269,22 @@ class TestFetchRecommendations:
                 payload={"goal": "relax"},
             )
         assert out == {"recommendations": []}
-        assert fake.last_call["url"] == ("https://ayla.test/internal/me/catalog/recommendations/")
+        assert fake.last_call["url"] == (
+            "https://ayla.test/api/v1/internal/me/catalog/recommendations/"
+        )
         assert fake.last_call["headers"]["Authorization"] == "Bearer tok"
         assert fake.last_call["headers"]["X-External-User-ID"] == "bot:max:1"
         assert fake.last_call["json"] == {"goal": "relax"}
 
     def test_config_error_when_token_missing(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = ""
+        settings.AYLA_INTERNAL_API_TOKEN = ""
         with pytest.raises(RecommendationsConfigError):
             fetch_recommendations(external_user_id="bot:max:1", payload={})
 
     def test_5xx_raises_unavailable(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
         fake = _FakeHttpxClient(response=_FakeResponse(status_code=503, payload={"detail": "down"}))
         with patch(
             "apps.integrations.ayla.recommendations_client.httpx.Client",
@@ -283,7 +295,7 @@ class TestFetchRecommendations:
 
     def test_timeout_raises_unavailable(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
         fake = _FakeHttpxClient(raise_exc=httpx.ConnectTimeout("slow"))
         with patch(
             "apps.integrations.ayla.recommendations_client.httpx.Client",
@@ -294,7 +306,7 @@ class TestFetchRecommendations:
 
     def test_4xx_raises_bad_request_with_body(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
         fake = _FakeHttpxClient(
             response=_FakeResponse(status_code=422, payload={"detail": "lat/lon out of range"})
         )
@@ -309,7 +321,7 @@ class TestFetchRecommendations:
 
     def test_malformed_json_raises_unavailable(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
         fake = _FakeHttpxClient(
             response=_FakeResponse(status_code=200, payload=ValueError("bad json"))
         )
@@ -322,7 +334,7 @@ class TestFetchRecommendations:
 
     def test_non_dict_top_level_raises(self, settings):
         settings.AYLA_BASE_URL = "https://ayla.test"
-        settings.AYLA_SERVICE_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
         fake = _FakeHttpxClient(response=_FakeResponse(status_code=200, payload=["a", "list"]))
         with patch(
             "apps.integrations.ayla.recommendations_client.httpx.Client",
@@ -330,3 +342,45 @@ class TestFetchRecommendations:
         ):
             with pytest.raises(RecommendationsUnavailable, match="not an object"):
                 fetch_recommendations(external_user_id="bot:max:1", payload={})
+
+    def test_breaker_opens_after_threshold_5xx(self, settings, monkeypatch):
+        """5 consecutive 5xx → breaker opens; next call short-circuits (#1048)."""
+        settings.AYLA_BASE_URL = "https://ayla.test"
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        # Silence the Telegram alert path — the breaker is the unit under test.
+        monkeypatch.setattr(rc, "_fire_breaker_alert", lambda transition, failures: None)
+        fake = _FakeHttpxClient(response=_FakeResponse(status_code=503, payload={"detail": "down"}))
+        with patch(
+            "apps.integrations.ayla.recommendations_client.httpx.Client",
+            return_value=fake,
+        ):
+            for _ in range(rc.CIRCUIT_FAILURE_THRESHOLD):
+                with pytest.raises(RecommendationsUnavailable, match="server"):
+                    fetch_recommendations(external_user_id="bot:max:1", payload={})
+            # Threshold reached — the next call short-circuits BEFORE the
+            # transport, so the message is ``circuit_open`` not ``server``.
+            with pytest.raises(RecommendationsUnavailable, match="circuit_open"):
+                fetch_recommendations(external_user_id="bot:max:1", payload={})
+
+    def test_4xx_does_not_trip_breaker(self, settings):
+        """A run of 4xx (we sent garbage, Ayla is healthy) must NOT open the breaker."""
+        settings.AYLA_BASE_URL = "https://ayla.test"
+        settings.AYLA_INTERNAL_API_TOKEN = "tok"  # noqa: S105  # pragma: allowlist secret
+        bad = _FakeHttpxClient(response=_FakeResponse(status_code=422, payload={"detail": "x"}))
+        with patch(
+            "apps.integrations.ayla.recommendations_client.httpx.Client",
+            return_value=bad,
+        ):
+            for _ in range(rc.CIRCUIT_FAILURE_THRESHOLD + 1):
+                with pytest.raises(RecommendationsBadRequest):
+                    fetch_recommendations(external_user_id="bot:max:1", payload={})
+        # Breaker is still closed: a subsequent healthy call goes through.
+        ok = _FakeHttpxClient(
+            response=_FakeResponse(status_code=200, payload={"recommendations": []})
+        )
+        with patch(
+            "apps.integrations.ayla.recommendations_client.httpx.Client",
+            return_value=ok,
+        ):
+            out = fetch_recommendations(external_user_id="bot:max:1", payload={})
+        assert out == {"recommendations": []}
