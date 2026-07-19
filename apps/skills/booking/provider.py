@@ -46,6 +46,7 @@ from apps.integrations.ayla.booking_client import (
     AylaSlot,
     AylaUserRecord,
     BookingAPIError,
+    BookingBadRequestError,
     BookingUnavailableError,
 )
 from apps.integrations.yclients.client import (
@@ -227,6 +228,27 @@ class AylaYClientsAdapter:
 # ─── error translation ───────────────────────────────────────────────────────
 
 
+class YClientsSpecialistUnavailableError(YClientsAPIError):
+    """C1 neutral surface: the specialist cannot take a NEW booking now.
+
+    Raised on the flag-ON path when Ayla rejects ``create`` with HTTP 409
+    ``SUBSCRIPTION_PAST_DUE`` (PILOT_CONTRACTS_2026-08-15 §2). The C1
+    privacy rule forbids leaking the debt reason to the customer — the
+    concierge/miniapp must render a NEUTRAL «запись к этому специалисту
+    недоступна» + offer another master/time, so this error carries no
+    debt semantics in its type or message beyond the neutral slug. It
+    subclasses ``YClientsAPIError`` so unspecialised handlers keep
+    working; the create path catches it FIRST.
+    """
+
+
+def _is_c1_debt_block(exc: BaseException) -> bool:
+    """True when the Ayla 4xx is the C1 billing-eligibility rejection."""
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status_code", None)
+    return status == 409 and isinstance(code, str) and code.lower() == "subscription_past_due"
+
+
 class _translate_errors:
     """Context manager: Ayla booking errors → YClients errors.
 
@@ -243,6 +265,8 @@ class _translate_errors:
         # translated YClients error, or lets the original propagate.
         if exc_type is None:
             return
+        if issubclass(exc_type, BookingBadRequestError) and _is_c1_debt_block(exc):
+            raise YClientsSpecialistUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingUnavailableError):
             raise YClientsUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingAPIError):

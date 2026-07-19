@@ -99,6 +99,8 @@
 
 ---
 
+> **Option B (2026-07-09): память для пилота В BOT.** Ayla M-A1/A2/A4 закрыты (bot apps/identity уже имеет зоны/Fernet/red-log/minor per ADR-0011/0006). Ayla держит declared-prefs+A1a. BOT M-B = ACTIVATE проводка concierge на существующие memory_reader/writer (НЕ клиент к Ayla-памяти). Ayla=central memory-сервис = post-pilot.
+
 ## STREAM 5 — Memory Foundation (⚠️ pilot-critical, ров · gated на §8 дизайн-дока)
 > **✅ РАЗБЛОКИРОВАНО (§8 закрыт 2026-07-04): Fernet · green под PERSONAL_DATA (текст→#947) · fill observe-only · один ayla_user_id (телефон=merge-ключ).** 2-й Ayla-агент: agent-2=память M-A (#1094-1097). Тикеты M-B #1098-1100 / M-C #1101. ~~НЕ СТАРТОВАТЬ, пока не закрыт §8~~ `2026-07-03-MEMORY_FOUNDATION_DESIGN.md`: EncryptedField-подход · green consent implicit vs light-opt-in · fill-rate метрика+порог · global-identity (один ayla_user_id vs per-tenant merge). **Ownership:** Ayla владеет ВСЕЙ памятью (зоны 🟢🟡🔴 + шифрование); bot = read/write API-клиент по ayla_user_id (152-ФЗ: одно место хранения/удаления). BUILD фундамент → ACTIVATE узко (green+surfacing) → PLUG-IN post-pilot.
 

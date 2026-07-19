@@ -52,6 +52,33 @@ class _FakeRedis:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _flush_real_ceiling_counters():
+    """Flush the REAL Redis ceiling counters before each test.
+
+    Suite-level hermeticity rot, exposed when a real Redis is reachable
+    (CI services / local docker): tests elsewhere drive MaxHandler's
+    hourly bucket over the limit, and the transition-log assertions here
+    never see the exact 1->limit+1 transition. Best-effort no-op when no
+    Redis is reachable (unit envs). ALSO resets the module-global Lua
+    script cache: once any earlier test registers the script against the
+    REAL client, the cached Script is reused even when the client is
+    monkeypatched to the fake — silently bypassing it.
+    """
+    from apps.workers.ceilings import _invalidate_incr_and_expire_script
+
+    _invalidate_incr_and_expire_script()
+    try:
+        from apps.ingress.streams import _client
+
+        r = _client()
+        for key in r.scan_iter("worker:ceil:tenant_required_missing:*"):
+            r.delete(key)
+    except Exception:  # noqa: BLE001 — no real Redis in this env
+        pass
+    yield
+
+
 @pytest.fixture
 def fake_redis(monkeypatch):
     fake = _FakeRedis()

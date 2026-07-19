@@ -1,35 +1,35 @@
-"""Catalog-mirror upserter (DRF-574 / Sprint 7 / C3).
+"""Catalog-mirror upserter — Ayla salon-services → CatalogService (S3B / #1044).
 
-Idempotent INSERT-or-UPDATE for the four
-:mod:`apps.catalog.models` mirrors, driven by DTOs the C2 HTTP client
-produces. Used by:
+Idempotent INSERT-or-UPDATE for the ``CatalogService`` mirror, driven by the
+DTOs the Ayla catalog HTTP client (:mod:`apps.catalog.services.http_client`)
+produces. Used by the periodic sync orchestrator
+(:mod:`apps.catalog.services.sync`).
 
-* C4 (DRF-575) — the periodic sync orchestrator
-* C6 (DRF-576) — admin "force resync" action
+### Re-key — Decision (S3B PR-1)
 
-### Conflict resolution — Decision 10
+The mirror is now keyed on the Ayla **stable UUID** (``ayla_service_id`` =
+``SalonService.id``), not the legacy mysite integer ``external_id``. Each row
+is an ``update_or_create`` on ``(tenant, ayla_service_id)``. The DB-level
+partial ``UniqueConstraint`` (``WHERE ayla_service_id IS NOT NULL``) is the
+backstop; the per-tenant Redis sync lock serialises beats so the
+``update_or_create`` never races itself.
 
-When two beats race (slow first run still in flight; second beat starts;
-both upsert the same external_id), the **upstream timestamp** decides
-who wins, NOT wall-clock-of-write. The upserter only OVERWRITES a row
-when ``incoming.external_updated_at > existing.external_updated_at``.
-A stale DTO (older upstream timestamp) is silently skipped — this
-implements last-writer-wins by upstream-source-of-truth, which is what
-Risk #5 in the plan flagged.
+### Tenant scoping
+
+The sync runs one tenant at a time (the beat fans out per tenant). We wrap
+the batch in ``tenant_scope(tenant)`` and write through the tenant-scoped
+``.objects`` manager — the mirror-write is intra-tenant by construction, so
+it needs neither ``.all_tenants`` nor the marketplace cross-tenant carve-out
+(MKT1). ``.objects.update_or_create`` finds the row within the tenant's scope
+and stamps/asserts the tenant on create.
 
 ### Per-row error isolation
 
-A single malformed DTO must NOT abort the rest of the batch — the
-sync orchestrator runs every 15 minutes and should make forward progress
-on every other row. Failures land in :class:`UpsertResult.errors` with
-the external_id + reason; the orchestrator logs them and continues.
-
-### Transaction semantics
-
-Each ``upsert_*`` call wraps its loop in a single transaction so the
-result-counter snapshot is consistent. A row failure rolls back ONLY
-that row (savepoints) — pre-existing rows committed by earlier
-iterations stay committed.
+A single malformed DTO must NOT abort the rest of the batch — the sync
+orchestrator runs on a schedule and should make forward progress on every
+other row. Failures land in :class:`UpsertResult.errors` with the
+``ayla_service_id`` + reason; the orchestrator logs them and continues. Each
+row is wrapped in a savepoint so its rollback doesn't poison the batch.
 """
 
 from __future__ import annotations
@@ -40,22 +40,11 @@ from typing import TYPE_CHECKING, Any
 
 from django.db import transaction
 
-from apps.catalog.models import (
-    CatalogFaq,
-    CatalogHelpArticle,
-    CatalogMaster,
-    CatalogService,
-)
+from apps.catalog.models import CatalogService
+from apps.tenancy.context import tenant_scope
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
-    from apps.catalog.services.http_client import (
-        CatalogFaqDTO,
-        CatalogHelpArticleDTO,
-        CatalogMasterDTO,
-        CatalogServiceDTO,
-    )
+    from apps.catalog.services.http_client import CatalogSalonServiceDTO
     from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
@@ -66,11 +55,12 @@ class UpsertResult:
     """Counter snapshot a single upsert_* call writes.
 
     Fields:
-      created: rows whose ``(tenant, external_id)`` wasn't present before.
-      updated: rows present + incoming external_updated_at is newer.
-      skipped: rows present + incoming external_updated_at is stale.
-      errors: per-row failures with ``{external_id, reason}`` so the
-              caller can blame the right input on a partial batch.
+      created: rows whose ``(tenant, ayla_service_id)`` wasn't present before.
+      updated: rows present + overwritten with the incoming payload.
+      skipped: reserved (no conditional skip in the re-key path — kept so the
+               orchestrator's counter shape is stable).
+      errors: per-row failures with ``{ayla_service_id, reason}`` so the caller
+              can blame the right input on a partial batch.
     """
 
     created: int = 0
@@ -79,191 +69,56 @@ class UpsertResult:
     errors: list[dict[str, Any]] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Public API — one method per mirror
-# ---------------------------------------------------------------------------
-
-
-def upsert_services(tenant: "Tenant", dtos: list["CatalogServiceDTO"]) -> UpsertResult:
-    return _upsert_batch(
-        tenant=tenant,
-        dtos=dtos,
-        model=CatalogService,
-        field_mapper=_service_fields,
-    )
-
-
-def upsert_masters(tenant: "Tenant", dtos: list["CatalogMasterDTO"]) -> UpsertResult:
-    return _upsert_batch(
-        tenant=tenant,
-        dtos=dtos,
-        model=CatalogMaster,
-        field_mapper=_master_fields,
-    )
-
-
-def upsert_faqs(tenant: "Tenant", dtos: list["CatalogFaqDTO"]) -> UpsertResult:
-    return _upsert_batch(
-        tenant=tenant,
-        dtos=dtos,
-        model=CatalogFaq,
-        field_mapper=_faq_fields,
-    )
-
-
-def upsert_help_articles(tenant: "Tenant", dtos: list["CatalogHelpArticleDTO"]) -> UpsertResult:
-    return _upsert_batch(
-        tenant=tenant,
-        dtos=dtos,
-        model=CatalogHelpArticle,
-        field_mapper=_help_article_fields,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Engine
-# ---------------------------------------------------------------------------
-
-
-def _upsert_batch(
-    *,
-    tenant: "Tenant",
-    dtos: list[Any],
-    model: Any,
-    field_mapper: Any,
-) -> UpsertResult:
-    """Shared loop. Per-row errors don't abort the batch — savepoint
-    rollback isolates failures.
-    """
+def upsert_salon_services(tenant: "Tenant", dtos: list["CatalogSalonServiceDTO"]) -> UpsertResult:
+    """Upsert Ayla salon-services into ``CatalogService`` for one tenant."""
     result = UpsertResult()
-    with transaction.atomic():
+    with tenant_scope(tenant), transaction.atomic():
         for dto in dtos:
             try:
-                _upsert_one(
-                    tenant=tenant,
-                    dto=dto,
-                    model=model,
-                    field_mapper=field_mapper,
-                    result=result,
-                )
+                _upsert_one(tenant=tenant, dto=dto, result=result)
             except Exception as exc:  # noqa: BLE001 — per-row safety net
-                # Each row is a savepoint thanks to the inner atomic
-                # block in :func:`_upsert_one`; the outer transaction
-                # absorbs the rollback. Log + record + carry on.
-                external_id = getattr(dto, "external_id", "?")
-                result.errors.append({"external_id": external_id, "reason": str(exc)})
+                ayla_id = getattr(dto, "ayla_service_id", "?")
+                result.errors.append({"ayla_service_id": ayla_id, "reason": str(exc)})
                 logger.exception(
-                    "catalog.upsert.row_failed model=%s external_id=%s",
-                    model.__name__,
-                    external_id,
+                    "catalog.upsert.row_failed model=CatalogService ayla_service_id=%s",
+                    ayla_id,
                 )
     return result
 
 
-def _upsert_one(
-    *,
-    tenant: "Tenant",
-    dto: Any,
-    model: Any,
-    field_mapper: Any,
-    result: UpsertResult,
-) -> None:
-    """One row. Wrapped in a savepoint so failures don't poison the batch."""
-    with transaction.atomic():
-        existing = (
-            model.all_tenants.filter(
-                tenant=tenant,
-                external_id=dto.external_id,
-            )
-            .only("id", "external_updated_at")
-            .first()
-        )
-        # Last-writer-wins on upstream timestamp.
-        if existing is not None and not _incoming_is_newer(
-            existing.external_updated_at, dto.external_updated_at
-        ):
-            result.skipped += 1
-            return
+def _upsert_one(*, tenant: "Tenant", dto: "CatalogSalonServiceDTO", result: UpsertResult) -> None:
+    """One row, wrapped in a savepoint so a failure doesn't poison the batch.
 
-        fields = field_mapper(dto)
-        if existing is None:
-            model.all_tenants.create(
-                tenant=tenant,
-                external_id=dto.external_id,
-                external_updated_at=dto.external_updated_at,
-                **fields,
-            )
+    Runs inside ``tenant_scope(tenant)`` (set by the caller), so the
+    tenant-scoped ``.objects`` manager finds the row within this tenant and
+    stamps the tenant on create — the explicit ``tenant=`` keeps the lookup
+    correct across STRICT_TENANT_SCOPE modes.
+    """
+    with transaction.atomic():
+        _obj, created = CatalogService.objects.update_or_create(
+            tenant=tenant,
+            ayla_service_id=dto.ayla_service_id,
+            defaults=_service_fields(dto),
+        )
+        if created:
             result.created += 1
         else:
-            # update_or_create-style; we already located the row and
-            # know it's newer.
-            model.all_tenants.filter(pk=existing.pk).update(
-                external_updated_at=dto.external_updated_at,
-                **fields,
-            )
             result.updated += 1
 
 
-def _incoming_is_newer(existing: "datetime", incoming: "datetime") -> bool:
-    """True when ``incoming`` is strictly newer.
+def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
+    """Columnar CatalogService fields the salon-service payload provides.
 
-    Equal timestamps are treated as "no change" → skip. This matters
-    when two beats race against an unchanged row.
+    ``template``/``category`` have no mirror column yet — they ride in
+    ``raw``. Fields with no salon-service source (slug, descriptions, seo_*,
+    goals, is_popular, contraindications) keep their model defaults.
     """
-    return incoming > existing
-
-
-# ---------------------------------------------------------------------------
-# Per-model field mappers
-# ---------------------------------------------------------------------------
-
-
-def _service_fields(dto: "CatalogServiceDTO") -> dict[str, Any]:
     return {
-        "slug": dto.slug,
+        "external_updated_at": dto.external_updated_at,
         "name": dto.name,
-        "short_description": dto.short_description,
-        "description": dto.description,
+        "is_active": dto.is_active,
+        "requires_health_check": dto.requires_health_check,
         "price_from": dto.price_from,
         "duration_min": dto.duration_min,
-        "is_active": dto.is_active,
-        "is_popular": dto.is_popular,
-        "seo_title": dto.seo_title,
-        "seo_description": dto.seo_description,
-        "goals": dto.goals,
-        "requires_health_check": dto.requires_health_check,
-        "contraindications": dto.contraindications,
-        "raw": dto.raw,
-    }
-
-
-def _master_fields(dto: "CatalogMasterDTO") -> dict[str, Any]:
-    return {
-        "name": dto.name,
-        "specialization": dto.specialization,
-        "bio": dto.bio,
-        "experience": dto.experience,
-        "rating": dto.rating,
-        "is_active": dto.is_active,
-        "yclients_staff_id": dto.yclients_staff_id,
-        "raw": dto.raw,
-    }
-
-
-def _faq_fields(dto: "CatalogFaqDTO") -> dict[str, Any]:
-    return {
-        "question": dto.question,
-        "answer": dto.answer,
-        "category_slug": dto.category_slug,
-        "raw": dto.raw,
-    }
-
-
-def _help_article_fields(dto: "CatalogHelpArticleDTO") -> dict[str, Any]:
-    return {
-        "question": dto.question,
-        "answer": dto.answer,
-        "order": dto.order,
-        "is_active": dto.is_active,
         "raw": dto.raw,
     }

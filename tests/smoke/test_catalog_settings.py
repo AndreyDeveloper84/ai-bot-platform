@@ -1,7 +1,9 @@
-"""Catalog sync settings smoke (DRF-578 / Sprint 7 / C8).
+"""Catalog sync settings smoke.
 
-Verifies the wiring of `MYSITE_CATALOG_*` + `CATALOG_SYNC_*` env vars
-and the production fail-fast behaviour. Production is loaded via
+Verifies the wiring of the catalog-sync env vars and the production
+fail-fast behaviour. Since S3B (#1044) the sync reads Ayla's internal
+catalog (``AYLA_BASE_URL`` + ``AYLA_INTERNAL_API_TOKEN``) — the retired
+``MYSITE_CATALOG_*`` vars are gone. Production is loaded via
 ``importlib.reload`` against a monkey-patched ``os.environ`` so the
 side-effect-on-import doesn't pollute the test runner's own settings.
 """
@@ -17,15 +19,13 @@ from django.core.exceptions import ImproperlyConfigured
 
 
 class TestBaseSettings:
-    def test_base_url_default(self) -> None:
-        assert settings.MYSITE_CATALOG_BASE_URL == "https://formulatela58.ru"
-
-    def test_service_token_default_empty(self) -> None:
-        # Local config doesn't enforce fail-fast — the token may be blank.
-        assert hasattr(settings, "MYSITE_CATALOG_SERVICE_TOKEN")
+    def test_ayla_catalog_settings_wired(self) -> None:
+        # Catalog sync now depends on the shared Ayla internal-API config.
+        assert hasattr(settings, "AYLA_BASE_URL")
+        assert hasattr(settings, "AYLA_INTERNAL_API_TOKEN")
 
     def test_lock_ttl_default(self) -> None:
-        # 25 minutes ≥ 1.5× the 15-min beat cadence (C5 / DRF-579).
+        # 25 minutes ≥ 1.5× the 15-min beat cadence.
         assert settings.CATALOG_SYNC_LOCK_TTL_SECONDS == 25 * 60
 
     def test_http_timeout_default(self) -> None:
@@ -56,29 +56,30 @@ def _restore_production_module() -> Iterator[None]:
 class TestProductionFailFast:
     """The production settings module raises on boot when any required
     service-token is missing. Loading by importlib so the test runner's
-    own settings (local) are unaffected.
+    own settings (local) are unaffected. The AYLA_INTERNAL_API_TOKEN guard
+    is first, so every non-AYLA scenario must set it to reach its target.
     """
 
-    def test_missing_catalog_token_raises_improperly_configured(
+    def test_missing_ayla_internal_token_raises_improperly_configured(
         self,
         monkeypatch: pytest.MonkeyPatch,
         _restore_production_module: None,
     ) -> None:
-        monkeypatch.delenv("MYSITE_CATALOG_SERVICE_TOKEN", raising=False)
+        """S3B (#1044) — catalog sync + internal clients need the Ayla token."""
+        monkeypatch.delenv("AYLA_INTERNAL_API_TOKEN", raising=False)
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
-        assert "MYSITE_CATALOG_SERVICE_TOKEN" in str(exc_info.value)
+        assert "AYLA_INTERNAL_API_TOKEN" in str(exc_info.value)
 
     def test_missing_chroma_token_raises_improperly_configured(
         self,
         monkeypatch: pytest.MonkeyPatch,
         _restore_production_module: None,
     ) -> None:
-        """Sprint 7 / M4 (DRF-595) — chromadb Bearer-token fail-fast."""
-        monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
+        monkeypatch.setenv("AYLA_INTERNAL_API_TOKEN", "ayla-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         monkeypatch.delenv("CHROMA_AUTH_TOKEN", raising=False)
@@ -91,8 +92,7 @@ class TestProductionFailFast:
         monkeypatch: pytest.MonkeyPatch,
         _restore_production_module: None,
     ) -> None:
-        """Sprint 8 / E1 (DRF-710) — production must have Sentry."""
-        monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
+        monkeypatch.setenv("AYLA_INTERNAL_API_TOKEN", "ayla-token-abc")  # noqa: S105
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         monkeypatch.delenv("SENTRY_DSN", raising=False)
@@ -106,7 +106,7 @@ class TestProductionFailFast:
         _restore_production_module: None,
     ) -> None:
         """Sprint 10 / C3 (DRF-879) — webhook HMAC secret fail-fast."""
-        monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "catalog-token")  # noqa: S105
+        monkeypatch.setenv("AYLA_INTERNAL_API_TOKEN", "ayla-token-abc")  # noqa: S105
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
         monkeypatch.delenv("MYSITE_WEBHOOK_HMAC_SECRET", raising=False)
@@ -119,12 +119,13 @@ class TestProductionFailFast:
         monkeypatch: pytest.MonkeyPatch,
         _restore_production_module: None,
     ) -> None:
-        monkeypatch.setenv("MYSITE_CATALOG_SERVICE_TOKEN", "prod-token-abc")  # noqa: S105
+        monkeypatch.setenv("AYLA_INTERNAL_API_TOKEN", "ayla-token-abc")  # noqa: S105
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         module = importlib.import_module("config.settings.production")
         assert module.DEBUG is False
+        assert module.AYLA_INTERNAL_API_TOKEN == "ayla-token-abc"  # noqa: S105
         assert module.CHROMA_AUTH_TOKEN == "chroma-token-abc"  # noqa: S105
         assert module.SENTRY_DSN == "https://public@sentry.example.com/1"
         expected_hmac = "hmac-secret-abc"  # noqa: S105  # pragma: allowlist secret

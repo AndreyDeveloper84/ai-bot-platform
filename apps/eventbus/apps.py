@@ -65,6 +65,13 @@ class EventBusConfig(AppConfig):
 
         register_reviews_handlers()
 
+        # C4 (pilot 2026-08-15) — Register billing consumer family
+        # (subscription.activated / subscription.past_due /
+        # billing.fee_charged).
+        from apps.eventbus.consumers.billing import register_billing_handlers
+
+        register_billing_handlers()
+
         # Hotfix C (retro review #3): the subscriber registry is cached
         # after first resolution per :func:`_subscribers`. Wire the
         # Django ``setting_changed`` signal so:

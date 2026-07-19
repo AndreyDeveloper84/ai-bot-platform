@@ -147,11 +147,18 @@ def run_onboarding_turn(
     ``consent_at`` — writes the server consent journal (#956 extension).
 
     Invariant: runs at ``current_tenant() is None`` (the global path never enters
-    a tenant scope). The assertion is a loud guard, not decoration.
+    a tenant scope). This is load-bearing for the #1074 consent-atomicity fix:
+    WelcomeSkill skips its own consent_at stamp exactly when ``current_tenant()``
+    is None, deferring to ``record_global_consent``'s atomic write. If a tenant
+    scope ever leaked in here, WelcomeSkill would stamp consent_at separately
+    (non-atomic) and reopen the split-transaction bug — so we FAIL LOUD with a
+    raise (not an ``assert``, which ``python -O`` would strip).
     """
-    assert current_tenant() is None, (  # noqa: S101 — tenant-less invariant guard
-        "global onboarding must run at current_tenant() is None"
-    )
+    if current_tenant() is not None:
+        raise RuntimeError(
+            "global onboarding must run at current_tenant() is None; a leaked "
+            "tenant scope would break the #1074 consent-atomicity invariant."
+        )
 
     # Lazy import — WelcomeSkill's module runs @register at import time (pulls
     # apps.skills.registry). Keep it off this module's load path, mirroring the
@@ -167,14 +174,14 @@ def run_onboarding_turn(
     )
     result = WelcomeSkill().handle(ctx)
 
-    # Journal consent on the grant turn. WelcomeSkill renders the S5 first-action
-    # surface ONLY after stamping consent_at (both consent_yes and
+    # Capture consent on the grant turn. WelcomeSkill renders the S5 first-action
+    # surface only on the consent-grant callbacks (both consent_yes and
     # consent_yes_via_s2a funnel through ``_render_consent_granted``), so the S5
-    # reply_kind is the reliable «consent granted this turn» signal — more robust
-    # than reading the in-memory ``consent_at`` delta (WelcomeSkill swallows a
-    # failed ``consent_at`` DB save, which would desync that delta). The journal
-    # write is idempotent (get_or_create), so re-tapping «Да» never duplicates and
-    # a repeat tap backfills a row a prior transient failure dropped.
+    # reply_kind is the reliable «consent granted this turn» signal. On this global
+    # path WelcomeSkill does NOT stamp consent_at itself (current_tenant() is None
+    # → its guard skips); record_global_consent stamps consent_at ATOMICALLY with
+    # the ConsentRecord (#1074). Idempotent (get_or_create) — re-tapping «Да» never
+    # duplicates and a repeat tap reconciles a consent_at a prior failure dropped.
     if _is_consent_grant_turn(result):
         _record_consent_journal(bot_user)
 
@@ -210,13 +217,16 @@ def _to_discovery_reply(result: Any) -> DiscoveryReply:
 
 
 def _record_consent_journal(bot_user: Any) -> None:
-    """Write the server-side proof-of-consent row (best-effort, loud on failure).
+    """Capture consent server-side, ATOMICALLY (best-effort, loud on failure).
 
-    ``consent_at`` on the BotUser is the primary record and is already stamped by
-    the time we get here; this ConsentRecord row is the auditable journal. A
-    failure must not break the user-facing reply (they DID consent this turn), but
-    it is a compliance gap, so we log LOUD (``exception``) rather than swallow
-    silently — matching WelcomeSkill's consent_at-save error handling.
+    ``record_global_consent`` writes the proof-of-consent ConsentRecord AND stamps
+    ``bot_user.consent_at`` in one transaction (#1074), so on this global path
+    consent_at is set iff the record exists — a transient failure rolls back both,
+    never leaving consent_at set without proof. The call is wrapped best-effort so
+    a failure doesn't break the user-facing reply; we log LOUD (``exception``)
+    because a failure means NO consent was captured this turn (the S5 CTA still
+    renders, but the user isn't marked consented — safe: nothing is persisted for
+    them). Idempotent, so a subsequent consent tap re-attempts cleanly.
     """
     try:
         from apps.consent.services import record_global_consent

@@ -558,8 +558,12 @@ class TestAvailabilityRequest:
         bot_user: BotUser,
         accepted_master: CatalogMaster,
     ) -> None:
-        start = _utc(datetime(2026, 5, 22, 9, 0))
-        end = _utc(datetime(2026, 5, 26, 18, 0))
+        start = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
+            hour=9, minute=0, second=0, microsecond=0
+        )
+        end = (datetime.now(tz=timezone.utc) + timedelta(days=11)).replace(
+            hour=18, minute=0, second=0, microsecond=0
+        )
         resp = client.post(
             reverse("master_api:availability_request"),
             data={
@@ -597,11 +601,15 @@ class TestAvailabilityRequest:
         _make_exception(
             tenant=tenant,
             master=accepted_master,
-            on_date=date(2026, 5, 23),
+            on_date=(datetime.now(tz=timezone.utc) + timedelta(days=8)).date(),
             type_=ScheduleException.Type.VACATION,
         )
-        start = _utc(datetime(2026, 5, 23, 9, 0))
-        end = _utc(datetime(2026, 5, 24, 18, 0))
+        start = (datetime.now(tz=timezone.utc) + timedelta(days=8)).replace(
+            hour=9, minute=0, second=0, microsecond=0
+        )
+        end = (datetime.now(tz=timezone.utc) + timedelta(days=9)).replace(
+            hour=18, minute=0, second=0, microsecond=0
+        )
         resp = client.post(
             reverse("master_api:availability_request"),
             data={
@@ -688,8 +696,12 @@ class TestAvailabilityRequest:
         bot_user: BotUser,
         accepted_master: CatalogMaster,
     ) -> None:
-        start = _utc(datetime(2026, 5, 25, 9, 0))
-        end = _utc(datetime(2026, 5, 25, 18, 0))
+        start = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
+            hour=9, minute=0, second=0, microsecond=0
+        )
+        end = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
+            hour=18, minute=0, second=0, microsecond=0
+        )
         resp = client.post(
             reverse("master_api:availability_request"),
             data={
@@ -713,8 +725,12 @@ class TestAvailabilityRequest:
     ) -> None:
         tenant.manager_chat_id = "777"
         tenant.save(update_fields=["manager_chat_id"])
-        start = _utc(datetime(2026, 5, 25, 9, 0))
-        end = _utc(datetime(2026, 5, 25, 18, 0))
+        start = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
+            hour=9, minute=0, second=0, microsecond=0
+        )
+        end = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
+            hour=18, minute=0, second=0, microsecond=0
+        )
         with patch("apps.channels.max.outbound.send_message") as send:
             resp = client.post(
                 reverse("master_api:availability_request"),
@@ -746,8 +762,12 @@ class TestAvailabilityRequest:
     ) -> None:
         # tenant fixture has empty manager_chat_id by default.
         assert tenant.manager_chat_id == ""
-        start = _utc(datetime(2026, 5, 25, 9, 0))
-        end = _utc(datetime(2026, 5, 25, 18, 0))
+        start = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
+            hour=9, minute=0, second=0, microsecond=0
+        )
+        end = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
+            hour=18, minute=0, second=0, microsecond=0
+        )
         with patch("apps.channels.max.outbound.send_message") as send:
             resp = client.post(
                 reverse("master_api:availability_request"),

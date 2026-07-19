@@ -93,7 +93,7 @@ def _photo_payload(url="https://cdn.max.test/p.jpg"):
 
 class TestPhotoHappyPath:
     def test_bytes_stashed_on_conversation_before_skill_dispatch(
-        self, tenant, mock_send, fake_redis, settings
+        self, tenant, mock_send, fake_redis, settings, mark_welcomed
     ):
         """End-to-end happy path — covers all 5 contract assertions:
 
@@ -114,6 +114,10 @@ class TestPhotoHappyPath:
            no leak through the dispatcher).
         """
         settings.STRICT_TENANT_SCOPE = "strict"
+        # food_scanner Веха-1 gate: master + photo flags on; per-user consent set
+        # via mark_welcomed(food_consent=True) below.
+        settings.NUTRITION_ENABLED = True
+        settings.FOOD_PHOTO_SCAN_ENABLED = True
         photo_bytes = b"\x89PNG fake bytes \x00\x01\x02"
 
         # food_scanner skill calls `asyncio.run(scan_photo(...))` —
@@ -145,6 +149,7 @@ class TestPhotoHappyPath:
             patch(_NUTRITION_TARGET, return_value=fake_client),
         ):
             with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+                mark_welcomed(user_id=24680, chat_id=13579, food_consent=True)
                 max_handler.handle_max_event(_photo_payload(url=photo_url))
 
         # ── Assertion 1: download_photo called exactly once with the
@@ -217,9 +222,13 @@ class TestPhotoHappyPath:
 
 
 class TestPhotoTooLargeGraceful:
-    def test_oversize_emits_skill_no_bytes_fallback(self, tenant, mock_send, fake_redis, settings):
+    def test_oversize_emits_skill_no_bytes_fallback(
+        self, tenant, mock_send, fake_redis, settings, mark_welcomed
+    ):
         """>10 MiB → attribute set to None → skill emits PHOTO_NO_BYTES."""
         settings.STRICT_TENANT_SCOPE = "strict"
+        settings.NUTRITION_ENABLED = True
+        settings.FOOD_PHOTO_SCAN_ENABLED = True
 
         from apps.skills.food_scanner.skill import PHOTO_NO_BYTES
 
@@ -228,6 +237,7 @@ class TestPhotoTooLargeGraceful:
 
         with patch(_DOWNLOAD_TARGET, side_effect=_raise_too_large):
             with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+                mark_welcomed(user_id=24680, chat_id=13579, food_consent=True)
                 max_handler.handle_max_event(_photo_payload())
 
         assert mock_send[0]["text"] == PHOTO_NO_BYTES
@@ -235,10 +245,12 @@ class TestPhotoTooLargeGraceful:
 
 class TestPhotoDownloadFailedGraceful:
     def test_download_error_emits_skill_no_bytes_fallback(
-        self, tenant, mock_send, fake_redis, settings
+        self, tenant, mock_send, fake_redis, settings, mark_welcomed
     ):
         """Timeout / 4xx / 5xx → attribute set to None → graceful reply."""
         settings.STRICT_TENANT_SCOPE = "strict"
+        settings.NUTRITION_ENABLED = True
+        settings.FOOD_PHOTO_SCAN_ENABLED = True
 
         from apps.skills.food_scanner.skill import PHOTO_NO_BYTES
 
@@ -247,6 +259,7 @@ class TestPhotoDownloadFailedGraceful:
 
         with patch(_DOWNLOAD_TARGET, side_effect=_raise_download):
             with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+                mark_welcomed(user_id=24680, chat_id=13579, food_consent=True)
                 max_handler.handle_max_event(_photo_payload())
 
         assert mock_send[0]["text"] == PHOTO_NO_BYTES

@@ -41,6 +41,9 @@ def _init_data_header(user_id: str = "12345") -> str:
 @pytest.fixture(autouse=True)
 def _bot_token(settings) -> None:
     settings.MAX_BOT_TOKEN = BOT_TOKEN
+    # miniapp_api auth resolves the request tenant by this slug — must
+    # match the `tenant` fixture below or every view 500s on lazy-create.
+    settings.MAX_BOT_TENANT_SLUG = "mn-test"
 
 
 @pytest.fixture
@@ -144,14 +147,18 @@ class TestAuthVerify:
         assert resp.json()["error"] == "bad_signature"
 
     @pytest.mark.django_db
-    def test_user_not_registered(self, client: Client) -> None:
-        # No BotUser fixture used; nothing in DB.
+    def test_user_not_registered(self, client: Client, tenant: Tenant) -> None:
+        # No BotUser fixture used; nothing in DB. Current auth LAZY-CREATES
+        # the BotUser on first verified contact (pre-cutover design — see
+        # require_init_data's comment), so an unknown user gets 200 and a row.
         resp = client.post(
             reverse("miniapp_api:auth_verify"),
             HTTP_AUTHORIZATION=_init_data_header("99999"),
         )
-        assert resp.status_code == 404
-        assert resp.json()["error"] == "user_not_registered"
+        assert resp.status_code == 200
+        assert BotUser.all_tenants.filter(
+            tenant=tenant, channel="max", channel_user_id="99999"
+        ).exists()
 
 
 class TestSlots:

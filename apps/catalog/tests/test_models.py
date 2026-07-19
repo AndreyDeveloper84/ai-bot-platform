@@ -73,6 +73,79 @@ class TestCatalogService:
         assert CatalogService.all_tenants.filter(external_id=1).count() == 2
 
 
+class TestCatalogServiceAylaRekey:
+    """S3B PR-1: CatalogService re-keyed onto the Ayla stable-id.
+
+    Ayla ids are UUIDs — there is no integer upstream id — so ``external_id``
+    is now nullable and Ayla-fed rows key on ``(tenant, ayla_service_id)`` via
+    a partial ``UniqueConstraint`` (``WHERE ayla_service_id IS NOT NULL``).
+    The legacy ``unique_together (tenant, external_id)`` stays for legacy rows
+    (NULL-safe: Postgres treats NULLs as distinct).
+    """
+
+    def test_external_id_nullable(self, tenant: Tenant) -> None:
+        import uuid
+
+        svc = CatalogService.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=_ts(),
+            ayla_service_id=uuid.uuid4(),
+            slug="a",
+            name="A",
+        )
+        assert svc.external_id is None
+
+    def test_ayla_service_id_unique_per_tenant(self, tenant: Tenant) -> None:
+        import uuid
+
+        aid = uuid.uuid4()
+        CatalogService.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=_ts(),
+            ayla_service_id=aid,
+            slug="a",
+            name="A",
+        )
+        with pytest.raises(IntegrityError):
+            CatalogService.all_tenants.create(
+                tenant=tenant,
+                external_updated_at=_ts(),
+                ayla_service_id=aid,
+                slug="dup",
+                name="Dup",
+            )
+
+    def test_null_ayla_service_id_not_constrained(self, tenant: Tenant) -> None:
+        # Two rows with a NULL ayla_service_id coexist — the partial
+        # constraint only bites when ayla_service_id IS NOT NULL.
+        CatalogService.all_tenants.create(
+            tenant=tenant, external_id=1, external_updated_at=_ts(), slug="a", name="A"
+        )
+        CatalogService.all_tenants.create(
+            tenant=tenant, external_id=2, external_updated_at=_ts(), slug="b", name="B"
+        )
+        assert (
+            CatalogService.all_tenants.filter(tenant=tenant, ayla_service_id__isnull=True).count()
+            == 2
+        )
+
+    def test_same_ayla_service_id_different_tenants_ok(
+        self, tenant: Tenant, tenant_b: Tenant
+    ) -> None:
+        import uuid
+
+        aid = uuid.uuid4()
+        for owner in (tenant, tenant_b):
+            CatalogService.all_tenants.create(
+                tenant=owner,
+                external_updated_at=_ts(),
+                ayla_service_id=aid,
+                slug="a",
+                name="A",
+            )
+        assert CatalogService.all_tenants.filter(ayla_service_id=aid).count() == 2
+
+
 class TestCatalogMaster:
     def test_yclients_staff_id_optional(self, tenant: Tenant) -> None:
         m = CatalogMaster.all_tenants.create(
@@ -162,6 +235,34 @@ class TestCatalogMasterAylaUserId:
         )
         match = CatalogMaster.all_tenants.get(ayla_user_id=target)
         assert match.external_id == 13
+
+
+class TestCatalogMasterReviewCount:
+    """#1060 — ``CatalogMaster.review_count`` for the discovery Bayesian
+    trust-score. Mirrors Ayla's ``reviews_count`` so a 5.0 from 1 review
+    can't outrank a 4.8 from 200. Defaults to 0 until sync is retargeted
+    to Ayla (#1044).
+    """
+
+    def test_review_count_default_zero(self, tenant: Tenant) -> None:
+        m = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=20,
+            external_updated_at=_ts(),
+            name="Без отзывов",
+        )
+        assert m.review_count == 0
+
+    def test_review_count_persists(self, tenant: Tenant) -> None:
+        m = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=21,
+            external_updated_at=_ts(),
+            name="С отзывами",
+            review_count=200,
+        )
+        m.refresh_from_db()
+        assert m.review_count == 200
 
 
 class TestCatalogFaq:

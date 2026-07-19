@@ -355,6 +355,41 @@ class TestErrorTranslation:
         with pytest.raises(YClientsAPIError):
             _adapter(fake).get_staff()
 
+    def test_c1_debt_block_translated_to_specialist_unavailable(self) -> None:
+        """C1: Ayla 409 SUBSCRIPTION_PAST_DUE → neutral specialist_unavailable."""
+        from apps.skills.booking.provider import YClientsSpecialistUnavailableError
+
+        fake = FakeAylaBooking()
+        fake.raise_exc = BookingBadRequestError(
+            "http_409_subscription_past_due",
+            status_code=409,
+            code="SUBSCRIPTION_PAST_DUE",
+        )
+        with pytest.raises(YClientsSpecialistUnavailableError):
+            _adapter(fake).create_record(
+                staff_id="s1",
+                services=["svc1"],
+                datetime="2026-08-01T10:00:00+03:00",
+                client_phone="79991234567",
+                client_name="Anna",
+            )
+
+    def test_other_409_stays_generic_api_error(self) -> None:
+        """A 409 that is NOT the C1 debt block (e.g. slot conflict) must
+        keep the generic mapping — the neutral slug is C1-only."""
+        fake = FakeAylaBooking()
+        fake.raise_exc = BookingBadRequestError(
+            "http_409_slot_taken", status_code=409, code="SLOT_TAKEN"
+        )
+        with pytest.raises(YClientsAPIError):
+            _adapter(fake).create_record(
+                staff_id="s1",
+                services=["svc1"],
+                datetime="2026-08-01T10:00:00+03:00",
+                client_phone="79991234567",
+                client_name="Anna",
+            )
+
     def test_not_implemented_propagates(self) -> None:
         # The skeleton guard must surface loudly, NOT be masked as a
         # YClients error — flipping the flag before the client lands fails.

@@ -151,3 +151,16 @@ class TestHappyPathRegression:
         assert len(mock_send) == 1
         # Whatever the skill returns (welcome / echo), it is NOT a safety reply.
         assert mock_send[0]["text"] not in (CRISIS_REPLY_TEXT, BLOCK_REPLY_TEXT)
+
+    def test_crisis_reply_routed_through_delivery_helper(
+        self, tenant_a, fake_redis, settings, monkeypatch
+    ):
+        # #1082: the per-tenant crisis send must go through _deliver_crisis_reply
+        # (is_global=False) so a delivery failure alerts. Guards against a refactor
+        # silently reverting to a bare send_message.
+        calls: list = []
+        monkeypatch.setattr(
+            max_handler, "_deliver_crisis_reply", lambda **kw: calls.append(kw.get("is_global"))
+        )
+        _run(tenant_a, "хочу покончить с собой")
+        assert calls == [False]

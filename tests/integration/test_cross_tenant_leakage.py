@@ -179,6 +179,176 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "code": lambda tenant, suffix: f"SCANNER-{suffix or 'X'}",
         "discount_percent": 10,
     },
+    # ── Scanner-rot backfill ─────────────────────────────────────────
+    # The entries below close the gap for models that landed without a
+    # ``_MODEL_REQUIRED_FIELDS`` row. Same contract as above: only
+    # NOT-NULL, no-default, non-auto fields are listed.
+    # AI observability (#769): request_id + the two NOT-NULL ints +
+    # outcome are the only no-default columns; bot_user and conversation
+    # FKs are nullable (system-triggered calls).
+    "AIRequestMetric": {
+        "request_id": lambda tenant, suffix: _new_uuid(),
+        "message_text_length": 42,
+        "latency_total_ms": 120,
+        "outcome": "success",
+    },
+    # M6: AiDraft needs conversation + master FKs and non-empty content.
+    # Fresh conversation per row keeps the one-active-draft-per-
+    # conversation partial unique intact (status defaults to ACTIVE).
+    "AiDraft": {
+        "conversation": lambda tenant, suffix: _make_conversation_for_scanner(
+            tenant, f"draft-{suffix or 'x'}"
+        ),
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"draft-{suffix or 'x'}"),
+        "content": "scanner draft",
+    },
+    # B2: bot_user FK + chat_id snapshot + visit_at + scheduled_at + kind.
+    # yclients_record_id stays NULL so unique_together (yclients_record_id,
+    # kind) never fires — NULL ≠ NULL in Postgres/SQLite uniqueness.
+    "BookingReminder": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
+        "chat_id": "scanner-chat",
+        "visit_at": lambda tenant, suffix: _future_datetime(days=7),
+        "kind": "day_before",
+        "scheduled_at": lambda tenant, suffix: _future_datetime(),
+    },
+    # Sprint 7 / C1 catalog mirrors — each needs external_updated_at
+    # (NOT NULL, no default) plus its own text fields. external_id stays
+    # NULL → unique_together (tenant, external_id) is NULL-safe.
+    "CatalogService": {
+        "slug": "scanner-service",
+        "name": "Scanner service",
+        "external_updated_at": lambda tenant, suffix: _future_datetime(),
+    },
+    "CatalogMaster": {
+        "name": "Scanner master",
+        "external_updated_at": lambda tenant, suffix: _future_datetime(),
+    },
+    "CatalogFaq": {
+        "question": "Scanner question?",
+        "answer": "Scanner answer.",
+        "external_updated_at": lambda tenant, suffix: _future_datetime(),
+    },
+    "CatalogHelpArticle": {
+        "question": "Scanner help question?",
+        "answer": "Scanner help answer.",
+        "external_updated_at": lambda tenant, suffix: _future_datetime(),
+    },
+    # MM4: MasterService is the master↔service M2M — a fresh master +
+    # service per row keeps unique_together (master, service) intact.
+    "MasterService": {
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"ms-m-{suffix or 'x'}"),
+        "service": lambda tenant, suffix: _make_service_for_scanner(
+            tenant, f"ms-s-{suffix or 'x'}"
+        ),
+    },
+    # Tier-A #3: signal needs a source AIRequestMetric (CASCADE FK) +
+    # signal_type. Fresh metric per row keeps ifs_metric_type_unique intact.
+    "ImplicitFeedbackSignal": {
+        "ai_request_metric": lambda tenant, suffix: _make_ai_request_metric_for_scanner(
+            tenant, suffix
+        ),
+        "signal_type": "abandoned_topic",
+    },
+    # Loyalty Phase 1: OneToOne customer — fresh BotUser per row (same
+    # shape as Holdout / ClientProfile above). No post_save auto-create
+    # exists for accounts, so a plain create is enough.
+    "LoyaltyAccount": {
+        "customer": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"loyalty-{suffix or 'x'}"
+        ),
+    },
+    # Append-only event: account FK + event_type + the two signed ints.
+    # Picks manual_adjust so the earn_visit / refund_revoke partial-unique
+    # constraints (booking IS NOT NULL) stay out of the way.
+    "LoyaltyEvent": {
+        "account": lambda tenant, suffix: _make_loyalty_account_for_scanner(tenant, suffix),
+        "event_type": "manual_adjust",
+        "points_delta": 5,
+        "balance_after": 5,
+    },
+    # Phase 2.d: referrer + referee FKs; referee is unique per tenant, so
+    # each side gets its own prefixed BotUser.
+    "LoyaltyReferral": {
+        "referrer_customer": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"referrer-{suffix or 'x'}"
+        ),
+        "referee_customer": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"referee-{suffix or 'x'}"
+        ),
+    },
+    # Internal chat §6.1: master FK + topic + sla_due_at. Topic "general"
+    # is NOT in SENSITIVE_TOPICS, so the is_sensitive CheckConstraint
+    # accepts the default False.
+    "MasterAdminThread": {
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"mat-{suffix or 'x'}"),
+        "topic": "general",
+        "sla_due_at": lambda tenant, suffix: _future_datetime(),
+    },
+    # M7: OneToOne master — fresh CatalogMaster per row. All toggles have
+    # defaults; urgent defaults True which the CheckConstraint demands.
+    "MasterNotificationPrefs": {
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"mnp-{suffix or 'x'}"),
+    },
+    # DRF-841 / B5: bot_user FK + kind + expires_at (10-min TTL column).
+    "PendingBookingAction": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
+        "kind": "confirm",
+        "expires_at": lambda tenant, suffix: _future_datetime(),
+    },
+    # ADR-0009 mirror: appointment_id is the PK *without* a default —
+    # supply a fresh UUID per row. start/end + status are the other
+    # NOT-NULL no-default columns; bot_user is nullable (orphan rows).
+    "RemoteBookingProxy": {
+        "appointment_id": lambda tenant, suffix: _new_uuid(),
+        "start_at": lambda tenant, suffix: _future_datetime(days=1),
+        "end_at": lambda tenant, suffix: _future_datetime(days=2),
+        "status": "confirmed",
+    },
+    # Schedule-management §1: master FK + day_of_week. The
+    # times-match-is_working CHECK forces start/end times when
+    # is_working=True (the default) — supply a 09:00–18:00 block.
+    "WorkingHours": {
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"wh-{suffix or 'x'}"),
+        "day_of_week": 0,
+        "start_time": lambda tenant, suffix: _scanner_time(9),
+        "end_time": lambda tenant, suffix: _scanner_time(18),
+    },
+    # master FK + date + type. type=vacation is a full-day type, so the
+    # times-match-type CHECK passes with NULL start/end (the defaults).
+    "ScheduleException": {
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"se-{suffix or 'x'}"),
+        "date": lambda tenant, suffix: _scanner_date(),
+        "type": "vacation",
+    },
+    # master FK + start/end + reason; the end_after_start CHECK wants
+    # distinct instants — separate offsets per field.
+    "TimeBlock": {
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"tb-{suffix or 'x'}"),
+        "start_at": lambda tenant, suffix: _future_datetime(days=1),
+        "end_at": lambda tenant, suffix: _future_datetime(days=2),
+        "reason": "scanner block",
+    },
+    # Q-M6: only the master FK is NOT-NULL without a default —
+    # requested_change defaults to {} and the M3 typed columns are nullable.
+    "ScheduleChangeRequest": {
+        "master": lambda tenant, suffix: _make_master_for_scanner(tenant, f"scr-{suffix or 'x'}"),
+    },
+    # ADR-0008: bot_user FK + role. Role "admin" (not "owner") so the
+    # one-active-owner-per-tenant partial unique never trips when the
+    # scanner creates several rows in the same tenant.
+    "TenantStaff": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
+        "role": "admin",
+    },
+    # Phase 3 / F4: OneToOne(BotUser) PK — same shape as ClientProfile,
+    # but no post_save auto-create exists for preferences, so a plain
+    # create with a fresh BotUser per row is enough.
+    "UserPreferences": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"prefs-{suffix or 'x'}"
+        ),
+    },
 }
 
 
@@ -224,14 +394,99 @@ def _make_user_for_scanner(suffix: str):
     return User.objects.create_user(username=f"scanner-user-{suffix or 'x'}")
 
 
-def _future_datetime():
-    """Helper: future timestamp for ReplayTrace.expires_at."""
+def _future_datetime(days: int = 30):
+    """Helper: future timestamp for NOT-NULL DateTimeField columns."""
 
     from datetime import timedelta
 
     from django.utils import timezone
 
-    return timezone.now() + timedelta(days=30)
+    return timezone.now() + timedelta(days=days)
+
+
+def _new_uuid():
+    """Helper: fresh UUID for scanner rows (PKs / correlation ids)."""
+
+    import uuid
+
+    return uuid.uuid4()
+
+
+def _scanner_date():
+    """Helper: fixed date for ScheduleException.date."""
+
+    from datetime import date
+
+    return date(2026, 1, 5)
+
+
+def _scanner_time(hour: int):
+    """Helper: fixed time-of-day for WorkingHours start/end."""
+
+    from datetime import time
+
+    return time(hour, 0)
+
+
+def _make_master_for_scanner(tenant, suffix: str):
+    """Inline CatalogMaster factory — FK target for master-owned models.
+
+    Only ``name`` + ``external_updated_at`` are NOT-NULL without a
+    default; ``external_id`` stays NULL so unique_together
+    (tenant, external_id) never fires.
+    """
+
+    from django.utils import timezone
+
+    from apps.catalog.models import CatalogMaster
+
+    return CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        name=f"scanner-master-{suffix or 'x'}",
+        external_updated_at=timezone.now(),
+    )
+
+
+def _make_service_for_scanner(tenant, suffix: str):
+    """Inline CatalogService factory for the MasterService row factory."""
+
+    from django.utils import timezone
+
+    from apps.catalog.models import CatalogService
+
+    return CatalogService.all_tenants.create(
+        tenant=tenant,
+        slug=f"scanner-service-{suffix or 'x'}",
+        name=f"Scanner Service {suffix or 'x'}",
+        external_updated_at=timezone.now(),
+    )
+
+
+def _make_ai_request_metric_for_scanner(tenant, suffix: str):
+    """Inline AIRequestMetric factory for ImplicitFeedbackSignal."""
+
+    from apps.observability.models import AIRequestMetric
+
+    return AIRequestMetric.all_tenants.create(
+        tenant=tenant,
+        request_id=_new_uuid(),
+        message_text_length=42,
+        latency_total_ms=120,
+        outcome="success",
+    )
+
+
+def _make_loyalty_account_for_scanner(tenant, suffix: str):
+    """Inline LoyaltyAccount factory for the LoyaltyEvent row factory.
+
+    ``customer`` is a OneToOne — a fresh prefixed BotUser per call keeps
+    the UNIQUE constraint intact across rows.
+    """
+
+    from apps.loyalty.models import LoyaltyAccount
+
+    customer = _make_bot_user_for_scanner(tenant, f"loyalty-acct-{suffix or 'x'}")
+    return LoyaltyAccount.all_tenants.create(tenant=tenant, customer=customer)
 
 
 _EXPERIMENT_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}

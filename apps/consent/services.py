@@ -167,12 +167,15 @@ def record_global_consent(
     enough for the pilot proof-of-consent; the domain-bus mirror is post-pilot
     (S1.7 memory wiring, #1054).
 
-    **Idempotent.** Uses ``get_or_create`` keyed on the active grant
-    ``(bot_user, consent_type, granted=True, withdrawn_at=None)`` so a repeated
-    consent tap never appends a duplicate row, and a repeat tap backfills a row a
-    prior transient failure dropped. The event + audit fire only on actual create.
-    (Withdrawal still appends a fresh row via :func:`withdraw`/:func:`grant`; this
-    helper is the append-once welcome-consent path only.)
+    **Idempotent for sequential re-taps.** Uses ``get_or_create`` keyed on the
+    active grant ``(bot_user, consent_type, granted=True, withdrawn_at=None)`` so a
+    repeated consent tap never appends a duplicate row, and a repeat tap backfills
+    a ``consent_at`` a prior transient failure dropped. The event + audit fire only
+    on actual create. NOTE: this is NOT race-safe against truly concurrent taps —
+    there is no DB unique constraint on the key, so two simultaneous grants could
+    both miss-then-create (pre-existing; a partial unique index is a post-pilot
+    follow-up). (Withdrawal still appends a fresh row via :func:`withdraw`/
+    :func:`grant`; this helper is the append-once welcome-consent path only.)
 
     Args:
       bot_user: the global (sentinel-tenant) BotUser granting consent.
@@ -202,6 +205,17 @@ def record_global_consent(
                 "document_version": document_version,
             },
         )
+
+        # #1074 — stamp consent_at ATOMICALLY with the ConsentRecord (same
+        # transaction). On the global path WelcomeSkill no longer stamps it
+        # separately (it defers to this call when current_tenant() is None), so
+        # consent_at is set IFF a ConsentRecord exists: a transient failure rolls
+        # back BOTH, never leaving consent_at set with no proof-of-consent row.
+        # Idempotent — only stamp when currently unset (never overwrite an earlier
+        # consent timestamp; also reconciles a legacy row whose consent_at is None).
+        if getattr(bot_user, "consent_at", None) is None:
+            bot_user.consent_at = record.captured_at
+            bot_user.save(update_fields=["consent_at"])
 
         def _emit_grant() -> None:
             emit(
@@ -384,6 +398,128 @@ def has_consent(
     if document_version is not None:
         qs = qs.filter(document_version=document_version)
     return qs.exists()
+
+
+def has_global_consent(
+    bot_user: "BotUser",
+    consent_type: str,
+    *,
+    document_version: str | None = None,
+) -> bool:
+    """Read-side consent check for the tenant-less GLOBAL path (#1046 / memory #1100).
+
+    Mirror of :func:`has_consent` for the global marketplace path, where
+    ``current_tenant()`` is None by design (the discovery contract) so
+    :func:`has_consent` would raise. Reads via ``all_tenants`` anchored on
+    ``bot_user`` — whose FK already pins the sentinel tenant — so no tenant scope
+    is required and no cross-tenant row is reachable (bot_user belongs to exactly
+    one tenant). Same predicate as :func:`has_consent`: the latest active grant,
+    ``granted=True AND withdrawn_at IS NULL`` (+ optional document_version match).
+
+    This is the symmetric read for :func:`record_global_consent`.
+    """
+
+    qs = ConsentRecord.all_tenants.filter(
+        bot_user=bot_user,
+        consent_type=consent_type,
+        granted=True,
+        withdrawn_at__isnull=True,
+    )
+    if document_version is not None:
+        qs = qs.filter(document_version=document_version)
+    return qs.exists()
+
+
+# ── Global memory consent (MEMORY_CONSENT_SPEC, founder 2026-07-03) ──────────
+# Память глобальна на человека (ayla_user_id), поэтому её согласие проверяется
+# КРОСС-ТЕНАНТНО: один grant в любом тенанте покрывает человека везде. Иначе
+# «в одном салоне помнит, в другом снова спрашивает». Отсюда all_tenants +
+# резолв по ayla_user_id, а не tenant-scoped has_consent().
+
+MEMORY_ZONE_CONSENT = {
+    "green": ConsentRecord.ConsentType.MEMORY_GREEN,
+    "yellow": ConsentRecord.ConsentType.MEMORY_YELLOW,
+    "red": ConsentRecord.ConsentType.MEMORY_RED,
+}
+
+# Отзыв personal_data каскадит на все зоны памяти (§8.4): выход из
+# персонализированного сервиса = снять все memory_* согласия.
+_PERSONAL_DATA_CASCADE = (
+    ConsentRecord.ConsentType.PERSONAL_DATA,
+    ConsentRecord.ConsentType.MEMORY_GREEN,
+    ConsentRecord.ConsentType.MEMORY_YELLOW,
+    ConsentRecord.ConsentType.MEMORY_RED,
+)
+
+
+def _bot_user_ids_for(ayla_user_id) -> list:
+    """Все BotUser (через все тенанты) с данным ayla_user_id."""
+    from apps.identity.models import BotUser
+
+    return list(BotUser.all_tenants.filter(ayla_user_id=ayla_user_id).values_list("id", flat=True))
+
+
+def has_memory_consent(
+    ayla_user_id,
+    zone: str,
+    *,
+    document_version: str | None = None,
+) -> bool:
+    """Глобальное согласие на память по ``ayla_user_id`` (кросс-тенантно).
+
+    Active = существует активная granted-строка нужного memory-типа у любого
+    BotUser этого человека (в любом тенанте), не отозванная, и (если передан)
+    с совпадающим document_version. Version-bump → re-prompt (вернёт False).
+
+    Отличается от :func:`has_consent` тем, что НЕ требует tenant в scope —
+    память глобальна по решению founder (MEMORY_CONSENT_SPEC §8.1).
+    """
+    consent_type = MEMORY_ZONE_CONSENT.get(zone)
+    if consent_type is None:
+        raise ValueError(f"unknown memory zone: {zone!r} (expected green/yellow/red)")
+    if not ayla_user_id:
+        return False
+    bot_user_ids = _bot_user_ids_for(ayla_user_id)
+    if not bot_user_ids:
+        return False
+    qs = ConsentRecord.all_tenants.filter(
+        bot_user_id__in=bot_user_ids,
+        consent_type=consent_type,
+        granted=True,
+        withdrawn_at__isnull=True,
+    )
+    if document_version is not None:
+        qs = qs.filter(document_version=document_version)
+    return qs.exists()
+
+
+def withdraw_personal_data(ayla_user_id, *, source: str) -> int:
+    """Глобальный отзыв ``personal_data`` с каскадом на все зоны памяти (§8.4).
+
+    Для каждого BotUser человека (во всех тенантах) отзывает personal_data +
+    memory_* через аудируемый :func:`withdraw` в его tenant_scope (сохраняет
+    audit-trail и CONSENT_WITHDRAWN события). Возвращает число отозванных строк.
+    Это «выход из персонализированного сервиса»: стоп surfacing/PATCH/inference.
+    """
+    if not ayla_user_id:
+        return 0
+    from apps.identity.models import BotUser
+    from apps.tenancy.context import tenant_scope
+
+    withdrawn = 0
+    bot_users = list(BotUser.all_tenants.filter(ayla_user_id=ayla_user_id))
+    for bu in bot_users:
+        with tenant_scope(bu.tenant):
+            for consent_type in _PERSONAL_DATA_CASCADE:
+                if withdraw(bu, consent_type=consent_type, source=source) is not None:
+                    withdrawn += 1
+    logger.info(
+        "consent.withdraw_personal_data ayla_user_id=%s withdrawn=%d source=%s",
+        ayla_user_id,
+        withdrawn,
+        source,
+    )
+    return withdrawn
 
 
 def get_consents(bot_user: "BotUser") -> list[ConsentRecord]:

@@ -117,10 +117,13 @@ from apps.conversations.services import (
     resolve_active_global_conversation,
 )
 from apps.events.services import emit
+from apps.consent.memory import can_store_green_memory
 from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
 )
+from apps.identity.services.memory_reader import read_personal_context
+from apps.persona.memory_commands import handle_memory_command
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
@@ -128,6 +131,7 @@ from apps.orchestrator.discovery import (
 )
 from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.memory.personal_context import record_explicit_green_facts
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
@@ -153,6 +157,19 @@ _FALLBACK_EMPTY = "?"
 # so this is only the defensive fallback. Operational copy (low sensitivity vs the
 # crisis copy) — founder may tweak.
 _HANDOFF_FALLBACK_TEXT = "Передаю ваш вопрос менеджеру — он ответит здесь в ближайшее время."
+
+
+def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
+    """Most recent assistant message text in short-term history, or None.
+
+    Used by the M-B4 «забудь всё» two-step confirmation to detect a pending
+    prompt without an extra state store.
+    """
+    for item in reversed(history or []):
+        if item.get("role") == "assistant":
+            content = item.get("content")
+            return content if isinstance(content, str) else None
+    return None
 
 
 def _build_attachments(action_data: dict[str, Any] | None) -> list[dict[str, Any]] | None:
@@ -232,6 +249,54 @@ def _emit_safety_shortcircuit(bot_user: Any, safety: Any, *, is_global: bool) ->
             "is_global_bot": is_global,
         },
     )
+
+
+def _deliver_crisis_reply(
+    *,
+    chat_id: str,
+    text: str,
+    bot_user: Any,
+    trace_id: str | uuid.UUID | None,
+    is_global: bool,
+    attachments: list[dict[str, Any]] | None = None,
+) -> None:
+    """Send a safety/crisis reply, alerting LOUDLY if delivery fails (#1082).
+
+    A crisis reply that fails to send is categorically worse than a normal one:
+    ``with_idempotency`` has already claimed the key, so a PEL retry hits
+    ``AlreadyClaimed`` and never resends — a person in crisis silently gets
+    nothing, while the DB shows a «delivered» reply. We can't guarantee delivery
+    here, but we MUST make the failure loud so ops follow up out-of-band.
+
+    On failure: a high-priority ERROR log (the durable, alerting-hooked signal —
+    survives even if the re-raised exception rolls a surrounding transaction
+    back) plus a distinct ``channels.max.safety.crisis_delivery_failed`` event
+    (analytics; separate from the PII-safe ``pre_check_triggered``). Both are
+    PII-safe — never the crisis text or the matched phrase. The exception is
+    re-raised: propagation / idempotency semantics are unchanged, the alert is
+    the only addition.
+    """
+    try:
+        send_message(chat_id=chat_id, text=text, attachments=attachments)
+    except Exception:
+        logger.error(
+            "channels.max.safety.crisis_delivery_failed bot_user=%s is_global=%s trace=%s",
+            getattr(bot_user, "id", "?"),
+            is_global,
+            trace_id,
+        )
+        try:
+            emit(
+                "channels.max.safety.crisis_delivery_failed",
+                payload={
+                    "bot_user_id": str(getattr(bot_user, "id", "")),
+                    "is_global_bot": is_global,
+                    "trace_id": str(trace_id) if trace_id else "",
+                },
+            )
+        except Exception:  # noqa: BLE001 — the alert event must not mask the send failure
+            logger.exception("channels.max.safety.crisis_delivery_alert_emit_failed")
+        raise
 
 
 def _dispatch_skill_handoff(
@@ -497,6 +562,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      into tenant T's booking flow, #1020).
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
+    was_memory_command = False
     safety = evaluate_inbound(event.text)
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
@@ -511,11 +577,64 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
     else:
-        reply = generate_discovery_reply(
-            event.text,
-            history=history,
-            trace_id=str(trace_id) if trace_id else None,
-        )
+        # An active memory identity = canonical ayla_user_id + PERSONAL_DATA
+        # consent (green's 152-ФЗ basis). While memory is dormant (no consent)
+        # this is None, so neither commands nor surfacing fire and the discovery
+        # happy-path is byte-identical. Best-effort: the consent read is a DB
+        # call and runs before the reply is sent, so a transient error must
+        # degrade to «no memory», never abort the turn.
+        ayla_user_id = None
+        try:
+            if bot_user.ayla_user_id and can_store_green_memory(bot_user):
+                ayla_user_id = bot_user.ayla_user_id
+        except Exception:  # noqa: BLE001 — memory gating must never break the turn
+            logger.exception("channels.max.global.memory_gate_failed bot_user=%s", bot_user.id)
+            ayla_user_id = None
+
+        # 2.5. Chat-side 152-ФЗ memory commands (M-B4 / #1113): «покажи что
+        #      знаешь», «забудь {X}», «забудь всё». Best-effort — a failure
+        #      degrades to normal discovery, never aborts the turn.
+        mem_reply: DiscoveryReply | None = None
+        if ayla_user_id is not None:
+            try:
+                cmd = handle_memory_command(
+                    user_id=ayla_user_id,
+                    text=event.text,
+                    last_assistant_text=_last_assistant_content(history),
+                )
+                if cmd is not None:
+                    mem_reply = DiscoveryReply(text=cmd.text)
+                    assistant_action_type = cmd.action_type
+            except Exception:  # noqa: BLE001 — memory commands must never break the turn
+                logger.exception(
+                    "channels.max.global.memory_command_failed bot_user=%s", bot_user.id
+                )
+                mem_reply = None
+        was_memory_command = mem_reply is not None
+
+        if mem_reply is not None:
+            reply = mem_reply
+        else:
+            # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
+            # the discovery prompt. Best-effort: these DB reads run BEFORE the reply
+            # is sent, so a transient error must degrade to «no memory», never abort
+            # the turn (the idempotency key is already claimed — a raise would lose
+            # the reply on retry).
+            personal_context = None
+            try:
+                if ayla_user_id is not None:
+                    personal_context = read_personal_context(ayla_user_id)
+            except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
+                logger.exception(
+                    "channels.max.global.memory_surface_failed bot_user=%s", bot_user.id
+                )
+                personal_context = None
+            reply = generate_discovery_reply(
+                event.text,
+                history=history,
+                personal_context=personal_context,
+                trace_id=str(trace_id) if trace_id else None,
+            )
 
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     record_global_message(
@@ -527,11 +646,33 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         trace_id=trace_id,
     )
     short_term.append(conversation.id, role="assistant", content=reply.text)
-    send_message(
-        chat_id=event.chat_id,
-        text=reply.text,
-        attachments=_build_attachments(reply.action_data),
-    )
+    if assistant_action_type == "safety_pre_check":
+        # Crisis reply — alert loudly on delivery failure (#1082).
+        _deliver_crisis_reply(
+            chat_id=event.chat_id,
+            text=reply.text,
+            bot_user=bot_user,
+            trace_id=trace_id,
+            is_global=True,
+            attachments=_build_attachments(reply.action_data),
+        )
+    else:
+        send_message(
+            chat_id=event.chat_id,
+            text=reply.text,
+            attachments=_build_attachments(reply.action_data),
+        )
+
+    # Memory write (M-B2 / #1099): learn explicit green facts the user stated
+    # this turn (e.g. «я веган»). Best-effort + consent-gated inside; never
+    # affects the reply already sent. No active questioning in the pilot.
+    #
+    # SKIP when this turn was a memory command (M-B4): «забудь что я веган»
+    # contains the substring «я веган», so re-running the extractor here would
+    # instantly re-create the fact the user just asked to forget — nullifying
+    # the 152-ФЗ erasure. A forget/show turn must never write memory.
+    if not was_memory_command:
+        record_explicit_green_facts(bot_user, event.text)
 
 
 def _discovery_handoff_reply(
@@ -627,7 +768,13 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             trace_id=trace_id,
         )
         short_term.append(conversation.id, role="assistant", content=safety.reply_text)
-        send_message(chat_id=event.chat_id, text=safety.reply_text)
+        _deliver_crisis_reply(
+            chat_id=event.chat_id,
+            text=safety.reply_text,
+            bot_user=bot_user,
+            trace_id=trace_id,
+            is_global=False,
+        )
         logger.info(
             "channels.max.handler.safety_shortcircuit conversation=%s verdict=%s",
             conversation.id,

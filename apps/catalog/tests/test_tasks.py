@@ -1,4 +1,10 @@
-"""Catalog Celery task tests (DRF-579 / Sprint 7 / C5)."""
+"""Catalog Celery task tests — fan-out over tenants (S3B / #1044).
+
+PR-1 syncs only ``CatalogService``, so the fan-out accumulator sums the
+``services`` mirror counters. Each test resets the ``Tenant`` table first so
+the seeded global bot tenant (identity migration ``0014``) doesn't perturb
+the exact-count assertions.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +28,8 @@ def _cache_clear():
 
 @pytest.fixture
 def tenants(db) -> list[Tenant]:
+    # Reset so the seeded global bot tenant doesn't skew exact counts.
+    Tenant.objects.all().delete()
     return [
         Tenant.objects.create(slug="t-a", name="A"),
         Tenant.objects.create(slug="t-b", name="B"),
@@ -37,11 +45,10 @@ def _result(
     updated: int = 0,
     error: str = "",
 ) -> SyncResult:
-    counts = MirrorCounts(created=created, updated=updated)
     return SyncResult(
         ran=ran,
         skipped=skipped,
-        services=counts,
+        services=MirrorCounts(created=created, updated=updated),
         cursor_advanced_to=datetime(2026, 5, 13, tzinfo=timezone.utc) if ran else None,
         error=error,
     )
@@ -58,12 +65,7 @@ class TestFanOut:
         assert counters["total_created"] == len(tenants)
 
     def test_per_tenant_failure_does_not_block_others(self, tenants: list[Tenant]) -> None:
-        # Middle tenant raises — first/third still run.
-        side_effects = [
-            _result(created=1),
-            RuntimeError("boom"),
-            _result(created=2),
-        ]
+        side_effects = [_result(created=1), RuntimeError("boom"), _result(created=2)]
         with patch("apps.catalog.tasks.CatalogSyncService") as MockService:
             instance = MockService.return_value
             instance.run.side_effect = side_effects
@@ -87,7 +89,6 @@ class TestFanOut:
         assert counters["tenants_failed"] == 0
 
     def test_error_field_counts_as_failure(self, tenants: list[Tenant]) -> None:
-        # Service returned ran=True but with error — counts as failure.
         with patch("apps.catalog.tasks.CatalogSyncService") as MockService:
             instance = MockService.return_value
             instance.run.return_value = _result(ran=True, error="boom")
@@ -98,26 +99,23 @@ class TestFanOut:
 
 class TestEmptyDatabase:
     def test_no_tenants_returns_zeros(self, db) -> None:
+        Tenant.objects.all().delete()
         counters = sync_catalog_for_all_tenants()
         assert counters["tenants_run"] == 0
         assert counters["tenants_failed"] == 0
 
 
 class TestAccumulator:
-    def test_counts_across_all_four_mirrors(self, tenants: list[Tenant]) -> None:
+    def test_counts_summed_across_tenants(self, tenants: list[Tenant]) -> None:
         result = SyncResult(
             ran=True,
-            services=MirrorCounts(created=1, updated=2),
-            masters=MirrorCounts(created=3, updated=4, skipped=5),
-            faqs=MirrorCounts(created=10),
-            help_articles=MirrorCounts(updated=20, skipped=30),
+            services=MirrorCounts(created=1, updated=2, skipped=5),
             cursor_advanced_to=datetime(2026, 5, 13, tzinfo=timezone.utc),
         )
         with patch("apps.catalog.tasks.CatalogSyncService") as MockService:
             instance = MockService.return_value
             instance.run.return_value = result
             counters = sync_catalog_for_all_tenants()
-        # 3 tenants × per-tenant counts.
-        assert counters["total_created"] == (1 + 3 + 10) * 3
-        assert counters["total_updated"] == (2 + 4 + 20) * 3
-        assert counters["total_skipped"] == (5 + 30) * 3
+        assert counters["total_created"] == 1 * len(tenants)
+        assert counters["total_updated"] == 2 * len(tenants)
+        assert counters["total_skipped"] == 5 * len(tenants)

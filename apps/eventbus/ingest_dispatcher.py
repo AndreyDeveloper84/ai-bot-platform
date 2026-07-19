@@ -175,6 +175,10 @@ _KNOWN_NAMES: Final[frozenset[str]] = frozenset(
         "service.updated",
         "master.schedule.updated",
         "user.profile.updated",
+        # C4 billing events (PILOT_CONTRACTS_2026-08-15 §5, frozen v1.0.0).
+        "subscription.activated",
+        "subscription.past_due",
+        "billing.fee_charged",
     }
 )
 

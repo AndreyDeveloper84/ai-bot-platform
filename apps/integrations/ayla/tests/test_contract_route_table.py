@@ -99,12 +99,41 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/specialists/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/slots/", Auth.BEARER),
-    Route("POST", "/api/v1/internal/appointments/", Auth.BEARER_EXT),
-    Route("POST", "/api/v1/internal/appointments/{id}/cancel/", Auth.BEARER_EXT),
-    Route("POST", "/api/v1/internal/appointments/{id}/reschedule/", Auth.BEARER_EXT),
+    # Writes pin X-Idempotency-Key — the double-booking dedup guarantee
+    # (В2.4), same rationale as payments' Idempotence-Key row below.
+    Route(
+        "POST",
+        "/api/v1/internal/appointments/",
+        Auth.BEARER_EXT,
+        frozenset({"x-idempotency-key"}),
+    ),
+    Route(
+        "POST",
+        "/api/v1/internal/appointments/{id}/cancel/",
+        Auth.BEARER_EXT,
+        frozenset({"x-idempotency-key"}),
+    ),
+    Route(
+        "POST",
+        "/api/v1/internal/appointments/{id}/reschedule/",
+        Auth.BEARER_EXT,
+        frozenset({"x-idempotency-key"}),
+    ),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
     # profile_client (#978).
     Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
+    # personal_context_client (M-B1, frozen contract v1.0 2026-07-09).
+    Route("GET", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
+    Route("PATCH", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/users/{id}/personal-context/ask-eligibility/", Auth.BEARER),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER),
+    # personal_context_client C5 legs (PILOT_CONTRACTS §6; upstream = W2 S3.1).
+    Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER),
+    Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER),
+    # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
+    Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
     # recommendations_client (#1048).
     Route("POST", "/api/v1/internal/me/catalog/recommendations/", Auth.BEARER_EXT),
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
@@ -282,14 +311,22 @@ def _exercise_booking() -> None:
             specialist_id="SPECID",
             service_id="SVCID",
             start_datetime="2026-07-03T10:00:00+03:00",
+            idempotency_key="IDEM-CREATE",
         )
     )
-    _swallow(lambda: c.cancel_appointment(external_user_id=_EXT_USER, appointment_id="APPTID"))
+    _swallow(
+        lambda: c.cancel_appointment(
+            external_user_id=_EXT_USER,
+            appointment_id="APPTID",
+            idempotency_key="IDEM-CANCEL",
+        )
+    )
     _swallow(
         lambda: c.reschedule_appointment(
             external_user_id=_EXT_USER,
             appointment_id="APPTID",
             new_start_datetime="2026-07-03T11:00:00+03:00",
+            idempotency_key="IDEM-RESCHEDULE",
         )
     )
     _swallow(lambda: c.get_user_appointments(external_user_id=_EXT_USER))
@@ -302,6 +339,24 @@ def _exercise_profile() -> None:
     _swallow(lambda: profile_client.fetch_profile_fields(_PROFILE_UUID))
 
 
+def _exercise_personal_context() -> None:
+    from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
+
+    uid = str(_PROFILE_UUID)
+    c = PersonalContextHttpClient()  # reads settings.AYLA_*; httpx.Client is patched
+    _swallow(lambda: c.get_context(ayla_user_id=uid))
+    _swallow(
+        lambda: c.patch_context(
+            ayla_user_id=uid, updates=[{"field": "diet_type", "value": "vegan"}]
+        )
+    )
+    _swallow(lambda: c.get_ask_eligibility(ayla_user_id=uid))
+    _swallow(lambda: c.mark_asked(ayla_user_id=uid, field="diet_type"))
+    _swallow(lambda: c.skip(ayla_user_id=uid, field="diet_type"))
+    _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid))
+    _swallow(lambda: c.delete_personal_data(ayla_user_id=uid))
+
+
 def _exercise_recommendations() -> None:
     from apps.integrations.ayla.recommendations_client import (
         fetch_recommendations,
@@ -310,6 +365,15 @@ def _exercise_recommendations() -> None:
 
     reset_recommendations_circuit()
     _swallow(lambda: fetch_recommendations(external_user_id=_EXT_USER, payload={"goal": "relax"}))
+
+
+def _exercise_billing() -> None:
+    from apps.integrations.ayla.billing_client import AylaBillingClient
+
+    sid = str(_PROFILE_UUID)
+    c = AylaBillingClient()  # reads settings.AYLA_*; httpx.Client is patched
+    _swallow(lambda: c.get_billing_status(specialist_id=sid))
+    _swallow(lambda: c.get_payout_preview(specialist_id=sid))
 
 
 def _exercise_payments(sink: list[Captured]) -> None:
@@ -380,6 +444,8 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     row must be produced by some client (bijection — no drift, no stale rows)."""
     _exercise_booking()
     _exercise_profile()
+    _exercise_personal_context()
+    _exercise_billing()
     _exercise_recommendations()
     _exercise_payments(captured)
     await _exercise_nutrition()
