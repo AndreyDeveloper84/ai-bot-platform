@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,7 +31,6 @@ from django.core.cache import cache
 from apps.kb.chromadb_client import ChromaClient, KbItem, reset_client_cache
 from apps.llm.protocol import CompletionResult, ToolCall
 from apps.llm.router import reset_router_cache
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
 
@@ -43,11 +42,18 @@ pytestmark = [
 ]
 
 
-def _fake_intent_provider() -> AsyncMock:
-    """Intent classifier that pins to FAQ for these tests."""
-    provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=json.dumps(
+def _fake_router(*, faq_completions: list[CompletionResult]) -> Mock:
+    """Router stub keyed per skill (the #975 production intent path).
+
+    Intent classify resolves its provider via ``apps.llm.router.get_router()``
+    and consumes the pinned FAQ IntentDecision JSON; the FAQ skill's
+    two-call loop consumes ``faq_completions`` in order. The Sprint-1
+    ``intent_router.OpenAIProvider`` symbol is the legacy path — pipeline
+    turns never consult it (that mock target was dead rot).
+    """
+    intent_provider = AsyncMock()
+    intent_provider.complete.return_value = _completion(
+        text=json.dumps(
             {
                 "intent": "faq",
                 "skill": "faq",
@@ -59,12 +65,17 @@ def _fake_intent_provider() -> AsyncMock:
                 "needs_tool": True,
             }
         ),
-        model="gpt-4o-mini-mock",
-        is_fallback=False,
-        tokens_in=8,
-        tokens_out=16,
     )
-    return provider
+    faq_provider = AsyncMock()
+    faq_provider.complete.side_effect = faq_completions
+    faq_provider.embedding.return_value = [0.9] * 8
+
+    def _get_provider(tenant=None, *, skill: str = "", op: str = "complete"):  # noqa: ANN001, ANN202
+        return intent_provider if skill == "intent" else faq_provider
+
+    router = Mock()
+    router.get_provider.side_effect = _get_provider
+    return router
 
 
 def _completion(
@@ -145,26 +156,20 @@ def _message(text: str) -> ChannelMessage:
 def _stub_external():
     """Mock the two LLM seams + MAX outbound. Yields no value."""
 
-    intent_provider = _fake_intent_provider()
     tc = ToolCall(
         id="call-1",
         name="search_knowledge_base",
         arguments={"query": "часы работы"},
     )
-    completions = [
-        _completion(tool_calls=[tc]),
-        _completion(text="Часы работы: с 10:00 до 22:00, без выходных."),
-    ]
-
-    from apps.llm.providers.openai_provider import OpenAIProvider
+    router = _fake_router(
+        faq_completions=[
+            _completion(tool_calls=[tc]),
+            _completion(text="Часы работы: с 10:00 до 22:00, без выходных."),
+        ]
+    )
 
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=intent_provider,
-        ),
-        patch.object(OpenAIProvider, "complete", side_effect=completions),
-        patch.object(OpenAIProvider, "embedding", return_value=[0.9] * 8),
+        patch("apps.llm.router.get_router", return_value=router),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),
     ):
         yield
@@ -175,23 +180,15 @@ def _stub_external_empty():
     """Intent + first LLM call still hits — empty chromadb forces handoff
     BEFORE the second call, so we only need ONE completion in the side_effect.
     """
-    intent_provider = _fake_intent_provider()
     tc = ToolCall(
         id="call-1",
         name="search_knowledge_base",
         arguments={"query": "часы работы"},
     )
-    completions = [_completion(tool_calls=[tc])]
-
-    from apps.llm.providers.openai_provider import OpenAIProvider
+    router = _fake_router(faq_completions=[_completion(tool_calls=[tc])])
 
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=intent_provider,
-        ),
-        patch.object(OpenAIProvider, "complete", side_effect=completions),
-        patch.object(OpenAIProvider, "embedding", return_value=[0.9] * 8),
+        patch("apps.llm.router.get_router", return_value=router),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),
     ):
         yield

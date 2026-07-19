@@ -10,14 +10,14 @@ so we don't burn LLM calls in CI.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID, uuid4
 
 import pytest
 from asgiref.sync import sync_to_async
 
+from apps.llm.protocol import CompletionResult
 from apps.orchestrator.intent_router import IntentDecision
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import (
     ChannelMessage,
     TurnResult,
@@ -32,8 +32,16 @@ pytestmark = [
 ]
 
 
-def _fake_llm(intent: str = "faq", risk_level: str = "low"):
-    """Build a fake provider whose complete() returns a pinned IntentDecision JSON."""
+def _fake_intent_router(intent: str = "faq", risk_level: str = "low"):
+    """Router stub whose intent provider answers with pinned IntentDecision JSON.
+
+    #975 moved intent classification to the production path:
+    ``_classify_production_path`` lazily imports ``apps.llm.router.get_router``
+    and awaits ``provider.complete(...)`` on whatever the router returns.
+    The deterministic seam is therefore the ROUTER — the Sprint-1
+    ``intent_router.OpenAIProvider`` symbol is the legacy path and is no
+    longer consulted by pipeline turns (that mock target was dead rot).
+    """
     import json
 
     payload = {
@@ -46,16 +54,11 @@ def _fake_llm(intent: str = "faq", risk_level: str = "low"):
         "needs_rag": False,
         "needs_tool": False,
     }
-    response = LLMResponse(
-        content=json.dumps(payload),
-        model="gpt-4o-mini-mock",
-        is_fallback=False,
-        tokens_in=10,
-        tokens_out=20,
-    )
     provider = AsyncMock()
-    provider.complete.return_value = response
-    return provider
+    provider.complete.return_value = CompletionResult(text=json.dumps(payload))
+    router = Mock()
+    router.get_provider.return_value = provider
+    return router
 
 
 def _message(text: str = "сколько стоит массаж?", tenant_slug: str = "o1-test"):
@@ -78,10 +81,7 @@ def tenant():
 @pytest.fixture(autouse=True)
 def _stub_provider():
     """Default: every test gets the faq-intent fake LLM unless overridden."""
-    with patch(
-        "apps.orchestrator.intent_router.OpenAIProvider",
-        return_value=_fake_llm(),
-    ):
+    with patch("apps.llm.router.get_router", return_value=_fake_intent_router()):
         yield
 
 
@@ -96,6 +96,27 @@ def _stub_outbound():
         return_value={"ok": True},
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tracer_provider():
+    """Neutralise the process-global OTel provider for the duration of each test.
+
+    OTel's ``set_tracer_provider`` is one-shot: the first SDK provider
+    installed by ANY test module stays active for the rest of the process
+    (later calls are ignored with a warning). While one is active,
+    ``apps.replay.recorder._prefer_otel_trace_id`` binds
+    ``ReplayTrace.trace_id`` to the OTel span id instead of the message
+    trace_id and TestReplayCapture can't find its row. Force the no-op
+    proxy here (span assertions live in test_otel*.py, not in this
+    module) and restore the previous provider afterwards.
+    """
+    from opentelemetry import trace as otel_trace
+
+    original = otel_trace._TRACER_PROVIDER
+    otel_trace._TRACER_PROVIDER = None
+    yield
+    otel_trace._TRACER_PROVIDER = original
 
 
 class TestHappyPath:

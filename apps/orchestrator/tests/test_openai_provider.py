@@ -17,7 +17,13 @@ from apps.audit.models import AuditLog
 from apps.orchestrator.llm.breaker import BreakerOpenError, reset_breaker
 from apps.orchestrator.llm.openai_provider import LLMResponse, OpenAIProvider
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.django_db]
+# transaction=True: the provider's fallback path writes its audit row via
+# sync_to_async(thread_sensitive=False), which COMMITS on a separate
+# connection outside the wrapping test transaction. Under plain django_db
+# those rows leak into later modules (the audit_cleanup health probes in
+# test_readyz_extended.py read the latest AuditLog row). Transactional
+# truncation between tests keeps the leak contained.
+pytestmark = [pytest.mark.asyncio, pytest.mark.django_db(transaction=True)]
 
 
 @pytest.fixture(autouse=True)

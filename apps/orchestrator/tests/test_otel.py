@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from opentelemetry import trace
@@ -34,7 +34,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 from apps.llm.protocol import CompletionResult
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
 
@@ -62,18 +61,6 @@ _INTENT_JSON = json.dumps(
 # provider is currently global, so spans land in this module's exporter
 # regardless of which test module booted OTel first.
 _MODULE_EXPORTER = InMemorySpanExporter()
-
-
-def _intent_provider() -> AsyncMock:
-    provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=_INTENT_JSON,
-        model="mock",
-        is_fallback=False,
-        tokens_in=5,
-        tokens_out=10,
-    )
-    return provider
 
 
 _PROCESSOR_INSTALLED = False
@@ -109,10 +96,31 @@ def t5_tenant() -> Tenant:
 
 @pytest.fixture(autouse=True)
 def _stub_external() -> Any:
-    """Neutralise both LLM seams + MAX outbound for a clean happy turn."""
+    """Neutralise the LLM seams + MAX outbound for a clean happy turn.
+
+    #975: intent classification resolves its provider через the LLM router
+    (production path), so the deterministic seam is the ROUTER, keyed per
+    skill — the intent provider answers with the pinned IntentDecision
+    JSON, anything else gets a plain "ok" text completion. The previous
+    Sprint-1 patch (``intent_router.OpenAIProvider``) was a dead target —
+    pipeline turns never consult the legacy path — and the class-level
+    ``complete`` patch fed the classifier a non-JSON "ok", pinning
+    intent="unknown" (the rot this fixes).
+    """
     from apps.llm.providers.openai_provider import OpenAIProvider as FaqProvider
 
-    faq_completion = CompletionResult(
+    intent_provider = AsyncMock()
+    intent_provider.complete.return_value = CompletionResult(
+        text=_INTENT_JSON,
+        tool_calls=[],
+        prompt_tokens=1,
+        completion_tokens=1,
+        model="mock",
+        provider="openai",
+        finish_reason="stop",
+    )
+    faq_provider = AsyncMock()
+    faq_provider.complete.return_value = CompletionResult(
         text="ok",
         tool_calls=[],
         prompt_tokens=1,
@@ -121,12 +129,14 @@ def _stub_external() -> Any:
         provider="openai",
         finish_reason="stop",
     )
+
+    def _get_provider(tenant=None, *, skill: str = "", op: str = "complete"):  # noqa: ANN001, ANN202
+        return intent_provider if skill == "intent" else faq_provider
+
+    router = Mock()
+    router.get_provider.side_effect = _get_provider
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=_intent_provider(),
-        ),
-        patch.object(FaqProvider, "complete", return_value=faq_completion),
+        patch("apps.llm.router.get_router", return_value=router),
         patch.object(FaqProvider, "embedding", return_value=[0.5] * 8),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),
     ):
