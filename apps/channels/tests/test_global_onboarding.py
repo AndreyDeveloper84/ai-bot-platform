@@ -61,12 +61,12 @@ def fake_redis(monkeypatch):
 
 @pytest.fixture
 def spy_discovery(monkeypatch):
-    """Replace generate_discovery_reply with a spy so we can assert it is NOT
+    """Replace generate_concierge_reply with a spy so we can assert it is NOT
     called during onboarding (and IS on the normal discovery path)."""
     from apps.orchestrator.discovery import DiscoveryReply
 
     spy = MagicMock(return_value=DiscoveryReply(text="Какая услуга интересует?"))
-    monkeypatch.setattr(max_handler, "generate_discovery_reply", spy)
+    monkeypatch.setattr(max_handler, "generate_concierge_reply", spy)
     return spy
 
 

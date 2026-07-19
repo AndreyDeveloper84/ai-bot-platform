@@ -66,7 +66,7 @@ def mock_discovery(monkeypatch):
 
     monkeypatch.setattr(
         max_handler,
-        "generate_discovery_reply",
+        "generate_concierge_reply",
         lambda *a, **k: DiscoveryReply(text="__DISCOVERY__"),
     )
 
