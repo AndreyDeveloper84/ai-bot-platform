@@ -1006,6 +1006,10 @@ def execute_confirm(
             datetime=slot_datetime,
             client_phone=phone,
             client_name=client_name,
+            # AMD-002 (D6): выбор оплаты из диалогового намерения; default
+            # true — обратная совместимость (старые payload'ы без поля
+            # трактуются как «с предоплатой», поведение как раньше).
+            payment_required=bool(payload.get("payment_required", True)),
         )
     except YClientsUnavailableError as exc:
         logger.warning("booking.confirm.exec.unavailable err=%s", exc)

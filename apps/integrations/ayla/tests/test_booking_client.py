@@ -261,6 +261,8 @@ class TestWriteRoundTrip:
             "specialist_id": "spec-1",
             "service_id": "svc-1",
             "start_datetime": "2026-06-10T14:00:00+03:00",
+            # AMD-002 — default true (обратная совместимость).
+            "payment_required": True,
         }
         assert rec.appointment_id == "appt-uuid"
         assert rec.raw["start_datetime"] == "2026-06-10T14:00:00+03:00"

@@ -175,6 +175,8 @@ class TestExecuteConfirm:
                 "datetime": future_iso,
                 "client_phone": "79991234567",
                 "client_name": "Anna",
+                # AMD-002 — default true for legacy payloads without the field.
+                "payment_required": True,
             }
         ]
         row = BookingRequest.all_tenants.get(
