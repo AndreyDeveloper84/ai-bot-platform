@@ -209,9 +209,13 @@ class TestExecuteConfirm:
         client surface (PILOT_CONTRACTS_2026-08-15 §2)."""
         from apps.skills.booking.provider import YClientsSpecialistUnavailableError
 
-        client = FakeClient()
         exc = YClientsSpecialistUnavailableError("http_409_subscription_past_due")
-        client.create_record = lambda **kwargs: (_ for _ in ()).throw(exc)
+
+        class _DebtBlockedClient(FakeClient):
+            def create_record(self, **kwargs):  # type: ignore[no-untyped-def]
+                raise exc
+
+        client = _DebtBlockedClient()
         with tenant_scope(tenant):
             result = execute_confirm(
                 client=client,

@@ -689,7 +689,7 @@ class TestBillingIdempotency:
         ["subscription.activated", "subscription.past_due", "billing.fee_charged"],
     )
     def test_billing_event_idempotent(self, event_name: str, tenant: Tenant) -> None:
-        payloads = {
+        payloads: dict[str, dict[str, Any]] = {
             "subscription.activated": {
                 "specialist_id": SPECIALIST_ID,
                 "tariff": "solo",
