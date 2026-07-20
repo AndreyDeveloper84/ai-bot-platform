@@ -20,6 +20,14 @@
  * legal/compliance before pilot ship. Frontend renders the draft to
  * unblock build; legal can swap copy without code changes by editing
  * this file as a single-string update.
+ *
+ * # Retention lines (issue #950)
+ *
+ * «Сообщения — 180 дней (потом анонимизируется)» REMOVED 2026-07-19:
+ * the anonymiser job does not exist in the backend (verified by grep —
+ * no anonymize/retention code), so the claim was unbacked. Re-add the
+ * line only when the backend job ships; «Записи и оплаты — 7 лет» is
+ * the statutory claim and stays.
  */
 
 import { useId, useState } from "react";
@@ -36,7 +44,6 @@ const DRAFT_NOT_DOING: readonly string[] = [
 ];
 
 const DRAFT_RETENTION: readonly string[] = [
-  "Сообщения — 180 дней (потом анонимизируется)",
   "Записи и оплаты — 7 лет (требование закона)",
 ];
 

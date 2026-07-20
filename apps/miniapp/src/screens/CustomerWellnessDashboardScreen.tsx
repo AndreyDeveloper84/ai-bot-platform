@@ -698,13 +698,15 @@ export function CustomerWellnessDashboardScreen() {
           )}
       </main>
 
-      {/* Bottom nav — 5 tabs. */}
+      {/* Bottom nav — 5 tabs. Wellness is the «День» day view
+          (#951): active tab is «День»; «Главная» leads to the records
+          home (/customer/main). */}
       <nav className="wellness-dash__nav" aria-label="Основная навигация">
         <button
           type="button"
-          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
-          aria-current="page"
+          className="wellness-dash__nav-tab"
           aria-label="Главная"
+          onClick={() => navigate("/customer/main")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             🏠
@@ -713,9 +715,9 @@ export function CustomerWellnessDashboardScreen() {
         </button>
         <button
           type="button"
-          className="wellness-dash__nav-tab"
+          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
+          aria-current="page"
           aria-label="День"
-          onClick={() => navigate("/")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             ☀

@@ -52,7 +52,7 @@ export function PilotComingSoonScreen({ surface }: Props) {
   const activeTab = surface === "home" ? "Главная" : "Услуги";
   const tabs: Array<{ label: string; icon: string; path: string }> = [
     { label: "Главная", icon: "🏠", path: "/customer/main" },
-    { label: "День", icon: "☀", path: "/" },
+    { label: "День", icon: "☀", path: "/customer/wellness" },
     { label: "Записи", icon: "📅", path: "/customer/records" },
     { label: "Услуги", icon: "💅", path: "/customer/catalog" },
     { label: "Я", icon: "👤", path: "/customer/profile" },

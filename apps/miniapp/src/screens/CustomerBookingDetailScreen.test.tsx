@@ -153,6 +153,17 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     expect(mockedUndo).not.toHaveBeenCalled();
   });
 
+  it("cancel modal closes on Escape without calling the endpoint (#953)", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue({ booking: FUTURE });
+    renderScreen("b-1");
+    await user.click(await screen.findByRole("button", { name: "Отменить" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mockedRequest).not.toHaveBeenCalled();
+  });
+
   it("reschedule CTA leads to the real reschedule screen", async () => {
     const user = userEvent.setup();
     mockedFetch.mockResolvedValue({ booking: FUTURE });

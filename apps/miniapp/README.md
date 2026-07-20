@@ -78,6 +78,13 @@ is empty. To still exercise the auth flow:
 3. Restart `npm run dev`. The `getInitData()` helper falls back to this
    value when `window.WebApp` is absent.
 
+## Runtime env vars
+
+- `VITE_SUPPORT_DEEPLINK` — support channel URL used by the profile
+  privacy sheets (#949). Falls back to the pilot placeholder
+  `https://max.me/aylasupport` when unset. Set it at deploy time once
+  ops decides the real support channel handle.
+
 ## What's deferred (swap later in one PR)
 
 | Defaulted today | Swap to |
