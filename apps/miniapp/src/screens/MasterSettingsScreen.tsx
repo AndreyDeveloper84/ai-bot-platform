@@ -135,6 +135,16 @@ export function MasterSettingsScreen() {
         {COPY.comingSoon}
       </p>
 
+      {/* Phase 2b — billing / payout surface (C2/C3, real proxies). */}
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
+        onClick={() => navigate("/master/billing")}
+      >
+        Оплата и выплаты
+      </button>
+
       <hr
         style={{
           border: 0,

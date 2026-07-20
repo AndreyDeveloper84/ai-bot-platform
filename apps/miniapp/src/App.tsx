@@ -76,6 +76,7 @@ import { MasterConversationDetailScreen } from "./screens/MasterConversationDeta
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
+import { MasterBillingScreen } from "./screens/MasterBillingScreen";
 import { MasterInternalChatListScreen } from "./screens/MasterInternalChatListScreen";
 import { MasterInternalChatThreadScreen } from "./screens/MasterInternalChatThreadScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
@@ -224,6 +225,7 @@ function masterRouteElements(): React.ReactNode {
         element={<MasterOnboardingScreen />}
       />
       <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
+      <Route path="/master/billing" element={<MasterBillingScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
       <Route
         path="/master/conversations"

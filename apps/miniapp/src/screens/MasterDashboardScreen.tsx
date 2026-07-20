@@ -58,6 +58,7 @@ import {
   signalReady,
 } from "../lib/max-sdk";
 import { MasterTabBar } from "../components/MasterTabBar";
+import { PayoutPreviewCard } from "../components/PayoutPreviewCard";
 import {
   formatDateLong,
   formatRelativePast,
@@ -362,6 +363,8 @@ export function MasterDashboardScreen() {
           />
         </>
       )}
+
+      <PayoutPreviewCard />
 
       <MasterTabBar
         unreadCount={tab_badges.conversations_unread}
