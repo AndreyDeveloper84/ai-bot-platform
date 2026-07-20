@@ -139,3 +139,29 @@ export async function setupMasterCard(params: {
   );
   return res.data;
 }
+
+// --- One-shot debt collection (past_due CTA) --------------------------------
+
+export interface PayDebtResult {
+  payment_id: string;
+  invoice_id: string;
+  /** Null when charged via the saved method — no webview needed. */
+  confirmation_url: string | null;
+  amount: string;
+  status: string;
+  subscription_status: string;
+}
+
+/**
+ * One-shot debt collection for a past_due subscription. 409 `no_debt`
+ * means the debt is already gone — the screen shows «долга нет, статус
+ * обновится» and refetches C2 for the truth. Errors: 403 foreign
+ * specialist, 502 upstream.
+ */
+export async function payDebt(returnUrl: string): Promise<PayDebtResult> {
+  const res = await request<Envelope<PayDebtResult>>("/billing/pay-debt", {
+    method: "POST",
+    body: JSON.stringify({ return_url: returnUrl }),
+  });
+  return res.data;
+}

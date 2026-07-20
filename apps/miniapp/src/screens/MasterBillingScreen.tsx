@@ -32,6 +32,7 @@ import { formatConsentDate } from "../lib/customer-profile";
 import {
   getBillingStatus,
   getPayoutPreview,
+  payDebt,
   setupMasterCard,
   type BillingStatus,
   type PayoutCaptureState,
@@ -74,8 +75,10 @@ export function MasterBillingScreen() {
   const [status, setStatus] = useState<Slice<BillingStatus>>({ kind: "loading" });
   const [payout, setPayout] = useState<Slice<PayoutPreview>>({ kind: "loading" });
 
-  const loadStatus = useCallback(async () => {
-    setStatus({ kind: "loading" });
+  const loadStatus = useCallback(async (opts?: { silent?: boolean }) => {
+    // Silent refresh keeps the current card (and its action notes)
+    // mounted while fresh data arrives — used after debt actions.
+    if (!opts?.silent) setStatus({ kind: "loading" });
     try {
       setStatus({ kind: "ok", data: await getBillingStatus() });
     } catch (err) {
@@ -124,7 +127,10 @@ export function MasterBillingScreen() {
             <BillingError err={status.err} onRetry={loadStatus} />
           )}
           {status.kind === "ok" && (
-            <SubscriptionCard status={status.data} />
+            <SubscriptionCard
+              status={status.data}
+              onChanged={() => void loadStatus({ silent: true })}
+            />
           )}
         </section>
 
@@ -155,7 +161,15 @@ export function MasterBillingScreen() {
 // Subscription card (C2)
 // ---------------------------------------------------------------------------
 
-function SubscriptionCard({ status }: { status: BillingStatus }) {
+function SubscriptionCard({
+  status,
+  onChanged,
+}: {
+  status: BillingStatus;
+  /** Refetch C2 after a debt action (charge / no_debt) — the server
+      holds the truth, the card re-renders from it. */
+  onChanged: () => void;
+}) {
   const sub = status.subscription;
   return (
     <div>
@@ -164,16 +178,7 @@ function SubscriptionCard({ status }: { status: BillingStatus }) {
         {sub.tariff && <> · тариф {TARIFF_LABELS[sub.tariff] ?? sub.tariff}</>}
       </p>
 
-      {sub.status === "past_due" && (
-        <div className="callout" role="status">
-          <p style={{ margin: 0 }}>
-            По подписке есть задолженность. Списание повторится
-            автоматически — проверь, что на привязанной карте достаточно
-            средств. Если карта изменилась, привяжи новую (раздел
-            появится, когда подключим привязку).
-          </p>
-        </div>
-      )}
+      {sub.status === "past_due" && <PayDebtBlock onChanged={onChanged} />}
 
       {sub.current_period_end && (
         <p className="profile-section__caption">
@@ -290,6 +295,70 @@ function CardBindingSection({ tariff }: { tariff: TariffCode | null }) {
         </p>
       )}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pay-debt block (past_due) — real one-shot charge via the W3 proxy.
+// ---------------------------------------------------------------------------
+
+function PayDebtBlock({ onChanged }: { onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onPay() {
+    // In-flight idempotency — the button is disabled, guard anyway.
+    if (busy) return;
+    setBusy(true);
+    setNote(null);
+    setError(null);
+    try {
+      const result = await payDebt(`${window.location.origin}/master/billing`);
+      if (result.confirmation_url) {
+        // No saved method — finish the payment in the webview.
+        openPaymentConfirmation(result.confirmation_url);
+        setNote("Открыла страницу оплаты. После списания статус обновится.");
+      } else {
+        setNote(`Списано ${formatMoney(result.amount)}. Задолженность погашена.`);
+      }
+      // The server holds the truth — refetch C2 regardless.
+      onChanged();
+    } catch (err) {
+      if (err instanceof ApiError && err.slug === "no_debt") {
+        setNote("Задолженности уже нет — статус обновится.");
+        onChanged();
+      } else {
+        setError("Не получилось списать долг. Попробуй ещё раз.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="callout" role="status">
+      <p style={{ margin: 0 }}>
+        По подписке есть задолженность. Списание повторится
+        автоматически — или можно погасить сейчас одной кнопкой.
+      </p>
+      <div style={{ marginTop: "var(--s-3)" }}>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={busy}
+          onClick={() => void onPay()}
+        >
+          {busy ? "Списываю…" : "Оплатить долг"}
+        </button>
+      </div>
+      {note && <p style={{ marginBottom: 0, marginTop: "var(--s-2)" }}>{note}</p>}
+      {error && (
+        <p role="alert" style={{ marginBottom: 0, marginTop: "var(--s-2)" }}>
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
 

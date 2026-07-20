@@ -20,6 +20,7 @@ vi.mock("./max-sdk", () => ({
 import {
   getBillingStatus,
   getPayoutPreview,
+  payDebt,
   setupMasterCard,
 } from "./master-billing";
 
@@ -218,5 +219,49 @@ describe("setupMasterCard (D7 card binding)", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(403);
     expect((err as ApiError).slug).toBe("forbidden");
+  });
+});
+
+describe("payDebt (one-shot debt collection)", () => {
+  it("POSTs return_url and unwraps the verbatim data payload", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: {
+          payment_id: "p-1",
+          invoice_id: "inv-9",
+          confirmation_url: null,
+          amount: "960.00",
+          status: "succeeded",
+          subscription_status: "active",
+        },
+      }),
+    );
+    const res = await payDebt("https://miniapp.test/master/billing");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/master/billing/pay-debt");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      return_url: "https://miniapp.test/master/billing",
+    });
+    expect(res).toEqual({
+      payment_id: "p-1",
+      invoice_id: "inv-9",
+      confirmation_url: null,
+      amount: "960.00",
+      status: "succeeded",
+      subscription_status: "active",
+    });
+  });
+
+  it("surfaces the 409 no_debt slug for the honest «nothing to pay» state", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: "no_debt", detail: "No outstanding debt." }, 409),
+    );
+    const err = await payDebt("https://miniapp.test/master/billing").catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).slug).toBe("no_debt");
   });
 });
