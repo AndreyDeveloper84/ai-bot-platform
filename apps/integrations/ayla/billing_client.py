@@ -60,6 +60,14 @@ class BillingClientError(BillingProxyError):
     """Other 4xx. Bug on either side."""
 
 
+class BillingConflictError(BillingProxyError):
+    """409 — carries the wire ``error.code`` (e.g. ``NO_DEBT``)."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class BillingTransportError(BillingProxyError):
     """5xx after retries / network failure."""
 
@@ -129,6 +137,26 @@ class AylaBillingClient:
             json_body={"tariff": tariff, "return_url": return_url},
         )
 
+    def pay_debt(
+        self,
+        *,
+        specialist_id: str,
+        return_url: str = "",
+    ) -> dict[str, Any]:
+        """One-shot debt collection: ``POST internal/billing/specialists/{id}/pay-debt/``.
+
+        ``return_url`` is required upstream ONLY when no payment method
+        is saved (redirect re-binding); with a saved method the charge
+        is instant. We pass it through verbatim and let upstream enforce
+        the conditional 400. 409 ``NO_DEBT`` → :class:`BillingConflictError`.
+        Response verbatim: ``{payment_id, invoice_id, confirmation_url,
+        amount, status, subscription_status}``.
+        """
+        return self._post(
+            f"internal/billing/specialists/{specialist_id}/pay-debt/",
+            json_body={"return_url": return_url},
+        )
+
     # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
@@ -195,6 +223,11 @@ class AylaBillingClient:
             raise BillingAuthError(f"Ayla billing auth failed: HTTP {response.status_code}")
         if response.status_code == 404:
             raise BillingNotFoundError(f"SPECIALIST_NOT_FOUND: {path}")
+        if response.status_code == 409:
+            raise BillingConflictError(
+                f"Ayla billing 409: code={_err_code(response)!r} on {path}",
+                code=_err_code(response),
+            )
         if 400 <= response.status_code < 500:
             raise BillingClientError(
                 f"Ayla billing 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
@@ -223,3 +256,11 @@ class AylaBillingClient:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+
+def _err_code(resp: httpx.Response) -> str:
+    """Pull ``error.code`` from an error body, best-effort."""
+    try:
+        return (resp.json().get("error") or {}).get("code", "") or "unknown"
+    except (ValueError, AttributeError):
+        return "unknown"

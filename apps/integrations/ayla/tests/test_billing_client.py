@@ -244,3 +244,60 @@ class TestCardSetup:
                 specialist_id=_SID, tariff="solo", return_url="https://x.test/"
             )
         assert calls["n"] == 2
+
+
+class TestPayDebt:
+    def test_happy_path_verbatim(self) -> None:
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["body"] = request.content.decode()
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "payment_id": "p-1",
+                        "invoice_id": "i-1",
+                        "confirmation_url": "https://pay.test/debt/1",
+                        "amount": "960.00",
+                        "status": "pending",
+                        "subscription_status": "past_due",
+                    }
+                },
+            )
+
+        out = _client(handler).pay_debt(
+            specialist_id=_SID, return_url="https://miniapp.test/return"
+        )
+
+        assert seen["url"] == f"{_BASE}/api/v1/internal/billing/specialists/{_SID}/pay-debt/"
+        assert "https://miniapp.test/return" in seen["body"]
+        assert out["payment_id"] == "p-1"
+        assert out["amount"] == "960.00"
+        assert out["subscription_status"] == "past_due"
+
+    def test_return_url_optional_passed_verbatim(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": {"payment_id": "p"}})
+
+        out = _client(handler).pay_debt(specialist_id=_SID)
+        assert out == {"payment_id": "p"}
+
+    def test_409_carries_no_debt_code(self) -> None:
+        from apps.integrations.ayla.billing_client import BillingConflictError
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(409, json={"error": {"code": "NO_DEBT"}})
+
+        with pytest.raises(BillingConflictError) as exc_info:
+            _client(handler).pay_debt(specialist_id=_SID)
+
+        assert exc_info.value.code == "NO_DEBT"
+
+    def test_404_maps_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"code": "SPECIALIST_NOT_FOUND"}})
+
+        with pytest.raises(BillingNotFoundError):
+            _client(handler).pay_debt(specialist_id=_SID)

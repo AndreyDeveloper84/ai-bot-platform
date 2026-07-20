@@ -79,6 +79,7 @@ from apps.master_api.services.billing import (
     ProxyStatus,
     billing_status_for_master,
     card_setup_for_master,
+    pay_debt_for_master,
     payout_preview_for_master,
 )
 from apps.master_api.services.notification_prefs import (
@@ -1516,6 +1517,12 @@ def _billing_proxy_response(result: BillingProxyResult) -> JsonResponse:
             "request rejected by billing upstream",
             400,
         )
+    if result.status is ProxyStatus.CONFLICT:
+        return _error(
+            "no_debt",
+            "no outstanding debt",
+            409,
+        )
     return _error(
         "billing_upstream_unavailable",
         "billing upstream is temporarily unavailable",
@@ -1541,6 +1548,43 @@ def payout_preview(request: HttpRequest) -> HttpResponse:
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     return _billing_proxy_response(payout_preview_for_master(master))
+
+
+@require_http_methods(["POST"])
+@require_master_init_data
+def billing_pay_debt(request: HttpRequest) -> HttpResponse:
+    """One-shot debt collection (past_due CTA) — proxy to Ayla pay-debt.
+
+    Body: ``{"return_url": "<https url>"}`` — optional here: upstream
+    requires it ONLY when no payment method is saved (redirect
+    re-binding), and the bot can't know which case applies. Response:
+    verbatim ``{payment_id, invoice_id, confirmation_url, amount,
+    status, subscription_status}``.
+
+    Verified binding (AMD-005): the ayla key resolves from the SESSION
+    master; a client-supplied specialist_id/ayla_user_id that does not
+    match is 403. 409 ``no_debt`` when there's nothing to pay.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+
+    supplied = body.get("specialist_id") or body.get("ayla_user_id")
+    if supplied and str(supplied) != str(master.ayla_user_id or ""):
+        logger.warning(
+            "master_api.billing.pay_debt.foreign_specialist master_id=%s",
+            master.pk,
+        )
+        return _error("forbidden", "specialist_id does not match the session identity", 403)
+
+    return_url = str(body.get("return_url") or "").strip()
+
+    return _billing_proxy_response(pay_debt_for_master(master, return_url=return_url))
 
 
 @require_http_methods(["POST"])
