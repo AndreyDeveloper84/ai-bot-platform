@@ -1,24 +1,35 @@
 /**
- * Customer cards screen — C7.2 skeleton (pilot phase 3, step 3).
+ * Customer cards screen — C7.2 live (saved cards for online payment).
  *
  * Route: `/customer/cards`
  *
- * Renders saved cards (brand + last4) from the `lib/cards.ts` seam.
- * The passthrough endpoint is W3-pending (C7.2), so today the seam
- * returns empty and the screen shows its honest empty state. The
- * «Привязать карту» action stays disabled with an explicit caption —
- * a button that pretends to work would violate the same truthfulness
- * rule as fake data. Card binding activates on the orchestrator's
- * signal (after the C7 passthrough + webview confirmation flow).
+ * Consent boundary (C7.2, locked): binding a card is a SEPARATE
+ * voluntary action — the «Привязать карту» button stays disabled until
+ * the user explicitly checks the consent box; the lib sends
+ * `consent_version` + `consented_at` with the setup call. The saved
+ * method is used only for user-initiated payments — no autocharges
+ * (AYLA-DEC-0001); after a revoke the method is never charged again.
+ *
+ * Flow: list (brand + last4) → consent → setup → webview
+ * (`openPaymentConfirmation`) → card appears after the webhook →
+ * revoke behind an explicit two-step confirmation (server-side
+ * idempotent, repeat → 204).
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { getSavedCards, type SavedCard } from "../lib/cards";
+import {
+  deleteCard,
+  getSavedCards,
+  setupCard,
+  type SavedCard,
+} from "../lib/cards";
+import { openPaymentConfirmation } from "../lib/max-sdk";
 
 type State =
   | { kind: "loading" }
-  | { kind: "ok"; cards: SavedCard[] };
+  | { kind: "ok"; cards: SavedCard[] }
+  | { kind: "error" };
 
 const BRAND_LABELS: Record<string, string> = {
   mir: "Мир",
@@ -33,22 +44,65 @@ function brandLabel(brand: string): string {
 export function CustomerCardsScreen() {
   const navigate = useNavigate();
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+  const [revokeBusy, setRevokeBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setState({ kind: "loading" });
+    try {
+      const cards = await getSavedCards();
+      setState({ kind: "ok", cards });
+    } catch {
+      setState({ kind: "error" });
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    getSavedCards()
-      .then((cards) => {
-        if (!cancelled) setState({ kind: "ok", cards });
-      })
-      .catch(() => {
-        // Pre-passthrough seam never rejects; defensive — empty state
-        // is the honest fallback (no fake cards, no scary error).
-        if (!cancelled) setState({ kind: "ok", cards: [] });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void load();
+  }, [load]);
+
+  async function onSetup() {
+    // Consent gate is the disabled button; guard here too (C7.2).
+    if (!consentChecked || setupBusy) return;
+    setSetupBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      const { confirmation_url } = await setupCard();
+      openPaymentConfirmation(confirmation_url);
+      setNote(
+        "Открыла страницу привязки. После подтверждения карта появится в списке.",
+      );
+      // Refresh — the webhook may already have saved the method.
+      void load();
+    } catch {
+      setError("Не получилось начать привязку. Попробуй ещё раз.");
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  async function onRevoke(cardId: string) {
+    if (revokeBusy) return;
+    setRevokeBusy(true);
+    try {
+      await deleteCard(cardId);
+      setConfirmRevokeId(null);
+      setState((s) =>
+        s.kind === "ok"
+          ? { kind: "ok", cards: s.cards.filter((c) => c.id !== cardId) }
+          : s,
+      );
+    } catch {
+      setError("Не получилось отвязать карту. Попробуй ещё раз.");
+    } finally {
+      setRevokeBusy(false);
+    }
+  }
 
   return (
     <div className="profile-screen">
@@ -70,6 +124,26 @@ export function CustomerCardsScreen() {
             Карты для оплаты онлайн
           </h2>
 
+          {state.kind === "loading" && (
+            <p className="profile-section__caption">Загружаю…</p>
+          )}
+
+          {state.kind === "error" && (
+            <div className="callout" role="alert">
+              <p style={{ margin: 0 }}>
+                Не получилось загрузить карты. Попробуй ещё раз.
+              </p>
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ marginTop: "var(--s-3)" }}
+                onClick={() => void load()}
+              >
+                Обновить
+              </button>
+            </div>
+          )}
+
           {state.kind === "ok" && state.cards.length === 0 && (
             <p className="profile-section__caption">
               Пока карт нет. Привязанная карта понадобится, если захочешь
@@ -82,30 +156,85 @@ export function CustomerCardsScreen() {
             <ul className="profile-cards__list" role="list">
               {state.cards.map((card) => (
                 <li key={card.id} className="profile-cards__item">
-                  <span className="profile-cards__brand">
-                    {brandLabel(card.brand)}
-                  </span>
-                  <span className="profile-cards__last4">
-                    ·· {card.last4}
-                  </span>
+                  {confirmRevokeId === card.id ? (
+                    <span className="profile-cards__revoke-confirm">
+                      <span>Отвязать ·· {card.last4}?</span>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={revokeBusy}
+                        onClick={() => void onRevoke(card.id)}
+                      >
+                        {revokeBusy ? "Отвязываю…" : "Да, отвязать"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={revokeBusy}
+                        onClick={() => setConfirmRevokeId(null)}
+                      >
+                        Оставить
+                      </button>
+                    </span>
+                  ) : (
+                    <>
+                      <span className="profile-cards__brand">
+                        {brandLabel(card.brand)}
+                      </span>
+                      <span className="profile-cards__last4">
+                        ·· {card.last4}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        aria-label={`Отвязать карту ${brandLabel(card.brand)} ·· ${card.last4}`}
+                        onClick={() => setConfirmRevokeId(card.id)}
+                      >
+                        Отвязать
+                      </button>
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
           )}
 
+          {/* Consent gate (C7.2) — binding starts only after the user
+              explicitly agrees. Saved method = user-initiated payments
+              only, no autocharges. */}
+          <label className="profile-cards__consent">
+            <input
+              type="checkbox"
+              checked={consentChecked}
+              onChange={(e) => setConsentChecked(e.target.checked)}
+            />
+            <span>
+              Соглашаюсь сохранить карту для оплаты записей онлайн.
+              Списания — только когда я сам оплачиваю запись.
+            </span>
+          </label>
+
           <div className="profile-section__cta-row">
             <button
               type="button"
               className="btn-secondary"
-              disabled
-              aria-disabled="true"
+              disabled={!consentChecked || setupBusy}
+              onClick={() => void onSetup()}
             >
-              Привязать карту
+              {setupBusy ? "Подключаю…" : "Привязать карту"}
             </button>
           </div>
-          <p className="profile-section__caption">
-            Привязка появится, когда подключим оплату онлайн.
-          </p>
+
+          {note && (
+            <p className="profile-section__caption" role="status">
+              {note}
+            </p>
+          )}
+          {error && (
+            <p className="profile-section__caption" role="alert">
+              {error}
+            </p>
+          )}
         </section>
       </main>
     </div>

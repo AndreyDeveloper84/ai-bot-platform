@@ -19,6 +19,10 @@ Constitution Art. VII probabilistic phrasing for hypotheses). Both honour
 the ai-core thresholds (>=0.8 assert, <0.4 clarify).
 
 Fail-closed on every error: memory surfacing must never break the turn.
+
+Concierge Mode rollback (runbook §7, W5): ``CONCIERGE_MEMORY_ENABLED=false``
+in env disables this whole surface without a deploy — see
+:func:`concierge_memory_enabled`.
 """
 
 from __future__ import annotations
@@ -52,6 +56,19 @@ _DECLARED_CONFIDENCE = 1.0
 _INFERRED_CONFIDENCE = 0.6
 
 
+def concierge_memory_enabled() -> bool:
+    """Concierge Mode rollback switch (runbook §7, W5).
+
+    Default ON; ``CONCIERGE_MEMORY_ENABLED=false`` in env disables the
+    whole concierge memory surface (prompt block + memory-ask) without a
+    deploy. Read via Django settings so tests flip it with the
+    ``settings`` fixture.
+    """
+    from django.conf import settings
+
+    return bool(getattr(settings, "CONCIERGE_MEMORY_ENABLED", True))
+
+
 def build_concierge_memory_block(bot_user: Any) -> str:
     """Return the system-prompt memory block, or "" when nothing may surface.
 
@@ -59,6 +76,8 @@ def build_concierge_memory_block(bot_user: Any) -> str:
     upstream error, or simply no facts — the caller injects nothing and
     the happy-path prompt is byte-identical to the no-memory one.
     """
+    if not concierge_memory_enabled():
+        return ""
     declared = get_declared_prefs(bot_user)
     if declared.status is not GateStatus.OK or declared.context is None:
         return ""

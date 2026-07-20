@@ -60,6 +60,7 @@ import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessSc
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
 import { CustomerProfileScreen } from "./screens/CustomerProfileScreen";
+import { CustomerNotificationSettingsScreen } from "./screens/CustomerNotificationSettingsScreen";
 import { CustomerCardsScreen } from "./screens/CustomerCardsScreen";
 import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
@@ -77,6 +78,7 @@ import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
 import { MasterBillingScreen } from "./screens/MasterBillingScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
+import { MasterBillingScreen } from "./screens/MasterBillingScreen";
 import { MasterInternalChatListScreen } from "./screens/MasterInternalChatListScreen";
 import { MasterInternalChatThreadScreen } from "./screens/MasterInternalChatThreadScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
@@ -225,6 +227,7 @@ function masterRouteElements(): React.ReactNode {
         element={<MasterOnboardingScreen />}
       />
       <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
+      <Route path="/master/billing" element={<MasterBillingScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
       <Route
         path="/master/conversations"
@@ -969,6 +972,10 @@ function CustomerRoutes() {
           deferred Variant 3 per tech-lead 2026-06-01). New canonical
           route. Legacy /me stays mounted for bot DM deeplinks. */}
       <Route path="/customer/profile" element={<CustomerProfileScreen />} />
+      <Route
+        path="/customer/notification-settings"
+        element={<CustomerNotificationSettingsScreen />}
+      />
       <Route path="/customer/cards" element={<CustomerCardsScreen />} />
       {/* Tier 1 Priority 7 Phase B — food scanner (Tau F1-F4 wizard +
           /дневник + manual fallback). Stubs with guardProd until W4

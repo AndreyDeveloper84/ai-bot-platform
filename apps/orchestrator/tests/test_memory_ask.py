@@ -264,3 +264,25 @@ class TestPendingStore:
     def test_raw_garbage_returns_none(self, _redis) -> None:
         _redis.setex("conv:c9:memory_ask_pending", 60, json.dumps(["not-a-dict"]))
         assert read_pending("c9") is None
+
+
+class TestRollbackFlag:
+    """CONCIERGE_MEMORY_ENABLED=false (runbook §7): ask flow fully bypassed."""
+
+    def test_weave_bypassed_when_off(self, monkeypatch, settings, conversation, bot_user) -> None:
+        settings.CONCIERGE_MEMORY_ENABLED = False
+        elig = Mock()
+        monkeypatch.setattr(memory_ask, "get_ask_eligibility", elig)
+        reply = DiscoveryReply(text="ответ")
+        assert maybe_weave_question(conversation, bot_user, reply) is reply
+        elig.assert_not_called()
+
+    def test_answer_capture_bypassed_when_off(
+        self, monkeypatch, settings, conversation, bot_user
+    ) -> None:
+        settings.CONCIERGE_MEMORY_ENABLED = False
+        memory_ask._write_pending(conversation.id, {"field": "diet_type", "hint": "h"})
+        patch = Mock()
+        monkeypatch.setattr(memory_ask, "patch_declared_prefs", patch)
+        assert try_handle_answer(conversation, bot_user, "я веган") is None
+        patch.assert_not_called()

@@ -49,9 +49,9 @@ describe("avatarInitials", () => {
 
 describe("formatConsentDate", () => {
   it("renders an ISO timestamp as a calm Russian calendar date", () => {
-    const out = formatConsentDate("2026-05-14T10:30:00+03:00");
-    expect(out).toContain("мая");
-    expect(out).toContain("2026");
+    // Local-constructor input pins the calendar day in ANY test-env TZ.
+    const iso = new Date(2026, 4, 14, 12, 30).toISOString();
+    expect(formatConsentDate(iso)).toBe("14 мая 2026");
   });
 
   it("passes through unparseable input unchanged", () => {

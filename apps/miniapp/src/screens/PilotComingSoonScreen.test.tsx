@@ -20,6 +20,7 @@ function renderWithRoutes(surface: "home" | "catalog") {
           element={<PilotComingSoonScreen surface={surface} />}
         />
         <Route path="/customer/profile" element={<div>PROFILE-PROBE</div>} />
+        <Route path="/customer/wellness" element={<div>WELLNESS-PROBE</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -60,5 +61,12 @@ describe("PilotComingSoonScreen", () => {
     renderWithRoutes("home");
     await user.click(screen.getByRole("button", { name: "Я" }));
     expect(await screen.findByText("PROFILE-PROBE")).toBeInTheDocument();
+  });
+
+  it("nav «День» tab leads to the day view (/customer/wellness, #951)", async () => {
+    const user = userEvent.setup();
+    renderWithRoutes("home");
+    await user.click(screen.getByRole("button", { name: "День" }));
+    expect(await screen.findByText("WELLNESS-PROBE")).toBeInTheDocument();
   });
 });

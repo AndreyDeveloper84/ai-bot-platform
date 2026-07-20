@@ -49,7 +49,6 @@ import {
 import { Skeleton } from "../components/Skeleton";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
-import type { SupportPreset } from "../components/SupportEntrySheet";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import {
   additionalSalonsLabel,
@@ -113,8 +112,6 @@ export function CustomerProfileScreen() {
   const [proactiveBusy, setProactiveBusy] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [notificationsSheet, setNotificationsSheet] =
-    useState<SupportPreset | null>(null);
   const exportTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -420,11 +417,11 @@ export function CustomerProfileScreen() {
               </button>
             </section>
 
-            {/* R5 — Notifications */}
+            {/* R5 — Notifications (real prefs screen, #948) */}
             <NotificationCard
-              supportPreset={notificationsSheet}
-              onOpenSupport={() => setNotificationsSheet("notifications")}
-              onCloseSupport={() => setNotificationsSheet(null)}
+              onOpenSettings={() =>
+                navigate("/customer/notification-settings")
+              }
             />
           </>
         )}
@@ -447,7 +444,7 @@ export function CustomerProfileScreen() {
           type="button"
           className="wellness-dash__nav-tab"
           aria-label="День"
-          onClick={() => navigate("/")}
+          onClick={() => navigate("/customer/wellness")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             ☀

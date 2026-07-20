@@ -1067,6 +1067,14 @@ GLOBAL_BOT_TOKENS = os.environ.get("GLOBAL_BOT_TOKENS", "")
 # #947 lawyer verdict) is a one-line change behind this same flag.
 GLOBAL_BOT_ONBOARDING = os.environ.get("GLOBAL_BOT_ONBOARDING", "false").lower() == "true"
 
+# W5 (pilot 2026-08-15) — Concierge Mode rollback switch for the concierge
+# memory surface (runbook §7). Default ON (the feature ships enabled); set
+# "false" to roll back WITHOUT a deploy: the ai-core memory block is not
+# injected into the concierge prompt and the memory-ask flow
+# (ask-eligibility → question → PATCH) is bypassed entirely — the W3 gated
+# services are not even called. The concierge dialog itself keeps working.
+CONCIERGE_MEMORY_ENABLED = os.environ.get("CONCIERGE_MEMORY_ENABLED", "true").lower() == "true"
+
 # Sprint 8 / T1 (DRF-705) — OpenTelemetry configuration.
 # Empty endpoint = no-op exporter (local dev + tests).
 # Sample rate is Decision 3 from sprint-8-observability-shadow.md.

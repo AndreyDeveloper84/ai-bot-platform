@@ -94,17 +94,16 @@ export interface ProactivePrefsResponse {
 }
 
 /**
- * Support deeplink placeholder (Q5 ambiguity per Phase A recon).
+ * Support deeplink (issue #949).
  *
- * FOLLOW_UP issue P-7 (pilot): file in deployment runbook + Phase J
- * follow-up to wire real support channel URL from
- * `apps/channels/max/` config. For pilot we render `https://max.me/aylasupport`
- * placeholder; both R2 deferred sheets (export + delete) and R5
- * notification-prefs entry route to the same deeplink to keep the
- * pilot truthful — Profile NEVER promises an in-app action it cannot
- * complete.
+ * Ops-configurable via `VITE_SUPPORT_DEEPLINK` (deploy-time env, no
+ * code change needed); falls back to the pilot placeholder. When the
+ * real support channel handle is decided (ops/W3), set the env var —
+ * do NOT hardcode another URL here.
  */
-export const SUPPORT_DEEPLINK = "https://max.me/aylasupport";
+export const SUPPORT_DEEPLINK =
+  (import.meta.env.VITE_SUPPORT_DEEPLINK as string | undefined) ??
+  "https://max.me/aylasupport";
 
 // ---------------------------------------------------------------------------
 // Stub variant picker — dev-only QA hook (mirror customer-records.ts).
@@ -305,16 +304,33 @@ export function additionalSalonsLabel(extraCount: number): string {
  * `datetime_relative_label` (server side normally pre-formats), but
  * for the consent timestamp the server returns ISO and the row needs
  * a calm calendar date.
+ *
+ * Built from a hardcoded month table (same discipline as
+ * `lib/format.ts`) — NOT `toLocaleDateString("ru-RU")`, whose output
+ * depends on the runtime's ICU data (small-icu builds render English
+ * and made this an env-dependent test failure, 114-vs-115).
  */
+const RU_MONTHS_GENITIVE = [
+  "января",
+  "февраля",
+  "марта",
+  "апреля",
+  "мая",
+  "июня",
+  "июля",
+  "августа",
+  "сентября",
+  "октября",
+  "ноября",
+  "декабря",
+];
+
 export function formatConsentDate(iso: string): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleDateString("ru-RU", {
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-    });
+    const month = RU_MONTHS_GENITIVE[d.getMonth()] ?? "";
+    return `${d.getDate()} ${month} ${d.getFullYear()}`;
   } catch {
     return iso;
   }

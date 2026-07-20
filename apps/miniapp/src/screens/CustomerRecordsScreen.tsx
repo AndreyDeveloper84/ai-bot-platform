@@ -452,7 +452,7 @@ export function CustomerRecordsScreen() {
           type="button"
           className="wellness-dash__nav-tab"
           aria-label="День"
-          onClick={() => navigate("/")}
+          onClick={() => navigate("/customer/wellness")}
         >
           <span className="wellness-dash__nav-icon" aria-hidden="true">
             ☀

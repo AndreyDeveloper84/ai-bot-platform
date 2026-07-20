@@ -153,6 +153,17 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     expect(mockedUndo).not.toHaveBeenCalled();
   });
 
+  it("cancel modal closes on Escape without calling the endpoint (#953)", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue({ booking: FUTURE });
+    renderScreen("b-1");
+    await user.click(await screen.findByRole("button", { name: "Отменить" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mockedRequest).not.toHaveBeenCalled();
+  });
+
   it("reschedule CTA leads to the real reschedule screen", async () => {
     const user = userEvent.setup();
     mockedFetch.mockResolvedValue({ booking: FUTURE });
@@ -179,10 +190,11 @@ describe("CustomerBookingDetailScreen (real data)", () => {
 
   it("shows the C7.3 payment badge when the booking carries a capture_state", async () => {
     mockedFetch.mockResolvedValue({
-      booking: { ...FUTURE, payment: { capture_state: "authorized" } },
+      booking: { ...FUTURE, payment: { capture_state: "authorized", amount: "2000.00" } },
     });
     renderScreen("b-1");
     expect(await screen.findByText("Зарезервировано")).toBeInTheDocument();
+    expect(screen.getByText(/2 000 ₽/)).toBeInTheDocument();
   });
 
   it("never shows waiting_for_capture to the customer (ADR)", async () => {

@@ -7,6 +7,7 @@ and NOT A SINGLE FACT reaches the prompt.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -45,6 +46,30 @@ class TestGate:
             lambda bot_user: _gated(memory_block.GateStatus.ERROR),
         )
         assert build_concierge_memory_block(object()) == ""
+
+
+class TestRollbackFlag:
+    """CONCIERGE_MEMORY_ENABLED=false (runbook §7): the whole surface is off."""
+
+    def test_flag_off_returns_empty_without_wire_call(self, monkeypatch, settings) -> None:
+        settings.CONCIERGE_MEMORY_ENABLED = False
+        get_prefs = Mock()
+        monkeypatch.setattr(memory_block, "get_declared_prefs", get_prefs)
+        assert build_concierge_memory_block(object()) == ""
+        # Rollback avoids even the upstream (gated) call.
+        get_prefs.assert_not_called()
+
+    def test_flag_on_renders_normally(self, monkeypatch, settings) -> None:
+        settings.CONCIERGE_MEMORY_ENABLED = True
+        monkeypatch.setattr(
+            memory_block,
+            "get_declared_prefs",
+            lambda bot_user: SimpleNamespace(
+                status=memory_block.GateStatus.OK,
+                context=SimpleNamespace(context={"diet_type": "vegan"}),
+            ),
+        )
+        assert "Диета: vegan" in build_concierge_memory_block(object())
 
 
 class TestDeclaredFacts:

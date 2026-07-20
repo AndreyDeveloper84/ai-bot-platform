@@ -1,263 +1,363 @@
 /**
- * Master billing screen — subscription status + card binding (D7).
+ * Master billing screen — C2 subscription status + C3 payout
+ * breakdown (pilot phase 2b).
  *
- * Route: /master/billing (entry: MasterSettingsScreen «Биллинг и карта»).
+ * Route: `/master/billing`
  *
- * Money path: without a bound card there is no subscription charge →
- * dunning → ``past_due`` → C1 blocks the master's NEW bookings (client
- * sees the neutral «unavailable»). So this screen is the pilot-critical
- * binding funnel:
+ * Data: real master_api proxies via `lib/master-billing.ts` (frozen
+ * contract §3/§4). Two isolated slices — a payout failure never
+ * blanks the subscription card and vice versa.
  *
- *   consent checkbox (gates the button) → cardSetup → payment webview
- *   (openPaymentConfirmation) → return → status refetch → card shown.
- *
- * Data: verbatim W3 proxies — GET /api/v1/master/billing/status (C2),
- * POST /api/v1/master/billing/card-setup. Error mapping: 403 forbidden
- * (identity mismatch), 503 specialist_mapping_unavailable (master has
- * no Ayla link yet), 502 billing_upstream_unavailable, 400
- * validation_error.
- *
- * Consent wording: placeholder pending legal — AUTOPAY_CONSENT_VERSION
- * travels with the acceptance so the backend can re-prompt on a bump.
- *
- * Tariff choice: solo/salon radio, persisted to localStorage (asked
- * once, remembered) per the follow-up brief.
+ * Locked UX:
+ *   - Statuses: trial «Пробный период», active «Активна», past_due
+ *     «Задолженность», canceled «Отменена», none «Подписки нет».
+ *   - AMD-013: next_charge renders as «Следующее списание {date}»
+ *     with the total and the subscription+fees breakdown; canceled →
+ *     no next charge.
+ *   - past_due: neutral block (the debt reason is visible ONLY to the
+ *     master, C1 §2). No «Оплатить долг» button — the payoff endpoint
+ *     does not exist (retry is automatic server-side, W2 dunning);
+ *     inventing a dead CTA would be the same lie class as fake data.
+ *   - C3: two item states explicitly — «Ожидает подтверждения после
+ *     визита» (scheduled) / «Подтверждено, ожидает перечисления»
+ *     (captured_pending_settlement). Settlement wording is always
+ *     «ожидается», never «гарантированно».
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-
-import { MasterTabBar } from "../components/MasterTabBar";
-import { Skeleton } from "../components/Skeleton";
-import { Snackbar } from "../components/Snackbar";
 import { ApiError } from "../lib/api";
+import { formatMoney } from "../lib/format";
+import { formatConsentDate } from "../lib/customer-profile";
 import {
-  cardSetup,
   getBillingStatus,
+  getPayoutPreview,
+  setupMasterCard,
   type BillingStatus,
-  type BillingTariff,
-} from "../lib/master-api";
-import {
-  hapticNotify,
-  hapticSelection,
-  onBackButton,
-  openPaymentConfirmation,
-  setBackButton,
-} from "../lib/max-sdk";
+  type PayoutCaptureState,
+  type PayoutPreview,
+  type SubscriptionStatus,
+  type TariffCode,
+} from "../lib/master-billing";
+import { openPaymentConfirmation } from "../lib/max-sdk";
 
-// --- Copy -----------------------------------------------------------------
+type Slice<T> =
+  | { kind: "loading" }
+  | { kind: "ok"; data: T }
+  | { kind: "error"; err: unknown };
 
-export const AUTOPAY_CONSENT_VERSION = "billing-autopay-v1";
-
-const TARIFF_STORAGE_KEY = "master_billing_tariff";
-
-const COPY = {
-  header: "Биллинг и карта",
-  subscriptionTitle: "Подписка",
-  cardTitle: "Карта для автосписаний",
-  cardBoundPrefix: "Карта привязана",
-  awaitingFirstCharge: "Карта привязана · ожидает первого списания",
-  cardNone:
-    "Карта не привязана. Без неё подписка не спишется — запись клиентов остановится.",
-  consent:
-    "Соглашаюсь на автоматическое списание абонементской платы с привязанной карты по выбранному тарифу. Текст оферты уточняется юристом.",
-  // TODO(legal #947): replace with the approved offer wording.
-  bindButton: "Привязать карту",
-  bindingButton: "Открываем оплату…",
-  tariffLegend: "Тариф",
-  tariffs: {
-    solo: "Соло — 690 ₽/мес",
-    salon: "Салон — 990 ₽/мес",
-  } as Record<BillingTariff, string>,
-  status: {
-    trial: "Пробный период",
-    active: "Подписка активна",
-    past_due: "Есть задолженность — оплатите, чтобы принимать записи",
-    canceled: "Подписка отменена",
-    none: "Подписки нет",
-  } as Record<string, string>,
-  errors: {
-    forbidden: "Действие недоступно: сессия не совпадает с аккаунтом мастера.",
-    mapping: "Связка с Ayla ещё не настроена. Напишите в поддержку студии.",
-    upstream: "Сервис биллинга временно недоступен. Попробуйте позже.",
-    generic: "Не удалось начать привязку. Попробуйте ещё раз.",
-    statusLoad: "Не удалось загрузить статус биллинга.",
-  },
+const SUBSCRIPTION_LABELS: Record<SubscriptionStatus, string> = {
+  trial: "Пробный период",
+  active: "Активна",
+  past_due: "Задолженность",
+  canceled: "Отменена",
+  none: "Подписки нет",
 };
 
-function tariffFromStorage(): BillingTariff {
-  if (typeof window === "undefined" || !window.localStorage) return "solo";
-  return window.localStorage.getItem(TARIFF_STORAGE_KEY) === "salon"
-    ? "salon"
-    : "solo";
-}
+const TARIFF_LABELS: Record<string, string> = {
+  solo: "Соло",
+  salon: "Салон",
+};
 
-function mapSetupError(err: unknown): string {
-  if (err instanceof ApiError) {
-    if (err.status === 403) return COPY.errors.forbidden;
-    if (err.status === 503) return COPY.errors.mapping;
-    if (err.status === 502) return COPY.errors.upstream;
-    if (err.status === 400 && err.detail) return err.detail;
-  }
-  return COPY.errors.generic;
-}
+/** C3 item states with explicit customer-safe wording (§4 UI rule). */
+const PAYOUT_STATE_LABELS: Partial<Record<PayoutCaptureState, string>> = {
+  scheduled: "Ожидает подтверждения после визита",
+  captured_pending_settlement: "Подтверждено, ожидает перечисления",
+};
 
-// --- Component --------------------------------------------------------------
+function payoutStateLabel(state: PayoutCaptureState): string {
+  return PAYOUT_STATE_LABELS[state] ?? "В обработке";
+}
 
 export function MasterBillingScreen() {
   const navigate = useNavigate();
-  const [status, setStatus] = useState<BillingStatus | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [status, setStatus] = useState<Slice<BillingStatus>>({ kind: "loading" });
+  const [payout, setPayout] = useState<Slice<PayoutPreview>>({ kind: "loading" });
+
+  const loadStatus = useCallback(async () => {
+    setStatus({ kind: "loading" });
+    try {
+      setStatus({ kind: "ok", data: await getBillingStatus() });
+    } catch (err) {
+      setStatus({ kind: "error", err });
+    }
+  }, []);
+
+  const loadPayout = useCallback(async () => {
+    setPayout({ kind: "loading" });
+    try {
+      setPayout({ kind: "ok", data: await getPayoutPreview() });
+    } catch (err) {
+      setPayout({ kind: "error", err });
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadStatus();
+    void loadPayout();
+  }, [loadStatus, loadPayout]);
+
+  return (
+    <div className="profile-screen">
+      <header className="records-screen__header">
+        <button
+          type="button"
+          className="records-screen__back"
+          aria-label="Назад"
+          onClick={() => navigate(-1)}
+        >
+          <span aria-hidden="true">←</span>
+        </button>
+        <h1 className="records-screen__title">Оплата и выплаты</h1>
+      </header>
+
+      <main className="profile-screen__main">
+        {/* ── Подписка (C2) ─────────────────────────────────────────── */}
+        <section className="profile-section" aria-labelledby="billing-sub-h2">
+          <h2 id="billing-sub-h2" className="profile-section__heading">
+            Подписка
+          </h2>
+          {status.kind === "loading" && (
+            <p className="profile-section__caption">Загружаю…</p>
+          )}
+          {status.kind === "error" && (
+            <BillingError err={status.err} onRetry={loadStatus} />
+          )}
+          {status.kind === "ok" && (
+            <SubscriptionCard status={status.data} />
+          )}
+        </section>
+
+        {/* ── Карта для автосписаний (D7) ─────────────────────────── */}
+        {status.kind === "ok" && (
+          <CardBindingSection tariff={status.data.subscription.tariff} />
+        )}
+
+        {/* ── К выплате (C3) ────────────────────────────────────────── */}
+        <section className="profile-section" aria-labelledby="billing-payout-h2">
+          <h2 id="billing-payout-h2" className="profile-section__heading">
+            К выплате
+          </h2>
+          {payout.kind === "loading" && (
+            <p className="profile-section__caption">Загружаю…</p>
+          )}
+          {payout.kind === "error" && (
+            <BillingError err={payout.err} onRetry={loadPayout} />
+          )}
+          {payout.kind === "ok" && <PayoutBreakdown preview={payout.data} />}
+        </section>
+      </main>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Subscription card (C2)
+// ---------------------------------------------------------------------------
+
+function SubscriptionCard({ status }: { status: BillingStatus }) {
+  const sub = status.subscription;
+  return (
+    <div>
+      <p className="profile-billing__status-line">
+        <strong>{SUBSCRIPTION_LABELS[sub.status]}</strong>
+        {sub.tariff && <> · тариф {TARIFF_LABELS[sub.tariff] ?? sub.tariff}</>}
+      </p>
+
+      {sub.status === "past_due" && (
+        <div className="callout" role="status">
+          <p style={{ margin: 0 }}>
+            По подписке есть задолженность. Списание повторится
+            автоматически — проверь, что на привязанной карте достаточно
+            средств. Если карта изменилась, привяжи новую (раздел
+            появится, когда подключим привязку).
+          </p>
+        </div>
+      )}
+
+      {sub.current_period_end && (
+        <p className="profile-section__caption">
+          Текущий период — до {formatConsentDate(sub.current_period_end)}.
+        </p>
+      )}
+
+      {sub.next_charge && (
+        <p className="profile-section__caption">
+          Следующее списание {formatConsentDate(sub.next_charge.date)}:{" "}
+          {formatMoney(sub.next_charge.total_amount)} (подписка{" "}
+          {formatMoney(sub.next_charge.subscription_amount)} + комиссии{" "}
+          {formatMoney(sub.next_charge.fees_amount)}).
+        </p>
+      )}
+
+      {status.fees.pending_count > 0 && (
+        <p className="profile-section__caption">
+          Комиссии за записи: {formatMoney(status.fees.pending_total)} (
+          {status.fees.pending_count}).
+        </p>
+      )}
+
+      {status.last_invoice && (
+        <p className="profile-section__caption">
+          Последний инвойс: {formatMoney(status.last_invoice.amount)} —{" "}
+          {status.last_invoice.status === "paid" ? "оплачен" : status.last_invoice.status}{" "}
+          {formatConsentDate(status.last_invoice.paid_at)}.
+        </p>
+      )}
+
+      {sub.status === "none" && (
+        <p className="profile-section__caption">
+          Подписки нет. Когда появится — здесь будут статус и списания.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Card binding (D7) — consent-gated setup + webview.
+// ---------------------------------------------------------------------------
+
+function CardBindingSection({ tariff }: { tariff: TariffCode | null }) {
   const [consent, setConsent] = useState(false);
-  const [tariff, setTariff] = useState<BillingTariff>(tariffFromStorage);
   const [busy, setBusy] = useState(false);
-  const [setupError, setSetupError] = useState<string | null>(null);
-  const [justBound, setJustBound] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      const data = await getBillingStatus();
-      setStatus(data);
-      setLoadError(null);
-    } catch {
-      setLoadError(COPY.errors.statusLoad);
-    }
-  }, []);
-
-  // --- Bridge: BackButton wiring ---
-  useEffect(() => {
-    setBackButton(true);
-    const off = onBackButton(() => {
-      hapticSelection();
-      navigate("/master/settings");
-    });
-    return () => {
-      off();
-      setBackButton(false);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  const pickTariff = useCallback((next: BillingTariff) => {
-    hapticSelection();
-    setTariff(next);
-    try {
-      window.localStorage.setItem(TARIFF_STORAGE_KEY, next);
-    } catch {
-      /* storage full / private mode — choice just isn't persisted */
-    }
-  }, []);
-
-  const bind = useCallback(async () => {
+  async function onBind() {
+    // Consent gate is the disabled button; guard here too (money path).
     if (!consent || busy) return;
     setBusy(true);
-    setSetupError(null);
+    setError(null);
+    setNote(null);
     try {
-      const resp = await cardSetup({
-        tariff,
-        return_url: window.location.href,
+      const { confirmation_url } = await setupMasterCard({
+        // Tariff decides the bound account (solo=personal /
+        // salon=tenant). C2 tariff wins; «solo» is the pilot default
+        // when there is no subscription yet.
+        tariff: tariff ?? "solo",
+        returnUrl: `${window.location.origin}/master/billing`,
       });
-      hapticNotify("success");
-      setJustBound(true);
-      openPaymentConfirmation(resp.confirmation_url);
-      // The user lands back on this screen after the webview — refresh
-      // so the bound card + status appear.
-      await refresh();
-    } catch (err) {
-      hapticNotify("error");
-      setSetupError(mapSetupError(err));
+      openPaymentConfirmation(confirmation_url);
+      setNote(
+        "Открыла страницу привязки. После оплаты карта привяжется к подписке — списания пойдут автоматически.",
+      );
+    } catch {
+      setError("Не получилось начать привязку. Попробуй ещё раз.");
     } finally {
       setBusy(false);
     }
-  }, [consent, busy, tariff, refresh]);
-
-  const card = status?.card ?? null;
-  const subStatus = status?.subscription.status ?? "none";
-  const showAwaiting =
-    justBound && card === null && (subStatus === "trial" || subStatus === "none");
+  }
 
   return (
-    <div className="master-billing-screen">
-      <header className="master-billing-screen__header">
-        <h1>{COPY.header}</h1>
-      </header>
+    <section className="profile-section" aria-labelledby="billing-card-h2">
+      <h2 id="billing-card-h2" className="profile-section__heading">
+        Карта для автосписаний
+      </h2>
+      <p className="profile-section__caption">
+        С привязанной карты раз в месяц будут списываться подписка и
+        комиссии за записи — автоматически.
+      </p>
+      <label className="profile-cards__consent">
+        <input
+          type="checkbox"
+          checked={consent}
+          onChange={(e) => setConsent(e.target.checked)}
+        />
+        <span>
+          Соглашаюсь на автоматические списания по подписке с привязанной
+          карты.
+        </span>
+      </label>
+      <div className="profile-section__cta-row">
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={!consent || busy}
+          onClick={() => void onBind()}
+        >
+          {busy ? "Подключаю…" : "Привязать карту"}
+        </button>
+      </div>
+      {note && (
+        <p className="profile-section__caption" role="status">
+          {note}
+        </p>
+      )}
+      {error && (
+        <p className="profile-section__caption" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
 
-      {loadError && <Snackbar visible message={loadError} />}
+// ---------------------------------------------------------------------------
+// Payout breakdown (C3)
+// ---------------------------------------------------------------------------
 
-      <section aria-labelledby="billing-subscription">
-        <h2 id="billing-subscription">{COPY.subscriptionTitle}</h2>
-        {status === null && !loadError ? (
-          <Skeleton />
-        ) : (
-          status !== null && (
-            <div>
-              <p>{COPY.status[subStatus] ?? subStatus}</p>
-              {status.subscription.current_period_end && (
-                <p>
-                  Действует до {status.subscription.current_period_end}
-                </p>
-              )}
-              {showAwaiting && <p>{COPY.awaitingFirstCharge}</p>}
-            </div>
-          )
-        )}
-      </section>
+function PayoutBreakdown({ preview }: { preview: PayoutPreview }) {
+  const isZero = preview.items.length === 0;
+  return (
+    <div>
+      <p className="profile-billing__payout-sum">
+        <strong>{formatMoney(preview.pending_amount)}</strong>
+      </p>
+      {preview.expected_settlement_hint && (
+        <p className="profile-section__caption">
+          Ожидается: {preview.expected_settlement_hint}.
+        </p>
+      )}
+      {isZero ? (
+        <p className="profile-section__caption">
+          Пока начислений нет — они появятся после первых визитов.
+        </p>
+      ) : (
+        <ul className="profile-payout__list" role="list">
+          {preview.items.map((item) => (
+            <li key={item.appointment_id} className="profile-payout__item">
+              <span className="profile-payout__item-state">
+                {payoutStateLabel(item.capture_state)}
+              </span>
+              <span className="profile-payout__item-amount">
+                {formatMoney(item.specialist_income)}
+              </span>
+              <span className="profile-payout__item-meta">
+                {formatConsentDate(item.completed_at)} · визит{" "}
+                {formatMoney(item.amount)} − комиссия{" "}
+                {formatMoney(item.platform_fee)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
-      <section aria-labelledby="billing-card">
-        <h2 id="billing-card">{COPY.cardTitle}</h2>
-        {card !== null ? (
-          <p>
-            {COPY.cardBoundPrefix}: {card.brand} •• {card.last4}
-          </p>
-        ) : (
-          <>
-            <p>{COPY.cardNone}</p>
-            <fieldset>
-              <legend>{COPY.tariffLegend}</legend>
-              {(Object.keys(COPY.tariffs) as BillingTariff[]).map((code) => (
-                <label key={code}>
-                  <input
-                    type="radio"
-                    name="billing-tariff"
-                    value={code}
-                    checked={tariff === code}
-                    onChange={() => pickTariff(code)}
-                  />
-                  {COPY.tariffs[code]}
-                </label>
-              ))}
-            </fieldset>
-            <label>
-              <input
-                type="checkbox"
-                checked={consent}
-                onChange={(e) => setConsent(e.target.checked)}
-              />
-              {COPY.consent} <small>({AUTOPAY_CONSENT_VERSION})</small>
-            </label>
-            <div>
-              <button
-                type="button"
-                disabled={!consent || busy}
-                onClick={() => void bind()}
-              >
-                {busy ? COPY.bindingButton : COPY.bindButton}
-              </button>
-            </div>
-            {setupError && <p role="alert">{setupError}</p>}
-          </>
-        )}
-      </section>
+// ---------------------------------------------------------------------------
+// Honest error states
+// ---------------------------------------------------------------------------
 
-      <MasterTabBar
-        unreadCount={0}
-        scheduleHasPendingChange={false}
-        profileHasOwnerPendingChange={false}
-      />
+function BillingError({ err, onRetry }: { err: unknown; onRetry: () => void }) {
+  const mapping =
+    err instanceof ApiError && err.slug === "specialist_mapping_unavailable";
+  return (
+    <div className="callout" role="alert">
+      <p style={{ margin: 0 }}>
+        {mapping
+          ? "Данные биллинга ещё синхронизируются — загляни чуть позже."
+          : "Не получилось загрузить. Попробуй ещё раз."}
+      </p>
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ marginTop: "var(--s-3)" }}
+        onClick={onRetry}
+      >
+        Обновить
+      </button>
     </div>
   );
 }

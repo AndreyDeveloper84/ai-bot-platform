@@ -135,15 +135,14 @@ export function MasterSettingsScreen() {
         {COPY.comingSoon}
       </p>
 
+      {/* Phase 2b — billing / payout surface (C2/C3, real proxies). */}
       <button
         type="button"
         className="btn-secondary"
-        onClick={() => {
-          hapticSelection();
-          navigate("/master/billing");
-        }}
+        style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
+        onClick={() => navigate("/master/billing")}
       >
-        Биллинг и карта
+        Оплата и выплаты
       </button>
 
       <hr

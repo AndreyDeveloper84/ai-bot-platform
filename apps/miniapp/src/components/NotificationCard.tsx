@@ -1,45 +1,25 @@
 /**
- * R5 notifications card — channel + soft timing + entry button.
+ * R5 notifications card — channel + soft timing + entry to the REAL
+ * customer notification-preferences screen (issue #948 / P-8).
  *
- * Spec: `docs/screens/customer-profile-flow.md` §7 (sign-off
- * 2026-06-01). Channel is MAX-only for pilot per memory
- * `project_max_only_pilot`. Timing copy is the SOFT phrasing per
- * `customer-reminders-voice` cut #5 — explicitly NOT a schedule
- * promise («за 24 часа и за 2 часа» = backend SLA-dependent — spec
- * §7.1).
+ * Spec: `docs/screens/customer-profile-flow.md` §7. Channel is
+ * MAX-only for pilot per memory `project_max_only_pilot`. Timing copy
+ * is the SOFT phrasing per `customer-reminders-voice` cut #5 —
+ * explicitly NOT a schedule promise («за 24 часа и за 2 часа» =
+ * backend SLA-dependent — spec §7.1).
  *
- * # «Открыть настройки уведомлений» — Phase A Q ambiguity
- *
- * Spec §7 says the entry button deeplinks to the existing
- * notification-preferences-ux full UI. There is no customer-facing
- * notification-preferences screen in `apps/miniapp/src/screens/` for
- * pilot (only `MasterNotificationSettingsScreen`). Phase A recon
- * flagged this; the pilot resolution is to route to support (same
- * deeplink as R2 deferred sheets) — consistent with Variant 3
- * truthfulness rule. FOLLOW_UP issue P-8 (post-pilot): build the
- * real customer-facing notification-prefs screen and flip the entry
- * target here.
+ * The entry button navigates to `/customer/notification-settings`
+ * (real toggles on GET/PATCH /me). The support-route sheet is gone —
+ * the screen exists now, so routing to support would be the same
+ * lie class as fake data.
  */
 
-import { useRef } from "react";
-import { SupportEntrySheet, type SupportPreset } from "./SupportEntrySheet";
-
 interface Props {
-  /**
-   * Receive open-state from parent so the screen owns sheet lifecycle.
-   * Mirrors the R2 sheet pattern.
-   */
-  supportPreset: SupportPreset | null;
-  onOpenSupport: () => void;
-  onCloseSupport: () => void;
+  /** Navigate to the real notification-settings screen. */
+  onOpenSettings: () => void;
 }
 
-export function NotificationCard({
-  supportPreset,
-  onOpenSupport,
-  onCloseSupport,
-}: Props) {
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
+export function NotificationCard({ onOpenSettings }: Props) {
   return (
     <section className="profile-notifications" aria-labelledby="profile-r5-h2">
       <h2 id="profile-r5-h2" className="profile-section__heading">
@@ -58,18 +38,12 @@ export function NotificationCard({
         </div>
       </dl>
       <button
-        ref={triggerRef}
         type="button"
         className="btn-secondary profile-notifications__cta"
-        onClick={onOpenSupport}
+        onClick={onOpenSettings}
       >
         Открыть настройки уведомлений
       </button>
-      <SupportEntrySheet
-        preset={supportPreset}
-        triggerRef={triggerRef}
-        onClose={onCloseSupport}
-      />
     </section>
   );
 }
