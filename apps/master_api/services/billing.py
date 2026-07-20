@@ -36,6 +36,7 @@ from apps.integrations.ayla.billing_client import (
     AylaBillingClient,
     BillingAuthError,
     BillingClientError,
+    BillingConflictError,
     BillingNotFoundError,
     BillingProxyError,
     BillingTransportError,
@@ -50,6 +51,7 @@ class ProxyStatus(str, Enum):
     NOT_FOUND = "not_found"  # upstream 404 (SPECIALIST_NOT_FOUND)
     UPSTREAM_ERROR = "upstream_error"  # 5xx / network / auth misconfig
     CLIENT_ERROR = "client_error"  # upstream 4xx (VALIDATION_ERROR)
+    CONFLICT = "conflict"  # upstream 409 (e.g. NO_DEBT)
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,61 @@ def card_setup_for_master(
         return BillingProxyResult(status=ProxyStatus.CLIENT_ERROR)
     except (BillingTransportError, BillingProxyError):
         logger.exception("master_api.billing.card_setup.upstream_error")
+        return BillingProxyResult(status=ProxyStatus.UPSTREAM_ERROR)
+    finally:
+        if owns_client:
+            client.close()
+
+
+def pay_debt_for_master(
+    master: CatalogMaster,
+    *,
+    return_url: str,
+    client: AylaBillingClient | None = None,
+) -> BillingProxyResult:
+    """One-shot debt collection for a past_due subscription (W4 CTA).
+
+    ``return_url`` passes through verbatim (required upstream only when
+    no payment method is saved). 409 ``NO_DEBT`` maps to
+    :attr:`ProxyStatus.CONFLICT` — the master sees his own debt state,
+    no leak concern here.
+    """
+    specialist_id = specialist_id_for_master(master)
+    if specialist_id is None:
+        logger.warning(
+            "master_api.billing.pay_debt.mapping_unavailable master_id=%s tenant_id=%s",
+            master.pk,
+            master.tenant_id,
+        )
+        return BillingProxyResult(status=ProxyStatus.MAPPING_UNAVAILABLE)
+
+    owns_client = client is None
+    client = client or AylaBillingClient()
+    try:
+        payload = client.pay_debt(specialist_id=specialist_id, return_url=return_url)
+        return BillingProxyResult(status=ProxyStatus.OK, payload=payload)
+    except BillingNotFoundError:
+        logger.warning(
+            "master_api.billing.pay_debt.specialist_not_found master_id=%s specialist_id=%s",
+            master.pk,
+            specialist_id,
+        )
+        return BillingProxyResult(status=ProxyStatus.NOT_FOUND)
+    except BillingConflictError as exc:
+        logger.info(
+            "master_api.billing.pay_debt.conflict master_id=%s code=%s",
+            master.pk,
+            exc.code,
+        )
+        return BillingProxyResult(status=ProxyStatus.CONFLICT)
+    except BillingAuthError:
+        logger.exception("master_api.billing.pay_debt.auth_error")
+        return BillingProxyResult(status=ProxyStatus.UPSTREAM_ERROR)
+    except BillingClientError as exc:
+        logger.info("master_api.billing.pay_debt.client_error err=%s", exc)
+        return BillingProxyResult(status=ProxyStatus.CLIENT_ERROR)
+    except (BillingTransportError, BillingProxyError):
+        logger.exception("master_api.billing.pay_debt.upstream_error")
         return BillingProxyResult(status=ProxyStatus.UPSTREAM_ERROR)
     finally:
         if owns_client:

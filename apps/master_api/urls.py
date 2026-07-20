@@ -82,5 +82,6 @@ urlpatterns = [
     # Billing status (C2) + payout preview (C3) proxies (pilot 2026-08-15)
     path("billing/status", views.billing_status, name="billing_status"),
     path("billing/card-setup", views.billing_card_setup, name="billing_card_setup"),
+    path("billing/pay-debt", views.billing_pay_debt, name="billing_pay_debt"),
     path("payout-preview", views.payout_preview, name="payout_preview"),
 ]
