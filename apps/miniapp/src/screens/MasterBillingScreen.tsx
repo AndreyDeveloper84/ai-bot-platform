@@ -136,7 +136,10 @@ export function MasterBillingScreen() {
 
         {/* ── Карта для автосписаний (D7) ─────────────────────────── */}
         {status.kind === "ok" && (
-          <CardBindingSection tariff={status.data.subscription.tariff} />
+          <CardBindingSection
+            tariff={status.data.subscription.tariff}
+            card={status.data.subscription.card}
+          />
         )}
 
         {/* ── К выплате (C3) ────────────────────────────────────────── */}
@@ -223,18 +226,26 @@ function SubscriptionCard({
 // Card binding (D7) — consent-gated setup + webview.
 // ---------------------------------------------------------------------------
 
-function CardBindingSection({ tariff }: { tariff: TariffCode | null }) {
+function CardBindingSection({
+  tariff,
+  card,
+}: {
+  tariff: TariffCode | null;
+  /** AMD-017 read-model: {last4, brand} once bound, null until then. */
+  card: { last4: string; brand: string } | null;
+}) {
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // After a successful setup-open the card exists only once the
+  // webhook lands — show an explicit placeholder until C2 carries it.
+  const [setupPending, setSetupPending] = useState(false);
 
   async function onBind() {
     // Consent gate is the disabled button; guard here too (money path).
     if (!consent || busy) return;
     setBusy(true);
     setError(null);
-    setNote(null);
     try {
       const { confirmation_url } = await setupMasterCard({
         // Tariff decides the bound account (solo=personal /
@@ -244,9 +255,7 @@ function CardBindingSection({ tariff }: { tariff: TariffCode | null }) {
         returnUrl: `${window.location.origin}/master/billing`,
       });
       openPaymentConfirmation(confirmation_url);
-      setNote(
-        "Открыла страницу привязки. После оплаты карта привяжется к подписке — списания пойдут автоматически.",
-      );
+      setSetupPending(true);
     } catch {
       setError("Не получилось начать привязку. Попробуй ещё раз.");
     } finally {
@@ -254,41 +263,59 @@ function CardBindingSection({ tariff }: { tariff: TariffCode | null }) {
     }
   }
 
+  const BRAND_LABELS: Record<string, string> = {
+    mir: "Мир",
+    visa: "Visa",
+    mastercard: "Mastercard",
+  };
+
   return (
     <section className="profile-section" aria-labelledby="billing-card-h2">
       <h2 id="billing-card-h2" className="profile-section__heading">
         Карта для автосписаний
       </h2>
-      <p className="profile-section__caption">
-        С привязанной карты раз в месяц будут списываться подписка и
-        комиссии за записи — автоматически.
-      </p>
-      <label className="profile-cards__consent">
-        <input
-          type="checkbox"
-          checked={consent}
-          onChange={(e) => setConsent(e.target.checked)}
-        />
-        <span>
-          Соглашаюсь на автоматические списания по подписке с привязанной
-          карты.
-        </span>
-      </label>
-      <div className="profile-section__cta-row">
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={!consent || busy}
-          onClick={() => void onBind()}
-        >
-          {busy ? "Подключаю…" : "Привязать карту"}
-        </button>
-      </div>
-      {note && (
-        <p className="profile-section__caption" role="status">
-          {note}
+
+      {card ? (
+        <p className="profile-cards__item">
+          <span className="profile-cards__brand">
+            {BRAND_LABELS[card.brand.toLowerCase()] ?? card.brand}
+          </span>{" "}
+          <span className="profile-cards__last4">·· {card.last4}</span>
         </p>
+      ) : setupPending ? (
+        <p className="profile-section__caption" role="status">
+          Карта привязывается — появится здесь после подтверждения.
+        </p>
+      ) : (
+        <>
+          <p className="profile-section__caption">
+            С привязанной карты раз в месяц будут списываться подписка и
+            комиссии за записи — автоматически.
+          </p>
+          <label className="profile-cards__consent">
+            <input
+              type="checkbox"
+              checked={consent}
+              onChange={(e) => setConsent(e.target.checked)}
+            />
+            <span>
+              Соглашаюсь на автоматические списания по подписке с
+              привязанной карты.
+            </span>
+          </label>
+          <div className="profile-section__cta-row">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={!consent || busy}
+              onClick={() => void onBind()}
+            >
+              {busy ? "Подключаю…" : "Привязать карту"}
+            </button>
+          </div>
+        </>
       )}
+
       {error && (
         <p className="profile-section__caption" role="alert">
           {error}
