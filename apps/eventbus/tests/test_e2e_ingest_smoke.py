@@ -170,14 +170,17 @@ class TestBotHalfJointSmoke:
         assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
 
     def test_unknown_event_name_rejected(self, client: Client, seed: Tenant) -> None:
-        """booking.no_show: Ayla emits it, the bot does not accept it yet
-        (issue #946). A name absent from ALLOWED_EVENT_NAMES is rejected at
-        the parse layer (400 invalid_event_name) BEFORE dispatch — either
-        way it is refused, never silently consumed. This is the early
-        warning the directive asked the smoke to carry, before delivery is
-        switched on."""
+        """A name absent from ALLOWED_EVENT_NAMES is rejected at the parse
+        layer (400 invalid_event_name) BEFORE dispatch — either way it is
+        refused, never silently consumed. This is the early warning the
+        directive asked the smoke to carry, before delivery is switched on.
+
+        (Was pinned on ``booking.no_show`` — AMD-018 approved it as event
+        #13, so the unknown-name example moves to a truly unregistered
+        name; the refusal contract itself is unchanged.)
+        """
         obj = load_contract("booking.confirmed.v1.json")
-        obj["event_name"] = "booking.no_show"
+        obj["event_name"] = "booking.fake_unregistered_event"
         obj["event_id"] = "01J9NOSHOW00000000000000ZZ"
         resp = _post(client, _body(obj))
         assert resp.status_code == 400, resp.content

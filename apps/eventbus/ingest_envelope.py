@@ -34,6 +34,11 @@ ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
         "booking.cancelled",
         "booking.rescheduled",
         "booking.completed",
+        # AMD-018: booking.no_show is an approved standalone
+        # cross-service event (#13, v1) — Ayla state machine
+        # emits it from mark_no_show. It is NOT modelled as
+        # booking.cancelled + reason_code.
+        "booking.no_show",
         "payment.authorized",
         "payment.captured",
         "payment.failed",
