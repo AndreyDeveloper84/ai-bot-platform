@@ -101,3 +101,41 @@ export async function getPayoutPreview(): Promise<PayoutPreview> {
   });
   return res.data;
 }
+
+// --- D7 — card binding -------------------------------------------------------
+
+/**
+ * Consent text version for the master card-binding checkbox.
+ * PLACEHOLDER pending the legal-approved offer text.
+ * TODO(legal): replace with the ratified version before pilot. The
+ * upstream endpoint takes only tariff+return_url today — the version is
+ * tracked here so the legal swap is one edit.
+ */
+export const MASTER_CARD_CONSENT_VERSION = "offer-0.0-todo-legal";
+
+export interface MasterCardSetupResult {
+  confirmation_url: string;
+}
+
+/**
+ * D7 — start card binding for the session master. The response carries
+ * the YooKassa confirmation_url to open in the webview (first payment
+ * with save_payment_method). `tariff` decides the bound account
+ * (solo=personal / salon=tenant) — pass the C2 subscription tariff.
+ */
+export async function setupMasterCard(params: {
+  tariff: TariffCode;
+  returnUrl: string;
+}): Promise<MasterCardSetupResult> {
+  const res = await request<Envelope<MasterCardSetupResult>>(
+    "/billing/card-setup",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        tariff: params.tariff,
+        return_url: params.returnUrl,
+      }),
+    },
+  );
+  return res.data;
+}

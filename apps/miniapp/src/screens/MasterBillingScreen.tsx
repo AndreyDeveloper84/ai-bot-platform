@@ -32,11 +32,14 @@ import { formatConsentDate } from "../lib/customer-profile";
 import {
   getBillingStatus,
   getPayoutPreview,
+  setupMasterCard,
   type BillingStatus,
   type PayoutCaptureState,
   type PayoutPreview,
   type SubscriptionStatus,
+  type TariffCode,
 } from "../lib/master-billing";
+import { openPaymentConfirmation } from "../lib/max-sdk";
 
 type Slice<T> =
   | { kind: "loading" }
@@ -125,6 +128,11 @@ export function MasterBillingScreen() {
           )}
         </section>
 
+        {/* ── Карта для автосписаний (D7) ─────────────────────────── */}
+        {status.kind === "ok" && (
+          <CardBindingSection tariff={status.data.subscription.tariff} />
+        )}
+
         {/* ── К выплате (C3) ────────────────────────────────────────── */}
         <section className="profile-section" aria-labelledby="billing-payout-h2">
           <h2 id="billing-payout-h2" className="profile-section__heading">
@@ -203,6 +211,85 @@ function SubscriptionCard({ status }: { status: BillingStatus }) {
         </p>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Card binding (D7) — consent-gated setup + webview.
+// ---------------------------------------------------------------------------
+
+function CardBindingSection({ tariff }: { tariff: TariffCode | null }) {
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onBind() {
+    // Consent gate is the disabled button; guard here too (money path).
+    if (!consent || busy) return;
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    try {
+      const { confirmation_url } = await setupMasterCard({
+        // Tariff decides the bound account (solo=personal /
+        // salon=tenant). C2 tariff wins; «solo» is the pilot default
+        // when there is no subscription yet.
+        tariff: tariff ?? "solo",
+        returnUrl: `${window.location.origin}/master/billing`,
+      });
+      openPaymentConfirmation(confirmation_url);
+      setNote(
+        "Открыла страницу привязки. После оплаты карта привяжется к подписке — списания пойдут автоматически.",
+      );
+    } catch {
+      setError("Не получилось начать привязку. Попробуй ещё раз.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="profile-section" aria-labelledby="billing-card-h2">
+      <h2 id="billing-card-h2" className="profile-section__heading">
+        Карта для автосписаний
+      </h2>
+      <p className="profile-section__caption">
+        С привязанной карты раз в месяц будут списываться подписка и
+        комиссии за записи — автоматически.
+      </p>
+      <label className="profile-cards__consent">
+        <input
+          type="checkbox"
+          checked={consent}
+          onChange={(e) => setConsent(e.target.checked)}
+        />
+        <span>
+          Соглашаюсь на автоматические списания по подписке с привязанной
+          карты.
+        </span>
+      </label>
+      <div className="profile-section__cta-row">
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={!consent || busy}
+          onClick={() => void onBind()}
+        >
+          {busy ? "Подключаю…" : "Привязать карту"}
+        </button>
+      </div>
+      {note && (
+        <p className="profile-section__caption" role="status">
+          {note}
+        </p>
+      )}
+      {error && (
+        <p className="profile-section__caption" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 

@@ -17,7 +17,11 @@ vi.mock("./max-sdk", () => ({
   getInitData: () => "test-init-data",
 }));
 
-import { getBillingStatus, getPayoutPreview } from "./master-billing";
+import {
+  getBillingStatus,
+  getPayoutPreview,
+  setupMasterCard,
+} from "./master-billing";
 
 const fetchMock = vi.fn();
 
@@ -178,5 +182,41 @@ describe("getPayoutPreview (C3)", () => {
     const preview = await getPayoutPreview();
     expect(preview.pending_amount).toBe("0.00");
     expect(preview.items).toEqual([]);
+  });
+});
+
+describe("setupMasterCard (D7 card binding)", () => {
+  it("POSTs tariff + return_url and unwraps {data: {confirmation_url}}", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ data: { confirmation_url: "https://pay.test/bind/1" } }),
+    );
+    const res = await setupMasterCard({
+      tariff: "solo",
+      returnUrl: "https://miniapp.test/master/billing",
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/master/billing/card-setup");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({
+      tariff: "solo",
+      return_url: "https://miniapp.test/master/billing",
+    });
+    expect(res.confirmation_url).toBe("https://pay.test/bind/1");
+  });
+
+  it("surfaces the 403 foreign-specialist slug", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: "forbidden", detail: "specialist_id does not match the session identity" },
+        403,
+      ),
+    );
+    const err = await setupMasterCard({
+      tariff: "salon",
+      returnUrl: "https://miniapp.test/master/billing",
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(403);
+    expect((err as ApiError).slug).toBe("forbidden");
   });
 });
