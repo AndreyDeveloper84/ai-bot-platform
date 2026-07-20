@@ -78,6 +78,7 @@ from apps.master_api.services.billing import (
     BillingProxyResult,
     ProxyStatus,
     billing_status_for_master,
+    card_setup_for_master,
     payout_preview_for_master,
 )
 from apps.master_api.services.notification_prefs import (
@@ -1509,6 +1510,12 @@ def _billing_proxy_response(result: BillingProxyResult) -> JsonResponse:
             "specialist not found or not accessible",
             404,
         )
+    if result.status is ProxyStatus.CLIENT_ERROR:
+        return _error(
+            "validation_error",
+            "request rejected by billing upstream",
+            400,
+        )
     return _error(
         "billing_upstream_unavailable",
         "billing upstream is temporarily unavailable",
@@ -1534,3 +1541,49 @@ def payout_preview(request: HttpRequest) -> HttpResponse:
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     return _billing_proxy_response(payout_preview_for_master(master))
+
+
+@require_http_methods(["POST"])
+@require_master_init_data
+def billing_card_setup(request: HttpRequest) -> HttpResponse:
+    """D7 card binding start — proxy to Ayla card-setup (money path).
+
+    Body: ``{"tariff": "solo"|"salon", "return_url": "<https url>"}``.
+    Response: verbatim ``{confirmation_url}`` — the miniapp opens it in
+    a webview to finish the first payment with save_payment_method.
+
+    Verified binding: the ayla key resolves from the SESSION master
+    (AMD-005); a client-supplied specialist_id/ayla_user_id that does
+    not match the session is 403. Local pre-validation mirrors the
+    upstream contract (tariff choices + non-empty return_url) so a
+    caller bug fails before the wire.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+
+    supplied = body.get("specialist_id") or body.get("ayla_user_id")
+    if supplied and str(supplied) != str(master.ayla_user_id or ""):
+        logger.warning(
+            "master_api.billing.card_setup.foreign_specialist master_id=%s",
+            master.pk,
+        )
+        return _error("forbidden", "specialist_id does not match the session identity", 403)
+
+    tariff = str(body.get("tariff") or "")
+    return_url = str(body.get("return_url") or "").strip()
+    if tariff not in ("solo", "salon") or not return_url:
+        return _error(
+            "validation_error",
+            "body must include tariff (solo|salon) and return_url",
+            400,
+        )
+
+    return _billing_proxy_response(
+        card_setup_for_master(master, tariff=tariff, return_url=return_url)
+    )

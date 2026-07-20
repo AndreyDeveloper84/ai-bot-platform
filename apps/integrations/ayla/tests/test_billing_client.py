@@ -186,3 +186,61 @@ class TestErrors:
         with pytest.raises(BillingConfigError):
             client.get_billing_status(specialist_id=_SID)
         assert calls["n"] == 0
+
+
+class TestCardSetup:
+    def test_happy_path_body_and_url(self) -> None:
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["method"] = request.method
+            seen["body"] = request.content.decode()
+            seen["auth"] = request.headers.get("authorization")
+            return httpx.Response(
+                200, json={"data": {"confirmation_url": "https://pay.test/bind/1"}}
+            )
+
+        out = _client(handler).card_setup(
+            specialist_id=_SID, tariff="solo", return_url="https://miniapp.test/return"
+        )
+
+        assert seen["method"] == "POST"
+        assert seen["url"] == f"{_BASE}/api/v1/internal/billing/specialists/{_SID}/card-setup/"
+        assert seen["auth"] == f"Bearer {_TOKEN}"
+        assert '"tariff": "solo"' in seen["body"] or '"tariff":"solo"' in seen["body"]
+        assert "https://miniapp.test/return" in seen["body"]
+        assert out == {"confirmation_url": "https://pay.test/bind/1"}
+
+    def test_404_maps_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"code": "SPECIALIST_NOT_FOUND"}})
+
+        with pytest.raises(BillingNotFoundError):
+            _client(handler).card_setup(
+                specialist_id=_SID, tariff="solo", return_url="https://x.test/"
+            )
+
+    def test_400_maps_client_error(self) -> None:
+        from apps.integrations.ayla.billing_client import BillingClientError
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"code": "VALIDATION_ERROR"}})
+
+        with pytest.raises(BillingClientError):
+            _client(handler).card_setup(
+                specialist_id=_SID, tariff="salon", return_url="https://x.test/"
+            )
+
+    def test_503_retried_then_raises(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(503, json={})
+
+        with pytest.raises(BillingTransportError):
+            _client(handler, retries=2).card_setup(
+                specialist_id=_SID, tariff="solo", return_url="https://x.test/"
+            )
+        assert calls["n"] == 2

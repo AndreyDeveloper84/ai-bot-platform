@@ -111,15 +111,43 @@ class AylaBillingClient:
         """C3: ``GET internal/specialists/{id}/payout-preview/`` → ``data`` verbatim."""
         return self._get(f"internal/specialists/{specialist_id}/payout-preview/")
 
+    def card_setup(
+        self,
+        *,
+        specialist_id: str,
+        tariff: str,
+        return_url: str,
+    ) -> dict[str, Any]:
+        """Card binding start (D7): ``POST internal/billing/specialists/{id}/card-setup/``.
+
+        Body mirrors the live Ayla contract: ``{"tariff": "solo"|"salon",
+        "return_url": "<url>"}`` → ``data`` verbatim (``confirmation_url``).
+        Idempotent per day upstream, so transport retries are safe.
+        """
+        return self._post(
+            f"internal/billing/specialists/{specialist_id}/card-setup/",
+            json_body={"tariff": tariff, "return_url": return_url},
+        )
+
     # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
 
     def _get(self, path: str) -> dict[str, Any]:
+        return self._with_retry("GET", path)
+
+    def _post(self, path: str, *, json_body: dict[str, Any]) -> dict[str, Any]:
+        # Upstream is idempotent per day (billing.charges.start_card_setup),
+        # so the retry policy matches the GETs.
+        return self._with_retry("POST", path, json_body=json_body)
+
+    def _with_retry(
+        self, method: str, path: str, *, json_body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         last_exc: Exception | None = None
         for attempt in range(self._retries):
             try:
-                return self._send(path)
+                return self._send(method, path, json_body=json_body)
             except BillingConfigError:
                 raise
             except BillingTransportError as exc:
@@ -138,7 +166,9 @@ class AylaBillingClient:
             f"Ayla billing: exhausted {self._retries} retries on {path}"
         ) from last_exc
 
-    def _send(self, path: str) -> dict[str, Any]:
+    def _send(
+        self, method: str, path: str, *, json_body: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         try:
             url = AylaUrlBuilder(self._base_url).build(path)
         except AylaUrlError as exc:
@@ -147,11 +177,14 @@ class AylaBillingClient:
             raise BillingConfigError("AYLA_INTERNAL_API_TOKEN not configured")
 
         try:
-            response = self._client().get(
+            response = self._client().request(
+                method,
                 url,
+                json=json_body,
                 headers={
                     "Authorization": f"Bearer {self._token}",
                     "Accept": "application/json",
+                    "Content-Type": "application/json",
                 },
                 timeout=self._timeout,
             )
