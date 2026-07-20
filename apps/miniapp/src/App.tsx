@@ -75,6 +75,7 @@ import { HelloScreen } from "./screens/HelloScreen";
 import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
 import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
+import { MasterBillingScreen } from "./screens/MasterBillingScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
 import { MasterInternalChatListScreen } from "./screens/MasterInternalChatListScreen";
 import { MasterInternalChatThreadScreen } from "./screens/MasterInternalChatThreadScreen";
@@ -241,6 +242,8 @@ function masterRouteElements(): React.ReactNode {
       />
       {/* M8 minimal — logout-only (full M8 deferred post-pilot) */}
       <Route path="/master/settings" element={<MasterSettingsScreen />} />
+      {/* D7 billing — subscription status + card binding (money path) */}
+      <Route path="/master/billing" element={<MasterBillingScreen />} />
       {/* Internal chat «Со студией» (master-admin internal-chat handoff §3) */}
       <Route
         path="/master/internal-chat"

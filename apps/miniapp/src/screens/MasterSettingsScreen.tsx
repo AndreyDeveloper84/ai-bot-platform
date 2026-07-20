@@ -135,6 +135,17 @@ export function MasterSettingsScreen() {
         {COPY.comingSoon}
       </p>
 
+      <button
+        type="button"
+        className="btn-secondary"
+        onClick={() => {
+          hapticSelection();
+          navigate("/master/billing");
+        }}
+      >
+        Биллинг и карта
+      </button>
+
       <hr
         style={{
           border: 0,

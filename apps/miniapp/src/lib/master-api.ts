@@ -908,3 +908,100 @@ export const getMasterCatalog = async (): Promise<MasterServiceItem[]> => {
   const env = await request<CatalogEnvelope>("/catalog", { method: "GET" });
   return env.services;
 };
+
+// --- Billing (D7 / C2 / card-setup) -----------------------------------------
+//
+// Mirrors the W3 proxies in apps/master_api:
+//   GET  /api/v1/master/billing/status        (C2, verbatim `data`)
+//   POST /api/v1/master/billing/card-setup    (D7 card binding start)
+// Error slugs surfaced to the screen: 403 forbidden, 400 validation_error,
+// 503 specialist_mapping_unavailable, 404 specialist_not_found,
+// 502 billing_upstream_unavailable.
+
+export type SubscriptionStatus =
+  | "trial"
+  | "active"
+  | "past_due"
+  | "canceled"
+  | "none";
+
+export interface BillingStatusNextCharge {
+  subscription_amount: string;
+  fees_amount: string;
+  total_amount: string;
+  date: string;
+}
+
+export interface BillingStatusSubscription {
+  status: SubscriptionStatus;
+  tariff: "solo" | "salon" | null;
+  current_period_end: string | null;
+  next_charge: BillingStatusNextCharge | null;
+}
+
+export interface BillingStatusFees {
+  pending_total: string;
+  pending_count: number;
+}
+
+export interface BillingStatusInvoice {
+  id: string;
+  amount: string;
+  status: string;
+  paid_at: string;
+}
+
+export interface BillingCard {
+  brand: string;
+  last4: string;
+}
+
+/** C2 status payload (verbatim upstream `data`). */
+export interface BillingStatus {
+  specialist_id: string;
+  subscription: BillingStatusSubscription;
+  fees: BillingStatusFees;
+  last_invoice: BillingStatusInvoice | null;
+  /** Forward-compat: present when the upstream exposes the bound card. */
+  card?: BillingCard | null;
+}
+
+interface BillingStatusEnvelope {
+  data: BillingStatus;
+}
+
+/** GET the session master's subscription/fees/invoice status (C2). */
+export const getBillingStatus = async (): Promise<BillingStatus> => {
+  const env = await request<BillingStatusEnvelope>("/billing/status", {
+    method: "GET",
+  });
+  return env.data;
+};
+
+export type BillingTariff = "solo" | "salon";
+
+export interface CardSetupResponse {
+  confirmation_url: string;
+}
+
+interface CardSetupEnvelope {
+  data: CardSetupResponse;
+}
+
+/**
+ * Start card binding (D7). The proxy validates tariff/return_url
+ * (400 validation_error), forbids foreign identities (403), and fails
+ * closed with 503 specialist_mapping_unavailable when the master has
+ * no Ayla link yet. On success the caller opens
+ * `confirmation_url` in the payment webview.
+ */
+export const cardSetup = async (input: {
+  tariff: BillingTariff;
+  return_url: string;
+}): Promise<CardSetupResponse> => {
+  const env = await request<CardSetupEnvelope>("/billing/card-setup", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return env.data;
+};
