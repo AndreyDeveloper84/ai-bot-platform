@@ -24,12 +24,13 @@
  * Tau §9.2). Voice: «ты», no exclamation marks.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
 import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
 import { StatusBadge } from "../components/StatusBadge";
+import { useSheetKeyNav } from "../hooks/useSheetKeyNav";
 import {
   ApiError,
   cancelBookingConfirm,
@@ -66,6 +67,17 @@ export function CustomerBookingDetailScreen() {
     showUndo: boolean;
   }>({ visible: false, message: "", showUndo: false });
   const [busy, setBusy] = useState(false);
+  const modalRef = useRef<HTMLDivElement | null>(null);
+
+  // Escape / focus trap on the cancel modal (#953 shared hook).
+  useSheetKeyNav(modalRef, {
+    onClose: () => {
+      if (!modalOpen) return;
+      setModalOpen(false);
+      setReasonClass(null);
+    },
+    closeDisabled: busy,
+  });
 
   const load = useCallback(() => {
     if (!bookingId) return;
@@ -315,6 +327,7 @@ export function CustomerBookingDetailScreen() {
           }}
         >
           <div
+            ref={modalRef}
             className="modal__sheet"
             style={{
               background: "var(--surface-1, #fff)",

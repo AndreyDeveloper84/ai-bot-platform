@@ -16,7 +16,7 @@
  * записи» status string instead — no toggle widget at all.
  */
 
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { ToggleSwitch } from "./ToggleSwitch";
 
 interface BaseProps {
@@ -42,9 +42,9 @@ interface ToggleVariantProps extends BaseProps {
 type Props = InfoVariantProps | ToggleVariantProps;
 
 export function ConsentRow(props: Props) {
-  const titleId = `consent-row-title-${props.title
-    .toLowerCase()
-    .replace(/[^а-яa-z0-9]+/g, "-")}`;
+  // #953: stable id via useId — the old slug-from-title scheme could
+  // collide on repeated titles and broke on punctuation.
+  const titleId = useId();
   return (
     <div className="profile-consent-row" role="group" aria-labelledby={titleId}>
       <div className="profile-consent-row__head">

@@ -39,6 +39,7 @@ import {
   PersonalDataPartialDeleteError,
   triggerDownload,
 } from "../lib/personal-data";
+import { useSheetKeyNav } from "../hooks/useSheetKeyNav";
 
 // ---------------------------------------------------------------------------
 // Shared sheet chrome (internal — the two sheets below are the public API).
@@ -85,38 +86,8 @@ function SheetChrome({
     (initial ?? dialog?.querySelector("button"))?.focus();
   }, []);
 
-  // Escape + Tab trap. Re-registered when `close` changes (busy toggle).
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        close();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const focusables = Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          "button:not([disabled]), a[href]",
-        ),
-      );
-      if (focusables.length === 0) return;
-      const active = document.activeElement as HTMLElement | null;
-      const idx = active ? focusables.indexOf(active) : -1;
-      if (e.shiftKey) {
-        if (idx <= 0) {
-          e.preventDefault();
-          focusables[focusables.length - 1]?.focus();
-        }
-      } else if (idx === focusables.length - 1) {
-        e.preventDefault();
-        focusables[0]?.focus();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [close]);
+  // Escape + Tab trap — shared hook (#953).
+  useSheetKeyNav(dialogRef, { onClose: close, closeDisabled });
 
   return (
     <div
