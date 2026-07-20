@@ -27,6 +27,7 @@ vi.mock("../lib/master-billing", async (importOriginal) => {
     getBillingStatus: vi.fn(),
     getPayoutPreview: vi.fn(),
     setupMasterCard: vi.fn(),
+    payDebt: vi.fn(),
   };
 });
 
@@ -39,6 +40,7 @@ import { ApiError } from "../lib/api";
 import {
   getBillingStatus,
   getPayoutPreview,
+  payDebt,
   setupMasterCard,
   type BillingStatus,
   type PayoutPreview,
@@ -49,6 +51,7 @@ import { MasterBillingScreen } from "./MasterBillingScreen";
 const mockedStatus = vi.mocked(getBillingStatus);
 const mockedPayout = vi.mocked(getPayoutPreview);
 const mockedSetup = vi.mocked(setupMasterCard);
+const mockedPayDebt = vi.mocked(payDebt);
 const mockedOpen = vi.mocked(openPaymentConfirmation);
 
 const STATUS_ACTIVE: BillingStatus = {
@@ -146,7 +149,7 @@ describe("MasterBillingScreen — subscription (C2)", () => {
     expect(screen.queryByText(/Следующее списание/)).not.toBeInTheDocument();
   });
 
-  it("past_due: neutral debt block — reason only for the master, no shame", async () => {
+  it("past_due: neutral debt block with the real «Оплатить долг» CTA", async () => {
     mockedStatus.mockResolvedValue({
       ...STATUS_ACTIVE,
       subscription: { ...STATUS_ACTIVE.subscription, status: "past_due" },
@@ -156,10 +159,9 @@ describe("MasterBillingScreen — subscription (C2)", () => {
       await screen.findByText(/По подписке есть задолженность/),
     ).toBeInTheDocument();
     expect(screen.getByText(/повтор/)).toBeInTheDocument();
-    // No fake payoff button — the payoff endpoint does not exist.
     expect(
-      screen.queryByRole("button", { name: "Оплатить долг" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Оплатить долг" }),
+    ).toBeInTheDocument();
   });
 
   it("canceled: status shown, no next charge (AMD-013)", async () => {
@@ -276,5 +278,109 @@ describe("MasterBillingScreen — card binding (D7)", () => {
       await screen.findByText(/Не получилось начать привязку/),
     ).toBeInTheDocument();
     expect(mockedOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe("MasterBillingScreen — pay debt CTA (past_due)", () => {
+  const PAST_DUE: BillingStatus = {
+    ...STATUS_ACTIVE,
+    subscription: { ...STATUS_ACTIVE.subscription, status: "past_due" },
+  };
+
+  it("confirmation_url path: opens the webview (re-binding)", async () => {
+    const user = userEvent.setup();
+    mockedStatus.mockResolvedValue(PAST_DUE);
+    mockedPayDebt.mockResolvedValue({
+      payment_id: "p-1",
+      invoice_id: "inv-9",
+      confirmation_url: "https://pay.test/debt/1",
+      amount: "960.00",
+      status: "pending",
+      subscription_status: "past_due",
+    });
+    renderScreen();
+    await user.click(
+      await screen.findByRole("button", { name: "Оплатить долг" }),
+    );
+    expect(mockedPayDebt).toHaveBeenCalledTimes(1);
+    expect(mockedOpen).toHaveBeenCalledWith("https://pay.test/debt/1");
+  });
+
+  it("saved-method path: shows «Списано» and refetches the status", async () => {
+    const user = userEvent.setup();
+    mockedStatus.mockResolvedValue(PAST_DUE);
+    mockedPayDebt.mockResolvedValue({
+      payment_id: "p-1",
+      invoice_id: "inv-9",
+      confirmation_url: null,
+      amount: "960.00",
+      status: "succeeded",
+      subscription_status: "active",
+    });
+    renderScreen();
+    await user.click(
+      await screen.findByRole("button", { name: "Оплатить долг" }),
+    );
+    expect(await screen.findByText(/Списано/)).toBeInTheDocument();
+    // Status refetched after the charge (load on mount + after success).
+    expect(mockedStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(mockedOpen).not.toHaveBeenCalled();
+  });
+
+  it("409 no_debt: honest «долга нет» note + status refetch", async () => {
+    const user = userEvent.setup();
+    mockedStatus.mockResolvedValue(PAST_DUE);
+    mockedPayDebt.mockRejectedValue(
+      new ApiError(409, "no_debt", "No outstanding debt."),
+    );
+    renderScreen();
+    await user.click(
+      await screen.findByRole("button", { name: "Оплатить долг" }),
+    );
+    expect(
+      await screen.findByText(/Задолженности уже нет/),
+    ).toBeInTheDocument();
+    expect(mockedStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("in-flight idempotency: repeated taps never spawn repeat charges", async () => {
+    const user = userEvent.setup();
+    mockedStatus.mockResolvedValue(PAST_DUE);
+    let resolveDebt: ((v: never) => void) | undefined;
+    mockedPayDebt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDebt = resolve as (v: never) => void;
+        }),
+    );
+    renderScreen();
+    const cta = await screen.findByRole("button", { name: "Оплатить долг" });
+    await user.click(cta);
+    await user.click(cta);
+    expect(mockedPayDebt).toHaveBeenCalledTimes(1);
+    resolveDebt!({
+      payment_id: "p-1",
+      invoice_id: "inv-9",
+      confirmation_url: null,
+      amount: "960.00",
+      status: "succeeded",
+      subscription_status: "active",
+    } as never);
+    expect(await screen.findByText(/Списано/)).toBeInTheDocument();
+  });
+
+  it("upstream failure shows an honest retryable error", async () => {
+    const user = userEvent.setup();
+    mockedStatus.mockResolvedValue(PAST_DUE);
+    mockedPayDebt.mockRejectedValue(
+      new ApiError(502, "billing_upstream_unavailable", "upstream down"),
+    );
+    renderScreen();
+    await user.click(
+      await screen.findByRole("button", { name: "Оплатить долг" }),
+    );
+    expect(
+      await screen.findByText(/Не получилось списать долг/),
+    ).toBeInTheDocument();
   });
 });
