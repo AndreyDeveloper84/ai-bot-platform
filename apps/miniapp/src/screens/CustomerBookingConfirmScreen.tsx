@@ -63,6 +63,7 @@ import { useHaptics } from "../hooks/useHaptics";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { formatMoney, formatVisitFull } from "../lib/format";
 import { getInitData, openPaymentConfirmation } from "../lib/max-sdk";
+import { createPayment } from "../lib/payments";
 import {
   restorePendingIntent,
   savePendingIntent,
@@ -198,18 +199,28 @@ export function CustomerBookingConfirmScreen() {
     setSubmitting(true);
     setErr(null);
     try {
-      const { booking, payment } = await createCustomerBooking({
+      const { booking } = await createCustomerBooking({
         service_id: draft.serviceId,
         master_id: draft.masterId,
         visit_at: draft.visitAt,
         // AMD-002 / C7.4 — user's payment choice rides the create call.
         payment_required: paymentChoice === "online",
       });
-      // C7.4 — the contour returns a confirmation_url once the W3
-      // passthrough is live; open it in the webview before the success
-      // screen. Absent today (pre-passthrough) → straight to success.
-      if (paymentChoice === "online" && payment?.confirmation_url) {
-        openPaymentConfirmation(payment.confirmation_url);
+      // C7.4 — online choice: create the two-stage payment right after
+      // the booking and open the checkout webview. A payment-create
+      // failure must NEVER mask the booking that already exists — the
+      // user lands on success with an honest note (retry from the
+      // booking detail / pay on-site).
+      let paymentStartFailed = false;
+      if (paymentChoice === "online") {
+        try {
+          const payment = await createPayment(booking.id);
+          if (payment.confirmation_url) {
+            openPaymentConfirmation(payment.confirmation_url);
+          }
+        } catch {
+          paymentStartFailed = true;
+        }
       }
       haptics.notify("success");
       resetBooking();
@@ -218,6 +229,7 @@ export function CustomerBookingConfirmScreen() {
           service_name: booking.service_name,
           master_name: booking.master_name,
           visit_at: booking.visit_at,
+          payment_start_failed: paymentStartFailed,
         },
         replace: true,
       });

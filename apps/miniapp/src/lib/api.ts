@@ -15,7 +15,7 @@ interface ErrorBody {
   detail: string;
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const initData = getInitData();
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
@@ -197,23 +197,13 @@ export interface CreatedBooking {
   duration_min: number;
   status: string;
 }
-/**
- * Payment contour fields on the create response (C7.4). Absent until the
- * W3 passthrough ships — the frontend checks presence tolerantly; when
- * `confirmation_url` appears, the payment page opens in the webview.
- */
-export interface CreatedBookingPayment {
-  confirmation_url?: string | null;
-  capture_state?: string | null;
-}
 export const createBooking = (body: {
   service_id: string;
   master_id: string;
   visit_at: string;
-  /** AMD-002: user-chosen online payment (C7). Optional — pre-C7
-   * backends simply ignore the field. */
+  /** AMD-002: user-chosen online payment (C7). */
   payment_required?: boolean;
-}): Promise<{ booking: CreatedBooking; payment?: CreatedBookingPayment | null }> =>
+}): Promise<{ booking: CreatedBooking }> =>
   request("/bookings", { method: "POST", body: JSON.stringify(body) });
 
 // --- bookings: list / detail / cancel / reschedule ---
@@ -243,11 +233,11 @@ export interface BookingItem {
   rating: number | null;
   can_rate: boolean;
   /**
-   * C7.3 payment read model — present only once the W3 passthrough
-   * ships payment fields on bookings. Checked tolerantly: absent /
-   * hidden states render no badge (see `PaymentStatusBadge`).
+   * C7.3 payment read model — present only when the event stream
+   * produced a mirror row (hold signal or a payment.* event).
+   * `amount` is a Decimal string per §1 (e.g. "2000.00").
    */
-  payment?: { capture_state?: string | null } | null;
+  payment?: { capture_state?: string | null; amount?: string | null } | null;
 }
 
 export const fetchMyBookings = (params?: {

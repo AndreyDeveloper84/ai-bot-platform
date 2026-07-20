@@ -41,7 +41,6 @@ import {
   createBooking,
 } from "./api";
 import type {
-  CreatedBookingPayment,
   Master,
   MasterDetail,
   FreeSlot,
@@ -120,8 +119,6 @@ export interface BookingCreatePayload {
 }
 export interface BookingCreateResponse {
   booking: CreatedBooking;
-  /** C7.4 — present once the W3 passthrough ships; checked tolerantly. */
-  payment?: CreatedBookingPayment | null;
 }
 
 export const getCustomerMaster = (masterId: string): Promise<{ master: CustomerMaster }> =>

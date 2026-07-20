@@ -39,7 +39,7 @@ import {
   type CancelReasonClass,
 } from "../lib/api";
 import { displayStatusFor, getBookingDetail, renderStatus } from "../lib/customer-records";
-import { formatDuration, formatVisitFull } from "../lib/format";
+import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
 
 type State =
   | { kind: "loading" }
@@ -218,6 +218,12 @@ export function CustomerBookingDetailScreen() {
               <>
                 <dt>Длительность</dt>
                 <dd>{formatDuration(b.duration_min)}</dd>
+              </>
+            )}
+            {b.payment?.amount && (
+              <>
+                <dt>Сумма</dt>
+                <dd>{formatMoney(b.payment.amount)}</dd>
               </>
             )}
             {b.rating != null && (
