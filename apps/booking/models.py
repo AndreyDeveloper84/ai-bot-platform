@@ -779,6 +779,9 @@ class RemoteBookingProxy(models.Model):
         TENTATIVE = "tentative", "Tentative"
         CANCELLED = "cancelled", "Cancelled"
         COMPLETED = "completed", "Completed"
+        # AMD-018: approved standalone cross-service event (#13) — client
+        # did not show up (Ayla state machine mark_no_show).
+        NO_SHOW = "no_show", "No show"
 
     class Source(models.TextChoices):
         """Mirrors event-contract.md §3.1 source enum."""

@@ -150,14 +150,17 @@ class TestDriftNamesAreRefused:
             parse_envelope(body)
         assert exc.value.reason == "invalid_event_name"
 
-    def test_booking_no_show_is_not_a_cross_service_event(self) -> None:
-        # #946: no-show is modeled as booking.cancelled + reason_code,
-        # NOT as a standalone event #13. booking.no_show must be refused.
+    def test_booking_no_show_is_cross_service_event_13(self) -> None:
+        # AMD-018 (supersedes the earlier #946-era choice): booking.no_show
+        # is an APPROVED standalone cross-service event (#13, v1) — the Ayla
+        # state machine emits it from mark_no_show. It is NOT modelled as
+        # booking.cancelled + reason_code, so the parse layer must ACCEPT it
+        # and the dispatcher routes it to its v1 consumer.
         body = load_contract("booking.confirmed.v1.json")
         body["event_name"] = "booking.no_show"
-        with pytest.raises(IngestEnvelopeError) as exc:
-            parse_envelope(body)
-        assert exc.value.reason == "invalid_event_name"
+        env = parse_envelope(body)
+        assert env.event_name == "booking.no_show"
+        assert env.event_version == 1
 
     def test_tenant_relationship_revoked_is_not_a_cross_service_event(self) -> None:
         # #946: Ayla emits tenant.relationship.revoked, but the bot has no

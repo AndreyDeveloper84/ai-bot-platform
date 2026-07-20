@@ -167,6 +167,7 @@ _KNOWN_NAMES: Final[frozenset[str]] = frozenset(
         "booking.cancelled",
         "booking.rescheduled",
         "booking.completed",
+        "booking.no_show",
         "payment.authorized",
         "payment.captured",
         "payment.failed",

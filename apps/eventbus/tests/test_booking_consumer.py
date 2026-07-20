@@ -43,6 +43,7 @@ from apps.eventbus.consumers.booking import (
     handle_booking_completed,
     handle_booking_confirmed,
     handle_booking_created,
+    handle_booking_no_show,
     handle_booking_rescheduled,
 )
 from apps.eventbus.ingest_envelope import IngestEnvelope
@@ -1050,3 +1051,145 @@ class TestTenantVerifyMandate:
             handle_booking_created(env)
 
         assert RemoteBookingProxy.all_tenants.count() == 0
+
+
+class TestNoShowAmd018:
+    """``booking.no_show`` (AMD-018, event #13 v1): proxy flips to NO_SHOW,
+    PENDING reminders cancelled (sent/other states untouched), replay
+    idempotent, unknown version dead-letters per existing DLQ policy."""
+
+    def _env(self, *, event_id: str = "01J9NOSHOW00000000000001", version: int = 1):
+        env = _envelope(
+            event_name="booking.no_show",
+            event_id=event_id,
+            data={"appointment_id": APPOINTMENT_ID},
+        )
+        if version != 1:
+            env = IngestEnvelope(
+                event_id=env.event_id,
+                event_name=env.event_name,
+                event_version=version,
+                occurred_at=env.occurred_at,
+                tenant_id=env.tenant_id,
+                user_id=env.user_id,
+                actor=env.actor,
+                correlation_id=env.correlation_id,
+                causation_id=env.causation_id,
+                data=env.data,
+            )
+        return env
+
+    def _proxy(self, tenant: Tenant, status=RemoteBookingProxy.Status.CONFIRMED):
+        return RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=None,
+            start_at=dt.datetime(2026, 7, 20, 15, 0, tzinfo=dt.timezone.utc),
+            end_at=dt.datetime(2026, 7, 20, 16, 0, tzinfo=dt.timezone.utc),
+            status=status,
+        )
+
+    def _reminder(self, tenant: Tenant, bot_user: BotUser, *, status: str, kind=None):
+        return BookingReminder.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            ayla_appointment_id=UUID(APPOINTMENT_ID),
+            kind=kind or BookingReminder.Kind.TWO_HOURS,
+            status=status,
+            chat_id="chat-1",
+            visit_at=dt.datetime(2026, 7, 20, 16, 0, tzinfo=dt.timezone.utc),
+            scheduled_at=dt.datetime(2026, 7, 20, 14, 0, tzinfo=dt.timezone.utc),
+        )
+
+    def test_vocabulary_contains_no_show(self) -> None:
+        """1) booking.no_show is in ALLOWED_EVENT_NAMES and _KNOWN_NAMES."""
+        from apps.eventbus.ingest_dispatcher import _KNOWN_NAMES
+        from apps.eventbus.ingest_envelope import ALLOWED_EVENT_NAMES
+
+        assert "booking.no_show" in ALLOWED_EVENT_NAMES
+        assert "booking.no_show" in _KNOWN_NAMES
+
+    def test_valid_event_flips_proxy(self, tenant: Tenant) -> None:
+        """2) Valid event moves the proxy to NO_SHOW."""
+        self._proxy(tenant)
+        handle_booking_no_show(self._env())
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.NO_SHOW
+
+    def test_pending_reminders_cancelled(self, tenant: Tenant, bot_user_linked: BotUser) -> None:
+        """3) PENDING reminders for the appointment are cancelled."""
+        self._proxy(tenant)
+        self._reminder(tenant, bot_user_linked, status=BookingReminder.Status.PENDING)
+        self._reminder(
+            tenant,
+            bot_user_linked,
+            status=BookingReminder.Status.PENDING,
+            kind=BookingReminder.Kind.DAY_BEFORE,
+        )
+
+        handle_booking_no_show(self._env())
+
+        reminders = BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID))
+        assert {r.status for r in reminders} == {BookingReminder.Status.CANCELLED}
+
+    def test_non_pending_reminders_untouched(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """4) Sent / already-cancelled reminders are NOT modified."""
+        self._proxy(tenant)
+        sent = self._reminder(tenant, bot_user_linked, status=BookingReminder.Status.SENT)
+        cancelled = self._reminder(
+            tenant,
+            bot_user_linked,
+            status=BookingReminder.Status.CANCELLED,
+            kind=BookingReminder.Kind.DAY_BEFORE,
+        )
+
+        handle_booking_no_show(self._env())
+
+        sent.refresh_from_db()
+        cancelled.refresh_from_db()
+        assert sent.status == BookingReminder.Status.SENT
+        assert cancelled.status == BookingReminder.Status.CANCELLED
+
+    def test_replay_idempotent(self, tenant: Tenant) -> None:
+        """5) Replay does not repeat side-effects."""
+        self._proxy(tenant)
+        env = self._env()
+        handle_booking_no_show(env)
+        first = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        handle_booking_no_show(env)
+        second = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert first.status == second.status == RemoteBookingProxy.Status.NO_SHOW
+        assert first.last_synced_event_id == second.last_synced_event_id
+
+    def test_dispatch_ok_and_dedupe(self, tenant: Tenant, settings) -> None:
+        """5b) Dispatcher-level: OK then DUPLICATE on the same event_id."""
+        settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+        from apps.eventbus.ingest_dispatcher import DispatchOutcome, dispatch_envelope
+
+        self._proxy(tenant)
+        env = self._env()
+        assert dispatch_envelope(env).outcome == DispatchOutcome.OK
+        assert dispatch_envelope(env).outcome == DispatchOutcome.DUPLICATE
+
+    def test_unknown_version_dead_letters(self, settings) -> None:
+        """6) Unknown event_version follows the existing DLQ policy."""
+        settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+        from apps.eventbus.ingest_dispatcher import DispatchOutcome, dispatch_envelope
+        from apps.eventbus.models import IngestDLQ
+
+        env = self._env(event_id="01J9NOSHOW00000000000002", version=2)
+        assert dispatch_envelope(env).outcome == DispatchOutcome.UNKNOWN_EVENT_VERSION
+        assert IngestDLQ.objects.filter(
+            event_id=env.event_id, reason="unknown_event_version"
+        ).exists()
+
+    def test_unknown_booking_no_error(self, tenant: Tenant) -> None:
+        """6b) Unknown appointment follows the standard proxy-missing path:
+        the proxy UPDATE matches 0 rows — no error, reminders still cancelled."""
+        # No proxy row for APPOINTMENT_ID at all.
+        handle_booking_no_show(self._env())
+        assert not RemoteBookingProxy.all_tenants.filter(
+            appointment_id=UUID(APPOINTMENT_ID)
+        ).exists()

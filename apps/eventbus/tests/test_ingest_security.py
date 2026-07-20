@@ -265,9 +265,15 @@ class TestSettingsWiring:
         monkeypatch.setattr(_views, "dispatch_with_timeout", _direct)
 
         # Health = the HMAC gate, not the consumer — stub the handler.
+        # monkeypatch.setitem restores the real one at teardown (a leaked
+        # stub silently breaks downstream dispatch tests in the process).
         import apps.eventbus.ingest_dispatcher as dispatcher_module
 
-        dispatcher_module._REGISTRY[("booking.created", 1)] = lambda envelope: None
+        monkeypatch.setitem(
+            dispatcher_module._REGISTRY,
+            ("booking.created", 1),
+            lambda envelope: None,
+        )
 
         body = json.dumps(
             {

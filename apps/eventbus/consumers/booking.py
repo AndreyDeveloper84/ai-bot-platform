@@ -640,11 +640,66 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     )
 
 
+def handle_booking_no_show(envelope: IngestEnvelope) -> None:
+    """``booking.no_show`` — client didn't show up (AMD-018, event #13 v1).
+
+    Standalone cross-service event emitted by Ayla's state machine
+    (``mark_no_show``) — NOT remodelled as ``booking.cancelled`` and the
+    cancelled handler is NOT invoked. Side-effects, mirroring the other
+    booking handlers' canonical shape:
+
+      1. Flip ``RemoteBookingProxy.status`` to ``NO_SHOW`` (faithful
+         mirror of Ayla's terminal state).
+      2. Cancel the appointment's reminders ONLY in ``PENDING`` state —
+         sent / already-cancelled / completed reminders are untouched.
+
+    No monetary action: no capture / cancel / refund / BookingFee —
+    no-show money policy is a separate W1 decision (AMD-018 §scope).
+
+    Idempotent: proxy ``last_synced_event_id`` short-circuit; the
+    reminders UPDATE is naturally idempotent. Unknown booking follows
+    the standard proxy-missing path (no new policy); unknown
+    event_version dead-letters at the dispatcher as usual.
+    """
+    assert_envelope_tenant_authorized(envelope)
+
+    data = envelope.data
+    appointment_id = UUID(data["appointment_id"])
+
+    tenant = _resolve_tenant(envelope.tenant_id)
+    if tenant is None:
+        logger.warning(
+            "eventbus.consumer.booking.no_show.unknown_tenant tenant_id=%s",
+            envelope.tenant_id,
+        )
+        return
+
+    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+
+    # N-Adv2: tenant guard FIRST, BEFORE the idempotency short-circuit.
+    _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
+
+    # Defence-in-depth idempotency short-circuit.
+    if proxy is not None and proxy.last_synced_event_id == envelope.event_id:
+        logger.info(
+            "eventbus.consumer.booking.no_show.replay_skipped appointment_id=%s event_id=%s",
+            appointment_id,
+            envelope.event_id,
+        )
+        return
+
+    RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
+        status=RemoteBookingProxy.Status.NO_SHOW,
+        last_synced_event_id=envelope.event_id,
+    )
+    _cancel_reminders(appointment_id=appointment_id)
+
+
 # ─── registration ──────────────────────────────────────────────────────────
 
 
 def register_booking_handlers() -> None:
-    """Register all four booking.* handlers with the ingest dispatcher.
+    """Register the booking.* handlers with the ingest dispatcher.
 
     Called from :meth:`apps.eventbus.apps.EventBusConfig.ready` so the
     registry is populated deterministically at every Django start.
@@ -660,6 +715,7 @@ def register_booking_handlers() -> None:
         ("booking.cancelled", 1, handle_booking_cancelled),
         ("booking.rescheduled", 1, handle_booking_rescheduled),
         ("booking.completed", 1, handle_booking_completed),
+        ("booking.no_show", 1, handle_booking_no_show),
     )
     for event_name, version, handler in pairs:
         try:
