@@ -1,0 +1,142 @@
+# ai-bot-platform — STAGING override (single VPS, next to Ayla on :8000).
+#
+# Usage:
+#   docker compose -p ayla-bot-staging \
+#     -f docker-compose.yml -f docker-compose.staging.yml up -d
+#
+# Project-prefixed (`-p ayla-bot-staging`) so volumes/networks are
+# isolated from any other stack on the host automatically.
+#
+# Env: `.env.staging` (NOT the shared .env) — names without values in
+# `.env.staging.template`; the file itself stays out of git.
+#
+# Host profile: 2 CPU / 8 GB / shared with Ayla → lean profile:
+# uvicorn instead of runserver, celery concurrency=2, one beat, no
+# chromadb (out of the sprint's critical path — if a code path hard-
+# requires it, surface the fact to the orchestrator instead of
+# silently enabling).
+
+# Shared staging env for all app services (YAML anchor).
+x-staging-app-env: &staging_app_env
+  DJANGO_SETTINGS_MODULE: config.settings.staging
+  DJANGO_ENV: staging
+  DJANGO_DEBUG: "False"
+  PYTHONUNBUFFERED: "1"
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ai_bot_platform
+  POSTGRES_USER: platform
+  POSTGRES_PASSWORD: platform  # dev-stack dummy default, same as docker-compose.yml  # pragma: allowlist secret
+  REDIS_URL: redis://redis:6379/0
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_ACCESS_KEY: minioadmin
+  S3_SECRET_KEY: minioadmin  # dev-stack dummy default, same as docker-compose.yml  # pragma: allowlist secret
+  S3_REPLAY_BUCKET: ai-bot-replay
+
+services:
+  # ------------------------------------------------------------------
+  # Django web — uvicorn (ASGI), staging settings.
+  # NOTE: brief said gunicorn; gunicorn is NOT in project deps (uv.lock)
+  # nor the image — uvicorn[standard] is present (chromadb transitive)
+  # and fills the same role. Deviation reported to the orchestrator.
+  # ------------------------------------------------------------------
+  web:
+    command: >
+      uvicorn config.asgi:application
+      --host 0.0.0.0 --port 8000 --workers 2 --timeout-keep-alive 30
+    environment: *staging_app_env
+    env_file:
+      - .env.staging
+    # 8000 is Ayla's on this host — bot binds 8001, loopback only.
+    # (!override replaces the dev stack's port list — compose
+    # CONCATENATES ports across override files; !override wins.)
+    ports: !override
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # chromadb (dev-file entry) is profiled out below — mark the
+      # dependency optional so the project model still validates.
+      chromadb:
+        condition: service_started
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz/"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # MAX DM stream consumer (XREADGROUP drain of ingress:max).
+  worker:
+    environment: *staging_app_env
+    env_file:
+      - .env.staging
+    restart: unless-stopped
+
+  # Celery worker — general tasks (reminders dispatch, followups, sync).
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A config worker --loglevel=INFO --concurrency=2
+    environment: *staging_app_env
+    env_file:
+      - .env.staging
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Celery beat — DatabaseScheduler. Without it R1 reminders (T-24h/T-2h)
+  # never fire. ONE beat per environment — do not scale this service.
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      celery -A config beat --loglevel=INFO
+      --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    environment: *staging_app_env
+    env_file:
+      - .env.staging
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Infra — internal only (this host's 5432/6379 belong to Ayla).
+  # ------------------------------------------------------------------
+  postgres:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  minio:
+    ports: !override
+      - "127.0.0.1:9002:9000"
+      - "127.0.0.1:9003:9001"
+
+  # chromadb is OUT of the sprint's critical path — kept behind an
+  # inert profile so a plain `up -d` never starts it. If a code path
+  # proves to require it, that's an orchestrator decision, not a
+  # silent flip here.
+  chromadb:
+    profiles: ["off"]

@@ -45,6 +45,8 @@ local_settings.py
 .env
 .env.local
 .env.*.local
+# Staging env file (values live on the VPS only; the template is committed).
+.env.staging
 !.env.example
 
 # Claude Code MCP server config — must never be committed. Contains
