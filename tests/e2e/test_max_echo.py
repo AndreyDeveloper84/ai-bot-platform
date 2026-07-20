@@ -33,6 +33,7 @@ import pytest
 import redis as redis_lib
 from django.conf import settings as django_settings
 from django.test import Client
+from django.utils import timezone
 
 from apps.channels.handlers import MaxHandler
 from apps.channels.max import handler as max_handler
@@ -171,6 +172,17 @@ def test_max_webhook_to_echo_happy_path(
     mock_redis_memory,
 ):
     """POST → 200, then consume_once → handler executes, DB has full chain."""
+
+    # #85 isolation: pre-create the BotUser as ALREADY welcomed — the S1
+    # auto-welcome trigger must not hijack the echo path this e2e
+    # exercises (the resolver returns this row instead of creating one).
+    BotUser.all_tenants.create(
+        tenant=g1_tenant,
+        channel="max",
+        channel_user_id="42",
+        chat_id="99",
+        welcomed_at=timezone.now(),
+    )
 
     client = Client()
     payload = _build_payload(text="Привет")

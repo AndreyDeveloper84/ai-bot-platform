@@ -207,8 +207,8 @@ class TestExecuteConfirm:
         self, tenant: Tenant, bot_user: BotUser
     ) -> None:
         """C1: Ayla 409 SUBSCRIPTION_PAST_DUE surfaces as the NEUTRAL
-        specialist_unavailable slug — the debt reason never reaches the
-        client surface (PILOT_CONTRACTS_2026-08-15 §2)."""
+        ``unavailable`` slug (frozen with W4) — the debt reason never
+        reaches the client surface (PILOT_CONTRACTS_2026-08-15 §2)."""
         from apps.skills.booking.provider import YClientsSpecialistUnavailableError
 
         exc = YClientsSpecialistUnavailableError("http_409_subscription_past_due")
@@ -233,10 +233,10 @@ class TestExecuteConfirm:
                 tenant=tenant,
                 bot_user=bot_user,
             )
-        assert result.error == "specialist_unavailable"
+        assert result.error == "unavailable"
         assert result.confirmation is not None
         assert result.confirmation.ok is False
-        assert result.confirmation.error == "specialist_unavailable"
+        assert result.confirmation.error == "unavailable"
         # The slug carries no debt semantics.
         assert "past_due" not in result.error
         assert "subscription" not in result.error

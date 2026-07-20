@@ -29,6 +29,8 @@ for the duration of the view, so ORM queries that use
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 from datetime import date as date_cls, datetime, timedelta
 from functools import wraps
 from typing import Any, Callable
@@ -38,6 +40,13 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
+
+from apps.integrations.ayla.payments_client import (
+    AylaClientPaymentsClient,
+    ClientPaymentsConflictError,
+    ClientPaymentsError,
+    ClientPaymentsNotFoundError,
+)
 
 from django.conf import settings
 
@@ -755,6 +764,21 @@ _BOOKINGS_PAGE_DEFAULT = 20
 _BOOKINGS_PAGE_MAX = 50
 
 
+_AYLA_MARKER_RE = re.compile(r"yclients_record_id=([0-9a-fA-F-]{36})")
+
+
+def _ayla_appointment_id_of(booking) -> str | None:
+    """Canonical Ayla appointment UUID of a local BookingRequest, if any.
+
+    On the Ayla path (BOOKING_VIA_AYLA_REST) execute_confirm writes it
+    into the ``yclients_record_id=<uuid>`` comment marker (same marker
+    key across providers — the reader convention is one). Returns None
+    for legacy/local-only rows.
+    """
+    match = _AYLA_MARKER_RE.search(booking.comment or "")
+    return match.group(1) if match else None
+
+
 def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
     from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
 
@@ -776,7 +800,7 @@ def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
     moment = now or timezone.now()
     is_past = bool(b.visit_at and b.visit_at < moment)
     can_rate = is_past and b.status == "confirmed" and b.rating is None
-    return {
+    out = {
         "id": str(b.id),
         "status": b.status,
         "service_id": str(b.service_id) if b.service_id else None,
@@ -793,6 +817,19 @@ def _booking_to_dict(b, *, now=None) -> dict[str, Any]:
         "rating": b.rating,
         "can_rate": can_rate,
     }
+    # C7.3: optional payment read-model — present only when the event
+    # stream produced a mirror row (hold signal or a payment.* event).
+    appt_id = _ayla_appointment_id_of(b)
+    if appt_id:
+        from apps.booking.models import PaymentMirror
+
+        mirror = PaymentMirror.all_tenants.filter(appointment_id=appt_id).first()
+        if mirror is not None:
+            out["payment"] = {
+                "capture_state": mirror.capture_state,
+                "amount": (f"{mirror.amount:.2f}" if mirror.amount is not None else None),
+            }
+    return out
 
 
 @require_http_methods(["GET"])
@@ -1668,3 +1705,189 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
         payload["next_booking"] = next_booking
 
     return JsonResponse(payload)
+
+
+# --- C7 client payments passthrough (PILOT_CONTRACTS §7.5) ------------------
+#
+# Verified customer binding (C7.6): every endpoint resolves the Ayla user
+# from the SESSION BotUser (identity linkage), never from client input.
+# A client-supplied ayla_user_id that doesn't match the session is 403.
+# Amounts never come from the client (C7.1 — Ayla prices from the Booking
+# snapshot). Fields pass through verbatim.
+
+
+def _resolve_c7_ayla_user(request: HttpRequest, body: dict | None = None) -> Any:
+    """C7.6 verified customer binding.
+
+    Returns the session-resolved ``ayla_user_id`` (str) on success, or a
+    ``JsonResponse`` error to return immediately:
+
+    * 403 ``identity_not_linked`` — the BotUser has no Ayla link yet.
+    * 403 ``forbidden`` — the client supplied an ``ayla_user_id`` that
+      does not match the session identity (arbitrary id never trusted).
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    ayla_user_id = getattr(bot_user, "ayla_user_id", None)
+    if not ayla_user_id:
+        return _error(
+            "identity_not_linked",
+            "user is not linked to Ayla yet — payments unavailable",
+            403,
+        )
+    supplied = request.GET.get("ayla_user_id") or (
+        body.get("ayla_user_id") if isinstance(body, dict) else None
+    )
+    if supplied and str(supplied) != str(ayla_user_id):
+        logger.warning(
+            "miniapp_api.c7.foreign_user_id bot_user=%s",
+            getattr(bot_user, "id", "?"),
+        )
+        return _error("forbidden", "ayla_user_id does not match the session identity", 403)
+    return str(ayla_user_id)
+
+
+def _c7_json_body(request: HttpRequest) -> dict | JsonResponse:
+    import json
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    return body
+
+
+def _c7_upstream_error(exc: Exception, *, not_found_slug: str = "not_found") -> JsonResponse:
+    """Map a C7 client failure onto an HTTP response (neutral slugs)."""
+
+    if isinstance(exc, ClientPaymentsConflictError):
+        if (exc.code or "").lower() == "subscription_past_due":
+            # C1: neutral surface — no debt semantics to the client.
+            return _error(
+                "unavailable",
+                "Запись к этому специалисту сейчас недоступна",
+                409,
+            )
+        return _error("conflict", "operation conflicts with current state", 409)
+    if isinstance(exc, ClientPaymentsNotFoundError):
+        return _error(not_found_slug, "resource not found", 404)
+    logger.exception("miniapp_api.c7.upstream_error")
+    return _error("upstream_unavailable", "payments upstream is temporarily unavailable", 502)
+
+
+def _customer_owns_appointment(*, bot_user, tenant, appointment_id: str) -> bool:
+    """Ownership check (C7.6): the appointment must belong to THIS user —
+    via the Ayla-path proxy mirror or a local BookingRequest link."""
+    from apps.booking.models import RemoteBookingProxy
+
+    return RemoteBookingProxy.all_tenants.filter(
+        tenant=tenant, appointment_id=appointment_id, bot_user=bot_user
+    ).exists()
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+@with_request_tenant
+def create_payment(request: HttpRequest) -> HttpResponse:
+    """C7.1 — create a two-stage payment for an owned appointment.
+
+    Body: ``{"appointment_id": "<uuid>"}`` (+ optional ayla_user_id that
+    MUST match the session, C7.6). No amount accepted — Ayla prices from
+    the Booking snapshot. Response: the Ayla ``data`` verbatim
+    (``payment_id``, ``confirmation_url``, ``amount``, ``capture_state``,
+    ``currency``).
+    """
+
+    body = _c7_json_body(request)
+    if isinstance(body, JsonResponse):
+        return body
+    binding = _resolve_c7_ayla_user(request, body)
+    if isinstance(binding, JsonResponse):
+        return binding
+
+    appointment_id = str(body.get("appointment_id") or "").strip()
+    if not appointment_id:
+        return _error("bad_request", "appointment_id is required", 400)
+    try:
+        uuid.UUID(appointment_id)
+    except (ValueError, AttributeError):
+        return _error("bad_request", "appointment_id must be a UUID", 400)
+
+    if not _customer_owns_appointment(
+        bot_user=request.bot_user,  # type: ignore[attr-defined]
+        tenant=request.tenant,  # type: ignore[attr-defined]
+        appointment_id=appointment_id,
+    ):
+        # 404, not 403 — do not leak that the appointment exists at all.
+        return _error("appointment_not_found", "appointment not found", 404)
+
+    try:
+        with AylaClientPaymentsClient() as client:
+            data = client.create_payment(appointment_id=appointment_id)
+    except ClientPaymentsError as exc:
+        return _c7_upstream_error(exc, not_found_slug="appointment_not_found")
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+@with_request_tenant
+def cards_setup(request: HttpRequest) -> HttpResponse:
+    """C7.2 — start card binding (separate voluntary action). Response:
+    ``{confirmation_url}`` verbatim."""
+
+    body = _c7_json_body(request)
+    if isinstance(body, JsonResponse):
+        return body
+    binding = _resolve_c7_ayla_user(request, body)
+    if isinstance(binding, JsonResponse):
+        return binding
+    try:
+        with AylaClientPaymentsClient() as client:
+            data = client.cards_setup(ayla_user_id=binding)
+    except ClientPaymentsError as exc:
+        return _c7_upstream_error(exc)
+    return JsonResponse(data)
+
+
+@require_http_methods(["GET"])
+@require_init_data
+@with_request_tenant
+def cards_list(request: HttpRequest) -> HttpResponse:
+    """C7.2 — list the customer's saved cards (verbatim upstream payload)."""
+
+    binding = _resolve_c7_ayla_user(request)
+    if isinstance(binding, JsonResponse):
+        return binding
+    try:
+        with AylaClientPaymentsClient() as client:
+            data = client.list_cards(ayla_user_id=binding)
+    except ClientPaymentsError as exc:
+        return _c7_upstream_error(exc)
+    if isinstance(data, list):
+        return JsonResponse({"cards": data})
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+@require_init_data
+@with_request_tenant
+def card_delete(request: HttpRequest, card_id) -> HttpResponse:
+    """C7.2 — revoke a saved card. Idempotent: upstream 404 (already
+    gone) counts as deleted (repeat → 204)."""
+
+    binding = _resolve_c7_ayla_user(request)
+    if isinstance(binding, JsonResponse):
+        return binding
+    try:
+        with AylaClientPaymentsClient() as client:
+            client.delete_card(ayla_user_id=binding, card_id=str(card_id))
+    except ClientPaymentsNotFoundError:
+        pass  # already gone — idempotent success
+    except ClientPaymentsError as exc:
+        return _c7_upstream_error(exc)
+    return HttpResponse(status=204)

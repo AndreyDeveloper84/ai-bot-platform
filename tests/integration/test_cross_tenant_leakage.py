@@ -305,6 +305,13 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "end_at": lambda tenant, suffix: _future_datetime(days=2),
         "status": "confirmed",
     },
+    # C7.3 read model: appointment_id + capture_state are the only
+    # NOT-NULL no-default columns; (tenant, appointment_id) unique key is
+    # fresh per row by construction.
+    "PaymentMirror": {
+        "appointment_id": lambda tenant, suffix: _new_uuid(),
+        "capture_state": "authorized",
+    },
     # Schedule-management §1: master FK + day_of_week. The
     # times-match-is_working CHECK forces start/end times when
     # is_working=True (the default) — supply a 09:00–18:00 block.

@@ -894,3 +894,84 @@ class RemoteBookingProxy(models.Model):
 
     def __str__(self) -> str:
         return f"RemoteBookingProxy[{self.appointment_id} {self.status}]"
+
+
+class PaymentMirror(models.Model):
+    """Read model of a client's payment state per appointment (C7.3).
+
+    Fed by the eventbus consumers — ``booking.confirmed`` carrying a
+    ``payment_id`` (the hold signal — C7.3 freezes NO separate
+    ``payment.authorized`` in the pilot) and the ``payment.*`` family
+    (captured / failed / refunded). Powers the optional ``payment``
+    field on customer BookingItem responses. ADR-0009: mirror, never
+    the source of truth — on-demand ``GET /internal/payments/{id}/`` is
+    the authoritative read when fresher state is needed.
+
+    One row per (tenant, appointment): C7.1 idempotency guarantees one
+    active payment per appointment, so the unique key is the natural
+    one. Amount follows the unified data contract (§1): Decimal, 2dp.
+    """
+
+    class CaptureState(models.TextChoices):
+        """Mirror states the pilot's events can deliver (C7.3 subset)."""
+
+        AUTHORIZED = "authorized", "Hold (booking.confirmed)"
+        CAPTURED = "captured", "Captured"
+        FAILED = "failed", "Failed"
+        REFUNDED = "refunded", "Refunded"
+        CANCELED = "canceled", "Canceled / released"
+
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.CASCADE,
+        related_name="payment_mirrors",
+        help_text="Owning tenant. CASCADE — mirror is derived data.",
+    )
+    appointment_id = models.UUIDField(
+        db_index=True,
+        help_text="Canonical Ayla Appointment.id the payment belongs to.",
+    )
+    payment_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Ayla Payment.id. Null for the hold signal when the "
+        "booking.confirmed payload omits it.",
+    )
+    capture_state = models.CharField(
+        max_length=16,
+        choices=CaptureState.choices,
+        help_text="Last known capture state from the event stream.",
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Payment amount (Decimal, 2dp per §1).",
+    )
+    last_synced_event_id = models.CharField(
+        max_length=36,
+        blank=True,
+        default="",
+        help_text="event_id of the last event that touched this row "
+        "(forensic trace; IngestDedupe is the primary idempotency).",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Payment mirror"
+        verbose_name_plural = "Payment mirrors"
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "appointment_id"],
+                name="uq_payment_mirror_tenant_appointment",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"PaymentMirror[{self.appointment_id} {self.capture_state}]"

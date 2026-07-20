@@ -66,7 +66,19 @@ ALLOWED_ACTORS: Final[frozenset[str]] = frozenset({"system", "user", "admin"})
 MAX_EVENT_ID_LENGTH: Final[int] = 36
 
 # event-contract.md §2 — the only event_name where tenant_id MAY be null.
-TENANT_NULLABLE_EVENT_NAMES: Final[frozenset[str]] = frozenset({"user.profile.updated"})
+# AMD-015 (pilot 2026-08-15): billing/subscription topics join the set —
+# a solo master's subscription has tenant=NULL, so its billing events
+# carry tenant_id=None; verification then runs by user-scope (the master
+# key IS the Ayla User UUID, AMD-005). Salon-scoped rows keep tenant set
+# and verify by tenant as before.
+TENANT_NULLABLE_EVENT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "user.profile.updated",
+        "subscription.activated",
+        "subscription.past_due",
+        "billing.fee_charged",
+    }
+)
 
 
 class IngestEnvelopeError(ValueError):
