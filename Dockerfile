@@ -25,9 +25,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Build-time secret for cloning private GitHub repos (ayla-ai-core).
+# Pattern from beautygo_backend/Dockerfile: pass via
+# `docker build --build-arg GH_DEPLOY_TOKEN=...`. The URL-rewrite makes
+# pip's git clone authenticate transparently. Consumed at build time
+# only — not baked into the runtime image (empty default = public repos
+# build without it).
+ARG GH_DEPLOY_TOKEN=""
+RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
+      git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"; \
+    fi
+
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && \
-    pip install -e ".[dev]" "psycopg[binary]>=3.2"
+    pip install -e ".[dev,ai-core]" "psycopg[binary]>=3.2"
 
 COPY . .
 
