@@ -46,6 +46,7 @@ const C2_ACTIVE = {
         total_amount: "960.00",
         date: "2026-09-01",
       },
+      card: { last4: "4242", brand: "mir" },
     },
     fees: { pending_total: "270.00", pending_count: 3 },
     last_invoice: {
@@ -101,6 +102,22 @@ describe("getBillingStatus (C2)", () => {
       "MaxInitData test-init-data",
     );
     expect(status).toEqual(C2_ACTIVE.data);
+  });
+
+  it("carries the AMD-017 card read-model verbatim (null when unbound)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(C2_ACTIVE));
+    const bound = await getBillingStatus();
+    expect(bound.subscription.card).toEqual({ last4: "4242", brand: "mir" });
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: {
+          ...C2_ACTIVE.data,
+          subscription: { ...C2_ACTIVE.data.subscription, card: null },
+        },
+      }),
+    );
+    const unbound = await getBillingStatus();
+    expect(unbound.subscription.card).toBeNull();
   });
 
   it("none-subscription shape: null fields, zero fees (C2)", async () => {

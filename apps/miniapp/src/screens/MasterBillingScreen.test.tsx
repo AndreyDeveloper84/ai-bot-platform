@@ -66,6 +66,7 @@ const STATUS_ACTIVE: BillingStatus = {
       total_amount: "960.00",
       date: "2026-09-01",
     },
+    card: null,
   },
   fees: { pending_total: "270.00", pending_count: 3 },
   last_invoice: {
@@ -136,6 +137,7 @@ describe("MasterBillingScreen — subscription (C2)", () => {
         tariff: null,
         current_period_end: null,
         next_charge: null,
+        card: null,
       },
       fees: { pending_total: "0.00", pending_count: 0 },
       last_invoice: null,
@@ -261,7 +263,7 @@ describe("MasterBillingScreen — card binding (D7)", () => {
     );
     expect(mockedOpen).toHaveBeenCalledWith("https://pay.test/bind/1");
     expect(
-      await screen.findByText(/Открыла страницу привязки/),
+      await screen.findByText(/Карта привязывается/),
     ).toBeInTheDocument();
   });
 
@@ -278,6 +280,36 @@ describe("MasterBillingScreen — card binding (D7)", () => {
       await screen.findByText(/Не получилось начать привязку/),
     ).toBeInTheDocument();
     expect(mockedOpen).not.toHaveBeenCalled();
+  });
+
+  it("bound card (AMD-017): brand + last4 shown, bind block hidden", async () => {
+    mockedStatus.mockResolvedValue({
+      ...STATUS_ACTIVE,
+      subscription: {
+        ...STATUS_ACTIVE.subscription,
+        card: { last4: "4242", brand: "mir" },
+      },
+    });
+    renderScreen();
+    expect(await screen.findByText("Мир")).toBeInTheDocument();
+    expect(screen.getByText("·· 4242")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Привязать карту" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("after setup: «карта привязывается» placeholder until the webhook lands", async () => {
+    const user = userEvent.setup();
+    mockedSetup.mockResolvedValue({
+      confirmation_url: "https://pay.test/bind/1",
+    });
+    renderScreen();
+    await screen.findByText("Активна");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Привязать карту" }));
+    expect(
+      await screen.findByText(/Карта привязывается/),
+    ).toBeInTheDocument();
   });
 });
 

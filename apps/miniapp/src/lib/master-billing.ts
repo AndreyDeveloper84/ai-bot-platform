@@ -45,6 +45,12 @@ export interface BillingStatus {
     tariff: TariffCode | null;
     current_period_end: string | null;
     next_charge: NextCharge | null;
+    /**
+     * AMD-017 card read-model: {last4, brand} once a card is bound
+     * (filled from the webhook only when payment_method.saved == true),
+     * null until then / after revoke.
+     */
+    card: { last4: string; brand: string } | null;
   };
   fees: { pending_total: string; pending_count: number };
   last_invoice: {
