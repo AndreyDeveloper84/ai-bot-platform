@@ -179,10 +179,11 @@ describe("CustomerBookingDetailScreen (real data)", () => {
 
   it("shows the C7.3 payment badge when the booking carries a capture_state", async () => {
     mockedFetch.mockResolvedValue({
-      booking: { ...FUTURE, payment: { capture_state: "authorized" } },
+      booking: { ...FUTURE, payment: { capture_state: "authorized", amount: "2000.00" } },
     });
     renderScreen("b-1");
     expect(await screen.findByText("Зарезервировано")).toBeInTheDocument();
+    expect(screen.getByText(/2 000 ₽/)).toBeInTheDocument();
   });
 
   it("never shows waiting_for_capture to the customer (ADR)", async () => {

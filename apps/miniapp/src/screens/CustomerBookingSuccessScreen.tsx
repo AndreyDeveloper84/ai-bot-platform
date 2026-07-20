@@ -34,6 +34,8 @@ interface SuccessState {
   service_name?: string;
   master_name?: string;
   visit_at?: string;
+  /** C7.4 — booking created but the payment create failed right after. */
+  payment_start_failed?: boolean;
 }
 
 export function CustomerBookingSuccessScreen() {
@@ -78,6 +80,15 @@ export function CustomerBookingSuccessScreen() {
     >
       <h1 className="customer-success__headline">{headline}</h1>
       <p className="customer-success__sub">{reminderCopy}</p>
+
+      {/* C7.4 — the booking exists; only the payment start failed.
+          Never imply the booking failed (duplicate-create risk). */}
+      {s.payment_start_failed && (
+        <p className="customer-success__payment-note" role="status">
+          Запись подтверждена. Начать онлайн-оплату не получилось —
+          можно оплатить на месте или позже из записи.
+        </p>
+      )}
 
       <div className="confirm-card">
         <dl>

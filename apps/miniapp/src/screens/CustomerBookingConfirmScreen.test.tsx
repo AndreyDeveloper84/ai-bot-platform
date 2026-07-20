@@ -38,9 +38,18 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
   };
 });
 
+vi.mock("../lib/payments", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/payments")>();
+  return {
+    ...original,
+    createPayment: vi.fn(),
+  };
+});
+
 import { ApiError, authVerify } from "../lib/api";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { openPaymentConfirmation } from "../lib/max-sdk";
+import { createPayment } from "../lib/payments";
 import {
   resetBooking,
   setMaster,
@@ -48,10 +57,12 @@ import {
   setVisitAt,
 } from "../state/booking";
 import { CustomerBookingConfirmScreen } from "./CustomerBookingConfirmScreen";
+import { CustomerBookingSuccessScreen } from "./CustomerBookingSuccessScreen";
 
 const mockedAuthVerify = vi.mocked(authVerify);
 const mockedCreate = vi.mocked(createCustomerBooking);
 const mockedOpenPayment = vi.mocked(openPaymentConfirmation);
+const mockedCreatePayment = vi.mocked(createPayment);
 
 const CREATED = {
   booking: {
@@ -82,7 +93,7 @@ function renderScreen() {
         <Route path="/customer/catalog" element={<div>CATALOG-PROBE</div>} />
         <Route
           path="/customer/booking/success/:bookingId"
-          element={<div>SUCCESS-PROBE</div>}
+          element={<CustomerBookingSuccessScreen />}
         />
         <Route
           path="/customer/masters/:masterId/slots"
@@ -143,21 +154,48 @@ describe("payment choice (C7.4 / AMD-002)", () => {
     expect(screen.queryByText(/24 часа/)).not.toBeInTheDocument();
   });
 
-  it("opens confirmation_url in the webview when the contour returns one", async () => {
+  it("online: creates the payment for the booking and opens the webview (C7.4)", async () => {
     const user = userEvent.setup();
-    mockedCreate.mockResolvedValue({
-      ...CREATED,
-      payment: {
-        confirmation_url: "https://yoomoney.ru/checkout/pay/123",
-        capture_state: "authorized",
-      },
+    mockedCreatePayment.mockResolvedValue({
+      payment_id: "pay-1",
+      confirmation_url: "https://yoomoney.ru/checkout/pay/123",
+      amount: "2000.00",
+      capture_state: "authorized",
+      currency: "RUB",
     });
     renderScreen();
     await user.click(screen.getByRole("radio", { name: /Оплатить онлайн/ }));
     await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(mockedCreatePayment).toHaveBeenCalledWith("b-1");
     expect(mockedOpenPayment).toHaveBeenCalledWith(
       "https://yoomoney.ru/checkout/pay/123",
     );
+  });
+
+  it("onsite: never calls the payment endpoint", async () => {
+    const user = userEvent.setup();
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(mockedCreatePayment).not.toHaveBeenCalled();
+  });
+
+  it("payment create failure after booking: booking preserved, honest note on success", async () => {
+    const user = userEvent.setup();
+    mockedCreatePayment.mockRejectedValue(
+      new ApiError(502, "upstream_unavailable", "payments upstream is temporarily unavailable"),
+    );
+    renderScreen();
+    await user.click(screen.getByRole("radio", { name: /Оплатить онлайн/ }));
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    // The booking EXISTS — the flow must land on success, not on an
+    // error screen (a duplicate-create retry is the real risk here).
+    expect(
+      await screen.findByText(/Записала тебя/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Начать онлайн-оплату не получилось/),
+    ).toBeInTheDocument();
+    expect(mockedOpenPayment).not.toHaveBeenCalled();
   });
 });
 
