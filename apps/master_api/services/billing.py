@@ -35,6 +35,7 @@ from apps.catalog.models import CatalogMaster
 from apps.integrations.ayla.billing_client import (
     AylaBillingClient,
     BillingAuthError,
+    BillingClientError,
     BillingNotFoundError,
     BillingProxyError,
     BillingTransportError,
@@ -48,6 +49,7 @@ class ProxyStatus(str, Enum):
     MAPPING_UNAVAILABLE = "mapping_unavailable"  # no specialist_id on the mirror
     NOT_FOUND = "not_found"  # upstream 404 (SPECIALIST_NOT_FOUND)
     UPSTREAM_ERROR = "upstream_error"  # 5xx / network / auth misconfig
+    CLIENT_ERROR = "client_error"  # upstream 4xx (VALIDATION_ERROR)
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,61 @@ def payout_preview_for_master(
         call="get_payout_preview",
         log_slug="payout_preview",
     )
+
+
+def card_setup_for_master(
+    master: CatalogMaster,
+    *,
+    tariff: str,
+    return_url: str,
+    client: AylaBillingClient | None = None,
+) -> BillingProxyResult:
+    """D7: start card binding for the session master.
+
+    The money path: no binding → no subscription charge → dunning →
+    ``past_due`` → C1 blocks new bookings. Proxies the verbatim
+    ``{confirmation_url}`` upstream answer; the miniapp opens it in a
+    webview. ``tariff``/``return_url`` are validated by the caller.
+    """
+    specialist_id = specialist_id_for_master(master)
+    if specialist_id is None:
+        logger.warning(
+            "master_api.billing.card_setup.mapping_unavailable master_id=%s tenant_id=%s",
+            master.pk,
+            master.tenant_id,
+        )
+        return BillingProxyResult(status=ProxyStatus.MAPPING_UNAVAILABLE)
+
+    owns_client = client is None
+    client = client or AylaBillingClient()
+    try:
+        payload = client.card_setup(
+            specialist_id=specialist_id,
+            tariff=tariff,
+            return_url=return_url,
+        )
+        return BillingProxyResult(status=ProxyStatus.OK, payload=payload)
+    except BillingNotFoundError:
+        logger.warning(
+            "master_api.billing.card_setup.specialist_not_found master_id=%s specialist_id=%s",
+            master.pk,
+            specialist_id,
+        )
+        return BillingProxyResult(status=ProxyStatus.NOT_FOUND)
+    except BillingAuthError:
+        logger.exception("master_api.billing.card_setup.auth_error")
+        return BillingProxyResult(status=ProxyStatus.UPSTREAM_ERROR)
+    except BillingClientError as exc:
+        # Upstream VALIDATION_ERROR (e.g. salon tariff without tenant) —
+        # client-correctable input problem, not an outage.
+        logger.info("master_api.billing.card_setup.client_error err=%s", exc)
+        return BillingProxyResult(status=ProxyStatus.CLIENT_ERROR)
+    except (BillingTransportError, BillingProxyError):
+        logger.exception("master_api.billing.card_setup.upstream_error")
+        return BillingProxyResult(status=ProxyStatus.UPSTREAM_ERROR)
+    finally:
+        if owns_client:
+            client.close()
 
 
 def _proxy(

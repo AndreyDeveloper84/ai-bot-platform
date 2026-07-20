@@ -133,6 +133,7 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER),
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
+    Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
     # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
     Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER),
@@ -382,6 +383,11 @@ def _exercise_billing() -> None:
     c = AylaBillingClient()  # reads settings.AYLA_*; httpx.Client is patched
     _swallow(lambda: c.get_billing_status(specialist_id=sid))
     _swallow(lambda: c.get_payout_preview(specialist_id=sid))
+    _swallow(
+        lambda: c.card_setup(
+            specialist_id=sid, tariff="solo", return_url="https://miniapp.test/return"
+        )
+    )
 
 
 def _exercise_client_payments() -> None:

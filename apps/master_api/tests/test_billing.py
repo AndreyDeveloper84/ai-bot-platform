@@ -62,6 +62,12 @@ class _StubClient:
             raise self.exc
         return self.payload
 
+    def card_setup(self, *, specialist_id: str, tariff: str, return_url: str):
+        self.calls.append(("card_setup", specialist_id, tariff, return_url))
+        if self.exc:
+            raise self.exc
+        return self.payload
+
     def close(self) -> None:
         self.closed = True
 
@@ -185,3 +191,132 @@ class TestViews:
         )
         assert resp.status_code == 404
         assert resp.json()["error"] == "specialist_not_found"
+
+
+class TestCardSetup:
+    """D7 card binding proxy — the money path (no binding → no charges
+    → dunning → past_due → C1 blocks new bookings)."""
+
+    @pytest.fixture
+    def linked_master(self, master) -> CatalogMaster:
+        master.ayla_user_id = uuid.UUID(_SID)
+        master.save(update_fields=["ayla_user_id"])
+        return master
+
+    def test_service_ok_verbatim(self, linked_master) -> None:
+        payload = {"confirmation_url": "https://pay.test/bind/1"}
+        client = _StubClient(payload=payload)
+        result = billing_svc.card_setup_for_master(
+            linked_master,
+            tariff="solo",
+            return_url="https://x.test/",
+            client=client,  # type: ignore[arg-type]
+        )
+        assert result.status is ProxyStatus.OK
+        assert result.payload is payload
+
+    def test_service_mapping_unavailable(self, master) -> None:
+        result = billing_svc.card_setup_for_master(
+            master, tariff="solo", return_url="https://x.test/"
+        )
+        assert result.status is ProxyStatus.MAPPING_UNAVAILABLE
+
+    def test_service_upstream_404(self, linked_master) -> None:
+        client = _StubClient(exc=BillingNotFoundError("nope"))
+        result = billing_svc.card_setup_for_master(
+            linked_master,
+            tariff="solo",
+            return_url="https://x.test/",
+            client=client,  # type: ignore[arg-type]
+        )
+        assert result.status is ProxyStatus.NOT_FOUND
+
+    def test_service_upstream_400_client_error(self, linked_master) -> None:
+        from apps.integrations.ayla.billing_client import BillingClientError
+
+        client = _StubClient(exc=BillingClientError("VALIDATION_ERROR"))
+        result = billing_svc.card_setup_for_master(
+            linked_master,
+            tariff="salon",
+            return_url="https://x.test/",
+            client=client,  # type: ignore[arg-type]
+        )
+        assert result.status is ProxyStatus.CLIENT_ERROR
+
+    def test_service_upstream_5xx(self, linked_master) -> None:
+        client = _StubClient(exc=BillingTransportError("http_503"))
+        result = billing_svc.card_setup_for_master(
+            linked_master,
+            tariff="solo",
+            return_url="https://x.test/",
+            client=client,  # type: ignore[arg-type]
+        )
+        assert result.status is ProxyStatus.UPSTREAM_ERROR
+
+    def _post(self, client, body: dict, user_id: str = "12345"):
+        return client.post(
+            "/api/v1/master/billing/card-setup",
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header(user_id),
+        )
+
+    def test_view_200_with_url(self, client: DjangoClient, linked_master, monkeypatch) -> None:
+        payload = {"confirmation_url": "https://pay.test/bind/1"}
+        monkeypatch.setattr(
+            "apps.master_api.views.card_setup_for_master",
+            lambda master, *, tariff, return_url: billing_svc.BillingProxyResult(
+                status=ProxyStatus.OK, payload=payload
+            ),
+        )
+        resp = self._post(client, {"tariff": "solo", "return_url": "https://x.test/"})
+        assert resp.status_code == 200
+        assert resp.json() == {"data": payload}
+
+    def test_view_foreign_specialist_403(self, client: DjangoClient, linked_master) -> None:
+        resp = self._post(
+            client,
+            {
+                "tariff": "solo",
+                "return_url": "https://x.test/",
+                "specialist_id": str(uuid.uuid4()),
+            },
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "forbidden"
+
+    def test_view_invalid_body_400(self, client: DjangoClient, linked_master) -> None:
+        resp = self._post(client, {"tariff": "gold"})
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "validation_error"
+
+    def test_view_upstream_400_maps_400(
+        self, client: DjangoClient, linked_master, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "apps.master_api.views.card_setup_for_master",
+            lambda master, *, tariff, return_url: billing_svc.BillingProxyResult(
+                status=ProxyStatus.CLIENT_ERROR
+            ),
+        )
+        resp = self._post(client, {"tariff": "salon", "return_url": "https://x.test/"})
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "validation_error"
+
+    def test_view_upstream_5xx_maps_502(
+        self, client: DjangoClient, linked_master, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "apps.master_api.views.card_setup_for_master",
+            lambda master, *, tariff, return_url: billing_svc.BillingProxyResult(
+                status=ProxyStatus.UPSTREAM_ERROR
+            ),
+        )
+        resp = self._post(client, {"tariff": "solo", "return_url": "https://x.test/"})
+        assert resp.status_code == 502
+        assert resp.json()["error"] == "billing_upstream_unavailable"
+
+    def test_view_unlinked_master_503(self, client: DjangoClient, master) -> None:
+        resp = self._post(client, {"tariff": "solo", "return_url": "https://x.test/"})
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "specialist_mapping_unavailable"
