@@ -26,20 +26,30 @@ vi.mock("../lib/master-billing", async (importOriginal) => {
     ...original,
     getBillingStatus: vi.fn(),
     getPayoutPreview: vi.fn(),
+    setupMasterCard: vi.fn(),
   };
+});
+
+vi.mock("../lib/max-sdk", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/max-sdk")>();
+  return { ...original, openPaymentConfirmation: vi.fn() };
 });
 
 import { ApiError } from "../lib/api";
 import {
   getBillingStatus,
   getPayoutPreview,
+  setupMasterCard,
   type BillingStatus,
   type PayoutPreview,
 } from "../lib/master-billing";
+import { openPaymentConfirmation } from "../lib/max-sdk";
 import { MasterBillingScreen } from "./MasterBillingScreen";
 
 const mockedStatus = vi.mocked(getBillingStatus);
 const mockedPayout = vi.mocked(getPayoutPreview);
+const mockedSetup = vi.mocked(setupMasterCard);
+const mockedOpen = vi.mocked(openPaymentConfirmation);
 
 const STATUS_ACTIVE: BillingStatus = {
   specialist_id: "spec-1",
@@ -221,5 +231,50 @@ describe("MasterBillingScreen — honest errors", () => {
     mockedStatus.mockResolvedValue(STATUS_ACTIVE);
     await user.click(screen.getAllByRole("button", { name: "Обновить" })[0]!);
     expect(await screen.findByText("Активна")).toBeInTheDocument();
+  });
+});
+
+describe("MasterBillingScreen — card binding (D7)", () => {
+  it("consent checkbox gates the bind button", async () => {
+    const user = userEvent.setup();
+    renderScreen();
+    await screen.findByText("Активна");
+    const bind = screen.getByRole("button", { name: "Привязать карту" });
+    expect(bind).toBeDisabled();
+    await user.click(screen.getByRole("checkbox"));
+    expect(bind).toBeEnabled();
+  });
+
+  it("setup posts the C2 tariff and opens the binding webview", async () => {
+    const user = userEvent.setup();
+    mockedSetup.mockResolvedValue({
+      confirmation_url: "https://pay.test/bind/1",
+    });
+    renderScreen();
+    await screen.findByText("Активна");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Привязать карту" }));
+    expect(mockedSetup).toHaveBeenCalledWith(
+      expect.objectContaining({ tariff: "solo" }),
+    );
+    expect(mockedOpen).toHaveBeenCalledWith("https://pay.test/bind/1");
+    expect(
+      await screen.findByText(/Открыла страницу привязки/),
+    ).toBeInTheDocument();
+  });
+
+  it("setup failure shows an honest error, no fake binding", async () => {
+    const user = userEvent.setup();
+    mockedSetup.mockRejectedValue(
+      new ApiError(502, "billing_upstream_unavailable", "upstream down"),
+    );
+    renderScreen();
+    await screen.findByText("Активна");
+    await user.click(screen.getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Привязать карту" }));
+    expect(
+      await screen.findByText(/Не получилось начать привязку/),
+    ).toBeInTheDocument();
+    expect(mockedOpen).not.toHaveBeenCalled();
   });
 });
