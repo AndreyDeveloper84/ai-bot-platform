@@ -696,10 +696,17 @@ ADMIN_MAX_CHAT_ID = os.environ.get("ADMIN_MAX_CHAT_ID", "")
 # ``timeout``. The rate limiter and SETNX callers above pass explicit
 # TTLs (90 / 90_000 / 3600 / 86_400 seconds); they are unaffected by
 # this default.
+# Redis connection URL — exposed as a settings attribute (not just an
+# inline env read) so the readyz probes (apps/orchestrator/views.py)
+# hit the SAME url as the cache/celery layers instead of falling back
+# to their getattr localhost default. CACHES below consumes this exact
+# variable — one source of truth.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+        "LOCATION": REDIS_URL,
         "KEY_PREFIX": f"ai_bot_platform:{os.environ.get('DJANGO_ENV', 'local')}",
         "TIMEOUT": 300,
         "OPTIONS": {
@@ -1111,6 +1118,12 @@ SHADOW_GROUND_TRUTH_PATH = os.environ.get("SHADOW_GROUND_TRUTH_PATH", "")
 CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "")
 CHROMA_HTTP_PORT = int(os.environ.get("CHROMA_HTTP_PORT", "8001"))
 CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
+
+# S3/minio endpoint — exposed as a settings attribute so the readyz
+# minio probe (apps/orchestrator/views.py) checks the configured
+# endpoint instead of its getattr localhost default. Replay/S3 writers
+# read env directly today; this is the single attribute probes rely on.
+S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
 
 # Catalog sync (Ayla internal catalog → CatalogService mirror). S3B (#1044):
 # the sync service pulls `salon-services` from Ayla's internal Bearer catalog
