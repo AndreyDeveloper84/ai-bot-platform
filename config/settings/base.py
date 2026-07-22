@@ -504,6 +504,14 @@ AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 #    recommendations + profile move onto it in S0-B.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
+# C7 client-payments: fallback ``return_url`` for the YooKassa confirmation
+# flows (payment create / card setup) when the miniapp request doesn't carry
+# one. W4's master-side flows send return_url explicitly (precedent); the
+# customer-side FE predates that — until it catches up, staging/prod set
+# this to the miniapp's public URL. Empty + no FE value → the views 400
+# (better a local validation error than an upstream one).
+AYLA_CLIENT_PAYMENTS_RETURN_URL = os.environ.get("AYLA_CLIENT_PAYMENTS_RETURN_URL", "")
+
 # 2. ``NUTRITION_SERVICE_TOKEN`` — the nutrition ``X-Service-Token`` shared
 #    secret, named to match what Ayla validates. Falls back to the legacy
 #    ``AYLA_SERVICE_TOKEN`` env var ONLY when unset, so a mid-migration deploy

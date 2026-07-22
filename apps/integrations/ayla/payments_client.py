@@ -7,7 +7,21 @@ Typed wrapper for the C7 surface (``PILOT_CONTRACTS_2026-08-15`` §7.5):
 * ``GET    /api/v1/internal/users/{ayla_user_id}/cards/`` (C7.2)
 * ``DELETE /api/v1/internal/users/{ayla_user_id}/cards/{card_id}/`` (C7.2)
 
-Bearer ``AYLA_INTERNAL_API_TOKEN`` — service-to-service only (C7.6).
+### Auth (IsBotServiceWithVerifiedClient — verified against Ayla live views)
+
+Every call carries BOTH:
+
+* ``Authorization: Bearer AYLA_INTERNAL_API_TOKEN`` — service-to-service (C7.6);
+* ``X-External-User-ID: <source>:<id>`` — Ayla resolves it to the actor
+  User (``request.user``); without it the permission 403s before the view.
+
+Body cross-checks (C7.6, defense-in-depth):
+
+* C7.1 create — body MUST carry ``client_id`` == the resolved actor
+  (else 403 CLIENT_MISMATCH) plus ``return_url`` (YooKassa redirect).
+* C7.2 cards — no body client_id; the path ``ayla_user_id`` is scope-
+  checked against the resolved actor. Setup requires ``consent_version``
+  + ``return_url``.
 
 ### Amount discipline (C7.1 / C7.6)
 
@@ -125,34 +139,71 @@ class AylaClientPaymentsClient:
     # C7.1 — payment create
     # ------------------------------------------------------------------
 
-    def create_payment(self, *, appointment_id: str) -> dict[str, Any]:
+    def create_payment(
+        self,
+        *,
+        appointment_id: str,
+        external_user_id: str,
+        client_id: str,
+        return_url: str,
+    ) -> dict[str, Any]:
         """``POST internal/appointments/{id}/payment/`` → ``data`` verbatim.
 
-        Empty body by design — the price comes from Ayla's Booking
-        snapshot (C7.1/C7.6). Repeat POST returns the same payment
-        (one active payment per appointment).
+        Body is exactly ``{client_id, return_url}``: ``client_id`` is the
+        C7.6 cross-check (must equal the actor the X-External-User-ID
+        resolves to — else 403 CLIENT_MISMATCH), ``return_url`` is the
+        YooKassa redirect. NO amount ever — the price comes from Ayla's
+        Booking snapshot (C7.1/C7.6). Repeat POST returns the same
+        payment (one active payment per appointment).
         """
         return self._send_with_retry(
-            "POST", f"internal/appointments/{appointment_id}/payment/", json_body={}
+            "POST",
+            f"internal/appointments/{appointment_id}/payment/",
+            json_body={"client_id": client_id, "return_url": return_url},
+            external_user_id=external_user_id,
         )
 
     # ------------------------------------------------------------------
     # C7.2 — cards
     # ------------------------------------------------------------------
 
-    def cards_setup(self, *, ayla_user_id: str) -> dict[str, Any]:
-        """``POST internal/users/{id}/cards/setup/`` → ``{confirmation_url}``."""
+    def cards_setup(
+        self,
+        *,
+        ayla_user_id: str,
+        external_user_id: str,
+        consent_version: str,
+        return_url: str,
+    ) -> dict[str, Any]:
+        """``POST internal/users/{id}/cards/setup/`` → ``{confirmation_url}``.
+
+        Body ``{consent_version, return_url}`` — the consent boundary
+        (C7.2): binding is a separate voluntary action with an explicit,
+        versioned consent text. Ownership is the path scope check
+        (ayla_user_id == resolved actor), no body client_id here.
+        """
         return self._send_with_retry(
-            "POST", f"internal/users/{ayla_user_id}/cards/setup/", json_body={}
+            "POST",
+            f"internal/users/{ayla_user_id}/cards/setup/",
+            json_body={"consent_version": consent_version, "return_url": return_url},
+            external_user_id=external_user_id,
         )
 
-    def list_cards(self, *, ayla_user_id: str) -> Any:
+    def list_cards(self, *, ayla_user_id: str, external_user_id: str) -> Any:
         """``GET internal/users/{id}/cards/`` → payload verbatim (list/envelope)."""
-        return self._send_with_retry("GET", f"internal/users/{ayla_user_id}/cards/")
+        return self._send_with_retry(
+            "GET",
+            f"internal/users/{ayla_user_id}/cards/",
+            external_user_id=external_user_id,
+        )
 
-    def delete_card(self, *, ayla_user_id: str, card_id: str) -> None:
+    def delete_card(self, *, ayla_user_id: str, card_id: str, external_user_id: str) -> None:
         """``DELETE internal/users/{id}/cards/{card_id}/`` — idempotent."""
-        self._send_with_retry("DELETE", f"internal/users/{ayla_user_id}/cards/{card_id}/")
+        self._send_with_retry(
+            "DELETE",
+            f"internal/users/{ayla_user_id}/cards/{card_id}/",
+            external_user_id=external_user_id,
+        )
 
     # ------------------------------------------------------------------
     # Plumbing
@@ -164,11 +215,14 @@ class AylaClientPaymentsClient:
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        external_user_id: str,
     ) -> Any:
         last_exc: Exception | None = None
         for attempt in range(self._retries):
             try:
-                return self._send(method, path, json_body=json_body)
+                return self._send(
+                    method, path, json_body=json_body, external_user_id=external_user_id
+                )
             except ClientPaymentsConfigError:
                 raise
             except ClientPaymentsTransportError as exc:
@@ -193,6 +247,7 @@ class AylaClientPaymentsClient:
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        external_user_id: str,
     ) -> Any:
         try:
             url = AylaUrlBuilder(self._base_url).build(path)
@@ -208,6 +263,9 @@ class AylaClientPaymentsClient:
                 json=json_body,
                 headers={
                     "Authorization": f"Bearer {self._token}",
+                    # IsBotServiceWithVerifiedClient: resolves the actor
+                    # User; without it Ayla 403s before the view (C7.6).
+                    "X-External-User-ID": external_user_id,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
                 },
