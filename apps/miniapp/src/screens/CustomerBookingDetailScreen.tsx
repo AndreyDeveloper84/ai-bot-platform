@@ -101,7 +101,16 @@ export function CustomerBookingDetailScreen() {
       setState({ kind: "ok", booking });
       setModalOpen(false);
       setReasonClass(null);
-      setSnack({ visible: true, message: "Запись отменена", showUndo: true });
+      if (booking.status === "cancel_requested") {
+        // Local path: 2-step with the server-held undo window.
+        setSnack({ visible: true, message: "Запись отменена", showUndo: true });
+      } else {
+        // Ayla path: cancel is immediate (no two-step confirm, no undo
+        // window — the proxy flips to cancelled via the round-trip
+        // event). Show the outcome honestly and refetch for the flip.
+        setSnack({ visible: true, message: "Запись отменена", showUndo: false });
+        window.setTimeout(() => load(), 1500);
+      }
     } catch (err) {
       if (err instanceof ApiError) {
         setSnack({
