@@ -236,3 +236,39 @@ describe("C1 neutral unavailable message (contract §2)", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("error matrix + idempotency (Wave 0 booking GO)", () => {
+  it("not-bookable 404 → neutral message + catalog alternative", async () => {
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValue(
+      new ApiError(404, "master_not_bookable", "master not found or not bookable"),
+    );
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(
+      await screen.findByText(/Эта услуга или специалист сейчас недоступны/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Посмотреть других мастеров" }),
+    ).toBeInTheDocument();
+    // Raw backend slug never renders.
+    expect(screen.queryByText(/not_bookable/)).not.toBeInTheDocument();
+  });
+
+  it("double-tap on «Записаться» creates the booking exactly once", async () => {
+    const user = userEvent.setup();
+    let resolveCreate: ((v: typeof CREATED) => void) | undefined;
+    mockedCreate.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    renderScreen();
+    const cta = screen.getByRole("button", { name: "Записаться" });
+    await user.click(cta);
+    await user.click(cta);
+    expect(mockedCreate).toHaveBeenCalledTimes(1);
+    resolveCreate!(CREATED);
+  });
+});

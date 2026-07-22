@@ -79,6 +79,7 @@ import {
 type ErrState =
   | { kind: "slot_unavailable"; substituteName?: string; substituteTime?: string }
   | { kind: "master_unavailable" }
+  | { kind: "not_bookable" }
   | { kind: "salon_suspended" }
   | { kind: "server" }
   | { kind: "network" }
@@ -92,6 +93,20 @@ type ErrState =
  * mapping lands. The UI must stay neutral (no debt wording) regardless.
  */
 const C1_UNAVAILABLE_SLUG = "unavailable";
+
+/**
+ * Create-time "not bookable" slugs (backend `_ERROR_SLUG_TO_STATUS`):
+ * the master/service vanished or can't be booked at all — distinct
+ * from a slot race. Neutral copy + catalog alternative, raw slug never
+ * rendered.
+ */
+const NOT_BOOKABLE_SLUGS = new Set([
+  "master_not_bookable",
+  "service_not_found",
+  "service_not_offered",
+  "service_unbookable",
+  "master_archived",
+]);
 
 /** Payment choice per C7.4 / AMD-002 — online is optional (D6). */
 type PaymentChoice = "onsite" | "online";
@@ -212,9 +227,11 @@ export function CustomerBookingConfirmScreen() {
       // user lands on success with an honest note (retry from the
       // booking detail / pay on-site).
       let paymentStartFailed = false;
+      let paymentCaptureState: string | null = null;
       if (paymentChoice === "online") {
         try {
           const payment = await createPayment(booking.id);
+          paymentCaptureState = payment.capture_state;
           if (payment.confirmation_url) {
             openPaymentConfirmation(payment.confirmation_url);
           }
@@ -230,6 +247,7 @@ export function CustomerBookingConfirmScreen() {
           master_name: booking.master_name,
           visit_at: booking.visit_at,
           payment_start_failed: paymentStartFailed,
+          payment_capture_state: paymentCaptureState,
         },
         replace: true,
       });
@@ -245,6 +263,9 @@ export function CustomerBookingConfirmScreen() {
         // C1 refusal (contract §2) — neutral message only; the backend
         // never sends the debt reason to the customer API.
         setErr({ kind: "master_unavailable" });
+      } else if (e instanceof ApiError && NOT_BOOKABLE_SLUGS.has(e.slug)) {
+        // Master/service can't be booked at all — neutral, no raw slug.
+        setErr({ kind: "not_bookable" });
       } else if (e instanceof ApiError && e.slug === "tenant_suspended") {
         setErr({ kind: "salon_suspended" });
       } else if (e instanceof ApiError && e.status >= 500) {
@@ -490,8 +511,7 @@ export function CustomerBookingConfirmScreen() {
           </button>
         </div>
       )}
-      {err?.kind === "master_unavailable" && (
-        <div className="callout" role="alert">
+      {err?.kind === "master_unavailable" && (        <div className="callout" role="alert">
           {/* C1 §2 — neutral wording only, the debt reason stays
               server-side by contract. */}
           <p style={{ margin: 0 }}>
@@ -523,6 +543,22 @@ export function CustomerBookingConfirmScreen() {
               Посмотреть других мастеров
             </button>
           </div>
+        </div>
+      )}
+      {err?.kind === "not_bookable" && (
+        <div className="callout" role="alert">
+          <p style={{ margin: 0 }}>
+            Эта услуга или специалист сейчас недоступны. Посмотри других
+            мастеров — подберём похожее.
+          </p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/customer/catalog")}
+          >
+            Посмотреть других мастеров
+          </button>
         </div>
       )}
       {err?.kind === "salon_suspended" && (
