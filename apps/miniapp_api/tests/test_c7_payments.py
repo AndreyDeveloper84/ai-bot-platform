@@ -22,7 +22,7 @@ from datetime import timedelta
 from urllib.parse import urlencode
 
 import pytest
-from django.test import Client as DjangoClient
+from django.test import Client as DjangoClient, override_settings
 
 from apps.booking.models import BookingRequest, PaymentMirror, RemoteBookingProxy
 from apps.eventbus.consumers.booking import handle_booking_confirmed
@@ -68,6 +68,9 @@ def _bot_token(settings) -> None:
     settings.MAX_BOT_TENANT_SLUG = "c7-test"
     # Pre-#246 transition bridge for the consumer-level tests in this file.
     settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+    # Staging-style fallback for the YooKassa redirect (the FE may also
+    # send return_url explicitly — that wins; see the dedicated tests).
+    settings.AYLA_CLIENT_PAYMENTS_RETURN_URL = "https://miniapp.test/return"
 
 
 @pytest.fixture
@@ -110,22 +113,22 @@ class _StubC7Client:
         self.calls: list[tuple] = []
         self.closed = False
 
-    def create_payment(self, *, appointment_id: str):
-        self.calls.append(("create_payment", appointment_id))
+    def create_payment(self, **kwargs):
+        self.calls.append(("create_payment", kwargs))
         if self.exc:
             raise self.exc
         return self.payment_data
 
-    def cards_setup(self, *, ayla_user_id: str):
-        self.calls.append(("cards_setup", ayla_user_id))
+    def cards_setup(self, **kwargs):
+        self.calls.append(("cards_setup", kwargs))
         return {"confirmation_url": "https://pay.test/bind"}
 
-    def list_cards(self, *, ayla_user_id: str):
-        self.calls.append(("list_cards", ayla_user_id))
+    def list_cards(self, **kwargs):
+        self.calls.append(("list_cards", kwargs))
         return [{"id": "c-1", "last4": "4242", "brand": "visa"}]
 
-    def delete_card(self, *, ayla_user_id: str, card_id: str) -> None:
-        self.calls.append(("delete_card", ayla_user_id, card_id))
+    def delete_card(self, **kwargs) -> None:
+        self.calls.append(("delete_card", kwargs))
 
     def close(self) -> None:
         self.closed = True
@@ -185,7 +188,11 @@ class TestBinding:
             HTTP_AUTHORIZATION=_init_data_header("12345"),
         )
         assert resp.status_code == 200
-        assert stub_client.calls == [("list_cards", str(AYLA_UID))]
+        (name, kwargs) = stub_client.calls[0]
+        assert name == "list_cards"
+        assert kwargs["ayla_user_id"] == str(AYLA_UID)
+        # IsBotServiceWithVerifiedClient: the resolved-actor header value.
+        assert kwargs["external_user_id"] == "bot:max:12345"
 
 
 class TestCreatePayment:
@@ -218,7 +225,42 @@ class TestCreatePayment:
             "currency": "RUB",
             "capture_state": "authorized",
         }
-        assert stub_client.calls == [("create_payment", str(APPT_ID))]
+        (name, kwargs) = stub_client.calls[0]
+        assert name == "create_payment"
+        assert kwargs["appointment_id"] == str(APPT_ID)
+        # IsBotServiceWithVerifiedClient wire contract (C7.6).
+        assert kwargs["external_user_id"] == "bot:max:12345"
+        assert kwargs["client_id"] == str(AYLA_UID)
+        # No FE return_url → the configured fallback is used.
+        assert kwargs["return_url"] == "https://miniapp.test/return"
+
+    def test_return_url_from_fe_wins(
+        self, client: DjangoClient, tenant, bot_user, stub_client
+    ) -> None:
+        self._own_appointment(tenant, bot_user)
+        resp = client.post(
+            "/api/v1/customer/me/payments/",
+            data=json.dumps({"appointment_id": str(APPT_ID), "return_url": "https://fe.test/back"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert stub_client.calls[0][1]["return_url"] == "https://fe.test/back"
+
+    @override_settings(AYLA_CLIENT_PAYMENTS_RETURN_URL="")
+    def test_return_url_missing_everywhere_400(
+        self, client: DjangoClient, tenant, bot_user, stub_client
+    ) -> None:
+        self._own_appointment(tenant, bot_user)
+        resp = client.post(
+            "/api/v1/customer/me/payments/",
+            data=json.dumps({"appointment_id": str(APPT_ID)}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "bad_request"
+        assert stub_client.calls == []  # validation fires BEFORE any upstream call
 
     def test_someone_elses_appointment_404(
         self, client: DjangoClient, tenant, bot_user, stub_client
@@ -295,13 +337,33 @@ class TestCards:
     def test_setup_verbatim(self, client: DjangoClient, bot_user, stub_client) -> None:
         resp = client.post(
             "/api/v1/customer/me/cards/setup/",
-            data="{}",
+            data=json.dumps(
+                {"consent_version": "offer-1.0", "consented_at": "2026-07-22T12:00:00Z"}
+            ),
             content_type="application/json",
             HTTP_AUTHORIZATION=_init_data_header("12345"),
         )
         assert resp.status_code == 200
         assert resp.json() == {"confirmation_url": "https://pay.test/bind"}
-        assert stub_client.calls == [("cards_setup", str(AYLA_UID))]
+        (name, kwargs) = stub_client.calls[0]
+        assert name == "cards_setup"
+        assert kwargs["ayla_user_id"] == str(AYLA_UID)
+        assert kwargs["external_user_id"] == "bot:max:12345"
+        assert kwargs["consent_version"] == "offer-1.0"
+        assert kwargs["return_url"] == "https://miniapp.test/return"
+
+    def test_setup_without_consent_version_400(
+        self, client: DjangoClient, bot_user, stub_client
+    ) -> None:
+        resp = client.post(
+            "/api/v1/customer/me/cards/setup/",
+            data="{}",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "bad_request"
+        assert stub_client.calls == []
 
     def test_list_verbatim(self, client: DjangoClient, bot_user, stub_client) -> None:
         resp = client.get(
@@ -310,6 +372,9 @@ class TestCards:
         )
         assert resp.status_code == 200
         assert resp.json() == {"cards": [{"id": "c-1", "last4": "4242", "brand": "visa"}]}
+        (name, kwargs) = stub_client.calls[0]
+        assert name == "list_cards"
+        assert kwargs["external_user_id"] == "bot:max:12345"
 
     def test_delete_204_and_repeat(self, client: DjangoClient, bot_user, stub_client) -> None:
         card_id = str(uuid.uuid4())
@@ -319,6 +384,10 @@ class TestCards:
                 HTTP_AUTHORIZATION=_init_data_header("12345"),
             )
             assert resp.status_code == 204
+        (name, kwargs) = stub_client.calls[0]
+        assert name == "delete_card"
+        assert kwargs["card_id"] == card_id
+        assert kwargs["external_user_id"] == "bot:max:12345"
 
     def test_delete_upstream_404_still_204(
         self, client: DjangoClient, bot_user, monkeypatch

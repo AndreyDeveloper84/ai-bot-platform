@@ -47,6 +47,7 @@ from apps.integrations.ayla.payments_client import (
     ClientPaymentsError,
     ClientPaymentsNotFoundError,
 )
+from apps.integrations.ayla.user_proxy import external_user_id_for
 
 from django.conf import settings
 
@@ -2170,6 +2171,20 @@ def _customer_owns_appointment(*, bot_user, tenant, appointment_id: str) -> bool
     ).exists()
 
 
+def _c7_return_url(body: dict) -> str:
+    """YooKassa ``return_url`` for the confirmation flows.
+
+    The miniapp may send one explicitly (master-side precedent); otherwise
+    fall back to the configured ``AYLA_CLIENT_PAYMENTS_RETURN_URL``. Empty
+    string when neither is set — the caller turns that into a local 400
+    rather than an upstream one.
+    """
+    supplied = str(body.get("return_url") or "").strip()
+    if supplied:
+        return supplied
+    return getattr(settings, "AYLA_CLIENT_PAYMENTS_RETURN_URL", "") or ""
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
@@ -2177,11 +2192,12 @@ def _customer_owns_appointment(*, bot_user, tenant, appointment_id: str) -> bool
 def create_payment(request: HttpRequest) -> HttpResponse:
     """C7.1 — create a two-stage payment for an owned appointment.
 
-    Body: ``{"appointment_id": "<uuid>"}`` (+ optional ayla_user_id that
-    MUST match the session, C7.6). No amount accepted — Ayla prices from
-    the Booking snapshot. Response: the Ayla ``data`` verbatim
-    (``payment_id``, ``confirmation_url``, ``amount``, ``capture_state``,
-    ``currency``).
+    Body: ``{"appointment_id": "<uuid>"}`` (+ optional ``return_url`` —
+    falls back to ``AYLA_CLIENT_PAYMENTS_RETURN_URL``; + optional
+    ayla_user_id that MUST match the session, C7.6). No amount accepted —
+    Ayla prices from the Booking snapshot. Response: the Ayla ``data``
+    verbatim (``payment_id``, ``confirmation_url``, ``amount``,
+    ``capture_state``, ``currency``).
     """
 
     body = _c7_json_body(request)
@@ -2207,9 +2223,21 @@ def create_payment(request: HttpRequest) -> HttpResponse:
         # 404, not 403 — do not leak that the appointment exists at all.
         return _error("appointment_not_found", "appointment not found", 404)
 
+    return_url = _c7_return_url(body)
+    if not return_url:
+        return _error("bad_request", "return_url is required", 400)
+
     try:
         with AylaClientPaymentsClient() as client:
-            data = client.create_payment(appointment_id=appointment_id)
+            data = client.create_payment(
+                appointment_id=appointment_id,
+                # IsBotServiceWithVerifiedClient: Bearer + resolved actor
+                # (X-External-User-ID); body client_id is the C7.6
+                # cross-check against that actor.
+                external_user_id=external_user_id_for(request.bot_user),  # type: ignore[attr-defined]
+                client_id=binding,
+                return_url=return_url,
+            )
     except ClientPaymentsError as exc:
         return _c7_upstream_error(exc, not_found_slug="appointment_not_found")
     return JsonResponse(data)
@@ -2220,8 +2248,10 @@ def create_payment(request: HttpRequest) -> HttpResponse:
 @require_init_data
 @with_request_tenant
 def cards_setup(request: HttpRequest) -> HttpResponse:
-    """C7.2 — start card binding (separate voluntary action). Response:
-    ``{confirmation_url}`` verbatim."""
+    """C7.2 — start card binding (separate voluntary action). Body carries
+    the consent boundary: ``consent_version`` (required; ``consented_at``
+    accepted for the audit trail, not forwarded upstream) + optional
+    ``return_url``. Response: ``{confirmation_url}`` verbatim."""
 
     body = _c7_json_body(request)
     if isinstance(body, JsonResponse):
@@ -2229,9 +2259,20 @@ def cards_setup(request: HttpRequest) -> HttpResponse:
     binding = _resolve_c7_ayla_user(request, body)
     if isinstance(binding, JsonResponse):
         return binding
+    consent_version = str(body.get("consent_version") or "").strip()
+    if not consent_version:
+        return _error("bad_request", "consent_version is required", 400)
+    return_url = _c7_return_url(body)
+    if not return_url:
+        return _error("bad_request", "return_url is required", 400)
     try:
         with AylaClientPaymentsClient() as client:
-            data = client.cards_setup(ayla_user_id=binding)
+            data = client.cards_setup(
+                ayla_user_id=binding,
+                external_user_id=external_user_id_for(request.bot_user),  # type: ignore[attr-defined]
+                consent_version=consent_version,
+                return_url=return_url,
+            )
     except ClientPaymentsError as exc:
         return _c7_upstream_error(exc)
     return JsonResponse(data)
@@ -2248,7 +2289,10 @@ def cards_list(request: HttpRequest) -> HttpResponse:
         return binding
     try:
         with AylaClientPaymentsClient() as client:
-            data = client.list_cards(ayla_user_id=binding)
+            data = client.list_cards(
+                ayla_user_id=binding,
+                external_user_id=external_user_id_for(request.bot_user),  # type: ignore[attr-defined]
+            )
     except ClientPaymentsError as exc:
         return _c7_upstream_error(exc)
     if isinstance(data, list):
@@ -2269,7 +2313,11 @@ def card_delete(request: HttpRequest, card_id) -> HttpResponse:
         return binding
     try:
         with AylaClientPaymentsClient() as client:
-            client.delete_card(ayla_user_id=binding, card_id=str(card_id))
+            client.delete_card(
+                ayla_user_id=binding,
+                card_id=str(card_id),
+                external_user_id=external_user_id_for(request.bot_user),  # type: ignore[attr-defined]
+            )
     except ClientPaymentsNotFoundError:
         pass  # already gone — idempotent success
     except ClientPaymentsError as exc:

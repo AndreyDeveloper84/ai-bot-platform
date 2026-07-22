@@ -137,10 +137,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("POST", "/api/v1/internal/billing/specialists/{id}/pay-debt/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
     # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
-    Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER),
-    Route("POST", "/api/v1/internal/users/{id}/cards/setup/", Auth.BEARER),
-    Route("GET", "/api/v1/internal/users/{id}/cards/", Auth.BEARER),
-    Route("DELETE", "/api/v1/internal/users/{id}/cards/{id}/", Auth.BEARER),
+    # IsBotServiceWithVerifiedClient: Bearer + X-External-User-ID on every leg.
+    Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/users/{id}/cards/setup/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/users/{id}/cards/", Auth.BEARER_EXT),
+    Route("DELETE", "/api/v1/internal/users/{id}/cards/{id}/", Auth.BEARER_EXT),
     # recommendations_client (#1048).
     Route("POST", "/api/v1/internal/me/catalog/recommendations/", Auth.BEARER_EXT),
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
@@ -397,10 +398,24 @@ def _exercise_client_payments() -> None:
 
     uid = str(_PROFILE_UUID)
     c = AylaClientPaymentsClient()  # reads settings.AYLA_*; httpx.Client is patched
-    _swallow(lambda: c.create_payment(appointment_id="APPTID"))
-    _swallow(lambda: c.cards_setup(ayla_user_id=uid))
-    _swallow(lambda: c.list_cards(ayla_user_id=uid))
-    _swallow(lambda: c.delete_card(ayla_user_id=uid, card_id="CARDID"))
+    _swallow(
+        lambda: c.create_payment(
+            appointment_id="APPTID",
+            external_user_id=_EXT_USER,
+            client_id=uid,
+            return_url="https://miniapp.test/return",
+        )
+    )
+    _swallow(
+        lambda: c.cards_setup(
+            ayla_user_id=uid,
+            external_user_id=_EXT_USER,
+            consent_version="offer-client-cards-1.0",
+            return_url="https://miniapp.test/return",
+        )
+    )
+    _swallow(lambda: c.list_cards(ayla_user_id=uid, external_user_id=_EXT_USER))
+    _swallow(lambda: c.delete_card(ayla_user_id=uid, card_id="CARDID", external_user_id=_EXT_USER))
 
 
 def _exercise_payments(sink: list[Captured]) -> None:
