@@ -130,6 +130,28 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     expect(mockedConfirm).not.toHaveBeenCalled();
   });
 
+  it("Ayla path: request returns a non-pending status → no undo window (immediate cancel)", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue({ booking: FUTURE });
+    // Ayla seam: cancel is immediate — the request responds with the
+    // proxy's current (still confirmed) status, NOT cancel_requested.
+    mockedRequest.mockResolvedValue({
+      booking: { ...FUTURE, status: "confirmed", cancellable: false, reschedulable: false },
+    });
+    renderScreen("b-1");
+    await user.click(await screen.findByRole("button", { name: "Отменить" }));
+    await user.click(await screen.findByRole("button", { name: "Отменить запись" }));
+    expect(mockedRequest).toHaveBeenCalledTimes(1);
+    // Snackbar has NO undo action — the undo window doesn't exist here.
+    expect(await screen.findByText("Запись отменена")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Отменить" }),
+    ).not.toBeInTheDocument();
+    // No auto-confirm fires on timeout for the immediate path.
+    expect(mockedConfirm).not.toHaveBeenCalled();
+    expect(mockedUndo).not.toHaveBeenCalled();
+  });
+
   it("confirms the cancel server-side once the undo window elapses", async () => {
     vi.useFakeTimers();
     mockedFetch.mockResolvedValue({ booking: FUTURE });
