@@ -1225,6 +1225,22 @@ MYSITE_WEBHOOK_HMAC_SECRET = os.environ.get("MYSITE_WEBHOOK_HMAC_SECRET", "")
 # sibling webhook secrets above.
 EVENT_INGEST_HMAC_SECRET = os.environ.get("EVENT_INGEST_HMAC_SECRET", "")
 
+# Tenant-verify bridge for the ingest path (Round-2 AS8, pre-#246). When
+# False (default), ``assert_envelope_tenant_authorized`` FAILS CLOSED on any
+# envelope whose tenant_id it cannot verify against TenantUserRelationship
+# (which lands with #246). staging.py opts into True — the documented
+# pre-#246 transition bridge; production.py stays fail-closed until #246.
+# Was getattr-only (staging round-trip finding №2) — env never reached it.
+EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = (
+    os.environ.get("EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN", "false").lower() == "true"
+)
+
+# Ingest rate-limit IP resolution (apps/eventbus/ingest_ip.py, Round-2 AS2):
+# how many leading XFF hops to discard before taking the client IP. 0 = trust
+# no XFF (direct deployment). staging nginx adds exactly one trusted hop →
+# staging.py sets 1. Env-wired for the same getattr-only reason as above.
+EVENT_INGEST_TRUSTED_PROXY_DEPTH = int(os.environ.get("EVENT_INGEST_TRUSTED_PROXY_DEPTH", "0"))
+
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [

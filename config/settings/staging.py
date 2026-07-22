@@ -25,3 +25,19 @@ DEBUG = False
 
 # Sprint 4 / D1 — IM-2 timing.
 STRICT_TENANT_SCOPE = "strict"
+
+# Pilot staging — pre-#246 tenant-verify bridge (Round-2 AS8). Without
+# TenantUserRelationship (lands with #246) the ingest would fail closed
+# on every legitimate Ayla delivery (staging round-trip finding №2).
+# staging opts into the documented bridge; production.py stays
+# fail-closed until #246 ships. The boot-time WARNING
+# (startup_checks.warn_if_tenant_verify_fail_open) keeps the exposure
+# window visible in ops.
+EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+
+# Rate-limit IP resolution (ingest_ip, Round-2 AS2): staging nginx adds
+# exactly ONE trusted hop in front of uvicorn (nginx → bot), so one
+# leading XFF hop is discarded before taking the client IP. 0 would
+# trust a client-controllable XFF blindly (AS2 spoof); 2+ would trust
+# the publisher's raw header against our single edge.
+EVENT_INGEST_TRUSTED_PROXY_DEPTH = 1
