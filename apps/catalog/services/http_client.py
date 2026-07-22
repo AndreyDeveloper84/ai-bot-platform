@@ -49,7 +49,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -84,6 +84,31 @@ class CatalogSalonServiceDTO:
     duration_min: int | None = None
     template: str | None = None
     category: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CatalogSpecialistDTO:
+    """One row of ``GET /api/v1/internal/specialists/`` (S3B masters mirror).
+
+    ``ayla_master_id`` is Ayla's SpecialistProfile.id (canonical UUID the
+    mirror keys on); ``user_id`` is the Ayla User UUID carried by
+    ``CatalogMaster.ayla_user_id`` (event/booking bridge, AMD-005).
+    ``is_active`` mirrors status==active AND is_available upstream; the
+    feed's queryset already filters to those, but the mapping stays
+    explicit for forward-compat. Platform-owned fields (invite_status,
+    photo_url, archived_at…) never ride here — sync must not touch them.
+    """
+
+    ayla_master_id: str
+    user_id: str | None
+    name: str
+    external_updated_at: datetime
+    bio: str = ""
+    experience: str = ""
+    rating: Decimal | None = None
+    review_count: int = 0
+    is_active: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -165,6 +190,18 @@ class CatalogHttpClient:
             params={"tenant": tenant_id},
         )
         return [_parse_salon_service(row) for row in rows]
+
+    def fetch_specialists(self) -> list[CatalogSpecialistDTO]:
+        """Specialists (→ ``CatalogMaster``) — S3B masters mirror.
+
+        NOTE (pilot scope): the endpoint has no ``?tenant=`` filter (the
+        public queryset is active+available only, tenant-blind), so the
+        pull is the full active list and each syncing tenant upserts the
+        same set. Correct for the single-salon pilot; the multi-tenant
+        rollout needs the upstream filter (reported to the orchestrator).
+        """
+        rows = self._fetch_all("internal/specialists/", params={})
+        return [_parse_specialist(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Plumbing
@@ -292,5 +329,25 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
         duration_min=_parse_int(row.get("duration_minutes")),
         template=row.get("template"),
         category=row.get("category"),
+        raw=row,
+    )
+
+
+def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
+    experience_years = row.get("experience_years")
+    return CatalogSpecialistDTO(
+        ayla_master_id=str(row["id"]),
+        user_id=str(row["user_id"]) if row.get("user_id") else None,
+        name=row.get("display_name") or "",
+        external_updated_at=(
+            _parse_dt(row["updated_at"]) if row.get("updated_at") else datetime.now(timezone.utc)
+        ),
+        bio=row.get("bio") or "",
+        experience=str(experience_years) if experience_years is not None else "",
+        rating=_parse_decimal(row.get("rating")),
+        review_count=int(row.get("reviews_count") or 0),
+        is_active=bool(
+            str(row.get("status", "")).lower() == "active" and row.get("is_available", True)
+        ),
         raw=row,
     )

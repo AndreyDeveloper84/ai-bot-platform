@@ -11,6 +11,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
@@ -201,3 +202,85 @@ class TestConfigGap:
             pytest.raises(CatalogTransportError),
         ):
             c.fetch_salon_services(tenant_id=_TID)
+
+
+class TestFetchSpecialists:
+    def test_parses_specialist_rows(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert str(request.url).endswith("/api/v1/internal/specialists/")
+            return httpx.Response(
+                200,
+                json={
+                    "count": 2,
+                    "next": None,
+                    "previous": None,
+                    "results": [
+                        {
+                            "id": "9d3f0000-0000-4000-8000-0000000000aa",
+                            "user_id": "9d3f0000-0000-4000-8000-0000000000bb",
+                            "display_name": "Анна Иванова",
+                            "bio": "Топ-мастер",
+                            "experience_years": 5,
+                            "status": "active",
+                            "rating": "4.90",
+                            "reviews_count": 42,
+                            "is_available": True,
+                            "address": "Пенза, Московская 1",
+                        }
+                    ],
+                },
+            )
+
+        from apps.catalog.services.http_client import CatalogHttpClient
+
+        client = CatalogHttpClient(
+            base_url="https://ayla.test",
+            token="t",  # noqa: S106
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        rows = client.fetch_specialists()
+
+        assert len(rows) == 1
+        dto = rows[0]
+        assert dto.ayla_master_id == "9d3f0000-0000-4000-8000-0000000000aa"
+        assert dto.user_id == "9d3f0000-0000-4000-8000-0000000000bb"
+        assert dto.name == "Анна Иванова"
+        assert dto.experience == "5"
+        assert str(dto.rating) == "4.90"
+        assert dto.review_count == 42
+        assert dto.is_active is True
+        assert dto.raw["address"] == "Пенза, Московская 1"
+
+    def test_missing_updated_at_uses_now(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 1,
+                    "next": None,
+                    "previous": None,
+                    "results": [
+                        {
+                            "id": "9d3f0000-0000-4000-8000-0000000000cc",
+                            "display_name": "No Timestamp",
+                            "experience_years": None,
+                            "rating": None,
+                            "reviews_count": 0,
+                            "status": "active",
+                            "is_available": True,
+                        }
+                    ],
+                },
+            )
+
+        from apps.catalog.services.http_client import CatalogHttpClient
+
+        client = CatalogHttpClient(
+            base_url="https://ayla.test",
+            token="t",  # noqa: S106
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        rows = client.fetch_specialists()
+        assert rows[0].external_updated_at is not None
+        assert rows[0].experience == ""
+        assert rows[0].rating is None
