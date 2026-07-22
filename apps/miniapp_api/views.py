@@ -1001,9 +1001,16 @@ def bookings_list(request: HttpRequest) -> HttpResponse:
     ``{"items": [...], "next_cursor": "ISO" | null}``
     """
 
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    # W4 escalation №3 (BOOKING_VIA_AYLA_REST): on the Ayla path the
+    # canonical read model is RemoteBookingProxy — the Ayla-first create
+    # deliberately never writes BookingRequest (no dual-write).
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return _bookings_list_ayla(request, bot_user)
+
     from apps.booking.models import BookingRequest
 
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     statuses = request.GET.getlist("status")
     is_past_view = "past" in statuses
     if is_past_view:
@@ -1076,11 +1083,225 @@ def _get_booking_owned(bot_user: BotUser, booking_id: str):
         return None
 
 
+# ── Ayla-path read model (RemoteBookingProxy) — W4 escalation №3 ────────────
+#
+# BOOKING_VIA_AYLA_REST ON: the Ayla-first create never writes
+# BookingRequest (no dual-write, by design), so list/detail/cancel read
+# the proxy mirror instead. The proxy itself is written ONLY by event
+# consumers (booking.* round-trip) — never by these views.
+
+# Statuses the customer considers "upcoming" on the Ayla path (analog of
+# CONFIRMED + RESCHEDULE_REQUESTED on the local path). ``pending_payment``
+# is the event-contract enum value consumers write; ``awaiting_payment``
+# is Ayla's wire status (the create response returns it verbatim) — kept
+# defensively so a verbatim-mirrored row still reads as upcoming.
+_AYLA_UPCOMING_STATUSES = ("confirmed", "awaiting_payment", "pending_payment")
+_AYLA_TERMINAL_STATUSES = ("cancelled", "completed", "no_show")
+
+
+def _proxy_booking_to_dict(proxy) -> dict[str, Any]:
+    """BookingItem shape from a RemoteBookingProxy row.
+
+    Field-for-field identical to the local ``_booking_to_dict`` so the FE
+    never branches: names resolve through the catalog mirrors
+    (CatalogService.ayla_service_id / CatalogMaster.id), duration from
+    the schedule window, status verbatim from the proxy. Mirror lookups
+    go through the tenant-scoped manager (``with_request_tenant`` sets
+    the context; the proxy row itself was fetched under the same
+    tenant) — no ``all_tenants`` carve-out here (MKT1, #1018).
+    """
+    from apps.catalog.models import CatalogMaster, CatalogService
+
+    service = None
+    if proxy.service_id:
+        service = CatalogService.objects.filter(ayla_service_id=proxy.service_id).first()
+    master = None
+    if proxy.specialist_id:
+        master = CatalogMaster.objects.filter(id=proxy.specialist_id).first()
+
+    duration_min = 0
+    if proxy.start_at and proxy.end_at:
+        duration_min = max(int((proxy.end_at - proxy.start_at).total_seconds() // 60), 0)
+
+    out = {
+        "id": str(proxy.appointment_id),
+        "status": proxy.status,
+        "service_id": str(proxy.service_id) if proxy.service_id else None,
+        "service_name": service.name if service else "",
+        "master_id": str(master.id) if master else None,
+        "master_name": master.name if master else "",
+        "visit_at": proxy.start_at.isoformat() if proxy.start_at else "",
+        "duration_min": duration_min,
+        # Immediate-cancel path — no two-step undo flow on the Ayla path.
+        "cancel_requested_at": None,
+        "undo_window_seconds": 0,
+        "cancellable": proxy.status in _AYLA_UPCOMING_STATUSES,
+        # Reschedule seam is out of the W4 №3 scope — keep it hidden.
+        "reschedulable": False,
+        # No rating read model on the Ayla path in pilot.
+        "rating": None,
+        "can_rate": False,
+    }
+    # C7.3 parity with the local BookingItem: optional payment read-model,
+    # present only when the event stream produced a mirror row (hold
+    # signal or a payment.* event) for this appointment.
+    from apps.booking.models import PaymentMirror
+
+    mirror = PaymentMirror.all_tenants.filter(
+        tenant=proxy.tenant, appointment_id=proxy.appointment_id
+    ).first()
+    if mirror is not None:
+        out["payment"] = {
+            "capture_state": mirror.capture_state,
+            "amount": (f"{mirror.amount:.2f}" if mirror.amount is not None else None),
+        }
+    return out
+
+
+def _bookings_list_ayla(request: HttpRequest, bot_user) -> HttpResponse:
+    """List the bot_user's bookings from RemoteBookingProxy (Ayla path).
+
+    Same query contract as the local list: ``status`` (repeatable, with
+    the special ``past`` toggle), ``limit`` (default 20, max 50),
+    ``before`` cursor on the visit timestamp.
+    """
+    from django.db.models import Q
+
+    from apps.booking.models import RemoteBookingProxy
+
+    statuses = request.GET.getlist("status")
+    is_past_view = "past" in statuses
+    if is_past_view:
+        statuses = [s for s in statuses if s != "past"]
+
+    try:
+        limit = int(request.GET.get("limit", _BOOKINGS_PAGE_DEFAULT))
+    except ValueError:
+        return _error("bad_request", "limit must be integer", 400)
+    if limit <= 0 or limit > _BOOKINGS_PAGE_MAX:
+        return _error("bad_request", f"limit must be 1..{_BOOKINGS_PAGE_MAX}", 400)
+
+    before = _parse_iso_datetime(request.GET.get("before"))
+
+    qs = RemoteBookingProxy.all_tenants.filter(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+    )
+    now = timezone.now()
+    if is_past_view:
+        qs = qs.filter(Q(start_at__lt=now) | Q(status__in=_AYLA_TERMINAL_STATUSES))
+        qs = qs.order_by("-start_at", "-created_at")
+    else:
+        wanted = statuses or list(_AYLA_UPCOMING_STATUSES)
+        qs = qs.filter(status__in=wanted, start_at__gte=now)
+        qs = qs.order_by("start_at", "created_at")
+
+    if before is not None:
+        qs = qs.filter(start_at__lt=before)
+
+    rows = list(qs[: limit + 1])
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    next_cursor: str | None = None
+    if has_more and rows:
+        last = rows[-1]
+        next_cursor = last.start_at.isoformat() if last.start_at else None
+
+    return JsonResponse(
+        {"items": [_proxy_booking_to_dict(p) for p in rows], "next_cursor": next_cursor}
+    )
+
+
+def _booking_detail_ayla(bot_user, booking_id: str) -> HttpResponse:
+    """Booking detail from RemoteBookingProxy (Ayla path). 404 on a
+    missing row AND on any ownership mismatch (foreign / orphan proxy)."""
+    from apps.booking.models import RemoteBookingProxy
+
+    proxy = RemoteBookingProxy.all_tenants.filter(
+        tenant=bot_user.tenant,
+        appointment_id=booking_id,
+        bot_user=bot_user,
+    ).first()
+    if proxy is None:
+        return _error("not_found", "booking not found", 404)
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy)})
+
+
+def _cancel_via_ayla(bot_user, booking_id: str) -> HttpResponse:
+    """Cancel through the Ayla seam (BOOKING_VIA_AYLA_REST ON).
+
+    Ownership is proven against the RemoteBookingProxy mirror (tenant +
+    bot_user); the seam call cancels in Ayla and the proxy row flips to
+    ``cancelled`` ONLY via the booking.cancelled round-trip event — this
+    view never mutates the proxy directly (no dual-write). Cancel is
+    immediate: there is no two-step confirm/undo on the Ayla path.
+    """
+    import hashlib
+
+    from apps.booking.models import RemoteBookingProxy
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        BookingBadRequestError,
+        BookingUnavailableError,
+        get_ayla_booking_client,
+    )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    proxy = RemoteBookingProxy.all_tenants.filter(
+        tenant=bot_user.tenant,
+        appointment_id=booking_id,
+        bot_user=bot_user,
+    ).first()
+    if proxy is None:
+        # Covers foreign and orphan proxies alike — no existence leak.
+        return _error("not_found", "booking not found", 404)
+
+    seed = "|".join([external_user_id_for(bot_user), "cancel", str(booking_id)])
+    idempotency_key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+    try:
+        get_ayla_booking_client().cancel_appointment(
+            external_user_id=external_user_id_for(bot_user),
+            appointment_id=str(booking_id),
+            idempotency_key=idempotency_key,
+        )
+    except BookingBadRequestError as exc:
+        if exc.status_code == 404 or (exc.code or "").upper() == "NOT_FOUND":
+            return _error("not_found", "booking not found", 404)
+        logger.info("miniapp_api.cancel_booking.ayla_bad_request err=%s", exc)
+        return _error(
+            "invalid_state",
+            "booking cannot be cancelled in its current state",
+            409,
+        )
+    except BookingUnavailableError:
+        logger.warning("miniapp_api.cancel_booking.ayla_unavailable")
+        return _error(
+            "upstream_unavailable",
+            "booking upstream is temporarily unavailable",
+            502,
+        )
+    except BookingAPIError:
+        logger.exception("miniapp_api.cancel_booking.ayla_error")
+        return _error(
+            "upstream_unavailable",
+            "booking upstream is temporarily unavailable",
+            502,
+        )
+
+    # The proxy stays untouched: the booking.cancelled round-trip event
+    # flips the status. The response mirrors the current row verbatim.
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy)})
+
+
 @require_http_methods(["GET"])
 @require_init_data
 @with_request_tenant
 def booking_detail(request: HttpRequest, booking_id: str) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return _booking_detail_ayla(bot_user, booking_id)
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -1120,6 +1341,8 @@ def booking_cancel_request(request: HttpRequest, booking_id: str) -> HttpRespons
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return _cancel_via_ayla(bot_user, booking_id)
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -1157,6 +1380,13 @@ def booking_cancel_confirm(request: HttpRequest, booking_id: str) -> HttpRespons
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        # Ayla-path cancel is immediate — no two-step confirm/undo.
+        return _error(
+            "invalid_state",
+            "cancel is immediate on the Ayla path — no two-step confirm",
+            409,
+        )
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -1191,6 +1421,13 @@ def booking_cancel_undo(request: HttpRequest, booking_id: str) -> HttpResponse:
     )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        # Ayla-path cancel is immediate — no two-step confirm/undo.
+        return _error(
+            "invalid_state",
+            "cancel is immediate on the Ayla path — no undo window",
+            409,
+        )
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
