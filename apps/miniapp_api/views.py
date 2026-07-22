@@ -746,7 +746,11 @@ def _create_booking_via_ayla(
         record = get_ayla_booking_client().create_appointment(
             external_user_id=external_user_id_for(bot_user),
             client_id=str(ayla_user_id),
-            specialist_id=str(master.ayla_user_id),
+            # #1027 / W4-эскалация №2: Ayla create expects the
+            # SpecialistProfile UUID (= CatalogMaster.id per the masters
+            # mirror mapping), NOT master.ayla_user_id (the Ayla User
+            # UUID — that one is the AMD-005 BILLING key only).
+            specialist_id=str(master.id),
             service_id=str(service.ayla_service_id),
             start_datetime=visit_at.isoformat(),
             idempotency_key=idempotency_key,

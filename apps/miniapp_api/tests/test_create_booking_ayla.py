@@ -150,7 +150,10 @@ class TestPassthrough:
         assert resp.status_code == 201
         call = stub_client.calls[0]
         assert call["payment_required"] is False
-        assert call["specialist_id"] == str(MASTER_AYLA_ID)
+        assert call["specialist_id"] == str(master.id)
+        # #1027: SpecialistProfile UUID (= CatalogMaster.id), NEVER the
+        # Ayla User UUID (that one is the AMD-005 billing key only).
+        assert call["specialist_id"] != str(master.ayla_user_id)
         assert call["service_id"] == str(SERVICE_AYLA_ID)
         assert call["client_id"] == str(AYLA_UID)
         assert resp.json()["booking"]["status"] == "confirmed"
