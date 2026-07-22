@@ -671,6 +671,132 @@ _ERROR_SLUG_TO_STATUS = {
 }
 
 
+def _create_booking_via_ayla(
+    *,
+    bot_user,
+    tenant,
+    service_id: str,
+    master_id: str,
+    visit_at,
+    payment_required: bool,
+) -> HttpResponse:
+    """Ayla-first booking create (BOOKING_VIA_AYLA_REST ON).
+
+    Local mirror rows ground the Ayla ids; a miss fails CLOSED (no
+    silent local write on the Ayla path — the #1034 gate semantics).
+    ``payment_required`` passes through verbatim; the response keeps
+    the existing BookingItem shape with the canonical appointment id
+    and Ayla's status (``confirmed`` / ``awaiting_payment``) verbatim.
+    """
+    import hashlib
+
+    from apps.catalog.models import CatalogMaster, CatalogService
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        BookingBadRequestError,
+        BookingUnavailableError,
+        get_ayla_booking_client,
+    )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    ayla_user_id = getattr(bot_user, "ayla_user_id", None)
+    if not ayla_user_id:
+        return _error(
+            "identity_not_linked",
+            "user is not linked to Ayla yet — booking unavailable",
+            403,
+        )
+
+    try:
+        service = CatalogService.objects.get(id=service_id, is_active=True)
+    except CatalogService.DoesNotExist:
+        return _error("not_found", "service not found", 404)
+    try:
+        master = CatalogMaster.objects.bookable().get(id=master_id)
+    except CatalogMaster.DoesNotExist:
+        return _error("not_found", "master not found or not bookable", 404)
+
+    if not service.ayla_service_id or not master.ayla_user_id:
+        # Fail closed per the booking health-check gate (#1034): on the
+        # Ayla path an ungrounded row must NOT silently book anywhere.
+        logger.warning(
+            "miniapp_api.create_booking.ayla_grounding_miss service_id=%s master_id=%s",
+            service_id,
+            master_id,
+        )
+        return _error(
+            "service_unbookable",
+            "service is not synced to Ayla yet",
+            409,
+        )
+
+    seed = "|".join(
+        [
+            external_user_id_for(bot_user),
+            "create",
+            str(master.ayla_user_id),
+            str(service.ayla_service_id),
+            visit_at.isoformat(),
+            str(payment_required),
+        ]
+    )
+    idempotency_key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+    try:
+        record = get_ayla_booking_client().create_appointment(
+            external_user_id=external_user_id_for(bot_user),
+            client_id=str(ayla_user_id),
+            specialist_id=str(master.ayla_user_id),
+            service_id=str(service.ayla_service_id),
+            start_datetime=visit_at.isoformat(),
+            idempotency_key=idempotency_key,
+            payment_required=payment_required,
+        )
+    except BookingBadRequestError as exc:
+        if (exc.code or "").lower() == "subscription_past_due":
+            # C1: neutral surface — no debt semantics to the client
+            # (frozen W4 slug).
+            return _error(
+                "unavailable",
+                "Запись к этому специалисту сейчас недоступна",
+                409,
+            )
+        logger.info("miniapp_api.create_booking.ayla_bad_request err=%s", exc)
+        slug = "slot_unavailable" if "slot" in (exc.code or "") else "bad_request"
+        return _error(slug, "booking rejected", 409 if slug == "slot_unavailable" else 400)
+    except BookingUnavailableError:
+        logger.warning("miniapp_api.create_booking.ayla_unavailable")
+        return _error(
+            "upstream_unavailable",
+            "booking upstream is temporarily unavailable",
+            502,
+        )
+    except BookingAPIError:
+        logger.exception("miniapp_api.create_booking.ayla_error")
+        return _error(
+            "upstream_unavailable",
+            "booking upstream is temporarily unavailable",
+            502,
+        )
+
+    status = record.raw.get("status", "")
+    return JsonResponse(
+        {
+            "booking": {
+                "id": record.appointment_id,
+                "service_name": service.name,
+                "master_name": master.name,
+                "visit_at": visit_at.isoformat(),
+                "duration_min": service.duration_min,
+                # Ayla verbatim: confirmed (payment_required=false) or
+                # awaiting_payment (true, pending Payment created).
+                "status": status,
+            }
+        },
+        status=201,
+    )
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_init_data
@@ -704,6 +830,23 @@ def create_booking(request: HttpRequest) -> HttpResponse:
             "bad_request",
             "service_id, master_id and visit_at (ISO 8601) are required",
             400,
+        )
+
+    # AMD-019 / D6: miniapp accepts payment_required (default FALSE —
+    # the pilot no-prepayment baseline; FE sends true explicitly for the
+    # online path). On the Ayla path (BOOKING_VIA_AYLA_REST) the value
+    # rides to Ayla's create: false → CONFIRMED without Payment,
+    # true → AWAITING_PAYMENT + pending Payment. The chat flow's
+    # execute_confirm default (True) is intentionally NOT shared here.
+    payment_required = bool(body.get("payment_required", False))
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return _create_booking_via_ayla(
+            bot_user=bot_user,
+            tenant=tenant,
+            service_id=service_id,
+            master_id=master_id,
+            visit_at=visit_at,
+            payment_required=payment_required,
         )
 
     from apps.booking.services.create import (
