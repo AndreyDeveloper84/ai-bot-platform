@@ -39,7 +39,11 @@ from django.core.cache import cache
 
 from apps.audit.services import write_audit
 from apps.catalog.services.http_client import CatalogHttpClient
-from apps.catalog.services.upserter import UpsertResult, upsert_salon_services
+from apps.catalog.services.upserter import (
+    UpsertResult,
+    upsert_salon_services,
+    upsert_specialists,
+)
 from apps.events.services import emit
 
 if TYPE_CHECKING:
@@ -75,6 +79,7 @@ class SyncResult:
       skipped: True when the lock was held by another beat — we returned
                without doing work.
       services: CatalogService (salon-services) mirror counters.
+      masters: CatalogMaster (specialists) mirror counters — S3B masters.
       cursor_advanced_to: the new ``last_catalog_sync_at`` value (None when
                           ran=False or no rows touched).
     """
@@ -82,6 +87,7 @@ class SyncResult:
     ran: bool = False
     skipped: bool = False
     services: MirrorCounts = field(default_factory=MirrorCounts)
+    masters: MirrorCounts = field(default_factory=MirrorCounts)
     cursor_advanced_to: datetime | None = None
     error: str = ""
 
@@ -152,6 +158,20 @@ class CatalogSyncService:
 
         services_res = upsert_salon_services(tenant, salon_dtos)
 
+        # S3B masters mirror (specialists → CatalogMaster). A specialists
+        # fetch failure must not abort the services mirror that already
+        # landed — logged, counted as error, services result stands.
+        masters_res = UpsertResult()
+        try:
+            with http:
+                specialist_dtos = http.fetch_specialists()
+        except Exception as exc:  # noqa: BLE001 — per-mirror isolation
+            logger.exception("catalog.sync.fetch_specialists_failed tenant_id=%s", tenant.id)
+            specialist_dtos = []
+            masters_res.errors.append({"ayla_master_id": "?", "reason": str(exc)})
+        else:
+            masters_res = upsert_specialists(tenant, specialist_dtos)
+
         # Freshness signal only — not a fetch cursor (Ayla has no ?since=).
         new_cursor = _max_upstream_ts(salon_dtos)
         if new_cursor is not None:
@@ -161,16 +181,20 @@ class CatalogSyncService:
         result = SyncResult(
             ran=True,
             services=_to_counts(services_res),
+            masters=_to_counts(masters_res),
             cursor_advanced_to=new_cursor,
         )
 
         _audit_and_emit(tenant, result)
         logger.info(
-            "catalog.sync.completed tenant_id=%s services=%s/%s/%s cursor=%s",
+            "catalog.sync.completed tenant_id=%s services=%s/%s/%s masters=%s/%s/%s cursor=%s",
             tenant.id,
             result.services.created,
             result.services.updated,
             result.services.skipped,
+            result.masters.created,
+            result.masters.updated,
+            result.masters.skipped,
             new_cursor.isoformat() if new_cursor else "unchanged",
         )
         return result
@@ -201,7 +225,10 @@ def _max_upstream_ts(dtos: list[Any]) -> datetime | None:
 
 
 def _audit_and_emit(tenant: "Tenant", result: SyncResult) -> None:
-    counts_payload = {"services": _counts_dict(result.services)}
+    counts_payload = {
+        "services": _counts_dict(result.services),
+        "masters": _counts_dict(result.masters),
+    }
     write_audit(
         EVENT_CATALOG_SYNCED,
         target="Tenant",

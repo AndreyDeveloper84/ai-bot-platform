@@ -10,7 +10,10 @@ from django.core.cache import cache
 
 from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogService
-from apps.catalog.services.http_client import CatalogSalonServiceDTO
+from apps.catalog.services.http_client import (
+    CatalogSalonServiceDTO,
+    CatalogSpecialistDTO,
+)
 from apps.catalog.services.sync import (
     EVENT_CATALOG_SYNCED,
     CatalogSyncService,
@@ -50,10 +53,14 @@ class FakeHttpClient:
         self,
         *,
         services: list[CatalogSalonServiceDTO] | None = None,
+        specialists: list[CatalogSpecialistDTO] | None = None,
         raise_on_fetch: type[Exception] | None = None,
+        raise_on_specialists: type[Exception] | None = None,
     ) -> None:
         self._services = services or []
+        self._specialists = specialists or []
         self._raise = raise_on_fetch
+        self._raise_specialists = raise_on_specialists
         self.tenant_ids_seen: list[str] = []
 
     def fetch_salon_services(self, *, tenant_id: str) -> list[CatalogSalonServiceDTO]:
@@ -61,6 +68,11 @@ class FakeHttpClient:
             raise self._raise("synthetic")
         self.tenant_ids_seen.append(tenant_id)
         return self._services
+
+    def fetch_specialists(self) -> list[CatalogSpecialistDTO]:
+        if self._raise_specialists is not None:
+            raise self._raise_specialists("synthetic")
+        return self._specialists
 
     def close(self) -> None: ...
 
@@ -166,3 +178,58 @@ class TestIdempotent:
         assert result.services.created == 0
         assert result.services.updated == 1
         assert CatalogService.all_tenants.filter(tenant=tenant, ayla_service_id=aid).count() == 1
+
+
+def _specialist(mid: str, *, name: str = "Анна") -> CatalogSpecialistDTO:
+    return CatalogSpecialistDTO(
+        ayla_master_id=mid,
+        user_id=str(uuid.uuid4()),
+        name=name,
+        external_updated_at=_ts(),
+        experience="5",
+    )
+
+
+class TestMastersMirror:
+    def test_masters_upserted_in_same_cycle(self, tenant: Tenant) -> None:
+        mid = str(uuid.uuid4())
+        http = FakeHttpClient(specialists=[_specialist(mid)])
+        result = CatalogSyncService(http_client=http).run(tenant)
+        assert result.masters.created == 1
+        assert result.masters.errors == 0
+        from apps.catalog.models import CatalogMaster
+
+        m = CatalogMaster.all_tenants.get(tenant=tenant, id=mid)
+        assert m.name == "Анна"
+        assert m.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+
+    def test_specialists_fetch_failure_isolated(self, tenant: Tenant) -> None:
+        """A specialists fetch failure must not abort the services mirror."""
+        http = FakeHttpClient(
+            services=[_salon(str(uuid.uuid4()), name="Service 1")],
+            raise_on_specialists=RuntimeError,
+        )
+        result = CatalogSyncService(http_client=http).run(tenant)
+        assert result.ran is True
+        assert result.services.created == 1
+        assert result.masters.errors == 1
+
+    def test_rerun_masters_idempotent(self, tenant: Tenant) -> None:
+        mid = str(uuid.uuid4())
+        http = FakeHttpClient(specialists=[_specialist(mid)])
+        svc = CatalogSyncService(http_client=http)
+        svc.run(tenant)
+        result = svc.run(tenant)
+        assert result.masters.created == 0
+        assert result.masters.updated == 1
+        from apps.catalog.models import CatalogMaster
+
+        assert CatalogMaster.all_tenants.filter(id=mid).count() == 1
+
+    def test_audit_payload_carries_masters_counts(self, tenant: Tenant) -> None:
+        http = FakeHttpClient(specialists=[_specialist(str(uuid.uuid4()))])
+        CatalogSyncService(http_client=http).run(tenant)
+        log = AuditLog.all_tenants.filter(action=EVENT_CATALOG_SYNCED).first()
+        assert log is not None
+        assert "masters" in log.payload["counts"]
+        assert log.payload["counts"]["masters"]["created"] == 1

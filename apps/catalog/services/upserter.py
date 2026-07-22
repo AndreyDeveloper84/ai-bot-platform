@@ -44,7 +44,10 @@ from apps.catalog.models import CatalogService
 from apps.tenancy.context import tenant_scope
 
 if TYPE_CHECKING:
-    from apps.catalog.services.http_client import CatalogSalonServiceDTO
+    from apps.catalog.services.http_client import (
+        CatalogSalonServiceDTO,
+        CatalogSpecialistDTO,
+    )
     from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
@@ -122,3 +125,52 @@ def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
         "duration_min": dto.duration_min,
         "raw": dto.raw,
     }
+
+
+def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> UpsertResult:
+    """Upsert Ayla specialists into ``CatalogMaster`` for one tenant (S3B masters).
+
+    Keyed by the canonical Ayla SpecialistProfile.id (``CatalogMaster.id``).
+    Update overwrites ONLY mirror fields (name, bio, experience, rating,
+    review_count, is_active, ayla_user_id, external_updated_at, raw) —
+    platform-owned fields (invite_status, mode, photo_url, archived_at,
+    invited_at, max_handle, linked_bot_user) are NEVER touched by sync.
+
+    Missing-from-feed rows are kept as-is (same policy as salon-services:
+    upsert-only, no proactive deactivation — documented in the S3B PR
+    report). Per-row error isolation matches the services path.
+    """
+    from apps.catalog.models import CatalogMaster
+
+    result = UpsertResult()
+    with tenant_scope(tenant), transaction.atomic():
+        for dto in dtos:
+            try:
+                with transaction.atomic():
+                    _obj, created = CatalogMaster.objects.update_or_create(
+                        tenant=tenant,
+                        id=dto.ayla_master_id,
+                        defaults={
+                            "name": dto.name,
+                            "bio": dto.bio,
+                            "experience": dto.experience,
+                            "rating": dto.rating,
+                            "review_count": dto.review_count,
+                            "is_active": dto.is_active,
+                            "ayla_user_id": dto.user_id,
+                            "external_updated_at": dto.external_updated_at,
+                            "raw": dto.raw,
+                        },
+                    )
+                    if created:
+                        result.created += 1
+                    else:
+                        result.updated += 1
+            except Exception as exc:  # noqa: BLE001 — per-row safety net
+                ayla_id = getattr(dto, "ayla_master_id", "?")
+                result.errors.append({"ayla_master_id": ayla_id, "reason": str(exc)})
+                logger.exception(
+                    "catalog.upsert.row_failed model=CatalogMaster ayla_master_id=%s",
+                    ayla_id,
+                )
+    return result
