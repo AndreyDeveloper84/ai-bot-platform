@@ -67,7 +67,8 @@ export type CustomerVisibleStatus =
   | "completed"
   | "no_show"
   | "refund_pending"
-  | "refund_completed";
+  | "refund_completed"
+  | "awaiting_payment";
 
 /** Colour tint vocabulary — drives CSS class suffix on `<StatusBadge>`. */
 export type StatusTint = "sage" | "muted" | "warning";
@@ -128,6 +129,14 @@ export const STATUS_VOCABULARY: Record<CustomerVisibleStatus, StatusRendering> =
       icon: "money-check",
       tint: "sage",
     },
+    // C7 online path — booking created, payment not finished yet
+    // (webview in progress / pending). Neutral muted, NOT warning:
+    // nothing went wrong, the customer just hasn't paid yet.
+    awaiting_payment: {
+      label: "Ожидает оплаты",
+      icon: "clock",
+      tint: "muted",
+    },
   };
 
 /**
@@ -140,6 +149,10 @@ const BACKEND_ALIAS_MAP: Record<string, CustomerVisibleStatus> = {
   // confirmed family
   confirmed: "confirmed",
   in_progress: "confirmed", // visit started but not yet completed — treat as "still active" UI
+
+  // C7 online path (payment created, not yet captured)
+  awaiting_payment: "awaiting_payment",
+  payment_pending: "awaiting_payment",
 
   // rescheduled
   rescheduled: "rescheduled",
@@ -234,6 +247,7 @@ export function sectionFor(status: CustomerVisibleStatus | "unknown"):
   switch (status) {
     case "confirmed":
     case "rescheduled":
+    case "awaiting_payment":
       return "upcoming";
     case "cancelled_customer":
     case "provider_cancelled":

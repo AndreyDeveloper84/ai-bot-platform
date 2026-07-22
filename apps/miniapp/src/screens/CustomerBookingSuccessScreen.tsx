@@ -25,6 +25,7 @@
 
 import { useEffect } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { formatVisitFull } from "../lib/format";
@@ -36,6 +37,8 @@ interface SuccessState {
   visit_at?: string;
   /** C7.4 — booking created but the payment create failed right after. */
   payment_start_failed?: boolean;
+  /** C7.3 — capture_state right after payment create (online path). */
+  payment_capture_state?: string | null;
 }
 
 export function CustomerBookingSuccessScreen() {
@@ -80,6 +83,10 @@ export function CustomerBookingSuccessScreen() {
     >
       <h1 className="customer-success__headline">{headline}</h1>
       <p className="customer-success__sub">{reminderCopy}</p>
+
+      {/* C7.3 — online path: payment status right on the success
+          screen («Зарезервировано» after create). Hidden otherwise. */}
+      <PaymentStatusBadge state={s.payment_capture_state} />
 
       {/* C7.4 — the booking exists; only the payment start failed.
           Never imply the booking failed (duplicate-create risk). */}

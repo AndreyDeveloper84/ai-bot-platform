@@ -40,6 +40,17 @@ describe("mapBookingStatus", () => {
     expect(mapBookingStatus("in_progress").status).toBe("confirmed");
   });
 
+  it("maps awaiting_payment to «Ожидает оплаты» (C7 online path)", () => {
+    const mapped = mapBookingStatus("awaiting_payment");
+    expect(mapped.status).toBe("awaiting_payment");
+    expect(mapped.rendering.label).toBe("Ожидает оплаты");
+    expect(mapped.rendering.tint).toBe("muted");
+  });
+
+  it("keeps awaiting_payment in the upcoming section", () => {
+    expect(sectionFor("awaiting_payment")).toBe("upcoming");
+  });
+
   it("normalises case and whitespace before lookup", () => {
     expect(mapBookingStatus("  Confirmed ").status).toBe("confirmed");
   });

@@ -84,7 +84,11 @@ export function BookingWhenScreen() {
 
   function onContinue() {
     if (!draft.visitAt) return;
-    navigate("/book/confirm");
+    // Wave 0 flow unification: the service-first chain also lands on
+    // the payment-capable confirmation screen (payment choice C7.4
+    // lives there; the legacy /book/confirm has none and stays
+    // reachable only for deep links).
+    navigate("/customer/booking/confirm");
   }
 
   if (state.kind === "loading") {
