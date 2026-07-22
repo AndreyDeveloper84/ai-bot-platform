@@ -36,6 +36,7 @@ import logging
 from celery import shared_task  # type: ignore[import-untyped]
 
 from apps.catalog.services.sync import CatalogSyncService, SyncResult
+from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
 from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,15 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
 
     service = CatalogSyncService()
     for tenant in Tenant.objects.all().iterator():
+        # Skip the global_bot sentinel (#1019): it owns tenant-less global
+        # BotUsers + discovery, NOT a salon catalog — the Ayla fetch with
+        # its UUID returns 400 every cycle (perpetual tenants_failed=1 +
+        # monitoring noise). Marker: GLOBAL_BOT_TENANT_SLUG from
+        # apps.identity.constants — the same single source of truth the
+        # identity resolver uses, so the sentinel can't drift past the
+        # exclusion. The row itself is NOT touched (it must stay alive).
+        if tenant.slug == GLOBAL_BOT_TENANT_SLUG:
+            continue
         try:
             result = service.run(tenant)
         except Exception:

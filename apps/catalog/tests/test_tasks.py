@@ -119,3 +119,27 @@ class TestAccumulator:
         assert counters["total_created"] == 1 * len(tenants)
         assert counters["total_updated"] == 2 * len(tenants)
         assert counters["total_skipped"] == 5 * len(tenants)
+
+
+class TestSentinelExclusion:
+    """Staging hygiene: the global_bot sentinel must NOT get a catalog
+    sync fan-out (it owns tenant-less global BotUsers + discovery, not a
+    salon catalog — its Ayla fetch 400s every cycle)."""
+
+    def test_global_bot_skipped_salon_synced(self, db) -> None:
+        Tenant.objects.all().delete()
+        sentinel = Tenant.objects.create(slug="global_bot", name="Global Bot Identity")
+        salon = Tenant.objects.create(slug="formula-tela", name="Formula Tela")
+
+        with patch("apps.catalog.tasks.CatalogSyncService") as MockService:
+            instance = MockService.return_value
+            instance.run.return_value = _result(created=1)
+            counters = sync_catalog_for_all_tenants()
+
+        assert instance.run.call_count == 1
+        instance.run.assert_called_once_with(salon)
+        assert counters["tenants_run"] == 1
+        assert counters["tenants_failed"] == 0
+        # The sentinel row itself is untouched (alive, untouched by sync).
+        sentinel.refresh_from_db()
+        assert sentinel.slug == "global_bot"
