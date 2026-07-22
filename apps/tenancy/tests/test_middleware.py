@@ -237,3 +237,50 @@ class TestContextVarReset:
         # threading.local under thread reuse).
         assert r1.tenant.id == t1.id
         assert r2.tenant.slug == "t2"
+
+
+class TestInternalEventsOptOut:
+    """Staging round-trip finding: the cross-service event ingest must
+    not be strict-blocked — Ayla's publisher never sends X-Tenant by
+    design (tenancy lives per-event in the envelope and is enforced by
+    apps.eventbus.ingest_tenancy). The middleware carries NO security
+    function on this path; HMAC/timestamp/rate-limit/IP live in the
+    view (fail-closed preserved: no signature → 401 there)."""
+
+    def test_ingest_without_header_passes_tenant_gate(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        downstream_called: list[bool] = []
+
+        def downstream(_):
+            downstream_called.append(True)
+            return ("ok", None)
+
+        request = RequestFactory().post("/api/v1/internal/events/ingest")
+        response, _ = _call(request, response_func=downstream)
+        # Gate passes: downstream (the view) runs and answers 401 on its
+        # own HMAC check — middleware must NOT pre-empt with TENANT_REQUIRED.
+        assert downstream_called == [True]
+        assert isinstance(response, tuple)
+
+    def test_ingest_with_valid_header_still_resolves(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        Tenant.objects.create(slug="formula", name="F")
+        request = RequestFactory().post(
+            "/api/v1/internal/events/ingest",
+            HTTP_X_TENANT="formula",
+        )
+        response, captured = _call(request)
+        # Opting out of the REQUIREMENT doesn't break header resolution
+        # when the header IS present.
+        assert request.tenant is not None
+        assert captured and captured[0] is not None
+        assert isinstance(response, tuple)
+
+    def test_other_internal_paths_still_require_tenant(self, settings):
+        """Regression: the opt-out is scoped to /api/v1/internal/events/
+        only — sibling internal paths keep the strict requirement."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+        request = RequestFactory().post("/api/v1/internal/users/123/personal-context/")
+        response, _ = _call(request)
+        assert response.status_code == 400
+        assert b"TENANT_REQUIRED" in response.content

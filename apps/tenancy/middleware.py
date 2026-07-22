@@ -85,6 +85,16 @@ STRICT_OPT_OUT_PREFIXES = (
     # forensic-capture design. Removed by the cleanup PR alongside
     # the apps.integrations.yookassa_retired package.
     "/api/v1/yookassa/",
+    # Cross-service event ingest (ADR-0009): the Ayla outbox publisher
+    # never sends X-Tenant BY DESIGN — tenancy is per-event inside the
+    # envelope and resolved by apps.eventbus.ingest_tenancy (fail-closed
+    # when tenant_id mismatches user_id). The endpoint is multi-tenant
+    # and carries its own security stack (HMAC-SHA256 + timestamp
+    # anti-replay, rate limit, IP allowlist) — the same ingress pattern
+    # as /api/v1/ingress/ above. Staging round-trip finding: without this
+    # opt-out strict_block answered 400 TENANT_REQUIRED to every
+    # legitimate booking.*/payment.*/billing.* delivery.
+    "/api/v1/internal/events/",
 )
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.
