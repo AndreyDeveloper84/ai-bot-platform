@@ -65,6 +65,21 @@ repos:
         # file is actually staged. Unrelated commits → no invocation,
         # no failure.
 
+      # W0-X1 sensitive-filename denylist. Blocks credential-bearing
+      # names (.env, *.pem, *.p12, *service-account*.json, ...) even
+      # when detect-secrets entropy scanning would not flag them —
+      # e.g. a force-added Firebase service-account JSON. Paths only;
+      # never reads file contents. `.example` templates stay allowed.
+      - id: sensitive-file-guard
+        name: Refuse credential-bearing filenames (.env, *.pem, service-account JSON, ...)
+        entry: python tools/lint/sensitive_file_guard.py
+        language: system
+        # The script inspects the staged diff itself (paths only, never
+        # contents), so pre-commit must not pass filenames and the hook
+        # must run on every commit.
+        pass_filenames: false
+        always_run: true
+
       # Red-zone direct-access guard (#229 + spec §13 row 14.25). AST
       # scan blocks direct ORM reads of red MemoryEntry rows outside
       # the sanctioned `RedZoneReader` accessor. First line of defence

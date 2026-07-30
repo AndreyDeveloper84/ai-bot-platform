@@ -41,9 +41,11 @@ local_settings.py
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.*.example
 .env.local
 .env.*.local
-!.env.example
 
 # Claude Code MCP server config — must never be committed. Contains
 # Figma / Notion / similar third-party API tokens (per issue #419).
@@ -79,6 +81,21 @@ coverage.xml
 secrets/
 *.pem
 *.key
+*.p12
+*.pfx
+
+# Sensitive files (W0-X1 denylist) — credential-bearing filenames that
+# must never enter git even if entropy scanning would not flag them.
+# Placeholder templates keep an explicit `.example` suffix.
+id_rsa
+id_ed25519
+firebase-admin.json
+*firebase-adminsdk*.json
+*service-account*.json
+*service_account*.json
+credentials.json
+client_secret*.json
+!*.example
 
 # KB-RAG Sub-4 (GH #117) — Google Docs service-account JSON keys.
 # The runbook puts the file at `infra/secrets/gdocs-sa.json`. The

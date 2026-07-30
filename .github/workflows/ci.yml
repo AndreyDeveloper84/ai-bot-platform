@@ -136,6 +136,27 @@ jobs:
       - name: Import-boundary guard (AST lint)
         run: uv run python tools/lint/import_boundaries.py apps/
 
+      # W0-X1 secret containment, mirroring the pre-commit hooks:
+      #   1. filename denylist — refuses credential-bearing names even
+      #      when entropy scanning would not flag them (paths only);
+      #   2. detect-secrets baseline audit — fails on any secret not
+      #      already recorded in the checked-in .secrets.baseline.
+      - name: Sensitive filename guard
+        run: uv run python tools/lint/sensitive_file_guard.py --all
+
+      - name: detect-secrets (baseline audit)
+        # detect-secrets-hook is the gating entry point: it exits
+        # non-zero on any scanned secret not recorded in the baseline
+        # (plain `scan --baseline` does not gate). File set mirrors the
+        # pre-commit hook's `exclude` so CI and local rules stay
+        # compatible. The pragma on the `run:` line marks the pinned
+        # package spec, which trips the Secret Keyword heuristic (the
+        # allowlist filter anchors on the YAML block's opening line).
+        run: |  # pragma: allowlist secret
+          git ls-files \
+            | grep -vE '^(\.secrets\.baseline|uv\.lock|.*\.lock|tests/fixtures/.*|legacy_maxbot/.*|legacy_formulatela_mcp/.*|legacy_notifications/.*)$' \
+            | xargs uv run --with detect-secrets==1.5.0 detect-secrets-hook --baseline .secrets.baseline
+
       - name: Django manage.py check
         run: uv run python manage.py check
 
