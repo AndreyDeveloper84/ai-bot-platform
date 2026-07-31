@@ -67,6 +67,16 @@ from apps.bookings.escalation import escalate_stale_reminders  # noqa: F401
 # Re-export R3's post-visit follow-up task — same autodiscover rationale.
 from apps.bookings.followups import send_post_visit_followups  # noqa: F401
 
+# Shared send-time booking-state re-check (P0 PRE_PILOT). Lives in the
+# dependency-neutral ``services.recheck`` module so this beat and the
+# R2 escalation beat share one canonical implementation without
+# importing each other (W0-B1A — the tasks ↔ escalation import cycle).
+from apps.bookings.services.recheck import (
+    _ACTION_DEFER,
+    _ACTION_DROP,
+    _recheck_booking_state,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -149,93 +159,12 @@ def _target_status(kind: str) -> str:
 
 # ── Send-time booking-state re-check (P0 PRE_PILOT, founder sequence #2) ──
 #
-# Between the moment a reminder is scheduled (T-24h or T-2h before visit)
-# and the moment the beat dispatcher claims it, the underlying booking
-# may have flipped state — customer cancelled via B5, admin rescheduled,
-# visit already happened. Sending in those states = «Ayla напомнила о
-# записи которую я отменила» = trust break.
-#
-# This helper re-fetches the linked ``BookingRequest`` mirror at dispatch
-# time and classifies the action к take:
-#
-#   * **send** — booking still CONFIRMED + not completed; proceed normally.
-#   * **drop** — booking moved к a terminal-invalid state. Reminder
-#                transitions к ``STALE_DROPPED`` (audit trail), no send.
-#   * **defer** — booking is in an interim reversible state
-#                 (CANCEL_REQUESTED / RESCHEDULE_REQUESTED within undo
-#                 window). Skip THIS tick без CAS; next 15-min tick
-#                 re-checks. Avoids the «user un-cancels but reminder
-#                 already dropped» edge case.
-#
-# Action constants live as plain strings (no Enum) — minimum surface for a
-# 3-state classifier; callers branch on equality directly.
-_ACTION_SEND = "send"
-_ACTION_DROP = "drop"
-_ACTION_DEFER = "defer"
-
-
-def _recheck_booking_state(reminder: BookingReminder) -> tuple[str, str]:
-    """Classify the dispatch action for ``reminder`` based on current
-    booking state. See module-level rationale block above for verbatim
-    state-mapping table.
-
-    Returns:
-      A ``(action, reason)`` pair. ``reason`` is a stable slug suitable
-      для audit payload / log line correlation. Caller chooses what к
-      do based on ``action``.
-
-    ### NULL FK / Ayla-path handling
-
-    ``BookingReminder.booking_request`` may be NULL для:
-
-      * Legacy rows pre-B5 (B5 introduced ``BookingRequest.status``
-        enum and the FK on the reminder).
-      * Ayla-path rows that link via ``ayla_appointment_id`` instead.
-
-    Both cases return ``(send, "null_fk_legacy_or_ayla_path")`` — known
-    Phase 0 gap. Ayla-path stale detection lands в Phase 1 (Ayla emits
-    ``appointment.cancelled`` event → bot-platform consumer pre-emptively
-    drops the reminder). Documented prominently в PR description.
-    """
-    booking_request = reminder.booking_request
-    if booking_request is None:
-        # NULL FK = legacy row OR Ayla-path. Pilot-scope gap.
-        return (_ACTION_SEND, "null_fk_legacy_or_ayla_path")
-
-    # Completed visit — T-2h reminder for already-happened appointment
-    # is absurd; T-24h race window technically impossible (visit_at < 24h
-    # away can't be completed yet) but defensive check costs nothing.
-    if booking_request.completed_at is not None:
-        return (_ACTION_DROP, "booking_completed")
-
-    # Import locally to avoid module-import cycle с apps.booking.models
-    # (which may reach back into bookings via signals).
-    from apps.booking.models import BookingRequest
-
-    status = booking_request.status
-    if status in (
-        BookingRequest.Status.CANCELLED,
-        BookingRequest.Status.RESCHEDULED,
-    ):
-        return (_ACTION_DROP, f"booking_status_{status}")
-
-    if status in (
-        BookingRequest.Status.CANCEL_REQUESTED,
-        BookingRequest.Status.RESCHEDULE_REQUESTED,
-    ):
-        # Interim reversible state (~5s undo window per booking spec).
-        # Defer без CAS so user can revert and still receive reminder.
-        return (_ACTION_DEFER, f"booking_status_{status}")
-
-    if status == BookingRequest.Status.CONFIRMED:
-        return (_ACTION_SEND, "booking_confirmed")
-
-    # Unknown / future status (mirror may receive new Ayla state slugs
-    # before this code learns about them — e.g. ``provider_cancelled``,
-    # ``no_show``, ``dispute`` arrive в Phase 1). Conservative default:
-    # defer + log. Better к miss a few reminders one tick than send for
-    # a state we don't understand.
-    return (_ACTION_DEFER, f"booking_status_unknown_{status}")
+# The classifier (``_recheck_booking_state`` + the ``_ACTION_*``
+# constants) lives in :mod:`apps.bookings.services.recheck` — imported
+# at the top of this module. It was moved there to break the
+# tasks ↔ escalation import cycle (W0-B1A): the R2 escalation beat
+# shares the same canonical drop/defer rules, and a sibling-module
+# import made the two Celery task modules depend on each other.
 
 
 @shared_task(name="bookings.send_due_reminders")
@@ -287,8 +216,9 @@ def send_due_reminders() -> dict[str, int]:
     deferred = 0
     for row in due_qs:
         # Send-time re-check invariant (P0 PRE_PILOT). See
-        # ``_recheck_booking_state`` docstring + module-level rationale
-        # block above the helper для full state-mapping table.
+        # ``_recheck_booking_state`` docstring + the module-level
+        # rationale block in ``apps.bookings.services.recheck`` для
+        # full state-mapping table.
         action, reason = _recheck_booking_state(row)
         if action == _ACTION_DEFER:
             # Interim reversible state OR unknown status. Don't touch

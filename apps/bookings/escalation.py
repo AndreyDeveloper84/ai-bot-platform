@@ -95,14 +95,17 @@ from apps.booking.models import BookingReminder
 from apps.channels.max.outbound import MaxAPIError, send_message
 
 # E0 #6 — send-time booking-state recheck. The same helper governs
-# the T-24h / T-2h dispatch loop in `tasks.py`; reusing it here keeps
-# the canonical drop/defer rules aligned between dispatch and
-# escalation. Per founder verdict 2026-06-01 the escalation pipeline
-# was missing this recheck → a salon manager could receive "Клиент
-# не подтвердил" DMs for bookings the client had ALREADY cancelled
-# through Ayla. Especially relevant during pilot's A2 dual-source
-# state window (memory: adr_0009_yclients_webhook_shrink_post_pilot).
-from apps.bookings.tasks import (  # noqa: E501
+# the T-24h / T-2h dispatch loop in `tasks.py`; sharing it via the
+# dependency-neutral `services.recheck` module keeps the canonical
+# drop/defer rules aligned between dispatch and escalation WITHOUT a
+# sibling-module import (the tasks ↔ escalation import cycle, W0-B1A,
+# broke pytest collection and Celery autodiscovery). Per founder
+# verdict 2026-06-01 the escalation pipeline was missing this recheck
+# → a salon manager could receive "Клиент не подтвердил" DMs for
+# bookings the client had ALREADY cancelled through Ayla. Especially
+# relevant during pilot's A2 dual-source state window
+# (memory: adr_0009_yclients_webhook_shrink_post_pilot).
+from apps.bookings.services.recheck import (
     _ACTION_DEFER,
     _ACTION_DROP,
     _recheck_booking_state,
