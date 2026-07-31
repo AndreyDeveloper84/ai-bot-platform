@@ -21,9 +21,8 @@ as steps move around in future sprints.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from opentelemetry import trace
@@ -34,26 +33,24 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 from apps.llm.protocol import CompletionResult
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
+from tests.helpers.fake_intent_llm import patch_intent_llm
 
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
-_INTENT_JSON = json.dumps(
-    {
-        "intent": "faq",
-        "skill": "faq",
-        "confidence": 0.92,
-        "risk_level": "low",
-        "missing_slots": [],
-        "reply_mode": "text",
-        "needs_rag": False,
-        "needs_tool": False,
-    }
-)
+_INTENT_PAYLOAD: dict[str, Any] = {
+    "intent": "faq",
+    "skill": "faq",
+    "confidence": 0.92,
+    "risk_level": "low",
+    "missing_slots": [],
+    "reply_mode": "text",
+    "needs_rag": False,
+    "needs_tool": False,
+}
 
 
 # Module-level exporter — OTel's set_tracer_provider is process-global
@@ -62,18 +59,6 @@ _INTENT_JSON = json.dumps(
 # provider is currently global, so spans land in this module's exporter
 # regardless of which test module booted OTel first.
 _MODULE_EXPORTER = InMemorySpanExporter()
-
-
-def _intent_provider() -> AsyncMock:
-    provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=_INTENT_JSON,
-        model="mock",
-        is_fallback=False,
-        tokens_in=5,
-        tokens_out=10,
-    )
-    return provider
 
 
 _PROCESSOR_INSTALLED = False
@@ -122,10 +107,7 @@ def _stub_external() -> Any:
         finish_reason="stop",
     )
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=_intent_provider(),
-        ),
+        patch_intent_llm(intent_payload=_INTENT_PAYLOAD, delegate_skills=("faq",)),
         patch.object(FaqProvider, "complete", return_value=faq_completion),
         patch.object(FaqProvider, "embedding", return_value=[0.5] * 8),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),

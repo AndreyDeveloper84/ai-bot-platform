@@ -20,45 +20,21 @@ end-to-end traces off this file.
 
 from __future__ import annotations
 
-import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from asgiref.sync import sync_to_async
 
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
+from tests.helpers.fake_intent_llm import patch_intent_llm
 
 
 pytestmark = [
     pytest.mark.django_db(transaction=True),
     pytest.mark.asyncio,
 ]
-
-
-def _fake_provider() -> AsyncMock:
-    provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=json.dumps(
-            {
-                "intent": "faq",
-                "skill": "faq",
-                "confidence": 0.9,
-                "risk_level": "low",
-                "missing_slots": [],
-                "reply_mode": "text",
-                "needs_rag": False,
-                "needs_tool": False,
-            }
-        ),
-        model="mock",
-        is_fallback=False,
-        tokens_in=10,
-        tokens_out=20,
-    )
-    return provider
 
 
 def _message(text: str, *, tenant_slug: str = "o10-test", chan_uid: str = "o10-uid"):
@@ -81,10 +57,7 @@ def tenant():
 @pytest.fixture(autouse=True)
 def _stub_external():
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=_fake_provider(),
-        ),
+        patch_intent_llm(),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),
     ):
         yield
@@ -115,13 +88,15 @@ class TestFullStackTurn:
 
     async def test_replay_trace_captured_with_step_payloads(self, tenant, settings):
         settings.REPLAY_SAMPLE_RATE_TEST = 1.0
-        result = await turn(_message("когда работаете"))
+        await turn(_message("когда работаете"))
 
         from apps.replay.models import ReplayTrace
 
-        trace = await sync_to_async(
-            lambda: ReplayTrace.all_tenants.filter(trace_id=result.trace_id).first()
-        )()
+        # Match on tenant, not result.trace_id: the recorder binds the row's
+        # trace_id to the active OTel span id when a real TracerProvider is
+        # installed (Sprint 8 / T4 / DRF-708), which happens when test_otel.py
+        # ran earlier in the same pytest process.
+        trace = await sync_to_async(lambda: ReplayTrace.all_tenants.filter(tenant=tenant).first())()
         assert trace is not None
         # O8 multi-step shape — must have at least inbound/intent/skill/composer.
         steps = trace.pipeline_steps

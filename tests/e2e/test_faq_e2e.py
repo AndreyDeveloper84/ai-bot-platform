@@ -18,10 +18,9 @@ regressions in the F1↔F2↔O1↔O2 contract that the unit suite cannot.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,9 +30,9 @@ from django.core.cache import cache
 from apps.kb.chromadb_client import ChromaClient, KbItem, reset_client_cache
 from apps.llm.protocol import CompletionResult, ToolCall
 from apps.llm.router import reset_router_cache
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
+from tests.helpers.fake_intent_llm import patch_intent_llm
 
 
 pytestmark = [
@@ -43,28 +42,17 @@ pytestmark = [
 ]
 
 
-def _fake_intent_provider() -> AsyncMock:
-    """Intent classifier that pins to FAQ for these tests."""
-    provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=json.dumps(
-            {
-                "intent": "faq",
-                "skill": "faq",
-                "confidence": 0.92,
-                "risk_level": "low",
-                "missing_slots": [],
-                "reply_mode": "text",
-                "needs_rag": True,
-                "needs_tool": True,
-            }
-        ),
-        model="gpt-4o-mini-mock",
-        is_fallback=False,
-        tokens_in=8,
-        tokens_out=16,
-    )
-    return provider
+# Pinned intent payload — FAQ-shaped classifier output for these tests.
+_INTENT_PAYLOAD: dict[str, Any] = {
+    "intent": "faq",
+    "skill": "faq",
+    "confidence": 0.92,
+    "risk_level": "low",
+    "missing_slots": [],
+    "reply_mode": "text",
+    "needs_rag": True,
+    "needs_tool": True,
+}
 
 
 def _completion(
@@ -145,7 +133,6 @@ def _message(text: str) -> ChannelMessage:
 def _stub_external():
     """Mock the two LLM seams + MAX outbound. Yields no value."""
 
-    intent_provider = _fake_intent_provider()
     tc = ToolCall(
         id="call-1",
         name="search_knowledge_base",
@@ -159,10 +146,7 @@ def _stub_external():
     from apps.llm.providers.openai_provider import OpenAIProvider
 
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=intent_provider,
-        ),
+        patch_intent_llm(intent_payload=_INTENT_PAYLOAD, delegate_skills=("faq",)),
         patch.object(OpenAIProvider, "complete", side_effect=completions),
         patch.object(OpenAIProvider, "embedding", return_value=[0.9] * 8),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),
@@ -175,7 +159,6 @@ def _stub_external_empty():
     """Intent + first LLM call still hits — empty chromadb forces handoff
     BEFORE the second call, so we only need ONE completion in the side_effect.
     """
-    intent_provider = _fake_intent_provider()
     tc = ToolCall(
         id="call-1",
         name="search_knowledge_base",
@@ -186,10 +169,7 @@ def _stub_external_empty():
     from apps.llm.providers.openai_provider import OpenAIProvider
 
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=intent_provider,
-        ),
+        patch_intent_llm(intent_payload=_INTENT_PAYLOAD, delegate_skills=("faq",)),
         patch.object(OpenAIProvider, "complete", side_effect=completions),
         patch.object(OpenAIProvider, "embedding", return_value=[0.9] * 8),
         patch("apps.channels.max.outbound.send_message", return_value={"ok": True}),

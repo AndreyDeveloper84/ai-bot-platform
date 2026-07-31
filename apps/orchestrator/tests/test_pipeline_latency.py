@@ -7,9 +7,12 @@ cost stays well within budget.
 
 ### What's mocked
 
-- **OpenAIProvider.complete** — returns a pinned LLMResponse instantly
-  (no real LLM call). Simulates the "best case" — production p95 is
-  dominated by LLM round-trip; in-process work should be <50ms.
+- **Intent provider** — faked at the current production boundary
+  (``apps.llm.router.get_router`` via
+  :func:`tests.helpers.fake_intent_llm.patch_intent_llm`); returns a
+  pinned IntentDecision instantly (no real LLM call). Simulates the
+  "best case" — production p95 is dominated by LLM round-trip;
+  in-process work should be <50ms.
 - **send_message** (MAX outbound) — returns success instantly.
 
 ### What's measured
@@ -33,51 +36,22 @@ histograms off the same instrumentation hooks this test exercises.
 
 from __future__ import annotations
 
-import json
 import statistics
 import time
-from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
+from tests.helpers.fake_intent_llm import patch_intent_llm
 
 
 pytestmark = [
     pytest.mark.django_db(transaction=True),
     pytest.mark.asyncio,
 ]
-
-
-# Pinned intent decision payload — same as test_pipeline.py.
-_INTENT_JSON = json.dumps(
-    {
-        "intent": "faq",
-        "skill": "faq",
-        "confidence": 0.9,
-        "risk_level": "low",
-        "missing_slots": [],
-        "reply_mode": "text",
-        "needs_rag": False,
-        "needs_tool": False,
-    }
-)
-
-
-def _mock_provider() -> Any:
-    provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=_INTENT_JSON,
-        model="mock",
-        is_fallback=False,
-        tokens_in=10,
-        tokens_out=20,
-    )
-    return provider
 
 
 def _message(text: str = "когда работаете?") -> ChannelMessage:
@@ -101,10 +75,7 @@ def tenant():
 def _stub_external_io():
     """Mock LLM + outbound — measure in-process pipeline cost only."""
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=_mock_provider(),
-        ),
+        patch_intent_llm(),
         patch(
             "apps.channels.max.outbound.send_message",
             return_value={"ok": True},

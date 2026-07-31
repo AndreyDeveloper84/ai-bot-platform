@@ -4,58 +4,34 @@ Integration-style tests with mocked LLM. Each test drives a real
 ChannelMessage through `turn()` and asserts the 19-step flow produces
 the expected TurnResult shape.
 
-The OpenAIProvider is patched to return a deterministic IntentDecision
-so we don't burn LLM calls in CI.
+The intent provider is faked at the current production boundary
+(``apps.llm.router.get_router`` via
+:func:`tests.helpers.fake_intent_llm.patch_intent_llm`) so we don't burn
+LLM calls in CI.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 from asgiref.sync import sync_to_async
 
 from apps.orchestrator.intent_router import IntentDecision
-from apps.orchestrator.llm.openai_provider import LLMResponse
 from apps.orchestrator.pipeline import (
     ChannelMessage,
     TurnResult,
     turn,
 )
 from apps.tenancy.models import Tenant
+from tests.helpers.fake_intent_llm import patch_intent_llm
 
 
 pytestmark = [
     pytest.mark.django_db(transaction=True),
     pytest.mark.asyncio,
 ]
-
-
-def _fake_llm(intent: str = "faq", risk_level: str = "low"):
-    """Build a fake provider whose complete() returns a pinned IntentDecision JSON."""
-    import json
-
-    payload = {
-        "intent": intent,
-        "skill": intent,
-        "confidence": 0.9,
-        "risk_level": risk_level,
-        "missing_slots": [],
-        "reply_mode": "text",
-        "needs_rag": False,
-        "needs_tool": False,
-    }
-    response = LLMResponse(
-        content=json.dumps(payload),
-        model="gpt-4o-mini-mock",
-        is_fallback=False,
-        tokens_in=10,
-        tokens_out=20,
-    )
-    provider = AsyncMock()
-    provider.complete.return_value = response
-    return provider
 
 
 def _message(text: str = "сколько стоит массаж?", tenant_slug: str = "o1-test"):
@@ -76,12 +52,9 @@ def tenant():
 
 
 @pytest.fixture(autouse=True)
-def _stub_provider():
+def _stub_intent_llm():
     """Default: every test gets the faq-intent fake LLM unless overridden."""
-    with patch(
-        "apps.orchestrator.intent_router.OpenAIProvider",
-        return_value=_fake_llm(),
-    ):
+    with patch_intent_llm():
         yield
 
 
@@ -437,14 +410,17 @@ class TestErrorPath:
 class TestReplayCapture:
     async def test_trace_captured(self, tenant, settings):
         settings.REPLAY_SAMPLE_RATE_TEST = 1.0
-        result = await turn(_message(text="когда работаете"))
+        await turn(_message(text="когда работаете"))
 
         from apps.replay.models import ReplayTrace
 
-        count = await sync_to_async(
-            lambda: ReplayTrace.all_tenants.filter(trace_id=result.trace_id).count()
-        )()
-        assert count == 1
+        # ReplayTrace.trace_id binds to the active OTel span id when a real
+        # TracerProvider is installed (Sprint 8 / T4 / DRF-708) — e.g. when
+        # test_otel.py ran earlier in the same pytest process — so match on
+        # the per-test tenant, not result.trace_id. Fresh DB per test ⇒
+        # exactly one row for this turn.
+        rows = await sync_to_async(lambda: list(ReplayTrace.all_tenants.filter(tenant=tenant)))()
+        assert len(rows) == 1
 
 
 class TestAuditTrail:
