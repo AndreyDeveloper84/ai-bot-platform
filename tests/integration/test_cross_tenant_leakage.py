@@ -93,13 +93,20 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
     },
     "Message": {
         "conversation": lambda tenant, suffix: _make_conversation_for_scanner(tenant, suffix),
-        "role": "user",
+        # Callable so the scanner's suffix-append doesn't corrupt the
+        # choices-constrained role value (max_length=16 — "user-audit-Message"
+        # would overflow).
+        "role": lambda tenant, suffix: "user",
     },
     # Sprint 3 / A1: ConsentRecord needs bot_user FK + non-blank
     # consent_type + non-blank source.
     "ConsentRecord": {
         "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
-        "consent_type": "personal_data",
+        # Callable so the scanner's suffix-append doesn't corrupt the
+        # ConsentType enum value — consent_type is varchar(32) with
+        # choices, and "personal_data-audit-ConsentRecord" (33 chars)
+        # overflows the column on PostgreSQL (W0-B1B).
+        "consent_type": lambda tenant, suffix: "personal_data",
         "source": "scanner-test",
     },
     # Sprint 3 / C1: AdminTask needs bot_user + conversation + task_type.
@@ -110,7 +117,9 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
     "AdminTask": {
         "bot_user": lambda tenant, suffix: _make_admin_task_pair(tenant, suffix)[0],
         "conversation": lambda tenant, suffix: _make_admin_task_pair(tenant, suffix)[1],
-        "task_type": "handoff",
+        # Callable: task_type is choices-constrained — suffix-append would
+        # produce a non-enum value ("handoff-AdminTask-1").
+        "task_type": lambda tenant, suffix: "handoff",
     },
     # Sprint 4 / A1: PromptVersion needs skill_name + body + version + created_by.
     # created_by is an auth.User FK — the scanner creates one per row.
@@ -133,8 +142,10 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
     },
     # Sprint 4 / A3: DisclaimerLibrary needs category + risk_level + text.
     "DisclaimerLibrary": {
-        "category": "general",
-        "risk_level": "low",
+        # Callables: category/risk_level are choices-constrained and
+        # risk_level is varchar(8) — suffix-append overflows it (W0-B1B).
+        "category": lambda tenant, suffix: "general",
+        "risk_level": lambda tenant, suffix: "low",
         "text": "scanner disclaimer",
         "version": 1,
     },
@@ -178,6 +189,178 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
     "Promotion": {
         "code": lambda tenant, suffix: f"SCANNER-{suffix or 'X'}",
         "discount_percent": 10,
+    },
+    # W0-B1B: entries below close fixture drift for tenant-scoped models
+    # that landed without a factory row. Choice fields use callables so
+    # the scanner's suffix-append can't corrupt enum values or overflow
+    # short varchar columns; FK targets come from the shared helpers
+    # further down (cached per (tenant, suffix) where a pair must stay
+    # consistent inside one row build).
+    #
+    # ADR-0008: TenantStaff needs a bot_user FK + a valid Role choice.
+    # "receptionist" (not "owner") avoids the unique-active-owner partial
+    # constraint if a second row ever lands for the same tenant.
+    "TenantStaff": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"staff-{suffix or 'x'}"
+        ),
+        "role": lambda tenant, suffix: "receptionist",
+    },
+    # identity: UserPreferences is OneToOne(BotUser); everything else has
+    # defaults.
+    "UserPreferences": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"prefs-{suffix or 'x'}"
+        ),
+    },
+    # conversations: AiDraft needs conversation + master FKs + content.
+    "AiDraft": {
+        "conversation": lambda tenant, suffix: _make_conversation_for_scanner(tenant, suffix),
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+        "content": "scanner draft",
+    },
+    # catalog mirrors: external_id is unique per tenant — the counter
+    # helper keeps values deterministic (sequential per process) without
+    # hardcoding per-model magic numbers.
+    "CatalogService": {
+        "external_id": lambda tenant, suffix: _next_external_id(),
+        "external_updated_at": lambda tenant, suffix: _now(),
+        "slug": "scanner-svc",
+        "name": "Scanner Service",
+    },
+    "CatalogMaster": {
+        "external_id": lambda tenant, suffix: _next_external_id(),
+        "external_updated_at": lambda tenant, suffix: _now(),
+        "name": "Scanner Master",
+    },
+    "CatalogFaq": {
+        "external_id": lambda tenant, suffix: _next_external_id(),
+        "external_updated_at": lambda tenant, suffix: _now(),
+        "question": "Scanner question?",
+        "answer": "Scanner answer.",
+    },
+    "CatalogHelpArticle": {
+        "external_id": lambda tenant, suffix: _next_external_id(),
+        "external_updated_at": lambda tenant, suffix: _now(),
+        "question": "Scanner article?",
+        "answer": "Scanner article body.",
+    },
+    # catalog: MasterService joins one master + one service.
+    "MasterService": {
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+        "service": lambda tenant, suffix: _make_catalog_service_for_scanner(tenant, suffix),
+    },
+    # observability: AIRequestMetric needs request_id + two NOT-NULL int
+    # metrics + a valid outcome choice.
+    "AIRequestMetric": {
+        "request_id": lambda tenant, suffix: _scanner_uuid("airm", suffix),
+        "message_text_length": 1,
+        "latency_total_ms": 1,
+        "outcome": lambda tenant, suffix: "success",
+    },
+    # observability: ImplicitFeedbackSignal FKs to AIRequestMetric;
+    # signal_type is choices-constrained (varchar(48)).
+    "ImplicitFeedbackSignal": {
+        "ai_request_metric": lambda tenant, suffix: _make_ai_request_metric_for_scanner(
+            tenant, suffix
+        ),
+        "signal_type": lambda tenant, suffix: "repeat_interaction",
+    },
+    # booking: BookingReminder needs bot_user + chat_id + visit_at +
+    # kind + scheduled_at. yclients_record_id stays NULL — Postgres
+    # treats NULLs as distinct under the (yclients_record_id, kind)
+    # unique_together.
+    "BookingReminder": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"rem-{suffix or 'x'}"
+        ),
+        "chat_id": "scanner-chat",
+        "visit_at": lambda tenant, suffix: _future_datetime(),
+        "kind": lambda tenant, suffix: "day_before",
+        "scheduled_at": lambda tenant, suffix: _now(),
+    },
+    # booking: PendingBookingAction needs bot_user + kind + expires_at.
+    "PendingBookingAction": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"pba-{suffix or 'x'}"
+        ),
+        "kind": lambda tenant, suffix: "confirm",
+        "expires_at": lambda tenant, suffix: _future_datetime(),
+    },
+    # booking: RemoteBookingProxy needs appointment_id + start/end + a
+    # valid status choice.
+    "RemoteBookingProxy": {
+        "appointment_id": lambda tenant, suffix: _scanner_uuid("rbp", suffix),
+        "start_at": lambda tenant, suffix: _now(),
+        "end_at": lambda tenant, suffix: _future_datetime(),
+        "status": lambda tenant, suffix: "confirmed",
+    },
+    # scheduling: WorkingHours — is_working=False with NULL times
+    # satisfies working_hours_times_match_is_working without inventing
+    # a time window.
+    "WorkingHours": {
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+        "day_of_week": 0,
+        "is_working": False,
+    },
+    # scheduling: ScheduleException — type=day_off keeps both time
+    # columns NULL per schedule_exception_times_match_type.
+    "ScheduleException": {
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+        "date": lambda tenant, suffix: _today(),
+        "type": lambda tenant, suffix: "day_off",
+    },
+    # scheduling: TimeBlock needs master + start/end (end > start) +
+    # reason.
+    "TimeBlock": {
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+        "start_at": lambda tenant, suffix: _now(),
+        "end_at": lambda tenant, suffix: _future_datetime(),
+        "reason": "scanner block",
+    },
+    # scheduling: ScheduleChangeRequest — only master is NOT NULL without
+    # a default; requested_* stay NULL so end_after_start is vacuous.
+    "ScheduleChangeRequest": {
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+    },
+    # notifications: MasterNotificationPrefs is OneToOne(CatalogMaster);
+    # all toggles have defaults (urgent defaults True per
+    # master_notif_urgent_forced_on).
+    "MasterNotificationPrefs": {
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+    },
+    # loyalty: LoyaltyAccount is OneToOne(BotUser) via `customer`.
+    "LoyaltyAccount": {
+        "customer": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"loy-{suffix or 'x'}"
+        ),
+    },
+    # loyalty: LoyaltyEvent needs account + event_type + points_delta +
+    # balance_after. manual_adjust keeps the per-booking partial unique
+    # constraints (earn_visit / refund_revoke) out of scope.
+    "LoyaltyEvent": {
+        "account": lambda tenant, suffix: _make_loyalty_account_for_scanner(tenant, suffix),
+        "event_type": lambda tenant, suffix: "manual_adjust",
+        "points_delta": 1,
+        "balance_after": 1,
+    },
+    # loyalty: LoyaltyReferral needs two DISTINCT BotUsers — referee is
+    # unique per tenant (loyalty_referral_unique_referee_per_tenant).
+    "LoyaltyReferral": {
+        "referrer_customer": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"ref-er-{suffix or 'x'}"
+        ),
+        "referee_customer": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"ref-ee-{suffix or 'x'}"
+        ),
+    },
+    # internal_chat: MasterAdminThread needs master + topic + sla_due_at.
+    # topic=general keeps is_sensitive=False consistent with
+    # ck_internal_chat_sensitive_topics_flagged.
+    "MasterAdminThread": {
+        "master": lambda tenant, suffix: _make_catalog_master_for_scanner(tenant, suffix),
+        "topic": lambda tenant, suffix: "general",
+        "sla_due_at": lambda tenant, suffix: _future_datetime(),
     },
 }
 
@@ -232,6 +415,114 @@ def _future_datetime():
     from django.utils import timezone
 
     return timezone.now() + timedelta(days=30)
+
+
+def _now():
+    """Helper: current timestamp for *_updated_at / start_at columns."""
+
+    from django.utils import timezone
+
+    return timezone.now()
+
+
+def _today():
+    """Helper: current date for ScheduleException.date."""
+
+    from django.utils import timezone
+
+    return timezone.now().date()
+
+
+# Sequential external_id source for the catalog mirror models. Values are
+# deterministic for a fixed test execution order and only need to be
+# unique per tenant (unique_together (tenant, external_id)); the scanner
+# never asserts on the numbers themselves.
+_EXTERNAL_ID_COUNTER = 900000
+
+
+def _next_external_id() -> int:
+    global _EXTERNAL_ID_COUNTER
+    _EXTERNAL_ID_COUNTER += 1
+    return _EXTERNAL_ID_COUNTER
+
+
+def _scanner_uuid(stem: str, suffix: str):
+    """Deterministic UUID per (stem, suffix) — uuid5, not random uuid4."""
+
+    import uuid
+
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scanner:{stem}:{suffix or 'x'}")
+
+
+# Caches keyed by (tenant.id, suffix) — same pattern as _ADMIN_TASK_PAIRS:
+# a helper must return the SAME row when two factory lambdas in one
+# `_create_row` call share a suffix (unique_together on the mirror
+# models), and suffixes differ across tests so no rolled-back row from a
+# previous test is ever reused.
+_CATALOG_MASTER_ROWS: dict[tuple[str, str], object] = {}
+_CATALOG_SERVICE_ROWS: dict[tuple[str, str], object] = {}
+
+
+def _make_catalog_master_for_scanner(tenant, suffix: str):
+    """Inline CatalogMaster factory for scheduling / chat / draft models."""
+
+    from apps.catalog.models import CatalogMaster
+
+    key = (str(tenant.id), suffix)
+    cached = _CATALOG_MASTER_ROWS.get(key)
+    if cached is not None:
+        return cached
+    master = CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        external_id=_next_external_id(),
+        external_updated_at=_now(),
+        name=f"Scanner Master {suffix or 'x'}",
+    )
+    _CATALOG_MASTER_ROWS[key] = master
+    return master
+
+
+def _make_catalog_service_for_scanner(tenant, suffix: str):
+    """Inline CatalogService factory for the MasterService join model."""
+
+    from apps.catalog.models import CatalogService
+
+    key = (str(tenant.id), suffix)
+    cached = _CATALOG_SERVICE_ROWS.get(key)
+    if cached is not None:
+        return cached
+    service = CatalogService.all_tenants.create(
+        tenant=tenant,
+        external_id=_next_external_id(),
+        external_updated_at=_now(),
+        slug=f"scanner-svc-{suffix or 'x'}",
+        name=f"Scanner Service {suffix or 'x'}",
+    )
+    _CATALOG_SERVICE_ROWS[key] = service
+    return service
+
+
+def _make_ai_request_metric_for_scanner(tenant, suffix: str):
+    """Inline AIRequestMetric factory for ImplicitFeedbackSignal."""
+
+    from apps.observability.models import AIRequestMetric
+
+    return AIRequestMetric.all_tenants.create(
+        tenant=tenant,
+        request_id=_scanner_uuid("airm", suffix),
+        message_text_length=1,
+        latency_total_ms=1,
+        outcome="success",
+    )
+
+
+def _make_loyalty_account_for_scanner(tenant, suffix: str):
+    """Inline LoyaltyAccount factory for LoyaltyEvent."""
+
+    from apps.loyalty.models import LoyaltyAccount
+
+    customer = _make_bot_user_for_scanner(tenant, f"loyacct-{suffix or 'x'}")
+    return LoyaltyAccount.all_tenants.create(tenant=tenant, customer=customer)
 
 
 _EXPERIMENT_PAIRS: dict[tuple[str, str], tuple[object, object]] = {}
@@ -460,6 +751,51 @@ def test_scanner_finds_expected_sprint7_models():
         f"Sprint 7 expected scanner to find {sprint7_expected}; "
         f"missing: {sprint7_missing}. Got: {names}."
     )
+
+
+def test_factory_entries_respect_field_constraints():
+    """W0-B1B regression: factory values must fit the live model schema.
+
+    For every non-relation field configured in ``_MODEL_REQUIRED_FIELDS``,
+    resolve the value with the LONGEST suffix patterns the scanner uses
+    and assert it (a) fits ``max_length`` and (b) is a member of
+    ``choices`` when the field declares them. This fails fast at the
+    fixture layer instead of surfacing as 3×N red integration tests the
+    next time a model's schema drifts from its factory row.
+    """
+
+    # Mirror of the suffix logic in ``_create_row`` (kept in sync by hand —
+    # extracting it would couple the scanner's internals to this test).
+    def resolve(base_value, suffix: str):
+        if callable(base_value):
+            return base_value(None, suffix)
+        if isinstance(base_value, str) and suffix:
+            return f"{base_value}-{suffix}" if base_value else suffix
+        return base_value
+
+    suffix_patterns = ("{name}-1", "audit-{name}", "off-{name}-1")
+    for model in SCANNED_MODELS:
+        extras = _MODEL_REQUIRED_FIELDS.get(model.__name__, {})
+        for field_name, base_value in extras.items():
+            field = model._meta.get_field(field_name)
+            if field.is_relation:
+                # FK factories need a real tenant row; the parametrized
+                # contract tests below exercise them against a live DB.
+                continue
+            for pattern in suffix_patterns:
+                value = resolve(base_value, pattern.format(name=model.__name__))
+                if isinstance(value, str) and field.max_length is not None:
+                    assert len(value) <= field.max_length, (
+                        f"{model.__name__}.{field_name}: factory value "
+                        f"{value!r} ({len(value)} chars) overflows "
+                        f"max_length={field.max_length}"
+                    )
+                if field.choices:
+                    valid = {choice[0] for choice in field.choices}
+                    assert value in valid, (
+                        f"{model.__name__}.{field_name}: factory value "
+                        f"{value!r} is not one of {sorted(valid)}"
+                    )
 
 
 @pytest.mark.parametrize("model", SCANNED_MODELS, ids=lambda m: m.__name__)
