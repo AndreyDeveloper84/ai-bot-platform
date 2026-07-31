@@ -2063,11 +2063,15 @@ def execute_reschedule(
         )
 
         with _db_transaction.atomic():
-            booking = (
-                BookingRequest.all_tenants.select_for_update()
-                .select_related("service")
-                .get(pk=booking.pk)
-            )
+            # Lock ONLY the booking row. ``service`` is a nullable FK
+            # (SET_NULL, null=True), so a ``select_related("service")``
+            # here emits a LEFT OUTER JOIN and Postgres rejects
+            # ``FOR UPDATE`` on the nullable side of an outer join
+            # (psycopg FeatureNotSupported, W0-B1 evidence).
+            # ``booking.service`` is lazy-loaded below inside the same
+            # transaction — it is read-only in this flow and needs no
+            # lock of its own.
+            booking = BookingRequest.all_tenants.select_for_update().get(pk=booking.pk)
 
             # Q12-α continuation decision (issue #478, founder ACK
             # 2026-05-22). The LLM reschedule tool always keeps the

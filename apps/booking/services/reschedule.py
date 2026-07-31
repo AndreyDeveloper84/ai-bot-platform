@@ -67,10 +67,16 @@ def reschedule_customer_booking(
 
     with tenant_scope(tenant), transaction.atomic():
         try:
-            old = (
-                BookingRequest.all_tenants.select_for_update()
-                .select_related("service", "master")
-                .get(id=old_booking_id, tenant_id=tenant.id)
+            # Lock ONLY the booking row. ``service``/``master`` are
+            # nullable FKs (SET_NULL, null=True), so a ``select_related``
+            # on this queryset emits LEFT OUTER JOINs and Postgres
+            # rejects ``FOR UPDATE`` on the nullable side of an outer
+            # join (psycopg FeatureNotSupported, W0-B1 evidence). The
+            # related rows are loaded lazily below, inside the same
+            # transaction, after the lock is held — they are read-only
+            # in this flow and need no lock of their own.
+            old = BookingRequest.all_tenants.select_for_update().get(
+                id=old_booking_id, tenant_id=tenant.id
             )
         except BookingRequest.DoesNotExist:
             raise BookingCreateError("not_found", "booking not found")
@@ -99,8 +105,10 @@ def reschedule_customer_booking(
         # break the chain if the root's snapshot diverges from this live
         # view (admin price hike, currency swap, duration change).
         # The legacy_row guard above proves ``old.service_id is not
-        # None``; ``old.service`` is the matching FK row eager-loaded
-        # via ``select_related``.
+        # None``; ``old.service`` is the matching FK row, lazy-loaded
+        # here inside the same transaction (the booking row lock is
+        # already held; the service row itself is read-only in this
+        # flow and needs no lock).
         # #618 follow-up: shape lives in
         # ``attribution.build_live_commercial_identity``.
         live_service = old.service

@@ -379,16 +379,15 @@ class TestRescheduleCustomerBooking:
         assert link3.original_booking_event_id == existing_booking.id
 
         # Contract assertion: at least one query against
-        # apps_booking_bookingrequest is issued with FOR UPDATE OF.
-        # Postgres emits ``FOR UPDATE OF "apps_booking_bookingrequest"``;
-        # SQLite silently no-ops the FOR UPDATE (Django warning, no SQL
-        # appended). Skip the SQL assertion on SQLite; trust the patch-
-        # based assertion below.
+        # booking_bookingrequest is issued with FOR UPDATE.
+        # Postgres appends ``FOR UPDATE`` to the root SELECT; SQLite
+        # silently no-ops it (Django warning, no SQL appended). Skip the
+        # SQL assertion on SQLite; trust the patch-based assertion below.
         if connection.vendor == "postgresql":
             queries_with_lock = [
                 q["sql"]
                 for q in ctx.captured_queries
-                if "FOR UPDATE" in q["sql"] and "apps_booking_bookingrequest" in q["sql"]
+                if "FOR UPDATE" in q["sql"] and "booking_bookingrequest" in q["sql"]
             ]
             assert queries_with_lock, (
                 "Expected at least one BookingRequest SELECT with FOR UPDATE; "
@@ -468,3 +467,77 @@ class TestRescheduleCustomerBooking:
             assert call["args"] == () and call["kwargs"] == {}, (
                 f"BookingRequest.select_for_update must be called with no args; got {call}"
             )
+
+    def test_pg_locking_legacy_row_null_fks_rejected_without_join_error(self, tenant, bot_user):
+        """W0-B1C regression: the old-row lock query MUST NOT join the
+        nullable ``service``/``master`` FKs. Pre-fix, a legacy row with
+        NULL FKs made Postgres raise ``FeatureNotSupported: FOR UPDATE
+        cannot be applied to the nullable side of an outer join`` at the
+        lock query itself — before the ``legacy_row`` guard could run.
+        Post-fix the lock is a single-table ``FOR UPDATE`` and the
+        guard rejects the row cleanly on every backend."""
+
+        legacy = BookingRequest.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            service=None,
+            master=None,
+            service_name="Legacy manicure",
+            client_name="Мария",
+            client_phone="+79000000000",
+            visit_at=_monday_at(12),
+        )
+
+        with pytest.raises(BookingCreateError) as exc_info:
+            reschedule_customer_booking(
+                tenant=tenant,
+                bot_user=bot_user,
+                old_booking_id=str(legacy.id),
+                new_visit_at=_monday_at(14),
+            )
+        assert exc_info.value.slug == "legacy_row"
+
+    def test_pg_locking_old_row_select_for_update_has_no_outer_join(
+        self,
+        tenant,
+        bot_user,
+        master,
+        service,
+        master_service,
+        working_hours,
+        existing_booking,
+    ):
+        """W0-B1C regression pin on the SQL shape: the old-row lock
+        SELECT must stay a single-table ``FOR UPDATE`` — no OUTER JOIN
+        against the nullable ``service``/``master`` FK tables (Postgres
+        rejects ``FOR UPDATE`` on the nullable side of an outer join).
+        Asserts both directions of the contract: the row lock is still
+        taken (no silent unlocked fallback) and the join shape stays
+        single-table.
+
+        SQL assertion runs on Postgres only; on SQLite
+        ``select_for_update`` is a no-op (Django emits no locking SQL),
+        so the behavioural assertions above carry the contract there."""
+
+        with CaptureQueriesContext(connection) as ctx:
+            reschedule_customer_booking(
+                tenant=tenant,
+                bot_user=bot_user,
+                old_booking_id=str(existing_booking.id),
+                new_visit_at=_monday_at(14),
+            )
+
+        if connection.vendor == "postgresql":
+            lock_queries = [
+                q["sql"]
+                for q in ctx.captured_queries
+                if "FOR UPDATE" in q["sql"] and "booking_bookingrequest" in q["sql"]
+            ]
+            assert lock_queries, (
+                "Expected the old booking row SELECT to keep its FOR UPDATE "
+                "lock; captured queries:\n" + "\n".join(q["sql"] for q in ctx.captured_queries)
+            )
+            for sql in lock_queries:
+                assert "OUTER JOIN" not in sql, (
+                    "FOR UPDATE must not span a nullable outer join: " + sql
+                )
