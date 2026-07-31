@@ -97,3 +97,66 @@ if not MYSITE_WEBHOOK_HMAC_SECRET:
 # docs/runbooks/eventbus-subscriber-activation.md.
 if not os.environ.get("DOMAIN_EVENT_SUBSCRIBERS"):
     DOMAIN_EVENT_SUBSCRIBERS = ["apps.eventbus.subscribers.AuditSubscriber"]
+
+
+# W0-B3 — events ingest HMAC secret. The ingest endpoint
+# (``POST /api/v1/internal/events/ingest``) is unconditionally routed
+# (config/urls.py) and every consumer family registers at app-ready
+# (apps/eventbus/apps.py) — the ingest feature is structurally ALWAYS
+# enabled in any booted deploy. The codebase has no off-switch setting
+# for it and W0-B3 deliberately does not invent one: a flag here would
+# gate only this validation while the endpoint stays live regardless.
+# With an empty secret the receiver fails closed (401 ``no_secret`` on
+# every delivery, apps/eventbus/ingest_security.py) — i.e. silent 100%
+# event loss that only surfaces as Ayla-side retry exhaustion. Fail
+# fast on boot instead. Absence outside strict production does not
+# block startup (base.py keeps the empty default).
+EVENT_INGEST_HMAC_SECRET = os.environ.get("EVENT_INGEST_HMAC_SECRET", "")
+if not EVENT_INGEST_HMAC_SECRET:
+    raise ImproperlyConfigured(
+        "EVENT_INGEST_HMAC_SECRET is required in production. The Ayla "
+        "events ingest endpoint is unconditionally routed "
+        "(config/urls.py) and fails closed without the secret — every "
+        "delivery would be rejected with 401 no_secret. Set it to the "
+        "shared secret configured on Ayla (event-contract.md §6.2; "
+        "quarterly rotation)."
+    )
+
+
+# W0-B3 — LLM provider selection. Supported provider names mirror the
+# router registry (``_PROVIDER_NAMES`` in apps/llm/router.py); the
+# registry is deliberately NOT imported here — settings load must not
+# import apps. An unsupported org-wide default previously fell through
+# to OpenAI with only a log warning; in production that's a silent
+# vendor misroute, so fail fast. Non-production keeps the router's
+# warn-and-fallback behaviour unchanged.
+_LLM_SUPPORTED_PROVIDERS = ("openai", "anthropic")  # apps/llm/router.py::_PROVIDER_NAMES
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower() or "openai"
+if LLM_PROVIDER not in _LLM_SUPPORTED_PROVIDERS:
+    raise ImproperlyConfigured(
+        f"LLM_PROVIDER={LLM_PROVIDER!r} is not a supported provider. "
+        f"Supported: {', '.join(_LLM_SUPPORTED_PROVIDERS)} "
+        "(see apps/llm/router.py::_PROVIDER_NAMES)."
+    )
+
+
+# W0-B3 — Anthropic credential requirement. ANTHROPIC_API_KEY is
+# required only when an existing CONFIGURED provider path selects
+# anthropic: the org-wide default (LLM_PROVIDER) or any per-skill
+# override (SKILL_LLM_PROVIDER, e.g. {"intent": "anthropic"}). The
+# router's tier-1 per-tenant override lives in the Tenant.features DB
+# column and cannot be boot-validated. Presence check only — no API
+# call, no credential verification, and the value is never logged.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+_skill_llm_provider = globals().get("SKILL_LLM_PROVIDER", {}) or {}
+_anthropic_routed = LLM_PROVIDER == "anthropic" or any(
+    isinstance(choice, str) and choice.strip().lower() == "anthropic"
+    for choice in _skill_llm_provider.values()
+)
+if _anthropic_routed and not ANTHROPIC_API_KEY:
+    raise ImproperlyConfigured(
+        "ANTHROPIC_API_KEY is required in production: a configured "
+        "provider path selects anthropic (LLM_PROVIDER or "
+        "SKILL_LLM_PROVIDER). Set ANTHROPIC_API_KEY in the environment "
+        "or route those paths back to openai."
+    )

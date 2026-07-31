@@ -123,6 +123,9 @@ class TestProductionFailFast:
         monkeypatch.setenv("CHROMA_AUTH_TOKEN", "chroma-token-abc")  # noqa: S105
         monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
+        # W0-B3 — events ingest HMAC secret is now required in
+        # production (the ingest endpoint is unconditionally routed).
+        monkeypatch.setenv("EVENT_INGEST_HMAC_SECRET", "ingest-hmac-secret-abc")  # noqa: S105
         module = importlib.import_module("config.settings.production")
         assert module.DEBUG is False
         assert module.CHROMA_AUTH_TOKEN == "chroma-token-abc"  # noqa: S105

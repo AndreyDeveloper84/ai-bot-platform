@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from celery.schedules import crontab  # type: ignore[import-untyped]
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -1194,6 +1195,76 @@ ALERTS_DEDUP_TTL_SECONDS = int(os.environ.get("ALERTS_DEDUP_TTL_SECONDS", "300")
 # rejects everything in dev/CI — never silently accepts unsigned
 # deliveries.
 MYSITE_WEBHOOK_HMAC_SECRET = os.environ.get("MYSITE_WEBHOOK_HMAC_SECRET", "")
+
+# ---------------------------------------------------------------------------
+# W0-B3 — security-critical bot feature settings (declaration slice only).
+#
+# These formalize settings that runtime consumers already read via
+# ``getattr(settings, ...)`` fallbacks (apps/eventbus/*, apps/llm/*).
+# Declaring them centrally makes boot-time validation possible
+# (config/settings/production.py) and pins the defaults. NOTHING in
+# this block activates a feature: the events-ingest endpoint is
+# already unconditionally routed (config/urls.py) and the LLM router
+# reads the same setting names it always did.
+# ---------------------------------------------------------------------------
+
+# Phase 0 / #432 (ADR-0009, event-contract.md §6.2) — HMAC-SHA256 shared
+# secret for the Ayla → bot-platform events ingest channel
+# (``POST /api/v1/internal/events/ingest``). Empty default: the receiver
+# fails closed (401 ``no_secret`` on every delivery,
+# apps/eventbus/ingest_security.py) — nothing is silently accepted.
+# Never log this value. Required in strict production
+# (config/settings/production.py).
+EVENT_INGEST_HMAC_SECRET = os.environ.get("EVENT_INGEST_HMAC_SECRET", "")
+
+# Round-2 AS1 — trusted reverse-proxy depth for source-IP resolution on
+# the ingest endpoint (apps/eventbus/ingest_ip.py). ``0`` = trust
+# REMOTE_ADDR only (safe default: X-Forwarded-For is NOT walked, so a
+# spoofed XFF header can't redirect the rate-limit bucket). A depth
+# > 0 only steers proxy-chain IP resolution — it does NOT enable or
+# disable the ingest feature. Negative / non-integer values are
+# rejected at configuration load in every environment: a malformed
+# deploy must fail loudly at boot, not mid-request.
+_raw_proxy_depth = os.environ.get("EVENT_INGEST_TRUSTED_PROXY_DEPTH", "0").strip()
+try:
+    EVENT_INGEST_TRUSTED_PROXY_DEPTH = int(_raw_proxy_depth)
+except ValueError:
+    raise ImproperlyConfigured(
+        f"EVENT_INGEST_TRUSTED_PROXY_DEPTH must be an integer (got {_raw_proxy_depth!r})."
+    ) from None
+if EVENT_INGEST_TRUSTED_PROXY_DEPTH < 0:
+    raise ImproperlyConfigured(
+        f"EVENT_INGEST_TRUSTED_PROXY_DEPTH must be >= 0 (got {EVENT_INGEST_TRUSTED_PROXY_DEPTH})."
+    )
+del _raw_proxy_depth
+
+# Sprint 7 / L5 (DRF-587) — org-wide default LLM provider, tier 3 of
+# the three-tier router (apps/llm/router.py). Canonical default
+# ``"openai"`` — same as the router's own fallback. Normalized
+# (strip + lower) so ops casing/whitespace can't split the registry
+# lookup; empty after normalization falls back to ``"openai"`` exactly
+# like the router does. Supported values today: ``"openai"``,
+# ``"anthropic"`` — strict production rejects anything else at boot
+# (config/settings/production.py); non-production keeps the router's
+# existing warn-and-fallback-to-openai behaviour unchanged.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower() or "openai"
+
+# Tier 2 of the router — per-skill provider overrides
+# (e.g. ``{"intent": "anthropic"}``). Env-driven not supported for
+# dict; set in a deployment-specific settings module when per-skill
+# routing is needed (same convention as
+# ``SKILL_CONFIDENCE_HANDOFF_THRESHOLD``). Declared here so production
+# validation can inspect every configured provider path.
+SKILL_LLM_PROVIDER: dict[str, str] = {}
+
+# Anthropic auth — read by
+# ``apps.llm.providers.anthropic_provider.AnthropicProvider`` via
+# ``getattr(settings, "ANTHROPIC_API_KEY", "")``. Empty default; the
+# provider lazy-constructs its SDK client, so an empty key only fails
+# when an anthropic route is actually exercised. Required in strict
+# production whenever a configured provider path selects anthropic
+# (config/settings/production.py). Never log this value.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 ROOT_URLCONF = "config.urls"
 
