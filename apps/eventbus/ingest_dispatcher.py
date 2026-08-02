@@ -160,12 +160,19 @@ def registered_handlers() -> dict[tuple[str, int], EventHandler]:
 # present in one but not the other is a latent 400/422 mismatch.
 # ``booking.confirmed`` is a v1 contract extension beyond the original 12
 # (B1 consumer; contract addition tracked in issue #946).
+# ``appointment.rescheduled`` is the canonical cross-repo event;
+# ``booking.rescheduled`` remains a temporary repo-local legacy
+# compatibility name. The two route to SEPARATE handlers with distinct
+# payload contracts (see apps.eventbus.consumers.booking) — see the
+# comment on ``ingest_envelope.ALLOWED_EVENT_NAMES`` (must stay in
+# sync with that set).
 _KNOWN_NAMES: Final[frozenset[str]] = frozenset(
     {
         "booking.created",
         "booking.confirmed",
         "booking.cancelled",
         "booking.rescheduled",
+        "appointment.rescheduled",
         "booking.completed",
         "booking.no_show",
         "payment.authorized",

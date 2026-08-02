@@ -880,6 +880,18 @@ class RemoteBookingProxy(models.Model):
         help_text="When the platform last updated this row.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    last_applied_appointment_version = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Highest canonical `appointment.rescheduled` DER "
+        "`version` applied to this proxy (AYLA-DEC-0022/0036 "
+        "version-aware ordering). NULL means no canonical "
+        "version-tracked event has been applied yet — proxies created "
+        "or updated only via legacy booking.created/booking.rescheduled "
+        "never set this field. See "
+        "apps.eventbus.consumers.booking.handle_appointment_rescheduled_canonical "
+        "for the ordering state machine (bootstrap / skip / apply / gap).",
+    )
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()

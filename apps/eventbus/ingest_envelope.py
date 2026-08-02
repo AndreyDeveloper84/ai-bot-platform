@@ -27,12 +27,22 @@ from typing import Any, Final, Literal
 
 # event-contract.md §3 — the closed set of cross-service event names.
 # Unknown name → 422 + DLQ per §8.5.
+#
+# ``appointment.rescheduled`` is the canonical cross-repo event
+# (AYLA-DEC-0022, AYLA-DEC-0036). ``booking.rescheduled`` remains
+# temporarily supported as a repo-local legacy compatibility name
+# until the bot event contract migration and deprecation task are
+# completed. The two names route to SEPARATE handlers with distinct
+# payload contracts (see apps.eventbus.consumers.booking) — do not
+# remove ``booking.rescheduled`` here before that migration task
+# lands.
 ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
     {
         "booking.created",
         "booking.confirmed",
         "booking.cancelled",
         "booking.rescheduled",
+        "appointment.rescheduled",
         "booking.completed",
         # AMD-018: booking.no_show is an approved standalone
         # cross-service event (#13, v1) — Ayla state machine
