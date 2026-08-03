@@ -129,7 +129,7 @@ jobs:
           fi
 
       - name: uv sync
-        run: uv sync --extra dev --frozen
+        run: uv sync --extra dev --extra ai-core --frozen
 
       - name: apps.replay unit + integration tests (strict)
         run: uv run pytest apps/replay/ -v --tb=short

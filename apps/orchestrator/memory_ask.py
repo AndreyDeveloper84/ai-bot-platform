@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, cast
 
 from apps.identity.services.personal_context import (
     GateStatus,
@@ -78,7 +78,7 @@ def read_pending(conversation_id: Any) -> dict | None:
         raw = short_term._redis_client().get(_pending_key(conversation_id))
         if not raw:
             return None
-        data = json.loads(raw)
+        data = json.loads(cast(str, raw))
         return data if isinstance(data, dict) and data.get("field") else None
     except Exception:  # noqa: BLE001
         logger.warning("orchestrator.memory_ask.pending_read_failed", exc_info=True)

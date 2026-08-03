@@ -169,6 +169,26 @@ def _dispatch(request: HttpRequest) -> JsonResponse:
         # Non-record events (clients, etc) — ignore quietly.
         return _ack("ignored", reason=f"resource={resource}")
 
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        # Source arbitration (Wave 1 Simple Reschedule audit, P1-2):
+        # this legacy receiver and apps.eventbus.consumers.booking's
+        # canonical Ayla event consumer both write BookingReminder rows,
+        # keyed on disjoint id spaces (yclients_record_id vs
+        # ayla_appointment_id) with no shared uniqueness constraint. If
+        # both ran for the same tenant/appointment, a customer could get
+        # two independent, uncoordinated reminder schedules. Once Ayla
+        # REST is the write path, Ayla is also the authority for this
+        # admin-side change (it syncs from YClients itself) and will
+        # publish the canonical appointment.rescheduled event (or its
+        # booking.rescheduled legacy compatibility name) — so this
+        # receiver stands down rather than double-write.
+        write_audit(
+            action="yclients.webhook.skipped_ayla_native",
+            target="yclients.webhook",
+            payload={"resource": resource, "status": str(payload.get("status") or "")},
+        )
+        return _ack("skipped", reason="ayla_native_active")
+
     tenant = _resolve_tenant(payload)
     if tenant is None:
         write_audit(

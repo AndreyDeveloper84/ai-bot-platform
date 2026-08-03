@@ -639,7 +639,9 @@ def _flow_already_established(context: SkillContext) -> bool:
     import uuid as _uuid
 
     if isinstance(current_pk, (int, _uuid.UUID)):
-        other_messages = other_messages.exclude(conversation_id=current_pk)
+        # int included for test contexts with a plain-int pk; the ORM
+        # accepts it identically to a UUID/str at the lookup layer.
+        other_messages = other_messages.exclude(conversation_id=current_pk)  # type: ignore[misc]
     if other_messages.exists():
         return True
     return AdminTask.all_tenants.filter(conversation__bot_user=context.bot_user).exists()

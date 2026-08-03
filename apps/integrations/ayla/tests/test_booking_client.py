@@ -302,6 +302,29 @@ class TestWriteRoundTrip:
         )
         assert rec.appointment_id == "a1"
 
+    def test_reschedule_sends_idempotency_key_header(self) -> None:
+        """P1 test gap closed (Wave 1 Simple Reschedule audit): the
+        create-appointment path already asserted ``X-Idempotency-Key``
+        lands on the wire (see ``test_create_sends_body_and_headers``
+        above); reschedule accepts the same ``idempotency_key`` kwarg
+        (``booking_client.py`` write helper) but had no equivalent
+        assertion."""
+        captured: dict = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured["req"] = req
+            return httpx.Response(
+                200, json={"data": {"id": "a1", "start_datetime": "2026-06-11T16:00:00+03:00"}}
+            )
+
+        _client_with(handler).reschedule_appointment(
+            external_user_id="bot:telegram:42",
+            appointment_id="a1",
+            new_start_datetime="2026-06-11T16:00:00+03:00",
+            idempotency_key="idem-reschedule-1",
+        )
+        assert captured["req"].headers["X-Idempotency-Key"] == "idem-reschedule-1"
+
     def test_reschedule_falls_back_to_passed_id(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"data": {}})

@@ -390,6 +390,67 @@ class TestAlwaysReturns200:
         assert "yclients.webhook.handler_exception" in _audit_actions()
 
 
+# ─── BOOKING_VIA_AYLA_REST source arbitration (dual reminder paths) ───────
+
+
+class TestBookingViaAylaRestGate:
+    """P1-2 dual-reminder-path fix (Wave 1 Simple Reschedule Phase 1 prep).
+
+    This receiver and ``apps.eventbus.consumers.booking``'s canonical
+    Ayla event consumer both write ``BookingReminder`` rows, keyed on
+    disjoint id spaces, with no prior code-level coordination. Once
+    ``BOOKING_VIA_AYLA_REST`` is on, Ayla is authoritative and this
+    receiver must stand down rather than create a second, uncoordinated
+    reminder schedule for the same appointment.
+    """
+
+    def test_flag_on_skips_write_and_audits(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with patch("apps.integrations.yclients.webhooks.emit") as emit_mock:
+                resp = _post(client, _payload_create())
+
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "skipped", "reason": "ayla_native_active"}
+        assert BookingRequest.all_tenants.count() == 0
+        assert BookingReminder.all_tenants.count() == 0
+        assert "yclients.webhook.skipped_ayla_native" in _audit_actions()
+        emit_mock.assert_not_called()
+
+    def test_flag_on_gates_update_and_delete_too(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            create_resp = _post(client, _payload_create())
+            update_payload = _payload_create()
+            update_payload["status"] = "update"
+            update_resp = _post(client, update_payload)
+            delete_payload = _payload_create()
+            delete_payload["status"] = "delete"
+            delete_resp = _post(client, delete_payload)
+
+        for resp in (create_resp, update_resp, delete_resp):
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "skipped"
+        assert BookingReminder.all_tenants.count() == 0
+
+    def test_flag_off_still_creates_as_before(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Explicit regression guard: the default (flag OFF) must be
+        unaffected by the gate — same behaviour as
+        ``TestCreateEvent.test_create_persists_booking_and_two_reminders``."""
+        with override_settings(BOOKING_VIA_AYLA_REST=False):
+            with patch("apps.integrations.yclients.webhooks.emit"):
+                resp = _post(client, _payload_create())
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "created"
+        assert BookingRequest.all_tenants.count() == 1
+        assert BookingReminder.all_tenants.count() == 2
+
+
 # ─── phone normalisation ────────────────────────────────────────────────
 
 

@@ -161,3 +161,33 @@ class TestInferredMerge:
         block = build_concierge_memory_block(SimpleNamespace(ayla_user_id=uuid4()))
         assert "omnivore" in block
         assert "vegan" not in block
+
+
+class TestInferredKeyTypeSafety:
+    def test_unhashable_key_raises_typeerror(self, monkeypatch) -> None:
+        """Malformed content (non-str "key") hits dict.get() unguarded —
+        pinning the pre-existing runtime behaviour so a future type-only
+        fix can't silently swallow it (see PR #1130 review)."""
+        from apps.identity.services.memory_reader import GreenFact, PersonalContextView
+
+        monkeypatch.setattr(
+            memory_block,
+            "get_declared_prefs",
+            lambda bot_user: _gated(memory_block.GateStatus.OK, SimpleNamespace(context={})),
+        )
+        monkeypatch.setattr(
+            "apps.consent.memory.can_store_green_memory",
+            lambda bot_user: True,
+        )
+        view = PersonalContextView(
+            summary="",
+            green_facts=[
+                GreenFact(kind="lifestyle", content={"key": ["not", "hashable"], "value": "x"})
+            ],
+        )
+        monkeypatch.setattr(
+            "apps.identity.services.memory_reader.read_personal_context",
+            lambda user_id: view,
+        )
+        with pytest.raises(TypeError):
+            build_concierge_memory_block(SimpleNamespace(ayla_user_id=uuid4()))
