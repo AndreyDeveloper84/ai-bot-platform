@@ -151,6 +151,8 @@ class TestGoldenFixtureSet:
         Growth log:
           - Sprint 5 (baseline): 41
           - Sprint 9 / Q2 (DRF-829): +35 (5 per skill × 7 new skills)
+          - E2E-BOT-02A: +4 booking (personal lookup / booking-rules
+            FAQ / reschedule / cancel routing boundary)
         """
         from pathlib import Path
 
@@ -158,7 +160,7 @@ class TestGoldenFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         fixtures = load_fixture_set(root)
-        assert len(fixtures) == 76, f"expected 76 golden fixtures, got {len(fixtures)}"
+        assert len(fixtures) == 80, f"expected 80 golden fixtures, got {len(fixtures)}"
 
     def test_balanced_per_category(self):
         from pathlib import Path

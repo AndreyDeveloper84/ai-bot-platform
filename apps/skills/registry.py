@@ -117,7 +117,18 @@ def dispatch(context: "SkillContext") -> "SkillResult | None":
         try:
             if skill.matches(context):
                 logger.info("skills.dispatch.match name=%s", skill.name)
-                return skill.handle(context)
+                result = skill.handle(context)
+                # E2E-BOT-02A observability — proves which skill ran,
+                # which action it produced and which tools fired, so a
+                # read-only turn (e.g. show_my_bookings) is auditable
+                # as mutation-free from logs alone.
+                logger.info(
+                    "skills.dispatch.result name=%s action_type=%s tools=%s",
+                    skill.name,
+                    result.action_type,
+                    [call.name for call in result.tool_calls_made],
+                )
+                return result
         except Exception:  # noqa: BLE001 — log + rethrow
             logger.exception(
                 "skills.dispatch.match_failed name=%s",

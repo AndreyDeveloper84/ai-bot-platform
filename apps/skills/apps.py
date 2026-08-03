@@ -62,9 +62,12 @@ class SkillsConfig(AppConfig):
         # 4 YClients-backed tools. Registers AFTER faq because the FAQ
         # keyword fallback would otherwise swallow questions like
         # "сколько стоит запись" before the booking intent classifier
-        # gets a chance. In production both gate on ctx.intent and the
-        # order is moot; the legacy keyword fallback drives this
-        # ordering only.
+        # gets a chance. NOTE: production webhook dispatch does NOT set
+        # ctx.intent (unlike the orchestrator pipeline), so the legacy
+        # keyword fallbacks drive live routing and this order is load-
+        # bearing. E2E-BOT-02A made the order safe for personal booking
+        # lookups: faq yields them (apps/skills/booking/lookup.py) and
+        # booking claims them explicitly below the intent gate.
         from apps.skills.booking import skill as _booking  # noqa: F401
 
         # 2026-05-20 — welcome skill ports the /start greeting into a

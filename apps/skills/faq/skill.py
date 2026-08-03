@@ -56,6 +56,7 @@ from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
 from apps.llm.protocol import LLMError
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.booking.lookup import is_personal_booking_lookup
 from apps.skills.faq.prompts import BrandVoiceConfig, build_faq_prompt
 from apps.skills.faq.tools import (
     SEARCH_KB_TOOL_SPEC,
@@ -124,8 +125,15 @@ class FAQSkill:
         intent = context.intent
         if intent is not None:
             return intent.intent == "faq"
-        # No intent attached (Sprint 3 callers, tests) — fall back to
-        # the keyword heuristic so we don't regress dispatch behaviour.
+        # No intent attached (production webhook dispatch, Sprint 3
+        # callers, tests) — fall back to the keyword heuristic.
+        # E2E-BOT-02A: personal booking lookups ("когда у меня запись?",
+        # "покажи мои записи") carry generic question signals ("когда",
+        # "?") but are NOT faq — the booking skill owns them via the
+        # read-only show_my_bookings tool. Yield them here so the
+        # first-match-wins registry order stops intercepting them.
+        if is_personal_booking_lookup(context.message_text):
+            return False
         return _legacy_keyword_match(context.message_text)
 
     def handle(self, context: SkillContext) -> SkillResult:

@@ -1,0 +1,10 @@
+name: booking_rules_faq
+description: Booking-process FAQ (E2E-BOT-02A boundary) — "how do I book" stays on faq, must NOT become an own-bookings lookup.
+input:
+  channel: max
+  text: Как записаться?
+must_pass:
+  - skill_used: faq
+voice_check:
+  max_length: 600
+  caps_lock: 0.5
