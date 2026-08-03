@@ -167,7 +167,7 @@ class TestErrorIsolation:
             ayla_master_id=str(uuid.uuid4()),
             user_id=None,
             name="Bad",
-            external_updated_at=None,  # type: ignore[arg-type] — violates NOT NULL
+            external_updated_at=None,  # type: ignore[arg-type]  # violates NOT NULL
         )
         res = upsert_specialists(tenant, [good, bad])
         assert res.created == 1

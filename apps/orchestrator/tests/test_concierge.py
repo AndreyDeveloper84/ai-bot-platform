@@ -221,6 +221,7 @@ class TestGenerateConciergeReply:
 
         assert "Анна" in reply.text
         assert reply.persisted is True
+        assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert buttons[0]["callback"] == "cb:discover:book:t1:m1"
 

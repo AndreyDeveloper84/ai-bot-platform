@@ -66,6 +66,7 @@ class TestFailOpenBranch:
         class _Env:
             event_name = "booking.created"
             user_id = "f1a2b3c4-d5e6-4789-9abc-def012345678"
+            tenant_id: str | None = None
 
         env = _Env()
         env.tenant_id = tenant_id

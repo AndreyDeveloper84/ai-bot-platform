@@ -393,7 +393,7 @@ class TestCards:
         self, client: DjangoClient, bot_user, monkeypatch
     ) -> None:
         stub = _StubC7Client()
-        stub.delete_card = lambda **kwargs: (_ for _ in ()).throw(
+        stub.delete_card = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
             ClientPaymentsNotFoundError("gone")
         )
         monkeypatch.setattr("apps.miniapp_api.views.AylaClientPaymentsClient", lambda: stub)

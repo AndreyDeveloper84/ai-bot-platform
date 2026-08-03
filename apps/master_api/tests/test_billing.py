@@ -47,7 +47,7 @@ class _StubClient:
     def __init__(self, payload=None, exc: Exception | None = None) -> None:
         self.payload = payload or {}
         self.exc = exc
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, ...]] = []
         self.closed = False
 
     def get_billing_status(self, *, specialist_id: str):
