@@ -1,0 +1,12 @@
+name: booking_my_bookings_lookup
+description: Personal booking lookup (E2E-BOT-02A) — own-bookings question routes to booking, read-only reply about the user's records.
+input:
+  channel: max
+  text: Когда у меня следующая запись?
+must_pass:
+  - skill_used: booking
+  - response_contains_any:
+      - запис
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

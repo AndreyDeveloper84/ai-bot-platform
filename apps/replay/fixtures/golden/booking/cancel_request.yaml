@@ -1,0 +1,12 @@
+name: booking_cancel_request
+description: Cancel request (E2E-BOT-02A boundary) — personal reference but a mutation intent; routes to booking, never the read-only lookup fast path.
+input:
+  channel: max
+  text: Отмени мою запись
+must_pass:
+  - skill_used: booking
+  - response_contains_any:
+      - запис
+voice_check:
+  max_length: 600
+  caps_lock: 0.5

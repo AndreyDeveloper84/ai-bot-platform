@@ -66,6 +66,7 @@ from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
 from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.booking.lookup import is_personal_booking_lookup
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
@@ -212,6 +213,12 @@ class BookingSkill:
         intent = context.intent
         if intent is not None:
             return intent.intent == "booking"
+        # E2E-BOT-02A — personal booking lookups ("покажи мои записи",
+        # "на когда я записан?") don't always contain the literal
+        # "запись" keyword; claim them explicitly on the no-intent
+        # fallback path (production webhook dispatch sets no intent).
+        if is_personal_booking_lookup(context.message_text):
+            return True
         return _legacy_keyword_match(context.message_text)
 
     def handle(self, context: SkillContext) -> SkillResult:
@@ -323,6 +330,32 @@ class BookingSkill:
                         id=f"synth:pick_date:{master_id}:{raw_date}",
                         name=SHOW_SLOTS_TOOL_SPEC["name"],
                         arguments={"master_id": master_id, "date_from": raw_date},
+                    )
+                ],
+                provider="synth",
+                finish_reason="tool_calls",
+            )
+        # ── Personal booking-lookup fast path (E2E-BOT-02A) ─────────
+        # "Когда у меня следующая запись?" / "Покажи мои записи" —
+        # deterministic read-only show_my_bookings selection, same
+        # synth-ToolCall pattern as the date-pick callback above.
+        # Skipping the Phase-1 LLM tool choice means a lookup turn can
+        # never drift into a mutation tool (confirm/cancel/reschedule);
+        # Phase 3 still renders the natural-language reply. Mutation
+        # phrasings ("перенеси мою запись") are excluded inside
+        # is_personal_booking_lookup and keep the LLM tool-choice path.
+        elif is_personal_booking_lookup(text):
+            logger.info(
+                "booking.lookup.fastpath tool=%s mutation=false",
+                SHOW_MY_BOOKINGS_TOOL_SPEC["name"],
+            )
+            first = CompletionResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="synth:my_bookings",
+                        name=SHOW_MY_BOOKINGS_TOOL_SPEC["name"],
+                        arguments={},
                     )
                 ],
                 provider="synth",
