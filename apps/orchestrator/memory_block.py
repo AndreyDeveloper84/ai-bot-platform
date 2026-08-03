@@ -28,7 +28,7 @@ in env disables this whole surface without a deploy — see
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from ayla_ai_core import build_memory_block
 
@@ -122,8 +122,8 @@ def _merge_inferred(bot_user: Any, facts: dict, confidences: dict) -> None:
 
     for fact in view.green_facts:
         content = fact.content if isinstance(fact.content, dict) else {}
-        raw_key = content.get("key")
-        key = _INFERRED_KEY_MAP.get(raw_key, raw_key) if isinstance(raw_key, str) else raw_key
+        raw_key = cast(str, content.get("key"))
+        key = _INFERRED_KEY_MAP.get(raw_key, raw_key)
         value = content.get("value")
         if isinstance(key, str) and key not in facts and value not in (None, "", []):
             facts[key] = value
