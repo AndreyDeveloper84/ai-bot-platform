@@ -159,9 +159,9 @@ class FakeYClients:
         return []
 
 
-def _staff(id_: int, name: str = "Olga", spec: str = "Массаж") -> Staff:
+def _staff(id_: int | str, name: str = "Olga", spec: str = "Массаж") -> Staff:
     return Staff(
-        id=id_,
+        id=id_,  # type: ignore[arg-type]  # flag-ON path carries Ayla UUID strings
         name=name,
         specialization=spec,
         rating=4.5,
@@ -171,9 +171,9 @@ def _staff(id_: int, name: str = "Olga", spec: str = "Массаж") -> Staff:
     )
 
 
-def _service(id_: int, title: str = "Массаж") -> Service:
+def _service(id_: int | str, title: str = "Массаж") -> Service:
     return Service(
-        id=id_,
+        id=id_,  # type: ignore[arg-type]  # flag-ON path carries Ayla UUID strings
         title=title,
         price_min=1500.0,
         price_max=2500.0,
@@ -733,6 +733,9 @@ class TestSlotPickCallback:
         token_second = second.action_data["pending_action"]["token"]
         assert token_first == token_second
         assert PendingBookingAction.all_tenants.count() == 1
+        # Reuse happens BEFORE the availability re-check: the second tap
+        # must not hit the provider again.
+        assert len(client.times_calls) == 1
 
     def test_slot_recheck_provider_failure_handoffs(
         self, context: SkillContext, tenant: Tenant
@@ -762,7 +765,7 @@ class TestSlotPickCallback:
         assert result.handoff_reason == "booking_yclients_failure"
         assert PendingBookingAction.all_tenants.count() == 0
 
-    def test_empty_callback_payload_handoffs_softly(
+    def test_empty_callback_payload_rejected_locally(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
         ctx = SkillContext(
@@ -773,8 +776,135 @@ class TestSlotPickCallback:
         with _patch_yclients(FakeYClients()), _patch_provider_complete([]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
+        assert result.should_handoff is False
         assert "время" in result.reply_text.lower() or "ещё раз" in result.reply_text.lower()
         assert result.tool_calls_made == []
+
+    def test_health_check_gated_service_handoffs_on_pick_slot(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The deterministic pick_slot path honours the same health-check
+        gate as the LLM confirm path — gated service → handoff, no pending
+        row, no availability call."""
+        from django.utils import timezone as dj_timezone
+
+        from apps.booking.models import PendingBookingAction
+        from apps.catalog.models import CatalogService
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="massage-gated",
+                name="Массаж (по показаниям)",
+                requires_health_check=True,
+            )
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_health_check_required"
+        assert client.times_calls == []
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_offset_drift_slot_still_matches(self, context: SkillContext, tenant: Tenant) -> None:
+        """Same instant in a different ISO offset format must still match
+        the availability re-check (flag-ON Ayla datetimes carry offsets)."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = [
+            AvailableTime(
+                time="11:00",
+                datetime="2026-05-22T11:00:00+00:00",
+                seance_length_s=3600,
+            )
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00+03:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "Подтверждаете?" in result.reply_text
+        assert PendingBookingAction.all_tenants.count() == 1
+
+    def test_flag_on_uuid_pick_slot_creates_pending(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """BOOKING_VIA_AYLA_REST=True: UUID ids survive the deterministic
+        path end-to-end into the PendingBookingAction payload. This is the
+        configuration where RB1.1-D05 manifested live."""
+        import uuid as _uuid
+
+        from django.utils import timezone as dj_timezone
+
+        from apps.booking.models import PendingBookingAction
+        from apps.catalog.models import CatalogService
+
+        master_uuid = "11111111-1111-4111-8111-111111111111"
+        service_uuid = "22222222-2222-4222-8222-222222222222"
+        with tenant_scope(tenant):
+            # The health-check gate fails closed on a mirror miss under
+            # flag-ON — a matched, not-gated row lets the booking through.
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="svc-22",
+                name="Service 22",
+                requires_health_check=False,
+                ayla_service_id=_uuid.UUID(service_uuid),
+            )
+        client = FakeYClients()
+        client.services_rows = [_service(service_uuid)]
+        client.staff_rows = [_staff(master_uuid, "Ольга")]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-05-22T14:00:00",
+        )
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=client,
+                ),
+                _patch_provider_complete([]) as mock_complete,
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "Подтверждаете?" in result.reply_text
+        assert result.action_data is not None
+        token = result.action_data["pending_action"]["token"]
+        row = PendingBookingAction.all_tenants.get(pk=token)
+        assert row.payload["master_id"] == master_uuid
+        assert row.payload["service_id"] == service_uuid
+        assert row.payload["slot_datetime"] == "2026-05-22T14:00:00"
+        assert client.times_calls == [
+            {"staff_id": master_uuid, "date": "2026-05-22", "service_ids": [service_uuid]}
+        ]
 
     def test_old_slot_payload_without_master_service_is_rejected(
         self, context: SkillContext, tenant: Tenant

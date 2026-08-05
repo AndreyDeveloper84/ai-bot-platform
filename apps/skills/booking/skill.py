@@ -29,6 +29,16 @@ up the service in :mod:`apps.catalog` BEFORE the confirm call and, if
 the gate fires, returns ``should_handoff=True`` with reason
 ``booking_health_check_required``.
 
+### Deterministic callback short-circuits
+
+Booking-flow button taps (``cb:book:pick_master:`` /
+``cb:book:pick_date:`` / ``cb:book:pick_slot:``) bypass the Phase-1 LLM
+entirely. Their payloads are self-contained (ids + date/slot), so
+``handle()`` validates them against live tenant data and renders the
+next step — date picker, slot cards, or the confirm preview —
+deterministically. pick_slot additionally re-checks slot availability
+and reuses an identical active pending on duplicate taps (RB1.1-D05).
+
 ### Handoff reasons (locked vocabulary)
 
 * ``booking_no_masters`` — show_masters returned empty.
@@ -244,9 +254,9 @@ class BookingSkill:
         # carries the deterministic prefix. Take these before the intent
         # classifier — the prefixes are unambiguous and the classifier
         # might mis-route a bare numeric string / ISO datetime.
-        #   * cb:book:pick_master:<staff_id>          — master cards (#505)
-        #   * cb:book:pick_date:<master_id>:<date>    — date picker (#517 fixup)
-        #   * cb:book:pick_slot:<iso_datetime>        — slot cards (#513)
+        #   * cb:book:pick_master:<staff_id>:<service_id>              — master cards (#505)
+        #   * cb:book:pick_date:<master_id>:<date>:<service_id>        — date picker (#517 fixup)
+        #   * cb:book:pick_slot:<master_id>:<service_id>:<iso_datetime> — slot cards (#513)
         text = (context.message_text or "").strip()
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
             return True
@@ -382,7 +392,7 @@ class BookingSkill:
                 )
             if service_id is None:
                 return _build_skill_result(
-                    text="Контекст записи устарел. Начните выбор услуги заново.",
+                    text=_STALE_CONTEXT_TEXT,
                     tool_calls_made=[],
                     confidence=_CONFIDENCE_OK,
                 )
@@ -439,7 +449,7 @@ class BookingSkill:
                 )
             if service_id is None:
                 return _build_skill_result(
-                    text="Контекст записи устарел. Начните выбор услуги заново.",
+                    text=_STALE_CONTEXT_TEXT,
                     tool_calls_made=[],
                     confidence=_CONFIDENCE_OK,
                 )
@@ -1312,7 +1322,7 @@ def _same_slot_instant(candidate: str, tapped: str) -> bool:
     Exact string equality first (the common case — the tapped value came
     from a slot card rendered off the same provider field); parsed
     comparison second to tolerate offset-format drift. A naive/aware mix
-    can't be ordered, so it counts as different unless the strings
+    compares unequal, so it counts as different unless the strings
     matched.
     """
     if candidate == tapped:
@@ -1322,10 +1332,9 @@ def _same_slot_instant(candidate: str, tapped: str) -> bool:
         tapped_dt = datetime.fromisoformat(tapped)
     except (TypeError, ValueError):
         return False
-    try:
-        return bool(cand_dt == tapped_dt)
-    except TypeError:
-        return False
+    # A naive/aware mix compares unequal (never raises for ==), so it
+    # counts as different unless the strings matched above.
+    return bool(cand_dt == tapped_dt)
 
 
 def _find_identical_active_confirm_pending(
@@ -1415,8 +1424,6 @@ def _render_date_picker(
     the booking flow — UX is "переключаю на менеджера" rather than a
     raw error.
     """
-    from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
-
     try:
         service_ids = [service_id] if service_id is not None else None
         dates = yclients.get_available_dates(staff_id=master_id, service_ids=service_ids)
