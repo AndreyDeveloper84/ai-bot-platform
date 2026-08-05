@@ -29,6 +29,16 @@ up the service in :mod:`apps.catalog` BEFORE the confirm call and, if
 the gate fires, returns ``should_handoff=True`` with reason
 ``booking_health_check_required``.
 
+### Deterministic callback short-circuits
+
+Booking-flow button taps (``cb:book:pick_master:`` /
+``cb:book:pick_date:`` / ``cb:book:pick_slot:``) bypass the Phase-1 LLM
+entirely. Their payloads are self-contained (ids + date/slot), so
+``handle()`` validates them against live tenant data and renders the
+next step — date picker, slot cards, or the confirm preview —
+deterministically. pick_slot additionally re-checks slot availability
+and reuses an identical active pending on duplicate taps (RB1.1-D05).
+
 ### Handoff reasons (locked vocabulary)
 
 * ``booking_no_masters`` — show_masters returned empty.
@@ -60,10 +70,12 @@ from typing import Any, ClassVar
 from django.utils import timezone
 
 from apps.audit.services import write_audit
+from apps.booking.models import PendingBookingAction
 from apps.bookings.keyboards import (
     CALLBACK_BOOK_PICK_DATE_PREFIX,
     CALLBACK_BOOK_PICK_MASTER_PREFIX,
     CALLBACK_BOOK_PICK_SLOT_PREFIX,
+    confirm_2_button,
 )
 from apps.bookings.pending_actions import (
     is_cancel_text,
@@ -72,6 +84,7 @@ from apps.bookings.pending_actions import (
 )
 from apps.events.services import emit
 from apps.events.vocabulary import BOOKING_FLOW_STATE_WRITE_FAILED, SKILL_DISPATCHED
+from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
 from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.lookup import (
@@ -91,10 +104,13 @@ from apps.skills.booking.tools import (
     SHOW_MY_BOOKINGS_TOOL_SPEC,
     SHOW_SLOTS_TOOL_SPEC,
     BookingToolResult,
+    PendingPreview,
     _as_uuid,
     _booking_via_ayla,
     _coerce_id,
+    _format_confirm_preview,
     _id_key,
+    _to_slot_candidate,
     build_master_lookup,
     build_service_lookup,
     buy_certificate,
@@ -140,6 +156,15 @@ _SLOT_PICK_PROMPT = "Выберите время:"
 # Date picker — shown after master pick, before slot listing.
 _DATE_PICK_PROMPT = "Выберите дату:"
 _DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет свободных дат в ближайшее время."
+
+# pick_slot deterministic short-circuit (RB1.1-D05) — safe local replies.
+# Stale/invalid callback context never reaches the backend; the user is
+# asked to restart the service selection instead.
+_STALE_CONTEXT_TEXT = "Контекст записи устарел. Начните выбор услуги заново."
+_SLOT_TAKEN_PROMPT = "Это время уже занято. Выберите другое:"
+_SLOT_TAKEN_NO_ALTERNATIVES = (
+    "Это время уже занято, и на эту дату свободных слотов больше нет. Выберите другую дату."
+)
 
 # How many dates to render in the picker. YClients usually returns
 # a 30-day window; trimming keeps the keyboard tappable on mobile.
@@ -229,9 +254,9 @@ class BookingSkill:
         # carries the deterministic prefix. Take these before the intent
         # classifier — the prefixes are unambiguous and the classifier
         # might mis-route a bare numeric string / ISO datetime.
-        #   * cb:book:pick_master:<staff_id>          — master cards (#505)
-        #   * cb:book:pick_date:<master_id>:<date>    — date picker (#517 fixup)
-        #   * cb:book:pick_slot:<iso_datetime>        — slot cards (#513)
+        #   * cb:book:pick_master:<staff_id>:<service_id>              — master cards (#505)
+        #   * cb:book:pick_date:<master_id>:<date>:<service_id>        — date picker (#517 fixup)
+        #   * cb:book:pick_slot:<master_id>:<service_id>:<iso_datetime> — slot cards (#513)
         text = (context.message_text or "").strip()
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
             return True
@@ -367,7 +392,7 @@ class BookingSkill:
                 )
             if service_id is None:
                 return _build_skill_result(
-                    text="Контекст записи устарел. Начните выбор услуги заново.",
+                    text=_STALE_CONTEXT_TEXT,
                     tool_calls_made=[],
                     confidence=_CONFIDENCE_OK,
                 )
@@ -376,6 +401,24 @@ class BookingSkill:
                 service_id=service_id,
                 yclients=yclients,
                 tenant_id=tenant_id,
+            )
+
+        # ── Slot-pick callback short-circuit (RB1.1-D05) ───────────
+        # Fully deterministic: parse → validate context against live
+        # tenant data → re-check slot availability → confirm preview +
+        # PendingBookingAction. No Phase-1 LLM: the stateless tool-choice
+        # prompt refused to ground the synthesised UUID query and looped
+        # back to show_masters (Wave 1 RB1.1 live gate evidence), so the
+        # create flow never reached a preview.
+        if text.startswith(CALLBACK_BOOK_PICK_SLOT_PREFIX):
+            return _handle_pick_slot_callback(
+                text=text,
+                context=context,
+                tenant=tenant,
+                tenant_id=tenant_id,
+                yclients=yclients,
+                allowed_service_ids=allowed_service_ids,
+                service_lookup=service_lookup,
             )
 
         # ── Date-pick callback short-circuit ────────────────────────
@@ -406,7 +449,7 @@ class BookingSkill:
                 )
             if service_id is None:
                 return _build_skill_result(
-                    text="Контекст записи устарел. Начните выбор услуги заново.",
+                    text=_STALE_CONTEXT_TEXT,
                     tool_calls_made=[],
                     confidence=_CONFIDENCE_OK,
                 )
@@ -453,38 +496,7 @@ class BookingSkill:
                 finish_reason="tool_calls",
             )
         else:
-            # Slot-pick callback
-            # (cb:book:pick_slot:<master_id>:<service_id>:<iso_datetime>).
-            # The payload carries the full selection context so the LLM can
-            # emit confirm_booking deterministically instead of guessing
-            # master/service from short-term memory.
-            if text.startswith(CALLBACK_BOOK_PICK_SLOT_PREFIX):
-                raw_payload = text[len(CALLBACK_BOOK_PICK_SLOT_PREFIX) :].strip()
-                parts = raw_payload.split(":", 2)
-                if len(parts) != 3:
-                    logger.warning("booking.pick_slot.bad_payload raw=%r", raw_payload)
-                    return _build_skill_result(
-                        text="Не удалось распознать время. Напишите ещё раз?",
-                        tool_calls_made=[],
-                        confidence=None,
-                    )
-                raw_master, raw_service, raw_dt = parts
-                master_id = _coerce_id(raw_master)
-                service_id = _coerce_id(raw_service)
-                if (
-                    master_id is None
-                    or service_id is None
-                    or not raw_dt
-                    or not _is_iso_datetime(raw_dt)
-                ):
-                    return _build_skill_result(
-                        text="Контекст записи устарел. Начните выбор услуги заново.",
-                        tool_calls_made=[],
-                        confidence=_CONFIDENCE_OK,
-                    )
-                query_text = f"Запиши меня на {raw_dt} к мастеру {master_id} на услугу {service_id}"
-            else:
-                query_text = context.message_text
+            query_text = context.message_text
 
             # E0#1 Variant A (CR #955 F11 — moved past callback
             # short-circuits): pre-load the tenant master roster only
@@ -1121,6 +1133,340 @@ _RU_MONTHS_SHORT = (
 )
 
 
+def _handle_pick_slot_callback(
+    *,
+    text: str,
+    context: SkillContext,
+    tenant: Any,
+    tenant_id: str,
+    yclients: Any,
+    allowed_service_ids: AbstractSet[int | str],
+    service_lookup: dict[int | str, str],
+) -> SkillResult:
+    """Deterministic ``cb:book:pick_slot:`` handling (RB1.1-D05).
+
+    Same architectural pattern as the pick_master / pick_date
+    short-circuits: the callback payload is self-contained, so the whole
+    path runs without a Phase-1 LLM tool-choice call. Steps:
+
+    1. Parse + schema-validate the payload (UUID/int ids, ISO datetime).
+    2. Validate the service against the prefetched tenant catalog and
+       the specialist against the live tenant roster — both lookups are
+       tenant-scoped, so this is also the tenant-ownership check.
+    3. Health-check gate — identical to the LLM confirm path.
+    4. Duplicate-tap reuse: an identical active CONFIRM pending returns
+       the same preview token instead of stacking a second row.
+    5. Slot availability re-check against the provider (the keyboard may
+       be minutes old); a taken slot renders fresh alternatives, never a
+       pending action.
+    6. ``confirm_booking`` builds the preview + persists the
+       :class:`PendingBookingAction` — the exact same validator/writer
+       the LLM path uses. The ✅ tap then executes through
+       :mod:`apps.bookings.callbacks` as usual.
+
+    Invalid/stale context is recovered locally (no handoff, no backend
+    call, no pending row) — the user is asked to restart the selection.
+    """
+    raw_payload = text[len(CALLBACK_BOOK_PICK_SLOT_PREFIX) :].strip()
+    parts = raw_payload.split(":", 2)
+    if len(parts) != 3:
+        logger.warning("booking.pick_slot.bad_payload raw=%r", raw_payload)
+        return _build_skill_result(
+            text="Не удалось распознать время. Напишите ещё раз?",
+            tool_calls_made=[],
+            confidence=None,
+        )
+    raw_master, raw_service, raw_dt = parts
+    master_id = _coerce_id(raw_master)
+    service_id = _coerce_id(raw_service)
+    if master_id is None or service_id is None or not raw_dt or not _is_iso_datetime(raw_dt):
+        return _build_skill_result(
+            text=_STALE_CONTEXT_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+
+    # Service must exist in the tenant catalog (prefetched in handle()).
+    if service_id not in allowed_service_ids:
+        logger.info("booking.pick_slot.unknown_service service=%s", service_id)
+        return _build_skill_result(
+            text=_STALE_CONTEXT_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+    # Specialist must be on the live tenant roster. One staff fetch feeds
+    # both the membership check and the display-name lookup; a provider
+    # failure here is a handoff, NOT a "stale context" verdict — the two
+    # failure modes must stay distinguishable for the user.
+    try:
+        staff_rows = yclients.get_staff(staff_id=None)
+    except (YClientsAPIError, YClientsUnavailableError) as exc:
+        logger.warning("booking.pick_slot.staff_failed err=%s", exc)
+        return _handoff(
+            tool_calls_made=[],
+            reason="booking_yclients_failure",
+            text=_FALLBACK_HANDOFF_TEXT,
+            tenant_id=tenant_id,
+        )
+    allowed_master_ids = {_id_key(s.id) for s in staff_rows}
+    master_lookup = build_master_lookup(staff_rows)
+    if master_id not in allowed_master_ids:
+        logger.info("booking.pick_slot.unknown_master master=%s", master_id)
+        return _build_skill_result(
+            text=_STALE_CONTEXT_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+
+    # Health-check gate — same rule as the LLM confirm path: gated
+    # services route to a human instead of rendering a preview.
+    if _service_requires_health_check(tenant, service_id):
+        return _handoff(
+            tool_calls_made=[],
+            reason="booking_health_check_required",
+            text=_FALLBACK_HANDOFF_TEXT,
+            tenant_id=tenant_id,
+        )
+
+    # A past slot means the keyboard outlived itself — recover locally
+    # instead of hitting the provider with a date it will 4xx on.
+    tapped_dt = datetime.fromisoformat(raw_dt)  # validated above
+    now = timezone.now()
+    if tapped_dt.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    if tapped_dt < now:
+        logger.info("booking.pick_slot.past_slot slot=%s", raw_dt)
+        return _build_skill_result(
+            text=_STALE_CONTEXT_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+
+    # Duplicate tap on the same slot button: reuse the identical active
+    # preview instead of stacking a second PendingBookingAction row.
+    existing = _find_identical_active_confirm_pending(
+        tenant=tenant,
+        bot_user=context.bot_user,
+        master_id=master_id,
+        service_id=service_id,
+        slot_datetime=raw_dt,
+    )
+    if existing is not None:
+        return _skill_result_for_existing_pending(
+            existing,
+            context=context,
+            tenant_id=tenant_id,
+        )
+
+    # Slot availability re-check — the slot keyboard may be stale by tap
+    # time (D05-D). A taken slot never produces a pending action; the
+    # user gets fresh alternatives for the same day instead.
+    target_date = raw_dt[:10]
+    try:
+        times = yclients.get_available_times(
+            staff_id=master_id,
+            date=target_date,
+            service_ids=[service_id],
+        )
+    except (YClientsAPIError, YClientsUnavailableError) as exc:
+        logger.warning("booking.pick_slot.slots_failed master=%s err=%s", master_id, exc)
+        return _handoff(
+            tool_calls_made=[],
+            reason="booking_yclients_failure",
+            text=_FALLBACK_HANDOFF_TEXT,
+            tenant_id=tenant_id,
+        )
+    slots = [c for c in (_to_slot_candidate(t, target_date) for t in times) if c is not None]
+    if not any(_same_slot_instant(c.datetime, raw_dt) for c in slots):
+        logger.info("booking.pick_slot.slot_gone master=%s slot=%s", master_id, raw_dt)
+        if slots:
+            return _build_skill_result(
+                text=_SLOT_TAKEN_PROMPT,
+                tool_calls_made=[],
+                confidence=_CONFIDENCE_OK,
+                action_data=_action_data_for_slot_pick(
+                    slots,
+                    master_id=master_id,
+                    service_id=service_id,
+                ),
+            )
+        return _build_skill_result(
+            text=_SLOT_TAKEN_NO_ALTERNATIVES,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+
+    # Deterministic preview — confirm_booking validates + persists the
+    # PendingBookingAction exactly as on the LLM path. The synthesised
+    # ToolCall is recorded in tool_calls_made for telemetry parity with
+    # the pick_date short-circuit.
+    synth_call = ToolCall(
+        id=f"synth:pick_slot:{master_id}:{service_id}:{raw_dt}",
+        name=CONFIRM_BOOKING_TOOL_SPEC["name"],
+        arguments={
+            "master_id": master_id,
+            "service_id": service_id,
+            "slot_datetime": raw_dt,
+        },
+    )
+    result = confirm_booking(
+        client=yclients,
+        arguments=synth_call.arguments,
+        tenant=tenant,
+        bot_user=context.bot_user,
+        allowed_master_ids=allowed_master_ids,
+        allowed_service_ids=allowed_service_ids,
+        master_lookup=master_lookup,
+        service_lookup=service_lookup,
+    )
+    if result.error in {"invalid_master_id", "invalid_service_id", "missing_slot"}:
+        # Pre-validated above; a roster/catalog race mid-flow lands here.
+        # Recoverable locally — no handoff, no pending row.
+        logger.info("booking.pick_slot.validation_race err=%s", result.error)
+        return _build_skill_result(
+            text=_STALE_CONTEXT_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+    if result.error:
+        return _handoff(
+            tool_calls_made=[synth_call],
+            reason="booking_yclients_failure",
+            text=_FALLBACK_HANDOFF_TEXT,
+            tenant_id=tenant_id,
+        )
+
+    # At most one active create-preview per user: supersede any earlier
+    # unconsumed CONFIRM pendings so two different preview cards can't
+    # both be ✅-executed into two real bookings.
+    if result.pending is not None:
+        new_token = result.pending.token
+        superseded = (
+            PendingBookingAction.all_tenants.filter(
+                tenant=tenant,
+                bot_user=context.bot_user,
+                kind=PendingBookingAction.Kind.CONFIRM,
+                consumed_at__isnull=True,
+            )
+            .exclude(pk=new_token)
+            .update(consumed_at=timezone.now())
+        )
+        if superseded:
+            logger.info(
+                "booking.pick_slot.superseded_pending count=%s new_token=%s",
+                superseded,
+                new_token,
+            )
+
+    # A created preview closes any D-10 continuation state — the
+    # confirmation gate owns the flow from here (mirrors the LLM path).
+    _clear_flow_state(context.conversation)
+    _audit_handled(tenant_id=tenant_id, tool=CONFIRM_BOOKING_TOOL_SPEC["name"])
+    return _build_skill_result(
+        text=result.text,
+        tool_calls_made=[synth_call],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_pending(result),
+    )
+
+
+def _same_slot_instant(candidate: str, tapped: str) -> bool:
+    """True when two ISO datetimes denote the same slot.
+
+    Exact string equality first (the common case — the tapped value came
+    from a slot card rendered off the same provider field); parsed
+    comparison second to tolerate offset-format drift. A naive/aware mix
+    compares unequal, so it counts as different unless the strings
+    matched.
+    """
+    if candidate == tapped:
+        return True
+    try:
+        cand_dt = datetime.fromisoformat(candidate)
+        tapped_dt = datetime.fromisoformat(tapped)
+    except (TypeError, ValueError):
+        return False
+    if (cand_dt.tzinfo is None) != (tapped_dt.tzinfo is None):
+        # The provider emits both shapes (offset-aware ``datetime`` field,
+        # naive ``time`` fallback). A naive/aware mix compares unequal
+        # even for the same wall-clock slot — compare wall clocks so the
+        # re-check doesn't report the very slot on the keyboard as taken.
+        return cand_dt.replace(tzinfo=None) == tapped_dt.replace(tzinfo=None)
+    return bool(cand_dt == tapped_dt)
+
+
+def _find_identical_active_confirm_pending(
+    *,
+    tenant: Any,
+    bot_user: Any,
+    master_id: int | str,
+    service_id: int | str,
+    slot_datetime: str,
+) -> PendingBookingAction | None:
+    """Latest unconsumed, unexpired CONFIRM pending with the same payload.
+
+    Duplicate-tap safety for the deterministic pick_slot path: a second
+    tap on the same slot button returns the existing preview instead of
+    stacking another row. Payload ids are compared as strings so the
+    flag-OFF int path and the flag-ON UUID path behave identically.
+    """
+    rows = PendingBookingAction.all_tenants.filter(
+        tenant=tenant,
+        bot_user=bot_user,
+        kind=PendingBookingAction.Kind.CONFIRM,
+        consumed_at__isnull=True,
+        expires_at__gt=timezone.now(),
+    ).order_by("-created_at")[:10]
+    for row in rows:
+        payload = row.payload or {}
+        if (
+            str(payload.get("master_id")) == str(master_id)
+            and str(payload.get("service_id")) == str(service_id)
+            and _same_slot_instant(str(payload.get("slot_datetime") or ""), slot_datetime)
+        ):
+            return row
+    return None
+
+
+def _skill_result_for_existing_pending(
+    row: PendingBookingAction,
+    *,
+    context: SkillContext,
+    tenant_id: str,
+) -> SkillResult:
+    """Rebuild the preview card for an already-active pending row.
+
+    The snapshot stored on the row (names + slot) is authoritative — no
+    provider round-trip needed to re-render the same card with the same
+    token, so both taps converge on one PendingBookingAction. Flow state
+    is cleared exactly as on the new-preview path: the confirmation gate
+    owns the flow from here.
+    """
+    payload = row.payload or {}
+    preview_text = _format_confirm_preview(
+        master_name=str(payload.get("master_name") or ""),
+        service_name=str(payload.get("service_name") or ""),
+        slot_datetime=str(payload.get("slot_datetime") or ""),
+    )
+    result = BookingToolResult(
+        text=preview_text,
+        pending=PendingPreview(
+            kind=PendingBookingAction.Kind.CONFIRM,
+            token=row.pk,
+            preview_text=preview_text,
+            keyboard=confirm_2_button(str(row.pk)),
+        ),
+    )
+    _clear_flow_state(context.conversation)
+    _audit_handled(tenant_id=tenant_id, tool=CONFIRM_BOOKING_TOOL_SPEC["name"])
+    return _build_skill_result(
+        text=preview_text,
+        tool_calls_made=[],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_pending(result),
+    )
+
+
 def _render_date_picker(
     *,
     master_id: int | str,
@@ -1140,8 +1486,6 @@ def _render_date_picker(
     the booking flow — UX is "переключаю на менеджера" rather than a
     raw error.
     """
-    from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
-
     try:
         service_ids = [service_id] if service_id is not None else None
         dates = yclients.get_available_dates(staff_id=master_id, service_ids=service_ids)
