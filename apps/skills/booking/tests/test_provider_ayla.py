@@ -37,7 +37,11 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
-from apps.skills.booking.provider import AylaYClientsAdapter, get_booking_provider
+from apps.skills.booking.provider import (
+    AylaYClientsAdapter,
+    YClientsStaleVersionError,
+    get_booking_provider,
+)
 from apps.skills.booking.tools import show_masters, show_slots
 from apps.tenancy.models import Tenant
 
@@ -151,6 +155,7 @@ class FakeAylaBooking:
         external_user_id: str,
         appointment_id: str,
         new_start_datetime: str,
+        expected_version: int | None = None,
         idempotency_key: str | None = None,
     ) -> AylaBookingRecord:
         self.calls.append(
@@ -158,6 +163,7 @@ class FakeAylaBooking:
                 "op": "reschedule",
                 "appointment_id": appointment_id,
                 "new_start_datetime": new_start_datetime,
+                "expected_version": expected_version,
                 "idempotency_key": idempotency_key,
             }
         )
@@ -409,6 +415,17 @@ class TestErrorTranslation:
                 datetime="2026-08-01T10:00:00+03:00",
                 client_phone="79991234567",
                 client_name="Anna",
+            )
+
+    def test_stale_version_translated_to_structured_error(self) -> None:
+        """Ayla 409 stale_version → structured YClientsStaleVersionError."""
+        fake = FakeAylaBooking()
+        fake.raise_exc = BookingBadRequestError(
+            "http_409_stale_version", status_code=409, code="stale_version"
+        )
+        with pytest.raises(YClientsStaleVersionError):
+            _adapter(fake).reschedule_record(
+                record_id=_APPT_UUID, datetime="2026-06-11T16:00:00+03:00"
             )
 
     def test_not_implemented_propagates(self) -> None:

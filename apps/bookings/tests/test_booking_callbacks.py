@@ -34,6 +34,7 @@ from apps.bookings.callbacks import (
     REPLY_BOOK_CANCELLED_PREVIEW,
     REPLY_BOOK_EXPIRED,
     REPLY_BOOK_PARTIAL_FAILURE,
+    REPLY_BOOK_STALE_VERSION,
     REPLY_FORBIDDEN,
     REPLY_NOT_FOUND,
     BookingGateCallbackSkill,
@@ -581,6 +582,36 @@ class TestConfirmTapReschedule:
         assert send_mock.called
         body = send_mock.call_args.kwargs["text"]
         assert "не завершён" in body or "Перенос" in body
+
+    def test_stale_version_returns_conflict_reply_without_handoff(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
+    ) -> None:
+        _make_booking(tenant, bot_user, yc_id=555)
+        token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.RESCHEDULE,
+            payload=_reschedule_payload(),
+        )
+        ctx = _ctx(
+            f"cb:book:confirm:{token}",
+            bot_user=bot_user,
+            conversation=conversation,
+        )
+        from apps.skills.booking.tools import BookingToolResult
+
+        with (
+            _patch_yclients(FakeYClients()),
+            patch(
+                "apps.bookings.callbacks.execute_reschedule",
+                return_value=BookingToolResult(error="stale_version"),
+            ) as exec_mock,
+        ):
+            result = BookingGateCallbackSkill().handle(ctx)
+
+        assert result.should_handoff is False
+        assert result.reply_text == REPLY_BOOK_STALE_VERSION
+        exec_mock.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

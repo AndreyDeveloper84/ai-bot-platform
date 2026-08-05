@@ -107,7 +107,10 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
-from apps.skills.booking.provider import YClientsSpecialistUnavailableError
+from apps.skills.booking.provider import (
+    YClientsSpecialistUnavailableError,
+    YClientsStaleVersionError,
+)
 from apps.promotions.formatting import format_rub
 from apps.promotions.services import validate_promo
 
@@ -131,7 +134,7 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients service id, when known.",
             },
             "service_name": {
@@ -156,11 +159,11 @@ SHOW_SLOTS_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "master_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients staff id, must come from a prior show_masters call.",
             },
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients service id, optional but improves accuracy.",
             },
             "date_from": {
@@ -189,11 +192,11 @@ CONFIRM_BOOKING_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "master_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients staff id, grounded by show_masters.",
             },
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients service id, grounded by show_masters.",
             },
             "slot_datetime": {
@@ -225,7 +228,7 @@ CANCEL_BOOKING_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "record_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": (
                     "YClients record id of the booking to cancel. "
                     "MUST come from show_my_bookings — must belong to "
@@ -258,7 +261,7 @@ RESCHEDULE_BOOKING_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "record_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": (
                     "YClients record id of the booking to move. MUST come "
                     "from show_my_bookings — must belong to the user."
@@ -308,7 +311,7 @@ CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": (
                     "Catalog/YClients service id. Must come from the "
                     "bot's known catalog — never invent."
@@ -1548,8 +1551,10 @@ def reschedule_booking(
     # — the YClients records endpoint isn't the source of truth under Ayla.
     staff_id: int | str | None
     service_id: int | str | None
+    expected_version: int | None = None
     if _booking_via_ayla():
         staff_id, service_id = _proxy_master_service(tenant=tenant, record_id=record_id)
+        expected_version = _proxy_expected_version(tenant=tenant, record_id=record_id)
     else:
         user_record = _find_yclients_user_record(client=client, record_id=record_id)
         if user_record is None:
@@ -1592,6 +1597,7 @@ def reschedule_booking(
         "client_phone": booking.client_phone,
         "client_name": booking.client_name,
         "booking_request_id": str(booking.id),
+        "expected_version": expected_version,
     }
     token = create_pending(
         tenant=tenant,
@@ -1675,6 +1681,7 @@ def _execute_reschedule_ayla(
     visit_at_dt: datetime,
     master_name: str,
     service_name: str,
+    expected_version: int | None = None,
 ) -> BookingToolResult:
     """Native Ayla reschedule (flag ON) — preserves the canonical appointment
     id *and* duration, so there is no cancel-and-recreate.
@@ -1712,11 +1719,16 @@ def _execute_reschedule_ayla(
         record: BookingRecord = client.reschedule_record(
             record_id=record_id,
             datetime=new_datetime,
+            expected_version=expected_version,
         )
     except YClientsUnavailableError as exc:
         logger.warning("booking.reschedule.ayla.unavailable err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_unavailable")
         return BookingToolResult(error="yclients_cancel_failure")
+    except YClientsStaleVersionError:
+        logger.info("booking.reschedule.ayla.stale_version record_id=%s", record_id)
+        _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="stale_version")
+        return BookingToolResult(error="stale_version")
     except YClientsAPIError as exc:
         logger.info("booking.reschedule.ayla.api_error err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_api_error")
@@ -1813,6 +1825,14 @@ def execute_reschedule(
     client_name = str(payload.get("client_name") or "Client")
     tenant_id = str(getattr(tenant, "id", ""))
 
+    raw_expected_version = payload.get("expected_version")
+    expected_version: int | None = None
+    if raw_expected_version is not None:
+        try:
+            expected_version = int(raw_expected_version)
+        except (TypeError, ValueError):
+            expected_version = None
+
     if record_id is None or master_id is None or service_id is None or not new_datetime:
         return BookingToolResult(error="invalid_payload")
 
@@ -1879,6 +1899,7 @@ def execute_reschedule(
             visit_at_dt=visit_at_dt,
             master_name=master_name,
             service_name=service_name,
+            expected_version=expected_version,
         )
 
     # Skills retro hotfix #4: re-check slot availability at execute time.
@@ -3188,6 +3209,28 @@ def _upsert_remote_booking_proxy(
         )
     except Exception:  # noqa: BLE001 — mirror write is best-effort (see docstring)
         logger.exception("booking.proxy.upsert_failed appt=%s", appt)
+
+
+def _proxy_expected_version(*, tenant: Any, record_id: int | str) -> int | None:
+    """Return the last known canonical appointment version for optimistic concurrency.
+
+    Returns ``None`` when no mirror row exists or the proxy has never been
+    updated by a version-tracked canonical event.
+    """
+    appt = _as_uuid(record_id)
+    if appt is None:
+        return None
+    try:
+        from apps.booking.models import RemoteBookingProxy
+
+        row = (
+            RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appt)
+            .only("last_applied_appointment_version")
+            .first()
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return row.last_applied_appointment_version if row else None
 
 
 def _proxy_master_service(*, tenant: Any, record_id: int | str) -> tuple[str | None, str | None]:

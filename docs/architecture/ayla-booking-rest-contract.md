@@ -118,6 +118,18 @@ payload raw.
 > Singular `service_id`. `client_id` is **required** and must equal the Ayla
 > user the bearer + `X-External-User-ID` resolved to, else `403 CLIENT_MISMATCH`.
 
+**Reschedule appointment — request**
+```json
+{ "start_datetime": "2026-06-10T16:00:00+03:00",
+  "expected_version": 3 }
+```
+> `expected_version` is the bot's last known canonical appointment
+> ``rescheduled`` version (mirror ``last_applied_appointment_version``). Ayla
+> MUST reject the call with HTTP 409 ``stale_version`` when the appointment has
+> changed since that version. **Status: S1 implemented; pending S2 ACK of field
+> name + wire code.** Until Ayla enforces it the guard is fail-open on the
+> backend, but the bot already surfaces the conflict to the user.
+
 **Appointment — response** (`AppointmentDetailSerializer`; create / reschedule / `me/bookings` item)
 ```json
 { "id": "3f1c2e9a-4b7d-4c2a-9e1f-8a2b6c0d1e34", "status": "confirmed",
@@ -154,13 +166,15 @@ Writes carry an idempotency key so a retried bot turn cannot double-book.
 
 ## 6. Errors
 
-| HTTP | Bot client raises | Meaning |
-|---|---|---|
-| 2xx | — | success |
-| 400 / 409 / 422 | `BookingBadRequestError` | validation, slot gone, consent missing — surface to user |
-| 401 / 403 | `BookingBadRequestError` | auth / tenant-binding rejected (not retried) |
-| 404 | depends — cancel/reschedule of a missing appt → `False` / `BookingBadRequestError` | already gone |
-| 5xx, timeout, network, circuit-open | `BookingUnavailableError` | outage — caller shows fallback; trips the breaker |
+| HTTP | Code | Bot client raises | Meaning |
+|---|---|---|---|
+| 2xx | — | — | success |
+| 400 / 422 | varies | `BookingBadRequestError` | validation, slot gone, consent missing — surface to user |
+| 401 / 403 | varies | `BookingBadRequestError` | auth / tenant-binding rejected (not retried) |
+| 404 | varies | depends — cancel/reschedule of a missing appt → `False` / `BookingBadRequestError` | already gone |
+| 409 | `stale_version` | `BookingBadRequestError(status_code=409, code="stale_version")` | optimistic concurrency conflict on reschedule — bot surfaces conflict, does NOT retry |
+| 409 | `subscription_past_due` | `BookingBadRequestError(status_code=409, code="subscription_past_due")` | C1 billing block — mapped to neutral specialist-unavailable surface |
+| 5xx, timeout, network, circuit-open | — | `BookingUnavailableError` | outage — caller shows fallback; trips the breaker |
 
 Error body shape (code for mapping) — **confirm with S2**:
 ```json
