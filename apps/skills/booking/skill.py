@@ -345,27 +345,35 @@ class BookingSkill:
         service_lookup = build_service_lookup(services)
 
         # ── Master-pick callback short-circuit ──────────────────────
-        # User tapped a master-card button (cb:book:pick_master:<id>).
+        # User tapped a master-card button (cb:book:pick_master:<id>:<service_id>).
         # Fetch the master's available dates and render them as a date
         # picker. show_slots is NOT dispatched here — it would auto-pick
         # the nearest date and surprise the user (UX feedback 2026-05-21:
         # "меня не спросили про дату"). Date-pick callback fires
-        # show_slots(master_id, date_from=<date>) on the user's choice.
+        # show_slots(master_id, date_from=<date>, service_id=<id>) on the
+        # user's choice.
         text = (context.message_text or "").strip()
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
-            raw_id = text[len(CALLBACK_BOOK_PICK_MASTER_PREFIX) :].strip()
-            # Flag OFF: master id is a YClients int. Flag ON: an Ayla UUID —
-            # ``_coerce_id`` keeps it a string instead of crashing on int().
-            master_id = _coerce_id(raw_id)
+            raw_payload = text[len(CALLBACK_BOOK_PICK_MASTER_PREFIX) :].strip()
+            parts = raw_payload.split(":", 1)
+            master_id = _coerce_id(parts[0]) if parts else None
+            service_id = _coerce_id(parts[1]) if len(parts) > 1 else None
             if master_id is None:
-                logger.warning("booking.pick_master.bad_id raw=%r", raw_id)
+                logger.warning("booking.pick_master.bad_id raw=%r", raw_payload)
                 return _build_skill_result(
                     text="Не удалось распознать выбор мастера. Напишите имя ещё раз?",
                     tool_calls_made=[],
                     confidence=None,
                 )
+            if service_id is None:
+                return _build_skill_result(
+                    text="Контекст записи устарел. Начните выбор услуги заново.",
+                    tool_calls_made=[],
+                    confidence=_CONFIDENCE_OK,
+                )
             return _render_date_picker(
                 master_id=master_id,
+                service_id=service_id,
                 yclients=yclients,
                 tenant_id=tenant_id,
             )
@@ -575,16 +583,19 @@ class BookingSkill:
 
         # Master-cards short-circuit: when show_masters returned candidates,
         # render them as a deterministic text + inline-keyboard (one button
-        # per master, cb:book:pick_master:<id> payload). Skip Phase 3 LLM
-        # to avoid the round-trip + remove the failure mode where the
-        # model writes filler text instead of presenting the cards.
+        # per master, cb:book:pick_master:<id>:<service_id> payload). Skip
+        # Phase 3 LLM to avoid the round-trip + remove the failure mode where
+        # the model writes filler text instead of presenting the cards.
         if tool_name == SHOW_MASTERS_TOOL_SPEC["name"] and tool_result.masters:
             _audit_handled(tenant_id=tenant_id, tool=tool_name)
+            service_id = _coerce_id(first_call.arguments.get("service_id"))
             return _build_skill_result(
                 text=_MASTER_PICK_PROMPT,
                 tool_calls_made=tool_calls_made,
                 confidence=_CONFIDENCE_OK,
-                action_data=_action_data_for_master_pick(tool_result.masters),
+                action_data=_action_data_for_master_pick(
+                    tool_result.masters, service_id=service_id
+                ),
             )
 
         # Slot-cards short-circuit (symmetric to master cards). When
@@ -916,7 +927,10 @@ def _masters_payload(result: BookingToolResult) -> list[dict[str, Any]] | None:
     ]
 
 
-def _action_data_for_master_pick(masters: list) -> dict[str, Any]:
+def _action_data_for_master_pick(
+    masters: list,
+    service_id: int | str | None = None,
+) -> dict[str, Any]:
     """Build the master-cards keyboard from a show_masters result.
 
     Channel adapters consume the platform-canonical envelope shape (same
@@ -924,19 +938,21 @@ def _action_data_for_master_pick(masters: list) -> dict[str, Any]:
     handler ``_build_attachments`` converts the channel-agnostic
     ``[{label, callback}]`` list to the MAX wire format.
 
-    One button per master, callback payload
-    ``cb:book:pick_master:<staff_id>``. The skill's matches() picks the
-    prefix up on the tap and the handle() short-circuit dispatches
-    show_slots(master_id=<id>) without a Phase 1 LLM round-trip.
+    One button per master. The callback carries both the selected master
+    id and the service id so the downstream date/slot lookups are self-
+    contained: ``cb:book:pick_master:<staff_id>:<service_id>``. The skill's
+    ``matches()`` picks the prefix up on the tap and ``handle()`` dispatches
+    the date picker without a Phase 1 LLM round-trip.
 
     Label shape: ``<emoji> <name>`` with a specialisation hint when
     distinct from the canonical "Мастер массажа" boilerplate — keeps the
     button readable in MAX's tight inline-keyboard layout.
     """
+    service_suffix = f":{service_id}" if service_id is not None else ""
     buttons = [
         {
             "label": _master_button_label(m),
-            "callback": f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}{m.id}",
+            "callback": f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}{m.id}{service_suffix}",
         }
         for m in masters
     ]
@@ -1009,6 +1025,7 @@ _RU_MONTHS_SHORT = (
 def _render_date_picker(
     *,
     master_id: int | str,
+    service_id: int | str,
     yclients: Any,
     tenant_id: str,
 ) -> SkillResult:
@@ -1017,7 +1034,8 @@ def _render_date_picker(
     Calls ``client.get_available_dates`` directly (no tool wrapper —
     the dates list isn't an LLM-grounded artefact, it's pure ops data).
     Renders the first :data:`_MAX_DATE_BUTTONS` dates as inline-keyboard
-    buttons with ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>`` payloads.
+    buttons with ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>:<service_id>``
+    payloads.
 
     YClients failures fold into the same handoff path as the rest of
     the booking flow — UX is "переключаю на менеджера" rather than a
@@ -1026,7 +1044,8 @@ def _render_date_picker(
     from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
 
     try:
-        dates = yclients.get_available_dates(staff_id=master_id, service_ids=None)
+        service_ids = [service_id] if service_id is not None else None
+        dates = yclients.get_available_dates(staff_id=master_id, service_ids=service_ids)
     except (YClientsAPIError, YClientsUnavailableError) as exc:
         logger.warning("booking.pick_master.yclients_failed master=%s err=%s", master_id, exc)
         return _handoff(
@@ -1051,21 +1070,27 @@ def _render_date_picker(
         text=_DATE_PICK_PROMPT,
         tool_calls_made=[],
         confidence=_CONFIDENCE_OK,
-        action_data=_action_data_for_date_pick(master_id, capped),
+        action_data=_action_data_for_date_pick(master_id, capped, service_id),
     )
 
 
-def _action_data_for_date_pick(master_id: int | str, dates: list[str]) -> dict[str, Any]:
+def _action_data_for_date_pick(
+    master_id: int | str,
+    dates: list[str],
+    service_id: int | str | None = None,
+) -> dict[str, Any]:
     """Build the date-cards keyboard from a YClients dates list.
 
-    One button per date, callback ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>``.
-    Master id is embedded so the date-pick callback can synthesise
-    show_slots without re-fetching the master from history.
+    One button per date, callback
+    ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>:<service_id>``.
+    Master id and service id are embedded so the date-pick callback can
+    synthesise show_slots without re-fetching context from history.
     """
+    service_suffix = f":{service_id}" if service_id is not None else ""
     buttons = [
         {
             "label": _date_button_label(d),
-            "callback": f"{CALLBACK_BOOK_PICK_DATE_PREFIX}{master_id}:{d}",
+            "callback": f"{CALLBACK_BOOK_PICK_DATE_PREFIX}{master_id}:{d}{service_suffix}",
         }
         for d in dates
     ]
