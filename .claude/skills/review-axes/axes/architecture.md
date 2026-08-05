@@ -1,9 +1,10 @@
 # Ось: architecture
 
-**Владелец:** `ln-24-architecture-auditor`
+**Владелец:** *(inline — нет выделенного агента, чек-лист ниже проходит
+диспетчер сам)*
 **Не трогает:** качество SQL (persistence), корректность логики (correctness).
 
-## Жёсткие правила ADR-0009 — нарушение = `PRE_MERGE`
+## Жёсткие правила ADR-0009 — нарушение = `MUST_FIX_PRE_MERGE`
 
 1. bot-platform **не пишет** в booking / payment / catalog / schedule / review /
    user-profile. Только REST-вызов в Ayla. Прямой ORM-write в эти домены — блокер.
