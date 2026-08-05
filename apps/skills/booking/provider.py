@@ -209,7 +209,13 @@ class AylaYClientsAdapter:
                 idempotency_key=key,
             )
 
-    def reschedule_record(self, *, record_id: int | str, datetime: str) -> BookingRecord:
+    def reschedule_record(
+        self,
+        *,
+        record_id: int | str,
+        datetime: str,
+        expected_version: int | None = None,
+    ) -> BookingRecord:
         """Native Ayla reschedule — preserves the canonical ``appointment_id``.
 
         The tools' YClients path reschedules as cancel+create (which would mint
@@ -222,6 +228,7 @@ class AylaYClientsAdapter:
                 external_user_id=self._external_user_id,
                 appointment_id=str(record_id),
                 new_start_datetime=datetime,
+                expected_version=expected_version,
                 idempotency_key=key,
             )
         return BookingRecord(record_id=0, record_hash="", raw=_mirror_raw(record))

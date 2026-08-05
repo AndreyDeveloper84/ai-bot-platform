@@ -287,6 +287,7 @@ class AylaBookingClient(Protocol):
         external_user_id: str,
         appointment_id: str,
         new_start_datetime: str,
+        expected_version: int | None = ...,
         idempotency_key: str | None = ...,
     ) -> AylaBookingRecord: ...
 
@@ -655,13 +656,17 @@ class AylaBookingHTTPClient:
         external_user_id: str,
         appointment_id: str,
         new_start_datetime: str,
+        expected_version: int | None = None,
         idempotency_key: str | None = None,
     ) -> AylaBookingRecord:
+        json_body: dict[str, Any] = {"new_start_datetime": new_start_datetime}
+        if expected_version is not None:
+            json_body["expected_version"] = expected_version
         resp = self._request(
             "POST",
             f"appointments/{appointment_id}/reschedule/",
             external_user_id=external_user_id,
-            json_body={"new_start_datetime": new_start_datetime},
+            json_body=json_body,
             idempotency_key=idempotency_key,
         )
         data = self._ok(resp, success=(200, 201))

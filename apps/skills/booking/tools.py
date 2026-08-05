@@ -1678,6 +1678,7 @@ def _execute_reschedule_ayla(
     visit_at_dt: datetime,
     master_name: str,
     service_name: str,
+    expected_version: int | None = None,
 ) -> BookingToolResult:
     """Native Ayla reschedule (flag ON) — preserves the canonical appointment
     id *and* duration, so there is no cancel-and-recreate.
@@ -1715,6 +1716,7 @@ def _execute_reschedule_ayla(
         record: BookingRecord = client.reschedule_record(
             record_id=record_id,
             datetime=new_datetime,
+            expected_version=expected_version,
         )
     except YClientsUnavailableError as exc:
         logger.warning("booking.reschedule.ayla.unavailable err=%s", exc)
@@ -1816,6 +1818,14 @@ def execute_reschedule(
     client_name = str(payload.get("client_name") or "Client")
     tenant_id = str(getattr(tenant, "id", ""))
 
+    raw_expected_version = payload.get("expected_version")
+    expected_version: int | None = None
+    if raw_expected_version is not None:
+        try:
+            expected_version = int(raw_expected_version)
+        except (TypeError, ValueError):
+            expected_version = None
+
     if record_id is None or master_id is None or service_id is None or not new_datetime:
         return BookingToolResult(error="invalid_payload")
 
@@ -1882,6 +1892,7 @@ def execute_reschedule(
             visit_at_dt=visit_at_dt,
             master_name=master_name,
             service_name=service_name,
+            expected_version=expected_version,
         )
 
     # Skills retro hotfix #4: re-check slot availability at execute time.
