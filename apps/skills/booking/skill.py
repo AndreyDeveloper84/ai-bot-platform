@@ -453,22 +453,31 @@ class BookingSkill:
                 finish_reason="tool_calls",
             )
         else:
-            # Slot-pick callback (cb:book:pick_slot:<iso_datetime>). Unlike
-            # master-pick — which deterministically dispatches show_slots —
-            # the slot tap needs the LLM to synthesise confirm_booking
-            # with master_id + service_id pulled from short-term history.
-            # We override the query with a synthesised user-text so the
-            # standard Phase-1 prompt + tool-use loop fires naturally.
+            # Slot-pick callback
+            # (cb:book:pick_slot:<master_id>:<service_id>:<iso_datetime>).
+            # The payload carries the full selection context so the LLM can
+            # emit confirm_booking deterministically instead of guessing
+            # master/service from short-term memory.
             if text.startswith(CALLBACK_BOOK_PICK_SLOT_PREFIX):
-                raw_dt = text[len(CALLBACK_BOOK_PICK_SLOT_PREFIX) :].strip()
-                if not raw_dt:
-                    logger.warning("booking.pick_slot.empty_payload")
+                raw_payload = text[len(CALLBACK_BOOK_PICK_SLOT_PREFIX) :].strip()
+                parts = raw_payload.split(":", 2)
+                if len(parts) != 3:
+                    logger.warning("booking.pick_slot.bad_payload raw=%r", raw_payload)
                     return _build_skill_result(
                         text="Не удалось распознать время. Напишите ещё раз?",
                         tool_calls_made=[],
                         confidence=None,
                     )
-                query_text = f"Запиши меня на {raw_dt}"
+                raw_master, raw_service, raw_dt = parts
+                master_id = _coerce_id(raw_master)
+                service_id = _coerce_id(raw_service)
+                if master_id is None or service_id is None or not raw_dt:
+                    return _build_skill_result(
+                        text="Контекст записи устарел. Начните выбор услуги заново.",
+                        tool_calls_made=[],
+                        confidence=_CONFIDENCE_OK,
+                    )
+                query_text = f"Запиши меня на {raw_dt} к мастеру {master_id} на услугу {service_id}"
             else:
                 query_text = context.message_text
 
@@ -610,18 +619,30 @@ class BookingSkill:
                 ),
             )
 
-        # Slot-cards short-circuit (symmetric to master cards). When
-        # show_slots returned candidate times, render them as a
-        # deterministic text + keyboard (one button per slot,
-        # cb:book:pick_slot:<iso_datetime>). Skip Phase 3 LLM —
-        # identical UX rationale as master cards.
+        # Slot-cards short-circuit. When show_slots returned candidate
+        # times, render them as a deterministic text + keyboard. Each
+        # callback carries master_id + service_id + slot so the tap can
+        # ground confirm_booking without relying on short-term memory.
         if tool_name == SHOW_SLOTS_TOOL_SPEC["name"] and tool_result.slots:
             _audit_handled(tenant_id=tenant_id, tool=tool_name)
+            master_id = _coerce_id(first_call.arguments.get("master_id"))
+            service_id = _coerce_id(first_call.arguments.get("service_id"))
+            if master_id is None or service_id is None:
+                return _handoff(
+                    tool_calls_made=tool_calls_made,
+                    reason="booking_missing_service_context",
+                    text=_FALLBACK_HANDOFF_TEXT,
+                    tenant_id=tenant_id,
+                )
             return _build_skill_result(
                 text=_SLOT_PICK_PROMPT,
                 tool_calls_made=tool_calls_made,
                 confidence=_CONFIDENCE_OK,
-                action_data=_action_data_for_slot_pick(tool_result.slots),
+                action_data=_action_data_for_slot_pick(
+                    tool_result.slots,
+                    master_id=master_id,
+                    service_id=service_id,
+                ),
             )
 
         # Health-check gate — only relevant for confirm_booking.
@@ -988,20 +1009,21 @@ def _master_button_label(master) -> str:
     return f"👤 {name}"
 
 
-def _action_data_for_slot_pick(slots: list) -> dict[str, Any]:
+def _action_data_for_slot_pick(
+    slots: list,
+    master_id: int | str,
+    service_id: int | str,
+) -> dict[str, Any]:
     """Build the slot-cards keyboard from a show_slots result.
 
-    Mirror of :func:`_action_data_for_master_pick`. One button per slot,
-    callback payload ``cb:book:pick_slot:<iso_datetime>`` carrying the
-    YClients-returned ISO datetime verbatim. The skill's slot-callback
-    branch synthesises a "запиши меня на <datetime>" user-text so the
-    Phase-1 LLM can emit confirm_booking with master_id + service_id
-    drawn from short-term conversation memory.
+    One button per slot. Callback carries master, service and slot so
+    the tap can ground confirm_booking deterministically:
+    ``cb:book:pick_slot:<master_id>:<service_id>:<iso_datetime>``.
     """
     buttons = [
         {
             "label": _slot_button_label(s),
-            "callback": f"{CALLBACK_BOOK_PICK_SLOT_PREFIX}{s.datetime}",
+            "callback": f"{CALLBACK_BOOK_PICK_SLOT_PREFIX}{master_id}:{service_id}:{s.datetime}",
         }
         for s in slots
     ]
