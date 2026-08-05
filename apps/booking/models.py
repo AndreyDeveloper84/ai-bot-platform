@@ -654,7 +654,7 @@ class PendingBookingAction(models.Model):
                        service_name}``
     * ``cancel``:     ``{record_id, reason}``
     * ``reschedule``: ``{record_id, new_datetime, master_id, service_id,
-                       master_name, service_name}``
+                       master_name, service_name, expected_version}``
 
     The dict is the source of truth for the callback handler — it
     re-validates the IDs against fresh YClients data at execute time

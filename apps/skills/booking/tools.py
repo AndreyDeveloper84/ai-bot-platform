@@ -1548,8 +1548,10 @@ def reschedule_booking(
     # — the YClients records endpoint isn't the source of truth under Ayla.
     staff_id: int | str | None
     service_id: int | str | None
+    expected_version: int | None = None
     if _booking_via_ayla():
         staff_id, service_id = _proxy_master_service(tenant=tenant, record_id=record_id)
+        expected_version = _proxy_expected_version(tenant=tenant, record_id=record_id)
     else:
         user_record = _find_yclients_user_record(client=client, record_id=record_id)
         if user_record is None:
@@ -1592,6 +1594,7 @@ def reschedule_booking(
         "client_phone": booking.client_phone,
         "client_name": booking.client_name,
         "booking_request_id": str(booking.id),
+        "expected_version": expected_version,
     }
     token = create_pending(
         tenant=tenant,
@@ -3188,6 +3191,28 @@ def _upsert_remote_booking_proxy(
         )
     except Exception:  # noqa: BLE001 — mirror write is best-effort (see docstring)
         logger.exception("booking.proxy.upsert_failed appt=%s", appt)
+
+
+def _proxy_expected_version(*, tenant: Any, record_id: int | str) -> int | None:
+    """Return the last known canonical appointment version for optimistic concurrency.
+
+    Returns ``None`` when no mirror row exists or the proxy has never been
+    updated by a version-tracked canonical event.
+    """
+    appt = _as_uuid(record_id)
+    if appt is None:
+        return None
+    try:
+        from apps.booking.models import RemoteBookingProxy
+
+        row = (
+            RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appt)
+            .only("last_applied_appointment_version")
+            .first()
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return row.last_applied_appointment_version if row else None
 
 
 def _proxy_master_service(*, tenant: Any, record_id: int | str) -> tuple[str | None, str | None]:
