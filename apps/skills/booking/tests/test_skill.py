@@ -325,6 +325,40 @@ class TestShowMastersFlow:
         assert result.should_handoff is True
         assert result.handoff_reason == "booking_missing_service_context"
 
+    def test_show_masters_resolves_service_name_by_substring(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Free-text service_name can be resolved when it matches exactly one catalog title."""
+        client = FakeYClients()
+        client.services_rows = [_service(22, title="Маникюр классический")]
+        client.staff_rows = [_staff(11)]
+        tc = ToolCall(id="c1", name="show_masters", arguments={"service_name": "маникюр"})
+        with _patch_yclients(client), _patch_provider_complete([_completion(tool_calls=[tc])]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is False
+        callbacks = [
+            b["callback"] for b in result.action_data["attachments"][0]["payload"]["buttons"]
+        ]
+        assert "cb:book:pick_master:11:22" in callbacks
+
+    def test_show_masters_ambiguous_service_name_hands_off(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """A service_name matching multiple catalog titles must not guess."""
+        client = FakeYClients()
+        client.services_rows = [
+            _service(22, title="Маникюр классический"),
+            _service(23, title="Маникюр французский"),
+        ]
+        client.staff_rows = [_staff(11)]
+        tc = ToolCall(id="c1", name="show_masters", arguments={"service_name": "маникюр"})
+        with _patch_yclients(client), _patch_provider_complete([_completion(tool_calls=[tc])]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_missing_service_context"
+
 
 class TestMasterPickCallback:
     """User taps a master card from the show_masters keyboard.

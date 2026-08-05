@@ -134,7 +134,7 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients service id, when known.",
             },
             "service_name": {
@@ -159,11 +159,11 @@ SHOW_SLOTS_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "master_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients staff id, must come from a prior show_masters call.",
             },
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients service id, optional but improves accuracy.",
             },
             "date_from": {
@@ -192,11 +192,11 @@ CONFIRM_BOOKING_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "master_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients staff id, grounded by show_masters.",
             },
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": "YClients service id, grounded by show_masters.",
             },
             "slot_datetime": {
@@ -228,7 +228,7 @@ CANCEL_BOOKING_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "record_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": (
                     "YClients record id of the booking to cancel. "
                     "MUST come from show_my_bookings — must belong to "
@@ -261,7 +261,7 @@ RESCHEDULE_BOOKING_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "record_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": (
                     "YClients record id of the booking to move. MUST come "
                     "from show_my_bookings — must belong to the user."
@@ -311,7 +311,7 @@ CALC_PRICE_TOOL_SPEC: dict[str, Any] = {
         "type": "object",
         "properties": {
             "service_id": {
-                "type": "integer",
+                "type": ["integer", "string"],
                 "description": (
                     "Catalog/YClients service id. Must come from the "
                     "bot's known catalog — never invent."

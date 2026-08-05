@@ -1029,19 +1029,35 @@ def _resolve_service_id_by_name(
     service_name: str,
     service_lookup: dict[int | str, str],
 ) -> int | str | None:
-    """Map a free-text service name to a catalog id (case-insensitive exact match).
+    """Map a free-text service name to a catalog id.
 
-    Returns ``None`` when the name is empty or not found, so the caller can
-    route to the missing-service-context handoff instead of emitting a broken
-    master-pick keyboard.
+    Resolution is fuzzy but conservative: a match is accepted only when the
+    normalized user input is an exact, substring, or superstring match of
+    exactly one catalog title. Multiple matches mean the request is ambiguous
+    and the caller must hand off rather than guess.
+
+    Returns ``None`` when the name is empty, not found, or ambiguous, so the
+    caller routes to ``booking_missing_service_context`` instead of emitting a
+    broken master-pick keyboard.
     """
-    needle = service_name.strip().lower()
+    needle = _normalize_service_text(service_name)
     if not needle:
         return None
+    matches: list[int | str] = []
     for service_id, title in service_lookup.items():
-        if title.strip().lower() == needle:
-            return service_id
-    return None
+        norm_title = _normalize_service_text(title)
+        if norm_title == needle or needle in norm_title or norm_title in needle:
+            matches.append(service_id)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _normalize_service_text(value: str) -> str:
+    """Lower-case, collapse whitespace and strip punctuation for matching."""
+    lowered = value.lower().strip()
+    # Drop common punctuation so "маникюр классический" and "маникюр, классический"
+    # still match. Keep letters, digits and spaces.
+    cleaned = "".join(ch for ch in lowered if ch.isalnum() or ch.isspace())
+    return " ".join(cleaned.split())
 
 
 def _is_iso_datetime(value: str) -> bool:
