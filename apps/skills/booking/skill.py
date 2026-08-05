@@ -54,7 +54,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Set as AbstractSet
+from datetime import datetime, timedelta
 from typing import Any, ClassVar
+
+from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.bookings.keyboards import (
@@ -62,11 +65,20 @@ from apps.bookings.keyboards import (
     CALLBACK_BOOK_PICK_MASTER_PREFIX,
     CALLBACK_BOOK_PICK_SLOT_PREFIX,
 )
+from apps.bookings.pending_actions import (
+    is_cancel_text,
+    is_confirm_text,
+    latest_relevant_pending,
+)
 from apps.events.services import emit
-from apps.events.vocabulary import SKILL_DISPATCHED
+from apps.events.vocabulary import BOOKING_FLOW_STATE_WRITE_FAILED, SKILL_DISPATCHED
 from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.booking.lookup import is_personal_booking_lookup
+from apps.skills.booking.lookup import (
+    booking_mutation_flow,
+    is_personal_booking_lookup,
+    looks_like_flow_selection,
+)
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
@@ -142,6 +154,24 @@ _MAX_DATE_BUTTONS = 14
 _KNOWN_MASTERS_ROSTER_CAP = 20
 
 
+# D-10 — booking-flow continuation state. Written to
+# ``Conversation.skill_state[_FLOW_STATE_KEY]`` when a mutation-request
+# turn («Перенеси мою запись») ends with a bookings listing instead of
+# a tool preview (the disambiguation question). While fresh, the skill
+# claims follow-up turns and grounds the Phase-1 LLM call with the
+# stored bookings + current local time so a single call can resolve
+# «Первую, на 9 августа в 20:00» → reschedule_booking(record_id, ISO).
+# Same 10-minute TTL as the PendingBookingAction preview window.
+_FLOW_STATE_KEY = "booking_flow"
+_FLOW_STATE_TTL = timedelta(minutes=10)
+_FLOW_STAGE_AWAITING_SELECTION = "awaiting_selection"
+
+_FLOW_ABORT_REPLIES = {
+    "reschedule": "Хорошо, не переношу запись. Если передумаете — напишите.",
+    "cancel": "Хорошо, не отменяю запись. Если передумаете — напишите.",
+}
+
+
 # Audit / event slugs.
 EVENT_BOOKING_HANDLED = "booking.handled"
 EVENT_BOOKING_HANDOFF = "booking.handoff"
@@ -213,6 +243,47 @@ class BookingSkill:
         intent = context.intent
         if intent is not None:
             return intent.intent == "booking"
+
+        # D-10 — active booking-flow continuation claims the turn BEFORE
+        # the keyword fallback: «Первую, на 9 августа в 20:00» carries no
+        # booking keyword, but a fresh skill_state["booking_flow"] marks
+        # it as the disambiguation answer. Ownership is deliberately
+        # narrow (review finding #2 — the original unrestricted claim
+        # swallowed ANY text for the full 10-minute TTL, so «спасибо»
+        # or a fresh «Хочу маникюр» were mis-routed into the flow at
+        # two LLM calls per turn). The claim ADDS matches; a non-claim
+        # falls through to the normal fallbacks below (review round 2 —
+        # an unconditional ``return looks_like_flow_selection(...)``
+        # shadowed is_personal_booking_lookup/_legacy_keyword_match for
+        # the whole TTL and echo'ed fresh booking requests):
+        #   * cb:* texts belong to their dedicated callback skills;
+        #   * confirm/cancel vocab is claimed only when NO relevant
+        #     PendingBookingAction exists — with one the gate skill
+        #     (registered right after this one) owns the turn. Without
+        #     one: cancel → the deterministic flow-abort in handle(),
+        #     confirm → a Phase-1 replay with flow grounding (review
+        #     round 2 — the Phase-1-without-tool-call degradation of
+        #     the D-10 root cause ends in a free-text «Подтверждаете?»
+        #     with NO pending row; «да» must re-enter the flow, not
+        #     echo);
+        #   * any other text is claimed only when it looks like a
+        #     selection answer (ordinal / date / time / bare number);
+        #     otherwise it falls through to the standard fallbacks.
+        if not text.startswith("cb:"):
+            flow_state = _read_flow_state(context.conversation)
+            if flow_state is not None:
+                if is_confirm_text(text) or is_cancel_text(text):
+                    if (
+                        latest_relevant_pending(
+                            tenant=context.conversation.tenant,
+                            bot_user=context.bot_user,
+                        )
+                        is None
+                    ):
+                        return True
+                elif looks_like_flow_selection(text):
+                    return True
+
         # E2E-BOT-02A — personal booking lookups ("покажи мои записи",
         # "на когда я записан?") don't always contain the literal
         # "запись" keyword; claim them explicitly on the no-intent
@@ -388,12 +459,52 @@ class BookingSkill:
             # building a prompt, so loading there was wasted I/O.
             known_masters, known_masters_truncated = _load_tenant_master_roster(tenant)
 
+            # D-10 — flow continuation. While skill_state["booking_flow"]
+            # is fresh, exact cancel-vocab aborts the flow
+            # deterministically (no LLM, no mutation); every other turn
+            # gets the stored bookings + current local time injected into
+            # the Phase-1 prompt so the single tool call can resolve
+            # selection + datetime (staging D-10: ungrounded calls
+            # degenerated to free-text «Подтверждаете?»).
+            flow_state = _read_flow_state(context.conversation)
+            if flow_state is not None and is_cancel_text(query_text):
+                _clear_flow_state(context.conversation)
+                logger.info(
+                    "booking.flow.aborted tenant_id=%s conversation_id=%s "
+                    "flow=%s stage=%s trace_id=%s",
+                    tenant_id,
+                    context.conversation.id,
+                    flow_state.get("flow"),
+                    flow_state.get("stage"),
+                    context.trace_id,
+                )
+                return _build_skill_result(
+                    text=_FLOW_ABORT_REPLIES.get(
+                        str(flow_state.get("flow")),
+                        _FLOW_ABORT_REPLIES["reschedule"],
+                    ),
+                    tool_calls_made=[],
+                    confidence=_CONFIDENCE_OK,
+                )
+            flow_context = _flow_context_payload(flow_state, query_text=query_text)
+            if flow_context is not None:
+                logger.info(
+                    "booking.flow.continuation tenant_id=%s conversation_id=%s "
+                    "flow=%s stage=%s trace_id=%s",
+                    tenant_id,
+                    context.conversation.id,
+                    flow_context.get("flow"),
+                    flow_state.get("stage") if flow_state else "",
+                    context.trace_id,
+                )
+
             # ── Phase 1: first LLM call (decide on tool use) ───────
             first_messages = build_booking_prompt(
                 brand_voice=_DEFAULT_BRAND_VOICE,
                 query=query_text,
                 known_masters=known_masters,
                 known_masters_truncated=known_masters_truncated,
+                flow_context=flow_context,
             )
             # #473 LLM Y3 envelope expansion: catch any LLMError (covers
             # UnknownTenantError from cost_tracker, LLMProviderUnavailable,
@@ -542,6 +653,20 @@ class BookingSkill:
 
         # Fall back to deterministic text when the model returns empty.
         reply_text = second.text or tool_result.text or _FALLBACK_HANDOFF_TEXT
+
+        # D-10 — flow-state bookkeeping. A mutation-request turn that
+        # ended with a bookings listing (disambiguation question) opens
+        # the continuation state; a created preview (pending row) closes
+        # it — the gate skill owns confirmation from here.
+        if tool_name == SHOW_MY_BOOKINGS_TOOL_SPEC["name"]:
+            _maybe_write_flow_state(
+                context,
+                message_text=context.message_text,
+                tool_result=tool_result,
+                tenant_id=tenant_id,
+            )
+        elif tool_result.pending is not None:
+            _clear_flow_state(context.conversation)
 
         _audit_handled(tenant_id=tenant_id, tool=tool_name)
         action_data = _action_data_for_pending(tool_result)
@@ -1269,6 +1394,159 @@ def _load_tenant_master_roster(tenant: Any) -> tuple[list[dict[str, str]], bool]
 def _legacy_keyword_match(text: str) -> bool:
     lower = (text or "").lower()
     return any(kw in lower for kw in _BOOKING_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# D-10 — booking-flow continuation state (skill_state["booking_flow"])
+# ---------------------------------------------------------------------------
+
+
+def _read_flow_state(conversation: Any) -> dict[str, Any] | None:
+    """Return the active flow state, or None when missing/expired.
+
+    Lazy expiry: stale state is simply not claimed (and NOT deleted
+    here — matches() must stay side-effect free); the next write or
+    clear overwrites/removes the subkey.
+    """
+    raw = (getattr(conversation, "skill_state", None) or {}).get(_FLOW_STATE_KEY)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        expires_at = datetime.fromisoformat(str(raw.get("expires_at") or ""))
+    except ValueError:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = timezone.make_aware(expires_at)
+    if expires_at <= timezone.now():
+        return None
+    return raw
+
+
+def _write_flow_state(conversation: Any, *, flow: str, bookings: list[Any]) -> None:
+    """Open/refresh the continuation state after a disambiguation reply."""
+    from apps.conversations.services import write_skill_state
+
+    state = {
+        "flow": flow,
+        "stage": _FLOW_STAGE_AWAITING_SELECTION,
+        "bookings": [
+            {
+                "record_id": str(b.record_id),
+                "visit_at": b.visit_at,
+                "master_name": b.master_name,
+                "service_name": b.service_name,
+            }
+            for b in bookings
+        ],
+        "expires_at": (timezone.now() + _FLOW_STATE_TTL).isoformat(),
+    }
+    try:
+        write_skill_state(conversation, _FLOW_STATE_KEY, state)
+    except Exception:  # noqa: BLE001 — state is an optimization, never crash the turn
+        logger.warning(
+            "booking.flow.state_write_failed conversation=%s",
+            getattr(conversation, "id", "?"),
+            exc_info=True,
+        )
+        # Review finding #5 — without a telemetry row this failure mode
+        # is a single log line and the feature silently degrades to
+        # pre-D-10 behaviour (e.g. when called outside tenant_scope).
+        # ``emit`` is fail-soft; if the root cause IS a missing tenant
+        # scope, the Event insert fails too and is swallowed inside
+        # emit(). The slug is canonical (review round 2 — a raw string
+        # literal also triggered events.emit.non_canonical WARNINGs).
+        emit(
+            BOOKING_FLOW_STATE_WRITE_FAILED,
+            distinct_id="",
+            dialog_id=getattr(conversation, "id", None),
+            properties={"conversation_id": str(getattr(conversation, "id", ""))},
+        )
+
+
+def _clear_flow_state(conversation: Any) -> None:
+    """Remove the continuation state (preview created / user aborted)."""
+    if not (getattr(conversation, "skill_state", None) or {}).get(_FLOW_STATE_KEY):
+        return
+    from apps.conversations.services import write_skill_state
+
+    try:
+        write_skill_state(conversation, _FLOW_STATE_KEY, None)
+    except Exception:  # noqa: BLE001 — same fail-soft rationale as _write_flow_state
+        logger.warning(
+            "booking.flow.state_clear_failed conversation=%s",
+            getattr(conversation, "id", "?"),
+            exc_info=True,
+        )
+
+
+def clear_booking_flow(conversation: Any) -> None:
+    """Public wrapper over :func:`_clear_flow_state` for the gate skill.
+
+    The preview gate (``apps.bookings.callbacks``) clears the flow on
+    every decision it owns — otherwise a text confirm/cancel resolved
+    via the pending-grace window leaves the continuation state alive
+    for the rest of its TTL and the booking skill keeps claiming
+    selection-shaped turns against a stale disambiguation context
+    (review finding #4).
+    """
+    _clear_flow_state(conversation)
+
+
+def _maybe_write_flow_state(
+    context: SkillContext,
+    *,
+    message_text: str,
+    tool_result: BookingToolResult,
+    tenant_id: str,
+) -> None:
+    """Open the continuation state when a mutation turn lists bookings.
+
+    Fires only when ALL of these hold:
+    * the user's own words are a mutation request (reschedule / cancel)
+      — read-only lookups («когда моя запись?») never open a flow;
+    * the tool returned at least one booking (nothing to select from
+      otherwise).
+    """
+    flow = booking_mutation_flow(message_text)
+    if flow is None or not tool_result.bookings:
+        return
+    _write_flow_state(context.conversation, flow=flow, bookings=tool_result.bookings)
+    logger.info(
+        "booking.flow.stage tenant_id=%s conversation_id=%s flow=%s stage=%s trace_id=%s",
+        tenant_id,
+        context.conversation.id,
+        flow,
+        _FLOW_STAGE_AWAITING_SELECTION,
+        context.trace_id,
+    )
+
+
+def _flow_context_payload(
+    flow_state: dict[str, Any] | None,
+    *,
+    query_text: str = "",
+) -> dict[str, Any] | None:
+    """Phase-1 prompt grounding for a continuation turn (D-10).
+
+    Injected only when the current turn is actually a continuation —
+    selection-shaped («первую», «20:00», «на завтра») or confirm-vocab
+    («да» replaying a Phase-1 free-text «Подтверждаете?» that never
+    created a pending row). A fresh booking request claimed via the
+    keyword/lookup fallbacks while a flow happens to be alive must NOT
+    get the «АКТИВНЫЙ СЦЕНАРИЙ… НЕ начинай сначала» block (review
+    round 2): the stored context belongs to a different request. The
+    flow state itself survives — the next selection-shaped turn still
+    picks it up.
+    """
+    if flow_state is None:
+        return None
+    if not (is_confirm_text(query_text) or looks_like_flow_selection(query_text)):
+        return None
+    return {
+        "flow": flow_state.get("flow"),
+        "bookings": flow_state.get("bookings") or [],
+        "now_local": timezone.localtime().strftime("%Y-%m-%d %H:%M"),
+    }
 
 
 def _coerce_int(value: Any) -> int | None:
