@@ -10,13 +10,20 @@ retry of the create happens.
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 from typing import Any
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone as dj_timezone
 
-from apps.booking.models import BookingReminder, BookingRequest, PendingBookingAction
+from apps.booking.models import (
+    BookingReminder,
+    BookingRequest,
+    PendingBookingAction,
+    RemoteBookingProxy,
+)
 from apps.identity.models import BotUser
 from apps.integrations.yclients import (
     AvailableTime,
@@ -60,6 +67,9 @@ class FakeClient:
         self.user_records_exc: Exception | None = None
         self.times: list[AvailableTime] = []
         self.times_exc: Exception | None = None
+        self.reschedule_calls: list[dict[str, Any]] = []
+        self.reschedule_response: BookingRecord | None = None
+        self.reschedule_exc: Exception | None = None
 
     def cancel_record(self, *, record_id: int) -> bool:
         self.cancel_calls.append(record_id)
@@ -72,6 +82,26 @@ class FakeClient:
         if self.create_exc is not None:
             raise self.create_exc
         return self.create_response or BookingRecord(record_id=999, record_hash="h", raw={})
+
+    def reschedule_record(
+        self,
+        *,
+        record_id: int | str,
+        datetime: str,
+        expected_version: int | None = None,
+    ) -> BookingRecord:
+        self.reschedule_calls.append(
+            {
+                "record_id": record_id,
+                "datetime": datetime,
+                "expected_version": expected_version,
+            }
+        )
+        if self.reschedule_exc is not None:
+            raise self.reschedule_exc
+        return self.reschedule_response or BookingRecord(
+            record_id=0, record_hash="h", raw={"ayla_appointment_id": str(record_id)}
+        )
 
     def get_user_records(self) -> list[UserRecord]:
         if self.user_records_exc is not None:
@@ -790,3 +820,169 @@ class TestLocalCreateSplitBrainRecovery:
         assert alert.data["severity"] == "critical"
         assert "split_brain_unresolved" in alert.data["metric"]
         assert "yc_id=888" in alert.data["metric"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# RB1-D01 — Ayla native reschedule must send expected_version
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestAylaRescheduleExpectedVersion:
+    """Flag-ON path: optimistic concurrency version is captured from the
+    mirror, stored in the pending action, and forwarded to the Ayla client.
+    """
+
+    def _make_ayla_booking(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        appt_id: uuid.UUID,
+        version: int,
+    ) -> tuple[RemoteBookingProxy, BookingRequest]:
+        proxy = RemoteBookingProxy.all_tenants.create(
+            appointment_id=appt_id,
+            tenant=tenant,
+            bot_user=bot_user,
+            start_at=dj_timezone.now() + timedelta(days=1),
+            end_at=dj_timezone.now() + timedelta(days=1, hours=1),
+            status=RemoteBookingProxy.Status.CONFIRMED,
+            service_id=uuid.uuid4(),
+            specialist_id=uuid.uuid4(),
+            last_applied_appointment_version=version,
+        )
+        booking = BookingRequest.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            service_name="Массаж",
+            master_name="Ольга",
+            client_name="Anna",
+            client_phone="79991234567",
+            comment=f"Bot booking | yclients_record_id={appt_id}",
+            source="bot",
+            status=BookingRequest.Status.CONFIRMED,
+        )
+        return proxy, booking
+
+    def test_pending_action_stores_expected_version(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        appt_id = uuid.uuid4()
+        self._make_ayla_booking(tenant, bot_user, appt_id, version=7)
+        client = FakeClient()
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
+
+        with tenant_scope(tenant), override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = reschedule_booking(
+                client=client,
+                arguments={
+                    "record_id": str(appt_id),
+                    "new_datetime": new_dt,
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+
+        assert result.error == ""
+        assert result.pending is not None
+        row = PendingBookingAction.all_tenants.get(pk=result.pending.token)
+        assert row.payload["expected_version"] == 7
+        assert row.payload["master_id"] == str(row.payload["master_id"])
+
+    def test_execute_sends_expected_version_to_client(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        appt_id = uuid.uuid4()
+        proxy, _ = self._make_ayla_booking(tenant, bot_user, appt_id, version=4)
+        client = FakeClient()
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
+
+        with tenant_scope(tenant), override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": str(appt_id),
+                    "new_datetime": new_dt,
+                    "master_id": str(proxy.specialist_id),
+                    "service_id": str(proxy.service_id),
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                    "expected_version": 4,
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+
+        assert result.error == ""
+        assert len(client.reschedule_calls) == 1
+        call = client.reschedule_calls[0]
+        assert call["record_id"] == str(appt_id)
+        assert call["expected_version"] == 4
+
+    def test_stale_version_returns_error_not_success(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        appt_id = uuid.uuid4()
+        proxy, booking = self._make_ayla_booking(tenant, bot_user, appt_id, version=2)
+        client = FakeClient()
+        client.reschedule_exc = YClientsAPIError("http_409_STALE_VERSION")
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
+
+        with tenant_scope(tenant), override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": str(appt_id),
+                    "new_datetime": new_dt,
+                    "master_id": str(proxy.specialist_id),
+                    "service_id": str(proxy.service_id),
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                    "expected_version": 2,
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+
+        assert result.error == "stale_version"
+        # The canonical appointment and local booking must NOT be mutated.
+        booking.refresh_from_db()
+        assert booking.status == BookingRequest.Status.CONFIRMED
+
+    def test_missing_expected_version_does_not_block_execution(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """A pending row created before this fix (no expected_version) must
+        still execute, sending ``None`` to the client rather than crashing.
+        """
+        appt_id = uuid.uuid4()
+        proxy, _ = self._make_ayla_booking(tenant, bot_user, appt_id, version=None)
+        client = FakeClient()
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
+
+        with tenant_scope(tenant), override_settings(BOOKING_VIA_AYLA_REST=True):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": str(appt_id),
+                    "new_datetime": new_dt,
+                    "master_id": str(proxy.specialist_id),
+                    "service_id": str(proxy.service_id),
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+
+        assert result.error == ""
+        assert client.reschedule_calls[0]["expected_version"] is None
