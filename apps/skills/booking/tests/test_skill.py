@@ -337,6 +337,7 @@ class TestShowMastersFlow:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(context)
         assert result.should_handoff is False
+        assert result.action_data is not None
         callbacks = [
             b["callback"] for b in result.action_data["attachments"][0]["payload"]["buttons"]
         ]
@@ -658,6 +659,7 @@ class TestCreateFlowServiceContext:
         with _patch_yclients(client), _patch_provider_complete([_completion(tool_calls=[tc])]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(context)
+        assert result.action_data is not None
         callbacks = [
             b["callback"] for b in result.action_data["attachments"][0]["payload"]["buttons"]
         ]

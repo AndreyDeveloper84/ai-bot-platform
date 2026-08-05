@@ -838,7 +838,7 @@ class TestAylaRescheduleExpectedVersion:
         tenant: Tenant,
         bot_user: BotUser,
         appt_id: uuid.UUID,
-        version: int,
+        version: int | None,
     ) -> tuple[RemoteBookingProxy, BookingRequest]:
         proxy = RemoteBookingProxy.all_tenants.create(
             appointment_id=appt_id,
