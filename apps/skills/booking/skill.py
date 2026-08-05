@@ -471,7 +471,12 @@ class BookingSkill:
                 raw_master, raw_service, raw_dt = parts
                 master_id = _coerce_id(raw_master)
                 service_id = _coerce_id(raw_service)
-                if master_id is None or service_id is None or not raw_dt:
+                if (
+                    master_id is None
+                    or service_id is None
+                    or not raw_dt
+                    or not _is_iso_datetime(raw_dt)
+                ):
                     return _build_skill_result(
                         text="Контекст записи устарел. Начните выбор услуги заново.",
                         tool_calls_made=[],
@@ -610,6 +615,17 @@ class BookingSkill:
         if tool_name == SHOW_MASTERS_TOOL_SPEC["name"] and tool_result.masters:
             _audit_handled(tenant_id=tenant_id, tool=tool_name)
             service_id = _coerce_id(first_call.arguments.get("service_id"))
+            if service_id is None:
+                service_id = _resolve_service_id_by_name(
+                    str(first_call.arguments.get("service_name") or ""), service_lookup
+                )
+            if service_id is None:
+                return _handoff(
+                    tool_calls_made=tool_calls_made,
+                    reason="booking_missing_service_context",
+                    text=_FALLBACK_HANDOFF_TEXT,
+                    tenant_id=tenant_id,
+                )
             return _build_skill_result(
                 text=_MASTER_PICK_PROMPT,
                 tool_calls_made=tool_calls_made,
@@ -1007,6 +1023,39 @@ def _master_button_label(master) -> str:
     if spec and spec.lower() != "мастер массажа":
         return f"👤 {name} — {spec}"
     return f"👤 {name}"
+
+
+def _resolve_service_id_by_name(
+    service_name: str,
+    service_lookup: dict[int | str, str],
+) -> int | str | None:
+    """Map a free-text service name to a catalog id (case-insensitive exact match).
+
+    Returns ``None`` when the name is empty or not found, so the caller can
+    route to the missing-service-context handoff instead of emitting a broken
+    master-pick keyboard.
+    """
+    needle = service_name.strip().lower()
+    if not needle:
+        return None
+    for service_id, title in service_lookup.items():
+        if title.strip().lower() == needle:
+            return service_id
+    return None
+
+
+def _is_iso_datetime(value: str) -> bool:
+    """Return True when ``value`` parses as an ISO-8601 datetime.
+
+    Callback payloads that carry ``<master>:<service>:<datetime>`` must not
+    have their datetime portion mistaken for master/service ids when an old
+    ``<datetime>``-only payload is received after the format change.
+    """
+    try:
+        datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _action_data_for_slot_pick(

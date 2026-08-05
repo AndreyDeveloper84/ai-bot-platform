@@ -311,6 +311,20 @@ class TestShowMastersFlow:
         assert "cb:book:pick_master:11:22" in callbacks
         assert "cb:book:pick_master:12:22" in callbacks
 
+    def test_show_masters_without_resolvable_service_hands_off(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """A master list with no grounded service_id must not emit broken buttons."""
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        tc = ToolCall(id="c1", name="show_masters", arguments={})
+        with _patch_yclients(client), _patch_provider_complete([_completion(tool_calls=[tc])]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_missing_service_context"
+
 
 class TestMasterPickCallback:
     """User taps a master card from the show_masters keyboard.
@@ -560,6 +574,35 @@ class TestSlotPickCallback:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert "время" in result.reply_text.lower() or "ещё раз" in result.reply_text.lower()
+        assert result.tool_calls_made == []
+
+    def test_old_slot_payload_without_master_service_is_rejected(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Legacy pick_slot payload (only ISO datetime) must not be mis-parsed
+        as master/service under BOOKING_VIA_AYLA_REST where ids are UUID strings.
+        """
+
+        class _FakeProvider:
+            def get_services(self) -> list:
+                return []
+
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:2026-08-06T14:00:00+03:00",
+        )
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=_FakeProvider(),
+                ),
+                _patch_provider_complete([]),
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        assert "контекст" in result.reply_text.lower() or "услуги" in result.reply_text.lower()
         assert result.tool_calls_made == []
 
 

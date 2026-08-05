@@ -256,11 +256,28 @@ class YClientsSpecialistUnavailableError(YClientsAPIError):
     """
 
 
+class YClientsStaleVersionError(YClientsAPIError):
+    """Optimistic concurrency conflict on Ayla reschedule.
+
+    Raised on the flag-ON path when Ayla rejects ``reschedule`` with HTTP 409
+    ``stale_version``. The caller surfaces a user-visible conflict message
+    and does NOT retry automatically, so a concurrent change to the same
+    appointment is never silently overwritten.
+    """
+
+
 def _is_c1_debt_block(exc: BaseException) -> bool:
     """True when the Ayla 4xx is the C1 billing-eligibility rejection."""
     code = getattr(exc, "code", None)
     status = getattr(exc, "status_code", None)
     return status == 409 and isinstance(code, str) and code.lower() == "subscription_past_due"
+
+
+def _is_stale_version(exc: BaseException) -> bool:
+    """True when the Ayla 4xx is an optimistic-concurrency stale version."""
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status_code", None)
+    return status == 409 and isinstance(code, str) and code.lower() == "stale_version"
 
 
 class _translate_errors:
@@ -281,6 +298,8 @@ class _translate_errors:
             return
         if issubclass(exc_type, BookingBadRequestError) and _is_c1_debt_block(exc):
             raise YClientsSpecialistUnavailableError(str(exc)) from exc
+        if issubclass(exc_type, BookingBadRequestError) and _is_stale_version(exc):
+            raise YClientsStaleVersionError(str(exc)) from exc
         if issubclass(exc_type, BookingUnavailableError):
             raise YClientsUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingAPIError):

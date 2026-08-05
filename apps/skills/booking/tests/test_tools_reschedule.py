@@ -32,6 +32,7 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
+from apps.skills.booking.provider import YClientsStaleVersionError
 from apps.skills.booking.tools import execute_reschedule, reschedule_booking
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
@@ -928,7 +929,7 @@ class TestAylaRescheduleExpectedVersion:
         appt_id = uuid.uuid4()
         proxy, booking = self._make_ayla_booking(tenant, bot_user, appt_id, version=2)
         client = FakeClient()
-        client.reschedule_exc = YClientsAPIError("http_409_STALE_VERSION")
+        client.reschedule_exc = YClientsStaleVersionError("stale_version")
         new_dt = _future_iso(72)
         client.times = [_slot_at(new_dt)]
 
