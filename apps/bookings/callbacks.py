@@ -99,6 +99,10 @@ REPLY_BOOK_CANCELLED_PREVIEW = "Ок, не записываю."
 REPLY_BOOK_ALREADY_HANDLED = "Это действие уже выполнено."
 REPLY_BOOK_PARTIAL_FAILURE = "Не удалось завершить перенос — передал администратору, он свяжется."
 REPLY_BOOK_CANCEL_FAILED = "Не получилось отменить запись — передал администратору, скоро уточнит."
+REPLY_BOOK_STALE_VERSION = (
+    "Запись уже изменилась с момента выбора времени. "
+    "Откройте актуальные записи и попробуйте перенести снова."
+)
 
 
 # Audit slugs. Out-of-canonical-vocab; the audit subsystem accepts
@@ -698,6 +702,12 @@ class BookingGateCallbackSkill:
                 reply_text=REPLY_BOOK_CANCEL_FAILED,
                 should_handoff=True,
                 handoff_reason="booking_cancel_yclients_failure",
+            )
+        if result.error == "stale_version":
+            return SkillResult(
+                reply_text=REPLY_BOOK_STALE_VERSION,
+                should_handoff=False,
+                handoff_reason="",
             )
         if result.error == "invalid_record_id":
             return SkillResult(

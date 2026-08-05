@@ -1723,6 +1723,10 @@ def _execute_reschedule_ayla(
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_unavailable")
         return BookingToolResult(error="yclients_cancel_failure")
     except YClientsAPIError as exc:
+        if "STALE_VERSION" in str(exc):
+            logger.info("booking.reschedule.ayla.stale_version record_id=%s", record_id)
+            _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="stale_version")
+            return BookingToolResult(error="stale_version")
         logger.info("booking.reschedule.ayla.api_error err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_api_error")
         return BookingToolResult(error="yclients_api_error")
