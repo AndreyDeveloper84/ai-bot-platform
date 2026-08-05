@@ -1194,8 +1194,22 @@ def _handle_pick_slot_callback(
             tool_calls_made=[],
             confidence=_CONFIDENCE_OK,
         )
-    # Specialist must be on the live tenant roster.
-    allowed_master_ids = _fetch_master_ids(yclients)
+    # Specialist must be on the live tenant roster. One staff fetch feeds
+    # both the membership check and the display-name lookup; a provider
+    # failure here is a handoff, NOT a "stale context" verdict — the two
+    # failure modes must stay distinguishable for the user.
+    try:
+        staff_rows = yclients.get_staff(staff_id=None)
+    except (YClientsAPIError, YClientsUnavailableError) as exc:
+        logger.warning("booking.pick_slot.staff_failed err=%s", exc)
+        return _handoff(
+            tool_calls_made=[],
+            reason="booking_yclients_failure",
+            text=_FALLBACK_HANDOFF_TEXT,
+            tenant_id=tenant_id,
+        )
+    allowed_master_ids = {_id_key(s.id) for s in staff_rows}
+    master_lookup = build_master_lookup(staff_rows)
     if master_id not in allowed_master_ids:
         logger.info("booking.pick_slot.unknown_master master=%s", master_id)
         return _build_skill_result(
@@ -1214,6 +1228,20 @@ def _handle_pick_slot_callback(
             tenant_id=tenant_id,
         )
 
+    # A past slot means the keyboard outlived itself — recover locally
+    # instead of hitting the provider with a date it will 4xx on.
+    tapped_dt = datetime.fromisoformat(raw_dt)  # validated above
+    now = timezone.now()
+    if tapped_dt.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    if tapped_dt < now:
+        logger.info("booking.pick_slot.past_slot slot=%s", raw_dt)
+        return _build_skill_result(
+            text=_STALE_CONTEXT_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+
     # Duplicate tap on the same slot button: reuse the identical active
     # preview instead of stacking a second PendingBookingAction row.
     existing = _find_identical_active_confirm_pending(
@@ -1224,7 +1252,11 @@ def _handle_pick_slot_callback(
         slot_datetime=raw_dt,
     )
     if existing is not None:
-        return _skill_result_for_existing_pending(existing, tenant_id=tenant_id)
+        return _skill_result_for_existing_pending(
+            existing,
+            context=context,
+            tenant_id=tenant_id,
+        )
 
     # Slot availability re-check — the slot keyboard may be stale by tap
     # time (D05-D). A taken slot never produces a pending action; the
@@ -1284,7 +1316,7 @@ def _handle_pick_slot_callback(
         bot_user=context.bot_user,
         allowed_master_ids=allowed_master_ids,
         allowed_service_ids=allowed_service_ids,
-        master_lookup=_fetch_master_lookup(yclients),
+        master_lookup=master_lookup,
         service_lookup=service_lookup,
     )
     if result.error in {"invalid_master_id", "invalid_service_id", "missing_slot"}:
@@ -1303,6 +1335,28 @@ def _handle_pick_slot_callback(
             text=_FALLBACK_HANDOFF_TEXT,
             tenant_id=tenant_id,
         )
+
+    # At most one active create-preview per user: supersede any earlier
+    # unconsumed CONFIRM pendings so two different preview cards can't
+    # both be ✅-executed into two real bookings.
+    if result.pending is not None:
+        new_token = result.pending.token
+        superseded = (
+            PendingBookingAction.all_tenants.filter(
+                tenant=tenant,
+                bot_user=context.bot_user,
+                kind=PendingBookingAction.Kind.CONFIRM,
+                consumed_at__isnull=True,
+            )
+            .exclude(pk=new_token)
+            .update(consumed_at=timezone.now())
+        )
+        if superseded:
+            logger.info(
+                "booking.pick_slot.superseded_pending count=%s new_token=%s",
+                superseded,
+                new_token,
+            )
 
     # A created preview closes any D-10 continuation state — the
     # confirmation gate owns the flow from here (mirrors the LLM path).
@@ -1332,8 +1386,12 @@ def _same_slot_instant(candidate: str, tapped: str) -> bool:
         tapped_dt = datetime.fromisoformat(tapped)
     except (TypeError, ValueError):
         return False
-    # A naive/aware mix compares unequal (never raises for ==), so it
-    # counts as different unless the strings matched above.
+    if (cand_dt.tzinfo is None) != (tapped_dt.tzinfo is None):
+        # The provider emits both shapes (offset-aware ``datetime`` field,
+        # naive ``time`` fallback). A naive/aware mix compares unequal
+        # even for the same wall-clock slot — compare wall clocks so the
+        # re-check doesn't report the very slot on the keyboard as taken.
+        return cand_dt.replace(tzinfo=None) == tapped_dt.replace(tzinfo=None)
     return bool(cand_dt == tapped_dt)
 
 
@@ -1364,7 +1422,7 @@ def _find_identical_active_confirm_pending(
         if (
             str(payload.get("master_id")) == str(master_id)
             and str(payload.get("service_id")) == str(service_id)
-            and str(payload.get("slot_datetime")) == slot_datetime
+            and _same_slot_instant(str(payload.get("slot_datetime") or ""), slot_datetime)
         ):
             return row
     return None
@@ -1373,13 +1431,16 @@ def _find_identical_active_confirm_pending(
 def _skill_result_for_existing_pending(
     row: PendingBookingAction,
     *,
+    context: SkillContext,
     tenant_id: str,
 ) -> SkillResult:
     """Rebuild the preview card for an already-active pending row.
 
     The snapshot stored on the row (names + slot) is authoritative — no
     provider round-trip needed to re-render the same card with the same
-    token, so both taps converge on one PendingBookingAction.
+    token, so both taps converge on one PendingBookingAction. Flow state
+    is cleared exactly as on the new-preview path: the confirmation gate
+    owns the flow from here.
     """
     payload = row.payload or {}
     preview_text = _format_confirm_preview(
@@ -1396,6 +1457,7 @@ def _skill_result_for_existing_pending(
             keyboard=confirm_2_button(str(row.pk)),
         ),
     )
+    _clear_flow_state(context.conversation)
     _audit_handled(tenant_id=tenant_id, tool=CONFIRM_BOOKING_TOOL_SPEC["name"])
     return _build_skill_result(
         text=preview_text,

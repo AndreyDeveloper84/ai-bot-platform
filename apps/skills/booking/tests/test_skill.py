@@ -389,9 +389,9 @@ class TestMasterPickCallback:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-05-22", "2026-05-23", "2026-05-25"]
+        client.dates = ["2026-09-22", "2026-05-23", "2026-05-25"]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
@@ -409,7 +409,7 @@ class TestMasterPickCallback:
         # One button per date, callback embeds master_id + date + service_id.
         assert len(buttons) == 3
         callbacks = [b["callback"] for b in buttons]
-        assert "cb:book:pick_date:11:2026-05-22:22" in callbacks
+        assert "cb:book:pick_date:11:2026-09-22:22" in callbacks
         assert "cb:book:pick_date:11:2026-05-23:22" in callbacks
         assert "cb:book:pick_date:11:2026-05-25:22" in callbacks
         # No tool_call recorded — date picker is a direct YClients call,
@@ -465,7 +465,7 @@ class TestDatePickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:11:2026-05-22:22",
+            message_text="cb:book:pick_date:11:2026-09-22:22",
         )
         assert BookingSkill().matches(ctx) is True
 
@@ -478,14 +478,14 @@ class TestDatePickCallback:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-05-22"]
+        client.dates = ["2026-09-22"]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:11:2026-05-22:22",
+            message_text="cb:book:pick_date:11:2026-09-22:22",
         )
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
@@ -495,12 +495,12 @@ class TestDatePickCallback:
         assert result.reply_text == "Выберите время:"
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
-        assert "cb:book:pick_slot:11:22:2026-05-22T14:00:00" in [b["callback"] for b in buttons]
+        assert "cb:book:pick_slot:11:22:2026-09-22T14:00:00" in [b["callback"] for b in buttons]
         # Synthetic show_slots tool_call recorded with date_from + service_id.
         assert len(result.tool_calls_made) == 1
         tc = result.tool_calls_made[0]
         assert tc.name == "show_slots"
-        assert tc.arguments == {"master_id": 11, "date_from": "2026-05-22", "service_id": 22}
+        assert tc.arguments == {"master_id": 11, "date_from": "2026-09-22", "service_id": 22}
 
     def test_malformed_payload_handoffs_softly(self, context: SkillContext, tenant: Tenant) -> None:
         ctx = SkillContext(
@@ -561,7 +561,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         assert BookingSkill().matches(ctx) is True
 
@@ -577,12 +577,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11, "Ольга")]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -602,13 +602,13 @@ class TestSlotPickCallback:
         assert row.kind == PendingBookingAction.Kind.CONFIRM
         assert row.payload["master_id"] == 11
         assert row.payload["service_id"] == 22
-        assert row.payload["slot_datetime"] == "2026-05-22T14:00:00"
+        assert row.payload["slot_datetime"] == "2026-09-22T14:00:00"
         assert row.consumed_at is None
         # Synthetic confirm_booking call recorded for telemetry; the LLM
         # never picked a tool.
         assert [tc.name for tc in result.tool_calls_made] == ["confirm_booking"]
         # Slot availability was re-checked against the provider.
-        assert client.times_calls == [{"staff_id": 11, "date": "2026-05-22", "service_ids": [22]}]
+        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
 
     def test_unknown_service_rejected_locally(self, context: SkillContext, tenant: Tenant) -> None:
         """Service id outside the tenant catalog → safe local reply, no
@@ -621,7 +621,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:99:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:99:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -643,7 +643,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -665,12 +665,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = [
-            AvailableTime(time="15:00", datetime="2026-05-22T15:00:00", seance_length_s=3600)
+            AvailableTime(time="15:00", datetime="2026-09-22T15:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -680,7 +680,7 @@ class TestSlotPickCallback:
         assert "занято" in result.reply_text.lower()
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
-        assert [b["callback"] for b in buttons] == ["cb:book:pick_slot:11:22:2026-05-22T15:00:00"]
+        assert [b["callback"] for b in buttons] == ["cb:book:pick_slot:11:22:2026-09-22T15:00:00"]
         assert PendingBookingAction.all_tenants.count() == 0
 
     def test_slot_taken_without_alternatives(self, context: SkillContext, tenant: Tenant) -> None:
@@ -695,7 +695,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -715,12 +715,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -755,7 +755,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -806,7 +806,7 @@ class TestSlotPickCallback:
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -828,14 +828,14 @@ class TestSlotPickCallback:
         client.times = [
             AvailableTime(
                 time="11:00",
-                datetime="2026-05-22T11:00:00+00:00",
+                datetime="2026-09-22T11:00:00+00:00",
                 seance_length_s=3600,
             )
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00+03:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00+03:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -876,12 +876,12 @@ class TestSlotPickCallback:
         client.services_rows = [_service(service_uuid)]
         client.staff_rows = [_staff(master_uuid, "Ольга")]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-05-22T14:00:00",
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
         )
         with override_settings(BOOKING_VIA_AYLA_REST=True):
             with (
@@ -901,10 +901,128 @@ class TestSlotPickCallback:
         row = PendingBookingAction.all_tenants.get(pk=token)
         assert row.payload["master_id"] == master_uuid
         assert row.payload["service_id"] == service_uuid
-        assert row.payload["slot_datetime"] == "2026-05-22T14:00:00"
+        assert row.payload["slot_datetime"] == "2026-09-22T14:00:00"
         assert client.times_calls == [
-            {"staff_id": master_uuid, "date": "2026-05-22", "service_ids": [service_uuid]}
+            {"staff_id": master_uuid, "date": "2026-09-22", "service_ids": [service_uuid]}
         ]
+
+    def test_staff_fetch_failure_handoffs_not_stale(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Provider blip on the roster fetch must hand off, not tell the
+        user their context is stale — the two failure modes are different."""
+
+        class _FailingStaffClient(FakeYClients):
+            def get_staff(self, *, staff_id: Any = None) -> list:
+                raise YClientsUnavailableError("circuit_open")
+
+        from apps.booking.models import PendingBookingAction
+
+        client = _FailingStaffClient()
+        client.services_rows = [_service(22)]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_yclients_failure"
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_new_preview_supersedes_earlier_pending(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Tap slot A then slot B → pending A is superseded (consumed), so
+        two different preview cards can't both be executed into two real
+        bookings."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600),
+            AvailableTime(time="15:00", datetime="2026-09-22T15:00:00", seance_length_s=3600),
+        ]
+
+        def _tap(dt: str) -> SkillResult:
+            return BookingSkill().handle(
+                SkillContext(
+                    conversation=context.conversation,
+                    bot_user=context.bot_user,
+                    message_text=f"cb:book:pick_slot:11:22:{dt}",
+                )
+            )
+
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                first = _tap("2026-09-22T14:00:00")
+                second = _tap("2026-09-22T15:00:00")
+        assert first.action_data is not None
+        assert second.action_data is not None
+        token_a = first.action_data["pending_action"]["token"]
+        token_b = second.action_data["pending_action"]["token"]
+        assert token_a != token_b
+        row_a = PendingBookingAction.all_tenants.get(pk=token_a)
+        row_b = PendingBookingAction.all_tenants.get(pk=token_b)
+        # A is consumed (superseded) — a ✅ tap on the old card gets the
+        # "already handled" reply instead of executing a second create.
+        assert row_a.consumed_at is not None
+        assert row_b.consumed_at is None
+
+    def test_past_slot_rejected_locally(self, context: SkillContext, tenant: Tenant) -> None:
+        """A day-old keyboard's slot is already in the past — recover
+        locally instead of hitting the provider with a date it 4xx-es on."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2020-01-01T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "контекст" in result.reply_text.lower()
+        assert client.times_calls == []
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_naive_aware_wall_clock_match(self, context: SkillContext, tenant: Tenant) -> None:
+        """Provider emits both offset-aware and naive datetimes; the same
+        wall-clock slot in mixed forms must NOT be reported as taken."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = [
+            AvailableTime(
+                time="14:00",
+                datetime="2026-09-22T14:00:00+03:00",  # aware form
+                seance_length_s=3600,
+            )
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",  # naive form
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "Подтверждаете?" in result.reply_text
+        assert PendingBookingAction.all_tenants.count() == 1
 
     def test_old_slot_payload_without_master_service_is_rejected(
         self, context: SkillContext, tenant: Tenant
@@ -945,7 +1063,7 @@ class TestCreateFlowServiceContext:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-05-22"]
+        client.dates = ["2026-09-22"]
         tc = ToolCall(
             id="c1",
             name="show_masters",
@@ -985,14 +1103,14 @@ class TestCreateFlowServiceContext:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-05-22"]
+        client.dates = ["2026-09-22"]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_date:11:2026-05-22:22",
+            message_text="cb:book:pick_date:11:2026-09-22:22",
         )
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
@@ -1013,12 +1131,12 @@ class TestCreateFlowServiceContext:
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
-            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
         )
         with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
@@ -1041,9 +1159,9 @@ class TestCreateFlowServiceContext:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11, "Ольга")]
-        client.dates = ["2026-05-22"]
+        client.dates = ["2026-09-22"]
         client.times = [
-            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
         ]
         tc = ToolCall(
             id="c1",
@@ -1088,7 +1206,7 @@ class TestCreateFlowServiceContext:
         assert row.kind == PendingBookingAction.Kind.CONFIRM
         assert row.payload["master_id"] == 11
         assert row.payload["service_id"] == 22
-        assert row.payload["slot_datetime"] == "2026-05-22T14:00:00"
+        assert row.payload["slot_datetime"] == "2026-09-22T14:00:00"
 
 
 class TestConfirmBookingFlow:
@@ -1494,7 +1612,7 @@ class TestE0RegressionGuards:
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
-        client.dates = ["2026-05-22"]
+        client.dates = ["2026-09-22"]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
