@@ -58,7 +58,13 @@ from apps.bookings.keyboards import (
     CALLBACK_CONFIRM_PREFIX,
     CALLBACK_RESCHEDULE_PREFIX,
 )
-from apps.bookings.pending_actions import consume_pending, discard_pending
+from apps.bookings.pending_actions import (
+    consume_pending,
+    discard_pending,
+    is_cancel_text,
+    is_confirm_text,
+    latest_relevant_pending,
+)
 from apps.events.services import emit
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.tools import (
@@ -386,28 +392,112 @@ class BookingGateCallbackSkill:
     Symmetric design with :class:`BookingReminderCallbackSkill`: same
     skill-registry registration, same matches() predicate shape, same
     authorisation principle.
+
+    ### D-10 — text confirmation path
+
+    ``matches()`` additionally claims exact-match confirm/cancel vocab
+    («Подтверждаю», «да», «отмена», «не надо»…) when
+    :func:`apps.bookings.pending_actions.latest_relevant_pending` finds
+    a live row for this (tenant, bot_user); ``handle()`` resolves the
+    row and delegates to the same ``_handle_confirm_tap`` /
+    ``_handle_cancel_tap`` the keyboard uses. Without a relevant row
+    the vocab is not claimed and no mutation can fire.
+
+    Every gate decision — tap or text — also clears any open
+    booking-flow continuation state (review finding #4): a preview
+    decision ends the disambiguation context it came from, and one
+    resolved via the pending-grace window must not leave
+    ``skill_state["booking_flow"]`` alive for the rest of its TTL.
+    Malformed payloads are NOT decisions and leave the flow untouched
+    (review round 2).
     """
 
     name: ClassVar[str] = "booking_gate_callback"
 
     def matches(self, context: SkillContext) -> bool:
         text = (context.message_text or "").strip()
-        return text.startswith(CALLBACK_BOOK_CONFIRM_PREFIX) or text.startswith(
+        if text.startswith(CALLBACK_BOOK_CONFIRM_PREFIX) or text.startswith(
             CALLBACK_BOOK_CANCEL_PREFIX
-        )
+        ):
+            return True
+        # D-10 — text confirmation path («Подтверждаю» / «Не надо»).
+        # Claims the turn ONLY when a relevant pending row exists for
+        # this (tenant, bot_user); without one the exact-match vocab is
+        # still not ours («да» mid-FAQ stays with FAQ/echo) and no
+        # mutation can fire.
+        if is_confirm_text(text) or is_cancel_text(text):
+            return (
+                latest_relevant_pending(
+                    tenant=context.conversation.tenant,
+                    bot_user=context.bot_user,
+                )
+                is not None
+            )
+        return False
 
     def handle(self, context: SkillContext) -> SkillResult:
+        # D-10 review finding #4 — any gate DECISION ends an open
+        # booking-flow continuation. Otherwise a text confirm/cancel
+        # resolved via the pending-grace window leaves
+        # skill_state["booking_flow"] alive for the rest of its TTL,
+        # and the booking skill keeps claiming selection-shaped turns
+        # against a stale disambiguation context. No-op when no flow
+        # is open; fail-soft inside. Review round 2: the clear moved
+        # past token parsing — a malformed ``cb:book:…`` payload
+        # decided nothing and must not wipe the continuation context.
+        from apps.skills.booking.skill import clear_booking_flow
+
         text = context.message_text.strip()
         parsed = _parse_gate_token(text)
-        if parsed is None:
-            logger.info("bookings.gate.malformed text=%r", text)
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+        if parsed is not None:
+            action, token = parsed
+            clear_booking_flow(context.conversation)
+            if action == "cancel":
+                return self._handle_cancel_tap(context, token)
+            # action == "confirm"
+            return self._handle_confirm_tap(context, token)
 
-        action, token = parsed
-        if action == "cancel":
-            return self._handle_cancel_tap(context, token)
-        # action == "confirm"
-        return self._handle_confirm_tap(context, token)
+        # D-10 — text confirmation/cancellation. Resolve the user's
+        # latest relevant pending row and delegate to the SAME tap
+        # handlers the inline keyboard uses: tenant + ownership checks,
+        # TTL, CAS idempotency, audit rows and manager notifications are
+        # all reused verbatim.
+        if is_confirm_text(text) or is_cancel_text(text):
+            row = latest_relevant_pending(
+                tenant=context.conversation.tenant,
+                bot_user=context.bot_user,
+            )
+            if row is None:
+                # matches() and handle() disagree only when the row was
+                # consumed/expired between the two calls — fail closed.
+                return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+            clear_booking_flow(context.conversation)
+            if is_confirm_text(text):
+                logger.info(
+                    "booking.pending.confirmed tenant_id=%s conversation_id=%s "
+                    "pending_action_id=%s operation=%s stage=confirm "
+                    "mutation=true channel=text trace_id=%s",
+                    row.tenant_id,
+                    context.conversation.id,
+                    row.pk,
+                    row.kind,
+                    context.trace_id,
+                )
+                return self._handle_confirm_tap(context, row.pk)
+            logger.info(
+                "booking.pending.cancelled tenant_id=%s conversation_id=%s "
+                "pending_action_id=%s operation=%s stage=confirm "
+                "mutation=false channel=text trace_id=%s",
+                row.tenant_id,
+                context.conversation.id,
+                row.pk,
+                row.kind,
+                context.trace_id,
+            )
+            return self._handle_cancel_tap(context, row.pk)
+
+        logger.info("bookings.gate.malformed text=%r", text)
+        return SkillResult(reply_text=REPLY_NOT_FOUND)
 
     # ─── confirm-tap (executes the destructive verb) ─────────────────────
 
@@ -490,9 +580,14 @@ class BookingGateCallbackSkill:
         # We claimed the row. Execute the matching verb.
         row = lookup.row
         try:
-            from apps.integrations.yclients import get_yclients_client
+            # D-10 — provider selection must mirror the preview side
+            # (``apps.skills.booking.provider.get_booking_provider``):
+            # under BOOKING_VIA_AYLA_REST the YClients singleton has no
+            # ``reschedule_record`` — only the Ayla adapter does. Flag
+            # OFF this returns the same YClients client as before.
+            from apps.skills.booking.provider import get_booking_provider
 
-            client = get_yclients_client()
+            client = get_booking_provider(bot_user=row.bot_user)
         except Exception as exc:  # noqa: BLE001 — misconfigured integration
             logger.warning("bookings.gate.yclients_init_failed err=%s", exc)
             return SkillResult(

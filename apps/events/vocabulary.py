@@ -64,6 +64,13 @@ BOOKING_RESCHEDULE_REQUESTED = "booking.reschedule_requested"
 BOOKING_RESCHEDULE_ABANDONED = "booking.reschedule_abandoned"
 BOOKING_RESCHEDULED = "booking.rescheduled"
 
+# --- Booking flow continuation telemetry (D-10) -------------------------
+# Fail-soft telemetry from the booking-flow continuation state machine
+# (``skill_state["booking_flow"]``). Not user-facing analytics — infra
+# signal for the D-10 dashboard: a state write that raised (e.g. called
+# outside tenant_scope) degrades the feature silently otherwise.
+BOOKING_FLOW_STATE_WRITE_FAILED = "booking.flow.state_write_failed"
+
 # --- payment_failed skill triggered (W2/Epsilon, #443 + Variant C) -----
 # Emitted by Gamma's #443 payment.failed consumer when delegating to
 # the payment_failed skill (apps/skills/payment_failed/). Observability
@@ -298,6 +305,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         BOOKING_RESCHEDULE_REQUESTED,
         BOOKING_RESCHEDULE_ABANDONED,
         BOOKING_RESCHEDULED,
+        BOOKING_FLOW_STATE_WRITE_FAILED,
         MASTER_ONBOARDING_STARTED,
         MASTER_ONBOARDING_ACCEPTED,
         MASTER_ONBOARDING_REJECTED,

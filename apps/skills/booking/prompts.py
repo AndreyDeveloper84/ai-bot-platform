@@ -61,6 +61,7 @@ def build_booking_prompt(
     user_bookings: list[dict[str, Any]] | None = None,
     price: dict[str, Any] | None = None,
     certificate: dict[str, Any] | None = None,
+    flow_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a ChatML messages list for one booking-skill LLM call.
 
@@ -109,6 +110,7 @@ def build_booking_prompt(
         user_bookings=user_bookings,
         price=price,
         certificate=certificate,
+        flow_context=flow_context,
     )
     return [
         {"role": "system", "content": system_text},
@@ -128,6 +130,7 @@ def _render_system_prompt(
     user_bookings: list[dict[str, Any]] | None,
     price: dict[str, Any] | None = None,
     certificate: dict[str, Any] | None = None,
+    flow_context: dict[str, Any] | None = None,
 ) -> str:
     sections: list[str] = [f"Ты — {brand_voice.persona}."]
 
@@ -256,9 +259,64 @@ def _render_system_prompt(
         sections.append(_format_price_block(price))
     if certificate is not None:
         sections.append(_format_certificate_block(certificate))
+    if flow_context:
+        sections.append(_format_flow_block(flow_context))
 
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
+
+
+def _format_flow_block(flow_context: dict[str, Any]) -> str:
+    """D-10 — continuation grounding for an active booking flow.
+
+    Rendered ONLY on Phase-1 calls while
+    ``conversation.skill_state["booking_flow"]`` is fresh: the turn the
+    user answers the disambiguation question («Первую, на 9 августа в
+    20:00»). Without this block the Phase-1 prompt has no bookings and
+    no current date, so the model cannot resolve ``record_id`` or build
+    an ISO ``new_datetime`` and degenerates to free-text «Подтверждаете?»
+    with no tool call (staging defect D-10).
+
+    All free-text fields pass through :func:`_sanitize_for_prompt` —
+    master/service names originate from the catalog mirror.
+    """
+    flow = str(flow_context.get("flow") or "reschedule")
+    bookings = list(flow_context.get("bookings") or [])
+    now_local = _sanitize_for_prompt(flow_context.get("now_local"), max_chars=40)
+    verb = "перенести" if flow == "reschedule" else "отменить"
+
+    lines = [
+        f"АКТИВНЫЙ СЦЕНАРИЙ: клиент хочет {verb} свою запись "
+        "(продолжение начатого диалога — НЕ начинай сначала).",
+        "Его текущие записи:",
+    ]
+    for idx, b in enumerate(bookings, start=1):
+        service = _sanitize_for_prompt(b.get("service_name")) or "услуга"
+        master = _sanitize_for_prompt(b.get("master_name")) or "мастер"
+        visit = _sanitize_for_prompt(b.get("visit_at"), max_chars=40)
+        record_id = _sanitize_for_prompt(b.get("record_id"), max_chars=40)
+        lines.append(f"{idx}) {service} — {master}, {visit} (record_id={record_id})")
+    if now_local:
+        lines.append(f"Сейчас: {now_local} (локальное время салона).")
+    lines.append(
+        "Определи по сообщению клиента, какую запись он выбрал "
+        "(порядковый номер «первая/вторая/…» или дату визита). "
+        "record_id бери ТОЛЬКО из списка выше — никогда не выдумывай."
+    )
+    if flow == "reschedule":
+        lines.append(
+            "Если новые дата/время названы — преобразуй в ISO "
+            "(YYYY-MM-DDTHH:MM:SS, локальное время) и вызови "
+            "reschedule_booking. Если запись или новое время непонятны "
+            "— задай короткий уточняющий вопрос БЕЗ вызова инструмента."
+        )
+    else:
+        lines.append(
+            "Вызови cancel_booking для выбранной записи. Если выбор "
+            "неоднозначен — задай короткий уточняющий вопрос БЕЗ вызова "
+            "инструмента."
+        )
+    return "\n".join(lines)
 
 
 def _format_certificate_block(certificate: dict[str, Any]) -> str:

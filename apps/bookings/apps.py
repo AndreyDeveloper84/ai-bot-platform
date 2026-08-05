@@ -3,10 +3,16 @@
 ``ready()`` imports the callback skill module so its
 :func:`apps.skills.registry.register` decorator fires at Django boot,
 mirroring the pattern used by :class:`apps.skills.apps.SkillsConfig`.
-The callback skill registers AFTER the booking-skill (B3) so the
-``cb:rem:*`` family is owned by exactly one matcher — there's no overlap
-between the two namespaces (``cb:rem:`` vs ``cb:`` general), so order
-is correctness-by-construction here.
+
+D-10 note (2026-08-04): the canonical registration point moved to
+``SkillsConfig.ready()`` (imported right after the booking skill,
+BEFORE echo) — this app's ``ready()`` runs later in INSTALLED_APPS
+order, which used to leave both callback skills behind the
+always-matching echo and therefore unreachable via production
+dispatch. The import below is kept as a no-op fallback for boot
+paths where ``apps.skills`` is not installed (module cache makes the
+double import free); when both apps load normally, registration
+happens inside ``SkillsConfig.ready()``.
 """
 
 from __future__ import annotations

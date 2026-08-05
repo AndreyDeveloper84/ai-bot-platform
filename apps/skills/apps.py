@@ -70,6 +70,17 @@ class SkillsConfig(AppConfig):
         # booking claims them explicitly below the intent gate.
         from apps.skills.booking import skill as _booking  # noqa: F401
 
+        # D-10 (2026-08-04) — booking gate + reminder callback skills
+        # MUST register BEFORE echo. They live in ``apps.bookings``,
+        # whose ``ready()`` runs AFTER ``apps.skills`` (INSTALLED_APPS
+        # order) — so their natural registration point used to append
+        # them after the always-matching echo and ``cb:book:confirm:*``
+        # / ``cb:rem:*`` taps (and the D-10 text-confirmation path)
+        # were echo-claimed in production dispatch. Importing here
+        # puts them in their correct slot; ``apps.bookings.apps``
+        # keeps its own import as a no-op fallback (module cache).
+        from apps.bookings import callbacks as _booking_callbacks  # noqa: F401
+
         # 2026-05-20 — welcome skill ports the /start greeting into a
         # dedicated handler that emits an inline keyboard with Mini App
         # quick-actions (📅 Записаться / 📋 Мои визиты / 👤 Профиль / ❓ Задать

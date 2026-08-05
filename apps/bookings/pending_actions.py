@@ -15,6 +15,17 @@ Two operations:
   expired. Idempotent: a double-tap returns ``None`` on the second
   call (caller maps that to the "already handled" reply).
 
+D-10 adds the TEXT confirmation helpers shared by the gate callback
+skill and the booking skill's flow-continuation routing:
+
+* :data:`_CONFIRM_VOCAB` / :data:`_CANCEL_VOCAB` with
+  :func:`is_confirm_text` / :func:`is_cancel_text` — exact-match
+  vocabulary for «подтверждаю» / «не надо» style turns.
+* :func:`latest_relevant_pending` — the single resolver for "is there
+  a pending row this user's text could plausibly refer to", bounding
+  stale/expired/consumed relevance to :data:`PENDING_TEXT_GRACE`
+  (90 seconds — a real double-tap / late-answer window, not more).
+
 ### TTL
 
 10 minutes per spec. Long enough for the user to actually read the
@@ -61,6 +72,118 @@ logger = logging.getLogger(__name__)
 
 # 10-minute TTL — module-scope constant so tests can monkeypatch.
 PENDING_ACTION_TTL = timedelta(minutes=10)
+
+# D-10 — how long after expiry/consumption a pending row stays
+# "relevant" for the TEXT confirmation path. Bounds the window where
+# «подтверждаю» / «отмена» are claimed by the gate skill: within the
+# grace window the user gets the controlled reply (expired / already
+# handled); beyond it the text falls through to normal routing (echo /
+# FAQ) with zero mutation risk.
+#
+# Review D-10 finding #1: the original 10-minute grace was far wider
+# than the real double-tap / late-answer window — a «да» answering an
+# unrelated FAQ question 5 minutes after a tap got hijacked into the
+# canned "already handled" reply. 90 seconds covers genuine
+# double-taps and slightly-late answers; anything older routes
+# normally. (The ACTIVE preview window is unchanged — an unconsumed,
+# unexpired row is relevant for its full 10-minute TTL regardless.)
+PENDING_TEXT_GRACE = timedelta(seconds=90)
+
+
+# ─── Text confirmation vocabulary (D-10) ─────────────────────────────
+# Exact-match after normalization — substring matching would hijack
+# unrelated turns («да, но…», «ничего не надо делать»). Both ё/е forms
+# listed explicitly instead of a normalization fold, keeps the sets
+# greppable.
+_CONFIRM_VOCAB: frozenset[str] = frozenset(
+    {
+        "подтверждаю",
+        "подтвердить",
+        "подтверди",
+        "да",
+        "давай",
+        "ок",
+        "окей",
+        "верно",
+        "всё верно",
+        "все верно",
+        "согласен",
+        "согласна",
+        "точно",
+        "угу",
+        "ага",
+        "конечно",
+    }
+)
+_CANCEL_VOCAB: frozenset[str] = frozenset(
+    {
+        "отмена",
+        "отменить",
+        "не надо",
+        "не нужно",
+        "нет",
+        "передумал",
+        "передумала",
+        "отбой",
+        "не хочу",
+        "стоп",
+    }
+)
+
+
+def normalize_gate_text(text: str) -> str:
+    """Lowercase, collapse whitespace, strip trailing punctuation/emoji."""
+    normalized = " ".join((text or "").lower().split())
+    return normalized.strip(" .,!?)»«…")
+
+
+def is_confirm_text(text: str) -> bool:
+    """True when ``text`` is exactly a confirmation phrase."""
+    return normalize_gate_text(text) in _CONFIRM_VOCAB
+
+
+def is_cancel_text(text: str) -> bool:
+    """True when ``text`` is exactly a cancellation phrase."""
+    return normalize_gate_text(text) in _CANCEL_VOCAB
+
+
+def latest_relevant_pending(
+    *,
+    tenant: "Tenant",
+    bot_user: "BotUser",
+) -> PendingBookingAction | None:
+    """Latest pending row still relevant for the text-confirmation path.
+
+    Relevant means one of:
+
+    * unconsumed and not expired → active preview awaiting a decision;
+    * unconsumed, expired within :data:`PENDING_TEXT_GRACE` → controlled
+      "too much time" reply via the normal consume path;
+    * consumed within :data:`PENDING_TEXT_GRACE` → controlled "already
+      handled" reply (duplicate confirm / double-tap).
+
+    Anything older → ``None``: the turn keeps its previous routing and
+    no mutation can fire. Rows are scoped by (tenant, bot_user) — the
+    same ownership pair the callback tap path authorises against.
+    """
+    row = (
+        PendingBookingAction.all_tenants.filter(
+            tenant=tenant,
+            bot_user=bot_user,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if row is None:
+        return None
+    now = timezone.now()
+    if row.consumed_at is None:
+        if row.expires_at > now - PENDING_TEXT_GRACE:
+            return row
+        return None
+    if row.consumed_at > now - PENDING_TEXT_GRACE:
+        return row
+    return None
 
 
 def create_pending(

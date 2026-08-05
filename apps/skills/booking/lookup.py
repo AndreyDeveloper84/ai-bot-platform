@@ -52,6 +52,12 @@ Consumers:
   * :meth:`apps.skills.booking.skill.BookingSkill.handle` — selects
     the read-only ``show_my_bookings`` tool deterministically.
 
+The module also hosts two sibling pure-text detectors used by the
+booking skill's D-10 flow continuation: :func:`booking_mutation_flow`
+(tags the continuation state with the requested verb) and
+:func:`looks_like_flow_selection` (bounds which follow-up turns the
+continuation may claim).
+
 Pure text processing, no Django imports — safe to import from any
 skill module at registration time.
 """
@@ -67,6 +73,20 @@ import re
 # "замен" cover change-requests like "можно поменять мою запись?".
 _MUTATION_SIGNAL = re.compile(
     r"перенес|отмен|запиши|забронир|поменя|замен|измени|сдвин|удал",
+    re.IGNORECASE,
+)
+
+# D-10 — split mutation signals by target flow so the booking skill can
+# tag the continuation state (``skill_state["booking_flow"]["flow"]``)
+# with the verb the user actually asked for. Union equals the relevant
+# subset of _MUTATION_SIGNAL (create-verbs «запиши/забронир» are not
+# continuation flows — they start a fresh booking instead).
+_RESCHEDULE_SIGNAL = re.compile(
+    r"перенес|поменя|замен|измени|сдвин",
+    re.IGNORECASE,
+)
+_CANCEL_SIGNAL = re.compile(
+    r"отмен|удал",
     re.IGNORECASE,
 )
 
@@ -171,4 +191,96 @@ def is_personal_booking_lookup(text: str) -> bool:
         _POSSESSIVE_BOOKING.search(normalized)
         or _AT_ME.search(normalized)
         or _I_AM_BOOKED.search(normalized)
+    )
+
+
+def booking_mutation_flow(text: str) -> str | None:
+    """Classify a mutation request as ``"reschedule"`` / ``"cancel"`` / None.
+
+    D-10 — used by the booking skill to tag the continuation state
+    (``skill_state["booking_flow"]``) when a mutation-request turn ends
+    with a bookings listing (disambiguation) instead of a tool preview.
+    Pure text processing, same module as the lookup detector so the two
+    never drift apart.
+    """
+    normalized = " ".join((text or "").lower().split())
+    if not normalized:
+        return None
+    if _RESCHEDULE_SIGNAL.search(normalized):
+        return "reschedule"
+    if _CANCEL_SIGNAL.search(normalized):
+        return "cancel"
+    return None
+
+
+# D-10 review (Wave-1 follow-up, finding #2) — selection-shaped turn
+# detector bounding the booking-flow continuation claim. While
+# ``skill_state["booking_flow"]`` is fresh the booking skill claims
+# follow-up turns; the original UNRESTRICTED claim swallowed any text
+# for the full 10-minute TTL («спасибо», a fresh «Хочу маникюр»
+# request) into the flow — mis-routing new requests and costing two
+# LLM calls per off-topic turn. The claim is now bounded to turns that
+# look like a disambiguation answer:
+#
+#   * ordinal pick — «первую», «вторая», «последнюю»;
+#   * bare position number — «2» (whole message);
+#   * time — «20:00», «в 8 вечера», spaced «20 00» (review round 3 —
+#     channel users type «20 00» without the colon and the turn fell
+#     through to echo while the flow was alive);
+#   * daypart — «утром», «вечером», «попозже», «в обед» (review round 2 —
+#     the most frequent answers to «во сколько?» fell through to echo);
+#   * date — «9 августа», «на завтра», «в пятницу».
+#
+# Anything else keeps its previous routing; the flow state stays fresh
+# until its TTL or the next selection-shaped turn.
+_SELECTION_ORDINAL = re.compile(
+    r"\b(перв(?:ая|ой|ого|ое|ый|ую|ым|ом)"
+    r"|втор(?:ая|ой|ого|ое|ую|ым|ом)"
+    r"|треть(?:я|ей|его|е|ий|ью|им|ем)"
+    r"|последн(?:яя|ей|его|ее|ий|юю|им|ем))\b",
+    re.IGNORECASE,
+)
+_SELECTION_NUMBER_ONLY = re.compile(r"\d{1,2}")
+_SELECTION_TIME = re.compile(r"\b\d{1,2}[:.]\d{2}\b")
+# Spaced time «20 00» — hour bounded to 0-23 and minute to [0-5]\d so
+# phone fragments («8 999 123 45 67») and ages («мне 30 лет») do not
+# match; deliberately NOT the wider «\d{1,2}\s\d{2}» form.
+_SELECTION_SPACED_TIME = re.compile(r"\b([01]?\d|2[0-3])\s[0-5]\d\b")
+_SELECTION_WORD_TIME = re.compile(
+    r"\b\d{1,2}\s*(?:утра|вечера|дня|ночи)\b",
+    re.IGNORECASE,
+)
+# Daypart / relative-time answers to «во сколько?» — no digits at all.
+_SELECTION_DAYPART = re.compile(
+    r"\b(?:утром|днём|днем|вечером|ночью|попозже|пораньше|в\s+обед)\b",
+    re.IGNORECASE,
+)
+_SELECTION_DATE = re.compile(
+    r"\b\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|"
+    r"сентября|октября|ноября|декабря)\b"
+    r"|\b(?:сегодня|завтра|послезавтра|понедельник\w*|вторник\w*|сред[ауы]|"
+    r"четверг\w*|пятниц[ауы]|суббот[ауы]|воскресен\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_flow_selection(text: str) -> bool:
+    """True when ``text`` looks like a flow-continuation selection answer.
+
+    Conservative by design — a False only means "not provably a
+    selection", the turn keeps its previous routing and the flow state
+    survives for the next selection-shaped turn.
+    """
+    normalized = " ".join((text or "").lower().split())
+    if not normalized:
+        return False
+    if _SELECTION_NUMBER_ONLY.fullmatch(normalized):
+        return True
+    return bool(
+        _SELECTION_ORDINAL.search(normalized)
+        or _SELECTION_TIME.search(normalized)
+        or _SELECTION_SPACED_TIME.search(normalized)
+        or _SELECTION_WORD_TIME.search(normalized)
+        or _SELECTION_DAYPART.search(normalized)
+        or _SELECTION_DATE.search(normalized)
     )
