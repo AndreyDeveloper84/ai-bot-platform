@@ -118,10 +118,15 @@ class FakeAyla:
         external_user_id: str,
         appointment_id: str,
         new_start_datetime: str,
+        expected_version: int | None = None,
         idempotency_key: str | None = None,
     ) -> AylaBookingRecord:
         self.reschedule_calls.append(
-            {"appointment_id": appointment_id, "new_start_datetime": new_start_datetime}
+            {
+                "appointment_id": appointment_id,
+                "new_start_datetime": new_start_datetime,
+                "expected_version": expected_version,
+            }
         )
         return self.reschedule_response or AylaBookingRecord(appointment_id=appointment_id, raw={})
 
@@ -343,7 +348,13 @@ class TestRescheduleFlagOn:
         assert result.confirmation is not None and result.confirmation.ok
         # Same canonical id (native move, not cancel+create).
         assert result.confirmation.record_id == _APPT
-        assert fake.reschedule_calls == [{"appointment_id": _APPT, "new_start_datetime": _NEW_DT}]
+        assert fake.reschedule_calls == [
+            {
+                "appointment_id": _APPT,
+                "new_start_datetime": _NEW_DT,
+                "expected_version": None,
+            }
+        ]
         # Billing row stays CONFIRMED (not RESCHEDULED) — id unchanged.
         billing = BookingRequest.all_tenants.get(comment__contains=f"yclients_record_id={_APPT}")
         assert billing.status == BookingRequest.Status.CONFIRMED

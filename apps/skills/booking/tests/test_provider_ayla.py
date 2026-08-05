@@ -151,6 +151,7 @@ class FakeAylaBooking:
         external_user_id: str,
         appointment_id: str,
         new_start_datetime: str,
+        expected_version: int | None = None,
         idempotency_key: str | None = None,
     ) -> AylaBookingRecord:
         self.calls.append(
@@ -158,6 +159,7 @@ class FakeAylaBooking:
                 "op": "reschedule",
                 "appointment_id": appointment_id,
                 "new_start_datetime": new_start_datetime,
+                "expected_version": expected_version,
                 "idempotency_key": idempotency_key,
             }
         )
