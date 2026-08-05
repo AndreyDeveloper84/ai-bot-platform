@@ -379,13 +379,14 @@ class BookingSkill:
             )
 
         # ── Date-pick callback short-circuit ────────────────────────
-        # User tapped a date button (cb:book:pick_date:<master_id>:<date>).
-        # Synthesise show_slots(master_id, date_from=<date>) so the
-        # existing slot-cards short-circuit picks up + renders times.
+        # User tapped a date button
+        # (cb:book:pick_date:<master_id>:<date>:<service_id>).
+        # Synthesise show_slots(master_id, date_from=<date>, service_id=<id>)
+        # so the existing slot-cards short-circuit picks up + renders times.
         if text.startswith(CALLBACK_BOOK_PICK_DATE_PREFIX):
             payload = text[len(CALLBACK_BOOK_PICK_DATE_PREFIX) :].strip()
             try:
-                raw_master, raw_date = payload.split(":", 1)
+                raw_master, raw_date, raw_service = payload.split(":", 2)
             except (TypeError, ValueError):
                 logger.warning("booking.pick_date.bad_payload raw=%r", payload)
                 return _build_skill_result(
@@ -395,6 +396,7 @@ class BookingSkill:
                 )
             # Flag OFF: int YClients id; flag ON: Ayla UUID string.
             master_id = _coerce_id(raw_master)
+            service_id = _coerce_id(raw_service)
             if master_id is None:
                 logger.warning("booking.pick_date.bad_payload raw=%r", payload)
                 return _build_skill_result(
@@ -402,13 +404,23 @@ class BookingSkill:
                     tool_calls_made=[],
                     confidence=None,
                 )
+            if service_id is None:
+                return _build_skill_result(
+                    text="Контекст записи устарел. Начните выбор услуги заново.",
+                    tool_calls_made=[],
+                    confidence=_CONFIDENCE_OK,
+                )
             first = CompletionResult(
                 text="",
                 tool_calls=[
                     ToolCall(
                         id=f"synth:pick_date:{master_id}:{raw_date}",
                         name=SHOW_SLOTS_TOOL_SPEC["name"],
-                        arguments={"master_id": master_id, "date_from": raw_date},
+                        arguments={
+                            "master_id": master_id,
+                            "date_from": raw_date,
+                            "service_id": service_id,
+                        },
                     )
                 ],
                 provider="synth",
