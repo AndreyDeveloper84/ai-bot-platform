@@ -548,11 +548,13 @@ class TestShowSlotsFlow:
 class TestSlotPickCallback:
     """User taps a slot button from the show_slots keyboard.
 
-    Unlike master-pick (deterministic show_slots dispatch), slot-pick
-    needs the LLM to emit confirm_booking with master_id + service_id
-    drawn from short-term conversation history. The skill overrides
-    the prompt query with a synthesised "запиши меня на <datetime>"
-    user text and lets Phase 1 LLM do the inference.
+    RB1.1-D05: pick_slot is a fully deterministic short-circuit — same
+    pattern as pick_master / pick_date. The callback payload carries
+    master + service + slot; the skill validates them against live
+    tenant data, re-checks slot availability, and builds the confirm
+    preview + PendingBookingAction WITHOUT any LLM call. (The previous
+    synth-query → Phase-1 LLM path looped back to show_masters because
+    the stateless prompt refused to ground raw UUIDs.)
     """
 
     def test_matches_callback_prefix(self, context: SkillContext) -> None:
@@ -563,14 +565,188 @@ class TestSlotPickCallback:
         )
         assert BookingSkill().matches(ctx) is True
 
-    def test_callback_synthesises_user_query_for_llm(
+    def test_valid_pick_slot_creates_preview_without_llm(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
-        """The Phase 1 LLM prompt's ``query`` is overridden with the
-        synthesised user-text that carries master_id + service_id.
-        Regression guard: the mocked completion receives the synthesised
-        query, not the raw callback payload."""
+        """Valid tap → confirm preview card + PendingBookingAction, zero
+        completions consumed (no Phase-1 tool choice, no Phase-3
+        rephrase)."""
+        from apps.booking.models import PendingBookingAction
+
         client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11, "Ольга")]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "Подтверждаете?" in result.reply_text
+        # Preview keyboard carries the pending token.
+        assert result.action_data is not None
+        pending_meta = result.action_data["pending_action"]
+        assert pending_meta["kind"] == "confirm"
+        token = pending_meta["token"]
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert any(token in b["callback"] for b in buttons)
+        # PendingBookingAction persisted with the full selection context.
+        row = PendingBookingAction.all_tenants.get(pk=token)
+        assert row.kind == PendingBookingAction.Kind.CONFIRM
+        assert row.payload["master_id"] == 11
+        assert row.payload["service_id"] == 22
+        assert row.payload["slot_datetime"] == "2026-05-22T14:00:00"
+        assert row.consumed_at is None
+        # Synthetic confirm_booking call recorded for telemetry; the LLM
+        # never picked a tool.
+        assert [tc.name for tc in result.tool_calls_made] == ["confirm_booking"]
+        # Slot availability was re-checked against the provider.
+        assert client.times_calls == [{"staff_id": 11, "date": "2026-05-22", "service_ids": [22]}]
+
+    def test_unknown_service_rejected_locally(self, context: SkillContext, tenant: Tenant) -> None:
+        """Service id outside the tenant catalog → safe local reply, no
+        pending row, no availability call."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:99:2026-05-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "контекст" in result.reply_text.lower()
+        assert client.times_calls == []
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_unknown_master_rejected_locally(self, context: SkillContext, tenant: Tenant) -> None:
+        """Master id outside the tenant roster → safe local reply, no
+        pending row, no availability call."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = []  # master 11 not on the roster
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "контекст" in result.reply_text.lower()
+        assert client.times_calls == []
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_slot_taken_offers_fresh_alternatives(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Tapped slot no longer offered → deterministic «занято» reply
+        with a fresh slot keyboard; no pending row is created."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = [
+            AvailableTime(time="15:00", datetime="2026-05-22T15:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "занято" in result.reply_text.lower()
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert [b["callback"] for b in buttons] == ["cb:book:pick_slot:11:22:2026-05-22T15:00:00"]
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_slot_taken_without_alternatives(self, context: SkillContext, tenant: Tenant) -> None:
+        """No slots left that day → plain safe message, no keyboard, no
+        pending row, no handoff."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = []
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "занято" in result.reply_text.lower()
+        assert result.action_data is None
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_duplicate_tap_reuses_same_pending(self, context: SkillContext, tenant: Tenant) -> None:
+        """Second tap on the same slot button returns the existing
+        preview token instead of stacking a second pending row."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
+            with tenant_scope(tenant):
+                first = BookingSkill().handle(ctx)
+                second = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert first.action_data is not None
+        assert second.action_data is not None
+        token_first = first.action_data["pending_action"]["token"]
+        token_second = second.action_data["pending_action"]["token"]
+        assert token_first == token_second
+        assert PendingBookingAction.all_tenants.count() == 1
+
+    def test_slot_recheck_provider_failure_handoffs(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Provider error on the availability re-check → friendly
+        handoff, no pending row."""
+
+        class _FailingTimesClient(FakeYClients):
+            def get_available_times(self, **kwargs: Any) -> list:
+                raise YClientsAPIError("boom")
+
+        from apps.booking.models import PendingBookingAction
+
+        client = _FailingTimesClient()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
         ctx = SkillContext(
@@ -578,24 +754,13 @@ class TestSlotPickCallback:
             bot_user=context.bot_user,
             message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
         )
-        # LLM returns plain text "ok, на 14:00" — no tool call needed
-        # for this test (we just want to verify the prompt path).
-        completions = [_completion(text="Ок, проверю слот.")]
-        with _patch_yclients(client), _patch_provider_complete(completions) as mock_complete:
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
-        # No tool calls → small-talk path → returns LLM text verbatim.
-        assert result.reply_text == "Ок, проверю слот."
-        # Inspect the prompt that was actually sent: it should contain
-        # the synthesised "запиши меня на <datetime>" string plus ids.
-        sent_messages = mock_complete.call_args.args[0]
-        user_msg = next(m for m in sent_messages if m["role"] == "user")
-        assert "Запиши меня на" in user_msg["content"]
-        assert "2026-05-22T14:00:00" in user_msg["content"]
-        assert "11" in user_msg["content"]
-        assert "22" in user_msg["content"]
-        # Raw callback payload must NOT leak into the LLM context.
-        assert "cb:book:pick_slot:" not in user_msg["content"]
+        mock_complete.assert_not_called()
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_yclients_failure"
+        assert PendingBookingAction.all_tenants.count() == 0
 
     def test_empty_callback_payload_handoffs_softly(
         self, context: SkillContext, tenant: Tenant
@@ -706,26 +871,94 @@ class TestCreateFlowServiceContext:
         assert len(result.tool_calls_made) == 1
         assert result.tool_calls_made[0].arguments["service_id"] == 22
 
-    def test_service_id_survives_slot_pick_prompt(
+    def test_service_id_survives_slot_pick_pending(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
+        """RB1.1-D05: pick_slot is deterministic — the service_id from the
+        callback lands in the PendingBookingAction payload without any LLM
+        round-trip."""
+        from apps.booking.models import PendingBookingAction
+
         client = FakeYClients()
         client.services_rows = [_service(22)]
         client.staff_rows = [_staff(11)]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+        ]
         ctx = SkillContext(
             conversation=context.conversation,
             bot_user=context.bot_user,
             message_text="cb:book:pick_slot:11:22:2026-05-22T14:00:00",
         )
-        completions = [_completion(text="Ок, проверю слот.")]
-        with _patch_yclients(client), _patch_provider_complete(completions) as mock_complete:
+        with _patch_yclients(client), _patch_provider_complete([]) as mock_complete:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
-        assert result.reply_text == "Ок, проверю слот."
-        sent_messages = mock_complete.call_args.args[0]
-        user_msg = next(m for m in sent_messages if m["role"] == "user")
-        assert "11" in user_msg["content"]
-        assert "22" in user_msg["content"]
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert result.action_data is not None
+        token = result.action_data["pending_action"]["token"]
+        row = PendingBookingAction.all_tenants.get(pk=token)
+        assert row.payload["service_id"] == 22
+
+    def test_full_button_chain_master_date_slot_to_preview(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """End-to-end button chain: exactly one Phase-1 completion (the
+        initial show_masters); every callback step is deterministic and
+        the chain terminates in a confirm preview + pending row."""
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11, "Ольга")]
+        client.dates = ["2026-05-22"]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-05-22T14:00:00", seance_length_s=3600)
+        ]
+        tc = ToolCall(
+            id="c1",
+            name="show_masters",
+            arguments={"service_name": "массаж", "service_id": 22},
+        )
+        skill = BookingSkill()
+
+        def _tap(text: str) -> SkillResult:
+            return skill.handle(
+                SkillContext(
+                    conversation=context.conversation,
+                    bot_user=context.bot_user,
+                    message_text=text,
+                )
+            )
+
+        def _callbacks(res: SkillResult) -> list[str]:
+            assert res.action_data is not None
+            return [b["callback"] for b in res.action_data["attachments"][0]["payload"]["buttons"]]
+
+        with (
+            _patch_yclients(client),
+            _patch_provider_complete([_completion(tool_calls=[tc])]) as mock_complete,
+        ):
+            with tenant_scope(tenant):
+                r_master = skill.handle(context)
+                cb_master = next(
+                    c for c in _callbacks(r_master) if c.startswith("cb:book:pick_master:")
+                )
+                r_date = _tap(cb_master)
+                cb_date = next(c for c in _callbacks(r_date) if c.startswith("cb:book:pick_date:"))
+                r_slot = _tap(cb_date)
+                cb_slot = next(c for c in _callbacks(r_slot) if c.startswith("cb:book:pick_slot:"))
+                r_preview = _tap(cb_slot)
+        # Only the very first turn consumed an LLM completion.
+        assert mock_complete.call_count == 1
+        assert "Подтверждаете?" in r_preview.reply_text
+        assert r_preview.action_data is not None
+        token = r_preview.action_data["pending_action"]["token"]
+        row = PendingBookingAction.all_tenants.get(pk=token)
+        assert row.kind == PendingBookingAction.Kind.CONFIRM
+        assert row.payload["master_id"] == 11
+        assert row.payload["service_id"] == 22
+        assert row.payload["slot_datetime"] == "2026-05-22T14:00:00"
 
 
 class TestConfirmBookingFlow:
