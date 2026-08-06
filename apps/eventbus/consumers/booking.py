@@ -329,12 +329,26 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
     # is linked or orphan before the upsert fires.
     bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
 
+    raw_status = data.get("status")
+    normalized_status = normalize_booking_created_status(raw_status)
+
+    if raw_status != normalized_status:
+        logger.info(
+            "eventbus.consumer.booking.created.status_normalized "
+            "event_id=%s appointment_id=%s tenant_id=%s raw_status=%s normalized_status=%s",
+            envelope.event_id,
+            data.get("appointment_id"),
+            envelope.tenant_id,
+            raw_status,
+            normalized_status,
+        )
+
     create_defaults = {
         "tenant": tenant,
         "bot_user": bot_user,  # may be None — orphan proxy
         "start_at": start_at,
         "end_at": end_at,
-        "status": data["status"],
+        "status": normalized_status,
         "source": data.get("source", ""),
         "service_id": UUID(data["service_id"]) if data.get("service_id") else None,
         "specialist_id": (UUID(data["specialist_id"]) if data.get("specialist_id") else None),
@@ -370,12 +384,13 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(**update_fields)
 
     if bot_user is not None:
-        _schedule_reminders(
-            tenant=tenant,
-            bot_user=bot_user,
-            appointment_id=appointment_id,
-            start_at=start_at,
-        )
+        if _is_reminder_eligible(normalized_status):
+            _schedule_reminders(
+                tenant=tenant,
+                bot_user=bot_user,
+                appointment_id=appointment_id,
+                start_at=start_at,
+            )
         _touch_conversation_last_booking(
             bot_user=bot_user,
             tenant=tenant,
@@ -383,10 +398,9 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         )
     else:
         logger.info(
-            "eventbus.consumer.booking.created.orphan_proxy "
-            "user_id=%s appointment_id=%s — awaiting BotUser backfill signal",
-            envelope.user_id,
+            "eventbus.consumer.booking.created.orphan_proxy appointment_id=%s status=%s",
             appointment_id,
+            normalized_status,
         )
 
     # Analytics fan-out — apps/events/ snake_case bus (§3.1 step 3).
@@ -394,7 +408,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         "booking_created",
         properties={
             "appointment_id": str(appointment_id),
-            "status": data["status"],
+            "status": normalized_status,
             "source": data.get("source", ""),
             "start_at": data["start_at"],
         },

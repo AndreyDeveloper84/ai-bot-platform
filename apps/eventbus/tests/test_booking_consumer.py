@@ -289,6 +289,57 @@ class TestBookingCreated:
             BookingReminder.Kind.TWO_HOURS,
         }
 
+    def test_status_awaiting_payment_normalized_to_pending_payment(self, tenant, bot_user_linked):
+        env = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="awaiting_payment"),
+        )
+        handle_booking_created(env)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.PENDING_PAYMENT
+
+    def test_pending_payment_creates_no_reminders(self, tenant, bot_user_linked):
+        env = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="pending_payment"),
+        )
+        handle_booking_created(env)
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 0
+        )
+
+    def test_tentative_creates_no_reminders(self, tenant, bot_user_linked):
+        env = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="tentative"),
+        )
+        handle_booking_created(env)
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 0
+        )
+
+    def test_unknown_status_raises(self, tenant, bot_user_linked):
+        from apps.eventbus.consumers.booking import UnknownBookingStatusError
+
+        env = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="future_unknown"),
+        )
+        with pytest.raises(UnknownBookingStatusError):
+            handle_booking_created(env)
+
+    def test_non_string_status_raises(self, tenant, bot_user_linked):
+        from apps.eventbus.consumers.booking import UnknownBookingStatusError
+
+        data = _booking_created_data()
+        data["status"] = {"value": "confirmed"}
+        env = _envelope(event_name="booking.created", data=data)
+        with pytest.raises(UnknownBookingStatusError):
+            handle_booking_created(env)
+
 
 # ─── booking.completed ─────────────────────────────────────────────────────
 
