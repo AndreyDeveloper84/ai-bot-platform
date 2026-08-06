@@ -850,7 +850,12 @@ class TestSlotPickCallback:
     ) -> None:
         """BOOKING_VIA_AYLA_REST=True: UUID ids survive the deterministic
         path end-to-end into the PendingBookingAction payload. This is the
-        configuration where RB1.1-D05 manifested live."""
+        configuration where RB1.1-D05 manifested live.
+
+        Health-gate fail-closed semantics are covered by separate unit tests.
+        This test isolates the gate locally to keep successful deterministic
+        booking-path coverage separate from the fail-closed gate behavior.
+        """
         import uuid as _uuid
 
         from django.utils import timezone as dj_timezone
@@ -888,6 +893,10 @@ class TestSlotPickCallback:
                 patch(
                     "apps.skills.booking.provider.get_booking_provider",
                     return_value=client,
+                ),
+                patch(
+                    "apps.skills.booking.skill._service_requires_health_check",
+                    return_value=False,
                 ),
                 _patch_provider_complete([]) as mock_complete,
             ):
