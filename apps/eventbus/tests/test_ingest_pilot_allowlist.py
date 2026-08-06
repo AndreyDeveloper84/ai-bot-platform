@@ -688,6 +688,58 @@ class TestPrecedence:
             )
         assert "tenant_id is null" in str(exc.value)
 
+    def test_probe_failing_for_a_non_import_reason_fails_closed(
+        self, tenant_a: Tenant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A BROKEN canonical check must not degrade to the allowlist.
+
+        ``ImportError`` means "not shipped yet" and legitimately falls back.
+        Anything else — ``AppRegistryNotReady`` on an eager worker, an error
+        raised inside ``apps.tenancy.models``, a circular import mid rolling
+        deploy — means the check exists and is malfunctioning. Silently
+        answering "unavailable" there would downgrade every envelope to the
+        allowlist, i.e. weaken precedence rule 1 from the other side.
+        """
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _boom(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "apps.tenancy.models":
+                raise RuntimeError("AppRegistryNotReady")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _boom)
+        with _pilot_settings(), pytest.raises(TenantAuthorizationError) as exc:
+            assert_envelope_tenant_authorized(_envelope())
+        assert "tenant_verify_probe_error" in str(exc.value)
+
+    def test_canonical_rejection_message_is_sanitized(
+        self, tenant_a: Tenant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The #246 branch must not be a log-injection vector either.
+
+        ``user_id``/``tenant_id`` are type-checked as non-empty ``str`` and
+        nothing more, so a newline in either would let the holder of the
+        shared HMAC secret forge extra log records out of the exception
+        message the dispatcher writes to the log.
+        """
+        import apps.tenancy.models as tenancy_models
+
+        monkeypatch.setattr(
+            tenancy_models,
+            "TenantUserRelationship",
+            _fake_relationship_model(exists=False),
+            raising=False,
+        )
+        with _pilot_settings(), pytest.raises(TenantAuthorizationError) as exc:
+            assert_envelope_tenant_authorized(
+                _envelope(user_id="victim\neventbus.ingest.tenant_verify_accepted")
+            )
+        message = str(exc.value)
+        assert "\n" not in message
+        assert "no_active_relationship" in message
+
 
 # ─── the global fail-open escape hatch ─────────────────────────────────────
 
@@ -1141,7 +1193,14 @@ class TestTenantNullCarveOutIsIntentional:
 
     It is pinned here so the exemption is VISIBLE: a reader of this suite
     must not conclude that "allowlist configured" means "nothing else can
-    be ingested". Gating these is a tracked follow-up.
+    be ingested".
+
+    Two properties bound it, and both are pinned below: every admission is
+    logged (``verification_mode=tenant_null_carveout``), and the carve-out
+    is no longer evaluated ahead of the canonical probe — once
+    ``TenantUserRelationship`` ships, a tenant-null envelope is verified
+    against its subject. Without that second property the pilot compromise
+    would have been frozen into the permanent design.
     """
 
     @pytest.mark.parametrize(
@@ -1175,3 +1234,80 @@ class TestTenantNullCarveOutIsIntentional:
                 _envelope(event_name="billing.fee_charged", tenant_id=TENANT_A)
             )
         assert "event_not_allowed" in str(exc.value)
+
+    def test_carve_out_admission_is_audited(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The bypass leaves a trail — otherwise observability is inverted.
+
+        Events the allowlist ADMITS log an accept line; without this, events
+        that skip the allowlist entirely would log nothing at all, so the
+        least-verified surface would be the least visible one.
+        """
+        with caplog.at_level(logging.INFO, logger="apps.eventbus.ingest_tenancy"):
+            assert_envelope_tenant_authorized(
+                _envelope(event_name="user.profile.updated", tenant_id=None)
+            )
+        accepted = [
+            record.getMessage()
+            for record in caplog.records
+            if "tenant_verify_accepted" in record.getMessage()
+        ]
+        assert accepted, "tenant-null admission produced no audit line"
+        assert "verification_mode=tenant_null_carveout" in accepted[0]
+        assert f"user_id={AYLA_USER_ID}" in accepted[0]
+
+    def test_carve_out_log_line_is_sanitized(self, caplog: pytest.LogCaptureFixture) -> None:
+        """``user_id`` is publisher-controlled on this path — and unverified."""
+        with caplog.at_level(logging.INFO, logger="apps.eventbus.ingest_tenancy"):
+            assert_envelope_tenant_authorized(
+                _envelope(
+                    event_name="user.profile.updated",
+                    tenant_id=None,
+                    user_id="victim\ntenant_verify_accepted forged=1",
+                )
+            )
+        rendered = [
+            record.getMessage()
+            for record in caplog.records
+            if "tenant_null_carveout" in record.getMessage()
+        ]
+        assert rendered
+        assert "\n" not in rendered[0]
+
+    def test_carve_out_verifies_the_subject_once_the_model_ships(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Post-#246 the exemption stops being unconditional.
+
+        A tenant-null event has no tenant to bind to, but it still names a
+        SUBJECT. Once the canonical model exists, that subject must be a
+        user the platform actually knows — which is what kills the
+        "arbitrary attacker-chosen ``user_id``" primitive.
+        """
+        import apps.tenancy.models as tenancy_models
+
+        monkeypatch.setattr(
+            tenancy_models,
+            "TenantUserRelationship",
+            _fake_relationship_model(exists=False),
+            raising=False,
+        )
+        with pytest.raises(TenantAuthorizationError) as exc:
+            assert_envelope_tenant_authorized(
+                _envelope(event_name="user.profile.updated", tenant_id=None)
+            )
+        assert "no_active_relationship_user_scope" in str(exc.value)
+
+    def test_carve_out_admits_a_known_subject_once_the_model_ships(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import apps.tenancy.models as tenancy_models
+
+        monkeypatch.setattr(
+            tenancy_models,
+            "TenantUserRelationship",
+            _fake_relationship_model(exists=True),
+            raising=False,
+        )
+        assert_envelope_tenant_authorized(
+            _envelope(event_name="user.profile.updated", tenant_id=None)
+        )

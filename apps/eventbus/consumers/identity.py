@@ -32,9 +32,17 @@ Per event-contract.md §3.12. One handler:
 
 * **Tenant-nullable** — ``user.profile.updated`` is the ONE event
   where ``envelope.tenant_id`` may be null (display_name + avatar are
-  user-global, not tenant-scoped). The handler iterates over ALL
-  BotUser rows for that ``ayla_user_id`` across tenants — same Ayla
-  user typically has one BotUser per (tenant, channel) pair.
+  user-global, not tenant-scoped). ONLY on that null path does the
+  handler iterate over ALL BotUser rows for that ``ayla_user_id``
+  across tenants — same Ayla user typically has one BotUser per
+  (tenant, channel) pair. When the envelope IS tenant-scoped, the write
+  is narrowed to that tenant: the authorization helper verified exactly
+  that pair, and nothing authorizes touching another tenant's rows.
+
+* **Subject = envelope, not payload** — the acted-upon user is
+  ``envelope.user_id``, the field the tenant-authorization helper
+  verified. A ``data["user_id"]`` that disagrees is a contract
+  violation and the event is dropped with no REST call and no write.
 
 ### Failure modes
 
@@ -92,7 +100,8 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
     Steps:
       1. Verify envelope tenant authorization (A3). Note: tenant_id MAY
          be null for this event family — auth helper handles that.
-      2. Parse ``user_id`` (UUID) from data.
+      2. Parse ``user_id`` (UUID) from the ENVELOPE, and drop the event
+         if ``data["user_id"]`` names a different subject.
       3. Compute safe-sync slice: ``changed_fields ∩ _SAFE_SYNC_FIELDS``.
          If empty → no-op (skip REST + DB).
       4. Fetch profile via Ayla REST.
@@ -104,16 +113,46 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
     assert_envelope_tenant_authorized(envelope)
 
     data = envelope.data
+
+    # The SUBJECT of the event is ``envelope.user_id`` — the field the
+    # envelope parser requires, the field every other consumer family keys
+    # off, and the field the tenant-authorization helper just verified.
+    # This handler used to key off ``data["user_id"]`` instead: an
+    # unverified payload field that authorization never looks at. On the
+    # tenant-null path that made the pair (authorized subject, acted-upon
+    # subject) divergeable at will, turning the handler into a REST fan-out
+    # against arbitrary Ayla user UUIDs. Use the envelope; treat a payload
+    # that disagrees as a contract violation.
     try:
-        user_id = UUID(data["user_id"])
-    except (KeyError, ValueError, TypeError) as exc:
+        user_id = UUID(envelope.user_id)
+    except (ValueError, TypeError) as exc:
         logger.warning(
-            "eventbus.consumer.identity.profile_updated.bad_user_id event_id=%s data=%r exc=%s",
+            "eventbus.consumer.identity.profile_updated.bad_user_id event_id=%s exc=%s",
             envelope.event_id,
-            data,
-            exc,
+            type(exc).__name__,
         )
         return
+
+    payload_user_id = data.get("user_id") if isinstance(data, dict) else None
+    if payload_user_id is not None:
+        try:
+            payload_matches = UUID(str(payload_user_id)) == user_id
+        except (ValueError, TypeError):
+            payload_matches = False
+        if not payload_matches:
+            # Drop without side effects rather than raising: a raise
+            # dead-letters and pages (§6.3), which hands anyone holding the
+            # shared HMAC secret a pager trigger. Nothing is fetched and
+            # nothing is written, so the primitive is dead either way.
+            logger.error(
+                "eventbus.consumer.identity.profile_updated.subject_mismatch "
+                "security=high event_id=%s envelope_user_id=%s — data.user_id "
+                "disagrees with the authorized envelope subject; dropping "
+                "without REST or DB side effects.",
+                envelope.event_id,
+                envelope.user_id,
+            )
+            return
 
     # Closed-shape parse of changed_fields. Defence against publisher
     # contract drift (non-list, non-string entries).
@@ -132,11 +171,15 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
     # in changed_fields are dropped HERE before any network call.
     safe_slice = changed_fields & _SAFE_SYNC_FIELDS
     if not safe_slice:
+        # Count only — ``changed_fields`` entries are publisher-supplied
+        # strings, so rendering them into a key=value log line is the same
+        # log-injection vector the tenancy helper sanitizes against. The
+        # names carry no diagnostic value here beyond "none were safe".
         logger.info(
             "eventbus.consumer.identity.profile_updated.no_safe_fields "
-            "event_id=%s changed_fields=%s — skipping REST (PII §7 enforcement)",
+            "event_id=%s changed_field_count=%d — skipping REST (PII §7 enforcement)",
             envelope.event_id,
-            sorted(changed_fields),
+            len(changed_fields),
         )
         return
 
@@ -144,10 +187,21 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
     # → Ayla retries. NEVER swallow + skip (stale projection forever).
     profile = fetch_profile_fields(user_id)
 
-    # Locate all BotUser rows for this Ayla user, across tenants +
-    # channels (one user may have MAX + Telegram BotUsers under the
-    # same tenant, OR have BotUsers under multiple tenants).
-    bot_users = list(BotUser.all_tenants.filter(ayla_user_id=user_id))
+    # Locate the BotUser rows for this Ayla user. ``display_name`` and
+    # ``avatar_url`` are user-global, so a genuinely tenant-null envelope
+    # legitimately fans out across tenants + channels (one user may have
+    # MAX + Telegram BotUsers under the same tenant, OR BotUsers under
+    # several tenants).
+    #
+    # But when the publisher DID scope the envelope to a tenant, that scope
+    # is the authorized one — the tenant-authorization helper verified
+    # exactly that pair. Writing outside it was an unnecessary widening:
+    # a tenant-scoped envelope has no business mutating rows belonging to
+    # other tenants. Narrow to the authorized tenant in that case.
+    user_rows = BotUser.all_tenants.filter(ayla_user_id=user_id)
+    if envelope.tenant_id is not None:
+        user_rows = user_rows.filter(tenant_id=envelope.tenant_id)
+    bot_users = list(user_rows)
     if not bot_users:
         logger.info(
             "eventbus.consumer.identity.profile_updated.no_bot_users "
@@ -192,13 +246,19 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
         else:
             skipped_count += 1
 
+    # ``tenant_scope`` makes the fan-out auditable: ``all_tenants`` says
+    # this write crossed tenant boundaries on the authority of a tenant-null
+    # envelope, which is the accepted Controlled-Pilot residual risk and the
+    # thing an operator needs to be able to enumerate. ``safe_slice`` is a
+    # closed two-value enum, so it is safe to render verbatim.
     logger.info(
         "eventbus.consumer.identity.profile_updated.synced "
-        "ayla_user_id=%s event_id=%s safe_slice=%s "
+        "ayla_user_id=%s event_id=%s safe_slice=%s tenant_scope=%s "
         "bot_users_updated=%d bot_users_skipped_idempotent=%d",
         user_id,
         envelope.event_id,
         sorted(safe_slice),
+        "all_tenants" if envelope.tenant_id is None else "envelope_tenant",
         updated_count,
         skipped_count,
     )

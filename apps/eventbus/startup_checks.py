@@ -176,7 +176,9 @@ def check_event_ingest_allowlists() -> None:
             "user-tenant relationship (Public MVP requirement), and it does "
             "NOT bound the tenant-null events (%s), which are authorized by "
             "the event-contract's own null-tenant rule and bypass the "
-            "allowlist entirely.",
+            "allowlist entirely — they are logged with "
+            "verification_mode=tenant_null_carveout and, once "
+            "TenantUserRelationship ships, verified against the subject user.",
             len(tenants),
             ",".join(sorted(events)),
             ",".join(sorted(_tenant_nullable_event_names())),
