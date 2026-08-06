@@ -86,6 +86,23 @@ Set via per-tenant env file `/etc/ai-bot-platform/tenants/{slug}.env`. The
 platform settings module reads tenant-scoped env via the slug → file mapping
 (implemented in Sprint 1 / DRF-410).
 
+### 2a. Booking integration: Ayla mirror linkage (conditional)
+
+Skip unless the tenant uses the Ayla-backed booking flow (Wave 1+,
+`BOOKING_VIA_AYLA_REST`). Both steps below are **silent failure points** —
+each was hit in e2e with a correctly-looking tenant (Wave 1 RB1.2 gate,
+findings O05/O06):
+
+1. **Catalog mirror backfill** — every bookable `CatalogService` row must have
+   `ayla_service_id` pointing at the real Ayla catalog service UUID. A stale
+   or missing value makes the `pick_slot` health-check gate fail closed:
+   booking silently degrades to manager handoff. Verify per active service
+   that `ayla_service_id` resolves in the Ayla catalog API.
+2. **BotUser ↔ Ayla user linking** — booking users must carry
+   `identity_botuser.ayla_user_id` (the resolved Ayla actor). Missing →
+   create fails with `ayla_client_id_missing`; wrong UUID → backend 403
+   `CLIENT_MISMATCH`. Both surface as unexplained booking failures.
+
 ### 3. Configure channels
 
 #### 3a. MAX (primary for Phase 0)
@@ -207,6 +224,9 @@ You can call onboarding **complete** when **all** of:
 * `/start` smoke green (step 7a)
 * FAQ smoke green AND scoped to this tenant (step 7b)
 * Callback smoke green (step 7c)
+* Booking linkage verified (step 2a) if booking is in scope — mirror
+  `ayla_service_id` resolves and a test user with `ayla_user_id` completes a
+  create + cancel smoke
 * `apps.audit` log shows **zero** cross-tenant warnings during the smoke
   session (replay last 100 audit rows via admin filter)
 * Tenant manager has acknowledged go-live message + escalation contacts
@@ -301,3 +321,5 @@ After go-live, escalations follow `on-call.md` (per-tenant alert routing).
 
 * 2026-05-10 — Lead — skeleton committed (DRF-414)
 * 2026-05-14 — Lead — full version (Sprint 10 / O4 / DRF-865)
+* 2026-08-06 — booking/Ayla mirror linkage steps 2a + verification (O05/O06,
+  Wave 1 RB1.2 channel gate)
