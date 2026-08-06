@@ -36,6 +36,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from freezegun import freeze_time
 
 from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.eventbus.consumers.booking import (
@@ -779,6 +780,45 @@ class TestBookingLifecycleOrdering:
             ).count()
             == 2
         )
+
+    def test_synced_at_advances_on_confirm_and_cancel(self, tenant, bot_user_linked):
+        """O6-regression: handler-side ``proxy.save()`` must advance
+        ``synced_at`` for both ``booking.confirmed`` and ``booking.cancelled``.
+
+        The old cancelled implementation used ``QuerySet.update()``, which
+        bypasses Django's ``auto_now`` and left ``synced_at`` stale.
+        """
+        self._pending_proxy(tenant)
+
+        with freeze_time("2026-05-21T10:00:00Z") as frozen:
+            env_confirmed = _envelope(
+                event_id="01J9CONFIRMSYNC",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+            handle_booking_confirmed(env_confirmed)
+
+            proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+            confirmed_synced_at = proxy.synced_at
+            assert confirmed_synced_at.isoformat() == "2026-05-21T10:00:00+00:00"
+
+            frozen.move_to("2026-05-21T11:00:00Z")
+            env_cancelled = _envelope(
+                event_id="01J9CANCELSYNC",
+                event_name="booking.cancelled",
+                data={
+                    "appointment_id": APPOINTMENT_ID,
+                    "cancelled_by": "user",
+                    "reason_code": "user_changed_plans",
+                    "cancelled_at": "2026-05-21T16:35:00.000Z",
+                },
+            )
+            handle_booking_cancelled(env_cancelled)
+
+            proxy.refresh_from_db()
+            assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+            assert proxy.synced_at == dt.datetime(2026, 5, 21, 11, 0, tzinfo=dt.timezone.utc)
+            assert proxy.synced_at > confirmed_synced_at
 
     def test_unknown_status_booking_created_has_no_side_effects(self, tenant, bot_user_linked):
         """O7 — an unrecognised ``booking.created`` status is rejected before

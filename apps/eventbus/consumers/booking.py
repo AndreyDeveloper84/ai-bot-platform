@@ -325,10 +325,8 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
     start_at = _parse_iso(data["start_at"])
     end_at = _parse_iso(data["end_at"])
 
-    # Resolve channel-side BotUser FIRST so we know whether the proxy
-    # is linked or orphan before the upsert fires.
-    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
-
+    # Validate/normalize the producer status before doing any lookup work.
+    # An unknown status raises early, leaving no side-effects behind.
     raw_status = data.get("status")
     normalized_status = normalize_booking_created_status(raw_status)
 
@@ -342,6 +340,10 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
             raw_status,
             normalized_status,
         )
+
+    # Resolve channel-side BotUser so we know whether the proxy is
+    # linked or orphan before the upsert fires.
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
 
     create_defaults = {
         "tenant": tenant,
@@ -420,8 +422,19 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
 
     Steps:
       1. Verify tenant authorization.
-      2. Update RemoteBookingProxy.status = cancelled.
+      2. Lock the :class:`RemoteBookingProxy` row and update
+         ``status = cancelled`` plus ``last_synced_event_id`` via
+         ``proxy.save()`` so ``synced_at`` (``auto_now``) advances.
       3. Cancel all PENDING reminders for this appointment.
+
+    Idempotency: if the proxy's ``last_synced_event_id`` already matches
+    ``envelope.event_id`` the handler returns early (no state change).
+
+    Missing proxy: raises :class:`BookingCancelledPendingProxyError`, a
+    retryable failure — the dispatcher rolls back and Ayla will redeliver
+    until ``booking.created`` creates the proxy (or the retry threshold
+    sends the event to the DLQ). This is the terminal handler path for a
+    cancellation that arrives out-of-order; there is no silent no-op.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -467,10 +480,9 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
             f"(event_id={envelope.event_id})"
         )
 
-    RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
-        status=RemoteBookingProxy.Status.CANCELLED,
-        last_synced_event_id=envelope.event_id,
-    )
+    proxy.status = RemoteBookingProxy.Status.CANCELLED
+    proxy.last_synced_event_id = envelope.event_id
+    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
 
     _cancel_reminders(appointment_id=appointment_id)
 
@@ -1020,6 +1032,10 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     and ensures reminders exist. Missing proxy is a retryable failure;
     a late confirm after cancellation is a no-op because ``cancelled``
     is a terminal state for the pilot.
+
+    Side-effect: if ``data.payment_id`` is present, the handler also
+    upserts the payment mirror via ``upsert_payment_mirror`` so the
+    local copy stays in sync with the Ayla payment state.
     """
     assert_envelope_tenant_authorized(envelope)
 
