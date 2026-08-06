@@ -1251,3 +1251,18 @@ class TestNoShowAmd018:
         assert not RemoteBookingProxy.all_tenants.filter(
             appointment_id=UUID(APPOINTMENT_ID)
         ).exists()
+
+
+class TestStatusNormalizer:
+    def test_normalizer_exists(self):
+        from apps.eventbus.consumers.booking import (
+            BookingCancelledPendingProxyError,
+            BookingConfirmedPendingProxyError,
+            UnknownBookingStatusError,
+            normalize_booking_created_status,
+        )
+
+        assert normalize_booking_created_status("confirmed") == "confirmed"
+        assert issubclass(UnknownBookingStatusError, ValueError)
+        assert issubclass(BookingConfirmedPendingProxyError, ValueError)
+        assert issubclass(BookingCancelledPendingProxyError, ValueError)

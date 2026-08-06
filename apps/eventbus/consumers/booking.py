@@ -77,6 +77,46 @@ _REMINDER_OFFSETS: Final[tuple[tuple[str, timedelta], ...]] = (
 )
 
 
+class UnknownBookingStatusError(ValueError):
+    """``booking.created`` carried a status outside the closed enum."""
+
+
+class BookingConfirmedPendingProxyError(ValueError):
+    """``booking.confirmed`` arrived before the proxy exists."""
+
+
+class BookingCancelledPendingProxyError(ValueError):
+    """``booking.cancelled`` arrived before the proxy exists."""
+
+
+def normalize_booking_created_status(raw_status: object) -> str:
+    """Map producer booking.created status values to the BOT enum.
+
+    Raises UnknownBookingStatusError for any value that is not a string
+    or not one of the four contracted strings.
+    """
+    if not isinstance(raw_status, str):
+        raise UnknownBookingStatusError(
+            f"Unknown booking.created status type: {type(raw_status).__name__}"
+        )
+
+    mapping = {
+        "awaiting_payment": RemoteBookingProxy.Status.PENDING_PAYMENT,
+        "pending_payment": RemoteBookingProxy.Status.PENDING_PAYMENT,
+        "confirmed": RemoteBookingProxy.Status.CONFIRMED,
+        "tentative": RemoteBookingProxy.Status.TENTATIVE,
+    }
+    try:
+        return mapping[raw_status]
+    except KeyError as exc:
+        raise UnknownBookingStatusError(f"Unknown booking.created status: {raw_status!r}") from exc
+
+
+def _is_reminder_eligible(status: str) -> bool:
+    """Reminders are only created for confirmed bookings."""
+    return status == RemoteBookingProxy.Status.CONFIRMED
+
+
 # ─── helpers ───────────────────────────────────────────────────────────────
 
 
