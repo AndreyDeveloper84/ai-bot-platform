@@ -69,9 +69,17 @@ def _envelope(
 
 
 @pytest.fixture(autouse=True)
-def _enable_tenant_verify_fail_open(settings) -> None:
-    """Round-3 NEW-5 bridge — pre-#246 transition mode."""
-    settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+def _pilot_allowlist(settings) -> None:
+    """T-02 pilot scope — NOT the global fail-open.
+
+    These envelopes are tenant-null by contract, so the carve-out admits
+    them regardless; the allowlist entry covers the tenant-scoped variants
+    and keeps this suite off the emergency escape hatch, which is what the
+    production path actually looks like.
+    """
+    settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = False
+    settings.EVENT_INGEST_ALLOWED_TENANTS = frozenset({TENANT_ID})
+    settings.EVENT_INGEST_ALLOWED_EVENTS = frozenset({"user.profile.updated"})
 
 
 @pytest.fixture(autouse=True)
@@ -425,3 +433,132 @@ class TestTenantNullable:
 
         bot_user.refresh_from_db()
         assert bot_user.display_name == "Updated"
+
+
+# ─── subject binding + tenant scoping ──────────────────────────────────────
+
+
+OTHER_TENANT_ID = "1d4f8a2c-6b3e-4a7d-9c1f-2e5b8d3a6c9f"
+OTHER_USER_ID = "aa11bb22-cc33-4d44-9e55-ff6677889900"
+
+
+@pytest.fixture
+def other_tenant() -> Tenant:
+    return Tenant.objects.create(
+        id=OTHER_TENANT_ID,
+        slug="t-identity-other",
+        name="Neighbour tenant",
+    )
+
+
+@pytest.fixture
+def other_tenant_bot_user(other_tenant: Tenant) -> BotUser:
+    """The SAME Ayla user, projected under a second tenant."""
+    return BotUser.all_tenants.create(
+        tenant=other_tenant,
+        channel="max",
+        channel_user_id="9002",
+        chat_id="chat-9002",
+        ayla_user_id=AYLA_USER_ID,
+        display_name="Old Name",
+    )
+
+
+class TestSubjectIsTheEnvelope:
+    """The acted-upon user is the AUTHORIZED user, not a payload field.
+
+    The handler used to key off ``data["user_id"]`` — a field the tenant
+    authorization helper never inspects. Combined with the tenant-null
+    carve-out, that made the pair (authorized subject, acted-upon subject)
+    divergeable at will: a REST fan-out primitive against arbitrary Ayla
+    user UUIDs, driven purely by the payload.
+    """
+
+    def test_payload_user_id_mismatch_is_dropped(self, tenant: Tenant, bot_user: BotUser) -> None:
+        env = _envelope(
+            data={"user_id": OTHER_USER_ID, "changed_fields": ["display_name"]},
+            user_id=AYLA_USER_ID,
+        )
+        with patch("apps.eventbus.consumers.identity.fetch_profile_fields") as mock_fetch:
+            handle_user_profile_updated(env)
+
+        # No REST call — the fan-out primitive is exactly what this kills.
+        mock_fetch.assert_not_called()
+        bot_user.refresh_from_db()
+        assert bot_user.display_name == "Old Name"
+
+    def test_the_envelope_subject_is_the_one_fetched(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """A payload naming a different user cannot redirect the fetch."""
+        env = _envelope(
+            data={"user_id": AYLA_USER_ID, "changed_fields": ["display_name"]},
+            user_id=AYLA_USER_ID,
+        )
+        with patch(
+            "apps.eventbus.consumers.identity.fetch_profile_fields",
+            return_value=ProfileFields(display_name="Updated", avatar_url=""),
+        ) as mock_fetch:
+            handle_user_profile_updated(env)
+
+        mock_fetch.assert_called_once_with(UUID(AYLA_USER_ID))
+
+    def test_absent_payload_user_id_still_works(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """``data.user_id`` is no longer required — the envelope carries it."""
+        env = _envelope(data={"changed_fields": ["display_name"]})
+        with patch(
+            "apps.eventbus.consumers.identity.fetch_profile_fields",
+            return_value=ProfileFields(display_name="Updated", avatar_url=""),
+        ):
+            handle_user_profile_updated(env)
+
+        bot_user.refresh_from_db()
+        assert bot_user.display_name == "Updated"
+
+
+class TestTenantScopedWritesDoNotCrossTenants:
+    def test_tenant_scoped_envelope_writes_only_its_own_tenant(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        other_tenant: Tenant,
+        other_tenant_bot_user: BotUser,
+    ) -> None:
+        """A tenant-scoped envelope authorizes ONE tenant — write only it."""
+        env = _envelope(
+            data={"user_id": AYLA_USER_ID, "changed_fields": ["display_name"]},
+            tenant_id=TENANT_ID,
+        )
+        with patch(
+            "apps.eventbus.consumers.identity.fetch_profile_fields",
+            return_value=ProfileFields(display_name="Updated", avatar_url=""),
+        ):
+            handle_user_profile_updated(env)
+
+        bot_user.refresh_from_db()
+        other_tenant_bot_user.refresh_from_db()
+        assert bot_user.display_name == "Updated"
+        assert other_tenant_bot_user.display_name == "Old Name"
+
+    def test_tenant_null_envelope_still_fans_out(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+        other_tenant: Tenant,
+        other_tenant_bot_user: BotUser,
+    ) -> None:
+        """display_name/avatar are user-global — the null path is by design."""
+        env = _envelope(
+            data={"user_id": AYLA_USER_ID, "changed_fields": ["display_name"]},
+            tenant_id=None,
+        )
+        with patch(
+            "apps.eventbus.consumers.identity.fetch_profile_fields",
+            return_value=ProfileFields(display_name="Updated", avatar_url=""),
+        ):
+            handle_user_profile_updated(env)
+
+        bot_user.refresh_from_db()
+        other_tenant_bot_user.refresh_from_db()
+        assert bot_user.display_name == "Updated"
+        assert other_tenant_bot_user.display_name == "Updated"

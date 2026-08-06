@@ -133,7 +133,21 @@ does not stop them. This is pre-existing contract behaviour that T-02
 deliberately did not change (OD-T02-1 scope: "envelope без tenant_id —
 сохранить существующее контрактное поведение"). Do not read "allowlist active"
 in the boot log as "this is the complete ingest surface"; the log line names
-the four exempt events. Gating them is tracked as a follow-up.
+the four exempt events.
+
+Two properties bound that carve-out:
+
+* **It is observable.** Every admitted tenant-null envelope emits
+  `eventbus.ingest.tenant_verify_accepted verification_mode=tenant_null_carveout`
+  with `event_id`, `event_name`, `user_id`, `correlation_id`. That line is the
+  only way to enumerate which subjects were asserted with no tenant binding —
+  alert on an anomalous `user_id` spread from this key.
+* **It is temporary, not permanent.** The check is no longer short-circuited
+  ahead of the canonical probe: once `TenantUserRelationship` ships (Sprint 1
+  #246), a tenant-null envelope is verified against the subject — `user_id`
+  must hold at least one active relationship with some tenant, else
+  `no_active_relationship_user_scope`. No operator action is needed at that
+  point; expect the reject reason to start appearing for unknown users.
 
 **No wildcards.** `*`, `all`, `any`, `booking.*` are rejected by the parser.
 There is no spelling that means "allow everything"; enumerate every value.

@@ -56,6 +56,17 @@ The allowlist is a **scope limiter, not a relationship proof** — it does
 not establish that ``user_id`` belongs to ``tenant_id``. Controlled Pilot
 only; Public MVP MUST restore the full relationship contract.
 
+### The tenant-null carve-out is bounded, not permanent
+
+Four contract events carry ``tenant_id: null`` and have no tenant
+dimension for the allowlist to match on. They are still admitted, but two
+things bound that: every admission emits an audit line
+(``verification_mode=tenant_null_carveout``), and the check is no longer
+evaluated ahead of the canonical probe — once #246 ships, the SUBJECT is
+verified (``user_id`` must hold an active relationship with some tenant).
+Without that ordering the pilot-era exemption would have outlived the
+pilot silently. See :func:`_authorize_tenant_null_envelope`.
+
 The lint test :mod:`tests.contracts.test_consumer_tenant_verification_mandate`
 scans handler source code for a call to this exact function name.
 """
@@ -111,6 +122,17 @@ def _tenant_user_relationship_available() -> bool:
     behaviour. We probe at every call (cheap importlib check) so the
     transition from #246-pre to #246-post is automatic — no settings
     flip required at deploy.
+
+    The ONLY tolerated failure is :class:`ImportError` — "the model has not
+    shipped yet", which is the expected pre-#246 state and legitimately
+    degrades to the pilot allowlist. Anything else (``AppRegistryNotReady``
+    on a worker that imports too early, an error raised inside
+    ``apps.tenancy.models`` itself, a circular import during a rolling
+    deploy) means the canonical check is broken, NOT absent. Returning
+    ``False`` there would silently downgrade every envelope to the pilot
+    allowlist — exactly the weakening precedence rule 1 forbids, just
+    entered from the other side. Post-#246 that would be a live security
+    regression triggered by an unrelated startup fault, so we fail CLOSED.
     """
     # The model lands with Sprint 1 #246; mypy under current tree
     # can't resolve it. The try/except below catches the runtime
@@ -119,8 +141,15 @@ def _tenant_user_relationship_available() -> bool:
         from apps.tenancy.models import TenantUserRelationship  # type: ignore[attr-defined]  # noqa: F401
     except ImportError:
         return False
-    except Exception:  # noqa: BLE001 — defensive
-        return False
+    except Exception as exc:  # noqa: BLE001 — see docstring: broken ≠ absent
+        logger.error(
+            "eventbus.ingest.tenant_verify_probe_error security=high error=%s — "
+            "apps.tenancy.models could not be imported for a reason other than "
+            "ImportError. Failing CLOSED rather than degrading to the pilot "
+            "allowlist.",
+            type(exc).__name__,
+        )
+        raise TenantAuthorizationError(f"tenant_verify_probe_error: {type(exc).__name__}") from exc
     return True
 
 
@@ -317,6 +346,83 @@ def _log_pilot_rejected(
     )
 
 
+def _authorize_tenant_null_envelope(
+    *,
+    event_id: str,
+    event_name: str,
+    user_id: str,
+    correlation_id: str | None,
+) -> None:
+    """Authorize an envelope that legitimately carries ``tenant_id=null``.
+
+    The four `event-contract.md` §2 + AMD-015 events have no tenant
+    dimension, so the pilot allowlist has nothing to match on and T-02 left
+    them admitted (OD-T02-1 §1 — preserve the existing contract behaviour
+    for envelopes without ``tenant_id``). Two properties of that carve-out
+    were wrong and are fixed here.
+
+    **It must not be permanent.** The pre-T-02 code returned *before*
+    probing for :class:`TenantUserRelationship`, so these four events would
+    never be authorized against the canonical model even after Sprint 1
+    #246 ships — a temporary pilot compromise silently frozen into the
+    permanent design. Once the model is importable we verify the subject
+    exists: ``user_id`` must hold at least one active relationship with
+    SOME tenant. That is the strongest statement available for a
+    user-global event (there is no tenant to bind to), and it is what
+    closes the "arbitrary attacker-chosen ``user_id``" hole.
+
+    **It must be observable.** The carve-out previously logged nothing, so
+    the ingest path had the inverted property that events the allowlist
+    ADMITTED left an audit trail while events that bypassed it entirely did
+    not. Every pass through here now emits an accept line with
+    ``verification_mode=tenant_null_carveout``.
+
+    Raises :class:`TenantAuthorizationError` when the canonical model is
+    available and the subject has no active relationship anywhere.
+    """
+    if _tenant_user_relationship_available():
+        try:
+            from apps.tenancy.models import TenantUserRelationship  # type: ignore[attr-defined]
+        except ImportError as exc:
+            raise TenantAuthorizationError("tenant_verify_import_race") from exc
+        try:
+            known_user = TenantUserRelationship.objects.filter(
+                user_id=user_id,
+                is_active=True,
+            ).exists()
+        except Exception as exc:  # noqa: BLE001 — DB lookup failure
+            raise TenantAuthorizationError(f"tenant_verify_db_error: {type(exc).__name__}") from exc
+        if not known_user:
+            logger.warning(
+                "eventbus.ingest.tenant_verify_rejected "
+                "verification_mode=tenant_null_carveout reason=unknown_user "
+                "event_id=%s event_name=%s user_id=%s correlation_id=%s",
+                _safe_log_value(event_id),
+                _safe_log_value(event_name),
+                _safe_log_value(user_id),
+                _safe_log_value(correlation_id),
+            )
+            raise TenantAuthorizationError(
+                f"no_active_relationship_user_scope "
+                f"event_name={_safe_log_value(event_name)} "
+                f"user_id={_safe_log_value(user_id)}"
+            )
+
+    # Identifiers only — never the payload (§6.4). This is the sole
+    # detective control over the tenant-null surface: it is what lets an
+    # operator enumerate which user_ids were asserted without any tenant
+    # binding, and alert on an anomalous spread.
+    logger.info(
+        "eventbus.ingest.tenant_verify_accepted "
+        "verification_mode=tenant_null_carveout event_id=%s event_name=%s "
+        "user_id=%s correlation_id=%s",
+        _safe_log_value(event_id),
+        _safe_log_value(event_name),
+        _safe_log_value(user_id),
+        _safe_log_value(correlation_id),
+    )
+
+
 def assert_envelope_tenant_authorized(envelope: Any) -> None:
     """Verify ``(envelope.user_id, envelope.tenant_id)`` authorization.
 
@@ -351,7 +457,8 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
 
     | tenant_id state | model available | pilot allowlist | flag  | outcome    |
     |-----------------|-----------------|-----------------|-------|------------|
-    | None + nullable | n/a             | n/a             | n/a   | pass       |
+    | None + nullable | no              | n/a             | n/a   | log + pass |
+    | None + nullable | yes             | n/a             | n/a   | user check |
     | None + others   | n/a             | n/a             | n/a   | RAISE      |
     | set             | yes             | not consulted   | n/a   | real check |
     | set             | no              | allow           | n/a   | log + pass |
@@ -371,8 +478,14 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     if tenant_id is None:
         if event_name not in _TENANT_NULLABLE_EVENT_NAMES:
             raise TenantAuthorizationError(
-                f"tenant_id is null for non-nullable event {event_name!r}"
+                f"tenant_id is null for non-nullable event {_safe_log_value(event_name)!r}"
             )
+        _authorize_tenant_null_envelope(
+            event_id=event_id,
+            event_name=event_name,
+            user_id=user_id,
+            correlation_id=correlation_id,
+        )
         return
 
     if _tenant_user_relationship_available():
@@ -402,8 +515,16 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
                     f"tenant_verify_db_error: {type(exc).__name__}"
                 ) from exc
             if not exists:
+                # Sanitized: both fields are attacker-influenced (the
+                # envelope parser type-checks them as non-empty ``str`` and
+                # nothing more), and this message is written to the log by
+                # the dispatcher — the same log-injection vector the pilot
+                # branch already defends against. This branch activates
+                # with #246, so it must be safe before then, not after.
                 raise TenantAuthorizationError(
-                    f"no_active_relationship user_id={user_id} tenant_id={tenant_id}"
+                    f"no_active_relationship "
+                    f"user_id={_safe_log_value(user_id)} "
+                    f"tenant_id={_safe_log_value(tenant_id)}"
                 )
             return
 
