@@ -242,8 +242,6 @@ def _schedule_reminders(
                 # Names are looked up via the catalog mirror on send.
                 "master_name": "",
                 "service_name": "",
-                "sent_at": None,
-                "replied_at": None,
             },
         )
 
