@@ -249,7 +249,7 @@ class AylaBookingClient(Protocol):
         self,
         *,
         specialist_id: str,
-        service_id: str | None = ...,
+        service_id: str,  # #1051: mandatory on the Ayla slots path
         window_days: int = ...,
     ) -> list[str]: ...
 
@@ -258,7 +258,7 @@ class AylaBookingClient(Protocol):
         *,
         specialist_id: str,
         date: str,
-        service_id: str | None = ...,
+        service_id: str,  # #1051: mandatory
     ) -> list[AylaSlot]: ...
 
     def create_appointment(
@@ -556,11 +556,19 @@ class AylaBookingHTTPClient:
         *,
         specialist_id: str,
         date: str,
-        service_id: str | None = None,
+        service_id: str,
     ) -> list[AylaSlot]:
-        params: dict[str, Any] = {"date": date}
-        if service_id:
-            params["service_id"] = service_id
+        # #1051: Ayla's slots action REQUIRES service_id — without it the
+        # endpoint returns 400 MISSING_PARAM. Fail fast with a clear, non-
+        # retryable error (BookingBadRequestError → YClientsAPIError) BEFORE the
+        # HTTP call, so a service-less query never hits the wire (and, via the
+        # get_available_dates fan-out, never repeats per day). NOTE: whether the
+        # Ayla booking flow guarantees service-before-slots or needs a
+        # service-less fallback is decided in #1016 — this guard only makes the
+        # service-less case fail cleanly, it does not itself order the flow.
+        if not service_id:
+            raise BookingBadRequestError("service_id_required")
+        params: dict[str, Any] = {"date": date, "service_id": service_id}
         resp = self._request("GET", f"specialists/{specialist_id}/slots/", params=params)
         payload = self._ok(resp)
         slots = payload.get("slots") if isinstance(payload, dict) else payload
@@ -570,7 +578,7 @@ class AylaBookingHTTPClient:
         self,
         *,
         specialist_id: str,
-        service_id: str | None = None,
+        service_id: str,
         window_days: int = AVAILABLE_DATES_WINDOW_DAYS,
     ) -> list[str]:
         """Derive the free-day calendar by fanning out over a date window.
@@ -578,7 +586,13 @@ class AylaBookingHTTPClient:
         Ayla exposes no range endpoint; the single-day ``slots`` action is
         called per day and days with at least one slot are returned. The S2
         slot cache keeps the fan-out cheap.
+
+        #1051: ``service_id`` is REQUIRED — validated once up front so a
+        service-less request fails immediately (one clear BookingBadRequestError,
+        zero HTTP) rather than entering the per-day fan-out loop at all.
         """
+        if not service_id:
+            raise BookingBadRequestError("service_id_required")
         today = date_cls.today()
         out: list[str] = []
         clamped_window = min(max(window_days, 0), MAX_AVAILABLE_DATES_WINDOW_DAYS)
