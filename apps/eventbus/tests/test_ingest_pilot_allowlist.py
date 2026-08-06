@@ -253,6 +253,39 @@ class TestSettingsDefaults:
 
         assert dj_settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN is False
 
+    def test_ingest_allowlist_module_imports_nothing_from_django_or_apps(self) -> None:
+        """``config/settings/base.py`` imports this module at settings-load time.
+
+        That is only safe while the module is stdlib-only: the Django app
+        registry does not exist yet at that point, and ``django.conf.settings``
+        is mid-construction. A future edit adding ``from django.conf import
+        settings`` (or any ``apps.*`` import) would turn every ``manage.py``
+        invocation into an opaque settings-import failure. The property is
+        asserted in three docstrings; pin it here.
+        """
+        import ast
+        from pathlib import Path
+
+        import apps.eventbus.ingest_allowlist as module
+
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        imported: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+
+        offenders = [
+            name
+            for name in imported
+            if name.split(".")[0] in {"django", "apps", "config", "celery"}
+        ]
+        assert offenders == [], (
+            f"ingest_allowlist must stay stdlib-only (imported at settings load); "
+            f"found: {offenders}"
+        )
+
 
 # ─── authorization: happy path ─────────────────────────────────────────────
 
@@ -302,6 +335,10 @@ class TestPilotHappyPath:
         assert "event_name=booking.created" in line
         assert f"tenant_id={TENANT_A}" in line
         assert "correlation_id=a1b2c3d4-e5f6-7890-abcd-ef1234567890" in line
+        # The allowlist verifies the TENANT dimension only — it never proves
+        # user_id belongs to tenant_id. This field is the sole detective
+        # control over that accepted residual risk.
+        assert f"user_id={AYLA_USER_ID}" in line
 
 
 # ─── authorization: tenant rejection ───────────────────────────────────────
@@ -406,6 +443,7 @@ class TestTenantRejection:
         assert "event_id=EV-REJECT-1" in line
         assert "event_name=booking.created" in line
         assert f"tenant_id={TENANT_B}" in line
+        assert f"user_id={AYLA_USER_ID}" in line
 
 
 # ─── authorization: event rejection ────────────────────────────────────────
@@ -556,6 +594,22 @@ class TestPrecedence:
         )
         with _pilot_settings():
             assert_envelope_tenant_authorized(_envelope(tenant_id=TENANT_B))
+
+    def test_probe_import_race_fails_closed(
+        self, tenant_a: Tenant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Probe says the model exists, the import then fails — deny.
+
+        Falling through to the allowlist here would admit an allowlisted
+        tenant with NO relationship verification, which is exactly the
+        weakening precedence rule 1 forbids.
+        """
+        import apps.eventbus.ingest_tenancy as tenancy
+
+        monkeypatch.setattr(tenancy, "_tenant_user_relationship_available", lambda: True)
+        with _pilot_settings(), pytest.raises(TenantAuthorizationError) as exc:
+            assert_envelope_tenant_authorized(_envelope())
+        assert "tenant_verify_import_race" in str(exc.value)
 
     def test_null_tenant_contract_behaviour_unchanged(self) -> None:
         """Rule 0 — the allowlist does not touch tenant-null events."""
@@ -832,6 +886,17 @@ class TestStartupChecks:
         line = next(m for m in messages if "allowlist_active" in m)
         assert "verification_mode=pilot_allowlist" in line
         assert "does NOT prove" in line
+        # The allowlist gates tenant-scoped events only. Four contract
+        # events carry tenant_id=null and bypass it — the boot line must
+        # name them so nobody reads "active" as "complete ingest surface".
+        assert "does NOT bound the tenant-null events" in line
+        for exempt in (
+            "user.profile.updated",
+            "subscription.activated",
+            "subscription.past_due",
+            "billing.fee_charged",
+        ):
+            assert exempt in line
 
     def test_malformed_configuration_reports_deny_all(
         self, caplog: pytest.LogCaptureFixture

@@ -87,6 +87,20 @@ def _environment_label() -> str:
     return os.environ.get("DJANGO_SETTINGS_MODULE", "unknown")
 
 
+def _tenant_nullable_event_names() -> frozenset[str]:
+    """The events the allowlist deliberately does not gate.
+
+    Per `event-contract.md` §2 + AMD-015 these carry ``tenant_id=null`` by
+    contract, so there is no tenant dimension to check them against; the
+    null-tenant rule in ``assert_envelope_tenant_authorized`` admits them
+    before the allowlist is consulted. Surfaced at boot so nobody reads
+    "allowlist active" as "this is the complete ingest surface".
+    """
+    from apps.eventbus.ingest_tenancy import _TENANT_NULLABLE_EVENT_NAMES
+
+    return _TENANT_NULLABLE_EVENT_NAMES
+
+
 def check_event_ingest_allowlists() -> None:
     """T-02 — surface every unsafe or ineffective pilot-allowlist combination.
 
@@ -158,10 +172,14 @@ def check_event_ingest_allowlists() -> None:
         logger.info(
             "eventbus.ingest.allowlist_active verification_mode=pilot_allowlist "
             "tenants=%d events=%s — Controlled Pilot scope. This bounds WHICH "
-            "tenants and events may be ingested; it does NOT prove the "
-            "user-tenant relationship (Public MVP requirement).",
+            "TENANT-SCOPED events may be ingested. It does NOT prove the "
+            "user-tenant relationship (Public MVP requirement), and it does "
+            "NOT bound the tenant-null events (%s), which are authorized by "
+            "the event-contract's own null-tenant rule and bypass the "
+            "allowlist entirely.",
             len(tenants),
             ",".join(sorted(events)),
+            ",".join(sorted(_tenant_nullable_event_names())),
         )
 
     # Vocabulary sanity: an event name no consumer can ever dispatch is a

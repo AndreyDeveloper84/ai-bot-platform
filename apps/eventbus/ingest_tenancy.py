@@ -261,6 +261,7 @@ def _log_pilot_accepted(
     event_id: str,
     event_name: str,
     tenant_id: str,
+    user_id: str,
     correlation_id: str | None,
 ) -> None:
     """Structured audit line for an event admitted by the pilot allowlist.
@@ -268,14 +269,22 @@ def _log_pilot_accepted(
     Identifiers only — never the payload. ``event_id``/``correlation_id``
     are the join keys an operator needs to reconcile a bot-side accept with
     Ayla's outbox row; the payload itself may carry PII (§6.4).
+
+    ``user_id`` is included deliberately. The pilot allowlist verifies the
+    TENANT dimension only — it never establishes that ``user_id`` belongs to
+    ``tenant_id`` (that is the accepted Controlled-Pilot residual risk). This
+    log line is therefore the ONLY detective control over it: without it,
+    nobody can enumerate which users an allowlisted tenant asserted, or
+    alert on one tenant claiming an anomalous spread of user_ids.
     """
     logger.info(
         "eventbus.ingest.tenant_verify_accepted "
         "verification_mode=pilot_allowlist event_id=%s event_name=%s "
-        "tenant_id=%s correlation_id=%s",
+        "tenant_id=%s user_id=%s correlation_id=%s",
         _safe_log_value(event_id),
         _safe_log_value(event_name),
         _safe_log_value(tenant_id),
+        _safe_log_value(user_id),
         _safe_log_value(correlation_id),
     )
 
@@ -285,6 +294,7 @@ def _log_pilot_rejected(
     event_id: str,
     event_name: str,
     tenant_id: str,
+    user_id: str,
     reason: str,
     correlation_id: str | None,
 ) -> None:
@@ -297,11 +307,12 @@ def _log_pilot_rejected(
     logger.warning(
         "eventbus.ingest.tenant_verify_rejected "
         "verification_mode=pilot_allowlist reason=%s event_id=%s "
-        "event_name=%s tenant_id=%s correlation_id=%s",
+        "event_name=%s tenant_id=%s user_id=%s correlation_id=%s",
         reason,
         _safe_log_value(event_id),
         _safe_log_value(event_name),
         _safe_log_value(tenant_id),
+        _safe_log_value(user_id),
         _safe_log_value(correlation_id),
     )
 
@@ -368,10 +379,14 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
         # Sprint 1 #246 has shipped — do the real lookup.
         try:
             from apps.tenancy.models import TenantUserRelationship  # type: ignore[attr-defined]
-        except ImportError:
-            # Race between probe + import — shouldn't happen, but if
-            # it does, fall through to the fail-closed branch below.
-            pass
+        except ImportError as exc:
+            # Race between the probe and this import. Falling through to
+            # the pilot allowlist here would let an allowlisted tenant in
+            # WITHOUT any relationship verification — precisely the
+            # weakening precedence rule 1 forbids. Fail closed instead;
+            # this is not reachable in practice (module caching), and if it
+            # ever fires the operator needs to see it, not absorb it.
+            raise TenantAuthorizationError("tenant_verify_import_race") from exc
         else:
             try:
                 exists = TenantUserRelationship.objects.filter(
@@ -400,6 +415,7 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             event_id=event_id,
             event_name=event_name,
             tenant_id=tenant_id,
+            user_id=user_id,
             correlation_id=correlation_id,
         )
         return
@@ -409,6 +425,7 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
         event_id=event_id,
         event_name=event_name,
         tenant_id=tenant_id,
+        user_id=user_id,
         reason=reason,
         correlation_id=correlation_id,
     )
@@ -470,6 +487,29 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
         count = increment_tenant_fail_open_count(composite_key)
 
         if should_emit_tenant_fail_open_audit(count):
+            # T-02 — the pilot tenant-existence lookup above runs inside
+            # the dispatcher's transaction.atomic(). If it raised a
+            # DatabaseError (reason=tenant_lookup_error), Django has
+            # already flagged the connection needs_rollback and ANY query
+            # here — including this audit write — raises
+            # TransactionManagementError. That is caught below and logged
+            # as a generic audit_failed, indistinguishable from a real
+            # audit bug, silently losing the one durable forensic artifact
+            # for the module's most dangerous branch. Detect the poisoned
+            # transaction explicitly and say so.
+            from django.db import transaction as _db_transaction
+
+            if _db_transaction.get_connection().needs_rollback:
+                logger.error(
+                    "eventbus.ingest.tenant_verify_fail_open.audit_skipped_broken_tx "
+                    "security=high overridden_reason=%s count_in_window=%d — an event "
+                    "was admitted by the global fail-open but the AuditLog row could "
+                    "not be written because the transaction was already broken. The "
+                    "WARNING line above is the only record of this exposure.",
+                    reason,
+                    count,
+                )
+                return
             write_audit(
                 action="eventbus.ingest.tenant_verify_fail_open",
                 target="eventbus.ingest",

@@ -123,6 +123,18 @@ An envelope is admitted only when **all** of the following hold:
 read as "no restriction". A half-configured pair (tenants but no events, or
 vice versa) is also deny-all — the boot log flags it as `ERROR`.
 
+**Scope carve-out — the allowlist gates TENANT-SCOPED events only.** Four
+contract events carry `tenant_id: null` by design (`user.profile.updated`,
+`subscription.activated`, `subscription.past_due`, `billing.fee_charged`,
+per `event-contract.md` §2 + AMD-015). They have no tenant dimension to check,
+so `assert_envelope_tenant_authorized` admits them under the null-tenant rule
+**before** the allowlist is consulted — configuring a narrow pilot event set
+does not stop them. This is pre-existing contract behaviour that T-02
+deliberately did not change (OD-T02-1 scope: "envelope без tenant_id —
+сохранить существующее контрактное поведение"). Do not read "allowlist active"
+in the boot log as "this is the complete ingest surface"; the log line names
+the four exempt events. Gating them is tracked as a follow-up.
+
 **No wildcards.** `*`, `all`, `any`, `booking.*` are rejected by the parser.
 There is no spelling that means "allow everything"; enumerate every value.
 
@@ -184,7 +196,12 @@ does **not** establish that `envelope.user_id` genuinely belongs to
 - the ingest HMAC secret is installation-wide, so any holder can sign for
   any allowlisted tenant — the allowlist caps the blast radius, it does not
   eliminate it;
-- an allowlisted tenant can assert events for arbitrary `user_id` values.
+- an allowlisted tenant can assert events for arbitrary `user_id` values. The
+  only detective control is the `user_id` field on every
+  `tenant_verify_accepted` log line — alert on a tenant asserting an
+  anomalous spread of user ids;
+- the four tenant-null events above bypass the allowlist entirely (see the
+  scope carve-out).
 
 Public MVP MUST replace this with the full `TenantUserRelationship`
 contract. Until then, keep the tenant allowlist to the handful of tenants
