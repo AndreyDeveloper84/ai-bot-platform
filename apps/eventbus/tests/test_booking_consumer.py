@@ -550,6 +550,137 @@ class TestBookingConfirmed:
         assert str(proxy.tenant_id) == TENANT_ID
 
 
+# ─── booking.lifecycle ordering scenarios (O1–O4) ──────────────────────────
+
+
+class TestBookingLifecycleOrdering:
+    """Ordering / adversarial lifecycle scenarios for booking.* handlers.
+
+    O1: created(awaiting_payment) → confirmed creates reminders.
+    O2: created(confirmed) → confirmed does not duplicate reminders.
+    O3: confirmed → cancelled cancels all pending reminders.
+    O4: cancelled → confirmed is a no-op (cancelled is terminal for pilot).
+    """
+
+    def _pending_proxy(self, tenant: Tenant) -> RemoteBookingProxy:
+        return RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=None,
+            start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
+            end_at=dt.datetime(2026, 5, 22, 16, 0, tzinfo=dt.timezone.utc),
+            status=RemoteBookingProxy.Status.PENDING_PAYMENT,
+        )
+
+    def test_normal_paid_booking_flow(self, tenant, bot_user_linked):
+        env_created = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="awaiting_payment"),
+        )
+        handle_booking_created(env_created)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.PENDING_PAYMENT
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 0
+        )
+
+        env_confirmed = _envelope(
+            event_id="01J9CONFIRM001",
+            event_name="booking.confirmed",
+            data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+        )
+        handle_booking_confirmed(env_confirmed)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 2
+        )
+
+    def test_walk_in_no_duplicate_reminders(self, tenant, bot_user_linked):
+        env_created = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="confirmed"),
+        )
+        handle_booking_created(env_created)
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 2
+        )
+
+        env_confirmed = _envelope(
+            event_id="01J9CONFIRM002",
+            event_name="booking.confirmed",
+            data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+        )
+        handle_booking_confirmed(env_confirmed)
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 2
+        )
+
+    def test_confirmed_then_cancelled_cancels_reminders(self, tenant, bot_user_linked):
+        self._pending_proxy(tenant)
+        handle_booking_confirmed(
+            _envelope(
+                event_id="01J9CONFIRM003",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+        )
+        assert (
+            BookingReminder.all_tenants.filter(
+                ayla_appointment_id=UUID(APPOINTMENT_ID),
+                status=BookingReminder.Status.PENDING,
+            ).count()
+            == 2
+        )
+
+        handle_booking_cancelled(
+            _envelope(
+                event_id="01J9CANCEL003",
+                event_name="booking.cancelled",
+                data={
+                    "appointment_id": APPOINTMENT_ID,
+                    "cancelled_by": "user",
+                    "reason_code": "user_changed_plans",
+                    "cancelled_at": "2026-05-22T16:35:00.000Z",
+                },
+            )
+        )
+        assert (
+            BookingReminder.all_tenants.filter(
+                ayla_appointment_id=UUID(APPOINTMENT_ID),
+                status=BookingReminder.Status.CANCELLED,
+            ).count()
+            == 2
+        )
+
+    def test_late_confirmed_after_cancelled_stays_cancelled(self, tenant, bot_user_linked):
+        proxy = RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=bot_user_linked,
+            start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
+            end_at=dt.datetime(2026, 5, 22, 16, 0, tzinfo=dt.timezone.utc),
+            status=RemoteBookingProxy.Status.CANCELLED,
+            last_synced_event_id="01J9CANCEL004",
+        )
+        handle_booking_confirmed(
+            _envelope(
+                event_id="01J9CONFIRMAFTERCANCEL004",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+        )
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert proxy.last_synced_event_id == "01J9CANCEL004"
+
+
 # ─── booking.cancelled ─────────────────────────────────────────────────────
 
 
@@ -1372,3 +1503,45 @@ class TestStatusNormalizer:
         assert issubclass(UnknownBookingStatusError, ValueError)
         assert issubclass(BookingConfirmedPendingProxyError, ValueError)
         assert issubclass(BookingCancelledPendingProxyError, ValueError)
+
+
+# ─── Dispatcher-level dedupe rollback (adversarial) ─────────────────────────
+
+
+@pytest.mark.django_db
+def test_confirmed_without_proxy_does_not_commit_dedupe(settings):
+    """§5.1 atomicity: handler exception rolls back the dedupe insert.
+
+    A booking.confirmed event that arrives before its proxy causes a
+    retryable BookingConfirmedPendingProxyError. The dispatcher MUST NOT
+    leave an IngestDedupe row behind, otherwise Ayla's retry would be
+    rejected as a duplicate and the appointment would stay unconfirmed
+    forever.
+    """
+    from apps.eventbus.consumers.booking import BookingConfirmedPendingProxyError
+    from apps.eventbus.ingest_dispatcher import DispatchOutcome, dispatch_envelope
+    from apps.eventbus.ingest_envelope import IngestEnvelope
+    from apps.eventbus.models import IngestDedupe
+    from apps.tenancy.models import Tenant
+
+    settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+    Tenant.objects.get_or_create(
+        id="9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c",
+        defaults={"slug": "t-dedupe", "name": "Dedupe test tenant"},
+    )
+    env = IngestEnvelope(
+        event_id="01J9DEDUPECONFIRM000000001",
+        event_name="booking.confirmed",
+        event_version=1,
+        occurred_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
+        tenant_id="9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c",
+        user_id="f1a2b3c4-d5e6-4789-9abc-def012345678",
+        actor="system",
+        correlation_id=None,
+        causation_id=None,
+        data={"appointment_id": "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8", "payment_id": PAYMENT_ID},
+    )
+    result = dispatch_envelope(env)
+    assert result.outcome == DispatchOutcome.HANDLER_EXCEPTION
+    assert isinstance(result.exception, BookingConfirmedPendingProxyError)
+    assert not IngestDedupe.objects.filter(event_id=env.event_id).exists()
