@@ -1336,27 +1336,9 @@ def _handle_pick_slot_callback(
             tenant_id=tenant_id,
         )
 
-    # At most one active create-preview per user: supersede any earlier
-    # unconsumed CONFIRM pendings so two different preview cards can't
-    # both be ✅-executed into two real bookings.
-    if result.pending is not None:
-        new_token = result.pending.token
-        superseded = (
-            PendingBookingAction.all_tenants.filter(
-                tenant=tenant,
-                bot_user=context.bot_user,
-                kind=PendingBookingAction.Kind.CONFIRM,
-                consumed_at__isnull=True,
-            )
-            .exclude(pk=new_token)
-            .update(consumed_at=timezone.now())
-        )
-        if superseded:
-            logger.info(
-                "booking.pick_slot.superseded_pending count=%s new_token=%s",
-                superseded,
-                new_token,
-            )
+    # At most one active create-preview per user is enforced inside
+    # confirm_booking itself (it supersedes earlier unconsumed CONFIRM
+    # pendings next to row creation), so this path needs no extra step.
 
     # A created preview closes any D-10 continuation state — the
     # confirmation gate owns the flow from here (mirrors the LLM path).

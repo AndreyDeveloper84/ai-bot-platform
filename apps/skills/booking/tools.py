@@ -840,6 +840,10 @@ def confirm_booking(
     YClients create + ``BookingRequest`` insert in one shot. Now it
     just validates inputs, persists the pending action, and returns
     the preview card. :func:`execute_confirm` runs on the ✅ tap.
+
+    Persisting a new preview supersedes any earlier unconsumed CONFIRM
+    pendings for the same (tenant, bot_user): at most one active
+    create-preview per user, enforced for every caller of this tool.
     """
     master_id = _coerce_id(arguments.get("master_id"))
     service_id = _coerce_id(arguments.get("service_id"))
@@ -890,6 +894,29 @@ def confirm_booking(
         kind=PendingBookingAction.Kind.CONFIRM,
         payload=payload,
     )
+
+    # At most one active create-preview per user: supersede any earlier
+    # unconsumed CONFIRM pendings so two different preview cards can't
+    # both be ✅-executed into two real bookings. Enforced here — next to
+    # row creation — so every caller (LLM tool path and the deterministic
+    # pick_slot short-circuit alike) gets the invariant; a future call
+    # site can't bypass it.
+    superseded = (
+        PendingBookingAction.all_tenants.filter(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            consumed_at__isnull=True,
+        )
+        .exclude(pk=token)
+        .update(consumed_at=dj_timezone.now())
+    )
+    if superseded:
+        logger.info(
+            "booking.confirm_booking.superseded_pending count=%s new_token=%s",
+            superseded,
+            token,
+        )
 
     preview_text = _format_confirm_preview(
         master_name=master_name,
