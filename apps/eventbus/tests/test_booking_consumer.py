@@ -680,6 +680,156 @@ class TestBookingLifecycleOrdering:
         assert proxy.status == RemoteBookingProxy.Status.CANCELLED
         assert proxy.last_synced_event_id == "01J9CANCEL004"
 
+    def test_cancel_pending_payment_booking(self, tenant, bot_user_linked):
+        """O5 — cancel a booking that never left ``awaiting_payment``.
+
+        No reminders were scheduled; cancellation must leave the count at 0.
+        """
+        env_created = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="awaiting_payment"),
+        )
+        handle_booking_created(env_created)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.PENDING_PAYMENT
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 0
+        )
+
+        env_cancelled = _envelope(
+            event_id="01J9CANCEL005",
+            event_name="booking.cancelled",
+            data={
+                "appointment_id": APPOINTMENT_ID,
+                "cancelled_by": "user",
+                "reason_code": "user_changed_plans",
+                "cancelled_at": "2026-05-22T16:35:00.000Z",
+            },
+        )
+        handle_booking_cancelled(env_cancelled)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 0
+        )
+
+    def test_duplicate_events_are_idempotent(self, tenant, bot_user_linked):
+        """O6 — duplicate deliveries of the same event_id are short-circuited.
+
+        created(confirmed) ×2 → one proxy, two reminders.
+        confirmed ×2 → still two reminders, no duplicate side-effects.
+        cancelled ×2 → proxy cancelled, reminders cancelled.
+        """
+        env_created = _envelope(
+            event_id="01J9CREATED006",
+            event_name="booking.created",
+            data=_booking_created_data(status="confirmed"),
+        )
+        handle_booking_created(env_created)
+        handle_booking_created(env_created)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert proxy.last_synced_event_id == "01J9CREATED006"
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 2
+        )
+
+        env_confirmed = _envelope(
+            event_id="01J9CONFIRM006",
+            event_name="booking.confirmed",
+            data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+        )
+        handle_booking_confirmed(env_confirmed)
+        handle_booking_confirmed(env_confirmed)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert proxy.last_synced_event_id == "01J9CONFIRM006"
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 2
+        )
+
+        env_cancelled = _envelope(
+            event_id="01J9CANCEL006",
+            event_name="booking.cancelled",
+            data={
+                "appointment_id": APPOINTMENT_ID,
+                "cancelled_by": "user",
+                "reason_code": "user_changed_plans",
+                "cancelled_at": "2026-05-22T16:35:00.000Z",
+            },
+        )
+        handle_booking_cancelled(env_cancelled)
+        handle_booking_cancelled(env_cancelled)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert proxy.last_synced_event_id == "01J9CANCEL006"
+        assert (
+            BookingReminder.all_tenants.filter(
+                ayla_appointment_id=UUID(APPOINTMENT_ID),
+                status=BookingReminder.Status.CANCELLED,
+            ).count()
+            == 2
+        )
+
+    def test_unknown_status_booking_created_has_no_side_effects(self, tenant, bot_user_linked):
+        """O7 — an unrecognised ``booking.created`` status is rejected before
+        any side-effect, leaving no proxy, reminders, or dedupe row."""
+        from apps.eventbus.consumers.booking import UnknownBookingStatusError
+
+        env = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="future_unknown"),
+        )
+        with pytest.raises(UnknownBookingStatusError):
+            handle_booking_created(env)
+
+        assert (
+            RemoteBookingProxy.all_tenants.filter(appointment_id=UUID(APPOINTMENT_ID)).count() == 0
+        )
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 0
+        )
+
+    def test_tentative_then_confirmed_creates_reminders(self, tenant, bot_user_linked):
+        """O8 — a tentative booking is written without reminders; confirming it
+        later schedules the standard T-24h + T-2h pair."""
+        env_created = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(status="tentative"),
+        )
+        handle_booking_created(env_created)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.TENTATIVE
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 0
+        )
+
+        env_confirmed = _envelope(
+            event_id="01J9CONFIRM008",
+            event_name="booking.confirmed",
+            data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+        )
+        handle_booking_confirmed(env_confirmed)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 2
+        )
+
 
 # ─── booking.cancelled ─────────────────────────────────────────────────────
 
