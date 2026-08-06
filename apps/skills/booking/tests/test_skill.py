@@ -1250,6 +1250,52 @@ class TestConfirmBookingFlow:
         assert "pending_action" in result.action_data
         assert result.action_data["pending_action"]["kind"] == PendingBookingAction.Kind.CONFIRM
 
+    def test_second_llm_preview_supersedes_first(
+        self, context: SkillContext, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Two consecutive LLM-path previews → only the latest is executable.
+
+        "запиши к Анне в 15:00" then "а лучше в 17:00": both go through the
+        confirm_booking tool; the first pending must be superseded so the
+        two preview cards can't both be ✅-executed into two real bookings.
+        """
+        from apps.booking.models import PendingBookingAction
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11, "Ольга")]
+
+        def _preview(slot: str) -> SkillResult:
+            tc = ToolCall(
+                id="c1",
+                name="confirm_booking",
+                arguments={
+                    "master_id": 11,
+                    "service_id": 22,
+                    "slot_datetime": slot,
+                },
+            )
+            completions = [
+                _completion(tool_calls=[tc]),
+                _completion(text="Записываю — подтверждаете?"),
+            ]
+            with _patch_provider_complete(completions):
+                with tenant_scope(tenant):
+                    return BookingSkill().handle(context)
+
+        with _patch_yclients(client):
+            first = _preview("2026-05-20T15:00:00")
+            second = _preview("2026-05-20T17:00:00")
+        assert first.action_data is not None
+        assert second.action_data is not None
+        token_a = first.action_data["pending_action"]["token"]
+        token_b = second.action_data["pending_action"]["token"]
+        assert token_a != token_b
+        row_a = PendingBookingAction.all_tenants.get(pk=token_a)
+        row_b = PendingBookingAction.all_tenants.get(pk=token_b)
+        assert row_a.consumed_at is not None
+        assert row_b.consumed_at is None
+
 
 class TestShowMyBookingsFlow:
     def test_returns_text(self, context: SkillContext, tenant: Tenant) -> None:
