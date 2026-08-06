@@ -1019,16 +1019,10 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     """``booking.confirmed`` — appointment moved to ``confirmed`` (B1).
 
     Emitted by Ayla when an appointment is confirmed (typically once
-    payment is captured). Canonical ``data``: ``appointment_id`` +
-    ``payment_id`` (the Ayla emitter currently sends ``booking_id`` —
-    tracked for migration in issue #945). booking.confirmed is a v1
-    contract extension beyond the original 12 events (issue #946).
-
-    Side-effect: idempotently flip ``RemoteBookingProxy.status`` to
-    ``confirmed``. Same canonical shape as the other booking handlers:
-    tenant guard first, then idempotency short-circuit, then an
-    upsert-shaped UPDATE. No reminder change — confirming doesn't move
-    ``start_at``, so the T-24h/T-2h rows from booking.created stand.
+    payment is captured). Idempotently flips the proxy to ``confirmed``
+    and ensures reminders exist. Missing proxy is a retryable failure;
+    a late confirm after cancellation is a no-op because ``cancelled``
+    is a terminal state for the pilot.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -1043,13 +1037,28 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
         )
         return
 
-    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+    proxy = (
+        RemoteBookingProxy.all_tenants.select_for_update()
+        .filter(appointment_id=appointment_id)
+        .first()
+    )
 
-    # N-Adv2: tenant guard FIRST, BEFORE the idempotency short-circuit.
     _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
 
-    # Defence-in-depth idempotency short-circuit.
-    if proxy is not None and proxy.last_synced_event_id == envelope.event_id:
+    if proxy is None:
+        logger.warning(
+            "eventbus.consumer.booking.confirmed.pending_proxy "
+            "appointment_id=%s event_id=%s tenant_id=%s",
+            appointment_id,
+            envelope.event_id,
+            tenant.id,
+        )
+        raise BookingConfirmedPendingProxyError(
+            f"appointment {appointment_id}: no RemoteBookingProxy yet for booking.confirmed "
+            f"(event_id={envelope.event_id})"
+        )
+
+    if proxy.last_synced_event_id == envelope.event_id:
         logger.info(
             "eventbus.consumer.booking.confirmed.replay_skipped appointment_id=%s event_id=%s",
             appointment_id,
@@ -1057,15 +1066,28 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
         )
         return
 
-    RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
-        status=RemoteBookingProxy.Status.CONFIRMED,
-        last_synced_event_id=envelope.event_id,
-    )
+    if proxy.status == RemoteBookingProxy.Status.CANCELLED:
+        logger.info(
+            "eventbus.consumer.booking.confirmed.after_cancelled_noop "
+            "appointment_id=%s event_id=%s",
+            appointment_id,
+            envelope.event_id,
+        )
+        return
 
-    # C7.3: booking.confirmed carrying a payment_id is the pilot's HOLD
-    # signal (no separate payment.authorized event) — stamp the read
-    # model so customer BookingItem can show «зарезервировано». Without
-    # a payment_id the booking is prepay-free: no payment row at all.
+    proxy.status = RemoteBookingProxy.Status.CONFIRMED
+    proxy.last_synced_event_id = envelope.event_id
+    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
+
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    if bot_user is not None:
+        _schedule_reminders(
+            tenant=tenant,
+            bot_user=bot_user,
+            appointment_id=appointment_id,
+            start_at=proxy.start_at,
+        )
+
     if data.get("payment_id"):
         from apps.eventbus.consumers.payment import upsert_payment_mirror
 

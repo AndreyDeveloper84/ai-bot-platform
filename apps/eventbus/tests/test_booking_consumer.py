@@ -439,17 +439,53 @@ class TestBookingConfirmed:
         assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
         assert proxy.last_synced_event_id == env.event_id
 
-    def test_unknown_appointment_no_error(self) -> None:
-        """Confirm for a proxy that doesn't exist locally (out-of-order:
-        confirmed before created). No-op on empty queryset, no raise."""
+    def test_confirmed_without_proxy_raises(self, tenant):
+        from apps.eventbus.consumers.booking import BookingConfirmedPendingProxyError
+
         env = _envelope(
             event_name="booking.confirmed",
-            data={
-                "appointment_id": "deadbeef-0000-0000-0000-000000000000",
-                "payment_id": PAYMENT_ID,
-            },
+            data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+        )
+        with pytest.raises(BookingConfirmedPendingProxyError):
+            handle_booking_confirmed(env)
+
+    def test_confirmed_creates_reminders_for_pending_proxy(self, tenant, bot_user_linked):
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=None,
+            start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
+            end_at=dt.datetime(2026, 5, 22, 16, 0, tzinfo=dt.timezone.utc),
+            status=RemoteBookingProxy.Status.PENDING_PAYMENT,
+        )
+        env = _envelope(event_name="booking.confirmed", data=self._confirmed_data())
+        handle_booking_confirmed(env)
+
+        assert (
+            BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
+            == 2
+        )
+
+    def test_confirmed_after_cancelled_is_no_op(self, tenant, bot_user_linked):
+        proxy = RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=bot_user_linked,
+            start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
+            end_at=dt.datetime(2026, 5, 22, 16, 0, tzinfo=dt.timezone.utc),
+            status=RemoteBookingProxy.Status.CANCELLED,
+            last_synced_event_id="01J9CANCEL0000000000000001",
+        )
+        env = _envelope(
+            event_id="01J9CONFIRMAFTERCANCEL0001",
+            event_name="booking.confirmed",
+            data=self._confirmed_data(),
         )
         handle_booking_confirmed(env)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert proxy.last_synced_event_id == "01J9CANCEL0000000000000001"
 
     def test_emits_internal_booking_confirmed_event(self, tenant: Tenant) -> None:
         self._pending_proxy(tenant)
