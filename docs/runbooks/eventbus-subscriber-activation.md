@@ -185,8 +185,31 @@ EVENT_INGEST_ALLOWED_TENANTS=
 EVENT_INGEST_ALLOWED_EVENTS=
 ```
 
-The ingest returns to fail-closed. Inbound tenant events will 500 and
-dead-letter — which is the intended, safe state, not an outage to page on.
+The ingest returns to fail-closed. Bot-platform is then safe — but this is
+**not a silent rollback**. A denied envelope raises `TenantAuthorizationError`,
+which the dispatcher surfaces as `HANDLER_EXCEPTION` → HTTP 500. Per
+`event-contract.md` §6.3/§6.4 Ayla treats 500 as retryable: 5 attempts with
+backoff, then `dead=true` **and a PagerDuty alert on the `ayla-events`
+rotation**. Rolling back therefore pages the Ayla on-call for every subsequent
+tenant event.
+
+Consequences to plan for:
+
+- **Coordinate rollback with the Ayla on-call.** Silence or expect the
+  `ayla-events` alerts for the duration.
+- **The same applies to any event outside the pilot event set.** The
+  OD-T02-2 set (`booking.created`, `booking.cancelled`,
+  `appointment.rescheduled`) is 3 of the 18 contract event names. If Ayla
+  emits `payment.*`, `review.created`, `service.updated`,
+  `master.schedule.updated`, `booking.confirmed`, `booking.completed` or
+  `booking.no_show` for an allowlisted pilot tenant, each one burns the
+  retry budget and dead-letters. Confirm with the owner that the pilot
+  event set matches what Ayla actually publishes **before** rollout.
+
+`event_not_allowed` / `tenant_not_allowed` are configuration-permanent — a
+retry can never succeed — so §6.3 arguably wants a 4xx here rather than 500.
+Changing the dispatcher's outcome mapping is a cross-repo contract change and
+is deliberately **out of scope for PR-T02-1**; it is a tracked follow-up.
 
 **Public MVP limitation.** The allowlist is a *scope limiter, not a
 relationship proof*. It bounds which tenants and events may be ingested; it

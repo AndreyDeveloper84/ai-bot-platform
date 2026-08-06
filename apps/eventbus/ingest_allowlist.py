@@ -53,7 +53,6 @@ startup failure, per the T-02 preference for production-like environments.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 from typing import Any
 
 
@@ -63,10 +62,21 @@ from typing import Any
 # Ayla tenant table and so no exotic spelling slips past a review.
 _UUID_RE = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 
-# Dotted lower-case event name, ≥2 segments (``booking.created``,
-# ``master.schedule.updated``). No wildcards, no whitespace, no uppercase
-# after normalization.
-_EVENT_NAME_RE = re.compile(r"\A[a-z0-9]+(?:[._][a-z0-9]+)+\Z")
+# Dotted lower-case event name, >=2 dot-separated segments
+# (``booking.created``, ``master.schedule.updated``). Underscores are legal
+# WITHIN a segment (``booking.no_show``) but are NOT a segment separator:
+# ``booking_created`` must not parse as a "dotted event name", or a typo'd
+# underscore would silently deny the real event while the boot log reports
+# the allowlist as active. No wildcards, no whitespace, no uppercase after
+# normalization.
+_EVENT_SEGMENT = r"[a-z0-9]+(?:_[a-z0-9]+)*"
+_EVENT_NAME_RE = re.compile(rf"\A{_EVENT_SEGMENT}(?:\.{_EVENT_SEGMENT})+\Z")
+
+# NOTE: the allowlist has no ``event_version`` dimension — entries match on
+# name alone. When a ``booking.created@v2`` handler is registered it is
+# admitted by an existing v1 pilot configuration with no operator action.
+# Acceptable while the contract is frozen at v1 for the pilot; revisit
+# (``name@vN`` entries) before any consumer ships a second version.
 
 # Spellings that would mean "everything". Rejected outright rather than
 # silently treated as a literal name — an operator typing one of these
@@ -91,11 +101,16 @@ def _split_raw(raw: Any) -> list[str]:
     Accepts the two shapes a setting can legitimately have:
 
     * ``str`` — the raw CSV straight from the environment.
-    * any non-string iterable — an already-normalized ``frozenset`` (the
-      settings module's output) or a list/tuple set by a test.
+    * ``list`` / ``tuple`` / ``set`` / ``frozenset`` — an already-normalized
+      value (the settings module's output) or a container set by a test.
 
-    ``None`` is treated as unset (empty). Anything else — an int, a dict, a
-    bool — is a configuration error, not something to coerce.
+    ``None`` is treated as unset (empty). Anything else is a configuration
+    error, not something to coerce. The container check is deliberately an
+    explicit type list rather than ``isinstance(raw, Iterable)``: a ``dict``
+    is iterable, so the loose check silently accepted ``{uuid: "note"}`` as
+    a one-element allowlist keyed on its keys, and a generator would be
+    consumed by the first read — leaving the startup check and the request
+    path disagreeing about what is configured.
     """
     if raw is None:
         return []
@@ -107,7 +122,7 @@ def _split_raw(raw: Any) -> list[str]:
         raise AllowlistConfigurationError(
             f"allowlist must be a CSV string or an iterable of strings, got {type(raw).__name__}"
         )
-    if isinstance(raw, Iterable):
+    if isinstance(raw, (list, tuple, set, frozenset)):  # noqa: UP038 — explicit tuple
         elements: list[str] = []
         for element in raw:
             if not isinstance(element, str):

@@ -219,6 +219,42 @@ class TestEventAllowlistParsing:
         with pytest.raises(AllowlistConfigurationError):
             parse_event_allowlist(raw)
 
+    def test_underscore_is_legal_within_a_segment(self) -> None:
+        """``booking.no_show`` is a real contract name — must still parse."""
+        assert parse_event_allowlist("booking.no_show") == frozenset({"booking.no_show"})
+
+    def test_underscore_is_not_a_segment_separator(self) -> None:
+        """``booking_created`` must NOT parse as a dotted event name.
+
+        Accepting it would let a typo'd underscore sit in the allowlist
+        looking configured while silently denying the real event — the boot
+        log would report ``allowlist_active`` the whole time.
+        """
+        with pytest.raises(AllowlistConfigurationError):
+            parse_event_allowlist("booking_created")
+
+
+class TestContainerTypeStrictness:
+    """``_split_raw`` accepts explicit containers only, not "any Iterable".
+
+    A ``dict`` is iterable, so a loose check silently accepted
+    ``{uuid: "note"}`` as a one-element allowlist keyed on its keys. A
+    generator is worse: consumed by the first read, so the startup check and
+    the request path would disagree about what is configured.
+    """
+
+    def test_dict_rejected_even_with_valid_uuid_keys(self) -> None:
+        with pytest.raises(AllowlistConfigurationError):
+            parse_tenant_allowlist({TENANT_A: "pilot tenant"})
+
+    def test_generator_rejected(self) -> None:
+        with pytest.raises(AllowlistConfigurationError):
+            parse_tenant_allowlist(t for t in (TENANT_A,))
+
+    @pytest.mark.parametrize("container", [list, tuple, set, frozenset])
+    def test_explicit_containers_accepted(self, container: type) -> None:
+        assert parse_tenant_allowlist(container([TENANT_A])) == frozenset({TENANT_A})
+
 
 class TestResolveRevalidates:
     """``resolve_*`` must re-validate, not trust, whatever settings hold.
@@ -285,6 +321,34 @@ class TestSettingsDefaults:
             f"ingest_allowlist must stay stdlib-only (imported at settings load); "
             f"found: {offenders}"
         )
+
+    def test_parent_packages_stay_import_free(self) -> None:
+        """``apps/__init__.py`` and ``apps/eventbus/__init__.py`` must stay empty.
+
+        Importing ``apps.eventbus.ingest_allowlist`` from settings executes
+        both package ``__init__`` modules first. Guarding only the leaf
+        module is not enough: a future import in either parent touching
+        ``django.conf.settings`` turns every ``manage.py`` invocation into an
+        opaque settings-recursion failure.
+        """
+        import ast
+        from pathlib import Path
+
+        import apps
+        import apps.eventbus
+
+        for package in (apps, apps.eventbus):
+            path = Path(package.__file__)  # type: ignore[arg-type]
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            statements = [
+                node
+                for node in tree.body
+                if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+            ]
+            assert statements == [], (
+                f"{path} must stay empty — it executes during settings load. "
+                f"Found {len(statements)} statement(s)."
+            )
 
 
 # ─── authorization: happy path ─────────────────────────────────────────────
@@ -945,3 +1009,169 @@ class TestStartupChecks:
         assert not [
             r for r in caplog.records if "tenant_verify_fail_open_enabled" in r.getMessage()
         ]
+
+
+# ─── end-to-end through the HTTP view ──────────────────────────────────────
+
+
+INGEST_URL = "/api/v1/internal/events/ingest"
+_E2E_SECRET = "t02-allowlist-e2e-secret"  # pragma: allowlist secret
+
+
+@pytest.mark.django_db
+class TestAllowlistThroughTheHttpView:
+    """Prove the allowlist is actually wired into the request path.
+
+    Every other test in this module calls the helper or the dispatcher
+    directly. That leaves two things unproven: that the allowlist is
+    reached at all from an HTTP request, and — acceptance criterion (8) —
+    that HMAC verification still runs BEFORE it, so a forged signature is
+    401 regardless of how generous the allowlist is.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _wired(self, settings, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
+        settings.EVENT_INGEST_HMAC_SECRET = _E2E_SECRET
+        settings.RATELIMIT_ENABLE = False
+        settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = False
+        settings.EVENT_INGEST_ALLOWED_TENANTS = frozenset({TENANT_A})
+        settings.EVENT_INGEST_ALLOWED_EVENTS = PILOT_EVENTS
+
+        # SQLite test backend deadlocks on the timeout threadpool (A12).
+        from apps.eventbus import views as _views
+        from apps.eventbus.ingest_dispatcher import dispatch_envelope as _direct
+
+        monkeypatch.setattr(_views, "dispatch_with_timeout", _direct)
+
+    def _post(self, body: dict[str, Any], *, sign_with: str = _E2E_SECRET):
+        import hashlib
+        import hmac
+        import json
+        import time
+
+        from django.test import Client
+
+        raw = json.dumps(body).encode()
+        sig = "sha256=" + hmac.new(sign_with.encode(), raw, hashlib.sha256).hexdigest()
+        return Client().post(
+            INGEST_URL,
+            data=raw,
+            content_type="application/json",
+            HTTP_X_AYLA_EVENT_SIGNATURE=sig,
+            HTTP_X_AYLA_EVENT_TIMESTAMP=str(int(time.time() * 1000)),
+        )
+
+    def _payload(self, *, tenant_id: str, event_name: str, event_id: str) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "event_name": event_name,
+            "event_version": 1,
+            "occurred_at": "2026-08-06T12:00:00+00:00",
+            "tenant_id": tenant_id,
+            "user_id": AYLA_USER_ID,
+            "actor": "user",
+            "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "causation_id": None,
+            "data": {
+                "appointment_id": APPOINTMENT_ID,
+                "master_id": "3f7a1b2c-9d8e-4a5b-8c7d-6e5f4a3b2c1d",
+                "service_id": "2e6b9c1d-7a4f-4b3e-9d8c-1a2b3c4d5e6f",
+                "start_at": "2026-08-20T10:00:00+00:00",
+                "end_at": "2026-08-20T11:00:00+00:00",
+                "status": "pending",
+                "price_total": "1800.00",
+                "source": "bot",
+            },
+        }
+
+    def test_allowlisted_tenant_is_ingested_end_to_end(self, tenant_a: Tenant) -> None:
+        from apps.eventbus.consumers.booking import register_booking_handlers
+        from apps.eventbus.ingest_dispatcher import registered_handlers
+
+        if ("booking.created", 1) not in registered_handlers():
+            register_booking_handlers()
+
+        response = self._post(
+            self._payload(tenant_id=TENANT_A, event_name="booking.created", event_id="EV-E2E-OK")
+        )
+        assert response.status_code == 200, response.content
+
+    def test_non_allowlisted_tenant_is_refused_end_to_end(
+        self, tenant_a: Tenant, tenant_b: Tenant
+    ) -> None:
+        from apps.eventbus.consumers.booking import register_booking_handlers
+        from apps.eventbus.ingest_dispatcher import registered_handlers
+        from apps.eventbus.models import IngestDedupe
+
+        if ("booking.created", 1) not in registered_handlers():
+            register_booking_handlers()
+
+        response = self._post(
+            self._payload(tenant_id=TENANT_B, event_name="booking.created", event_id="EV-E2E-DENY")
+        )
+        assert response.status_code != 200
+        assert not IngestDedupe.objects.filter(event_id="EV-E2E-DENY").exists()
+
+    def test_invalid_hmac_is_401_even_for_an_allowlisted_tenant(self, tenant_a: Tenant) -> None:
+        """AC (8) — signature verification precedes allowlist evaluation.
+
+        A generous allowlist must never become a way around the HMAC gate.
+        """
+        response = self._post(
+            self._payload(
+                tenant_id=TENANT_A, event_name="booking.created", event_id="EV-E2E-BADSIG"
+            ),
+            sign_with="wrong-secret",  # pragma: allowlist secret
+        )
+        assert response.status_code == 401
+
+
+# ─── the tenant-null carve-out, made visible ───────────────────────────────
+
+
+@pytest.mark.django_db
+class TestTenantNullCarveOutIsIntentional:
+    """The allowlist gates TENANT-SCOPED events only — pinned, not implied.
+
+    Four contract events carry ``tenant_id=null`` by design and are admitted
+    by the null-tenant rule before the allowlist is consulted. That is
+    pre-existing contract behaviour which OD-T02-1 says to preserve
+    ("envelope без tenant_id — сохранить существующее контрактное
+    поведение"), so it is deliberate, not an oversight.
+
+    It is pinned here so the exemption is VISIBLE: a reader of this suite
+    must not conclude that "allowlist configured" means "nothing else can
+    be ingested". Gating these is a tracked follow-up.
+    """
+
+    @pytest.mark.parametrize(
+        "event_name",
+        [
+            "user.profile.updated",
+            "subscription.activated",
+            "subscription.past_due",
+            "billing.fee_charged",
+        ],
+    )
+    def test_tenant_null_events_bypass_the_allowlist(self, event_name: str) -> None:
+        # A pilot config that lists NEITHER this event nor any tenant.
+        with override_settings(
+            EVENT_INGEST_ALLOWED_TENANTS=frozenset(),
+            EVENT_INGEST_ALLOWED_EVENTS=frozenset({"booking.created"}),
+            EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN=False,
+        ):
+            # Admitted anyway — by the null-tenant contract rule.
+            assert_envelope_tenant_authorized(_envelope(event_name=event_name, tenant_id=None))
+
+    def test_the_same_names_are_still_gated_when_tenant_scoped(self, tenant_a: Tenant) -> None:
+        """The carve-out is about tenant_id=null, not about the name.
+
+        The same event name WITH a tenant_id goes through the allowlist
+        normally — so the exemption cannot be used as a general bypass by
+        simply choosing one of these four names.
+        """
+        with _pilot_settings(), pytest.raises(TenantAuthorizationError) as exc:
+            assert_envelope_tenant_authorized(
+                _envelope(event_name="billing.fee_charged", tenant_id=TENANT_A)
+            )
+        assert "event_not_allowed" in str(exc.value)
