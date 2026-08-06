@@ -436,7 +436,11 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
         )
         return
 
-    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+    proxy = (
+        RemoteBookingProxy.all_tenants.select_for_update()
+        .filter(appointment_id=appointment_id)
+        .first()
+    )
 
     # N-Adv2: tenant guard FIRST, BEFORE the idempotency short-circuit.
     _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
@@ -450,25 +454,18 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
         )
         return
 
-    # N-Adv1 Variant B: out-of-order cancelled-before-created is
-    # DROPPED, not stubbed. Writing a stub would let a spoofer "claim"
-    # an appointment_id under their tenant before the legitimate
-    # ``booking.created`` arrives — the legitimate create would then
-    # hit the cross-tenant guard and dead-letter, which is a denial
-    # of service from B against A. §3.2 says cancelled is idempotent
-    # and may arrive out-of-order; "idempotent" means same final
-    # state on N deliveries, not that a stub must be written. Drop
-    # + Ayla retry on (created → cancelled) sequence converges on
-    # status=CANCELLED naturally.
     if proxy is None:
-        logger.info(
-            "eventbus.consumer.booking.cancelled.out_of_order_dropped "
-            "appointment_id=%s event_id=%s — awaiting Ayla retry "
-            "post-created (cancelled-before-created sequence)",
+        logger.warning(
+            "eventbus.consumer.booking.cancelled.pending_proxy "
+            "appointment_id=%s event_id=%s tenant_id=%s",
             appointment_id,
             envelope.event_id,
+            tenant.id,
         )
-        return
+        raise BookingCancelledPendingProxyError(
+            f"appointment {appointment_id}: no RemoteBookingProxy yet for booking.cancelled "
+            f"(event_id={envelope.event_id})"
+        )
 
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         status=RemoteBookingProxy.Status.CANCELLED,

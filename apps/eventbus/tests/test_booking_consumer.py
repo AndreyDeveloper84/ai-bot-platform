@@ -579,29 +579,48 @@ class TestBookingCancelled:
         assert proxy.status == "cancelled"
         assert proxy.last_synced_event_id == env.event_id
 
-    def test_out_of_order_cancel_dropped_no_proxy_written(self, tenant: Tenant) -> None:
-        """N-Adv1 Variant B: cancel-before-created is DROPPED, not
-        stubbed. Writing a stub would let a spoofer claim
-        appointment_id under their tenant; the legitimate created
-        would then dead-letter. Drop + Ayla retry on
-        (created → cancelled) converges naturally on CANCELLED.
-        """
+    def test_cancelled_without_proxy_raises(self, tenant):
+        from apps.eventbus.consumers.booking import BookingCancelledPendingProxyError
+
         env = _envelope(
             event_name="booking.cancelled",
             data={
                 "appointment_id": APPOINTMENT_ID,
-                "cancelled_by": "system",
-                "reason_code": "payment_hold_expired",
+                "cancelled_by": "user",
+                "reason_code": "user_changed_plans",
                 "cancelled_at": "2026-05-21T16:08:45.119Z",
             },
         )
-        handle_booking_cancelled(env)
+        with pytest.raises(BookingCancelledPendingProxyError):
+            handle_booking_cancelled(env)
 
-        # No proxy was created — the handler returned early on
-        # proxy=None.
-        assert (
-            RemoteBookingProxy.all_tenants.filter(appointment_id=UUID(APPOINTMENT_ID)).count() == 0
+    def test_cancel_before_created_then_create_then_replay_cancels(self, tenant):
+        from apps.eventbus.consumers.booking import BookingCancelledPendingProxyError
+
+        env_cancel = _envelope(
+            event_id="01J9CANCELBEFORECREATE001",
+            event_name="booking.cancelled",
+            data={
+                "appointment_id": APPOINTMENT_ID,
+                "cancelled_by": "user",
+                "reason_code": "user_changed_plans",
+                "cancelled_at": "2026-05-21T16:08:45.119Z",
+            },
         )
+        with pytest.raises(BookingCancelledPendingProxyError):
+            handle_booking_cancelled(env_cancel)
+
+        env_create = _envelope(
+            event_id="01J9CREATEAFTERCANCEL001",
+            event_name="booking.created",
+            data=_booking_created_data(),
+        )
+        handle_booking_created(env_create)
+
+        handle_booking_cancelled(env_cancel)
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert proxy.last_synced_event_id == env_cancel.event_id
 
     def test_subsequent_booking_cancelled_updates_orphan_proxy(self, tenant: Tenant) -> None:
         """Two events for the same appointment, no linked BotUser:
