@@ -12,6 +12,7 @@ class EventBusConfig(AppConfig):
         from apps.eventbus.dispatcher import reset_registry_cache
         from apps.eventbus.ingest_ip import warn_if_proxy_trust_unconfigured
         from apps.eventbus.startup_checks import (
+            check_event_ingest_allowlists,
             warn_if_atomic_requests_true,
             warn_if_event_ingest_hmac_missing,
             warn_if_tenant_verify_fail_open,
@@ -36,6 +37,12 @@ class EventBusConfig(AppConfig):
         # O1/S4 — log a startup WARNING when the ingest HMAC secret is
         # empty (every envelope would be rejected with 401 no_secret).
         warn_if_event_ingest_hmac_missing()
+
+        # T-02 — report the effective pilot ingest scope at boot: empty
+        # (safe fail-closed), half-configured (deny-all that looks
+        # configured), active, or malformed. Never refuses to boot;
+        # malformed values already fail at settings load.
+        check_event_ingest_allowlists()
 
         # #442 — Register booking.* consumer family handlers with the
         # ingest dispatcher. Each consumer module exposes a

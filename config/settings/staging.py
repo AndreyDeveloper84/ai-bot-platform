@@ -26,14 +26,22 @@ DEBUG = False
 # Sprint 4 / D1 — IM-2 timing.
 STRICT_TENANT_SCOPE = "strict"
 
-# Pilot staging — pre-#246 tenant-verify bridge (Round-2 AS8). Without
-# TenantUserRelationship (lands with #246) the ingest would fail closed
-# on every legitimate Ayla delivery (staging round-trip finding №2).
-# staging opts into the documented bridge; production.py stays
-# fail-closed until #246 ships. The boot-time WARNING
-# (startup_checks.warn_if_tenant_verify_fail_open) keeps the exposure
-# window visible in ops.
-EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+# T-02 / OD-T02-1 — the unconditional
+# ``EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True`` that used to live here is
+# REMOVED. It disabled tenant verification for every tenant and every event
+# on staging — an unbounded blast radius for what was only ever needed to
+# unblock a handful of pilot deliveries (Round-2 AS8 / staging round-trip
+# finding №2).
+#
+# Staging now inherits the base default (False = fail-closed) and gets its
+# ingest scope from the environment-driven pilot allowlists
+# ``EVENT_INGEST_ALLOWED_TENANTS`` / ``EVENT_INGEST_ALLOWED_EVENTS``. With
+# both unset, staging is fail-closed — the correct resting state; operators
+# widen it deliberately, per environment, per tenant, per event.
+#
+# Do NOT re-add the flag here. It survives in base.py purely as an
+# emergency escape hatch: defaults False, logs a security warning when on,
+# and the pilot runbook does not recommend it.
 
 # Rate-limit IP resolution (ingest_ip, Round-2 AS2): staging nginx adds
 # exactly ONE trusted hop in front of uvicorn (nginx → bot), so one
