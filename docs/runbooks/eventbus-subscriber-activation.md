@@ -91,6 +91,105 @@ Activate, deactivate, or change which `apps.eventbus` subscribers consume dispat
    SELECT COUNT(*) FROM apps_eventbus_domainevent WHERE dead_lettered_at IS NOT NULL;
    ```
 
+### E. Pilot-scoped tenant + event allowlists for cross-service ingest (T-02)
+
+Applies to **inbound** envelopes from Ayla (`POST /api/v1/internal/events/ingest`),
+not to the in-repo subscriber registry above.
+
+**Why it exists.** `assert_envelope_tenant_authorized()` verifies
+`(user_id, tenant_id)` against the canonical `TenantUserRelationship`
+(ADR-0009 §Hard rule #6). That model lives in Ayla, so bot-platform cannot
+import it, and the helper fails **closed** on every tenant-scoped envelope:
+`TenantAuthorizationError → 500 → Ayla retry → DLQ`. Per owner decision
+**OD-T02-1** the pilot does not implement the full relationship in bot and
+does not use a global fail-open. Instead, two enumerated allowlists bound
+what may be ingested.
+
+**The two settings.**
+
+| Setting | Meaning |
+|---|---|
+| `EVENT_INGEST_ALLOWED_TENANTS` | CSV of canonical hyphenated tenant UUIDs. |
+| `EVENT_INGEST_ALLOWED_EVENTS` | CSV of event names. |
+
+An envelope is admitted only when **all** of the following hold:
+
+1. its `tenant_id` is in `EVENT_INGEST_ALLOWED_TENANTS`;
+2. its `event_name` is in `EVENT_INGEST_ALLOWED_EVENTS`;
+3. the tenant exists and is active in the bot DB;
+4. it already passed HMAC verification and schema validation.
+
+**Empty means DENY ALL.** Both default to empty, and an unset value is never
+read as "no restriction". A half-configured pair (tenants but no events, or
+vice versa) is also deny-all — the boot log flags it as `ERROR`.
+
+**No wildcards.** `*`, `all`, `any`, `booking.*` are rejected by the parser.
+There is no spelling that means "allow everything"; enumerate every value.
+
+**Malformed configuration fails the process.** A bad UUID, an empty CSV
+element, a stray trailing comma or a wildcard raises `ImproperlyConfigured`
+at settings load — the app refuses to boot rather than start with a
+half-parsed allowlist. Nothing about a parse error ever widens access.
+
+**Example configuration** (one pilot tenant, the OD-T02-2 event set):
+
+```bash
+EVENT_INGEST_ALLOWED_TENANTS=9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c
+EVENT_INGEST_ALLOWED_EVENTS=booking.created,booking.cancelled,appointment.rescheduled
+```
+
+Note `booking.rescheduled` is **not** in the pilot set — it is the
+repo-local legacy alias; `appointment.rescheduled` is the canonical
+cross-repo name.
+
+**Boot-time signals** (`apps.eventbus.startup_checks`):
+
+| Log key | Level | Meaning |
+|---|---|---|
+| `allowlist_empty` | WARNING | Both empty → fail-closed. Safe; the correct default. |
+| `allowlist_half_configured` | ERROR | One side empty → deny-all that *looks* configured. |
+| `allowlist_active` | INFO | Pilot scope in effect; lists the event names. |
+| `allowlist_malformed` | ERROR | Unparseable → deny-all. |
+| `allowlist_unknown_event` | ERROR | Name absent from the contract vocabulary — probably a typo. |
+| `tenant_verify_fail_open_enabled` | WARNING `security=critical` | Global fail-open is ON. See below. |
+
+**Per-event audit** (`apps.eventbus.ingest_tenancy`): `tenant_verify_accepted`
+(INFO, `verification_mode=pilot_allowlist`) and `tenant_verify_rejected`
+(WARNING) with `reason` ∈ {`tenant_not_allowed`, `event_not_allowed`,
+`tenant_not_found`, `tenant_lookup_error`, `relationship_unavailable`,
+`malformed_configuration`}. Identifiers only — payloads are never logged.
+
+**Do NOT use `EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN`.** It disables tenant
+verification for *every* tenant and *every* event. It defaults to `False`,
+staging no longer sets it, and it exists solely as an emergency escape
+hatch. If you ever turn it on, the boot log and every admitted event carry
+`security=critical`. This runbook does not recommend it under any
+circumstance — widen the allowlists instead.
+
+**Rollback.** Clear both variables and restart:
+
+```bash
+EVENT_INGEST_ALLOWED_TENANTS=
+EVENT_INGEST_ALLOWED_EVENTS=
+```
+
+The ingest returns to fail-closed. Inbound tenant events will 500 and
+dead-letter — which is the intended, safe state, not an outage to page on.
+
+**Public MVP limitation.** The allowlist is a *scope limiter, not a
+relationship proof*. It bounds which tenants and events may be ingested; it
+does **not** establish that `envelope.user_id` genuinely belongs to
+`envelope.tenant_id`. Residual risks accepted for the Controlled Pilot:
+
+- the ingest HMAC secret is installation-wide, so any holder can sign for
+  any allowlisted tenant — the allowlist caps the blast radius, it does not
+  eliminate it;
+- an allowlisted tenant can assert events for arbitrary `user_id` values.
+
+Public MVP MUST replace this with the full `TenantUserRelationship`
+contract. Until then, keep the tenant allowlist to the handful of tenants
+actually onboarded.
+
 ## Verification
 
 - DomainEvent row count and AuditLog row count grow in lockstep after activation (with ~60s lag for the Celery beat tick).
@@ -121,3 +220,4 @@ Used after every non-trivial run.
 ## Changelog
 
 - 2026-05-19 — Phase 2.2 PR-G — initial draft. AuditSubscriber default-active in production via settings/production.py override.
+- 2026-08-06 — T-02 PR-T02-1 — added §E: pilot-scoped `EVENT_INGEST_ALLOWED_TENANTS` / `EVENT_INGEST_ALLOWED_EVENTS` allowlists for cross-service ingest. Staging's unconditional `EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True` removed.

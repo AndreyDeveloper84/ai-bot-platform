@@ -14,6 +14,21 @@ import os
 from pathlib import Path
 
 from celery.schedules import crontab  # type: ignore[import-untyped]
+from django.core.exceptions import ImproperlyConfigured
+
+# T-02 — strict parsers for the pilot ingest allowlists (see the
+# EVENT_INGEST_ALLOWED_* block below). Imported under private aliases so
+# they don't leak into the settings namespace as pseudo-settings; the
+# module is stdlib-only, so importing it here is settings-load-safe.
+from apps.eventbus.ingest_allowlist import (
+    AllowlistConfigurationError as _IngestAllowlistConfigurationError,
+)
+from apps.eventbus.ingest_allowlist import (
+    parse_event_allowlist as _parse_ingest_event_allowlist,
+)
+from apps.eventbus.ingest_allowlist import (
+    parse_tenant_allowlist as _parse_ingest_tenant_allowlist,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -1242,6 +1257,42 @@ EVENT_INGEST_HMAC_SECRET = os.environ.get("EVENT_INGEST_HMAC_SECRET", "")
 EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = (
     os.environ.get("EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN", "false").lower() == "true"
 )
+
+# T-02 / OD-T02-1 — pilot-scoped ingest allowlists.
+#
+# ``TenantUserRelationship`` (the canonical ADR-0009 §Hard-rule-#6 check)
+# lives in Ayla, not here, so ``assert_envelope_tenant_authorized`` fails
+# CLOSED on every tenant-scoped envelope and the Wave-1 pilot cannot ingest
+# anything. The old workaround was the global FAIL_OPEN flag above —
+# unbounded blast radius, and staging was silently running with it. The new
+# answer is these two enumerated allowlists: an envelope passes the pilot
+# branch only when its tenant AND its event name are both explicitly listed
+# AND the tenant exists in the bot DB.
+#
+# BOTH default to empty = DENY ALL. An empty (or unset) value must never be
+# read as "no restriction". Parsing is strict — malformed input raises
+# ImproperlyConfigured at import time rather than silently widening access;
+# see apps/eventbus/ingest_allowlist.py for the full contract.
+#
+# Controlled Pilot ONLY. This bounds *scope*; it does not prove the
+# user↔tenant relationship. Public MVP MUST replace it with the real
+# relationship contract. Rollback = clear both vars (→ fail-closed).
+#
+# The import is settings-load-safe: ingest_allowlist pulls in nothing from
+# Django or the app registry (stdlib ``re`` only).
+try:
+    EVENT_INGEST_ALLOWED_TENANTS = _parse_ingest_tenant_allowlist(
+        os.environ.get("EVENT_INGEST_ALLOWED_TENANTS", "")
+    )
+    EVENT_INGEST_ALLOWED_EVENTS = _parse_ingest_event_allowlist(
+        os.environ.get("EVENT_INGEST_ALLOWED_EVENTS", "")
+    )
+except _IngestAllowlistConfigurationError as exc:
+    # Fail-safe = refuse to boot. A process that starts with a half-parsed
+    # allowlist is a process whose operator believes a tenant is onboarded
+    # when it is not (or vice versa). Startup failure is the T-02-preferred
+    # behaviour for production-like environments.
+    raise ImproperlyConfigured(f"Invalid event-ingest allowlist configuration: {exc}") from exc
 
 # Ingest rate-limit IP resolution (apps/eventbus/ingest_ip.py, Round-2 AS2):
 # how many leading XFF hops to discard before taking the client IP. 0 = trust

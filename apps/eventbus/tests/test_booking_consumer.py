@@ -110,18 +110,50 @@ def _booking_created_data(
 
 
 @pytest.fixture(autouse=True)
-def _enable_tenant_verify_fail_open(settings) -> None:
-    """Round-3 NEW-5 bridge — pre-#246 transition mode."""
-    settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
+def _pilot_allowlist(settings) -> None:
+    """T-02 / OD-T02-1 — authorize this suite via the pilot allowlist.
+
+    This used to set ``EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True``, i.e.
+    it proved the handlers worked only with tenant verification switched
+    off entirely. The suite now runs the same path production will: the
+    tenant and every event name under test are explicitly allowlisted, and
+    the ``tenant`` fixture provides the DB row the check requires.
+    """
+    settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = False
+    settings.EVENT_INGEST_ALLOWED_TENANTS = frozenset({TENANT_ID})
+    settings.EVENT_INGEST_ALLOWED_EVENTS = frozenset(
+        {
+            "booking.created",
+            "booking.confirmed",
+            "booking.cancelled",
+            "booking.completed",
+            "booking.no_show",
+            "booking.rescheduled",
+            "appointment.rescheduled",
+        }
+    )
+
+
+@pytest.fixture(autouse=True)
+def _pilot_tenant_row(db, _pilot_allowlist) -> None:
+    """The allowlisted tenant must exist for authorization to pass.
+
+    Autouse + ``get_or_create`` so tests that never touch the ``tenant``
+    fixture still satisfy the existence check without duplicating it.
+    """
+    Tenant.objects.get_or_create(
+        id=TENANT_ID, defaults={"slug": "t-booking", "name": "Booking test tenant"}
+    )
 
 
 @pytest.fixture
 def tenant() -> Tenant:
-    return Tenant.objects.create(
+    """The suite's tenant row — created by ``_pilot_tenant_row`` autouse."""
+    obj, _ = Tenant.objects.get_or_create(
         id=TENANT_ID,
-        slug="t-booking",
-        name="Booking test tenant",
+        defaults={"slug": "t-booking", "name": "Booking test tenant"},
     )
+    return obj
 
 
 @pytest.fixture
@@ -203,10 +235,36 @@ class TestBookingCreated:
         assert props["appointment_id"] == APPOINTMENT_ID
         assert props["status"] == "confirmed"
 
-    def test_unknown_tenant_logs_and_returns_without_error(self) -> None:
+    def test_unknown_tenant_rejected_by_pilot_allowlist(self) -> None:
+        """T-02 — an unknown tenant never reaches the handler at all.
+
+        Under the pilot allowlist the envelope is refused at authorization
+        (``tenant_not_allowed``), so the handler-level unknown-tenant path
+        below is unreachable in a pilot-configured deploy. Pinned here
+        because it is the outer half of the same guarantee.
+        """
+        from apps.eventbus.ingest_tenancy import TenantAuthorizationError
+
+        env = _envelope(
+            event_name="booking.created",
+            data=_booking_created_data(),
+            tenant_id="00000000-0000-0000-0000-000000000000",
+        )
+        with pytest.raises(TenantAuthorizationError):
+            handle_booking_created(env)
+        assert (
+            RemoteBookingProxy.all_tenants.filter(appointment_id=UUID(APPOINTMENT_ID)).count() == 0
+        )
+
+    def test_unknown_tenant_logs_and_returns_without_error(self, settings) -> None:  # noqa: ANN001
         """No tenant row exists for the envelope's tenant_id — handler
         logs + returns. Does not raise, does not create orphan rows.
+
+        This is defence-in-depth BELOW authorization, so the test must get
+        past authorization to reach it. The global escape hatch is used
+        deliberately and only here — it is not this suite's happy path.
         """
+        settings.EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True
         env = _envelope(
             event_name="booking.created",
             data=_booking_created_data(),
