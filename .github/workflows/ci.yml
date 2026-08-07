@@ -158,6 +158,15 @@ jobs:
       - name: Ayla client contract (route-table)
         run: uv run pytest apps/integrations/ayla/tests/test_contract_route_table.py -v
 
+      # T-02 / Wave 1 eventbus correctness gate. PR-T02-2 changed booking
+      # lifecycle semantics (status normalization, reminder eligibility,
+      # missing-proxy fail-loud). These tests were not exercised in CI and a
+      # regression (strict normalizer rejecting `pending`) reached `dev`.
+      # Keeping this gate narrow (eventbus only) prevents similar silent
+      # regressions without ballooning the job duration.
+      - name: eventbus booking lifecycle tests
+        run: uv run pytest apps/eventbus/tests/ -q
+
       # mypy is blocking. `strict=False` keeps the bar reasonable while
       # apps/ are mostly empty AppConfigs; tighten to strict per-package
       # as real code lands. New untyped imports must add stubs or
