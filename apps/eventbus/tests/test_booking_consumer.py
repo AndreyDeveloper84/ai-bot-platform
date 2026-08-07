@@ -488,8 +488,12 @@ class TestBookingConfirmed:
             visit_at=proxy.start_at,
             kind=BookingReminder.Kind.DAY_BEFORE,
             status=BookingReminder.Status.SENT,
-            scheduled_at=proxy.start_at - dt.timedelta(hours=24),
+            # Intentionally drift from the canonical T-24h offset so the
+            # test also proves ``scheduled_at`` is not rewritten by a late
+            # ``booking.confirmed``.
+            scheduled_at=proxy.start_at - dt.timedelta(hours=25),
         )
+        original_scheduled_at = reminder.scheduled_at
 
         env = _envelope(
             event_id="01J9CONFIRMREPLAY00000000001",
@@ -500,6 +504,7 @@ class TestBookingConfirmed:
 
         reminder.refresh_from_db()
         assert reminder.status == BookingReminder.Status.SENT
+        assert reminder.scheduled_at == original_scheduled_at
 
     def test_confirmed_after_cancelled_is_no_op(self, tenant, bot_user_linked):
         proxy = RemoteBookingProxy.all_tenants.create(
