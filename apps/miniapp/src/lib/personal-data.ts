@@ -51,9 +51,25 @@ export interface PersonalDataExportFile {
  * them to human copy, never render raw.
  */
 export class PersonalDataPartialDeleteError extends Error {
-  constructor(readonly failedSteps: string[]) {
+  constructor(
+    readonly failedSteps: string[],
+    /** step slug → reason slug, e.g. `{ayla_delete: "not_linked"}`. */
+    readonly failedDetails: Record<string, string> = {},
+  ) {
     super("personal-data delete finished partially");
     this.name = "PersonalDataPartialDeleteError";
+  }
+
+  /**
+   * True when every failure is structural (no Ayla linkage to address), so
+   * retrying is guaranteed to fail again. The sheet must not offer a retry
+   * in that case — the local erasure already happened.
+   */
+  get isUnretryable(): boolean {
+    return (
+      this.failedSteps.length > 0 &&
+      this.failedSteps.every((s) => this.failedDetails[s] === "not_linked")
+    );
   }
 }
 
@@ -126,9 +142,13 @@ export async function deletePersonalData(
       const body = (await res.json()) as {
         status?: string;
         failed_steps?: string[];
+        failed_details?: Record<string, string>;
       };
       if (body.status === "partial" && Array.isArray(body.failed_steps)) {
-        throw new PersonalDataPartialDeleteError(body.failed_steps);
+        throw new PersonalDataPartialDeleteError(
+          body.failed_steps,
+          body.failed_details ?? {},
+        );
       }
     } catch (err) {
       if (err instanceof PersonalDataPartialDeleteError) throw err;

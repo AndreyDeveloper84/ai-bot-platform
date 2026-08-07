@@ -533,7 +533,8 @@ def withdraw_personal_data_for_bot_users(bot_users, *, source: str) -> int:
                 if withdraw(bu, consent_type=consent_type, source=source) is not None:
                     withdrawn += 1
     logger.info(
-        "consent.withdraw_personal_data bot_users=%d withdrawn=%d source=%s",
+        "consent.withdraw_personal_data bot_user_ids=%s count=%d withdrawn=%d source=%s",
+        [str(bu.id) for bu in subjects],  # ids, never values
         len(subjects),
         withdrawn,
         source,

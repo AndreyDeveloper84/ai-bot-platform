@@ -30,16 +30,11 @@ sheet, so the chat trigger now routes there and states plainly that
 nothing was deleted. See ``apps/identity/services/privacy.py`` for the
 cascade the Mini App runs.
 
-.. warning::
-
-   The Mini App's confirmation for the C5 flow is **client-side only** —
-   ``DELETE /api/v1/customer/me/personal-data/`` performs no server-side
-   confirmation check, unlike the legacy ``POST /me/delete``, which
-   validates ``DELETE_CONFIRMATION_TOKEN`` in
-   ``apps.identity.services.profile``. Gating the chat closes the
-   unconfirmed *chat* path; it does not by itself make the destination
-   server-confirmed. Raised as a pre-pilot owner decision (it changes a
-   frozen contract endpoint + its client), tracked on DRF-956.
+The destination is server-confirmed: ``DELETE /me/personal-data/`` requires
+``DELETE_CONFIRMATION_TOKEN`` (``apps.identity.services.profile``) in the
+request body, the same primitive the legacy ``POST /me/delete`` uses, and
+the Mini App sheet makes the customer type it. So the redirect points at a
+door that checks intent, not merely a screen that asks politely.
 
 ### Why this skill ships first
 

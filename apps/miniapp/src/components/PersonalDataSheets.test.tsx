@@ -202,8 +202,16 @@ describe("PersonalDataDeleteSheet", () => {
           resolveDelete = resolve;
         }),
     );
-    await confirmDelete(user);
-    await user.click(screen.getByRole("button", { name: "Удалить данные" }));
+    // Hold the element reference from BEFORE the first tap: the confirm
+    // view unmounts on click, so re-querying by name would miss it and the
+    // repeat-tap invariant would stop being tested at all.
+    await user.type(
+      screen.getByLabelText(/Чтобы подтвердить/),
+      DELETE_CONFIRMATION_TOKEN,
+    );
+    const primary = screen.getByRole("button", { name: "Удалить данные" });
+    await user.click(primary);
+    await user.click(primary);
     expect(mockedDelete).toHaveBeenCalledTimes(1);
     resolveDelete!({ status: "deleted" });
     expect(await screen.findByText(/Данные удалены/)).toBeInTheDocument();
@@ -227,6 +235,39 @@ describe("PersonalDataDeleteSheet", () => {
     mockedDelete.mockResolvedValueOnce({ status: "deleted" });
     await user.click(screen.getByRole("button", { name: "Попробовать ещё раз" }));
     expect(await screen.findByText(/Данные удалены/)).toBeInTheDocument();
+  });
+
+  it("offers no retry when the failure is structural (not_linked)", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    mockedDelete.mockRejectedValueOnce(
+      new PersonalDataPartialDeleteError(["ayla_delete"], {
+        ayla_delete: "not_linked",
+      }),
+    );
+    await confirmDelete(user);
+
+    // Says plainly what DID happen locally...
+    expect(await screen.findByText(/я всё удалила/)).toBeInTheDocument();
+    // ...and does not invite a retry that can never succeed.
+    expect(
+      screen.queryByRole("button", { name: "Попробовать ещё раз" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Написать в поддержку" })).toBeInTheDocument();
+    expect(screen.queryByText(/ayla_delete/)).not.toBeInTheDocument();
+  });
+
+  it("still offers a retry when the failure is transient", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    mockedDelete.mockRejectedValueOnce(
+      new PersonalDataPartialDeleteError(["ayla_delete"], {}),
+    );
+    await confirmDelete(user);
+    expect(await screen.findByText(/Не всё удалено/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Попробовать ещё раз" }),
+    ).toBeInTheDocument();
   });
 
   it("shows a generic honest error on unexpected failures", async () => {

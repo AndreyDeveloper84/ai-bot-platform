@@ -260,7 +260,16 @@ export function PersonalDataExportSheet({ open, triggerRef, onClose }: SheetProp
 // C5.2 — Delete
 // ---------------------------------------------------------------------------
 
-type DeleteView = "confirm" | "busy" | "done" | "partial" | "error";
+type DeleteView =
+  | "confirm"
+  | "busy"
+  | "done"
+  | "partial"
+  // Structural failure (no Ayla linkage): local erasure succeeded, the
+  // remote leg is impossible, so we say so instead of offering a retry
+  // that can never work.
+  | "unretryable"
+  | "error";
 
 /** Backend cascade slugs → human copy (raw slugs never render). */
 const FAILED_STEP_LABELS: Record<string, string> = {
@@ -302,7 +311,7 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
     } catch (err) {
       if (err instanceof PersonalDataPartialDeleteError) {
         setFailedSteps(err.failedSteps);
-        setView("partial");
+        setView(err.isUnretryable ? "unretryable" : "partial");
       } else {
         setView("error");
       }
@@ -396,6 +405,29 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
             >
               Закрыть
             </button>
+          </div>
+        </>
+      )}
+      {view === "unretryable" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Здесь, в боте, я всё удалила: что помню о тебе, твои настройки и
+            согласия.
+          </p>
+          <p className="profile-support-sheet__body">
+            А вот {humanizeFailedSteps(failedSteps)} автоматически не вышло —
+            твой профиль не связан с основной системой. Напиши в поддержку,
+            и мы удалим там вручную. Повторная попытка тут не поможет.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+            <SupportLink />
           </div>
         </>
       )}

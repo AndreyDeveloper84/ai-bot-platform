@@ -5196,9 +5196,9 @@ a {
   padding: 0 var(--s-3);
   font-size: var(--font-size-200);
   color: var(--c-text-primary);
-  background: var(--c-surface-primary);
-  border: 1px solid var(--c-border-strong, var(--c-border));
-  border-radius: var(--radius-2);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
 }
 .profile-support-sheet__actions {
   display: flex;

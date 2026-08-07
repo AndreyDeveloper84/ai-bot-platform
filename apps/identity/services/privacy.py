@@ -9,7 +9,8 @@ Implements the bot-side half of ``PILOT_CONTRACTS_2026-08-15`` §6:
 * **Delete** — the cascade: Ayla personal-data delete (C5.2 upstream),
   bot ``MemoryEntry`` erasure (immediate green soft-delete +
   ``forget_all`` UPC tombstone), consent withdraw cascade
-  (:func:`apps.consent.services.withdraw_personal_data`).
+  (:func:`apps.consent.services.withdraw_personal_data_for_bot_users` —
+  keyed on local identity, see below), and bot-side profile PII erasure.
 
 ### Contract obligations honoured
 
@@ -116,6 +117,33 @@ def _resolve_ayla_user_id(bot_user: BotUser) -> uuid.UUID | None:
     if not raw:
         return None
     return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+
+
+def _resolve_person_ayla_user_id(bot_user: BotUser) -> uuid.UUID | None:
+    """The person's canonical Ayla id, looked up across *all* their shells.
+
+    Reading it off the requesting row alone is wrong: the only writer,
+    :func:`~apps.identity.services.resolver.resolve_or_create_global_bot_user`,
+    stamps it on the ``global_bot`` sentinel shell, while the Mini App
+    request resolves the ``MAX_BOT_TENANT_SLUG`` shell. So a linked person
+    looks unlinked from the Mini App side — and memory, which is keyed on
+    this id, would be declared "no state" while it is very much alive.
+    """
+    own = _resolve_ayla_user_id(bot_user)
+    if own is not None:
+        return own
+    sibling = (
+        BotUser.all_tenants.filter(
+            channel=bot_user.channel,
+            channel_user_id=bot_user.channel_user_id,
+            ayla_user_id__isnull=False,
+        )
+        .values_list("ayla_user_id", flat=True)
+        .first()
+    )
+    if sibling is None:
+        return None
+    return sibling if isinstance(sibling, uuid.UUID) else uuid.UUID(str(sibling))
 
 
 def _bot_user_ids_for(ayla_user_id: uuid.UUID) -> list[uuid.UUID]:
@@ -296,7 +324,10 @@ def delete_personal_data(
 ) -> DeleteCascadeResult:
     """Run the C5 delete cascade for the person. Every step is
     idempotent; per-step outcomes are reported, never hidden."""
-    ayla_user_id = _resolve_ayla_user_id(bot_user)
+    # Person-level, not row-level — see _resolve_person_ayla_user_id. A
+    # row-level read makes a linked person look unlinked from the Mini App
+    # shell, which would report their live memory as "no state".
+    ayla_user_id = _resolve_person_ayla_user_id(bot_user)
     steps: list[DeleteStep] = []
 
     # Step 1 — Ayla personal-data delete (upstream, C5.2).
@@ -349,7 +380,9 @@ def delete_personal_data(
     # (ruling §5). Subject = the same shell set step 4 erases.
     try:
         withdraw_personal_data_for_bot_users(
-            BotUser.all_tenants.filter(id__in=_person_shell_ids(bot_user, ayla_user_id)),
+            BotUser.all_tenants.filter(
+                id__in=_person_shell_ids(bot_user, ayla_user_id)
+            ).select_related("tenant"),
             source="privacy_delete",
         )
         steps.append(DeleteStep("consent_withdraw", True))

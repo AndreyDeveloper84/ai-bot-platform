@@ -1681,8 +1681,16 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
     result = delete_personal_data(bot_user)
     if result.all_ok:
         return JsonResponse({"status": "deleted"}, status=200)
+    # ``failed_details`` distinguishes a transient failure (retry helps) from
+    # a structural one like ``not_linked`` (retry can never help). Without it
+    # the sheet invites an infinite "попробуй ещё раз" loop. Slugs only —
+    # never values.
     return JsonResponse(
-        {"status": "partial", "failed_steps": result.failed_steps},
+        {
+            "status": "partial",
+            "failed_steps": result.failed_steps,
+            "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
+        },
         status=502,
     )
 

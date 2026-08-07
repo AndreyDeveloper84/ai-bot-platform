@@ -103,7 +103,8 @@ def _delete_request(
     user_id: str = "12345",
     confirmation: str | None = DELETE_CONFIRMATION_TOKEN,
 ):
-    """DELETE the C5 endpoint. ``confirmation=None`` omits the body entirely."""
+    """DELETE the C5 endpoint. ``confirmation=None`` sends an empty JSON object
+    (for a request with no body at all, call ``client.delete`` directly)."""
     body = {} if confirmation is None else {"confirmation": confirmation}
     return client.delete(
         "/api/v1/customer/me/personal-data/",
@@ -755,11 +756,61 @@ class TestServerSideDeleteConfirmation:
         assert bot_user.display_name == ""
         assert bot_user.client_name == ""
 
-    def test_token_matches_the_sibling_endpoint_primitive(self) -> None:
-        """Ruling §2 — reuse the existing primitive, don't invent a second."""
-        from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN as sibling
+    @pytest.mark.parametrize("body", ["[]", "null", '"УДАЛИТЬ"', "5", "true"])
+    def test_non_object_body_rejected_without_mutation(
+        self, client: DjangoClient, bot_user, body
+    ) -> None:
+        _with_pii(bot_user)
 
-        assert DELETE_CONFIRMATION_TOKEN == sibling == "УДАЛИТЬ"
+        resp = client.delete(
+            "/api/v1/customer/me/personal-data/",
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+
+        assert resp.status_code == 400
+        bot_user.refresh_from_db()
+        assert bot_user.phone == _PII["phone"]
+
+    @pytest.mark.parametrize("value", [5, True, ["УДАЛИТЬ"], {"v": "УДАЛИТЬ"}, None])
+    def test_non_string_confirmation_rejected(self, client: DjangoClient, bot_user, value) -> None:
+        _with_pii(bot_user)
+
+        resp = client.delete(
+            "/api/v1/customer/me/personal-data/",
+            data=json.dumps({"confirmation": value}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "confirmation_mismatch"
+        bot_user.refresh_from_db()
+        assert bot_user.phone == _PII["phone"]
+
+    def test_token_is_the_sibling_primitive_not_a_second_one(self) -> None:
+        """Ruling §2 — reuse the existing primitive, don't invent a second.
+
+        Compared against the literal, not against a re-import of the same
+        symbol: a view that grew its own ``_C5_TOKEN = "УДАЛИТЬ"`` would
+        satisfy an identity check while quietly forking the primitive.
+        """
+        import inspect
+
+        from apps.miniapp_api import views
+
+        assert DELETE_CONFIRMATION_TOKEN == "УДАЛИТЬ"
+        source = inspect.getsource(views.personal_data_delete)
+        assert "DELETE_CONFIRMATION_TOKEN" in source
+        assert "УДАЛИТЬ" not in source  # no hardcoded fork of the token
+
+    def test_frontend_constant_matches_backend_token(self) -> None:
+        """The Mini App hardcodes the token; drift would 400 every request."""
+        from pathlib import Path
+
+        ts = Path("apps/miniapp/src/lib/personal-data.ts").read_text(encoding="utf-8")
+        assert f'DELETE_CONFIRMATION_TOKEN = "{DELETE_CONFIRMATION_TOKEN}"' in ts
 
 
 class TestResultTruthfulness:
@@ -793,3 +844,114 @@ class TestResultTruthfulness:
         bu.refresh_from_db()
         assert bu.phone == ""
         assert not ConsentRecord.all_tenants.filter(bot_user=bu, withdrawn_at__isnull=True).exists()
+
+
+class TestPersonLevelAylaResolution:
+    """Round-3 P1-1 — the subject is the person, not the requesting row.
+
+    Only `resolve_or_create_global_bot_user` ever stamps `ayla_user_id`, and
+    it stamps the `global_bot` sentinel shell — while the Mini App request
+    resolves the `MAX_BOT_TENANT_SLUG` shell. Reading the id off the
+    requesting row makes a linked person look unlinked, which would declare
+    their live memory "no state" and never fire the forget_all tombstone.
+    """
+
+    def _sibling_pair(self, tenant, ayla_user_id):
+        """(miniapp shell: unlinked, sentinel shell: linked) — same person."""
+        sentinel = Tenant.objects.create(slug="global-bot-sib", name="Global")
+        linked = BotUser.all_tenants.create(
+            tenant=sentinel,
+            channel="max",
+            channel_user_id="12345",
+            ayla_user_id=ayla_user_id,
+        )
+        requesting = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="12345",  # same channel account
+            ayla_user_id=None,  # the Mini App shell is never stamped
+        )
+        return requesting, linked
+
+    def test_memory_is_erased_via_sibling_shell(self, tenant, ayla_user_id) -> None:
+        requesting, linked = self._sibling_pair(tenant, ayla_user_id)
+        _seed_memory(linked, ayla_user_id)
+        assert MemoryEntry.objects.filter(
+            user_id=ayla_user_id, soft_deleted_at__isnull=True
+        ).exists()
+
+        result = delete_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        # The live memory really goes — not reported as "no_state".
+        memory_step = next(s for s in result.steps if s.step == "memory_delete")
+        assert memory_step.ok
+        assert memory_step.detail != "no_state"
+        assert not MemoryEntry.objects.filter(
+            user_id=ayla_user_id, soft_deleted_at__isnull=True
+        ).exists()
+
+    def test_upstream_is_addressed_via_sibling_shell(self, tenant, ayla_user_id) -> None:
+        requesting, _ = self._sibling_pair(tenant, ayla_user_id)
+        client = _StubPCClient()
+
+        result = delete_personal_data(requesting, client=client)  # type: ignore[arg-type]
+
+        # Ayla was reachable after all — addressed with the person's id.
+        assert client.calls == [("delete", str(ayla_user_id))]
+        assert result.all_ok
+
+    def test_still_honest_when_no_shell_is_linked(self, tenant) -> None:
+        BotUser.all_tenants.create(
+            tenant=Tenant.objects.create(slug="global-bot-sib2", name="G2"),
+            channel="max",
+            channel_user_id="12345",
+            ayla_user_id=None,
+        )
+        requesting = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="12345", ayla_user_id=None
+        )
+
+        result = delete_personal_data(requesting)
+
+        assert not result.all_ok
+        assert result.failed_steps == ["ayla_delete"]
+
+
+class TestUnretryablePartialShape:
+    """Round-3 P2-1 — a structural failure must not read as 'retry me'."""
+
+    def test_502_body_carries_the_reason_slug(
+        self, client: DjangoClient, tenant, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "apps.identity.services.privacy.PersonalContextHttpClient",
+            lambda: _StubPCClient(),
+        )
+        _with_pii(
+            BotUser.all_tenants.create(
+                tenant=tenant, channel="max", channel_user_id="12345", ayla_user_id=None
+            )
+        )
+
+        resp = _delete_request(client)
+
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["failed_steps"] == ["ayla_delete"]
+        # Without this the sheet offers an infinite, hopeless retry.
+        assert body["failed_details"] == {"ayla_delete": "not_linked"}
+
+    def test_transient_failure_carries_no_structural_slug(
+        self, client: DjangoClient, bot_user, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "apps.identity.services.privacy.PersonalContextHttpClient",
+            lambda: _StubPCClient(delete_exc=PersonalContextTransportError("http_500")),
+        )
+
+        resp = _delete_request(client)
+
+        body = resp.json()
+        assert body["failed_steps"] == ["ayla_delete"]
+        # A 5xx IS worth retrying — it must not be tagged not_linked.
+        assert body.get("failed_details", {}).get("ayla_delete") != "not_linked"
