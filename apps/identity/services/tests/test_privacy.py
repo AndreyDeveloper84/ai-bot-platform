@@ -30,6 +30,7 @@ from apps.identity.services.privacy import (
     delete_personal_data,
     export_personal_data,
 )
+from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 from apps.integrations.ayla.personal_context_client import (
     PersonalContextNotFoundError,
     PersonalContextTransportError,
@@ -93,6 +94,22 @@ def _grant(bu: BotUser, ctype: str) -> ConsentRecord:
         consent_type=ctype,
         granted=True,
         source="test",
+    )
+
+
+def _delete_request(
+    client: DjangoClient,
+    *,
+    user_id: str = "12345",
+    confirmation: str | None = DELETE_CONFIRMATION_TOKEN,
+):
+    """DELETE the C5 endpoint. ``confirmation=None`` omits the body entirely."""
+    body = {} if confirmation is None else {"confirmation": confirmation}
+    return client.delete(
+        "/api/v1/customer/me/personal-data/",
+        data=json.dumps(body),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=_init_data_header(user_id),
     )
 
 
@@ -279,10 +296,7 @@ class TestViews:
             lambda: _StubPCClient(),
         )
         for _ in range(2):
-            resp = client.delete(
-                "/api/v1/customer/me/personal-data/",
-                HTTP_AUTHORIZATION=_init_data_header("12345"),
-            )
+            resp = _delete_request(client)
             assert resp.status_code == 200
             assert resp.json()["status"] == "deleted"
 
@@ -291,10 +305,7 @@ class TestViews:
             "apps.identity.services.privacy.PersonalContextHttpClient",
             lambda: _StubPCClient(delete_exc=PersonalContextTransportError("http_500")),
         )
-        resp = client.delete(
-            "/api/v1/customer/me/personal-data/",
-            HTTP_AUTHORIZATION=_init_data_header("12345"),
-        )
+        resp = _delete_request(client)
         assert resp.status_code == 502
         assert resp.json()["failed_steps"] == ["ayla_delete"]
 
@@ -512,38 +523,52 @@ class TestProfilePiiErase:
         assert stranger.display_name == _PII["display_name"]
         assert stranger.client_name == _PII["client_name"]
 
-    def test_unlinked_user_still_erased(self, tenant) -> None:
-        """No Ayla link ⇒ the other legs no-op, but the phone is still ours.
+    def test_unlinked_user_local_data_erased_and_result_is_truthful(self, tenant) -> None:
+        """NULL ayla_user_id: local data really goes, and we don't claim success.
 
-        NOTE the asymmetry this pins: steps 1-3 report ``not_linked``
-        success without doing anything, because they are keyed on
-        ``ayla_user_id``. That is pre-existing C5 behaviour and is a known
-        pre-pilot gap (a NULL-linked user CAN hold ConsentRecord rows, which
-        `withdraw_personal_data` then never reaches) — it is recorded here so
-        the gap is visible in the suite rather than implied to be correct.
-        Step 4 is the part this PR makes unconditional.
+        Owner ruling §3-§6. Local state (profile PII, consents) is owned via
+        the BotUser FK, so it is erased regardless of linkage. The upstream
+        Ayla step could not even be addressed, so it must NOT be reported as
+        an idempotent success — the cascade is honestly partial.
         """
         bu = _with_pii(
             BotUser.all_tenants.create(
                 tenant=tenant, channel="max", channel_user_id="555", ayla_user_id=None
             )
         )
+        _grant(bu, CT.PERSONAL_DATA)
 
         result = delete_personal_data(bu)
 
+        # Local legs really ran.
         pii_step = next(s for s in result.steps if s.step == "profile_pii_erase")
-        assert pii_step.ok
-        assert not pii_step.detail  # ran for real, not "not_linked"
-        # Pre-existing gap, asserted so a future fix trips this test loudly.
-        assert [s.detail for s in result.steps if s.step != "profile_pii_erase"] == [
-            "not_linked",
-            "not_linked",
-            "not_linked",
-        ]
+        assert pii_step.ok and not pii_step.detail
+        assert next(s for s in result.steps if s.step == "consent_withdraw").ok
+        assert not ConsentRecord.all_tenants.filter(bot_user=bu, withdrawn_at__isnull=True).exists()
+        # Memory genuinely cannot exist without the key — green is truthful.
+        memory_step = next(s for s in result.steps if s.step == "memory_delete")
+        assert memory_step.ok and memory_step.detail == "no_state"
+        # The unaddressable upstream step is NOT a success.
+        assert not result.all_ok
+        assert result.failed_steps == ["ayla_delete"]
+
         bu.refresh_from_db()
         assert bu.phone == ""
         assert bu.display_name == ""
         assert bu.client_name == ""
+
+    def test_unlinked_user_consents_are_withdrawn_not_skipped(self, tenant) -> None:
+        """Ruling §5 — ConsentRecord ownership is local, not ayla-keyed."""
+        bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="556", ayla_user_id=None
+        )
+        _grant(bu, CT.PERSONAL_DATA)
+        _grant(bu, CT.MEMORY_GREEN)
+        assert ConsentRecord.all_tenants.filter(bot_user=bu, withdrawn_at__isnull=True).count() == 2
+
+        delete_personal_data(bu)
+
+        assert not ConsentRecord.all_tenants.filter(bot_user=bu, withdrawn_at__isnull=True).exists()
 
     def test_repeat_delete_is_idempotent(self, bot_user, ayla_user_id) -> None:
         """Second pass sees a real upstream 404, as production would."""
@@ -638,3 +663,133 @@ class TestReOnboardingAfterErase:
 
         bu.refresh_from_db()
         assert bu.deleted_at is None
+
+
+class TestServerSideDeleteConfirmation:
+    """Owner ruling §1-2 — the C5 endpoint verifies the token itself.
+
+    A client-side sheet is not a confirmation: before this, any single
+    authenticated DELETE ran the whole cascade.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_upstream(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "apps.identity.services.privacy.PersonalContextHttpClient",
+            lambda: _StubPCClient(),
+        )
+
+    def _assert_untouched(self, bot_user) -> None:
+        bot_user.refresh_from_db()
+        assert bot_user.phone == _PII["phone"]
+        assert bot_user.display_name == _PII["display_name"]
+        assert bot_user.client_name == _PII["client_name"]
+        assert ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, withdrawn_at__isnull=True
+        ).exists()
+
+    def test_missing_confirmation_rejected_without_mutation(
+        self, client: DjangoClient, bot_user
+    ) -> None:
+        _with_pii(bot_user)
+        _grant(bot_user, CT.PERSONAL_DATA)
+
+        resp = _delete_request(client, confirmation=None)
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "confirmation_mismatch"
+        self._assert_untouched(bot_user)
+
+    def test_bare_delete_with_no_body_rejected(self, client: DjangoClient, bot_user) -> None:
+        """The exact shape of the pre-ruling call: DELETE, no body at all."""
+        _with_pii(bot_user)
+        _grant(bot_user, CT.PERSONAL_DATA)
+
+        resp = client.delete(
+            "/api/v1/customer/me/personal-data/",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+
+        assert resp.status_code == 400
+        self._assert_untouched(bot_user)
+
+    @pytest.mark.parametrize("bad", ["удалить", "DELETE", "УДАЛИТЬ ", "", "yes", "Удалить"])
+    def test_wrong_confirmation_rejected_without_mutation(
+        self, client: DjangoClient, bot_user, bad
+    ) -> None:
+        _with_pii(bot_user)
+        _grant(bot_user, CT.PERSONAL_DATA)
+
+        resp = _delete_request(client, confirmation=bad)
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "confirmation_mismatch"
+        self._assert_untouched(bot_user)
+
+    def test_malformed_body_rejected_without_mutation(self, client: DjangoClient, bot_user) -> None:
+        _with_pii(bot_user)
+
+        resp = client.delete(
+            "/api/v1/customer/me/personal-data/",
+            data="not json",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+
+        assert resp.status_code == 400
+        bot_user.refresh_from_db()
+        assert bot_user.phone == _PII["phone"]
+
+    def test_correct_confirmation_performs_erase(
+        self, client: DjangoClient, bot_user, ayla_user_id
+    ) -> None:
+        _seed_memory(bot_user, ayla_user_id)
+        _with_pii(bot_user)
+
+        resp = _delete_request(client)
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "deleted"
+        bot_user.refresh_from_db()
+        assert bot_user.phone == ""
+        assert bot_user.display_name == ""
+        assert bot_user.client_name == ""
+
+    def test_token_matches_the_sibling_endpoint_primitive(self) -> None:
+        """Ruling §2 — reuse the existing primitive, don't invent a second."""
+        from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN as sibling
+
+        assert DELETE_CONFIRMATION_TOKEN == sibling == "УДАЛИТЬ"
+
+
+class TestResultTruthfulness:
+    """Ruling §3 — never answer `deleted` when a mandatory step was skipped."""
+
+    def test_unlinked_user_gets_partial_not_deleted(
+        self, client: DjangoClient, tenant, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "apps.identity.services.privacy.PersonalContextHttpClient",
+            lambda: _StubPCClient(),
+        )
+        bu = _with_pii(
+            BotUser.all_tenants.create(
+                tenant=tenant,
+                channel="max",
+                channel_user_id="12345",  # what _init_data_header resolves to
+                ayla_user_id=None,
+            )
+        )
+        _grant(bu, CT.PERSONAL_DATA)
+
+        resp = _delete_request(client)
+
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["status"] == "partial"
+        assert body["status"] != "deleted"
+        assert body["failed_steps"] == ["ayla_delete"]
+        # ...and the local data really is gone despite the honest partial.
+        bu.refresh_from_db()
+        assert bu.phone == ""
+        assert not ConsentRecord.all_tenants.filter(bot_user=bu, withdrawn_at__isnull=True).exists()

@@ -19,6 +19,7 @@ vi.mock("./max-sdk", () => ({
 }));
 
 import {
+  DELETE_CONFIRMATION_TOKEN,
   deletePersonalData,
   exportPersonalData,
   PersonalDataPartialDeleteError,
@@ -100,7 +101,7 @@ describe("exportPersonalData", () => {
 describe("deletePersonalData", () => {
   it("DELETEs the C5 endpoint with MAX auth and resolves on {status: deleted}", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ status: "deleted" }));
-    const result = await deletePersonalData();
+    const result = await deletePersonalData(DELETE_CONFIRMATION_TOKEN);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/api/v1/customer/me/personal-data/");
     expect(init.method).toBe("DELETE");
@@ -109,12 +110,40 @@ describe("deletePersonalData", () => {
     expect(result.status).toBe("deleted");
   });
 
+  it("sends the confirmation token in the body (server verifies it)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ status: "deleted" }));
+    await deletePersonalData(DELETE_CONFIRMATION_TOKEN);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      confirmation: DELETE_CONFIRMATION_TOKEN,
+    });
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+  });
+
+  it("relays a wrong token verbatim so the server can reject it", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: "confirmation_mismatch", detail: "nope" },
+        { status: 400 },
+      ),
+    );
+    const err = await deletePersonalData("удалить").catch((e: unknown) => e);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ confirmation: "удалить" });
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+  });
+
   it("stays successful on a repeat call (backend idempotency, C5.2)", async () => {
     fetchMock.mockImplementation(() =>
       Promise.resolve(jsonResponse({ status: "deleted" })),
     );
-    await expect(deletePersonalData()).resolves.toEqual({ status: "deleted" });
-    await expect(deletePersonalData()).resolves.toEqual({ status: "deleted" });
+    await expect(deletePersonalData(DELETE_CONFIRMATION_TOKEN)).resolves.toEqual({
+      status: "deleted",
+    });
+    await expect(deletePersonalData(DELETE_CONFIRMATION_TOKEN)).resolves.toEqual({
+      status: "deleted",
+    });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -125,7 +154,7 @@ describe("deletePersonalData", () => {
         { status: 502 },
       ),
     );
-    const err = await deletePersonalData().catch((e: unknown) => e);
+    const err = await deletePersonalData(DELETE_CONFIRMATION_TOKEN).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PersonalDataPartialDeleteError);
     expect((err as PersonalDataPartialDeleteError).failedSteps).toEqual([
       "memory_delete",
@@ -135,7 +164,7 @@ describe("deletePersonalData", () => {
 
   it("throws ApiError on other failures", async () => {
     fetchMock.mockResolvedValue(new Response("boom", { status: 503 }));
-    const err = await deletePersonalData().catch((e: unknown) => e);
+    const err = await deletePersonalData(DELETE_CONFIRMATION_TOKEN).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(503);
   });

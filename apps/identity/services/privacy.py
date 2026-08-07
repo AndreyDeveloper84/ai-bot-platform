@@ -13,10 +13,20 @@ Implements the bot-side half of ``PILOT_CONTRACTS_2026-08-15`` §6:
 
 ### Contract obligations honoured
 
+* **Server-confirmed** — the view requires the ``DELETE_CONFIRMATION_TOKEN``
+  primitive in the request body before any of this runs. A client-side
+  confirmation sheet is not a confirmation (DRF-956 / T-05 ruling §1-2).
 * **Idempotent delete** — every step is naturally re-runnable: upstream
   404 counts as already-deleted, green soft-delete skips tombstoned
-  rows, ``forget_all``/``withdraw_personal_data`` are no-ops on repeat.
-  A repeated DELETE therefore returns the same success.
+  rows, ``forget_all``/consent withdrawal are no-ops on repeat.
+  A repeated confirmed DELETE therefore returns the same success.
+* **No success for work not done** — a step reports green only when it
+  actually erased, or when the absence of state is *provable* locally.
+  ``ayla_delete`` with no linkage is a **failure**, not an idempotent
+  success: we have no id to address Ayla with, so we can neither perform
+  the mandatory remote step nor establish there is nothing to erase
+  (ruling §3-4, §6). Consents are keyed on the local ``bot_user`` FK and
+  are therefore withdrawn regardless of linkage (ruling §5).
 * **Audit without personal values** — both operations append an audit
   row naming the actor, timestamp and *scope* of the action; fact
   values, phones and names never enter the audit payload.
@@ -59,7 +69,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
-from apps.consent.services import withdraw_personal_data
+from apps.consent.services import withdraw_personal_data_for_bot_users
 from apps.identity.models import BotUser
 from apps.identity.services.memory_deleter import (
     request_forget_all,
@@ -291,7 +301,16 @@ def delete_personal_data(
 
     # Step 1 — Ayla personal-data delete (upstream, C5.2).
     if ayla_user_id is None:
-        steps.append(DeleteStep("ayla_delete", True, "not_linked"))
+        # NOT a success. Without the linkage we have no id to address Ayla
+        # with, so we cannot perform the mandatory remote step *and* cannot
+        # establish that there is nothing there to delete. Reporting this
+        # green would be a false "deleted" (DRF-956 / T-05 ruling §4+§6).
+        logger.warning(
+            "identity.privacy.ayla_delete_unaddressable bot_user=%s — "
+            "ayla_user_id is NULL, upstream erasure not attempted",
+            bot_user.id,
+        )
+        steps.append(DeleteStep("ayla_delete", False, "not_linked"))
     else:
         owns = client is None
         client = client or PersonalContextHttpClient()
@@ -308,10 +327,12 @@ def delete_personal_data(
             if owns:
                 client.close()
 
-    # Steps 2+3 — bot memory erasure + consent cascade need the person id.
+    # Step 2 — bot memory. Memory is keyed on ``ayla_user_id``
+    # (``UserPersonalContext.user_id`` / ``MemoryEntry.user_id``) and cannot
+    # be written without one, so "no linkage" here provably means "no state
+    # to erase" — the one case where reporting green is truthful (ruling §4).
     if ayla_user_id is None:
-        steps.append(DeleteStep("memory_delete", True, "not_linked"))
-        steps.append(DeleteStep("consent_withdraw", True, "not_linked"))
+        steps.append(DeleteStep("memory_delete", True, "no_state"))
     else:
         try:
             live_green_ids = [e.id for e in read_green_entries(ayla_user_id)]
@@ -322,12 +343,19 @@ def delete_personal_data(
             logger.exception("identity.privacy.memory_delete_failed")
             steps.append(DeleteStep("memory_delete", False))
 
-        try:
-            withdraw_personal_data(ayla_user_id, source="privacy_delete")
-            steps.append(DeleteStep("consent_withdraw", True))
-        except Exception:  # noqa: BLE001 — per-step isolation
-            logger.exception("identity.privacy.consent_withdraw_failed")
-            steps.append(DeleteStep("consent_withdraw", False))
+    # Step 3 — consents. ConsentRecord hangs off the ``bot_user`` FK, not off
+    # ``ayla_user_id``, so ownership is fully determined by local identity and
+    # the withdrawal must not depend on a linkage that is NULL in production
+    # (ruling §5). Subject = the same shell set step 4 erases.
+    try:
+        withdraw_personal_data_for_bot_users(
+            BotUser.all_tenants.filter(id__in=_person_shell_ids(bot_user, ayla_user_id)),
+            source="privacy_delete",
+        )
+        steps.append(DeleteStep("consent_withdraw", True))
+    except Exception:  # noqa: BLE001 — per-step isolation
+        logger.exception("identity.privacy.consent_withdraw_failed")
+        steps.append(DeleteStep("consent_withdraw", False))
 
     # Step 4 — bot-side profile identifiers + preferences on the retained
     # shells. Runs unconditionally and is keyed on the channel account as

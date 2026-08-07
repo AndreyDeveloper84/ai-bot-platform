@@ -34,6 +34,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 import {
+  DELETE_CONFIRMATION_TOKEN,
   deletePersonalData,
   exportPersonalData,
   PersonalDataPartialDeleteError,
@@ -278,18 +279,25 @@ function humanizeFailedSteps(steps: string[]): string {
 export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProps) {
   const [view, setView] = useState<DeleteView>("confirm");
   const [failedSteps, setFailedSteps] = useState<string[]>([]);
+  const [typed, setTyped] = useState("");
 
   useEffect(() => {
     if (open) {
       setView("confirm");
       setFailedSteps([]);
+      setTyped("");
     }
   }, [open]);
 
+  // The server verifies this token too (400 confirmation_mismatch), so the
+  // input is real evidence of intent, not decoration.
+  const confirmed = typed.trim() === DELETE_CONFIRMATION_TOKEN;
+
   const start = useCallback(async () => {
+    if (!confirmed) return;
     setView("busy");
     try {
-      await deletePersonalData();
+      await deletePersonalData(typed.trim());
       setView("done");
     } catch (err) {
       if (err instanceof PersonalDataPartialDeleteError) {
@@ -299,7 +307,7 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
         setView("error");
       }
     }
-  }, []);
+  }, [confirmed, typed]);
 
   if (!open) return null;
   const busy = view === "busy";
@@ -323,6 +331,24 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
             Записи и оплаты могут храниться дольше, если этого требует
             закон.
           </p>
+          <label
+            className="profile-support-sheet__body"
+            htmlFor="personal-data-delete-confirm"
+          >
+            Чтобы подтвердить, введи{" "}
+            <b>{DELETE_CONFIRMATION_TOKEN}</b>:
+          </label>
+          <input
+            id="personal-data-delete-confirm"
+            type="text"
+            className="profile-support-sheet__input"
+            value={typed}
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            aria-describedby="personal-data-delete-headline"
+            onChange={(e) => setTyped(e.target.value)}
+          />
           <div className="profile-support-sheet__actions">
             <button
               type="button"
@@ -335,6 +361,7 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
             <button
               type="button"
               className="btn-primary profile-support-sheet__primary"
+              disabled={!confirmed}
               onClick={start}
             >
               Удалить данные

@@ -5187,6 +5187,19 @@ a {
   color: var(--c-text-secondary);
   line-height: var(--leading-normal);
 }
+/* Destructive-confirmation input (C5 erasure, DRF-956). Mirrors the
+   typed-token field on the legacy profile delete card. */
+.profile-support-sheet__input {
+  width: 100%;
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 0 var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  background: var(--c-surface-primary);
+  border: 1px solid var(--c-border-strong, var(--c-border));
+  border-radius: var(--radius-2);
+}
 .profile-support-sheet__actions {
   display: flex;
   flex-direction: column;

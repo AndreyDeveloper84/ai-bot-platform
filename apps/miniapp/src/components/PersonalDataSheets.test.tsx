@@ -24,6 +24,7 @@ vi.mock("../lib/personal-data", async (importOriginal) => {
 });
 
 import {
+  DELETE_CONFIRMATION_TOKEN,
   deletePersonalData,
   exportPersonalData,
   PersonalDataPartialDeleteError,
@@ -139,6 +140,15 @@ describe("PersonalDataExportSheet", () => {
   });
 });
 
+/** Type the destructive token, then tap the primary button. */
+async function confirmDelete(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(
+    screen.getByLabelText(/Чтобы подтвердить/),
+    DELETE_CONFIRMATION_TOKEN,
+  );
+  await user.click(screen.getByRole("button", { name: "Удалить данные" }));
+}
+
 describe("PersonalDataDeleteSheet", () => {
   it("asks for confirmation and states the retention boundary honestly", () => {
     renderDelete();
@@ -154,6 +164,34 @@ describe("PersonalDataDeleteSheet", () => {
     );
   });
 
+  it("keeps the destructive button inert until the token is typed", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    const primary = screen.getByRole("button", { name: "Удалить данные" });
+    expect(primary).toBeDisabled();
+
+    // A near-miss must not arm it — the server would reject it anyway.
+    await user.type(screen.getByLabelText(/Чтобы подтвердить/), "удалить");
+    expect(primary).toBeDisabled();
+    await user.click(primary);
+    expect(mockedDelete).not.toHaveBeenCalled();
+
+    await user.clear(screen.getByLabelText(/Чтобы подтвердить/));
+    await user.type(
+      screen.getByLabelText(/Чтобы подтвердить/),
+      DELETE_CONFIRMATION_TOKEN,
+    );
+    expect(primary).toBeEnabled();
+  });
+
+  it("passes the typed token to the backend, which verifies it", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    mockedDelete.mockResolvedValueOnce({ status: "deleted" });
+    await confirmDelete(user);
+    expect(mockedDelete).toHaveBeenCalledWith(DELETE_CONFIRMATION_TOKEN);
+  });
+
   it("runs the delete cascade once even on repeated taps, then shows status", async () => {
     const user = userEvent.setup();
     renderDelete();
@@ -164,9 +202,8 @@ describe("PersonalDataDeleteSheet", () => {
           resolveDelete = resolve;
         }),
     );
-    const primary = screen.getByRole("button", { name: "Удалить данные" });
-    await user.click(primary);
-    await user.click(primary);
+    await confirmDelete(user);
+    await user.click(screen.getByRole("button", { name: "Удалить данные" }));
     expect(mockedDelete).toHaveBeenCalledTimes(1);
     resolveDelete!({ status: "deleted" });
     expect(await screen.findByText(/Данные удалены/)).toBeInTheDocument();
@@ -178,7 +215,7 @@ describe("PersonalDataDeleteSheet", () => {
     mockedDelete.mockRejectedValueOnce(
       new PersonalDataPartialDeleteError(["memory_delete", "consent_withdraw"]),
     );
-    await user.click(screen.getByRole("button", { name: "Удалить данные" }));
+    await confirmDelete(user);
     expect(await screen.findByText(/Не всё удалено/)).toBeInTheDocument();
     expect(screen.getByText(/очистить память/)).toBeInTheDocument();
     expect(screen.getByText(/отозвать согласия/)).toBeInTheDocument();
@@ -196,7 +233,7 @@ describe("PersonalDataDeleteSheet", () => {
     const user = userEvent.setup();
     renderDelete();
     mockedDelete.mockRejectedValueOnce(new Error("[503] http_error"));
-    await user.click(screen.getByRole("button", { name: "Удалить данные" }));
+    await confirmDelete(user);
     expect(await screen.findByText(/Не получилось удалить данные/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Попробовать ещё раз" })).toBeInTheDocument();
   });
@@ -205,8 +242,47 @@ describe("PersonalDataDeleteSheet", () => {
     const user = userEvent.setup();
     const onClose = renderDelete();
     mockedDelete.mockImplementation(() => new Promise(() => undefined));
-    await user.click(screen.getByRole("button", { name: "Удалить данные" }));
+    await confirmDelete(user);
     await user.keyboard("{Escape}");
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("clears the typed token when the sheet is reopened", async () => {
+    const user = userEvent.setup();
+    const triggerRef = createRef<HTMLButtonElement>();
+    const { rerender } = render(
+      <>
+        <button ref={triggerRef} type="button">
+          Удалить аккаунт
+        </button>
+        <PersonalDataDeleteSheet open triggerRef={triggerRef} onClose={vi.fn()} />
+      </>,
+    );
+    await user.type(
+      screen.getByLabelText(/Чтобы подтвердить/),
+      DELETE_CONFIRMATION_TOKEN,
+    );
+    rerender(
+      <>
+        <button ref={triggerRef} type="button">
+          Удалить аккаунт
+        </button>
+        <PersonalDataDeleteSheet
+          open={false}
+          triggerRef={triggerRef}
+          onClose={vi.fn()}
+        />
+      </>,
+    );
+    rerender(
+      <>
+        <button ref={triggerRef} type="button">
+          Удалить аккаунт
+        </button>
+        <PersonalDataDeleteSheet open triggerRef={triggerRef} onClose={vi.fn()} />
+      </>,
+    );
+    expect(screen.getByLabelText(/Чтобы подтвердить/)).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Удалить данные" })).toBeDisabled();
   });
 });

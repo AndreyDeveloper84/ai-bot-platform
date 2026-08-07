@@ -93,14 +93,30 @@ export async function exportPersonalData(): Promise<PersonalDataExportFile> {
 }
 
 /**
+ * The exact string the customer must type to confirm erasure. Mirrors
+ * `DELETE_CONFIRMATION_TOKEN` in `apps/identity/services/profile.py` — the
+ * server rejects anything else with 400 `confirmation_mismatch`.
+ */
+export const DELETE_CONFIRMATION_TOKEN = "УДАЛИТЬ";
+
+/**
  * C5.2 — run the delete cascade. Resolves only on full success; a
  * partial cascade raises {@link PersonalDataPartialDeleteError} so the
  * sheet can offer an honest retry.
+ *
+ * `confirmation` must equal {@link DELETE_CONFIRMATION_TOKEN}; it is
+ * verified server-side (DRF-956 / T-05), so this is not a formality the
+ * client can skip.
  */
-export async function deletePersonalData(): Promise<{ status: "deleted" }> {
+export async function deletePersonalData(
+  confirmation: string,
+): Promise<{ status: "deleted" }> {
+  const headers = buildAuthHeaders();
+  headers.set("Content-Type", "application/json");
   const res = await fetch(`${API_BASE}${DELETE_PATH}`, {
     method: "DELETE",
-    headers: buildAuthHeaders(),
+    headers,
+    body: JSON.stringify({ confirmation }),
   });
   if (res.ok) {
     return (await res.json()) as { status: "deleted" };
