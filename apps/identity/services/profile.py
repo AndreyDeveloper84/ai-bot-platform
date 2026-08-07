@@ -10,7 +10,8 @@ Soft-delete semantics
 Per Phase 3 design Q-C3 + user decision 2026-05-19:
 
 * The "Delete my data" button writes ``BotUser.deleted_at`` AND scrubs
-  PII (``client_name``, ``phone``, ``context``).
+  PII (``display_name``, ``avatar_url``, ``client_name``, ``phone``,
+  ``context``).
 * The :class:`UserPreferences` row is deleted entirely (CASCADE'd by
   the FK is fine too; we delete explicitly so favorites are recomputed
   as ``None`` and the row is reclaimed before the deferred CASCADE fires).
@@ -201,14 +202,29 @@ def soft_delete_user(bot_user: BotUser, confirmation: str) -> None:
     :data:`DELETE_CONFIRMATION_TOKEN` exactly in the UI textarea. The
     Mini App relays that string here; mismatch raises. Re-running on an
     already-deleted user is a no-op (idempotent).
+
+    DRF-956 runtime hardening: also clear ``display_name`` and
+    ``avatar_url`` so the erased profile exposes no channel-side PII.
     """
     if confirmation != DELETE_CONFIRMATION_TOKEN:
         raise DeletionConfirmationMismatch(f"confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}")
     if bot_user.deleted_at is not None:
         return  # already scrubbed
     bot_user.deleted_at = timezone.now()
+    bot_user.display_name = ""
+    bot_user.avatar_url = ""
     bot_user.client_name = ""
     bot_user.phone = ""
     bot_user.context = {}
-    bot_user.save(update_fields=["deleted_at", "client_name", "phone", "context", "last_seen"])
+    bot_user.save(
+        update_fields=[
+            "deleted_at",
+            "display_name",
+            "avatar_url",
+            "client_name",
+            "phone",
+            "context",
+            "last_seen",
+        ]
+    )
     UserPreferences.all_tenants.filter(bot_user=bot_user).delete()

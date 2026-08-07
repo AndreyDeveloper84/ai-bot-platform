@@ -231,8 +231,9 @@ class BotUser(models.Model):
 
     # GDPR-style soft delete (Phase 3 / F4). ``deleted_at`` set when the
     # customer requests data deletion via the Mini App profile screen.
-    # ``soft_delete_user()`` scrubs PII (client_name/phone/context) at the
-    # same time. We keep the row so historical FKs (BookingRequest,
+    # ``soft_delete_user()`` scrubs PII (display_name/avatar_url/
+    # client_name/phone/context) at the same time. We keep the row so
+    # historical FKs (BookingRequest,
     # Conversation) stay intact for salon reporting + audit.
     deleted_at = models.DateTimeField(
         null=True,
