@@ -215,6 +215,10 @@ def _schedule_reminders(
     Idempotent via the partial unique constraint
     ``unique_ayla_booking_reminder(ayla_appointment_id, kind)``:
     re-delivery of ``booking.created`` rewrites the same two rows.
+
+    ``status`` and ``scheduled_at`` live in ``create_defaults`` so a
+    late ``booking.confirmed`` (different ``event_id``) does not reset
+    an already-sent reminder back to ``PENDING``.
     """
     chat_id = getattr(bot_user, "chat_id", "") or ""
     if not chat_id:
@@ -225,23 +229,31 @@ def _schedule_reminders(
         return
 
     for kind, offset in _REMINDER_OFFSETS:
+        # ``defaults`` are applied on UPDATE; ``create_defaults`` are
+        # applied on INSERT. Keeping ``status``/``scheduled_at`` out of
+        # ``defaults`` prevents a late/redelivered event from resurrecting
+        # an already-sent reminder back to PENDING.
+        common_defaults = {
+            "bot_user": bot_user,
+            # F-Fri1: write NULL (not "") so the legacy
+            # unique_together (yclients_record_id, kind) doesn't
+            # collide across multiple Ayla appointments.
+            "yclients_record_id": None,
+            "chat_id": chat_id,
+            "visit_at": start_at,
+            # Names are looked up via the catalog mirror on send.
+            "master_name": "",
+            "service_name": "",
+        }
         BookingReminder.all_tenants.update_or_create(
             ayla_appointment_id=appointment_id,
             tenant=tenant,  # F-Adv2: tenant scopes the partial unique key
             kind=kind,
-            defaults={
-                "bot_user": bot_user,
-                # F-Fri1: write NULL (not "") so the legacy
-                # unique_together (yclients_record_id, kind) doesn't
-                # collide across multiple Ayla appointments.
-                "yclients_record_id": None,
-                "chat_id": chat_id,
-                "visit_at": start_at,
+            defaults=common_defaults,
+            create_defaults={
+                **common_defaults,
                 "status": BookingReminder.Status.PENDING,
                 "scheduled_at": start_at - offset,
-                # Names are looked up via the catalog mirror on send.
-                "master_name": "",
-                "service_name": "",
             },
         )
 

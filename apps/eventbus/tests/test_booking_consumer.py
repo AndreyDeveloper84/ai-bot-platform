@@ -467,6 +467,40 @@ class TestBookingConfirmed:
             == 2
         )
 
+    def test_second_confirmed_does_not_resurrect_sent_reminder(
+        self, tenant, bot_user_linked
+    ) -> None:
+        """A late/replayed booking.confirmed (different event_id) must not
+        reset an already-sent reminder back to PENDING."""
+        proxy = RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=bot_user_linked,
+            start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc),
+            end_at=dt.datetime(2026, 5, 22, 16, 0, tzinfo=dt.timezone.utc),
+            status=RemoteBookingProxy.Status.PENDING_PAYMENT,
+        )
+        reminder = BookingReminder.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user_linked,
+            ayla_appointment_id=UUID(APPOINTMENT_ID),
+            chat_id=bot_user_linked.chat_id,
+            visit_at=proxy.start_at,
+            kind=BookingReminder.Kind.DAY_BEFORE,
+            status=BookingReminder.Status.SENT,
+            scheduled_at=proxy.start_at - dt.timedelta(hours=24),
+        )
+
+        env = _envelope(
+            event_id="01J9CONFIRMREPLAY00000000001",
+            event_name="booking.confirmed",
+            data=self._confirmed_data(),
+        )
+        handle_booking_confirmed(env)
+
+        reminder.refresh_from_db()
+        assert reminder.status == BookingReminder.Status.SENT
+
     def test_confirmed_after_cancelled_is_no_op(self, tenant, bot_user_linked):
         proxy = RemoteBookingProxy.all_tenants.create(
             appointment_id=UUID(APPOINTMENT_ID),
