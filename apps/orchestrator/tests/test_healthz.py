@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from django.test import AsyncClient
@@ -161,3 +161,144 @@ class TestExcludedFromTenantMiddleware:
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 200
+
+
+class TestReadyzChromaSemantics:
+    """Chroma readiness semantics: disabled != broken (DRF-955)."""
+
+    async def test_readyz_ok_when_chromadb_disabled(self, settings):
+        settings.CHROMA_HTTP_HOST = ""
+        client = AsyncClient()
+        with (
+            patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
+            patch("apps.orchestrator.views._ping_redis", AsyncMock()),
+            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
+        ):
+            response = await client.get("/readyz/")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["checks"]["chromadb"]["ok"] is True
+        assert body["checks"]["chromadb"]["error"] is None
+
+    async def test_readyz_ok_when_chromadb_whitespace_disabled(self, settings):
+        settings.CHROMA_HTTP_HOST = "   "
+        client = AsyncClient()
+        with (
+            patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
+            patch("apps.orchestrator.views._ping_redis", AsyncMock()),
+            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
+        ):
+            response = await client.get("/readyz/")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["checks"]["chromadb"]["ok"] is True
+        assert body["checks"]["chromadb"]["error"] is None
+
+    async def test_readyz_ok_when_chromadb_configured_and_healthy(self, settings):
+        settings.CHROMA_HTTP_HOST = "chromadb.internal"
+        settings.CHROMA_HTTP_PORT = 8001
+
+        class _FakeResponse:
+            def raise_for_status(self) -> None: ...
+
+        class _FakeClient:
+            def __init__(self, **_kwargs) -> None: ...
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                return _FakeResponse()
+
+        client = AsyncClient()
+        with (
+            patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
+            patch("apps.orchestrator.views._ping_redis", AsyncMock()),
+            patch("httpx.AsyncClient", side_effect=lambda **kw: _FakeClient(**kw)),
+            patch("httpx.head", return_value=MagicMock(status_code=200)),
+            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
+        ):
+            response = await client.get("/readyz/")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["checks"]["chromadb"]["ok"] is True
+
+    async def test_readyz_503_when_chromadb_configured_and_broken(self, settings):
+        settings.CHROMA_HTTP_HOST = "chromadb.internal"
+
+        def _raise(*_args, **_kwargs):
+            raise ConnectionError("refused")
+
+        client = AsyncClient()
+        with (
+            patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
+            patch("apps.orchestrator.views._ping_redis", AsyncMock()),
+            patch("httpx.AsyncClient", side_effect=lambda **kw: _raise()),
+            patch("httpx.head", return_value=MagicMock(status_code=200)),
+            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
+        ):
+            response = await client.get("/readyz/")
+        assert response.status_code == 503
+        body = response.json()
+        assert body["checks"]["chromadb"]["ok"] is False
+        assert "ConnectionError" in body["checks"]["chromadb"]["error"]
+
+    async def test_readyz_503_when_chromadb_auth_fails(self, settings):
+        settings.CHROMA_HTTP_HOST = "chromadb.internal"
+        settings.CHROMA_AUTH_TOKEN = "wrong-token"  # noqa: S105
+
+        class _UnauthorizedResponse:
+            def __init__(self, status_code: int):
+                self.status_code = status_code
+
+        class _FakeClient:
+            def __init__(self, **_kwargs) -> None: ...
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                class _OK:
+                    status_code = 200
+
+                    def raise_for_status(self) -> None: ...
+
+                return _OK()
+
+        client = AsyncClient()
+        with (
+            patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
+            patch("apps.orchestrator.views._ping_redis", AsyncMock()),
+            patch("httpx.AsyncClient", side_effect=lambda **kw: _FakeClient(**kw)),
+            patch("httpx.head", return_value=_UnauthorizedResponse(401)),
+            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
+        ):
+            response = await client.get("/readyz/")
+        assert response.status_code == 503
+        body = response.json()
+        assert body["checks"]["chromadb"]["ok"] is True
+        assert body["checks"]["chromadb_auth"]["ok"] is False
+        assert "401" in body["checks"]["chromadb_auth"]["error"]
+
+    async def test_readyz_503_when_other_dependency_broken_while_chromadb_disabled(self, settings):
+        settings.CHROMA_HTTP_HOST = ""
+        client = AsyncClient()
+        with (
+            patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
+            patch(
+                "apps.orchestrator.views._ping_redis",
+                AsyncMock(side_effect=ConnectionError("redis down")),
+            ),
+            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
+        ):
+            response = await client.get("/readyz/")
+        assert response.status_code == 503
+        body = response.json()
+        assert body["checks"]["redis"]["ok"] is False
+        assert body["checks"]["chromadb"]["ok"] is True
