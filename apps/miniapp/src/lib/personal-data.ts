@@ -45,6 +45,15 @@ export interface PersonalDataExportFile {
 }
 
 /**
+ * Backend reason slugs that mean "this can never succeed on retry": the
+ * subject cannot be addressed upstream at all (`not_linked`), or the
+ * identity graph disagrees with itself so the backend refuses to guess
+ * (`identity_conflict`). Anything else — a 5xx, a timeout — is transient
+ * and the retry button is honest.
+ */
+const STRUCTURAL_FAILURE_REASONS = new Set(["not_linked", "identity_conflict"]);
+
+/**
  * Thrown on the honest-partial 502: some cascade steps finished, the
  * listed ones did not. `failedSteps` are backend slugs
  * ("ayla_delete" | "memory_delete" | "consent_withdraw") — screens map
@@ -61,14 +70,14 @@ export class PersonalDataPartialDeleteError extends Error {
   }
 
   /**
-   * True when every failure is structural (no Ayla linkage to address), so
-   * retrying is guaranteed to fail again. The sheet must not offer a retry
-   * in that case — the local erasure already happened.
+   * True when every failure is structural rather than transient, so retrying
+   * is guaranteed to fail again. The sheet must not offer a retry in that
+   * case — the local erasure already happened and only support can finish it.
    */
   get isUnretryable(): boolean {
     return (
       this.failedSteps.length > 0 &&
-      this.failedSteps.every((s) => this.failedDetails[s] === "not_linked")
+      this.failedSteps.every((s) => STRUCTURAL_FAILURE_REASONS.has(this.failedDetails[s] ?? ""))
     );
   }
 }

@@ -955,3 +955,206 @@ class TestUnretryablePartialShape:
         assert body["failed_steps"] == ["ayla_delete"]
         # A 5xx IS worth retrying — it must not be tagged not_linked.
         assert body.get("failed_details", {}).get("ayla_delete") != "not_linked"
+
+
+class TestBlankChannelIdentityFailsClosed:
+    """Owner merge condition 2 — a blank channel_user_id is NOT an identity.
+
+    ``filter(channel="max", channel_user_id="")`` would otherwise select every
+    other shell that also has a blank key — i.e. unrelated people — and fan a
+    destructive erase out over them.
+    """
+
+    def _blank_key_user(self, slug: str) -> BotUser:
+        t = Tenant.objects.create(slug=slug, name=slug)
+        return _with_pii(
+            BotUser.all_tenants.create(
+                tenant=t, channel="max", channel_user_id="", ayla_user_id=None
+            )
+        )
+
+    def test_blank_channel_user_id_does_not_match_other_blank_users(self) -> None:
+        victim = self._blank_key_user("blank-victim")
+        actor = self._blank_key_user("blank-actor")
+
+        delete_personal_data(actor)
+
+        # The actor's own row is erased...
+        actor.refresh_from_db()
+        assert actor.phone == ""
+        # ...and the stranger who merely also has a blank key is untouched.
+        victim.refresh_from_db()
+        assert victim.phone == _PII["phone"]
+        assert victim.display_name == _PII["display_name"]
+        assert victim.client_name == _PII["client_name"]
+
+    def test_blank_channel_user_id_does_not_withdraw_other_consents(self) -> None:
+        victim = self._blank_key_user("blank-victim-c")
+        actor = self._blank_key_user("blank-actor-c")
+        _grant(victim, CT.PERSONAL_DATA)
+        _grant(actor, CT.PERSONAL_DATA)
+
+        delete_personal_data(actor)
+
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=actor, withdrawn_at__isnull=True
+        ).exists()
+        assert ConsentRecord.all_tenants.filter(bot_user=victim, withdrawn_at__isnull=True).exists()
+
+    def test_blank_channel_user_id_does_not_drop_other_preferences(self) -> None:
+        from apps.identity.models import UserPreferences
+
+        victim = self._blank_key_user("blank-victim-p")
+        actor = self._blank_key_user("blank-actor-p")
+        UserPreferences.all_tenants.create(
+            bot_user=victim, tenant=victim.tenant, allergies="латекс"
+        )
+
+        delete_personal_data(actor)
+
+        assert UserPreferences.all_tenants.filter(bot_user_id=victim.id).exists()
+
+    def test_blank_channel_slug_also_fails_closed(self) -> None:
+        """The guard covers ``channel``, not just ``channel_user_id``."""
+        t1 = Tenant.objects.create(slug="blank-chan-1", name="c1")
+        t2 = Tenant.objects.create(slug="blank-chan-2", name="c2")
+        victim = _with_pii(BotUser.all_tenants.create(tenant=t1, channel="", channel_user_id=""))
+        actor = _with_pii(BotUser.all_tenants.create(tenant=t2, channel="", channel_user_id=""))
+
+        delete_personal_data(actor)
+
+        victim.refresh_from_db()
+        assert victim.phone == _PII["phone"]
+
+    def test_normal_user_is_unaffected_by_the_guard(self, bot_user) -> None:
+        """Sanity: the guard must not break the ordinary path."""
+        _with_pii(bot_user)
+
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert result.all_ok
+        bot_user.refresh_from_db()
+        assert bot_user.phone == ""
+
+
+class TestConflictingSiblingAylaIdsFailClosed:
+    """Owner merge condition 3 — never guess between distinct linked ids.
+
+    0 distinct -> unlinked. Exactly 1 -> use it. 2+ -> identity
+    inconsistency, no destructive upstream/memory operation.
+    """
+
+    def _two_linked_siblings(self, tenant, id_a, id_b) -> BotUser:
+        """Same channel account, two shells, two DIFFERENT ayla ids."""
+        t_a = Tenant.objects.create(slug="conflict-a", name="A")
+        t_b = Tenant.objects.create(slug="conflict-b", name="B")
+        BotUser.all_tenants.create(
+            tenant=t_a, channel="max", channel_user_id="12345", ayla_user_id=id_a
+        )
+        BotUser.all_tenants.create(
+            tenant=t_b, channel="max", channel_user_id="12345", ayla_user_id=id_b
+        )
+        return _with_pii(
+            BotUser.all_tenants.create(
+                tenant=tenant, channel="max", channel_user_id="12345", ayla_user_id=None
+            )
+        )
+
+    def test_upstream_delete_is_not_attempted(self, tenant) -> None:
+        requesting = self._two_linked_siblings(tenant, uuid.uuid4(), uuid.uuid4())
+        client = _StubPCClient()
+
+        result = delete_personal_data(requesting, client=client)  # type: ignore[arg-type]
+
+        # Ayla was never called — we must not destroy a stranger's account.
+        assert client.calls == []
+        assert not result.all_ok
+        ayla_step = next(s for s in result.steps if s.step == "ayla_delete")
+        assert not ayla_step.ok
+        assert ayla_step.detail == "identity_conflict"
+
+    def test_memory_is_not_touched_under_conflict(self, tenant) -> None:
+        id_a, id_b = uuid.uuid4(), uuid.uuid4()
+        requesting = self._two_linked_siblings(tenant, id_a, id_b)
+        linked_a = BotUser.all_tenants.get(ayla_user_id=id_a)
+        _seed_memory(linked_a, id_a)
+
+        result = delete_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        memory_step = next(s for s in result.steps if s.step == "memory_delete")
+        assert not memory_step.ok
+        assert memory_step.detail == "identity_conflict"
+        # Neither candidate's memory was soft-deleted.
+        assert MemoryEntry.objects.filter(user_id=id_a, soft_deleted_at__isnull=True).exists()
+
+    def test_local_erase_narrows_to_the_authenticated_row(self, tenant) -> None:
+        id_a, id_b = uuid.uuid4(), uuid.uuid4()
+        requesting = self._two_linked_siblings(tenant, id_a, id_b)
+        sibling = _with_pii(BotUser.all_tenants.get(ayla_user_id=id_a))
+
+        result = delete_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        # Own row: erased. Ambiguous siblings: untouched.
+        requesting.refresh_from_db()
+        assert requesting.phone == ""
+        sibling.refresh_from_db()
+        assert sibling.phone == _PII["phone"]
+        pii_step = next(s for s in result.steps if s.step == "profile_pii_erase")
+        assert pii_step.ok and pii_step.detail == "own_row_only"
+
+    def test_result_is_not_deleted(self, client: DjangoClient, tenant, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "apps.identity.services.privacy.PersonalContextHttpClient",
+            lambda: _StubPCClient(),
+        )
+        self._two_linked_siblings(tenant, uuid.uuid4(), uuid.uuid4())
+
+        resp = _delete_request(client)
+
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["status"] != "deleted"
+        assert set(body["failed_steps"]) == {"ayla_delete", "memory_delete"}
+        assert body["failed_details"]["ayla_delete"] == "identity_conflict"
+
+    def test_single_distinct_id_across_shells_still_resolves(self, tenant) -> None:
+        """Exactly one unique id — duplicated across shells — is NOT a conflict."""
+        shared = uuid.uuid4()
+        requesting = self._two_linked_siblings(tenant, shared, shared)
+        client = _StubPCClient()
+
+        result = delete_personal_data(requesting, client=client)  # type: ignore[arg-type]
+
+        assert client.calls == [("delete", str(shared))]
+        assert result.all_ok
+
+    def test_conflict_detected_even_when_own_row_is_linked(self, tenant) -> None:
+        """Own id plus a different sibling id is still 2 distinct ids."""
+        own_id, other_id = uuid.uuid4(), uuid.uuid4()
+        t_other = Tenant.objects.create(slug="conflict-own", name="O")
+        BotUser.all_tenants.create(
+            tenant=t_other, channel="max", channel_user_id="12345", ayla_user_id=other_id
+        )
+        requesting = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="12345", ayla_user_id=own_id
+        )
+        client = _StubPCClient()
+
+        result = delete_personal_data(requesting, client=client)  # type: ignore[arg-type]
+
+        assert client.calls == []
+        assert not result.all_ok
+
+    def test_conflict_log_carries_no_identifiers(self, tenant, caplog) -> None:
+        import logging as _logging
+
+        id_a, id_b = uuid.uuid4(), uuid.uuid4()
+        requesting = self._two_linked_siblings(tenant, id_a, id_b)
+
+        with caplog.at_level(_logging.ERROR, logger="apps.identity.services.privacy"):
+            delete_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        blob = "\n".join(r.getMessage() for r in caplog.records)
+        assert "identity_conflict" in blob
+        assert str(id_a) not in blob and str(id_b) not in blob
+        assert _PII["phone"] not in blob

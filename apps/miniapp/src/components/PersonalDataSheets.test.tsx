@@ -257,11 +257,46 @@ describe("PersonalDataDeleteSheet", () => {
     expect(screen.queryByText(/ayla_delete/)).not.toBeInTheDocument();
   });
 
+  it("offers no retry on an identity conflict either (also structural)", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    mockedDelete.mockRejectedValueOnce(
+      new PersonalDataPartialDeleteError(["ayla_delete", "memory_delete"], {
+        ayla_delete: "identity_conflict",
+        memory_delete: "identity_conflict",
+      }),
+    );
+    await confirmDelete(user);
+
+    expect(await screen.findByText(/я всё удалила/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Попробовать ещё раз" }),
+    ).not.toBeInTheDocument();
+    // Raw reason slugs never reach the UI.
+    expect(screen.queryByText(/identity_conflict/)).not.toBeInTheDocument();
+  });
+
   it("still offers a retry when the failure is transient", async () => {
     const user = userEvent.setup();
     renderDelete();
     mockedDelete.mockRejectedValueOnce(
       new PersonalDataPartialDeleteError(["ayla_delete"], {}),
+    );
+    await confirmDelete(user);
+    expect(await screen.findByText(/Не всё удалено/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Попробовать ещё раз" }),
+    ).toBeInTheDocument();
+  });
+
+  it("still offers a retry when only SOME failures are structural", async () => {
+    const user = userEvent.setup();
+    renderDelete();
+    mockedDelete.mockRejectedValueOnce(
+      new PersonalDataPartialDeleteError(["ayla_delete", "consent_withdraw"], {
+        ayla_delete: "not_linked",
+        // consent_withdraw failed transiently — retry can still fix that half.
+      }),
     );
     await confirmDelete(user);
     expect(await screen.findByText(/Не всё удалено/)).toBeInTheDocument();

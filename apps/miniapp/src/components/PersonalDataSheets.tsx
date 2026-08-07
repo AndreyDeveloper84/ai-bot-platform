@@ -415,9 +415,9 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
             согласия.
           </p>
           <p className="profile-support-sheet__body">
-            А вот {humanizeFailedSteps(failedSteps)} автоматически не вышло —
-            твой профиль не связан с основной системой. Напиши в поддержку,
-            и мы удалим там вручную. Повторная попытка тут не поможет.
+            А вот {humanizeFailedSteps(failedSteps)} автоматически не вышло.
+            Напиши в поддержку — мы доведём это вручную. Повторная попытка
+            здесь не поможет.
           </p>
           <div className="profile-support-sheet__actions">
             <button
