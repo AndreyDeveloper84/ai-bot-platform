@@ -23,9 +23,28 @@ Implements the bot-side half of ``PILOT_CONTRACTS_2026-08-15`` §6:
 * **Honest partials** — a failed cascade step is reported, not hidden:
   the view maps ``all_ok=False`` to 502 so the miniapp can offer a retry
   (already-done steps no-op on that retry).
-* **Pilot scope (C5.2)** — personal context + memory + consents.
+* **Pilot scope (C5.2)** — personal context + memory + consents +
+  the bot-side profile identifiers on ``BotUser``.
   Transactional records (bookings, payments) follow statutory retention;
   their anonymisation is explicitly post-pilot.
+
+### Erase-in-place, don't drop the row (DRF-956 / T-05)
+
+The ``BotUser`` row is a *technical shell*, not personal data: it is the
+channel routing key and it is referenced ``on_delete=PROTECT`` by
+``observability.AIRequestMetric``, ``handoff.AdminTask`` and
+``tenancy.StaffAssignment``, and ``on_delete=SET_NULL`` by the statutory
+transactional records (``booking.BookingRequest``). Physically deleting it
+either raises ``ProtectedError`` or destroys the audit/metric trail that
+152-ФЗ itself expects us to keep — so the shell is retained and the
+*identifying values* on it are blanked instead (:data:`_PII_FIELDS`).
+
+``ayla_user_id`` is deliberately **retained**: it is the stable key of the
+person's memory (``UserPersonalContext.user_id``), so it is what the
+``forget_all`` tombstone is recorded against. Unlinking it would orphan
+that tombstone — the next turn would mint a fresh UPC and the erasure
+would silently undo itself — and would make a repeated DELETE report
+``not_linked`` success without ever re-reaching Ayla.
 """
 
 from __future__ import annotations
@@ -35,6 +54,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -91,6 +111,44 @@ def _resolve_ayla_user_id(bot_user: BotUser) -> uuid.UUID | None:
 def _bot_user_ids_for(ayla_user_id: uuid.UUID) -> list[uuid.UUID]:
     """Every BotUser of the person across tenants (memory is global)."""
     return list(BotUser.all_tenants.filter(ayla_user_id=ayla_user_id).values_list("id", flat=True))
+
+
+# The person's own identifying values held on the BotUser shell. Every one
+# is ``blank=True, default=""`` on the model, so the empty string is the
+# schema-sanctioned "no value" — this erasure needs no migration.
+#
+# Deliberately NOT in this set:
+#   ``channel_user_id`` / ``chat_id`` — the channel routing key of the
+#     retained shell; blanking them breaks the natural key
+#     ``(tenant, channel, channel_user_id)`` and orphans the row.
+#   ``ayla_user_id`` — the memory tombstone key (see module docstring).
+_PII_FIELDS: tuple[str, ...] = ("phone", "display_name", "client_name", "avatar_url")
+
+
+def _erase_bot_user_pii(bot_user: BotUser, ayla_user_id: uuid.UUID | None) -> None:
+    """Blank :data:`_PII_FIELDS` on every BotUser shell the person owns.
+
+    Cross-tenant on purpose — the same reach as the memory and consent
+    legs. One person may hold a ``BotUser`` per tenant and the phone is
+    stored on each of them, so erasing only the requesting tenant's row
+    would leave the number readable under a sibling tenant.
+
+    Single UPDATE ⇒ atomic by itself; the explicit block documents the
+    boundary and keeps it atomic if the field set ever grows a second
+    statement.
+    """
+    ids = set(_bot_user_ids_for(ayla_user_id)) if ayla_user_id is not None else set()
+    # The requesting row always counts, even when the person has no Ayla
+    # link — their phone/name live here regardless of upstream linkage.
+    ids.add(bot_user.id)
+
+    with transaction.atomic():
+        BotUser.all_tenants.filter(id__in=ids).update(**dict.fromkeys(_PII_FIELDS, ""))
+
+    # Keep the caller's in-memory instance consistent with the row — the
+    # view must never render a value we just erased.
+    for field_name in _PII_FIELDS:
+        setattr(bot_user, field_name, "")
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +290,16 @@ def delete_personal_data(
         except Exception:  # noqa: BLE001 — per-step isolation
             logger.exception("identity.privacy.consent_withdraw_failed")
             steps.append(DeleteStep("consent_withdraw", False))
+
+    # Step 4 — bot-side profile identifiers on the retained shell. Runs
+    # unconditionally: unlike memory/consents this data is ours alone and
+    # exists whether or not the person was ever linked to Ayla.
+    try:
+        _erase_bot_user_pii(bot_user, ayla_user_id)
+        steps.append(DeleteStep("profile_pii_erase", True))
+    except Exception:  # noqa: BLE001 — per-step isolation, reported below
+        logger.exception("identity.privacy.profile_pii_erase_failed")
+        steps.append(DeleteStep("profile_pii_erase", False))
 
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).

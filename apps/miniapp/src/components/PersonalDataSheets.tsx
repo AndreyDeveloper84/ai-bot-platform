@@ -266,6 +266,7 @@ const FAILED_STEP_LABELS: Record<string, string> = {
   ayla_delete: "удалить данные в основной системе",
   memory_delete: "очистить память",
   consent_withdraw: "отозвать согласия",
+  profile_pii_erase: "очистить контакты и имя в профиле",
 };
 
 function humanizeFailedSteps(steps: string[]): string {

@@ -232,6 +232,7 @@ class TestDelete:
             "ayla_delete",
             "memory_delete",
             "consent_withdraw",
+            "profile_pii_erase",
         }
 
 
@@ -307,3 +308,256 @@ class TestViews:
             401,
             403,
         )
+
+
+# ---------------------------------------------------------------------------
+# DRF-956 / T-05 — profile PII erasure on the confirmed Mini App path
+# ---------------------------------------------------------------------------
+
+_PII = {"phone": "+79991234567", "display_name": "Мария", "client_name": "Маша"}
+
+
+def _with_pii(bu: BotUser) -> BotUser:
+    """Give a shell the three confirmed-blocker PII values + an avatar."""
+    for field_name, value in _PII.items():
+        setattr(bu, field_name, value)
+    bu.avatar_url = "https://cdn.example/u/mariya.jpg"
+    bu.save(update_fields=[*_PII, "avatar_url"])
+    return bu
+
+
+def _make_ai_metric(bu: BotUser):
+    """A PROTECT-ing AIRequestMetric — every real user accumulates these."""
+    from apps.observability.models import AIRequestMetric
+
+    return AIRequestMetric.all_tenants.create(
+        tenant=bu.tenant,
+        bot_user=bu,
+        request_id=uuid.uuid4(),
+        message_text_length=12,
+        latency_total_ms=250,
+        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+    )
+
+
+class TestProfilePiiErase:
+    """The three fields DRF-956 confirmed survive today must not survive."""
+
+    def test_confirmed_delete_erases_phone_name_client_name(self, bot_user) -> None:
+        _with_pii(bot_user)
+
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert result.all_ok
+        bot_user.refresh_from_db()
+        assert bot_user.phone == ""
+        assert bot_user.display_name == ""
+        assert bot_user.client_name == ""
+        assert bot_user.avatar_url == ""
+
+    def test_old_values_do_not_survive_anywhere_on_the_row(self, bot_user) -> None:
+        """Not just "the fields are blank" — the literal old strings are gone."""
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        bot_user.refresh_from_db()
+        row = json.dumps(
+            {
+                "phone": bot_user.phone,
+                "display_name": bot_user.display_name,
+                "client_name": bot_user.client_name,
+                "avatar_url": bot_user.avatar_url,
+                "context": bot_user.context,
+            },
+            ensure_ascii=False,
+        )
+        for value in (*_PII.values(), "mariya"):
+            assert value not in row
+
+    def test_in_memory_instance_is_scrubbed_too(self, bot_user) -> None:
+        """The view renders from the instance — it must not hold stale PII."""
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        # No refresh_from_db() on purpose.
+        assert bot_user.phone == ""
+        assert bot_user.display_name == ""
+        assert bot_user.client_name == ""
+
+    def test_survives_protected_ai_request_metric(self, bot_user) -> None:
+        """The DRF-956 blocker-A crash must not reappear on this path."""
+        from apps.observability.models import AIRequestMetric
+
+        _with_pii(bot_user)
+        metric = _make_ai_metric(bot_user)
+
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert result.all_ok
+        # The metric row survives intact — forensic/billing integrity.
+        metric.refresh_from_db()
+        assert metric.bot_user_id == bot_user.id
+        assert AIRequestMetric.all_tenants.filter(pk=metric.pk).exists()
+        # And the shell it points at is still there, just empty.
+        bot_user.refresh_from_db()
+        assert bot_user.phone == ""
+
+    def test_shell_row_is_retained(self, bot_user) -> None:
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert BotUser.all_tenants.filter(pk=bot_user.pk).exists()
+
+    def test_ayla_binding_retained(self, bot_user, ayla_user_id) -> None:
+        """ayla_user_id is the memory-tombstone key — erasure must keep it."""
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        bot_user.refresh_from_db()
+        assert bot_user.ayla_user_id == ayla_user_id
+        # Channel routing key of the retained shell also survives.
+        assert bot_user.channel_user_id == "12345"
+
+    def test_erases_every_shell_of_the_person_cross_tenant(self, bot_user, ayla_user_id) -> None:
+        """One person, two tenants — the phone lives on both rows."""
+        other = Tenant.objects.create(slug="priv-test-2", name="Other")
+        sibling = _with_pii(
+            BotUser.all_tenants.create(
+                tenant=other,
+                channel="max",
+                channel_user_id="12345",
+                ayla_user_id=ayla_user_id,
+            )
+        )
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        sibling.refresh_from_db()
+        assert sibling.phone == ""
+        assert sibling.display_name == ""
+        assert sibling.client_name == ""
+
+    def test_does_not_touch_another_person(self, tenant, bot_user) -> None:
+        stranger = _with_pii(
+            BotUser.all_tenants.create(
+                tenant=tenant,
+                channel="max",
+                channel_user_id="99999",
+                ayla_user_id=uuid.uuid4(),
+            )
+        )
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        stranger.refresh_from_db()
+        assert stranger.phone == _PII["phone"]
+        assert stranger.display_name == _PII["display_name"]
+        assert stranger.client_name == _PII["client_name"]
+
+    def test_unlinked_user_still_erased(self, tenant) -> None:
+        """No Ayla link ⇒ the other legs no-op, but the phone is still ours."""
+        bu = _with_pii(
+            BotUser.all_tenants.create(
+                tenant=tenant, channel="max", channel_user_id="555", ayla_user_id=None
+            )
+        )
+
+        result = delete_personal_data(bu)
+
+        assert result.all_ok
+        assert result.failed_steps == []
+        bu.refresh_from_db()
+        assert bu.phone == ""
+        assert bu.display_name == ""
+        assert bu.client_name == ""
+
+    def test_repeat_delete_is_idempotent(self, bot_user, ayla_user_id) -> None:
+        _seed_memory(bot_user, ayla_user_id)
+        _with_pii(bot_user)
+        client = _StubPCClient()
+
+        first = delete_personal_data(bot_user, client=client)  # type: ignore[arg-type]
+        second = delete_personal_data(bot_user, client=client)  # type: ignore[arg-type]
+
+        assert first.all_ok and second.all_ok
+        bot_user.refresh_from_db()
+        assert bot_user.phone == ""
+
+    def test_pii_erase_runs_even_when_upstream_fails(self, bot_user) -> None:
+        """A 502 from Ayla must not leave our own copy of the phone behind."""
+        _with_pii(bot_user)
+        client = _StubPCClient(delete_exc=PersonalContextTransportError("http_500"))
+
+        result = delete_personal_data(bot_user, client=client)  # type: ignore[arg-type]
+
+        assert not result.all_ok
+        assert result.failed_steps == ["ayla_delete"]
+        pii_step = next(s for s in result.steps if s.step == "profile_pii_erase")
+        assert pii_step.ok
+        bot_user.refresh_from_db()
+        assert bot_user.phone == ""
+
+    def test_audit_payload_carries_no_pii_values(self, bot_user) -> None:
+        from apps.audit.models import AuditLog
+
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        log = AuditLog.all_tenants.filter(action="privacy.personal_data_deleted").first()
+        assert log is not None
+        blob = json.dumps(log.payload, ensure_ascii=False)
+        for value in _PII.values():
+            assert value not in blob
+        assert "profile_pii_erase" in blob
+
+
+class TestReOnboardingAfterErase:
+    """§8 invariant: the next legitimate contact must not resurrect PII."""
+
+    def test_next_turn_resolves_same_shell_without_restoring_pii(self, settings) -> None:
+        """The live global path supplies only chat_id — nothing to blank-fill."""
+        from apps.identity.services import resolve_or_create_global_bot_user
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        uid = uuid.uuid4()
+        bu = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="reonb-1", ayla_user_id=uid
+        )
+        _with_pii(bu)
+
+        delete_personal_data(bu, client=_StubPCClient())  # type: ignore[arg-type]
+
+        # Next legitimate contact — production passes chat_id only, see
+        # apps/channels/max/handler.py::_handle_global_max_event_inner.
+        again = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="reonb-1", chat_id="reonb-1"
+        )
+
+        assert again.id == bu.id  # same shell, no phantom identity
+        assert again.phone == ""
+        assert again.display_name == ""
+        assert again.client_name == ""
+        # Technical binding intact ⇒ the forget_all tombstone still applies.
+        assert again.ayla_user_id == uid
+
+    def test_erased_user_is_not_locked_out(self, settings) -> None:
+        """C5 erasure is not account closure — deleted_at stays NULL."""
+        from apps.identity.services import resolve_or_create_global_bot_user
+
+        settings.STRICT_TENANT_SCOPE = "strict"
+        bu = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="reonb-2", ayla_user_id=uuid.uuid4()
+        )
+        _with_pii(bu)
+
+        delete_personal_data(bu, client=_StubPCClient())  # type: ignore[arg-type]
+
+        bu.refresh_from_db()
+        assert bu.deleted_at is None

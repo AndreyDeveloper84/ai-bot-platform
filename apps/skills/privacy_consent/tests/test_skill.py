@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 
 import pytest
 
 from apps.audit.models import AuditLog
+from apps.consent.models import ConsentRecord
 from apps.consent.services import grant
 from apps.conversations.models import Conversation, Message
 from apps.events.models import Event
@@ -151,11 +153,64 @@ class TestDataDelete:
         ).first()
         assert ev is not None
 
+    def test_raises_protected_error_on_ai_metric(self, tenant, bot_user):
+        """Locks WHY the chat path no longer calls this (DRF-956 blocker A).
+
+        `delete_bot_user_data` hard-deletes the BotUser row, and
+        `AIRequestMetric.bot_user` is PROTECT — so any user who ever
+        triggered one AI turn cannot be deleted this way. The helper is
+        admin-only now; re-wiring it to a customer surface must first
+        resolve these references.
+        """
+        from django.db.models import ProtectedError
+
+        from apps.observability.models import AIRequestMetric
+
+        AIRequestMetric.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            request_id=uuid.uuid4(),
+            message_text_length=10,
+            latency_total_ms=100,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        )
+        with tenant_scope(tenant), pytest.raises(ProtectedError):
+            data_delete(bot_user)
+
 
 class TestSkillHandle:
-    def test_delete_intent_invokes_data_delete_closes_conversation(
-        self, tenant, bot_user, conversation
-    ):
+    """DRF-956 / T-05 — the chat delete intent is a redirect, not a delete."""
+
+    @pytest.mark.parametrize(
+        "text",
+        ["удалить мои данные", "удали меня", "delete my data", "DELETE ME"],
+    )
+    def test_delete_intent_does_not_mutate(self, tenant, bot_user, conversation, text):
+        """One message must never be enough to erase an account."""
+        Message.all_tenants.create(
+            tenant=tenant, conversation=conversation, role="user", content="msg"
+        )
+        with tenant_scope(tenant):
+            grant(bot_user, consent_type="personal_data", source="reg")
+            result = PrivacyConsentSkill().handle(
+                SkillContext(conversation=conversation, bot_user=bot_user, message_text=text)
+            )
+
+        assert result.should_send is not False
+        # Nothing was touched: user, conversation, messages, consents.
+        bot_user.refresh_from_db()
+        assert bot_user.phone == "+79991234567"
+        assert bot_user.display_name == "Ivan"
+        assert bot_user.deleted_at is None
+        conversation.refresh_from_db()
+        assert conversation.deleted_at is None
+        assert Message.all_tenants.filter(conversation=conversation).count() == 1
+        assert ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, withdrawn_at__isnull=True
+        ).exists()
+
+    def test_delete_intent_does_not_claim_success(self, tenant, bot_user, conversation):
+        """No false success — the reply must say plainly that nothing went."""
         ctx = SkillContext(
             conversation=conversation,
             bot_user=bot_user,
@@ -163,10 +218,67 @@ class TestSkillHandle:
         )
         with tenant_scope(tenant):
             result = PrivacyConsentSkill().handle(ctx)
-        assert result.should_close_conversation is True
-        assert "удалены" in result.reply_text
-        # BotUser actually deleted.
-        assert not BotUser.all_tenants.filter(pk=bot_user.id).exists()
+
+        assert "ничего не удалила" in result.reply_text
+        assert "Мои данные" in result.reply_text  # where the confirmed flow lives
+        assert "удалены" not in result.reply_text
+        assert result.meta["outcome"] == "redirected_to_confirmed_flow"
+        # Conversation stays open — nothing terminal happened.
+        assert result.should_close_conversation is False
+
+    def test_delete_intent_does_not_raise_on_protected_references(
+        self, tenant, bot_user, conversation
+    ):
+        """Blocker A: a user with an AIRequestMetric used to 500 here."""
+        from apps.observability.models import AIRequestMetric
+
+        AIRequestMetric.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user,
+            request_id=uuid.uuid4(),
+            message_text_length=10,
+            latency_total_ms=100,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        )
+        ctx = SkillContext(
+            conversation=conversation,
+            bot_user=bot_user,
+            message_text="удалить мои данные",
+        )
+        with tenant_scope(tenant):
+            result = PrivacyConsentSkill().handle(ctx)  # must not raise
+
+        assert result.reply_text
+        assert BotUser.all_tenants.filter(pk=bot_user.id).exists()
+
+    def test_delete_intent_still_emits_dispatch_event(self, tenant, bot_user, conversation):
+        """Gated ≠ invisible — the privacy request stays observable."""
+        ctx = SkillContext(
+            conversation=conversation,
+            bot_user=bot_user,
+            message_text="удалить мои данные",
+        )
+        with tenant_scope(tenant):
+            PrivacyConsentSkill().handle(ctx)
+
+        ev = Event.objects.filter(
+            tenant=tenant, event_name="skill_dispatched", properties__skill="privacy_consent"
+        ).first()
+        assert ev is not None
+        assert ev.properties["intent"] == "delete"
+
+    def test_no_destructive_tool_event_emitted(self, tenant, bot_user, conversation):
+        ctx = SkillContext(
+            conversation=conversation,
+            bot_user=bot_user,
+            message_text="удалить мои данные",
+        )
+        with tenant_scope(tenant):
+            PrivacyConsentSkill().handle(ctx)
+
+        assert not Event.objects.filter(
+            tenant=tenant, event_name="tool_called", properties__tool="data_delete"
+        ).exists()
 
     def test_export_intent_returns_json_in_reply(self, tenant, bot_user, conversation):
         ctx = SkillContext(
