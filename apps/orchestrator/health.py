@@ -149,7 +149,7 @@ def check_chromadb_auth() -> dict[str, Any]:
             }
 
         port = int(getattr(settings, "CHROMA_HTTP_PORT", 8001))
-        token = str(getattr(settings, "CHROMA_AUTH_TOKEN", "") or "")
+        token = str(getattr(settings, "CHROMA_AUTH_TOKEN", "") or "").strip()
         import httpx
 
         headers = {"Authorization": f"Bearer {token}"} if token else {}

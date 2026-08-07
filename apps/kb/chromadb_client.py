@@ -129,13 +129,13 @@ def _build_chromadb_client() -> Any:
     """
     import chromadb
 
-    host = getattr(settings, "CHROMA_HTTP_HOST", "") or ""
+    host = (getattr(settings, "CHROMA_HTTP_HOST", "") or "").strip()
     if host:
         port = int(getattr(settings, "CHROMA_HTTP_PORT", 8001))
         # M4 (DRF-595) ships Bearer-auth wiring. Until then HTTP client
         # falls back to unauthenticated mode — safe in our isolated
         # docker-compose network.
-        token = getattr(settings, "CHROMA_AUTH_TOKEN", "") or ""
+        token = (getattr(settings, "CHROMA_AUTH_TOKEN", "") or "").strip()
         client_kwargs: dict[str, Any] = {"host": host, "port": port}
         if token:
             from chromadb.config import Settings as ChromaSettings
