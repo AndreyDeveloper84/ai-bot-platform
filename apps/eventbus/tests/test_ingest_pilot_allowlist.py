@@ -55,11 +55,12 @@ TENANT_GHOST = "7e2b9c4d-8a1f-4b3e-a6d2-5c9f1b8e3a7d"
 AYLA_USER_ID = "f1a2b3c4-d5e6-4789-9abc-def012345678"
 APPOINTMENT_ID = "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8"
 
-# The OD-T02-2 + OD-T02-5 pilot event set. Note what is ABSENT:
-# ``booking.rescheduled`` is the repo-local legacy alias and is explicitly
-# NOT part of the pilot scope — ``appointment.rescheduled`` is the canonical
-# cross-repo name. ``booking.confirmed`` was added by PR-T02-2 to close the
-# awaiting-payment reminder lifecycle.
+# The OD-T02-5 pilot event set (extends the original OD-T02-2 three-event set
+# by adding ``booking.confirmed``). Note what is ABSENT: ``booking.rescheduled``
+# is the repo-local legacy alias and is explicitly NOT part of the pilot scope
+# — ``appointment.rescheduled`` is the canonical cross-repo name.
+# ``booking.confirmed`` was added by PR-T02-2 to close the awaiting-payment
+# reminder lifecycle.
 PILOT_EVENTS = frozenset(
     {"booking.created", "booking.confirmed", "booking.cancelled", "appointment.rescheduled"}
 )
