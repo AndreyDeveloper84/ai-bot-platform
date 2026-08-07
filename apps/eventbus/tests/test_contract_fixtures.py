@@ -61,6 +61,22 @@ EVENT_DATA_KEYS = {
         "appointment_id",
         "payment_id",
     },
+    "booking.cancelled.v1.json": {
+        "appointment_id",
+        "cancelled_by",
+        "reason_code",
+        "cancelled_at",
+    },
+    "appointment.rescheduled.v1.json": {
+        "appointment_id",
+        "version",
+        "previous_version",
+        "revision_id",
+        "changed_fields",
+        "actor",
+        "starts_at",
+        "previous_starts_at",
+    },
     "payment.captured.v1.json": {
         "payment_id",
         "appointment_id",
@@ -117,7 +133,20 @@ class TestEventFixturesParse:
         assert set(data) == EVENT_DATA_KEYS[name]
         # Every §3 data value is a string: UUIDs, ISO8601 stamps, decimal
         # strings, enums. A non-string value is a contract break.
-        assert all(isinstance(v, str) for v in data.values())
+        # appointment.rescheduled is intentionally structured (version ints,
+        # changed_fields list, actor object) and is type-checked separately.
+        if name == "appointment.rescheduled.v1.json":
+            assert isinstance(data["appointment_id"], str)
+            assert isinstance(data["version"], int)
+            assert isinstance(data["previous_version"], int)
+            assert isinstance(data["revision_id"], str)
+            assert isinstance(data["changed_fields"], list)
+            assert all(isinstance(field, str) for field in data["changed_fields"])
+            assert isinstance(data["actor"], dict)
+            assert isinstance(data["starts_at"], str)
+            assert isinstance(data["previous_starts_at"], str)
+        else:
+            assert all(isinstance(v, str) for v in data.values())
 
 
 class TestRecommendationsRequestShape:

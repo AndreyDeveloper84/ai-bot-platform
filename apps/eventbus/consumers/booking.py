@@ -77,6 +77,46 @@ _REMINDER_OFFSETS: Final[tuple[tuple[str, timedelta], ...]] = (
 )
 
 
+class UnknownBookingStatusError(ValueError):
+    """``booking.created`` carried a status outside the closed enum."""
+
+
+class BookingConfirmedPendingProxyError(ValueError):
+    """``booking.confirmed`` arrived before the proxy exists."""
+
+
+class BookingCancelledPendingProxyError(ValueError):
+    """``booking.cancelled`` arrived before the proxy exists."""
+
+
+def normalize_booking_created_status(raw_status: object) -> str:
+    """Map producer booking.created status values to the BOT enum.
+
+    Raises UnknownBookingStatusError for any value that is not a string
+    or not one of the four contracted strings.
+    """
+    if not isinstance(raw_status, str):
+        raise UnknownBookingStatusError(
+            f"Unknown booking.created status type: {type(raw_status).__name__}"
+        )
+
+    mapping = {
+        "awaiting_payment": RemoteBookingProxy.Status.PENDING_PAYMENT,
+        "pending_payment": RemoteBookingProxy.Status.PENDING_PAYMENT,
+        "confirmed": RemoteBookingProxy.Status.CONFIRMED,
+        "tentative": RemoteBookingProxy.Status.TENTATIVE,
+    }
+    try:
+        return mapping[raw_status]
+    except KeyError as exc:
+        raise UnknownBookingStatusError(f"Unknown booking.created status: {raw_status!r}") from exc
+
+
+def _is_reminder_eligible(status: str) -> bool:
+    """Reminders are only created for confirmed bookings."""
+    return status == RemoteBookingProxy.Status.CONFIRMED
+
+
 # ─── helpers ───────────────────────────────────────────────────────────────
 
 
@@ -202,8 +242,6 @@ def _schedule_reminders(
                 # Names are looked up via the catalog mirror on send.
                 "master_name": "",
                 "service_name": "",
-                "sent_at": None,
-                "replied_at": None,
             },
         )
 
@@ -287,8 +325,24 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
     start_at = _parse_iso(data["start_at"])
     end_at = _parse_iso(data["end_at"])
 
-    # Resolve channel-side BotUser FIRST so we know whether the proxy
-    # is linked or orphan before the upsert fires.
+    # Validate/normalize the producer status before doing any lookup work.
+    # An unknown status raises early, leaving no side-effects behind.
+    raw_status = data.get("status")
+    normalized_status = normalize_booking_created_status(raw_status)
+
+    if raw_status != normalized_status:
+        logger.info(
+            "eventbus.consumer.booking.created.status_normalized "
+            "event_id=%s appointment_id=%s tenant_id=%s raw_status=%s normalized_status=%s",
+            envelope.event_id,
+            data.get("appointment_id"),
+            envelope.tenant_id,
+            raw_status,
+            normalized_status,
+        )
+
+    # Resolve channel-side BotUser so we know whether the proxy is
+    # linked or orphan before the upsert fires.
     bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
 
     create_defaults = {
@@ -296,7 +350,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         "bot_user": bot_user,  # may be None — orphan proxy
         "start_at": start_at,
         "end_at": end_at,
-        "status": data["status"],
+        "status": normalized_status,
         "source": data.get("source", ""),
         "service_id": UUID(data["service_id"]) if data.get("service_id") else None,
         "specialist_id": (UUID(data["specialist_id"]) if data.get("specialist_id") else None),
@@ -332,12 +386,13 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(**update_fields)
 
     if bot_user is not None:
-        _schedule_reminders(
-            tenant=tenant,
-            bot_user=bot_user,
-            appointment_id=appointment_id,
-            start_at=start_at,
-        )
+        if _is_reminder_eligible(normalized_status):
+            _schedule_reminders(
+                tenant=tenant,
+                bot_user=bot_user,
+                appointment_id=appointment_id,
+                start_at=start_at,
+            )
         _touch_conversation_last_booking(
             bot_user=bot_user,
             tenant=tenant,
@@ -345,10 +400,9 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         )
     else:
         logger.info(
-            "eventbus.consumer.booking.created.orphan_proxy "
-            "user_id=%s appointment_id=%s — awaiting BotUser backfill signal",
-            envelope.user_id,
+            "eventbus.consumer.booking.created.orphan_proxy appointment_id=%s status=%s",
             appointment_id,
+            normalized_status,
         )
 
     # Analytics fan-out — apps/events/ snake_case bus (§3.1 step 3).
@@ -356,7 +410,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         "booking_created",
         properties={
             "appointment_id": str(appointment_id),
-            "status": data["status"],
+            "status": normalized_status,
             "source": data.get("source", ""),
             "start_at": data["start_at"],
         },
@@ -368,8 +422,19 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
 
     Steps:
       1. Verify tenant authorization.
-      2. Update RemoteBookingProxy.status = cancelled.
+      2. Lock the :class:`RemoteBookingProxy` row and update
+         ``status = cancelled`` plus ``last_synced_event_id`` via
+         ``proxy.save()`` so ``synced_at`` (``auto_now``) advances.
       3. Cancel all PENDING reminders for this appointment.
+
+    Idempotency: if the proxy's ``last_synced_event_id`` already matches
+    ``envelope.event_id`` the handler returns early (no state change).
+
+    Missing proxy: raises :class:`BookingCancelledPendingProxyError`, a
+    retryable failure — the dispatcher rolls back and Ayla will redeliver
+    until ``booking.created`` creates the proxy (or the retry threshold
+    sends the event to the DLQ). This is the terminal handler path for a
+    cancellation that arrives out-of-order; there is no silent no-op.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -384,7 +449,11 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
         )
         return
 
-    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+    proxy = (
+        RemoteBookingProxy.all_tenants.select_for_update()
+        .filter(appointment_id=appointment_id)
+        .first()
+    )
 
     # N-Adv2: tenant guard FIRST, BEFORE the idempotency short-circuit.
     _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
@@ -398,30 +467,22 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
         )
         return
 
-    # N-Adv1 Variant B: out-of-order cancelled-before-created is
-    # DROPPED, not stubbed. Writing a stub would let a spoofer "claim"
-    # an appointment_id under their tenant before the legitimate
-    # ``booking.created`` arrives — the legitimate create would then
-    # hit the cross-tenant guard and dead-letter, which is a denial
-    # of service from B against A. §3.2 says cancelled is idempotent
-    # and may arrive out-of-order; "idempotent" means same final
-    # state on N deliveries, not that a stub must be written. Drop
-    # + Ayla retry on (created → cancelled) sequence converges on
-    # status=CANCELLED naturally.
     if proxy is None:
-        logger.info(
-            "eventbus.consumer.booking.cancelled.out_of_order_dropped "
-            "appointment_id=%s event_id=%s — awaiting Ayla retry "
-            "post-created (cancelled-before-created sequence)",
+        logger.warning(
+            "eventbus.consumer.booking.cancelled.pending_proxy "
+            "appointment_id=%s event_id=%s tenant_id=%s",
             appointment_id,
             envelope.event_id,
+            tenant.id,
         )
-        return
+        raise BookingCancelledPendingProxyError(
+            f"appointment {appointment_id}: no RemoteBookingProxy yet for booking.cancelled "
+            f"(event_id={envelope.event_id})"
+        )
 
-    RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
-        status=RemoteBookingProxy.Status.CANCELLED,
-        last_synced_event_id=envelope.event_id,
-    )
+    proxy.status = RemoteBookingProxy.Status.CANCELLED
+    proxy.last_synced_event_id = envelope.event_id
+    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
 
     _cancel_reminders(appointment_id=appointment_id)
 
@@ -967,16 +1028,14 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     """``booking.confirmed`` — appointment moved to ``confirmed`` (B1).
 
     Emitted by Ayla when an appointment is confirmed (typically once
-    payment is captured). Canonical ``data``: ``appointment_id`` +
-    ``payment_id`` (the Ayla emitter currently sends ``booking_id`` —
-    tracked for migration in issue #945). booking.confirmed is a v1
-    contract extension beyond the original 12 events (issue #946).
+    payment is captured). Idempotently flips the proxy to ``confirmed``
+    and ensures reminders exist. Missing proxy is a retryable failure;
+    a late confirm after cancellation is a no-op because ``cancelled``
+    is a terminal state for the pilot.
 
-    Side-effect: idempotently flip ``RemoteBookingProxy.status`` to
-    ``confirmed``. Same canonical shape as the other booking handlers:
-    tenant guard first, then idempotency short-circuit, then an
-    upsert-shaped UPDATE. No reminder change — confirming doesn't move
-    ``start_at``, so the T-24h/T-2h rows from booking.created stand.
+    Side-effect: if ``data.payment_id`` is present, the handler also
+    upserts the payment mirror via ``upsert_payment_mirror`` so the
+    local copy stays in sync with the Ayla payment state.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -991,13 +1050,28 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
         )
         return
 
-    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+    proxy = (
+        RemoteBookingProxy.all_tenants.select_for_update()
+        .filter(appointment_id=appointment_id)
+        .first()
+    )
 
-    # N-Adv2: tenant guard FIRST, BEFORE the idempotency short-circuit.
     _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
 
-    # Defence-in-depth idempotency short-circuit.
-    if proxy is not None and proxy.last_synced_event_id == envelope.event_id:
+    if proxy is None:
+        logger.warning(
+            "eventbus.consumer.booking.confirmed.pending_proxy "
+            "appointment_id=%s event_id=%s tenant_id=%s",
+            appointment_id,
+            envelope.event_id,
+            tenant.id,
+        )
+        raise BookingConfirmedPendingProxyError(
+            f"appointment {appointment_id}: no RemoteBookingProxy yet for booking.confirmed "
+            f"(event_id={envelope.event_id})"
+        )
+
+    if proxy.last_synced_event_id == envelope.event_id:
         logger.info(
             "eventbus.consumer.booking.confirmed.replay_skipped appointment_id=%s event_id=%s",
             appointment_id,
@@ -1005,15 +1079,28 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
         )
         return
 
-    RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
-        status=RemoteBookingProxy.Status.CONFIRMED,
-        last_synced_event_id=envelope.event_id,
-    )
+    if proxy.status == RemoteBookingProxy.Status.CANCELLED:
+        logger.info(
+            "eventbus.consumer.booking.confirmed.after_cancelled_noop "
+            "appointment_id=%s event_id=%s",
+            appointment_id,
+            envelope.event_id,
+        )
+        return
 
-    # C7.3: booking.confirmed carrying a payment_id is the pilot's HOLD
-    # signal (no separate payment.authorized event) — stamp the read
-    # model so customer BookingItem can show «зарезервировано». Without
-    # a payment_id the booking is prepay-free: no payment row at all.
+    proxy.status = RemoteBookingProxy.Status.CONFIRMED
+    proxy.last_synced_event_id = envelope.event_id
+    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
+
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    if bot_user is not None:
+        _schedule_reminders(
+            tenant=tenant,
+            bot_user=bot_user,
+            appointment_id=appointment_id,
+            start_at=proxy.start_at,
+        )
+
     if data.get("payment_id"):
         from apps.eventbus.consumers.payment import upsert_payment_mirror
 

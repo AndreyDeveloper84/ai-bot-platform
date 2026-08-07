@@ -153,6 +153,7 @@ const BACKEND_ALIAS_MAP: Record<string, CustomerVisibleStatus> = {
   // C7 online path (payment created, not yet captured)
   awaiting_payment: "awaiting_payment",
   payment_pending: "awaiting_payment",
+  pending_payment: "awaiting_payment",
 
   // rescheduled
   rescheduled: "rescheduled",

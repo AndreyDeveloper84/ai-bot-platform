@@ -47,6 +47,8 @@ MANIFEST_PATH = CONTRACTS_DIR / "MANIFEST.sha256"
 EVENT_FIXTURES = (
     "booking.created.v1.json",
     "booking.confirmed.v1.json",
+    "booking.cancelled.v1.json",
+    "appointment.rescheduled.v1.json",
     "payment.captured.v1.json",
     "payment.failed.v1.json",
 )

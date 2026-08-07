@@ -88,6 +88,7 @@ ALLOWED_ENUM_VALUES: Final[frozenset[str]] = frozenset(
         # booking.created.status
         "confirmed",
         "pending_payment",
+        "awaiting_payment",
         "tentative",
         # booking.created.source
         "mobile_app",
