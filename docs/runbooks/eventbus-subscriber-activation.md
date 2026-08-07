@@ -157,11 +157,19 @@ element, a stray trailing comma or a wildcard raises `ImproperlyConfigured`
 at settings load — the app refuses to boot rather than start with a
 half-parsed allowlist. Nothing about a parse error ever widens access.
 
-**Example configuration** (one pilot tenant, the OD-T02-2 event set):
+**Owner decision OD-T02-5.** The controlled pilot ingests four events,
+not three. `booking.confirmed` is included because PR-T02-2 moved
+reminder scheduling from `booking.created` to `booking.confirmed`; without
+it, online bookings that start as `awaiting_payment` would never receive
+reminders, and every `booking.confirmed` would be rejected, retried, and
+dead-lettered. The owner explicitly accepted the wider ingest surface
+(4 of 18 contract event names) for the pilot.
+
+**Example configuration** (one pilot tenant, the OD-T02-5 event set):
 
 ```bash
 EVENT_INGEST_ALLOWED_TENANTS=9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c
-EVENT_INGEST_ALLOWED_EVENTS=booking.created,booking.cancelled,appointment.rescheduled
+EVENT_INGEST_ALLOWED_EVENTS=booking.created,booking.confirmed,booking.cancelled,appointment.rescheduled
 ```
 
 Note `booking.rescheduled` is **not** in the pilot set — it is the
@@ -212,13 +220,13 @@ Consequences to plan for:
 - **Coordinate rollback with the Ayla on-call.** Silence or expect the
   `ayla-events` alerts for the duration.
 - **The same applies to any event outside the pilot event set.** The
-  OD-T02-2 set (`booking.created`, `booking.cancelled`,
-  `appointment.rescheduled`) is 3 of the 18 contract event names. If Ayla
+  OD-T02-5 set (`booking.created`, `booking.confirmed`, `booking.cancelled`,
+  `appointment.rescheduled`) is 4 of the 18 contract event names. If Ayla
   emits `payment.*`, `review.created`, `service.updated`,
-  `master.schedule.updated`, `booking.confirmed`, `booking.completed` or
-  `booking.no_show` for an allowlisted pilot tenant, each one burns the
-  retry budget and dead-letters. Confirm with the owner that the pilot
-  event set matches what Ayla actually publishes **before** rollout.
+  `master.schedule.updated`, `booking.completed` or `booking.no_show` for an
+  allowlisted pilot tenant, each one burns the retry budget and
+  dead-letters. Confirm with the owner that the pilot event set matches
+  what Ayla actually publishes **before** rollout.
 
 `event_not_allowed` / `tenant_not_allowed` are configuration-permanent — a
 retry can never succeed — so §6.3 arguably wants a 4xx here rather than 500.
