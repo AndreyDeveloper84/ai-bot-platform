@@ -25,10 +25,21 @@ therefore hit ``ProtectedError`` — the request 500'd *after* the
 
 Erasure needs a confirmation the chat channel cannot express (there is no
 reusable two-step confirmation primitive for free-text turns, and Pilot is
-not the place to invent one). The Mini App already ships that
-confirmation, so the chat trigger now routes there and states plainly that
+not the place to invent one). The Mini App ships a two-step confirmation
+sheet, so the chat trigger now routes there and states plainly that
 nothing was deleted. See ``apps/identity/services/privacy.py`` for the
 cascade the Mini App runs.
+
+.. warning::
+
+   The Mini App's confirmation for the C5 flow is **client-side only** —
+   ``DELETE /api/v1/customer/me/personal-data/`` performs no server-side
+   confirmation check, unlike the legacy ``POST /me/delete``, which
+   validates ``DELETE_CONFIRMATION_TOKEN`` in
+   ``apps.identity.services.profile``. Gating the chat closes the
+   unconfirmed *chat* path; it does not by itself make the destination
+   server-confirmed. Raised as a pre-pilot owner decision (it changes a
+   frozen contract endpoint + its client), tracked on DRF-956.
 
 ### Why this skill ships first
 

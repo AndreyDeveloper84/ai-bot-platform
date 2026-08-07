@@ -13,6 +13,7 @@ import hmac
 import json
 import time as time_module
 import uuid
+from datetime import date
 from urllib.parse import urlencode
 
 import pytest
@@ -322,7 +323,10 @@ def _with_pii(bu: BotUser) -> BotUser:
     for field_name, value in _PII.items():
         setattr(bu, field_name, value)
     bu.avatar_url = "https://cdn.example/u/mariya.jpg"
-    bu.save(update_fields=[*_PII, "avatar_url"])
+    # Real content in `context` too, so the "nothing survives" assertion
+    # below is checking something rather than an always-empty dict.
+    bu.context = {"referred_by_name": "Маша", "note": _PII["phone"]}
+    bu.save(update_fields=[*_PII, "avatar_url", "context"])
     return bu
 
 
@@ -442,6 +446,54 @@ class TestProfilePiiErase:
         assert sibling.display_name == ""
         assert sibling.client_name == ""
 
+    def test_erases_unlinked_sibling_shell(self, bot_user) -> None:
+        """The production case: sibling shell with ayla_user_id NULL.
+
+        Nothing in production writes ``BotUser.ayla_user_id``, and the Mini
+        App resolves a different tenant's shell than the chat does. Keyed on
+        ``ayla_user_id`` alone this row would keep the phone while the API
+        reported "deleted".
+        """
+        sentinel = Tenant.objects.create(slug="global-bot-like", name="Global")
+        sibling = _with_pii(
+            BotUser.all_tenants.create(
+                tenant=sentinel,
+                channel="max",
+                channel_user_id="12345",  # same channel account
+                ayla_user_id=None,  # never linked — the production state
+            )
+        )
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        sibling.refresh_from_db()
+        assert sibling.phone == ""
+        assert sibling.display_name == ""
+        assert sibling.client_name == ""
+
+    def test_erases_preferences(self, tenant, bot_user) -> None:
+        """allergies is free-text health data; the sheet promises «настройки»."""
+        from apps.identity.models import UserPreferences
+
+        UserPreferences.all_tenants.create(
+            bot_user=bot_user,
+            tenant=tenant,
+            allergies="аллергия на латекс",
+            birthday_date=date(1990, 5, 17),
+        )
+        _with_pii(bot_user)
+
+        delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert not UserPreferences.all_tenants.filter(bot_user_id=bot_user.id).exists()
+        # And it is not readable through the profile surface either.
+        from apps.identity.services.profile import get_profile
+
+        snap = get_profile(bot_user)
+        assert snap.preferences["allergies"] == ""
+        assert snap.preferences["birthday_date"] is None
+
     def test_does_not_touch_another_person(self, tenant, bot_user) -> None:
         stranger = _with_pii(
             BotUser.all_tenants.create(
@@ -461,7 +513,16 @@ class TestProfilePiiErase:
         assert stranger.client_name == _PII["client_name"]
 
     def test_unlinked_user_still_erased(self, tenant) -> None:
-        """No Ayla link ⇒ the other legs no-op, but the phone is still ours."""
+        """No Ayla link ⇒ the other legs no-op, but the phone is still ours.
+
+        NOTE the asymmetry this pins: steps 1-3 report ``not_linked``
+        success without doing anything, because they are keyed on
+        ``ayla_user_id``. That is pre-existing C5 behaviour and is a known
+        pre-pilot gap (a NULL-linked user CAN hold ConsentRecord rows, which
+        `withdraw_personal_data` then never reaches) — it is recorded here so
+        the gap is visible in the suite rather than implied to be correct.
+        Step 4 is the part this PR makes unconditional.
+        """
         bu = _with_pii(
             BotUser.all_tenants.create(
                 tenant=tenant, channel="max", channel_user_id="555", ayla_user_id=None
@@ -470,22 +531,38 @@ class TestProfilePiiErase:
 
         result = delete_personal_data(bu)
 
-        assert result.all_ok
-        assert result.failed_steps == []
+        pii_step = next(s for s in result.steps if s.step == "profile_pii_erase")
+        assert pii_step.ok
+        assert not pii_step.detail  # ran for real, not "not_linked"
+        # Pre-existing gap, asserted so a future fix trips this test loudly.
+        assert [s.detail for s in result.steps if s.step != "profile_pii_erase"] == [
+            "not_linked",
+            "not_linked",
+            "not_linked",
+        ]
         bu.refresh_from_db()
         assert bu.phone == ""
         assert bu.display_name == ""
         assert bu.client_name == ""
 
     def test_repeat_delete_is_idempotent(self, bot_user, ayla_user_id) -> None:
+        """Second pass sees a real upstream 404, as production would."""
         _seed_memory(bot_user, ayla_user_id)
         _with_pii(bot_user)
-        client = _StubPCClient()
 
+        class _GoneOnRepeat(_StubPCClient):
+            def delete_personal_data(self, *, ayla_user_id: str) -> None:
+                already = ("delete", ayla_user_id) in self.calls
+                self.calls.append(("delete", ayla_user_id))
+                if already:
+                    raise PersonalContextNotFoundError("gone")
+
+        client = _GoneOnRepeat()
         first = delete_personal_data(bot_user, client=client)  # type: ignore[arg-type]
         second = delete_personal_data(bot_user, client=client)  # type: ignore[arg-type]
 
         assert first.all_ok and second.all_ok
+        assert next(s for s in second.steps if s.step == "ayla_delete").detail == "already_deleted"
         bot_user.refresh_from_db()
         assert bot_user.phone == ""
 

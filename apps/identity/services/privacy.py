@@ -122,33 +122,71 @@ def _bot_user_ids_for(ayla_user_id: uuid.UUID) -> list[uuid.UUID]:
 #     retained shell; blanking them breaks the natural key
 #     ``(tenant, channel, channel_user_id)`` and orphans the row.
 #   ``ayla_user_id`` — the memory tombstone key (see module docstring).
+#
+# ``context`` is blanked alongside these (it is ``default=dict``), for
+# parity with the legacy confirmed path.
 _PII_FIELDS: tuple[str, ...] = ("phone", "display_name", "client_name", "avatar_url")
 
 
-def _erase_bot_user_pii(bot_user: BotUser, ayla_user_id: uuid.UUID | None) -> None:
-    """Blank :data:`_PII_FIELDS` on every BotUser shell the person owns.
+def _person_shell_ids(bot_user: BotUser, ayla_user_id: uuid.UUID | None) -> set[uuid.UUID]:
+    """Every BotUser shell that is the same human as ``bot_user``.
 
-    Cross-tenant on purpose — the same reach as the memory and consent
-    legs. One person may hold a ``BotUser`` per tenant and the phone is
-    stored on each of them, so erasing only the requesting tenant's row
-    would leave the number readable under a sibling tenant.
+    Two keys, because neither alone is sufficient:
 
-    Single UPDATE ⇒ atomic by itself; the explicit block documents the
-    boundary and keeps it atomic if the field set ever grows a second
-    statement.
+    * ``ayla_user_id`` — the canonical person key, but it is **NULL on
+      most production rows today**. Nothing writes it: the only writer is
+      :func:`~apps.identity.services.resolver.resolve_or_create_global_bot_user`
+      via an explicit argument, and no production call site passes one
+      (``apps/channels/max/handler.py`` passes ``chat_id`` only); every
+      eventbus consumer merely *filters* on it.
+    * ``(channel, channel_user_id)`` — the channel account. This is what
+      actually links a person's shells in the pilot: the Mini App resolves
+      the shell under ``MAX_BOT_TENANT_SLUG`` while the chat resolves the
+      one under the ``global_bot`` sentinel tenant, and those are two rows
+      by ``unique_together (tenant, channel, channel_user_id)``.
+
+    Keyed on ``ayla_user_id`` alone this erase would silently miss the
+    user's other shell — i.e. it would report success while leaving the
+    phone readable on the row the bot actually talks to.
     """
-    ids = set(_bot_user_ids_for(ayla_user_id)) if ayla_user_id is not None else set()
-    # The requesting row always counts, even when the person has no Ayla
-    # link — their phone/name live here regardless of upstream linkage.
-    ids.add(bot_user.id)
+    ids = {bot_user.id}
+    if ayla_user_id is not None:
+        ids.update(_bot_user_ids_for(ayla_user_id))
+    ids.update(
+        BotUser.all_tenants.filter(
+            channel=bot_user.channel, channel_user_id=bot_user.channel_user_id
+        ).values_list("id", flat=True)
+    )
+    return ids
+
+
+def _erase_bot_user_pii(bot_user: BotUser, ayla_user_id: uuid.UUID | None) -> None:
+    """Blank the person's identifiers on every shell they own + drop prefs.
+
+    Cross-tenant on purpose — the same person may hold a ``BotUser`` per
+    tenant and the phone is stored on each of them, so erasing only the
+    requesting tenant's row would leave the number readable elsewhere.
+
+    ``UserPreferences`` goes too, matching what the legacy confirmed path
+    (:func:`apps.identity.services.profile.soft_delete_user`) already did:
+    ``allergies`` is free-text health data and ``birthday_date`` is a
+    direct identifier, and the delete sheet promises the customer that
+    their «персональные настройки» are removed. ``get_profile`` recreates
+    a default row on the next read, so nothing downstream breaks.
+    """
+    from apps.identity.models import UserPreferences
+
+    ids = _person_shell_ids(bot_user, ayla_user_id)
 
     with transaction.atomic():
-        BotUser.all_tenants.filter(id__in=ids).update(**dict.fromkeys(_PII_FIELDS, ""))
+        BotUser.all_tenants.filter(id__in=ids).update(context={}, **dict.fromkeys(_PII_FIELDS, ""))
+        UserPreferences.all_tenants.filter(bot_user_id__in=ids).delete()
 
     # Keep the caller's in-memory instance consistent with the row — the
     # view must never render a value we just erased.
     for field_name in _PII_FIELDS:
         setattr(bot_user, field_name, "")
+    bot_user.context = {}
 
 
 # ---------------------------------------------------------------------------
@@ -291,9 +329,10 @@ def delete_personal_data(
             logger.exception("identity.privacy.consent_withdraw_failed")
             steps.append(DeleteStep("consent_withdraw", False))
 
-    # Step 4 — bot-side profile identifiers on the retained shell. Runs
-    # unconditionally: unlike memory/consents this data is ours alone and
-    # exists whether or not the person was ever linked to Ayla.
+    # Step 4 — bot-side profile identifiers + preferences on the retained
+    # shells. Runs unconditionally and is keyed on the channel account as
+    # well as ``ayla_user_id``: unlike memory/consents this data is ours
+    # alone and exists whether or not the person was ever linked to Ayla.
     try:
         _erase_bot_user_pii(bot_user, ayla_user_id)
         steps.append(DeleteStep("profile_pii_erase", True))
