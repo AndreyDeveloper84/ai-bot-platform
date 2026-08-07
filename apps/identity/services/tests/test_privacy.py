@@ -292,7 +292,7 @@ class TestExportPersonLevelResolution:
         client = _StubPCClient()
 
         with pytest.raises(PrivacyIdentityConflictError):
-            export_personal_data(requesting, client=client)
+            export_personal_data(requesting, client=client)  # type: ignore[arg-type]
 
         assert client.calls == []
 
@@ -312,7 +312,7 @@ class TestExportPersonLevelResolution:
         _seed_memory(BotUser.all_tenants.get(ayla_user_id=id_a), id_a)
 
         with pytest.raises(PrivacyIdentityConflictError):
-            export_personal_data(requesting, client=_StubPCClient())
+            export_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
 
         # Candidate memory must remain untouched.
         assert MemoryEntry.objects.filter(user_id=id_a, soft_deleted_at__isnull=True).exists()
