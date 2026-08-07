@@ -132,11 +132,18 @@ async def _ping_redis() -> None:
 
 
 async def _ping_chromadb() -> None:
-    """HTTP heartbeat on chromadb."""
+    """HTTP heartbeat on chromadb.
+
+    Empty/whitespace-only CHROMA_HTTP_HOST (local dev / tests using
+    PersistentClient) short-circuits to ok=True — no remote to probe.
+    """
 
     import httpx
 
-    host = getattr(settings, "CHROMA_HTTP_HOST", "localhost")
+    host = str(getattr(settings, "CHROMA_HTTP_HOST", "") or "").strip()
+    if not host:
+        return
+
     port = getattr(settings, "CHROMA_HTTP_PORT", 8000)
     url = f"http://{host}:{port}/api/v2/heartbeat"
     async with httpx.AsyncClient(timeout=1.0) as client:

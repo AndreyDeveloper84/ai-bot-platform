@@ -139,7 +139,7 @@ def check_chromadb_auth() -> dict[str, Any]:
     try:
         from django.conf import settings
 
-        host = str(getattr(settings, "CHROMA_HTTP_HOST", "") or "")
+        host = str(getattr(settings, "CHROMA_HTTP_HOST", "") or "").strip()
         if not host:
             return {
                 "ok": True,
