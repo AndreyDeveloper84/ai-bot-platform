@@ -1624,7 +1624,11 @@ def personal_data_export(request: HttpRequest) -> HttpResponse:
     Delivered as an attachment (per contract). 502 when the Ayla leg
     fails — a silently-incomplete export is a compliance lie.
     """
-    from apps.identity.services.privacy import PrivacyUpstreamError, export_personal_data
+    from apps.identity.services.privacy import (
+        PrivacyIdentityConflictError,
+        PrivacyUpstreamError,
+        export_personal_data,
+    )
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     try:
@@ -1633,6 +1637,12 @@ def personal_data_export(request: HttpRequest) -> HttpResponse:
         return _error(
             "upstream_unavailable",
             "personal-data export is temporarily unavailable, try again later",
+            502,
+        )
+    except PrivacyIdentityConflictError:
+        return _error(
+            "identity_conflict",
+            "person identity conflict: cannot determine canonical subject",
             502,
         )
     response = JsonResponse(payload)
