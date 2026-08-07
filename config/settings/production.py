@@ -59,7 +59,7 @@ if not SENTRY_DSN:
 # present a matching ``CHROMA_AUTH_TOKEN`` on every request. A missing
 # value here would silently downgrade to anonymous and the FAQ skill
 # would start serving 401s — fail fast on boot instead.
-CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
+CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "").strip()
 if not CHROMA_AUTH_TOKEN:
     raise ImproperlyConfigured(
         "CHROMA_AUTH_TOKEN is required in production. "

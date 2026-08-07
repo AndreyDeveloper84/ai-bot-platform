@@ -1138,9 +1138,13 @@ SHADOW_GROUND_TRUTH_PATH = os.environ.get("SHADOW_GROUND_TRUTH_PATH", "")
 # unauthenticated against a same-network container). Production is the
 # only environment that must have a non-empty value — enforced in
 # :mod:`config.settings.production`.
-CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "")
+#
+# Both host and token are stripped at import time so probes and the
+# actual client see a single normalized value; whitespace-only input
+# is treated as intentionally unset (embedded mode / no auth).
+CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "").strip()
 CHROMA_HTTP_PORT = int(os.environ.get("CHROMA_HTTP_PORT", "8001"))
-CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "")
+CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "").strip()
 
 # S3/minio endpoint — exposed as a settings attribute so the readyz
 # minio probe (apps/orchestrator/views.py) checks the configured
