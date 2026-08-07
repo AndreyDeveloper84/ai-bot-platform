@@ -161,8 +161,12 @@ half-parsed allowlist. Nothing about a parse error ever widens access.
 
 ```bash
 EVENT_INGEST_ALLOWED_TENANTS=9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c
-EVENT_INGEST_ALLOWED_EVENTS=booking.created,booking.cancelled,appointment.rescheduled
+EVENT_INGEST_ALLOWED_EVENTS=booking.created,booking.confirmed,booking.cancelled,appointment.rescheduled
 ```
+
+`booking.confirmed` is required for the awaiting-payment lifecycle: it
+is the event that flips the proxy to `confirmed` and triggers reminder
+scheduling (PR-T02-2, OD-T02-5).
 
 Note `booking.rescheduled` is **not** in the pilot set — it is the
 repo-local legacy alias; `appointment.rescheduled` is the canonical

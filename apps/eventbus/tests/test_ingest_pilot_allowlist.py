@@ -55,10 +55,14 @@ TENANT_GHOST = "7e2b9c4d-8a1f-4b3e-a6d2-5c9f1b8e3a7d"
 AYLA_USER_ID = "f1a2b3c4-d5e6-4789-9abc-def012345678"
 APPOINTMENT_ID = "b8d3e4f5-1c2d-4e6f-8a9b-c3d4e5f6a7b8"
 
-# The OD-T02-2 pilot event set. Note what is ABSENT: ``booking.rescheduled``
-# is the repo-local legacy alias and is explicitly NOT part of the pilot
-# scope — ``appointment.rescheduled`` is the canonical cross-repo name.
-PILOT_EVENTS = frozenset({"booking.created", "booking.cancelled", "appointment.rescheduled"})
+# The OD-T02-2 + OD-T02-5 pilot event set. Note what is ABSENT:
+# ``booking.rescheduled`` is the repo-local legacy alias and is explicitly
+# NOT part of the pilot scope — ``appointment.rescheduled`` is the canonical
+# cross-repo name. ``booking.confirmed`` was added by PR-T02-2 to close the
+# awaiting-payment reminder lifecycle.
+PILOT_EVENTS = frozenset(
+    {"booking.created", "booking.confirmed", "booking.cancelled", "appointment.rescheduled"}
+)
 
 
 def _envelope(
@@ -176,7 +180,7 @@ class TestEventAllowlistParsing:
         assert parse_event_allowlist(None) == frozenset()
 
     def test_pilot_set(self) -> None:
-        raw = "booking.created,booking.cancelled,appointment.rescheduled"
+        raw = "booking.created,booking.confirmed,booking.cancelled,appointment.rescheduled"
         assert parse_event_allowlist(raw) == PILOT_EVENTS
 
     def test_whitespace_trimmed_and_duplicates_collapsed(self) -> None:
@@ -524,7 +528,7 @@ class TestEventRejection:
     @pytest.mark.parametrize(
         "event_name",
         [
-            "booking.confirmed",
+            # booking.confirmed is now part of the pilot set (OD-T02-5).
             "booking.completed",
             "booking.no_show",
             "payment.captured",
@@ -809,7 +813,7 @@ class TestCrossTenantIsolation:
             "service_id": "2e6b9c1d-7a4f-4b3e-9d8c-1a2b3c4d5e6f",
             "start_at": start_at,
             "end_at": "2026-08-20T11:00:00+00:00",
-            "status": "pending",
+            "status": "pending_payment",
             "price_total": "1800.00",
             "source": "bot",
         }
@@ -915,7 +919,7 @@ class TestDedupeSemantics:
                 "service_id": "2e6b9c1d-7a4f-4b3e-9d8c-1a2b3c4d5e6f",
                 "start_at": "2026-08-20T10:00:00+00:00",
                 "end_at": "2026-08-20T11:00:00+00:00",
-                "status": "pending",
+                "status": "pending_payment",
                 "price_total": "1800.00",
                 "source": "bot",
             },
@@ -1130,7 +1134,7 @@ class TestAllowlistThroughTheHttpView:
                 "service_id": "2e6b9c1d-7a4f-4b3e-9d8c-1a2b3c4d5e6f",
                 "start_at": "2026-08-20T10:00:00+00:00",
                 "end_at": "2026-08-20T11:00:00+00:00",
-                "status": "pending",
+                "status": "pending_payment",
                 "price_total": "1800.00",
                 "source": "bot",
             },
