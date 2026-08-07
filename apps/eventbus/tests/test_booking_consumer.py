@@ -55,6 +55,19 @@ from apps.tenancy.models import Tenant
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def _freeze_time_for_reminder_tests():
+    """Freeze wall clock so tests expecting future reminders see
+    offsets in the future relative to the fixed now.
+
+    ``booking.created`` and ``booking.confirmed`` skip backdated
+    reminders (#1146), so a real ``now`` would silently drop every
+    reminder whose start_at is in the test fixture past.
+    """
+    with freeze_time("2026-05-20T10:00:00Z"):
+        yield
+
+
 # Canonical Ayla user UUID used across the suite — set as
 # BotUser.ayla_user_id on the ``bot_user_linked`` fixture so the
 # handler's _resolve_bot_user lookup succeeds.
@@ -537,6 +550,141 @@ class TestBookingConfirmed:
         assert mock_emit.call_args[0][0] == "booking_confirmed"
         assert mock_emit.call_args[1]["properties"]["payment_id"] == PAYMENT_ID
 
+    # ── late confirmation / backdated reminder guard (#1146) ──
+
+    def _proxy_with_start_at(self, tenant: Tenant, start_at: str) -> RemoteBookingProxy:
+        """Create a pending proxy at an arbitrary ISO start time."""
+        return RemoteBookingProxy.all_tenants.create(
+            appointment_id=UUID(APPOINTMENT_ID),
+            tenant=tenant,
+            bot_user=None,
+            start_at=dt.datetime.fromisoformat(start_at.replace("Z", "+00:00")),
+            end_at=dt.datetime.fromisoformat(start_at.replace("Z", "+00:00"))
+            + dt.timedelta(hours=1),
+            status=RemoteBookingProxy.Status.PENDING_PAYMENT,
+        )
+
+    def test_late_confirm_more_than_24h_creates_both_reminders(self, tenant, bot_user_linked):
+        """#1146-B1: confirming >24h before visit creates T-24h and T-2h."""
+        self._proxy_with_start_at(tenant, "2026-05-22T15:00:00+03:00")
+        env = _envelope(
+            event_id="01J9CONFIRMLATE01",
+            event_name="booking.confirmed",
+            data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+        )
+        handle_booking_confirmed(env)
+
+        pending = BookingReminder.all_tenants.filter(
+            ayla_appointment_id=UUID(APPOINTMENT_ID),
+            status=BookingReminder.Status.PENDING,
+        )
+        assert pending.count() == 2
+        kinds = set(pending.values_list("kind", flat=True))
+        assert kinds == {BookingReminder.Kind.DAY_BEFORE, BookingReminder.Kind.TWO_HOURS}
+
+    def test_late_confirm_between_24h_and_2h_skips_day_before(self, tenant, bot_user_linked):
+        """#1146-B2: confirming between 24h and 2h before visit skips the
+        already-passed T-24h reminder but still creates T-2h."""
+        self._proxy_with_start_at(tenant, "2026-05-22T15:00:00+03:00")
+        with freeze_time("2026-05-21T14:00:00Z"):
+            env = _envelope(
+                event_id="01J9CONFIRMLATE02",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+            handle_booking_confirmed(env)
+
+        pending = BookingReminder.all_tenants.filter(
+            ayla_appointment_id=UUID(APPOINTMENT_ID),
+            status=BookingReminder.Status.PENDING,
+        )
+        assert pending.count() == 1
+        assert pending.first().kind == BookingReminder.Kind.TWO_HOURS
+
+    def test_late_confirm_less_than_2h_skips_both_reminders(self, tenant, bot_user_linked):
+        """#1146-B3: confirming <2h before visit skips both reminders."""
+        self._proxy_with_start_at(tenant, "2026-05-22T15:00:00+03:00")
+        with freeze_time("2026-05-22T11:00:00Z"):
+            env = _envelope(
+                event_id="01J9CONFIRMLATE03",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+            handle_booking_confirmed(env)
+
+        assert (
+            BookingReminder.all_tenants.filter(
+                ayla_appointment_id=UUID(APPOINTMENT_ID),
+                status=BookingReminder.Status.PENDING,
+            ).count()
+            == 0
+        )
+
+    def test_late_confirm_after_visit_skips_both_reminders(self, tenant, bot_user_linked):
+        """#1146-B4: confirming after the visit start skips both reminders."""
+        self._proxy_with_start_at(tenant, "2026-05-22T15:00:00+03:00")
+        with freeze_time("2026-05-22T13:00:00Z"):
+            env = _envelope(
+                event_id="01J9CONFIRMLATE04",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+            handle_booking_confirmed(env)
+
+        assert (
+            BookingReminder.all_tenants.filter(
+                ayla_appointment_id=UUID(APPOINTMENT_ID),
+                status=BookingReminder.Status.PENDING,
+            ).count()
+            == 0
+        )
+
+    def test_late_confirm_exact_boundary_does_not_create_reminder(self, tenant, bot_user_linked):
+        """#1146-B5: scheduled_at == now must not create a reminder."""
+        # start_at - 2h == frozen now; start_at - 24h is already past.
+        self._proxy_with_start_at(tenant, "2026-05-22T12:00:00+00:00")
+        with freeze_time("2026-05-22T10:00:00Z"):
+            env = _envelope(
+                event_id="01J9CONFIRMLATE05",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+            handle_booking_confirmed(env)
+
+        assert (
+            BookingReminder.all_tenants.filter(
+                ayla_appointment_id=UUID(APPOINTMENT_ID),
+            ).count()
+            == 0
+        )
+
+    def test_late_confirm_existing_pending_not_duplicated(self, tenant, bot_user_linked):
+        """#1146-B6: a pre-existing PENDING reminder is left intact and not
+        duplicated when a late confirmation skips creation."""
+        proxy = self._proxy_with_start_at(tenant, "2026-05-22T15:00:00+03:00")
+        BookingReminder.all_tenants.create(
+            tenant=tenant,
+            bot_user=bot_user_linked,
+            ayla_appointment_id=UUID(APPOINTMENT_ID),
+            chat_id="chat-9001",
+            visit_at=proxy.start_at,
+            kind=BookingReminder.Kind.TWO_HOURS,
+            status=BookingReminder.Status.PENDING,
+            scheduled_at=proxy.start_at - dt.timedelta(hours=2),
+        )
+
+        with freeze_time("2026-05-22T11:00:00Z"):
+            env = _envelope(
+                event_id="01J9CONFIRMLATE06",
+                event_name="booking.confirmed",
+                data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+            )
+            handle_booking_confirmed(env)
+
+        reminders = BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID))
+        assert reminders.count() == 1
+        assert reminders.first().status == BookingReminder.Status.PENDING
+
     # ── idempotency ×3 ──
     def test_replay_3x_single_confirmation(self, tenant: Tenant) -> None:
         self._pending_proxy(tenant)
@@ -908,6 +1056,140 @@ class TestBookingLifecycleOrdering:
             BookingReminder.all_tenants.filter(ayla_appointment_id=UUID(APPOINTMENT_ID)).count()
             == 2
         )
+
+    def test_created_after_confirmed_does_not_downgrade(self, tenant, bot_user_linked):
+        """#1147-O9: a stale booking.created with a fresh event_id must not
+        roll a confirmed proxy back to pending_payment."""
+        env_created = _envelope(
+            event_id="01J9CREATED009",
+            event_name="booking.created",
+            data=_booking_created_data(status="awaiting_payment"),
+        )
+        handle_booking_created(env_created)
+
+        env_confirmed = _envelope(
+            event_id="01J9CONFIRM009",
+            event_name="booking.confirmed",
+            data={"appointment_id": APPOINTMENT_ID, "payment_id": PAYMENT_ID},
+        )
+        handle_booking_confirmed(env_confirmed)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert proxy.last_synced_event_id == "01J9CONFIRM009"
+
+        # Stale created arrives with a NEW event_id.
+        env_stale_created = _envelope(
+            event_id="01J9CREATED009LATE",
+            event_name="booking.created",
+            data=_booking_created_data(status="awaiting_payment"),
+        )
+        handle_booking_created(env_stale_created)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert proxy.last_synced_event_id == "01J9CONFIRM009"
+
+    def test_created_after_cancelled_does_not_downgrade(self, tenant, bot_user_linked):
+        """#1147-O10: a stale booking.created must not revive a cancelled
+        booking or recreate reminders."""
+        env_created = _envelope(
+            event_id="01J9CREATED010",
+            event_name="booking.created",
+            data=_booking_created_data(status="awaiting_payment"),
+        )
+        handle_booking_created(env_created)
+
+        env_cancelled = _envelope(
+            event_id="01J9CANCEL010",
+            event_name="booking.cancelled",
+            data={
+                "appointment_id": APPOINTMENT_ID,
+                "cancelled_by": "user",
+                "reason_code": "user_changed_plans",
+                "cancelled_at": "2026-05-22T16:35:00.000Z",
+            },
+        )
+        handle_booking_cancelled(env_cancelled)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert proxy.last_synced_event_id == "01J9CANCEL010"
+
+        env_stale_created = _envelope(
+            event_id="01J9CREATED010LATE",
+            event_name="booking.created",
+            data=_booking_created_data(status="awaiting_payment"),
+        )
+        handle_booking_created(env_stale_created)
+
+        proxy.refresh_from_db()
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert proxy.last_synced_event_id == "01J9CANCEL010"
+        # No reminders were resurrected.
+        assert (
+            BookingReminder.all_tenants.filter(
+                ayla_appointment_id=UUID(APPOINTMENT_ID),
+                status=BookingReminder.Status.PENDING,
+            ).count()
+            == 0
+        )
+
+    def test_created_after_completed_does_not_downgrade(self, tenant, bot_user_linked):
+        """#1147-O11: a stale booking.created must not roll back a completed
+        proxy."""
+        env_created = _envelope(
+            event_id="01J9CREATED011",
+            event_name="booking.created",
+            data=_booking_created_data(status="confirmed"),
+        )
+        handle_booking_created(env_created)
+
+        env_completed = _envelope(
+            event_id="01J9COMPLETED011",
+            event_name="booking.completed",
+            data={"appointment_id": APPOINTMENT_ID, "completed_at": "2026-05-22T16:30:00.000Z"},
+        )
+        handle_booking_completed(env_completed)
+
+        env_stale_created = _envelope(
+            event_id="01J9CREATED011LATE",
+            event_name="booking.created",
+            data=_booking_created_data(status="confirmed"),
+        )
+        handle_booking_created(env_stale_created)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.COMPLETED
+        assert proxy.last_synced_event_id == "01J9COMPLETED011"
+
+    def test_created_after_no_show_does_not_downgrade(self, tenant, bot_user_linked):
+        """#1147-O12: a stale booking.created must not roll back a no_show
+        proxy."""
+        env_created = _envelope(
+            event_id="01J9CREATED012",
+            event_name="booking.created",
+            data=_booking_created_data(status="confirmed"),
+        )
+        handle_booking_created(env_created)
+
+        env_no_show = _envelope(
+            event_id="01J9NOSHOW012",
+            event_name="booking.no_show",
+            data={"appointment_id": APPOINTMENT_ID},
+        )
+        handle_booking_no_show(env_no_show)
+
+        env_stale_created = _envelope(
+            event_id="01J9CREATED012LATE",
+            event_name="booking.created",
+            data=_booking_created_data(status="confirmed"),
+        )
+        handle_booking_created(env_stale_created)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.NO_SHOW
+        assert proxy.last_synced_event_id == "01J9NOSHOW012"
 
 
 # ─── booking.cancelled ─────────────────────────────────────────────────────

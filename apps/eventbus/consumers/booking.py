@@ -54,6 +54,7 @@ from datetime import timedelta
 from typing import Any, Final
 from uuid import UUID
 
+from django.utils import timezone
 
 from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.conversations.models import Conversation
@@ -74,6 +75,20 @@ logger = logging.getLogger(__name__)
 _REMINDER_OFFSETS: Final[tuple[tuple[str, timedelta], ...]] = (
     (BookingReminder.Kind.DAY_BEFORE, timedelta(hours=24)),
     (BookingReminder.Kind.TWO_HOURS, timedelta(hours=2)),
+)
+
+
+# Booking lifecycle states that are advanced beyond the creation/bootstrap
+# event. A stale ``booking.created`` (e.g. redelivery with a fresh event_id
+# after the proxy has already been confirmed or cancelled) must NOT roll
+# the proxy back to an earlier state. See #1147.
+_CREATED_ADVANCED_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        RemoteBookingProxy.Status.CONFIRMED,
+        RemoteBookingProxy.Status.CANCELLED,
+        RemoteBookingProxy.Status.COMPLETED,
+        RemoteBookingProxy.Status.NO_SHOW,
+    }
 )
 
 
@@ -219,6 +234,11 @@ def _schedule_reminders(
     ``status`` and ``scheduled_at`` live in ``create_defaults`` so a
     late ``booking.confirmed`` (different ``event_id``) does not reset
     an already-sent reminder back to ``PENDING``.
+
+    New reminders are only created when their computed ``scheduled_at``
+    is in the future. A late confirmation (or a reminder offset already
+    passed) must not insert a PENDING row that the dispatcher would send
+    immediately — see #1146.
     """
     chat_id = getattr(bot_user, "chat_id", "") or ""
     if not chat_id:
@@ -228,7 +248,22 @@ def _schedule_reminders(
         )
         return
 
+    now = timezone.now()
     for kind, offset in _REMINDER_OFFSETS:
+        scheduled_at = start_at - offset
+        if scheduled_at <= now:
+            # #1146: do not create (or resurrect) a reminder whose send
+            # time has already passed.
+            logger.info(
+                "eventbus.consumer.booking.skip_backdated_reminder "
+                "appointment_id=%s kind=%s scheduled_at=%s now=%s",
+                appointment_id,
+                kind,
+                scheduled_at.isoformat(),
+                now.isoformat(),
+            )
+            continue
+
         # ``defaults`` are applied on UPDATE; ``create_defaults`` are
         # applied on INSERT. Keeping ``status``/``scheduled_at`` out of
         # ``defaults`` prevents a late/redelivered event from resurrecting
@@ -253,7 +288,7 @@ def _schedule_reminders(
             create_defaults={
                 **common_defaults,
                 "status": BookingReminder.Status.PENDING,
-                "scheduled_at": start_at - offset,
+                "scheduled_at": scheduled_at,
             },
         )
 
@@ -391,6 +426,19 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
             logger.info(
                 "eventbus.consumer.booking.created.replay_skipped appointment_id=%s event_id=%s",
                 appointment_id,
+                envelope.event_id,
+            )
+            return
+        if proxy.status in _CREATED_ADVANCED_STATUSES:
+            # #1147: a stale ``booking.created`` must not downgrade a
+            # proxy that has already moved past creation state. Leave
+            # ``last_synced_event_id`` untouched so the more advanced
+            # event stays authoritative for forensic ordering.
+            logger.info(
+                "eventbus.consumer.booking.created.advanced_state_noop "
+                "appointment_id=%s current_status=%s event_id=%s",
+                appointment_id,
+                proxy.status,
                 envelope.event_id,
             )
             return
