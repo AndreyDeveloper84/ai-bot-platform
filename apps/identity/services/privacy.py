@@ -9,23 +9,53 @@ Implements the bot-side half of ``PILOT_CONTRACTS_2026-08-15`` §6:
 * **Delete** — the cascade: Ayla personal-data delete (C5.2 upstream),
   bot ``MemoryEntry`` erasure (immediate green soft-delete +
   ``forget_all`` UPC tombstone), consent withdraw cascade
-  (:func:`apps.consent.services.withdraw_personal_data`).
+  (:func:`apps.consent.services.withdraw_personal_data_for_bot_users` —
+  keyed on local identity, see below), and bot-side profile PII erasure.
 
 ### Contract obligations honoured
 
+* **Server-confirmed** — the view requires the ``DELETE_CONFIRMATION_TOKEN``
+  primitive in the request body before any of this runs. A client-side
+  confirmation sheet is not a confirmation (DRF-956 / T-05 ruling §1-2).
 * **Idempotent delete** — every step is naturally re-runnable: upstream
   404 counts as already-deleted, green soft-delete skips tombstoned
-  rows, ``forget_all``/``withdraw_personal_data`` are no-ops on repeat.
-  A repeated DELETE therefore returns the same success.
+  rows, ``forget_all``/consent withdrawal are no-ops on repeat.
+  A repeated confirmed DELETE therefore returns the same success.
+* **No success for work not done** — a step reports green only when it
+  actually erased, or when the absence of state is *provable* locally.
+  ``ayla_delete`` with no linkage is a **failure**, not an idempotent
+  success: we have no id to address Ayla with, so we can neither perform
+  the mandatory remote step nor establish there is nothing to erase
+  (ruling §3-4, §6). Consents are keyed on the local ``bot_user`` FK and
+  are therefore withdrawn regardless of linkage (ruling §5).
 * **Audit without personal values** — both operations append an audit
   row naming the actor, timestamp and *scope* of the action; fact
   values, phones and names never enter the audit payload.
 * **Honest partials** — a failed cascade step is reported, not hidden:
   the view maps ``all_ok=False`` to 502 so the miniapp can offer a retry
   (already-done steps no-op on that retry).
-* **Pilot scope (C5.2)** — personal context + memory + consents.
+* **Pilot scope (C5.2)** — personal context + memory + consents +
+  the bot-side profile identifiers on ``BotUser``.
   Transactional records (bookings, payments) follow statutory retention;
   their anonymisation is explicitly post-pilot.
+
+### Erase-in-place, don't drop the row (DRF-956 / T-05)
+
+The ``BotUser`` row is a *technical shell*, not personal data: it is the
+channel routing key and it is referenced ``on_delete=PROTECT`` by
+``observability.AIRequestMetric``, ``handoff.AdminTask`` and
+``tenancy.StaffAssignment``, and ``on_delete=SET_NULL`` by the statutory
+transactional records (``booking.BookingRequest``). Physically deleting it
+either raises ``ProtectedError`` or destroys the audit/metric trail that
+152-ФЗ itself expects us to keep — so the shell is retained and the
+*identifying values* on it are blanked instead (:data:`_PII_FIELDS`).
+
+``ayla_user_id`` is deliberately **retained**: it is the stable key of the
+person's memory (``UserPersonalContext.user_id``), so it is what the
+``forget_all`` tombstone is recorded against. Unlinking it would orphan
+that tombstone — the next turn would mint a fresh UPC and the erasure
+would silently undo itself — and would make a repeated DELETE report
+``not_linked`` success without ever re-reaching Ayla.
 """
 
 from __future__ import annotations
@@ -35,11 +65,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
-from apps.consent.services import withdraw_personal_data
+from apps.consent.services import withdraw_personal_data_for_bot_users
 from apps.identity.models import BotUser
 from apps.identity.services.memory_deleter import (
     request_forget_all,
@@ -88,9 +119,172 @@ def _resolve_ayla_user_id(bot_user: BotUser) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
 
 
+def _has_channel_identity(bot_user: BotUser) -> bool:
+    """Is ``(channel, channel_user_id)`` a usable identity key on this row?
+
+    A blank ``channel_user_id`` is NOT an identity — matching on it would
+    select every *other* shell that also has a blank one, i.e. unrelated
+    people. The column is a ``CharField`` with no blank guard, so this is
+    reachable from any code path that creates a shell without it.
+    """
+    return bool((bot_user.channel or "").strip()) and bool((bot_user.channel_user_id or "").strip())
+
+
+def _channel_sibling_ids(bot_user: BotUser) -> set[uuid.UUID]:
+    """Shell ids sharing this channel account. Empty when the key is unusable.
+
+    Fail-closed: with no usable channel identity we return nothing rather
+    than a set that would sweep in strangers. The caller still operates on
+    the authenticated row itself, which is provably the right person.
+    """
+    if not _has_channel_identity(bot_user):
+        logger.warning(
+            "identity.privacy.no_channel_identity bot_user=%s — blank channel/"
+            "channel_user_id, cross-shell resolution skipped (fail-closed)",
+            bot_user.id,
+        )
+        return set()
+    return set(
+        BotUser.all_tenants.filter(
+            channel=bot_user.channel, channel_user_id=bot_user.channel_user_id
+        ).values_list("id", flat=True)
+    )
+
+
+@dataclass(frozen=True)
+class _PersonLink:
+    """Outcome of resolving the person's canonical Ayla id across shells."""
+
+    ayla_user_id: uuid.UUID | None = None
+    #: Two or more *distinct* non-null ids among this person's shells. The
+    #: identity graph disagrees with itself, so we cannot say whose data an
+    #: upstream erasure would destroy.
+    conflict: bool = False
+
+
+def _resolve_person_link(bot_user: BotUser) -> _PersonLink:
+    """Resolve the person's Ayla id across all their shells, deterministically.
+
+    Reading it off the requesting row alone is wrong: the only writer,
+    :func:`~apps.identity.services.resolver.resolve_or_create_global_bot_user`,
+    stamps it on the ``global_bot`` sentinel shell, while the Mini App
+    request resolves the ``MAX_BOT_TENANT_SLUG`` shell. So a linked person
+    looks unlinked from the Mini App side — and memory, which is keyed on
+    this id, would be declared "no state" while it is very much alive.
+
+    Semantics (fail-closed on disagreement):
+
+    * 0 distinct linked ids → unlinked.
+    * exactly 1 → that is the person.
+    * 2+ distinct → identity inconsistency. We do **not** pick one; an
+      arbitrary ``.first()`` would delete a stranger's upstream account on
+      whichever row the database happened to return first.
+    """
+    candidates: set[uuid.UUID] = set()
+    own = _resolve_ayla_user_id(bot_user)
+    if own is not None:
+        candidates.add(own)
+
+    sibling_ids = _channel_sibling_ids(bot_user)
+    if sibling_ids:
+        for raw in BotUser.all_tenants.filter(
+            id__in=sibling_ids, ayla_user_id__isnull=False
+        ).values_list("ayla_user_id", flat=True):
+            candidates.add(raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw)))
+
+    if len(candidates) > 1:
+        logger.error(
+            "identity.privacy.identity_conflict bot_user=%s distinct_ayla_ids=%d — "
+            "refusing destructive upstream/memory operations (fail-closed)",
+            bot_user.id,
+            len(candidates),  # count only, never the ids themselves
+        )
+        return _PersonLink(conflict=True)
+    return _PersonLink(ayla_user_id=next(iter(candidates), None))
+
+
 def _bot_user_ids_for(ayla_user_id: uuid.UUID) -> list[uuid.UUID]:
     """Every BotUser of the person across tenants (memory is global)."""
     return list(BotUser.all_tenants.filter(ayla_user_id=ayla_user_id).values_list("id", flat=True))
+
+
+# The person's own identifying values held on the BotUser shell. Every one
+# is ``blank=True, default=""`` on the model, so the empty string is the
+# schema-sanctioned "no value" — this erasure needs no migration.
+#
+# Deliberately NOT in this set:
+#   ``channel_user_id`` / ``chat_id`` — the channel routing key of the
+#     retained shell; blanking them breaks the natural key
+#     ``(tenant, channel, channel_user_id)`` and orphans the row.
+#   ``ayla_user_id`` — the memory tombstone key (see module docstring).
+#
+# ``context`` is blanked alongside these (it is ``default=dict``), for
+# parity with the legacy confirmed path.
+_PII_FIELDS: tuple[str, ...] = ("phone", "display_name", "client_name", "avatar_url")
+
+
+def _person_shell_ids(bot_user: BotUser, link: _PersonLink) -> set[uuid.UUID]:
+    """Every BotUser shell that is provably the same human as ``bot_user``.
+
+    Two keys, because neither alone is sufficient:
+
+    * ``ayla_user_id`` — the canonical person key, but it is **NULL on
+      most production rows today**. Nothing writes it: the only writer is
+      :func:`~apps.identity.services.resolver.resolve_or_create_global_bot_user`
+      via an explicit argument, and no production call site passes one
+      (``apps/channels/max/handler.py`` passes ``chat_id`` only); every
+      eventbus consumer merely *filters* on it.
+    * ``(channel, channel_user_id)`` — the channel account. This is what
+      actually links a person's shells in the pilot: the Mini App resolves
+      the shell under ``MAX_BOT_TENANT_SLUG`` while the chat resolves the
+      one under the ``global_bot`` sentinel tenant, and those are two rows
+      by ``unique_together (tenant, channel, channel_user_id)``.
+
+    Keyed on ``ayla_user_id`` alone this erase would silently miss the
+    user's other shell — i.e. it would report success while leaving the
+    phone readable on the row the bot actually talks to.
+
+    **Always fail-closed to the authenticated row.** With a blank channel
+    identity, or with an inconsistent identity graph, there is no proven
+    person key — so we narrow to ``bot_user`` itself rather than fanning a
+    destructive operation out over rows that might belong to someone else.
+    """
+    ids = {bot_user.id}
+    if link.conflict:
+        return ids
+    if link.ayla_user_id is not None:
+        ids.update(_bot_user_ids_for(link.ayla_user_id))
+    ids.update(_channel_sibling_ids(bot_user))
+    return ids
+
+
+def _erase_bot_user_pii(bot_user: BotUser, link: _PersonLink) -> None:
+    """Blank the person's identifiers on every shell they own + drop prefs.
+
+    Cross-tenant on purpose — the same person may hold a ``BotUser`` per
+    tenant and the phone is stored on each of them, so erasing only the
+    requesting tenant's row would leave the number readable elsewhere.
+
+    ``UserPreferences`` goes too, matching what the legacy confirmed path
+    (:func:`apps.identity.services.profile.soft_delete_user`) already did:
+    ``allergies`` is free-text health data and ``birthday_date`` is a
+    direct identifier, and the delete sheet promises the customer that
+    their «персональные настройки» are removed. ``get_profile`` recreates
+    a default row on the next read, so nothing downstream breaks.
+    """
+    from apps.identity.models import UserPreferences
+
+    ids = _person_shell_ids(bot_user, link)
+
+    with transaction.atomic():
+        BotUser.all_tenants.filter(id__in=ids).update(context={}, **dict.fromkeys(_PII_FIELDS, ""))
+        UserPreferences.all_tenants.filter(bot_user_id__in=ids).delete()
+
+    # Keep the caller's in-memory instance consistent with the row — the
+    # view must never render a value we just erased.
+    for field_name in _PII_FIELDS:
+        setattr(bot_user, field_name, "")
+    bot_user.context = {}
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +384,31 @@ def delete_personal_data(
 ) -> DeleteCascadeResult:
     """Run the C5 delete cascade for the person. Every step is
     idempotent; per-step outcomes are reported, never hidden."""
-    ayla_user_id = _resolve_ayla_user_id(bot_user)
+    # Person-level, not row-level — see _resolve_person_link. A row-level
+    # read makes a linked person look unlinked from the Mini App shell,
+    # which would report their live memory as "no state".
+    link = _resolve_person_link(bot_user)
+    ayla_user_id = link.ayla_user_id
     steps: list[DeleteStep] = []
 
     # Step 1 — Ayla personal-data delete (upstream, C5.2).
-    if ayla_user_id is None:
-        steps.append(DeleteStep("ayla_delete", True, "not_linked"))
+    if link.conflict:
+        # The person's shells carry two or more distinct ayla_user_ids. We
+        # will not guess which one this caller is: deleting the wrong
+        # upstream account is unrecoverable and would destroy a third
+        # party's data. Fail closed and report it (ruling §3).
+        steps.append(DeleteStep("ayla_delete", False, "identity_conflict"))
+    elif ayla_user_id is None:
+        # NOT a success. Without the linkage we have no id to address Ayla
+        # with, so we cannot perform the mandatory remote step *and* cannot
+        # establish that there is nothing there to delete. Reporting this
+        # green would be a false "deleted" (DRF-956 / T-05 ruling §4+§6).
+        logger.warning(
+            "identity.privacy.ayla_delete_unaddressable bot_user=%s — "
+            "ayla_user_id is NULL, upstream erasure not attempted",
+            bot_user.id,
+        )
+        steps.append(DeleteStep("ayla_delete", False, "not_linked"))
     else:
         owns = client is None
         client = client or PersonalContextHttpClient()
@@ -212,10 +425,17 @@ def delete_personal_data(
             if owns:
                 client.close()
 
-    # Steps 2+3 — bot memory erasure + consent cascade need the person id.
-    if ayla_user_id is None:
-        steps.append(DeleteStep("memory_delete", True, "not_linked"))
-        steps.append(DeleteStep("consent_withdraw", True, "not_linked"))
+    # Step 2 — bot memory. Memory is keyed on ``ayla_user_id``
+    # (``UserPersonalContext.user_id`` / ``MemoryEntry.user_id``) and cannot
+    # be written without one, so "no linkage" here provably means "no state
+    # to erase" — the one case where reporting green is truthful (ruling §4).
+    if link.conflict:
+        # Memory is keyed on ayla_user_id and we have more than one
+        # candidate — soft-deleting the wrong person's entries is exactly
+        # the harm this fail-closed branch exists to prevent.
+        steps.append(DeleteStep("memory_delete", False, "identity_conflict"))
+    elif ayla_user_id is None:
+        steps.append(DeleteStep("memory_delete", True, "no_state"))
     else:
         try:
             live_green_ids = [e.id for e in read_green_entries(ayla_user_id)]
@@ -226,12 +446,40 @@ def delete_personal_data(
             logger.exception("identity.privacy.memory_delete_failed")
             steps.append(DeleteStep("memory_delete", False))
 
-        try:
-            withdraw_personal_data(ayla_user_id, source="privacy_delete")
-            steps.append(DeleteStep("consent_withdraw", True))
-        except Exception:  # noqa: BLE001 — per-step isolation
-            logger.exception("identity.privacy.consent_withdraw_failed")
-            steps.append(DeleteStep("consent_withdraw", False))
+    # Step 3 — consents. ConsentRecord hangs off the ``bot_user`` FK, not off
+    # ``ayla_user_id``, so ownership is fully determined by local identity and
+    # the withdrawal must not depend on a linkage that is NULL in production
+    # (ruling §5). Subject = the same shell set step 4 erases.
+    try:
+        withdraw_personal_data_for_bot_users(
+            BotUser.all_tenants.filter(id__in=_person_shell_ids(bot_user, link)).select_related(
+                "tenant"
+            ),
+            source="privacy_delete",
+        )
+        steps.append(
+            DeleteStep(
+                "consent_withdraw",
+                True,
+                # Narrowed to the authenticated row — say so rather than
+                # implying the person's whole consent history was reached.
+                "own_row_only" if link.conflict else "",
+            )
+        )
+    except Exception:  # noqa: BLE001 — per-step isolation
+        logger.exception("identity.privacy.consent_withdraw_failed")
+        steps.append(DeleteStep("consent_withdraw", False))
+
+    # Step 4 — bot-side profile identifiers + preferences on the retained
+    # shells. Runs unconditionally and is keyed on the channel account as
+    # well as ``ayla_user_id``: unlike memory/consents this data is ours
+    # alone and exists whether or not the person was ever linked to Ayla.
+    try:
+        _erase_bot_user_pii(bot_user, link)
+        steps.append(DeleteStep("profile_pii_erase", True, "own_row_only" if link.conflict else ""))
+    except Exception:  # noqa: BLE001 — per-step isolation, reported below
+        logger.exception("identity.privacy.profile_pii_erase_failed")
+        steps.append(DeleteStep("profile_pii_erase", False))
 
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).

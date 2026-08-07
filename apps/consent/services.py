@@ -504,18 +504,38 @@ def withdraw_personal_data(ayla_user_id, *, source: str) -> int:
     if not ayla_user_id:
         return 0
     from apps.identity.models import BotUser
+
+    return withdraw_personal_data_for_bot_users(
+        BotUser.all_tenants.filter(ayla_user_id=ayla_user_id),
+        source=source,
+    )
+
+
+def withdraw_personal_data_for_bot_users(bot_users, *, source: str) -> int:
+    """Тот же каскад §8.4, но субъект задан **локальной** identity.
+
+    ``ConsentRecord`` висит на FK ``bot_user``, а не на ``ayla_user_id``, —
+    значит согласия можно (и нужно) отзывать, даже когда связка с Ayla не
+    заполнена. В проде ``BotUser.ayla_user_id`` сейчас NULL почти всегда, и
+    ключевание отзыва на нём означало бы, что privacy-каскад молча пропускает
+    реально существующие строки согласий и при этом рапортует успех
+    (DRF-956 / T-05 owner ruling §5).
+
+    Идемпотентно: :func:`withdraw` возвращает ``None`` для уже отозванных.
+    """
     from apps.tenancy.context import tenant_scope
 
+    subjects = list(bot_users)  # materialise once — may be a queryset
     withdrawn = 0
-    bot_users = list(BotUser.all_tenants.filter(ayla_user_id=ayla_user_id))
-    for bu in bot_users:
+    for bu in subjects:
         with tenant_scope(bu.tenant):
             for consent_type in _PERSONAL_DATA_CASCADE:
                 if withdraw(bu, consent_type=consent_type, source=source) is not None:
                     withdrawn += 1
     logger.info(
-        "consent.withdraw_personal_data ayla_user_id=%s withdrawn=%d source=%s",
-        ayla_user_id,
+        "consent.withdraw_personal_data bot_user_ids=%s count=%d withdrawn=%d source=%s",
+        [str(bu.id) for bu in subjects],  # ids, never values
+        len(subjects),
         withdrawn,
         source,
     )

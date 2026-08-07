@@ -1647,17 +1647,50 @@ def personal_data_export(request: HttpRequest) -> HttpResponse:
 def personal_data_delete(request: HttpRequest) -> HttpResponse:
     """C5.2 — delete cascade: Ayla delete + memory erasure + consent withdraw.
 
-    Idempotent per contract: a repeat request returns the same 200.
-    A failed step yields an honest 502 + failed_steps for retry.
+    Requires an explicit destructive confirmation in the body — the same
+    ``DELETE_CONFIRMATION_TOKEN`` primitive the sibling ``POST /me/delete``
+    already uses (DRF-956 / T-05 owner ruling). A client-side sheet alone is
+    not a confirmation: before this, any single authenticated DELETE — a
+    network retry, a bad deep link, a router bug — ran the full cascade with
+    no evidence of intent.
+
+    Idempotent per contract: a repeat confirmed request returns the same 200.
+    A failed or skipped mandatory step yields an honest 502 + failed_steps.
     """
+    import json
+
     from apps.identity.services.privacy import delete_personal_data
+    from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+    if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
+        # Nothing has been touched at this point — the cascade is below.
+        return _error(
+            "confirmation_mismatch",
+            f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
+            400,
+        )
+
     result = delete_personal_data(bot_user)
     if result.all_ok:
         return JsonResponse({"status": "deleted"}, status=200)
+    # ``failed_details`` distinguishes a transient failure (retry helps) from
+    # a structural one like ``not_linked`` (retry can never help). Without it
+    # the sheet invites an infinite "попробуй ещё раз" loop. Slugs only —
+    # never values.
     return JsonResponse(
-        {"status": "partial", "failed_steps": result.failed_steps},
+        {
+            "status": "partial",
+            "failed_steps": result.failed_steps,
+            "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
+        },
         status=502,
     )
 

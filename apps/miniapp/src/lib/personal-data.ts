@@ -45,15 +45,40 @@ export interface PersonalDataExportFile {
 }
 
 /**
+ * Backend reason slugs that mean "this can never succeed on retry": the
+ * subject cannot be addressed upstream at all (`not_linked`), or the
+ * identity graph disagrees with itself so the backend refuses to guess
+ * (`identity_conflict`). Anything else — a 5xx, a timeout — is transient
+ * and the retry button is honest.
+ */
+const STRUCTURAL_FAILURE_REASONS = new Set(["not_linked", "identity_conflict"]);
+
+/**
  * Thrown on the honest-partial 502: some cascade steps finished, the
  * listed ones did not. `failedSteps` are backend slugs
  * ("ayla_delete" | "memory_delete" | "consent_withdraw") — screens map
  * them to human copy, never render raw.
  */
 export class PersonalDataPartialDeleteError extends Error {
-  constructor(readonly failedSteps: string[]) {
+  constructor(
+    readonly failedSteps: string[],
+    /** step slug → reason slug, e.g. `{ayla_delete: "not_linked"}`. */
+    readonly failedDetails: Record<string, string> = {},
+  ) {
     super("personal-data delete finished partially");
     this.name = "PersonalDataPartialDeleteError";
+  }
+
+  /**
+   * True when every failure is structural rather than transient, so retrying
+   * is guaranteed to fail again. The sheet must not offer a retry in that
+   * case — the local erasure already happened and only support can finish it.
+   */
+  get isUnretryable(): boolean {
+    return (
+      this.failedSteps.length > 0 &&
+      this.failedSteps.every((s) => STRUCTURAL_FAILURE_REASONS.has(this.failedDetails[s] ?? ""))
+    );
   }
 }
 
@@ -93,14 +118,30 @@ export async function exportPersonalData(): Promise<PersonalDataExportFile> {
 }
 
 /**
+ * The exact string the customer must type to confirm erasure. Mirrors
+ * `DELETE_CONFIRMATION_TOKEN` in `apps/identity/services/profile.py` — the
+ * server rejects anything else with 400 `confirmation_mismatch`.
+ */
+export const DELETE_CONFIRMATION_TOKEN = "УДАЛИТЬ";
+
+/**
  * C5.2 — run the delete cascade. Resolves only on full success; a
  * partial cascade raises {@link PersonalDataPartialDeleteError} so the
  * sheet can offer an honest retry.
+ *
+ * `confirmation` must equal {@link DELETE_CONFIRMATION_TOKEN}; it is
+ * verified server-side (DRF-956 / T-05), so this is not a formality the
+ * client can skip.
  */
-export async function deletePersonalData(): Promise<{ status: "deleted" }> {
+export async function deletePersonalData(
+  confirmation: string,
+): Promise<{ status: "deleted" }> {
+  const headers = buildAuthHeaders();
+  headers.set("Content-Type", "application/json");
   const res = await fetch(`${API_BASE}${DELETE_PATH}`, {
     method: "DELETE",
-    headers: buildAuthHeaders(),
+    headers,
+    body: JSON.stringify({ confirmation }),
   });
   if (res.ok) {
     return (await res.json()) as { status: "deleted" };
@@ -110,9 +151,13 @@ export async function deletePersonalData(): Promise<{ status: "deleted" }> {
       const body = (await res.json()) as {
         status?: string;
         failed_steps?: string[];
+        failed_details?: Record<string, string>;
       };
       if (body.status === "partial" && Array.isArray(body.failed_steps)) {
-        throw new PersonalDataPartialDeleteError(body.failed_steps);
+        throw new PersonalDataPartialDeleteError(
+          body.failed_steps,
+          body.failed_details ?? {},
+        );
       }
     } catch (err) {
       if (err instanceof PersonalDataPartialDeleteError) throw err;

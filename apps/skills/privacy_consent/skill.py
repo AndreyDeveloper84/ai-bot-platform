@@ -3,13 +3,38 @@
 Surfaces 152-ФЗ / GDPR data-subject rights through the chat:
 
   * "удалить мои данные" / "delete my data" / "удалить меня" →
-    `data_delete(bot_user)` + close the conversation.
+    **redirect** to the confirmed Mini App erasure flow. No mutation.
   * "выгрузить мои данные" / "export my data" →
     `data_export(bot_user)` → JSON archive surfaced in the reply.
 
-Match keyword set is conservative on purpose — these triggers cause
-destructive action, so false positives would be expensive.
-Sprint 4+ adds an intent classifier that can soften the match.
+Match keyword set is conservative on purpose — a false positive on the
+delete trigger used to be expensive. Sprint 4+ adds an intent classifier
+that can soften the match.
+
+### Why the chat delete is a redirect, not a delete (DRF-956 / T-05)
+
+Until DRF-956 a single message ("удали мои данные") ran the full
+destructive cascade with **no confirmation step at all** — one typo-level
+false positive wiped an account. Worse, the cascade it called
+(:func:`apps.identity.services.delete_bot_user_data`) hard-deletes the
+``BotUser`` row, and that row is referenced ``on_delete=PROTECT`` by
+``observability.AIRequestMetric``, ``handoff.AdminTask`` and
+``tenancy.StaffAssignment``. Any user who had ever triggered one AI turn
+therefore hit ``ProtectedError`` — the request 500'd *after* the
+"requested" audit row was written, and the user was told nothing.
+
+Erasure needs a confirmation the chat channel cannot express (there is no
+reusable two-step confirmation primitive for free-text turns, and Pilot is
+not the place to invent one). The Mini App ships a two-step confirmation
+sheet, so the chat trigger now routes there and states plainly that
+nothing was deleted. See ``apps/identity/services/privacy.py`` for the
+cascade the Mini App runs.
+
+The destination is server-confirmed: ``DELETE /me/personal-data/`` requires
+``DELETE_CONFIRMATION_TOKEN`` (``apps.identity.services.profile``) in the
+request body, the same primitive the legacy ``POST /me/delete`` uses, and
+the Mini App sheet makes the customer type it. So the redirect points at a
+door that checks intent, not merely a screen that asks politely.
 
 ### Why this skill ships first
 
@@ -29,7 +54,7 @@ from typing import ClassVar
 from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.privacy_consent.tools import data_delete, data_export
+from apps.skills.privacy_consent.tools import data_export
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
@@ -47,6 +72,17 @@ _DELETE_KEYWORDS: tuple[str, ...] = (
     "delete my data",
     "delete me",
 )
+# Deterministic reply for the gated delete intent. States where the
+# confirmed flow lives and — explicitly — that nothing was deleted here.
+# Never promise an erasure this path did not perform.
+_DELETE_REDIRECT_TEXT = (
+    "Данные я удаляю только после подтверждения, а в чате подтвердить нельзя.\n\n"
+    "Откройте в приложении «Профиль» → «Мои данные» → «Удалить данные». "
+    "Там нужно подтвердить действие — после этого я удалю то, что помню о вас, "
+    "ваши настройки и согласия.\n\n"
+    "Сейчас я ничего не удалила."
+)
+
 _EXPORT_KEYWORDS: tuple[str, ...] = (
     "выгрузить мои данные",
     "выгрузите мои данные",
@@ -85,11 +121,15 @@ class PrivacyConsentSkill:
         )
 
         if intent == "delete":
-            count = data_delete(context.bot_user)
+            # No mutation on this path — see the module docstring. The reply
+            # must not imply anything was deleted.
             return SkillResult(
-                reply_text=(f"Все ваши данные удалены. Удалено диалогов: {count}. Спасибо!"),
-                should_close_conversation=True,
-                meta={"skill": self.name, "intent": "delete", "conversations": count},
+                reply_text=_DELETE_REDIRECT_TEXT,
+                meta={
+                    "skill": self.name,
+                    "intent": "delete",
+                    "outcome": "redirected_to_confirmed_flow",
+                },
             )
 
         if intent == "export":
