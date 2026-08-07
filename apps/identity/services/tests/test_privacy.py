@@ -26,6 +26,7 @@ from apps.identity.services.memory_inferred import (
     record_inferred_green_facts,
 )
 from apps.identity.services.privacy import (
+    PrivacyIdentityConflictError,
     PrivacyUpstreamError,
     delete_personal_data,
     export_personal_data,
@@ -190,6 +191,210 @@ class TestExport:
         assert payload["memory"] == []
 
 
+class TestExportPersonLevelResolution:
+    """DRF-959 — export subject must equal delete subject (the person, not the row)."""
+
+    def _sibling_pair(self, tenant, ayla_user_id: uuid.UUID | None) -> tuple[BotUser, BotUser]:
+        """Mini App shell (unlinked) + sentinel/global shell (linked)."""
+        sentinel = Tenant.objects.create(slug="global-bot-export", name="Global")
+        linked = BotUser.all_tenants.create(
+            tenant=sentinel,
+            channel="max",
+            channel_user_id="12345",
+            ayla_user_id=ayla_user_id,
+        )
+        requesting = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="12345",
+            ayla_user_id=None,
+        )
+        return requesting, linked
+
+    def test_export_resolves_ayla_via_linked_sibling(self, tenant, ayla_user_id) -> None:
+        requesting, linked = self._sibling_pair(tenant, ayla_user_id)
+        client = _StubPCClient()
+
+        payload = export_personal_data(requesting, client=client)  # type: ignore[arg-type]
+
+        assert payload["subject"]["ayla_user_id"] == str(ayla_user_id)
+        assert client.calls == [("export", str(ayla_user_id))]
+
+    def test_export_includes_memory_via_linked_sibling(self, tenant, ayla_user_id) -> None:
+        requesting, linked = self._sibling_pair(tenant, ayla_user_id)
+        _seed_memory(linked, ayla_user_id)
+
+        payload = export_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert [m["content"]["value"] for m in payload["memory"]] == ["vegan"]
+
+    def test_export_includes_consents_across_sibling_shells(self, tenant, ayla_user_id) -> None:
+        requesting, linked = self._sibling_pair(tenant, ayla_user_id)
+        _grant(requesting, ConsentRecord.ConsentType.PERSONAL_DATA)
+        _grant(linked, ConsentRecord.ConsentType.MEMORY_GREEN)
+
+        payload = export_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        consent_types = {c["consent_type"] for c in payload["consents"]}
+        assert {
+            ConsentRecord.ConsentType.PERSONAL_DATA,
+            ConsentRecord.ConsentType.MEMORY_GREEN,
+        } <= consent_types
+
+    def test_export_excludes_unrelated_user_consents(self, tenant, ayla_user_id) -> None:
+        requesting, linked = self._sibling_pair(tenant, ayla_user_id)
+        _grant(requesting, ConsentRecord.ConsentType.PERSONAL_DATA)
+        stranger = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="99999",
+            ayla_user_id=uuid.uuid4(),
+        )
+        _grant(stranger, ConsentRecord.ConsentType.MEMORY_GREEN)
+
+        payload = export_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        consent_types = {c["consent_type"] for c in payload["consents"]}
+        assert ConsentRecord.ConsentType.MEMORY_GREEN not in consent_types
+        assert ConsentRecord.ConsentType.PERSONAL_DATA in consent_types
+
+    def test_export_excludes_cross_tenant_unrelated_user(self, tenant, ayla_user_id) -> None:
+        requesting, linked = self._sibling_pair(tenant, ayla_user_id)
+        _grant(requesting, ConsentRecord.ConsentType.PERSONAL_DATA)
+        other_tenant = Tenant.objects.create(slug="other-export", name="Other")
+        cross = BotUser.all_tenants.create(
+            tenant=other_tenant,
+            channel="max",
+            channel_user_id="88888",
+            ayla_user_id=uuid.uuid4(),
+        )
+        _grant(cross, ConsentRecord.ConsentType.MEMORY_GREEN)
+
+        payload = export_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        consent_types = {c["consent_type"] for c in payload["consents"]}
+        assert ConsentRecord.ConsentType.MEMORY_GREEN not in consent_types
+        assert ConsentRecord.ConsentType.PERSONAL_DATA in consent_types
+
+    def test_export_conflict_fail_closed(self, tenant) -> None:
+        id_a, id_b = uuid.uuid4(), uuid.uuid4()
+        t_a = Tenant.objects.create(slug="conflict-export-a", name="A")
+        t_b = Tenant.objects.create(slug="conflict-export-b", name="B")
+        BotUser.all_tenants.create(
+            tenant=t_a, channel="max", channel_user_id="12345", ayla_user_id=id_a
+        )
+        BotUser.all_tenants.create(
+            tenant=t_b, channel="max", channel_user_id="12345", ayla_user_id=id_b
+        )
+        requesting = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="12345", ayla_user_id=None
+        )
+        client = _StubPCClient()
+
+        with pytest.raises(PrivacyIdentityConflictError):
+            export_personal_data(requesting, client=client)  # type: ignore[arg-type]
+
+        assert client.calls == []
+
+    def test_export_conflict_does_not_leak_memory(self, tenant) -> None:
+        id_a, id_b = uuid.uuid4(), uuid.uuid4()
+        t_a = Tenant.objects.create(slug="conflict-export-mem-a", name="A")
+        t_b = Tenant.objects.create(slug="conflict-export-mem-b", name="B")
+        BotUser.all_tenants.create(
+            tenant=t_a, channel="max", channel_user_id="12345", ayla_user_id=id_a
+        )
+        BotUser.all_tenants.create(
+            tenant=t_b, channel="max", channel_user_id="12345", ayla_user_id=id_b
+        )
+        requesting = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="12345", ayla_user_id=None
+        )
+        _seed_memory(BotUser.all_tenants.get(ayla_user_id=id_a), id_a)
+
+        with pytest.raises(PrivacyIdentityConflictError):
+            export_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        # Candidate memory must remain untouched.
+        assert MemoryEntry.objects.filter(user_id=id_a, soft_deleted_at__isnull=True).exists()
+
+    def test_export_blank_channel_identity_uses_own_row_only(self, tenant) -> None:
+        t2 = Tenant.objects.create(slug="blank-export-victim", name="Victim")
+        victim = BotUser.all_tenants.create(
+            tenant=t2, channel="max", channel_user_id="", ayla_user_id=None
+        )
+        _grant(victim, ConsentRecord.ConsentType.PERSONAL_DATA)
+        actor = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="", ayla_user_id=None
+        )
+        _grant(actor, ConsentRecord.ConsentType.MEMORY_GREEN)
+
+        payload = export_personal_data(actor)
+
+        consent_types = {c["consent_type"] for c in payload["consents"]}
+        assert ConsentRecord.ConsentType.MEMORY_GREEN in consent_types
+        assert ConsentRecord.ConsentType.PERSONAL_DATA not in consent_types
+
+    def test_export_unlinked_includes_channel_sibling_consents(self, tenant) -> None:
+        t2 = Tenant.objects.create(slug="unlinked-sib", name="Sibling")
+        sibling = BotUser.all_tenants.create(
+            tenant=t2,
+            channel="max",
+            channel_user_id="555",
+            ayla_user_id=None,
+        )
+        requesting = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="555",
+            ayla_user_id=None,
+        )
+        _grant(requesting, ConsentRecord.ConsentType.PERSONAL_DATA)
+        _grant(sibling, ConsentRecord.ConsentType.MEMORY_GREEN)
+
+        payload = export_personal_data(requesting)
+
+        consent_types = {c["consent_type"] for c in payload["consents"]}
+        assert {
+            ConsentRecord.ConsentType.PERSONAL_DATA,
+            ConsentRecord.ConsentType.MEMORY_GREEN,
+        } <= consent_types
+
+    def test_export_leaves_db_unchanged(self, tenant, ayla_user_id) -> None:
+        requesting, linked = self._sibling_pair(tenant, ayla_user_id)
+        _with_pii(requesting)
+        _grant(requesting, ConsentRecord.ConsentType.PERSONAL_DATA)
+        _seed_memory(linked, ayla_user_id)
+
+        before = {
+            "phone": requesting.phone,
+            "display_name": requesting.display_name,
+            "client_name": requesting.client_name,
+            "consent_count": ConsentRecord.all_tenants.filter(
+                bot_user=requesting, withdrawn_at__isnull=True
+            ).count(),
+            "memory_count": MemoryEntry.objects.filter(
+                user_id=ayla_user_id, soft_deleted_at__isnull=True
+            ).count(),
+            "ayla_user_id": requesting.ayla_user_id,
+        }
+
+        export_personal_data(requesting, client=_StubPCClient())  # type: ignore[arg-type]
+
+        requesting.refresh_from_db()
+        assert requesting.phone == before["phone"]
+        assert requesting.display_name == before["display_name"]
+        assert requesting.client_name == before["client_name"]
+        assert requesting.ayla_user_id == before["ayla_user_id"]
+        assert (
+            ConsentRecord.all_tenants.filter(bot_user=requesting, withdrawn_at__isnull=True).count()
+            == before["consent_count"]
+        )
+        assert (
+            MemoryEntry.objects.filter(user_id=ayla_user_id, soft_deleted_at__isnull=True).count()
+            == before["memory_count"]
+        )
+
+
 class TestDelete:
     def test_full_cascade(self, bot_user, ayla_user_id) -> None:
         _seed_memory(bot_user, ayla_user_id)
@@ -287,6 +492,18 @@ class TestViews:
         )
         assert resp.status_code == 502
         assert resp.json()["error"] == "upstream_unavailable"
+
+    def test_export_identity_conflict_502(self, client: DjangoClient, tenant, monkeypatch) -> None:
+        def _conflict(*args, **kwargs):
+            raise PrivacyIdentityConflictError("conflict")
+
+        monkeypatch.setattr("apps.identity.services.privacy.export_personal_data", _conflict)
+        resp = client.get(
+            "/api/v1/customer/me/personal-data/export/",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 502
+        assert resp.json()["error"] == "identity_conflict"
 
     def test_delete_200_and_repeat(
         self, client: DjangoClient, bot_user, ayla_user_id, monkeypatch
