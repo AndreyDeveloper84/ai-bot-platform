@@ -90,6 +90,14 @@ class PrivacyUpstreamError(Exception):
     """Ayla-side export/delete failed — the view maps this to 502."""
 
 
+class PrivacyIdentityConflictError(Exception):
+    """The person's shells carry two or more distinct ayla_user_ids.
+
+    Export (and delete) must not guess which upstream account the caller
+    is — picking one could return or destroy a stranger's data.
+    """
+
+
 @dataclass(frozen=True)
 class DeleteStep:
     """One cascade step outcome. ``detail`` is a slug, never a value."""
@@ -297,14 +305,30 @@ def export_personal_data(
     *,
     client: PersonalContextHttpClient | None = None,
 ) -> dict[str, Any]:
-    """Aggregate the person's export payload. Raises PrivacyUpstreamError
-    when the Ayla leg fails (an export silently missing its Ayla half
-    would be a compliance lie — better an honest 502).
+    """Aggregate the person's export payload.
+
+    Raises:
+        PrivacyIdentityConflictError: when the person's shells carry two
+            or more distinct ``ayla_user_id`` values.
+        PrivacyUpstreamError: when the Ayla leg fails (an export silently
+            missing its Ayla half would be a compliance lie).
 
     Bot-side sections are always present; the ``ayla`` section is ``None``
     when the user has no Ayla link yet (nothing exists upstream).
     """
-    ayla_user_id = _resolve_ayla_user_id(bot_user)
+    link = _resolve_person_link(bot_user)
+
+    if link.conflict:
+        logger.error(
+            "identity.privacy.export_identity_conflict bot_user=%s — "
+            "refusing export across ambiguous shells (fail-closed)",
+            bot_user.id,
+        )
+        raise PrivacyIdentityConflictError(
+            "person identity conflict: cannot determine canonical subject"
+        )
+
+    ayla_user_id = link.ayla_user_id
 
     ayla_section: dict[str, Any] | None = None
     if ayla_user_id is not None:
@@ -334,11 +358,10 @@ def export_personal_data(
             for entry in read_green_entries(ayla_user_id)
         ]
 
-    consents_qs = ConsentRecord.all_tenants.order_by("captured_at")
-    if ayla_user_id is not None:
-        consents_qs = consents_qs.filter(bot_user_id__in=_bot_user_ids_for(ayla_user_id))
-    else:
-        consents_qs = consents_qs.filter(bot_user_id=bot_user.id)
+    shell_ids = _person_shell_ids(bot_user, link)
+    consents_qs = ConsentRecord.all_tenants.filter(bot_user_id__in=shell_ids).order_by(
+        "captured_at"
+    )
     consents_section = [
         {
             "consent_type": row.consent_type,
