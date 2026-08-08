@@ -474,5 +474,5 @@ class TestPilotShape:
 
         assert res.created == 1
         assert MasterService.all_tenants.filter(
-            tenant=tenant, master_id=specialist_id, service=service
+            tenant=tenant, master_id=uuid.UUID(specialist_id), service=service
         ).exists()
