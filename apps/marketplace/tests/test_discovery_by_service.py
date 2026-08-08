@@ -1,0 +1,290 @@
+"""Service-relation discovery tests (DRF-945).
+
+The live Controlled-Pilot failure this covers:
+
+    user: «ищу массаж, что можешь предложить»
+    bot:  уточняет тип и город
+    user: «Город Пенза, хочу спортивный»
+    bot:  «По вашему запросу мастеров пока не нашлось…»
+
+``discover_masters`` filtered ``CatalogMaster.specialization``, which no sync
+path populates, so every service-specific query matched "" and returned zero.
+Matching now goes through ``MasterService`` — the real master↔service relation
+— with ``specialization`` kept only as an OR fallback.
+
+Every master here is created with ``specialization=""`` unless a test is
+explicitly about the fallback: that is the production shape, and a test that
+quietly sets it would prove nothing.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+from django.conf import settings
+
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.marketplace.discovery import discover_masters
+from apps.tenancy.models import Tenant
+
+# Postgres-only, deliberately, for the WHOLE module.
+#
+# Matching is ``icontains`` → ILIKE and case folding is the DB's job. Postgres
+# (CI + production) folds Unicode; SQLite folds ASCII only, so a lowercase
+# «спортивный» never matches a stored «Спортивный» there.
+#
+# The positive tests would fail on SQLite — but the negative ones ("returns
+# nothing") would PASS for the wrong reason, since nothing can match at all.
+# Vacuous green is worse than an honest skip, so the module skips wholesale
+# rather than splitting into two classes of trustworthiness.
+#
+# Run locally against Postgres with:
+#   POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_USER=postgres #   POSTGRES_PASSWORD=postgres uv run pytest apps/marketplace
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.skipif(
+        "postgresql" not in str(settings.DATABASES["default"]["ENGINE"]),
+        reason="Cyrillic ILIKE folding requires Postgres; on SQLite the negative "
+        "assertions would pass vacuously.",
+    ),
+]
+
+
+def _ts() -> datetime:
+    return datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def penza() -> Tenant:
+    return Tenant.objects.create(slug="salon-penza", name="Salon Penza", city="Пенза")
+
+
+@pytest.fixture
+def moscow() -> Tenant:
+    return Tenant.objects.create(slug="salon-msk", name="Salon Moscow", city="Москва")
+
+
+def _master(tenant: Tenant, name: str, *, specialization: str = "", **kw) -> CatalogMaster:
+    defaults = {
+        "is_active": True,
+        "invite_status": CatalogMaster.InviteStatus.ACCEPTED,
+    }
+    defaults.update(kw)
+    return CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        external_updated_at=_ts(),
+        name=name,
+        specialization=specialization,
+        **defaults,
+    )
+
+
+def _service(
+    tenant: Tenant, name: str, *, slug: str = "svc", is_active: bool = True
+) -> CatalogService:
+    return CatalogService.all_tenants.create(
+        tenant=tenant,
+        slug=slug,
+        name=name,
+        is_active=is_active,
+        external_updated_at=_ts(),
+    )
+
+
+def _link(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> MasterService:
+    return MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+
+
+class TestServiceRelationMatch:
+    def test_finds_master_by_linked_service(self, penza: Tenant) -> None:
+        """The exact live scenario, at the retrieval layer."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(city="Пенза", specialization="спортивный массаж")
+
+        assert {c.name for c in cards} == {"Массажист"}
+
+    def test_finds_master_by_partial_query(self, penza: Tenant) -> None:
+        """The live tool passed only «спортивный» — the adjective, no noun."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(city="Пенза", specialization="спортивный")
+
+        assert {c.name for c in cards} == {"Массажист"}
+
+    def test_word_order_does_not_matter(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(city="Пенза", specialization="массаж спортивный")
+
+        assert {c.name for c in cards} == {"Массажист"}
+
+    def test_broad_query_matches_every_massage(self, penza: Tenant) -> None:
+        sport = _master(penza, "Спортивный мастер", specialization="")
+        classic = _master(penza, "Классический мастер", specialization="")
+        nails = _master(penza, "Ногтевой мастер", specialization="")
+        _link(penza, sport, _service(penza, "Спортивный массаж", slug="sport"))
+        _link(penza, classic, _service(penza, "Классический массаж", slug="classic"))
+        _link(penza, nails, _service(penza, "Маникюр", slug="manicure"))
+
+        cards = discover_masters(city="Пенза", specialization="массаж")
+
+        assert {c.name for c in cards} == {"Спортивный мастер", "Классический мастер"}
+
+    def test_tokens_must_match_the_same_service(self, penza: Tenant) -> None:
+        """AND binds within one joined row, not across a master's whole list.
+
+        A master doing «Спортивный маникюр» and «Тайский массаж» must NOT
+        answer «спортивный массаж» — neither service is that.
+        """
+        master = _master(penza, "Универсал", specialization="")
+        _link(penza, master, _service(penza, "Спортивный маникюр", slug="sport-nails"))
+        _link(penza, master, _service(penza, "Тайский массаж", slug="thai"))
+
+        cards = discover_masters(city="Пенза", specialization="спортивный массаж")
+
+        assert cards == []
+
+    def test_case_insensitive(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный Массаж", slug="sport"))
+
+        assert len(discover_masters(specialization="СПОРТИВНЫЙ массаж")) == 1
+
+
+class TestNoFalsePositives:
+    def test_wrong_city_returns_nothing(self, penza: Tenant, moscow: Tenant) -> None:
+        master = _master(moscow, "Массажист", specialization="")
+        _link(moscow, master, _service(moscow, "Спортивный массаж", slug="sport"))
+
+        assert discover_masters(city="Пенза", specialization="спортивный массаж") == []
+
+    def test_inactive_service_returns_nothing(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport", is_active=False))
+
+        assert discover_masters(city="Пенза", specialization="спортивный массаж") == []
+
+    def test_inactive_master_returns_nothing(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="", is_active=False)
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        assert discover_masters(city="Пенза", specialization="спортивный массаж") == []
+
+    def test_unaccepted_master_returns_nothing(self, penza: Tenant) -> None:
+        master = _master(
+            penza,
+            "Массажист",
+            specialization="",
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+        )
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        assert discover_masters(city="Пенза", specialization="спортивный массаж") == []
+
+    def test_unrelated_service_does_not_match(self, penza: Tenant) -> None:
+        master = _master(penza, "Ногтевой мастер", specialization="")
+        _link(penza, master, _service(penza, "Маникюр", slug="manicure"))
+
+        assert discover_masters(city="Пенза", specialization="спортивный массаж") == []
+
+    def test_master_without_any_service_does_not_match(self, penza: Tenant) -> None:
+        _master(penza, "Пустой мастер", specialization="")
+
+        assert discover_masters(city="Пенза", specialization="массаж") == []
+
+    def test_foreign_tenant_edge_cannot_surface_a_master(
+        self, penza: Tenant, moscow: Tenant
+    ) -> None:
+        """A cross-tenant edge must not let a Penza service pull in a Moscow
+        master. Sync cannot create such a row, but discovery is the one reader
+        that sees every tenant at once and must not rely on that."""
+        moscow_master = _master(moscow, "Московский мастер", specialization="")
+        penza_service = _service(penza, "Спортивный массаж", slug="sport")
+        # Deliberately malformed edge: master and service in different tenants.
+        MasterService.all_tenants.create(tenant=moscow, master=moscow_master, service=penza_service)
+
+        cards = discover_masters(specialization="спортивный массаж")
+
+        assert cards == []
+
+
+class TestNoDuplicateCards:
+    def test_master_with_two_matching_services_renders_once(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+        _link(penza, master, _service(penza, "Классический массаж", slug="classic"))
+
+        cards = discover_masters(city="Пенза", specialization="массаж")
+
+        assert [c.name for c in cards] == ["Массажист"]
+
+    def test_match_on_both_service_and_specialization_renders_once(self, penza: Tenant) -> None:
+        """The OR branch must not double-count a master satisfying both sides."""
+        master = _master(penza, "Массажист", specialization="спортивный массаж")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(city="Пенза", specialization="спортивный массаж")
+
+        assert [c.name for c in cards] == ["Массажист"]
+
+
+class TestSpecializationFallback:
+    def test_specialization_only_match_still_works(self, penza: Tenant) -> None:
+        """Accepted current behaviour — must not regress."""
+        _master(penza, "Анна", specialization="маникюр педикюр")
+
+        assert {c.name for c in discover_masters(specialization="педикюр")} == {"Анна"}
+
+    def test_specialization_tokens_also_order_independent(self, penza: Tenant) -> None:
+        _master(penza, "Анна", specialization="маникюр педикюр")
+
+        assert {c.name for c in discover_masters(specialization="педикюр маникюр")} == {"Анна"}
+
+
+class TestQueryDegenerateInput:
+    def test_blank_query_does_not_filter(self, penza: Tenant) -> None:
+        _master(penza, "Анна", specialization="")
+
+        assert len(discover_masters(specialization="   ")) == 1
+
+    def test_single_character_token_is_dropped(self, penza: Tenant) -> None:
+        """A one-char ILIKE matches nearly everything and adds no signal."""
+        _master(penza, "Анна", specialization="")
+
+        assert len(discover_masters(specialization="а")) == 1
+
+    def test_quotes_are_stripped(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        assert len(discover_masters(specialization="«спортивный массаж»")) == 1
+
+
+class TestPagination:
+    def test_page_helper_shares_the_service_match(self, penza: Tenant) -> None:
+        from apps.marketplace.discovery import discover_masters_page
+
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards, meta = discover_masters_page(city="Пенза", specialization="спортивный массаж")
+
+        assert [c.name for c in cards] == ["Массажист"]
+        assert meta.total_count == 1
+
+    def test_page_count_not_inflated_by_join(self, penza: Tenant) -> None:
+        """``Paginator`` COUNTs the queryset — the join must not inflate it."""
+        from apps.marketplace.discovery import discover_masters_page
+
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+        _link(penza, master, _service(penza, "Классический массаж", slug="classic"))
+
+        _cards, meta = discover_masters_page(city="Пенза", specialization="массаж")
+
+        assert meta.total_count == 1

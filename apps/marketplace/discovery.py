@@ -18,7 +18,7 @@ from typing import NamedTuple
 from uuid import UUID
 
 from django.core.paginator import Paginator
-from django.db.models import QuerySet
+from django.db.models import F, Q, QuerySet
 
 from apps.catalog.models import CatalogMaster
 from apps.marketplace.dto import MasterCard
@@ -33,6 +33,31 @@ _MAX_LIMIT = 200
 # page size — not the list cap above — bounds each call.
 _DEFAULT_PAGE_SIZE = 20
 _MAX_PAGE_SIZE = 50
+
+# Query tokens shorter than this are dropped — a one-character ILIKE
+# ``%а%`` matches essentially every service name and adds no signal.
+_MIN_TOKEN_LEN = 2
+
+# Upper bound on tokens per query. Each one becomes an ILIKE against the same
+# joined row, so an unbounded query would be an unbounded AND-chain.
+_MAX_TOKENS = 5
+
+
+def _query_tokens(raw: str) -> list[str]:
+    """Normalize a discovery query into match tokens.
+
+    Deliberately NOT ``apps.catalog.services.linking.normalize_name``, despite
+    the overlap. That helper implements the C6 link contract, where **both**
+    sides are normalized in Python before comparison, so its ``ё→е`` step is
+    symmetric and safe. Here only the query is normalized — the service name
+    is matched raw through ``icontains`` (ILIKE) — so folding ``ё→е`` on one
+    side only would turn a perfectly matchable «ёлочный» query into a token
+    that can never match the stored «ё». Casefolding is fine because ILIKE is
+    already case-insensitive.
+    """
+    cleaned = raw.replace("«", " ").replace("»", " ")
+    tokens = [t for t in cleaned.casefold().split() if len(t) >= _MIN_TOKEN_LEN]
+    return tokens[:_MAX_TOKENS]
 
 
 class PageMeta(NamedTuple):
@@ -53,8 +78,30 @@ def _bookable_qs(
 
     The SOLE ``all_tenants`` carve-out (MKT1). Only ``is_active`` +
     invite-``accepted`` masters (the same ``bookable`` predicate
-    customer-facing reads use). Optional ``city`` (exact, case-insensitive,
-    on the owning tenant) and ``specialization`` (substring) narrow it.
+    customer-facing reads use). Optional ``city`` (exact, case-insensitive, on
+    the owning tenant) and ``specialization`` narrow it.
+
+    ### Matching a service (DRF-945)
+
+    ``specialization`` used to filter ``CatalogMaster.specialization`` alone.
+    Nothing populates that field — the Ayla specialists feed carries no such
+    value — so every service-specific query matched the empty string and
+    returned zero masters. That was the live pilot failure: «Пенза,
+    спортивный» produced the no-masters-found fallback even though the salon
+    offers exactly that service.
+
+    A master now matches when **either** side does:
+
+    * a service they actually perform, joined through ``MasterService`` (the
+      canonical relation, mirrored from Ayla's bookable ``SpecialistService``);
+    * or the legacy free-text ``specialization``, kept as an OR so
+      operator-maintained rows and any future feed that does populate it keep
+      working.
+
+    Tokens are AND-ed **within one joined row**, so «спортивный массаж» and
+    «массаж спортивный» both match the service «Спортивный массаж», while
+    «массаж» alone matches every massage service. Word order stops mattering
+    without reaching for fuzzy or vector search.
     """
     qs = (
         CatalogMaster.all_tenants.filter(
@@ -66,8 +113,39 @@ def _bookable_qs(
     )
     if city:
         qs = qs.filter(tenant__city__iexact=city)
+
     if specialization:
-        qs = qs.filter(specialization__icontains=specialization)
+        tokens = _query_tokens(specialization)
+        if tokens:
+            # One filter() call, so every condition binds to the SAME joined
+            # MasterService row — a master offering «Спортивный массаж» matches
+            # «спортивный массаж», but one offering «Спортивный маникюр» plus a
+            # separate «Тайский массаж» does not match on the split.
+            #
+            # A MasterService row existing IS the statement that the master
+            # performs the service (there is no status column — see the model);
+            # the service itself must still be active to be offered.
+            service_match = Q(services_offered__service__is_active=True)
+            # Belt-and-braces on an inherently cross-tenant queryset: the edge's
+            # service must belong to the same tenant as the master. The sync
+            # path cannot create a cross-tenant edge, but discovery is the one
+            # reader that sees every tenant at once, so it should not depend on
+            # a writer-side guarantee to avoid surfacing a master for a service
+            # they do not offer.
+            service_match &= Q(services_offered__service__tenant_id=F("tenant_id"))
+            for token in tokens:
+                service_match &= Q(services_offered__service__name__icontains=token)
+
+            specialization_match = Q()
+            for token in tokens:
+                specialization_match &= Q(specialization__icontains=token)
+
+            # DISTINCT is required: the join multiplies a master by every
+            # matching service row, so a master offering both «Спортивный
+            # массаж» and «Классический массаж» would otherwise render twice
+            # for the query «массаж».
+            qs = qs.filter(service_match | specialization_match).distinct()
+
     return qs
 
 
@@ -82,7 +160,9 @@ def discover_masters(
     Only ``is_active`` + invite-``accepted`` masters are returned (the same
     ``bookable`` predicate customer-facing reads use). Optional ``city``
     (exact, case-insensitive, on the owning tenant) and ``specialization``
-    (substring) narrow the result. ``limit`` is clamped to ``_MAX_LIMIT``.
+    narrow the result — the latter matches either a service the master
+    actually performs or their free-text specialization (see
+    :func:`_bookable_qs`). ``limit`` is clamped to ``_MAX_LIMIT``.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
     qs = _bookable_qs(city=city, specialization=specialization)
