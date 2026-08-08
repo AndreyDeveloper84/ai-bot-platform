@@ -189,7 +189,13 @@ def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
     for card in cards:
         rating = f" · ★ {card.rating}" if card.rating is not None else ""
         city = f" · {card.city}" if card.city else ""
-        lines.append(f"• {card.name} — {card.specialization}{rating}{city}")
+        # The em-dash belongs to the specialization, not to the line. Ayla's
+        # specialists feed carries no specialization, so since DRF-945 made
+        # service-relation matching the primary discovery path, the empty case
+        # is the COMMON one — an unconditional dash renders every card as
+        # «• Массажист —  · Пенза».
+        spec = f" — {card.specialization}" if card.specialization else ""
+        lines.append(f"• {card.name}{spec}{rating}{city}")
         buttons.append(
             {
                 "label": f"Записаться к {card.name}",

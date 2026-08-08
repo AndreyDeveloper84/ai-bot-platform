@@ -138,7 +138,12 @@ def test_live_turn_returns_a_master_not_the_fallback(
     )
 
     assert _ZERO_RESULT_FALLBACK not in reply.text
-    assert "Массажист Пилот" in reply.text
+    # Assert the WHOLE rendered line, not just that the name appears somewhere.
+    # A substring check happily passes on «• Массажист Пилот —  · Пенза», the
+    # dangling-dash rendering an empty specialization used to produce — and an
+    # empty specialization is the common case on this very path.
+    assert "• Массажист Пилот · Пенза" in reply.text
+    assert " —  " not in reply.text
     assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
     assert buttons[0]["callback"].startswith("cb:discover:book:")
