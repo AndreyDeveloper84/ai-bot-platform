@@ -5,10 +5,13 @@ catalog surface (`SalonService` → `SpecialistService`, per
 ``docs/CATALOG_INTERNAL_API_CONTRACT.md`` on the Ayla repo). The upserter
 (:mod:`apps.catalog.services.upserter`) consumes the returned DTOs.
 
-**S3B STAGE 2 PR-1 scope:** only ``salon-services`` (→ ``CatalogService``).
-``specialist-services`` (bookable → ``MasterService``) and the specialist
-enrichment endpoint (``/internal/specialists/`` → ``CatalogMaster``) land in
-PR-2, which owns the tenant-scoped master mirror.
+Covers all three read surfaces the mirror needs:
+
+* ``salon-services`` → ``CatalogService``
+* ``/internal/specialists/`` → ``CatalogMaster``
+* ``specialist-services`` → ``MasterService`` (the bookable master↔service
+  edge; added for DRF-945 so service-specific discovery can join through a
+  real relation instead of the free-text ``CatalogMaster.specialization``)
 
 This replaces the retired mysite catalog client — bot-platform no longer
 reads mysite's Postgres or its ``/api/v1/catalog/*`` HTTP surface (ADR-0009
@@ -112,6 +115,40 @@ class CatalogSpecialistDTO:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CatalogSpecialistServiceDTO:
+    """One row of ``GET /api/v1/internal/catalog/specialist-services/``.
+
+    Ayla's canonical **bookable edge** (``SpecialistService``) — the
+    master↔service relation the ``MasterService`` mirror is built from
+    (DRF-945). Per ``docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2:
+
+    * ``ayla_specialist_service_id`` — ``SpecialistService.id``, the stable
+      booking key and this mirror's provenance stamp.
+    * ``specialist`` — ``SpecialistProfile.id``. This equals
+      ``CatalogMaster.id`` locally: :func:`upsert_specialists` keys the master
+      mirror on the same id (``/internal/specialists/`` ``row["id"]``).
+    * ``salon_service`` — ``SalonService.id`` → ``CatalogService.ayla_service_id``.
+    * ``user_id`` — Ayla ``User.id``. Deliberately NOT the same as
+      ``specialist``; carried for cross-checks only, never as a join key.
+
+    ``resolved_duration`` / ``resolved_requires_health_check`` ride in ``raw``
+    only — they belong to the booking gate (#1034), not to discovery, and
+    mirroring them here would create a fail-open column with no reader.
+    """
+
+    ayla_specialist_service_id: str
+    salon_service: str
+    specialist: str
+    external_updated_at: datetime
+    tenant: str | None = None
+    user_id: str | None = None
+    name: str = ""
+    category_slug: str = ""
+    is_active: bool = True
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -202,6 +239,20 @@ class CatalogHttpClient:
         """
         rows = self._fetch_all("internal/specialists/", params={})
         return [_parse_specialist(row) for row in rows]
+
+    def fetch_specialist_services(self, *, tenant_id: str) -> list[CatalogSpecialistServiceDTO]:
+        """Bookable master↔service edges for one tenant (→ ``MasterService``).
+
+        Unlike ``/internal/specialists/`` this endpoint DOES support the
+        ``?tenant=`` filter (contract §2), so the pull is properly scoped and
+        the returned list is the tenant's **full** edge snapshot — which is
+        what makes sync reconciliation safe (DRF-945).
+        """
+        rows = self._fetch_all(
+            "internal/catalog/specialist-services/",
+            params={"tenant": tenant_id},
+        )
+        return [_parse_specialist_service(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Plumbing
@@ -329,6 +380,31 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
         duration_min=_parse_int(row.get("duration_minutes")),
         template=row.get("template"),
         category=row.get("category"),
+        raw=row,
+    )
+
+
+def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDTO:
+    """Parse one bookable-edge row. Raises ``KeyError`` on a missing join key.
+
+    ``id`` / ``salon_service`` / ``specialist`` are mandatory — an edge without
+    them cannot be mirrored, and the upserter's per-row savepoint turns the
+    resulting error into a counted row failure rather than a lost batch.
+    ``updated_at`` is optional upstream; falls back to now (same policy as
+    :func:`_parse_specialist`).
+    """
+    return CatalogSpecialistServiceDTO(
+        ayla_specialist_service_id=str(row["id"]),
+        salon_service=str(row["salon_service"]),
+        specialist=str(row["specialist"]),
+        external_updated_at=(
+            _parse_dt(row["updated_at"]) if row.get("updated_at") else datetime.now(timezone.utc)
+        ),
+        tenant=str(row["tenant"]) if row.get("tenant") else None,
+        user_id=str(row["user_id"]) if row.get("user_id") else None,
+        name=row.get("name") or "",
+        category_slug=row.get("category_slug") or "",
+        is_active=bool(row.get("is_active", True)),
         raw=row,
     )
 

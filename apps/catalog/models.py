@@ -360,6 +360,23 @@ class MasterService(models.Model):
     Per master-management handoff §MM4 — admin maintains via matrix UI.
     Customer booking endpoints MUST check this mapping before assigning
     ``BookingRequest.master_id``.
+
+    ### Dual ownership (DRF-945 / P1 service discovery)
+
+    This table has **two writers** and they must not fight:
+
+    * **Operator** — the MM4 matrix (``apps/admin_api/views_services_mapping.py``)
+      and the invite seeder (``views_invite.py``). Rows they create leave
+      ``ayla_specialist_service_id`` NULL.
+    * **Catalog sync** — mirrors Ayla's canonical ``SpecialistService`` edge
+      (``GET /internal/catalog/specialist-services/``). Rows it owns carry a
+      non-NULL ``ayla_specialist_service_id``.
+
+    Sync reconciliation only ever touches rows it owns (non-NULL Ayla id), so
+    an operator-maintained mapping can never be deactivated by a sync beat.
+    Reconciliation **deactivates** (``is_active=False``) rather than deletes —
+    the MM4 matrix reads row *existence*, so a tombstoned row keeps the
+    operator's view stable while dropping out of customer-facing discovery.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -388,6 +405,41 @@ class MasterService(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # DRF-945 — provenance + Ayla's canonical bookable-edge id
+    # (``SpecialistService.id``). NULL ⇒ operator-owned (MM4 matrix / invite
+    # seeder); non-NULL ⇒ catalog-sync owns this row and may reconcile it.
+    # This is the ONLY discriminator sync uses to decide what it may touch.
+    ayla_specialist_service_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla SpecialistService.id (UUID) — the bookable "
+            "master↔service edge. NULL means the row was created by an "
+            "operator (MM4 matrix / invite seeding) and catalog sync must "
+            "never reconcile it away."
+        ),
+    )
+
+    # DRF-945 — discoverability/bookability of this edge. Mirrors upstream
+    # ``SpecialistService.is_active`` for sync-owned rows; sync reconciliation
+    # flips it to False when an owned edge disappears from the feed.
+    #
+    # default=True is deliberate: every pre-existing row is operator-created
+    # and IS a real "this master performs this service" statement (that is the
+    # entire point of the MM4 matrix), so defaulting to True preserves current
+    # behaviour exactly. This flag gates *discovery*, not the booking health
+    # gate — resolved_requires_health_check stays out of scope here (#1034).
+    is_active = models.BooleanField(
+        default=True,
+        help_text=(
+            "Whether this master↔service edge is offered. Mirrors upstream "
+            "SpecialistService.is_active on sync-owned rows; operator rows "
+            "default True (pre-existing MM4 semantics). Discovery filters on "
+            "this — it is NOT the booking health gate."
+        ),
+    )
+
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
@@ -396,9 +448,23 @@ class MasterService(models.Model):
         verbose_name_plural = "Catalog: master-service mappings"
         ordering = ["master_id", "service_id"]
         unique_together = (("master", "service"),)
+        constraints = [
+            # One local row per Ayla edge, per tenant. Partial (WHERE NOT
+            # NULL) so operator rows — which are all NULL — are exempt. Same
+            # pattern as uq_catalog_service_tenant_ayla_service_id; applied
+            # while the column is all-NULL → instant validate, zero conflict.
+            models.UniqueConstraint(
+                fields=["tenant", "ayla_specialist_service_id"],
+                condition=models.Q(ayla_specialist_service_id__isnull=False),
+                name="uq_master_service_tenant_ayla_specialist_service_id",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "master"]),
             models.Index(fields=["tenant", "service"]),
+            # Discovery joins MasterService → CatalogService filtered on the
+            # active edge (DRF-945); this is the driving index for that scan.
+            models.Index(fields=["tenant", "is_active", "service"]),
         ]
 
     def __str__(self) -> str:
