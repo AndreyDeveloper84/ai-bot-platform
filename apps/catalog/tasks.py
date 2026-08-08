@@ -52,7 +52,7 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
 
     Returns:
       Counter dict ``{tenants_run, tenants_skipped, tenants_failed,
-      total_created, total_updated, total_skipped, total_deactivated}``
+      total_created, total_updated, total_skipped, total_removed}``
       aggregated across the fan-out. Surfaced to ``check_agents`` health
       (Sprint 8) for "last sync OK across N/M tenants".
     """
@@ -63,7 +63,7 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
         "total_created": 0,
         "total_updated": 0,
         "total_skipped": 0,
-        "total_deactivated": 0,
+        "total_removed": 0,
     }
 
     service = CatalogSyncService()
@@ -90,13 +90,16 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
 
     logger.info(
         "catalog.sync.beat_completed run=%s skipped=%s failed=%s "
-        "created=%s updated=%s skipped_rows=%s",
+        "created=%s updated=%s skipped_rows=%s removed=%s",
         counters["tenants_run"],
         counters["tenants_skipped"],
         counters["tenants_failed"],
         counters["total_created"],
         counters["total_updated"],
         counters["total_skipped"],
+        # Removal is the one destructive action a beat can take — it must not
+        # be the only counter missing from the line an operator reads.
+        counters["total_removed"],
     )
     return counters
 
@@ -119,4 +122,4 @@ def _accumulate(counters: dict[str, int], result: SyncResult) -> None:
         counters["total_created"] += mirror.created
         counters["total_updated"] += mirror.updated
         counters["total_skipped"] += mirror.skipped
-        counters["total_deactivated"] += mirror.deactivated
+        counters["total_removed"] += mirror.removed

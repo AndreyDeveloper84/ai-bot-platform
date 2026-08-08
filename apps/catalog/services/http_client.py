@@ -250,7 +250,14 @@ class CatalogHttpClient:
         """
         rows = self._fetch_all(
             "internal/catalog/specialist-services/",
-            params={"tenant": tenant_id},
+            # page_size=100 (the contract's documented maximum) is a
+            # correctness requirement, not a performance tweak: reconciliation
+            # deletes owned rows absent from this snapshot, and upstream orders
+            # by a non-unique ``created_at``. With the default PAGE_SIZE=20 a
+            # tie or a concurrent insert between page fetches can drop a row
+            # from the snapshot, which would read as "deleted upstream".
+            # Fewer pages ⇒ fewer seams where that can happen.
+            params={"tenant": tenant_id, "page_size": 100},
         )
         return [_parse_specialist_service(row) for row in rows]
 
@@ -388,8 +395,16 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
     """Parse one bookable-edge row. Raises ``KeyError`` on a missing join key.
 
     ``id`` / ``salon_service`` / ``specialist`` are mandatory — an edge without
-    them cannot be mirrored, and the upserter's per-row savepoint turns the
-    resulting error into a counted row failure rather than a lost batch.
+    them cannot be mirrored at all.
+
+    Note this raises out of ``fetch_specialist_services`` and therefore aborts
+    the whole tenant's edge batch, NOT just the offending row: parsing happens
+    before the upserter's per-row savepoints. That is deliberate — it fails
+    *safe* (nothing written, reconciliation never runs, the other two mirrors
+    still land), and a malformed join key means the snapshot can no longer be
+    trusted to prove absence, which is exactly when deleting rows is most
+    dangerous. Loud and inert beats silent and destructive.
+
     ``updated_at`` is optional upstream; falls back to now (same policy as
     :func:`_parse_specialist`).
     """

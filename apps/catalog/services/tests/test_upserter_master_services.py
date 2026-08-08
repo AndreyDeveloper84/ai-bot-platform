@@ -4,9 +4,14 @@
 service-specific discovery can join master→service instead of relying on the
 free-text ``CatalogMaster.specialization`` that no sync path populates.
 
-The invariant under test throughout: **sync owns only the rows it stamped**.
-``MasterService`` is co-owned with the operator (MM4 matrix / invite seeding),
-and an operator mapping must survive every beat, including reconciliation.
+Two invariants carry most of these tests:
+
+* **Sync owns only the rows it created.** ``MasterService`` is co-owned with
+  the operator (MM4 matrix / invite seeding); an operator mapping must survive
+  every beat and must never be adopted.
+* **Row existence is the contract.** No reader filters a status column, so an
+  edge that is inactive or gone upstream must leave no row — a tombstone would
+  read as "offered" to booking, slots and the miniapp catalogs.
 """
 
 from __future__ import annotations
@@ -62,19 +67,32 @@ def _dto(
     edge_id: str | None = None,
     is_active: bool = True,
     tenant_id: str | None = None,
-    name: str = "",
+    omit_tenant: bool = False,
 ) -> CatalogSpecialistServiceDTO:
     return CatalogSpecialistServiceDTO(
         ayla_specialist_service_id=edge_id or str(uuid.uuid4()),
         salon_service=str(service.ayla_service_id),
         specialist=str(master.id),
         external_updated_at=_TS,
-        tenant=tenant_id if tenant_id is not None else str(master.tenant_id),
+        tenant=None if omit_tenant else (tenant_id or str(master.tenant_id)),
         user_id=str(uuid.uuid4()),
-        name=name or service.name,
+        name=service.name,
         category_slug="massage",
         is_active=is_active,
         raw={},
+    )
+
+
+def _unresolvable(
+    tenant: Tenant, master: CatalogMaster, edge_id: str
+) -> CatalogSpecialistServiceDTO:
+    """A real upstream edge whose service isn't mirrored locally (yet)."""
+    return CatalogSpecialistServiceDTO(
+        ayla_specialist_service_id=edge_id,
+        salon_service=str(uuid.uuid4()),
+        specialist=str(master.id),
+        external_updated_at=_TS,
+        tenant=str(tenant.id),
     )
 
 
@@ -86,10 +104,9 @@ class TestCreate:
         res = upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id)])
 
         assert isinstance(res, UpsertResult)
-        assert (res.created, res.updated, res.skipped, res.deactivated) == (1, 0, 0, 0)
+        assert (res.created, res.updated, res.skipped, res.removed) == (1, 0, 0, 0)
         row = MasterService.all_tenants.get(tenant=tenant, master=m, service=s)
         assert str(row.ayla_specialist_service_id) == edge_id
-        assert row.is_active is True
 
     def test_one_specialist_many_services(self, tenant: Tenant) -> None:
         m = _master(tenant)
@@ -110,6 +127,59 @@ class TestCreate:
         assert res.created == 2
         assert MasterService.all_tenants.filter(tenant=tenant, service=s).count() == 2
 
+    def test_null_payload_tenant_is_accepted(self, tenant: Tenant) -> None:
+        """Contract marks the denormalized ``tenant`` nullable — guard #1 must
+        not reject on absence, only on mismatch."""
+        m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
+
+        res = upsert_master_services(tenant, [_dto(m, s, omit_tenant=True)])
+
+        assert res.created == 1
+        assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s).exists()
+
+
+class TestInactiveUpstream:
+    """Presence is the contract — no reader filters a status column."""
+
+    def test_inactive_edge_creates_no_row(self, tenant: Tenant) -> None:
+        m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
+
+        res = upsert_master_services(tenant, [_dto(m, s, is_active=False)])
+
+        assert res.created == 0
+        assert not MasterService.all_tenants.filter(tenant=tenant).exists()
+
+    def test_edge_going_inactive_removes_the_row(self, tenant: Tenant) -> None:
+        """The regression that matters: a tombstoned row would still satisfy
+        the ``.exists()`` check every booking/slots reader performs."""
+        m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
+        edge_id = str(uuid.uuid4())
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id)])
+        assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s).exists()
+
+        res = upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, is_active=False)])
+
+        assert res.removed == 1
+        assert not MasterService.all_tenants.filter(tenant=tenant, master=m, service=s).exists()
+
+    def test_inactive_edge_does_not_touch_operator_row(self, tenant: Tenant) -> None:
+        m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
+        MasterService.all_tenants.create(tenant=tenant, master=m, service=s)
+
+        res = upsert_master_services(tenant, [_dto(m, s, is_active=False)])
+
+        assert res.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s).exists()
+
+    def test_reoffered_edge_comes_back(self, tenant: Tenant) -> None:
+        m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
+        edge_id = str(uuid.uuid4())
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, is_active=False)])
+
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, is_active=True)])
+
+        assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s).exists()
+
 
 class TestIdempotency:
     def test_repeated_sync_is_stable(self, tenant: Tenant) -> None:
@@ -123,32 +193,25 @@ class TestIdempotency:
         assert first.created == 1
         assert (second.created, second.updated) == (0, 1)
         assert (third.created, third.updated) == (0, 1)
-        # The whole point: no duplicate rows accumulate across beats.
         assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
-        assert second.deactivated == third.deactivated == 0
+        assert second.removed == third.removed == 0
 
-    def test_updates_changed_activity(self, tenant: Tenant) -> None:
+    def test_noop_beat_does_not_bump_updated_at(self, tenant: Tenant) -> None:
+        """``updated_at`` is auto_now and the MM4 matrix derives its
+        optimistic-concurrency token from MAX(updated_at). An unconditional
+        save would 409 any operator mid-edit, every 15 minutes."""
         m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
-        edge_id = str(uuid.uuid4())
-        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id)])
+        dto = _dto(m, s)
+        upsert_master_services(tenant, [dto])
+        before = MasterService.all_tenants.get(tenant=tenant).updated_at
 
-        res = upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, is_active=False)])
+        upsert_master_services(tenant, [dto])
 
-        assert (res.created, res.updated) == (0, 1)
-        assert MasterService.all_tenants.get(master=m, service=s).is_active is False
-
-    def test_reactivates_when_upstream_returns(self, tenant: Tenant) -> None:
-        m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
-        edge_id = str(uuid.uuid4())
-        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, is_active=False)])
-
-        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, is_active=True)])
-
-        assert MasterService.all_tenants.get(master=m, service=s).is_active is True
+        assert MasterService.all_tenants.get(tenant=tenant).updated_at == before
 
 
 class TestReconciliation:
-    def test_removed_edge_is_deactivated_not_deleted(self, tenant: Tenant) -> None:
+    def test_removed_edge_is_deleted(self, tenant: Tenant) -> None:
         m = _master(tenant)
         s1 = _service(tenant, name="Спортивный массаж", slug="sport")
         s2 = _service(tenant, name="Классический массаж", slug="classic")
@@ -157,11 +220,10 @@ class TestReconciliation:
 
         res = upsert_master_services(tenant, [keep])
 
-        assert res.deactivated == 1
-        # Deactivated, NOT deleted — the MM4 matrix reads row existence.
-        assert MasterService.all_tenants.filter(tenant=tenant).count() == 2
-        assert MasterService.all_tenants.get(master=m, service=s2).is_active is False
-        assert MasterService.all_tenants.get(master=m, service=s1).is_active is True
+        assert res.removed == 1
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
+        assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s1).exists()
+        assert not MasterService.all_tenants.filter(tenant=tenant, master=m, service=s2).exists()
 
     def test_operator_row_is_never_reconciled(self, tenant: Tenant) -> None:
         """The core co-ownership guarantee: NULL stamp ⇒ sync must not touch it."""
@@ -172,24 +234,54 @@ class TestReconciliation:
 
         res = upsert_master_services(tenant, [_dto(m, s_ayla)])
 
-        assert res.deactivated == 0
+        assert res.removed == 0
         operator_row.refresh_from_db()
-        assert operator_row.is_active is True
         assert operator_row.ayla_specialist_service_id is None
 
-    def test_empty_snapshot_vetoes_reconciliation(self, tenant: Tenant) -> None:
-        """An empty feed is far likelier a tenant-id mismatch than a real wipe.
+    def test_skipped_edge_survives_reconciliation(self, tenant: Tenant) -> None:
+        """A previously-mirrored edge that fails to resolve this beat is NOT
+        absent upstream — deleting it would destroy a live relation."""
+        m = _master(tenant)
+        s1 = _service(tenant, name="Спортивный массаж", slug="sport")
+        s2 = _service(tenant, name="Классический массаж", slug="classic")
+        stays, fragile = _dto(m, s1), _dto(m, s2)
+        upsert_master_services(tenant, [stays, fragile])
 
-        Deactivating everything here would silently re-create the exact
-        zero-result discovery bug this mirror exists to fix.
-        """
+        # Same edge id, but its service is no longer resolvable locally.
+        broken = _unresolvable(tenant, m, fragile.ayla_specialist_service_id)
+        res = upsert_master_services(tenant, [stays, broken])
+
+        assert res.skipped == 1
+        assert res.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s2).exists()
+
+    def test_mass_skip_does_not_wipe_the_tenant(self, tenant: Tenant) -> None:
+        """The scale version: most edges failing to resolve must not delete them."""
+        m = _master(tenant)
+        services = [_service(tenant, name=f"Услуга {i}", slug=f"s{i}") for i in range(5)]
+        dtos = [_dto(m, svc) for svc in services]
+        upsert_master_services(tenant, dtos)
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 5
+
+        # Only the first still resolves; the other four go unresolvable.
+        degraded = [dtos[0]] + [
+            _unresolvable(tenant, m, d.ayla_specialist_service_id) for d in dtos[1:]
+        ]
+        res = upsert_master_services(tenant, degraded)
+
+        assert res.skipped == 4
+        assert res.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 5
+
+    def test_empty_snapshot_vetoes_reconciliation(self, tenant: Tenant) -> None:
+        """An empty feed is far likelier a tenant-id mismatch than a real wipe."""
         m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
         upsert_master_services(tenant, [_dto(m, s)])
 
         res = upsert_master_services(tenant, [])
 
-        assert res.deactivated == 0
-        assert MasterService.all_tenants.get(master=m, service=s).is_active is True
+        assert res.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant).exists()
 
     def test_partial_batch_vetoes_reconciliation(self, tenant: Tenant) -> None:
         """Requirement 8 — a partial failure must not leave knowingly-false state."""
@@ -198,7 +290,6 @@ class TestReconciliation:
         s2 = _service(tenant, name="Классический массаж", slug="classic")
         upsert_master_services(tenant, [_dto(m, s1), _dto(m, s2)])
 
-        # s1's edge resolves; the second row blows up on a malformed service id.
         broken = CatalogSpecialistServiceDTO(
             ayla_specialist_service_id=str(uuid.uuid4()),
             salon_service="not-a-uuid",
@@ -209,8 +300,8 @@ class TestReconciliation:
         res = upsert_master_services(tenant, [_dto(m, s1), broken])
 
         assert res.errors
-        assert res.deactivated == 0
-        assert MasterService.all_tenants.get(master=m, service=s2).is_active is True
+        assert res.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 2
 
     def test_reconcile_disabled_by_caller(self, tenant: Tenant) -> None:
         m = _master(tenant)
@@ -220,28 +311,42 @@ class TestReconciliation:
 
         res = upsert_master_services(tenant, [_dto(m, s1)], reconcile=False)
 
-        assert res.deactivated == 0
-        assert MasterService.all_tenants.get(master=m, service=s2).is_active is True
+        assert res.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 2
+
+    def test_reconciliation_is_tenant_scoped(self, tenant: Tenant, tenant_b: Tenant) -> None:
+        """Tenant A's beat must not reach tenant B's owned rows."""
+        m_a, s_a = _master(tenant), _service(tenant, name="Спортивный массаж")
+        m_b, s_b = _master(tenant_b), _service(tenant_b, name="Спортивный массаж")
+        upsert_master_services(tenant, [_dto(m_a, s_a)])
+        upsert_master_services(tenant_b, [_dto(m_b, s_b)])
+
+        # Tenant A's next beat drops its only edge.
+        upsert_master_services(tenant, [_dto(m_a, _service(tenant, name="Другое", slug="other"))])
+
+        assert MasterService.all_tenants.filter(tenant=tenant_b).count() == 1
 
 
-class TestAdoption:
-    def test_adopts_existing_operator_pair_without_duplicating(self, tenant: Tenant) -> None:
+class TestOwnership:
+    def test_operator_pair_is_not_adopted(self, tenant: Tenant) -> None:
+        """Adoption would hand an operator-authored row to reconciliation."""
         m, s = _master(tenant), _service(tenant, name="Спортивный массаж")
         MasterService.all_tenants.create(tenant=tenant, master=m, service=s)
-        edge_id = str(uuid.uuid4())
 
-        res = upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id)])
+        res = upsert_master_services(tenant, [_dto(m, s)])
 
-        assert (res.created, res.updated) == (0, 1)
+        assert (res.created, res.skipped) == (0, 1)
         assert MasterService.all_tenants.filter(tenant=tenant, master=m, service=s).count() == 1
-        row = MasterService.all_tenants.get(master=m, service=s)
-        assert str(row.ayla_specialist_service_id) == edge_id
+        row = MasterService.all_tenants.get(tenant=tenant, master=m, service=s)
+        assert row.ayla_specialist_service_id is None
 
-    def test_reparented_edge_id_does_not_wedge_the_beat(self, tenant: Tenant) -> None:
-        """Same Ayla edge id moved to another pair — must not fail forever.
+    def test_reparented_edge_removes_the_stale_row(self, tenant: Tenant) -> None:
+        """Same Ayla edge id moved to another pair.
 
-        Without the defensive un-stamp the partial unique constraint would
-        reject this write on every single beat.
+        The old row is provably sync-owned (it carries our stamp), so it is
+        deleted. Merely releasing the stamp would leave a NULL-stamped row
+        indistinguishable from an operator row — permanently un-reconcilable,
+        and a live false claim that the master performs that service.
         """
         m1, m2 = _master(tenant, name="Анна"), _master(tenant, name="Борис")
         s = _service(tenant, name="Спортивный массаж")
@@ -252,11 +357,8 @@ class TestAdoption:
 
         assert not res.errors
         assert res.created == 1
-        assert MasterService.all_tenants.get(master=m2, service=s).ayla_specialist_service_id
-        # The old holder released the id rather than colliding on it.
-        assert (
-            MasterService.all_tenants.get(master=m1, service=s).ayla_specialist_service_id is None
-        )
+        assert MasterService.all_tenants.filter(tenant=tenant, master=m2, service=s).exists()
+        assert not MasterService.all_tenants.filter(tenant=tenant, master=m1, service=s).exists()
 
 
 class TestSafety:
@@ -269,7 +371,7 @@ class TestSafety:
         assert not MasterService.all_tenants.filter(tenant=tenant).exists()
 
     def test_cross_tenant_edge_cannot_be_created(self, tenant: Tenant, tenant_b: Tenant) -> None:
-        """Master here, service in another tenant — unrepresentable, not merely rejected."""
+        """Master here, service in another tenant."""
         m = _master(tenant)
         foreign_service = _service(tenant_b, name="Спортивный массаж")
         dto = CatalogSpecialistServiceDTO(
@@ -291,7 +393,7 @@ class TestSafety:
         dto = CatalogSpecialistServiceDTO(
             ayla_specialist_service_id=str(uuid.uuid4()),
             salon_service=str(s.ayla_service_id),
-            specialist=str(uuid.uuid4()),  # not mirrored yet
+            specialist=str(uuid.uuid4()),
             external_updated_at=_TS,
             tenant=str(tenant.id),
         )
@@ -304,38 +406,11 @@ class TestSafety:
 
     def test_unknown_service_is_skipped(self, tenant: Tenant) -> None:
         m = _master(tenant)
-        dto = CatalogSpecialistServiceDTO(
-            ayla_specialist_service_id=str(uuid.uuid4()),
-            salon_service=str(uuid.uuid4()),  # not mirrored yet
-            specialist=str(m.id),
-            external_updated_at=_TS,
-            tenant=str(tenant.id),
-        )
 
-        res = upsert_master_services(tenant, [dto])
+        res = upsert_master_services(tenant, [_unresolvable(tenant, m, str(uuid.uuid4()))])
 
         assert (res.created, res.skipped) == (0, 1)
         assert not res.errors
-
-    def test_skipped_edge_does_not_deactivate_live_rows(self, tenant: Tenant) -> None:
-        """A skipped (unresolvable) edge must not count as 'seen' nor as absence."""
-        m = _master(tenant)
-        s = _service(tenant, name="Спортивный массаж")
-        live = _dto(m, s)
-        upsert_master_services(tenant, [live])
-
-        unresolvable = CatalogSpecialistServiceDTO(
-            ayla_specialist_service_id=str(uuid.uuid4()),
-            salon_service=str(uuid.uuid4()),
-            specialist=str(m.id),
-            external_updated_at=_TS,
-            tenant=str(tenant.id),
-        )
-        res = upsert_master_services(tenant, [live, unresolvable])
-
-        assert res.skipped == 1
-        assert res.deactivated == 0
-        assert MasterService.all_tenants.get(master=m, service=s).is_active is True
 
 
 class TestPilotShape:
@@ -348,16 +423,56 @@ class TestPilotShape:
         sport = _service(tenant, name="Спортивный массаж", slug="sport-massage")
         classic = _service(tenant, name="Классический массаж", slug="classic-massage")
 
-        res = upsert_master_services(
-            tenant,
-            [_dto(master, sport), _dto(master, classic)],
-        )
+        res = upsert_master_services(tenant, [_dto(master, sport), _dto(master, classic)])
 
         assert res.created == 2
         linked = set(
-            MasterService.all_tenants.filter(
-                tenant=tenant, master=master, is_active=True
-            ).values_list("service__name", flat=True)
+            MasterService.all_tenants.filter(tenant=tenant, master=master).values_list(
+                "service__name", flat=True
+            )
         )
         assert linked == {"Спортивный массаж", "Классический массаж"}
         assert master.specialization == ""
+
+    def test_id_contract_holds_end_to_end(self, tenant: Tenant) -> None:
+        """Ties the master mirror's output ids to this mirror's input ids.
+
+        The other tests mint their own master and hand its id straight back,
+        which proves nothing about the upstream contract. Here the master is
+        created by ``upsert_specialists`` from a specialists-feed DTO, and the
+        edge references it exactly the way Ayla does — by SpecialistProfile.id.
+        """
+        from apps.catalog.services.http_client import CatalogSpecialistDTO
+        from apps.catalog.services.upserter import upsert_specialists
+
+        specialist_id = str(uuid.uuid4())
+        upsert_specialists(
+            tenant,
+            [
+                CatalogSpecialistDTO(
+                    ayla_master_id=specialist_id,
+                    user_id=str(uuid.uuid4()),  # deliberately different — not the join key
+                    name="Массажист Пилот",
+                    external_updated_at=_TS,
+                )
+            ],
+        )
+        service = _service(tenant, name="Спортивный массаж", slug="sport-massage")
+
+        res = upsert_master_services(
+            tenant,
+            [
+                CatalogSpecialistServiceDTO(
+                    ayla_specialist_service_id=str(uuid.uuid4()),
+                    salon_service=str(service.ayla_service_id),
+                    specialist=specialist_id,
+                    external_updated_at=_TS,
+                    tenant=str(tenant.id),
+                )
+            ],
+        )
+
+        assert res.created == 1
+        assert MasterService.all_tenants.filter(
+            tenant=tenant, master_id=specialist_id, service=service
+        ).exists()

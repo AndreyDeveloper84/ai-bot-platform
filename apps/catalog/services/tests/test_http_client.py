@@ -322,7 +322,7 @@ class TestFetchSpecialistServices:
 
     def test_edge_dto_fields(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{_SPEC_SVC_URL}?tenant={_TID}",
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
             json={"count": 1, "next": None, "previous": None, "results": [_edge_row()]},
         )
 
@@ -343,7 +343,7 @@ class TestFetchSpecialistServices:
 
     def test_tenant_filter_is_sent(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{_SPEC_SVC_URL}?tenant={_TID}",
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
             json={"count": 0, "next": None, "previous": None, "results": []},
         )
 
@@ -353,10 +353,15 @@ class TestFetchSpecialistServices:
         assert request is not None
         assert request.url.params["tenant"] == _TID
         assert request.headers["Authorization"] == f"Bearer {_TOKEN}"
+        # page_size is a correctness requirement, not a tweak: reconciliation
+        # deletes rows absent from this snapshot, and upstream orders by a
+        # non-unique created_at, so fewer page seams means fewer chances for a
+        # row to fall out of the snapshot and read as "deleted upstream".
+        assert request.url.params["page_size"] == "100"
 
     def test_inactive_edge_preserved(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{_SPEC_SVC_URL}?tenant={_TID}",
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
             json={
                 "count": 1,
                 "next": None,
@@ -373,7 +378,7 @@ class TestFetchSpecialistServices:
         row = _edge_row()
         del row["updated_at"]
         httpx_mock.add_response(
-            url=f"{_SPEC_SVC_URL}?tenant={_TID}",
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
             json={"count": 1, "next": None, "previous": None, "results": [row]},
         )
 
@@ -383,7 +388,7 @@ class TestFetchSpecialistServices:
 
     def test_optional_text_fields_tolerate_null(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{_SPEC_SVC_URL}?tenant={_TID}",
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
             json={
                 "count": 1,
                 "next": None,
@@ -403,7 +408,7 @@ class TestFetchSpecialistServices:
         row = _edge_row()
         del row["specialist"]
         httpx_mock.add_response(
-            url=f"{_SPEC_SVC_URL}?tenant={_TID}",
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
             json={"count": 1, "next": None, "previous": None, "results": [row]},
         )
 
@@ -411,7 +416,7 @@ class TestFetchSpecialistServices:
             _client().fetch_specialist_services(tenant_id=_TID)
 
     def test_auth_failure_maps_to_auth_error(self, httpx_mock: HTTPXMock) -> None:
-        httpx_mock.add_response(url=f"{_SPEC_SVC_URL}?tenant={_TID}", status_code=403)
+        httpx_mock.add_response(url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100", status_code=403)
 
         with pytest.raises(CatalogAuthError):
             _client().fetch_specialist_services(tenant_id=_TID)

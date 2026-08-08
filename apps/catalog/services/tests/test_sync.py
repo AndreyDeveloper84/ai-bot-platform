@@ -286,7 +286,7 @@ class TestMasterServicesMirror:
         row = MasterService.all_tenants.get(tenant=tenant)
         assert str(row.master_id) == mid
         assert row.service.name == "Спортивный массаж"
-        assert row.is_active is True
+        assert row.ayla_specialist_service_id is not None
 
     def test_edge_fetch_is_tenant_scoped(self, tenant: Tenant) -> None:
         http = FakeHttpClient()
@@ -310,7 +310,7 @@ class TestMasterServicesMirror:
         assert result.master_services.errors == 1
         assert result.master_services.created == 0
 
-    def test_edge_fetch_failure_does_not_deactivate_existing(self, tenant: Tenant) -> None:
+    def test_edge_fetch_failure_does_not_remove_existing(self, tenant: Tenant) -> None:
         """Requirement 8 — a failed fetch must not reconcile anything away."""
         mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
         good = FakeHttpClient(
@@ -329,7 +329,7 @@ class TestMasterServicesMirror:
         )
         CatalogSyncService(http_client=broken).run(tenant)
 
-        assert MasterService.all_tenants.get(tenant=tenant).is_active is True
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
 
     def test_rerun_is_idempotent(self, tenant: Tenant) -> None:
         mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
@@ -379,4 +379,38 @@ class TestMasterServicesMirror:
         log = AuditLog.all_tenants.filter(action=EVENT_CATALOG_SYNCED).first()
         assert log is not None
         assert log.payload["counts"]["master_services"]["created"] == 1
-        assert "deactivated" in log.payload["counts"]["master_services"]
+        assert "removed" in log.payload["counts"]["master_services"]
+
+    def test_upsert_failure_preserves_run_bookkeeping(
+        self, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An upsert blowup must not swallow the audit row + cursor advance.
+
+        The two mirrors that already landed committed in their own
+        transactions; if the exception escaped, the beat would look like a
+        total failure and the operator would lose the counters entirely.
+        """
+        import apps.catalog.services.sync as sync_mod
+
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        http = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[
+                _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+            ],
+        )
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("synthetic upsert failure")
+
+        monkeypatch.setattr(sync_mod, "upsert_master_services", _boom)
+
+        result = CatalogSyncService(http_client=http).run(tenant)
+
+        assert result.ran is True
+        assert result.services.created == 1
+        assert result.masters.created == 1
+        assert result.master_services.errors == 1
+        assert result.cursor_advanced_to is not None
+        assert AuditLog.all_tenants.filter(action=EVENT_CATALOG_SYNCED).exists()

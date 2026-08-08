@@ -75,7 +75,7 @@ class MirrorCounts:
     created: int = 0
     updated: int = 0
     skipped: int = 0
-    deactivated: int = 0
+    removed: int = 0
     errors: int = 0
 
 
@@ -202,7 +202,21 @@ class CatalogSyncService:
                 {"ayla_specialist_service_id": "?", "reason": str(exc)}
             )
         else:
-            master_services_res = upsert_master_services(tenant, edge_dtos)
+            try:
+                master_services_res = upsert_master_services(tenant, edge_dtos)
+            except Exception as exc:  # noqa: BLE001 — per-mirror isolation
+                # The upsert's own atomic block already rolled the edge batch
+                # back. Catching here keeps the run's bookkeeping alive: an
+                # escaping exception would skip the audit row, the cursor
+                # advance and the completed-log, so a beat that mirrored two
+                # of three surfaces would look like a total failure.
+                logger.exception(
+                    "catalog.sync.upsert_specialist_services_failed tenant_id=%s", tenant.id
+                )
+                master_services_res = UpsertResult()
+                master_services_res.errors.append(
+                    {"ayla_specialist_service_id": "?", "reason": str(exc)}
+                )
 
         # Freshness signal only — not a fetch cursor (Ayla has no ?since=).
         new_cursor = _max_upstream_ts(salon_dtos)
@@ -232,7 +246,7 @@ class CatalogSyncService:
             result.master_services.created,
             result.master_services.updated,
             result.master_services.skipped,
-            result.master_services.deactivated,
+            result.master_services.removed,
             new_cursor.isoformat() if new_cursor else "unchanged",
         )
         return result
@@ -248,7 +262,7 @@ def _to_counts(res: UpsertResult) -> MirrorCounts:
         created=res.created,
         updated=res.updated,
         skipped=res.skipped,
-        deactivated=res.deactivated,
+        removed=res.removed,
         errors=len(res.errors),
     )
 
@@ -293,7 +307,7 @@ def _counts_dict(c: MirrorCounts) -> dict[str, int]:
         "created": c.created,
         "updated": c.updated,
         "skipped": c.skipped,
-        "deactivated": c.deactivated,
+        "removed": c.removed,
         "errors": c.errors,
     }
 

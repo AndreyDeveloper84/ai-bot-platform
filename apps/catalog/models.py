@@ -372,11 +372,19 @@ class MasterService(models.Model):
       (``GET /internal/catalog/specialist-services/``). Rows it owns carry a
       non-NULL ``ayla_specialist_service_id``.
 
-    Sync reconciliation only ever touches rows it owns (non-NULL Ayla id), so
-    an operator-maintained mapping can never be deactivated by a sync beat.
-    Reconciliation **deactivates** (``is_active=False``) rather than deletes —
-    the MM4 matrix reads row *existence*, so a tombstoned row keeps the
-    operator's view stable while dropping out of customer-facing discovery.
+    Sync only ever touches rows it created, so an operator-maintained mapping
+    can never be removed by a sync beat. Operator rows are deliberately NOT
+    adopted — adoption would hand an operator-authored row to reconciliation.
+
+    **Row existence is the contract.** Every reader — booking create and
+    reschedule, slot serving, the miniapp/master catalogs, the MM4 matrix —
+    treats the presence of a row as "this master performs this service", and
+    none of them filters a status column. So there is no ``is_active`` flag
+    here on purpose: an edge upstream marks inactive leaves no row, and a
+    vanished edge is deleted. A tombstone would read as "offered" everywhere
+    and would make a non-bookable service bookable. Delete also matches the
+    table's existing lifecycle — the MM4 matrix deletes the row when an
+    operator unchecks a cell.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -421,25 +429,6 @@ class MasterService(models.Model):
         ),
     )
 
-    # DRF-945 — discoverability/bookability of this edge. Mirrors upstream
-    # ``SpecialistService.is_active`` for sync-owned rows; sync reconciliation
-    # flips it to False when an owned edge disappears from the feed.
-    #
-    # default=True is deliberate: every pre-existing row is operator-created
-    # and IS a real "this master performs this service" statement (that is the
-    # entire point of the MM4 matrix), so defaulting to True preserves current
-    # behaviour exactly. This flag gates *discovery*, not the booking health
-    # gate — resolved_requires_health_check stays out of scope here (#1034).
-    is_active = models.BooleanField(
-        default=True,
-        help_text=(
-            "Whether this master↔service edge is offered. Mirrors upstream "
-            "SpecialistService.is_active on sync-owned rows; operator rows "
-            "default True (pre-existing MM4 semantics). Discovery filters on "
-            "this — it is NOT the booking health gate."
-        ),
-    )
-
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
@@ -462,9 +451,6 @@ class MasterService(models.Model):
         indexes = [
             models.Index(fields=["tenant", "master"]),
             models.Index(fields=["tenant", "service"]),
-            # Discovery joins MasterService → CatalogService filtered on the
-            # active edge (DRF-945); this is the driving index for that scan.
-            models.Index(fields=["tenant", "is_active", "service"]),
         ]
 
     def __str__(self) -> str:
