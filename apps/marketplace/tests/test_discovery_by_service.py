@@ -315,17 +315,24 @@ class TestPunctuationAndFillerDoNotBreakMatching:
 
     def test_two_services_separated_by_comma(self, penza: Tenant) -> None:
         """«маникюр, педикюр» must not be read as a service literally named
-        «маникюр,»."""
+        «маникюр,».
+
+        Scope note: this is about the COMMA, not about multi-service requests.
+        Two *separate* services «Маникюр» + «Педикюр» on one master still
+        return nothing — tokens are AND-ed within a single service row by
+        design (see ``test_tokens_must_match_the_same_service``).
+        """
         master = _master(penza, "Мастер", specialization="")
         _link(penza, master, _service(penza, "Маникюр педикюр", slug="mani-pedi"))
 
         assert {c.name for c in discover_masters(specialization="маникюр, педикюр")} == {"Мастер"}
 
     def test_polite_preamble_does_not_crowd_out_the_request(self, penza: Tenant) -> None:
-        """A chatty turn front-loads filler; the meaningful noun comes last.
+        """Filler removal, not the tail slice, is what saves this one.
 
-        Truncating to the FIRST tokens would keep five stopwords and AND them
-        together, which can only ever match nothing.
+        The query tokenizes to exactly two words, so the ``_MAX_TOKENS`` slice
+        is a no-op here — see ``test_tail_slice_keeps_the_trailing_tokens`` for
+        the case that actually exercises it.
         """
         master = _master(penza, "Массажист", specialization="")
         _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
@@ -400,3 +407,68 @@ class TestDegenerateQueryFailsClosed:
         _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
 
         assert discover_masters(specialization="хочу записаться пожалуйста") == []
+
+
+class TestGreetingIsStrippedAsAPhrase:
+    """«день» is both half of «добрый день» and half of «День красоты».
+
+    A word-level filler list cannot express that difference: listing «день»
+    degrades the real salon package to «красоты», and not listing it lets the
+    bare greeting match the package. Stripping the greeting as a PHRASE does
+    both correctly.
+    """
+
+    def test_day_package_is_not_diluted(self, penza: Tenant) -> None:
+        package_master = _master(penza, "Пакетный мастер", specialization="")
+        _link(penza, package_master, _service(penza, "День красоты", slug="beauty-day"))
+        other = _master(penza, "Другой мастер", specialization="")
+        _link(penza, other, _service(penza, "Массаж для красоты тела", slug="body"))
+
+        cards = discover_masters(specialization="день красоты")
+
+        assert {c.name for c in cards} == {"Пакетный мастер"}
+
+    @pytest.mark.parametrize(
+        "greeting",
+        ["добрый день", "день добрый", "Добрый день!", "доброе утро", "добрый вечер"],
+        ids=["добрый-день", "день-добрый", "capitalized", "утро", "вечер"],
+    )
+    def test_bare_greeting_matches_nothing(self, penza: Tenant, greeting: str) -> None:
+        master = _master(penza, "Пакетный мастер", specialization="")
+        _link(penza, master, _service(penza, "День красоты", slug="beauty-day"))
+
+        assert discover_masters(specialization=greeting) == []
+
+    def test_greeting_before_a_real_request_is_ignored(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(specialization="добрый день, хочу спортивный массаж")
+
+        assert {c.name for c in cards} == {"Массажист"}
+
+
+class TestTokenCapKeepsTheTail:
+    """The ``_MAX_TOKENS`` slice itself — the filler tests never reach it.
+
+    Seven non-filler words against a service whose name contains only the last
+    five. Keeping the FIRST five would AND «один»/«два» against that name and
+    return nothing, so this discriminates between the two slice directions
+    rather than passing either way.
+    """
+
+    def test_last_tokens_survive_the_cap(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Три четыре пять шесть массаж", slug="long"))
+
+        cards = discover_masters(specialization="один два три четыре пять шесть массаж")
+
+        assert {c.name for c in cards} == {"Массажист"}
+
+    def test_leading_tokens_are_the_ones_dropped(self, penza: Tenant) -> None:
+        """The mirror image: a service named after the LEADING words is not
+        found, confirming those tokens really were discarded."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Один два", slug="leading"))
+
+        assert discover_masters(specialization="один два три четыре пять шесть массаж") == []

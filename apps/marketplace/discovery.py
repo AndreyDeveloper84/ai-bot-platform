@@ -72,14 +72,24 @@ _FILLER_TOKENS = frozenset(
         "пожалуйста",
         "здравствуйте",
         "привет",
-        "добрый",
-        "день",
         "услуга",
         "услуги",
         "мастер",
         "мастера",
         "салон",
     }
+)
+
+
+# Greetings are stripped as PHRASES, before tokenizing, and deliberately not
+# as individual filler words. «день» is both half of «добрый день» and half of
+# «День красоты» — a real salon package — so listing it as filler silently
+# degrades that query to «красоты» and drags in unrelated masters, while NOT
+# listing it lets the bare greeting match the package. A word-level list cannot
+# express the difference; a phrase can.
+_GREETING_RE = re.compile(
+    r"\b(добрый\s+день|день\s+добрый|добрый\s+вечер|доброе\s+утро)\b",
+    re.IGNORECASE | re.UNICODE,
 )
 
 
@@ -103,7 +113,10 @@ def _query_tokens(raw: str) -> list[str]:
     that can never match the stored «ё». Casefolding is fine because ILIKE is
     already case-insensitive.
     """
-    words = [t for t in re.findall(r"\w+", raw.casefold(), re.UNICODE) if len(t) >= _MIN_TOKEN_LEN]
+    without_greeting = _GREETING_RE.sub(" ", raw.casefold())
+    words = [
+        t for t in re.findall(r"\w+", without_greeting, re.UNICODE) if len(t) >= _MIN_TOKEN_LEN
+    ]
     tokens = [t for t in words if t not in _FILLER_TOKENS]
     # If the request was ENTIRELY filler there is nothing to drop back to —
     # keep the raw words so the caller sees a real (if unhelpful) query rather
