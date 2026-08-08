@@ -14,6 +14,7 @@ swappable to the Ayla provider-directory API (#249-#251) later.
 
 from __future__ import annotations
 
+import re
 from typing import NamedTuple
 from uuid import UUID
 
@@ -42,9 +43,56 @@ _MIN_TOKEN_LEN = 2
 # joined row, so an unbounded query would be an unbounded AND-chain.
 _MAX_TOKENS = 5
 
+# Filler words a booking request carries around the actual service name. The
+# tool spec asks the model for a service substring, but it does sometimes
+# forward the user's phrasing verbatim — «хочу спортивный массаж» — and every
+# token is AND-ed against ONE service name, so a single stray «хочу» reduces
+# the whole query to zero results and the user sees "мастеров пока не нашлось"
+# for a service the salon actually offers.
+#
+# Deliberately a short, literal list and NOT stemming, a stopword corpus, or
+# any NLP: it covers the observed phrasings at pilot scale and stays trivially
+# auditable. A word here can only ever widen results, never narrow them.
+_FILLER_TOKENS = frozenset(
+    {
+        "хочу",
+        "хочется",
+        "ищу",
+        "нужен",
+        "нужна",
+        "нужно",
+        "мне",
+        "бы",
+        "на",
+        "записаться",
+        "запись",
+        "хотел",
+        "хотела",
+        "можно",
+        "пожалуйста",
+        "здравствуйте",
+        "привет",
+        "добрый",
+        "день",
+        "услуга",
+        "услуги",
+        "мастер",
+        "мастера",
+        "салон",
+    }
+)
+
 
 def _query_tokens(raw: str) -> list[str]:
     """Normalize a discovery query into match tokens.
+
+    Tokens are word runs, NOT whitespace-separated chunks. Punctuation must not
+    survive into a token: the tokens are AND-ed as substrings of a service
+    name, so a single trailing comma is fatal — «маникюр, педикюр» would look
+    for a service containing the literal «маникюр,» and find nothing, emitting
+    the very "мастеров пока не нашлось" line this module exists to prevent. A
+    stray comma or period is a far more likely model artifact than the
+    guillemets the first version thought to strip.
 
     Deliberately NOT ``apps.catalog.services.linking.normalize_name``, despite
     the overlap. That helper implements the C6 link contract, where **both**
@@ -55,9 +103,17 @@ def _query_tokens(raw: str) -> list[str]:
     that can never match the stored «ё». Casefolding is fine because ILIKE is
     already case-insensitive.
     """
-    cleaned = raw.replace("«", " ").replace("»", " ")
-    tokens = [t for t in cleaned.casefold().split() if len(t) >= _MIN_TOKEN_LEN]
-    return tokens[:_MAX_TOKENS]
+    words = [t for t in re.findall(r"\w+", raw.casefold(), re.UNICODE) if len(t) >= _MIN_TOKEN_LEN]
+    tokens = [t for t in words if t not in _FILLER_TOKENS]
+    # If the request was ENTIRELY filler there is nothing to drop back to —
+    # keep the raw words so the caller sees a real (if unhelpful) query rather
+    # than an empty one it would read as "untokenizable".
+    if not tokens:
+        tokens = words
+    # Keep the LAST tokens, not the first. Russian puts the informative noun at
+    # the end, so a request longer than the cap is far likelier to be
+    # «…записаться на спортивный массаж» than to lead with the service name.
+    return tokens[-_MAX_TOKENS:]
 
 
 class PageMeta(NamedTuple):
@@ -114,37 +170,49 @@ def _bookable_qs(
     if city:
         qs = qs.filter(tenant__city__iexact=city)
 
-    if specialization:
+    # Whitespace-only is "no filter supplied", not "a filter we failed to
+    # parse" — the two must not collapse together. Blank conveys no request, so
+    # every bookable master is the right answer; «я» conveys a request we
+    # cannot serve, and answering it with the whole directory would be wrong.
+    if specialization and specialization.strip():
         tokens = _query_tokens(specialization)
-        if tokens:
-            # One filter() call, so every condition binds to the SAME joined
-            # MasterService row — a master offering «Спортивный массаж» matches
-            # «спортивный массаж», but one offering «Спортивный маникюр» plus a
-            # separate «Тайский массаж» does not match on the split.
-            #
-            # A MasterService row existing IS the statement that the master
-            # performs the service (there is no status column — see the model);
-            # the service itself must still be active to be offered.
-            service_match = Q(services_offered__service__is_active=True)
-            # Belt-and-braces on an inherently cross-tenant queryset: the edge's
-            # service must belong to the same tenant as the master. The sync
-            # path cannot create a cross-tenant edge, but discovery is the one
-            # reader that sees every tenant at once, so it should not depend on
-            # a writer-side guarantee to avoid surfacing a master for a service
-            # they do not offer.
-            service_match &= Q(services_offered__service__tenant_id=F("tenant_id"))
-            for token in tokens:
-                service_match &= Q(services_offered__service__name__icontains=token)
+        if not tokens:
+            # The caller asked for something and we could not turn it into a
+            # single usable token («я», an emoji, bare punctuation). Fail
+            # CLOSED. Falling through would drop the filter entirely and hand
+            # back the whole nationwide directory under the heading «Вот
+            # мастера, которые могут подойти» — confidently wrong, and worse
+            # than an honest empty result.
+            return qs.none()
 
-            specialization_match = Q()
-            for token in tokens:
-                specialization_match &= Q(specialization__icontains=token)
+        # One filter() call, so every condition binds to the SAME joined
+        # MasterService row — a master offering «Спортивный массаж» matches
+        # «спортивный массаж», but one offering «Спортивный маникюр» plus a
+        # separate «Тайский массаж» does not match on the split.
+        #
+        # A MasterService row existing IS the statement that the master
+        # performs the service (there is no status column — see the model);
+        # the service itself must still be active to be offered.
+        service_match = Q(services_offered__service__is_active=True)
+        # Belt-and-braces on an inherently cross-tenant queryset: the edge's
+        # service must belong to the same tenant as the master. The sync
+        # path cannot create a cross-tenant edge, but discovery is the one
+        # reader that sees every tenant at once, so it should not depend on
+        # a writer-side guarantee to avoid surfacing a master for a service
+        # they do not offer.
+        service_match &= Q(services_offered__service__tenant_id=F("tenant_id"))
+        for token in tokens:
+            service_match &= Q(services_offered__service__name__icontains=token)
 
-            # DISTINCT is required: the join multiplies a master by every
-            # matching service row, so a master offering both «Спортивный
-            # массаж» and «Классический массаж» would otherwise render twice
-            # for the query «массаж».
-            qs = qs.filter(service_match | specialization_match).distinct()
+        specialization_match = Q()
+        for token in tokens:
+            specialization_match &= Q(specialization__icontains=token)
+
+        # DISTINCT is required: the join multiplies a master by every
+        # matching service row, so a master offering both «Спортивный
+        # массаж» and «Классический массаж» would otherwise render twice
+        # for the query «массаж».
+        qs = qs.filter(service_match | specialization_match).distinct()
 
     return qs
 

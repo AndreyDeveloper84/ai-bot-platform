@@ -247,17 +247,6 @@ class TestSpecializationFallback:
 
 
 class TestQueryDegenerateInput:
-    def test_blank_query_does_not_filter(self, penza: Tenant) -> None:
-        _master(penza, "Анна", specialization="")
-
-        assert len(discover_masters(specialization="   ")) == 1
-
-    def test_single_character_token_is_dropped(self, penza: Tenant) -> None:
-        """A one-char ILIKE matches nearly everything and adds no signal."""
-        _master(penza, "Анна", specialization="")
-
-        assert len(discover_masters(specialization="а")) == 1
-
     def test_quotes_are_stripped(self, penza: Tenant) -> None:
         master = _master(penza, "Массажист", specialization="")
         _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
@@ -288,3 +277,126 @@ class TestPagination:
         _cards, meta = discover_masters_page(city="Пенза", specialization="массаж")
 
         assert meta.total_count == 1
+
+
+class TestPunctuationAndFillerDoNotBreakMatching:
+    """Regression guards for the ways a model can phrase the same request.
+
+    Each of these previously produced the exact «мастеров пока не нашлось»
+    line the DRF-945 ticket is about, despite the salon offering the service.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "спортивный массаж",
+            "спортивный массаж.",
+            "спортивный, массаж",
+            "«спортивный массаж»",
+            "спортивный массаж!",
+            "  спортивный   массаж  ",
+            "Спортивный массаж?",
+        ],
+        ids=[
+            "plain",
+            "trailing-period",
+            "internal-comma",
+            "guillemets",
+            "exclamation",
+            "extra-whitespace",
+            "capitalized-question",
+        ],
+    )
+    def test_punctuation_variants_all_match(self, penza: Tenant, query: str) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        assert {c.name for c in discover_masters(specialization=query)} == {"Массажист"}
+
+    def test_two_services_separated_by_comma(self, penza: Tenant) -> None:
+        """«маникюр, педикюр» must not be read as a service literally named
+        «маникюр,»."""
+        master = _master(penza, "Мастер", specialization="")
+        _link(penza, master, _service(penza, "Маникюр педикюр", slug="mani-pedi"))
+
+        assert {c.name for c in discover_masters(specialization="маникюр, педикюр")} == {"Мастер"}
+
+    def test_polite_preamble_does_not_crowd_out_the_request(self, penza: Tenant) -> None:
+        """A chatty turn front-loads filler; the meaningful noun comes last.
+
+        Truncating to the FIRST tokens would keep five stopwords and AND them
+        together, which can only ever match nothing.
+        """
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(
+            specialization="здравствуйте я бы хотела записаться на спортивный массаж"
+        )
+
+        assert {c.name for c in cards} == {"Массажист"}
+
+
+class TestDegenerateQueryFailsClosed:
+    """A query we cannot tokenize must return nothing, never everything.
+
+    Falling through would drop the filter and hand back the whole nationwide
+    directory under «Вот мастера, которые могут подойти» — confidently wrong.
+    This path is also reachable unauthenticated via the public directory
+    endpoint.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        ["я", "😀", "!!!", "-", "?"],
+        ids=["single-letter", "emoji", "punctuation-only", "dash", "question-mark"],
+    )
+    def test_untokenizable_query_returns_nothing(self, penza: Tenant, query: str) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+        _master(penza, "Другой мастер", specialization="")
+
+        assert discover_masters(specialization=query) == []
+
+    def test_blank_query_still_means_no_filter(self, penza: Tenant) -> None:
+        """Whitespace-only is falsy-ish input, not a failed tokenization — the
+        caller supplied no filter at all, so everything bookable is correct."""
+        _master(penza, "Массажист", specialization="")
+
+        assert len(discover_masters(specialization="   ")) == 1
+
+    def test_degenerate_query_does_not_leak_the_directory_page(self, penza: Tenant) -> None:
+        from apps.marketplace.discovery import discover_masters_page
+
+        _master(penza, "Массажист", specialization="")
+
+        cards, meta = discover_masters_page(specialization="я")
+
+        assert cards == []
+        assert meta.total_count == 0
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "хочу спортивный массаж",
+            "ищу спортивный массаж",
+            "мне нужен спортивный массаж",
+            "здравствуйте я бы хотела записаться на спортивный массаж",
+            "нужен мастер на спортивный массаж, пожалуйста",
+        ],
+        ids=["хочу", "ищу", "мне-нужен", "polite-sentence", "master-plus-please"],
+    )
+    def test_filler_words_do_not_defeat_the_request(self, penza: Tenant, query: str) -> None:
+        """Every token is AND-ed against ONE service name, so a stray «хочу»
+        would otherwise reduce a valid request to zero results."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        assert {c.name for c in discover_masters(specialization=query)} == {"Массажист"}
+
+    def test_all_filler_query_does_not_match_everything(self, penza: Tenant) -> None:
+        """A request made entirely of filler must not widen into the directory."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        assert discover_masters(specialization="хочу записаться пожалуйста") == []
