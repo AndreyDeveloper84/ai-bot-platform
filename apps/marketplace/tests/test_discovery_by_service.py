@@ -39,8 +39,8 @@ from apps.tenancy.models import Tenant
 # Vacuous green is worse than an honest skip, so the module skips wholesale
 # rather than splitting into two classes of trustworthiness.
 #
-# Run locally against Postgres with:
-#   POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5432 POSTGRES_USER=postgres #   POSTGRES_PASSWORD=postgres uv run pytest apps/marketplace
+# Run locally against Postgres by exporting POSTGRES_HOST / POSTGRES_PORT /
+# POSTGRES_USER / POSTGRES_PASSWORD before `uv run pytest apps/marketplace`.
 pytestmark = [
     pytest.mark.django_db,
     pytest.mark.skipif(
@@ -430,8 +430,26 @@ class TestGreetingIsStrippedAsAPhrase:
 
     @pytest.mark.parametrize(
         "greeting",
-        ["добрый день", "день добрый", "Добрый день!", "доброе утро", "добрый вечер"],
-        ids=["добрый-день", "день-добрый", "capitalized", "утро", "вечер"],
+        [
+            "добрый день",
+            "день добрый",
+            "Добрый день!",
+            "доброе утро",
+            "добрый вечер",
+            "доброго дня",
+            "доброго вечера",
+            "доброго времени суток",
+        ],
+        ids=[
+            "добрый-день",
+            "день-добрый",
+            "capitalized",
+            "утро",
+            "вечер",
+            "genitive-дня",
+            "genitive-вечера",
+            "времени-суток",
+        ],
     )
     def test_bare_greeting_matches_nothing(self, penza: Tenant, greeting: str) -> None:
         master = _master(penza, "Пакетный мастер", specialization="")
@@ -439,13 +457,35 @@ class TestGreetingIsStrippedAsAPhrase:
 
         assert discover_masters(specialization=greeting) == []
 
-    def test_greeting_before_a_real_request_is_ignored(self, penza: Tenant) -> None:
+    @pytest.mark.parametrize(
+        "greeting",
+        [
+            "добрый день",
+            "доброго дня",
+            "доброго времени суток",
+            "добрый вечер",
+            "доброе утро",
+        ],
+        ids=["nominative", "genitive", "времени-суток", "вечер", "утро"],
+    )
+    def test_greeting_before_a_real_request_is_ignored(self, penza: Tenant, greeting: str) -> None:
+        """Genitive forms are as common in written Russian as nominative ones,
+        and left in the AND chain they produce the very fallback this PR
+        exists to remove."""
         master = _master(penza, "Массажист", specialization="")
         _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
 
-        cards = discover_masters(specialization="добрый день, хочу спортивный массаж")
+        cards = discover_masters(specialization=f"{greeting}, хочу спортивный массаж")
 
         assert {c.name for c in cards} == {"Массажист"}
+
+    def test_greeting_words_are_not_eaten_out_of_other_words(self, penza: Tenant) -> None:
+        """The \b anchors must not strip «день» out of «деньги» or «добрый»
+        out of «недобрый»."""
+        master = _master(penza, "Мастер", specialization="")
+        _link(penza, master, _service(penza, "Деньги на уход", slug="money"))
+
+        assert {c.name for c in discover_masters(specialization="деньги уход")} == {"Мастер"}
 
 
 class TestTokenCapKeepsTheTail:
@@ -466,9 +506,14 @@ class TestTokenCapKeepsTheTail:
         assert {c.name for c in cards} == {"Массажист"}
 
     def test_leading_tokens_are_the_ones_dropped(self, penza: Tenant) -> None:
-        """The mirror image: a service named after the LEADING words is not
-        found, confirming those tokens really were discarded."""
+        """The mirror image: a service named after the LEADING words is NOT found.
+
+        The name must be matched by the first five tokens and not by the last
+        five, otherwise the assertion holds under either slice direction and
+        proves nothing. «Один два три четыре пять» is exactly `first5`, so this
+        fails the moment the code goes back to ``tokens[:_MAX_TOKENS]``.
+        """
         master = _master(penza, "Массажист", specialization="")
-        _link(penza, master, _service(penza, "Один два", slug="leading"))
+        _link(penza, master, _service(penza, "Один два три четыре пять", slug="leading"))
 
         assert discover_masters(specialization="один два три четыре пять шесть массаж") == []

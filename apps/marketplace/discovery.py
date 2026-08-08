@@ -87,9 +87,19 @@ _FILLER_TOKENS = frozenset(
 # degrades that query to «красоты» and drags in unrelated masters, while NOT
 # listing it lets the bare greeting match the package. A word-level list cannot
 # express the difference; a phrase can.
+# Genitive forms («доброго дня», «доброго времени суток») are as common in
+# written Russian as the nominative ones and produce the same zero-result
+# fallback if they survive into the AND chain.
+#
+# No re.IGNORECASE: the input is casefolded before matching, so the flag would
+# be dead. Do not add it back without moving the casefold.
 _GREETING_RE = re.compile(
-    r"\b(добрый\s+день|день\s+добрый|добрый\s+вечер|доброе\s+утро)\b",
-    re.IGNORECASE | re.UNICODE,
+    r"\b("
+    r"добр(?:ый|ое|ого)\s+(?:день|дня|вечер|вечера|утро|утра)"
+    r"|день\s+добрый"
+    r"|доброго\s+времени(?:\s+суток)?"
+    r")\b",
+    re.UNICODE,
 )
 
 
