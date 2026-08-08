@@ -5,10 +5,13 @@ catalog surface (`SalonService` → `SpecialistService`, per
 ``docs/CATALOG_INTERNAL_API_CONTRACT.md`` on the Ayla repo). The upserter
 (:mod:`apps.catalog.services.upserter`) consumes the returned DTOs.
 
-**S3B STAGE 2 PR-1 scope:** only ``salon-services`` (→ ``CatalogService``).
-``specialist-services`` (bookable → ``MasterService``) and the specialist
-enrichment endpoint (``/internal/specialists/`` → ``CatalogMaster``) land in
-PR-2, which owns the tenant-scoped master mirror.
+Covers all three read surfaces the mirror needs:
+
+* ``salon-services`` → ``CatalogService``
+* ``/internal/specialists/`` → ``CatalogMaster``
+* ``specialist-services`` → ``MasterService`` (the bookable master↔service
+  edge; added for DRF-945 so service-specific discovery can join through a
+  real relation instead of the free-text ``CatalogMaster.specialization``)
 
 This replaces the retired mysite catalog client — bot-platform no longer
 reads mysite's Postgres or its ``/api/v1/catalog/*`` HTTP surface (ADR-0009
@@ -112,6 +115,54 @@ class CatalogSpecialistDTO:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CatalogSpecialistServiceDTO:
+    """One row of ``GET /api/v1/internal/catalog/specialist-services/``.
+
+    Ayla's canonical **bookable edge** (``SpecialistService``) — the
+    master↔service relation the ``MasterService`` mirror is built from
+    (DRF-945). Per ``docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2:
+
+    * ``ayla_specialist_service_id`` — ``SpecialistService.id``, the stable
+      booking key and this mirror's provenance stamp.
+    * ``specialist`` — ``SpecialistProfile.id``. This equals
+      ``CatalogMaster.id`` locally: :func:`upsert_specialists` keys the master
+      mirror on the same id (``/internal/specialists/`` ``row["id"]``).
+    * ``salon_service`` — ``SalonService.id`` → ``CatalogService.ayla_service_id``.
+    * ``user_id`` — Ayla ``User.id``. Deliberately NOT the same as
+      ``specialist``; carried for cross-checks only, never as a join key.
+
+    ``resolved_duration`` / ``resolved_requires_health_check`` ride in ``raw``
+    only — they belong to the booking gate (#1034), not to discovery, and
+    mirroring them here would create a fail-open column with no reader.
+    """
+
+    ayla_specialist_service_id: str
+    salon_service: str
+    specialist: str
+    external_updated_at: datetime
+    tenant: str | None = None
+    user_id: str | None = None
+    name: str = ""
+    category_slug: str = ""
+    is_active: bool = True
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EdgeSnapshot:
+    """A tenant's bookable edges plus whether the snapshot is trustworthy.
+
+    ``complete`` is the licence to delete. Reconciliation infers "this edge no
+    longer exists upstream" from absence, and absence is only meaningful in a
+    snapshot known to be whole — so an incomplete walk downgrades the beat to
+    additive-only instead of deleting rows that were merely missed.
+    """
+
+    edges: list[CatalogSpecialistServiceDTO]
+    complete: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -203,13 +254,60 @@ class CatalogHttpClient:
         rows = self._fetch_all("internal/specialists/", params={})
         return [_parse_specialist(row) for row in rows]
 
+    def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
+        """Bookable master↔service edges for one tenant (→ ``MasterService``).
+
+        Unlike ``/internal/specialists/`` this endpoint DOES support the
+        ``?tenant=`` filter (contract §2), so the pull is properly scoped and
+        the returned list is the tenant's edge snapshot — which is what makes
+        sync reconciliation possible (DRF-945).
+
+        Returns an :class:`EdgeSnapshot` rather than a bare list because the
+        caller deletes rows on absence and therefore needs to know whether
+        absence can be trusted.
+        """
+        rows, complete = self._fetch_all_checked(
+            "internal/catalog/specialist-services/",
+            # page_size=100 (the contract's documented maximum) is a
+            # correctness requirement, not a performance tweak: reconciliation
+            # deletes owned rows absent from this snapshot, and upstream orders
+            # by a non-unique ``created_at``. With the default PAGE_SIZE=20 a
+            # tie or a concurrent insert between page fetches can drop a row
+            # from the snapshot, which would read as "deleted upstream".
+            # Fewer pages ⇒ fewer seams where that can happen.
+            params={"tenant": tenant_id, "page_size": 100},
+        )
+        return EdgeSnapshot(
+            edges=[_parse_specialist_service(row) for row in rows],
+            complete=complete,
+        )
+
     # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
 
     def _fetch_all(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Walk the pagination chain. Returns a flat list of raw row dicts."""
+        return self._fetch_all_checked(path, params=params)[0]
+
+    def _fetch_all_checked(
+        self, path: str, *, params: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Paginated fetch plus a completeness verdict.
+
+        The second element is False when the walk collected a different number
+        of rows than the first page's ``count`` advertised. That happens when
+        an upstream insert shifts the LIMIT/OFFSET window between page fetches
+        (upstream orders by a non-unique ``created_at``), which silently drops
+        a row from the snapshot.
+
+        Callers that only add rows can ignore the flag. Callers that DELETE on
+        absence must not: "no exception was raised" is not evidence that a
+        snapshot is complete, and a dropped row is indistinguishable from a
+        deleted one.
+        """
         rows: list[dict[str, Any]] = []
+        advertised: int | None = None
         try:
             url: str | None = AylaUrlBuilder(self._base_url).build(path)
         except AylaUrlError as exc:
@@ -225,10 +323,24 @@ class CatalogHttpClient:
         # string (tenant + page) baked in — pass no params.
         while url:
             payload = self._get_with_retry(url, params=request_params)
+            if advertised is None:
+                count = payload.get("count")
+                advertised = int(count) if isinstance(count, int) else None
             rows.extend(payload.get("results", []))
             url = payload.get("next") or None
             request_params = None
-        return rows
+
+        complete = advertised is None or advertised == len(rows)
+        if not complete:
+            logger.warning(
+                "catalog.http.snapshot_incomplete path=%s advertised=%s collected=%d — "
+                "upstream page window shifted mid-walk; reconciliation must not treat "
+                "this as proof of absence.",
+                path,
+                advertised,
+                len(rows),
+            )
+        return rows, complete
 
     def _get_with_retry(self, url: str, *, params: dict[str, Any] | None) -> dict[str, Any]:
         last_exc: Exception | None = None
@@ -329,6 +441,39 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
         duration_min=_parse_int(row.get("duration_minutes")),
         template=row.get("template"),
         category=row.get("category"),
+        raw=row,
+    )
+
+
+def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDTO:
+    """Parse one bookable-edge row. Raises ``KeyError`` on a missing join key.
+
+    ``id`` / ``salon_service`` / ``specialist`` are mandatory — an edge without
+    them cannot be mirrored at all.
+
+    Note this raises out of ``fetch_specialist_services`` and therefore aborts
+    the whole tenant's edge batch, NOT just the offending row: parsing happens
+    before the upserter's per-row savepoints. That is deliberate — it fails
+    *safe* (nothing written, reconciliation never runs, the other two mirrors
+    still land), and a malformed join key means the snapshot can no longer be
+    trusted to prove absence, which is exactly when deleting rows is most
+    dangerous. Loud and inert beats silent and destructive.
+
+    ``updated_at`` is optional upstream; falls back to now (same policy as
+    :func:`_parse_specialist`).
+    """
+    return CatalogSpecialistServiceDTO(
+        ayla_specialist_service_id=str(row["id"]),
+        salon_service=str(row["salon_service"]),
+        specialist=str(row["specialist"]),
+        external_updated_at=(
+            _parse_dt(row["updated_at"]) if row.get("updated_at") else datetime.now(timezone.utc)
+        ),
+        tenant=str(row["tenant"]) if row.get("tenant") else None,
+        user_id=str(row["user_id"]) if row.get("user_id") else None,
+        name=row.get("name") or "",
+        category_slug=row.get("category_slug") or "",
+        is_active=bool(row.get("is_active", True)),
         raw=row,
     )
 

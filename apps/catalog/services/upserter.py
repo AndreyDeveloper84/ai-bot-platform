@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from apps.catalog.services.http_client import (
         CatalogSalonServiceDTO,
         CatalogSpecialistDTO,
+        CatalogSpecialistServiceDTO,
     )
     from apps.tenancy.models import Tenant
 
@@ -60,8 +61,16 @@ class UpsertResult:
     Fields:
       created: rows whose ``(tenant, ayla_service_id)`` wasn't present before.
       updated: rows present + overwritten with the incoming payload.
-      skipped: reserved (no conditional skip in the re-key path — kept so the
-               orchestrator's counter shape is stable).
+      skipped: rows deliberately not written — an edge whose master/service
+               isn't mirrored yet, one carrying a foreign tenant, or a pair an
+               operator already owns.
+      removed: sync-owned rows deleted because upstream no longer offers them
+               — vanished from the snapshot, or marked inactive. This is the
+               destructive-action signal the beat log surfaces, so a row that
+               merely MOVED is deliberately not counted here.
+      reparented: sync-owned rows deleted because upstream moved the edge to a
+               different (master, service) pair. The row is immediately
+               re-created at the new pair, so nothing is actually lost.
       errors: per-row failures with ``{ayla_service_id, reason}`` so the caller
               can blame the right input on a partial batch.
     """
@@ -69,6 +78,8 @@ class UpsertResult:
     created: int = 0
     updated: int = 0
     skipped: int = 0
+    removed: int = 0
+    reparented: int = 0
     errors: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -174,3 +185,313 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                     ayla_id,
                 )
     return result
+
+
+def upsert_master_services(
+    tenant: "Tenant",
+    dtos: list["CatalogSpecialistServiceDTO"],
+    *,
+    reconcile: bool = True,
+) -> UpsertResult:
+    """Mirror Ayla's bookable master↔service edges into ``MasterService`` (DRF-945).
+
+    This is what makes service-specific discovery possible: without it,
+    ``CatalogMaster.specialization`` (which no sync path populates) is the only
+    thing ``discover_masters`` can filter on, so every service-specific query
+    returns zero.
+
+    ### What sync may touch
+
+    ``MasterService`` has two writers — the operator (MM4 matrix / invite
+    seeding) and this function. Ownership is discriminated by
+    ``ayla_specialist_service_id``: NULL ⇒ operator's, non-NULL ⇒ sync's.
+    **Sync only ever touches rows it created.** An operator row for a pair Ayla
+    also publishes is deliberately NOT adopted: adoption would put an
+    operator-authored row under sync's reconciliation, and the operator's row
+    already states the same fact, so there is nothing to gain and a row to lose.
+
+    ### Presence is the contract
+
+    Row existence — not a flag — means "this master performs this service".
+    That is what every existing reader already assumes (booking create,
+    reschedule, slots, master/miniapp catalogs, the MM4 matrix); none of them
+    filters a status column. So an edge Ayla marks ``is_active=False`` must
+    leave **no row**, and a vanished edge must be **deleted**, not tombstoned.
+    A tombstone would read as "offered" to all seven readers and would make a
+    non-bookable service bookable — a regression this mirror must not
+    introduce. Delete is also the table's canonical lifecycle: the MM4 matrix
+    deletes the row when an operator unchecks a cell.
+
+    ### Reconciliation
+
+    ``?tenant=`` makes the fetch a complete per-tenant snapshot, so a sync-owned
+    row absent from it is stale and is deleted.
+
+    Deletion is gated on the snapshot being able to *prove* absence. It
+    self-vetoes when it cannot:
+
+    * ``reconcile=False`` — caller says the snapshot is untrustworthy;
+    * empty snapshot — far likelier a tenant-id mismatch than a real wipe, and
+      wiping the tenant's edges would silently re-create the exact zero-result
+      bug this mirror exists to fix;
+    * any row error in the batch.
+
+    Edges that were **skipped** (unresolvable master/service, foreign tenant)
+    are protected explicitly: a skip proves nothing about upstream absence, so
+    the row it would have refreshed must survive. Without that, a beat in which
+    N edges fail to resolve would delete N live relations.
+    """
+    from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+
+    result = UpsertResult()
+    seen_ayla_ids: set[str] = set()
+    protected_ayla_ids: set[str] = set()
+
+    with tenant_scope(tenant), transaction.atomic():
+        for dto in dtos:
+            try:
+                with transaction.atomic():
+                    written = _upsert_one_master_service(
+                        tenant=tenant,
+                        dto=dto,
+                        result=result,
+                        master_model=CatalogMaster,
+                        service_model=CatalogService,
+                        edge_model=MasterService,
+                    )
+                if written:
+                    seen_ayla_ids.add(dto.ayla_specialist_service_id)
+                else:
+                    # Skipped ≠ absent upstream. Protect whatever row this edge
+                    # id owns so reconciliation cannot mistake an unresolvable
+                    # edge for a deleted one.
+                    protected_ayla_ids.add(dto.ayla_specialist_service_id)
+            except Exception as exc:  # noqa: BLE001 — per-row safety net
+                ayla_id = getattr(dto, "ayla_specialist_service_id", "?")
+                protected_ayla_ids.add(ayla_id)
+                result.errors.append({"ayla_specialist_service_id": ayla_id, "reason": str(exc)})
+                logger.exception(
+                    "catalog.upsert.row_failed model=MasterService ayla_specialist_service_id=%s",
+                    ayla_id,
+                )
+
+        if reconcile:
+            result.removed += _reconcile_master_services(
+                tenant=tenant,
+                seen_ayla_ids=seen_ayla_ids,
+                protected_ayla_ids=protected_ayla_ids,
+                had_errors=bool(result.errors),
+                edge_model=MasterService,
+            )
+
+    return result
+
+
+def _upsert_one_master_service(
+    *,
+    tenant: "Tenant",
+    dto: "CatalogSpecialistServiceDTO",
+    result: UpsertResult,
+    master_model: Any,
+    service_model: Any,
+    edge_model: Any,
+) -> bool:
+    """Write one edge. Returns True when the edge was fully resolved.
+
+    False means "deliberately skipped" — the edge is unmappable right now
+    (master or service not mirrored yet, or a foreign tenant). The caller
+    protects skipped edge ids from reconciliation: a skip says nothing about
+    whether the edge still exists upstream, so deleting on that basis would
+    destroy live relations.
+
+    An upstream ``is_active=False`` edge resolves normally but leaves **no**
+    row (removing a sync-owned one if present) — presence is the contract, and
+    no reader filters a status column.
+    """
+    # Cross-tenant guard #1 — the payload's own tenant must match the tenant
+    # we're syncing. Ayla denormalizes `tenant` onto the edge; a mismatch means
+    # the upstream filter misfired and we must not write it.
+    if dto.tenant and dto.tenant != str(tenant.id):
+        result.skipped += 1
+        logger.warning(
+            "catalog.upsert.skipped model=MasterService reason=foreign_tenant "
+            "ayla_specialist_service_id=%s payload_tenant=%s sync_tenant=%s",
+            dto.ayla_specialist_service_id,
+            dto.tenant,
+            tenant.id,
+        )
+        return False
+
+    # Cross-tenant guard #2 — both lookups go through the tenant-scoped
+    # ``.objects`` manager under ``tenant_scope(tenant)``, so a master or
+    # service owned by another tenant simply isn't found and the edge is
+    # skipped rather than mis-written.
+    #
+    # The load-bearing half is the *service* lookup: salon-services is fetched
+    # with ``?tenant=``, so a foreign CatalogService is never mirrored here in
+    # the first place. The master lookup is a weaker guarantee —
+    # ``fetch_specialists()`` sends no tenant filter (pilot limitation noted on
+    # that method), so the same Ayla specialist is mirrored into every syncing
+    # tenant. That makes the master resolvable in more than one tenant, which
+    # is why the edge's own tenant (guard #1) and the service lookup both have
+    # to hold for a write to happen.
+    master = master_model.objects.filter(id=dto.specialist).first()
+    if master is None:
+        result.skipped += 1
+        logger.info(
+            "catalog.upsert.skipped model=MasterService reason=unknown_master "
+            "specialist=%s tenant_id=%s",
+            dto.specialist,
+            tenant.id,
+        )
+        return False
+
+    service = service_model.objects.filter(ayla_service_id=dto.salon_service).first()
+    if service is None:
+        result.skipped += 1
+        logger.info(
+            "catalog.upsert.skipped model=MasterService reason=unknown_service "
+            "salon_service=%s tenant_id=%s",
+            dto.salon_service,
+            tenant.id,
+        )
+        return False
+
+    # Re-parent: if this Ayla edge id currently sits on a DIFFERENT local pair
+    # (upstream moved it), that old row is stale AND provably sync-owned — it
+    # carries our stamp. Delete it. Releasing the stamp instead would leave a
+    # NULL-stamped row that is indistinguishable from an operator row, so
+    # reconciliation could never reclaim it: a permanent false relation.
+    # Skipping this entirely would wedge the beat forever on the partial
+    # unique constraint.
+    reparented = (
+        edge_model.objects.filter(
+            tenant=tenant,
+            ayla_specialist_service_id=dto.ayla_specialist_service_id,
+        )
+        .exclude(master=master, service=service)
+        .delete()
+    )
+    if reparented[0]:
+        result.reparented += reparented[0]
+        logger.info(
+            "catalog.upsert.reparented model=MasterService "
+            "ayla_specialist_service_id=%s removed=%d tenant_id=%s",
+            dto.ayla_specialist_service_id,
+            reparented[0],
+            tenant.id,
+        )
+
+    existing = edge_model.objects.filter(tenant=tenant, master=master, service=service).first()
+
+    # An operator row already asserts this pair. Leave it completely alone —
+    # adopting it would hand an operator-authored row to reconciliation, and it
+    # already carries the same meaning. Nothing to write, nothing to own.
+    if existing is not None and existing.ayla_specialist_service_id is None:
+        result.skipped += 1
+        logger.debug(
+            "catalog.upsert.skipped model=MasterService reason=operator_owned "
+            "master=%s service=%s tenant_id=%s",
+            master.pk,
+            service.pk,
+            tenant.id,
+        )
+        return False
+
+    if not dto.is_active:
+        # Not offered upstream ⇒ no row. Presence is the contract.
+        if existing is not None:
+            existing.delete()
+            result.removed += 1
+        else:
+            result.skipped += 1
+        return True
+
+    if existing is None:
+        edge_model.objects.create(
+            tenant=tenant,
+            master=master,
+            service=service,
+            ayla_specialist_service_id=dto.ayla_specialist_service_id,
+        )
+        result.created += 1
+        return True
+
+    # NOTE: ``updated`` here means "present and verified correct after this
+    # beat", which includes the no-save path below — unlike the other two
+    # mirrors where it strictly means "written".
+    #
+    # Already correct — do NOT save. ``updated_at`` is ``auto_now``, and the
+    # MM4 matrix derives its optimistic-concurrency token from
+    # MAX(updated_at) across the tenant's rows. An unconditional save would
+    # bump that token every beat and 409 any operator mid-edit.
+    if str(existing.ayla_specialist_service_id) != dto.ayla_specialist_service_id:
+        existing.ayla_specialist_service_id = dto.ayla_specialist_service_id
+        existing.save(update_fields=["ayla_specialist_service_id", "updated_at"])
+    result.updated += 1
+    return True
+
+
+def _reconcile_master_services(
+    *,
+    tenant: "Tenant",
+    seen_ayla_ids: set[str],
+    protected_ayla_ids: set[str],
+    had_errors: bool,
+    edge_model: Any,
+) -> int:
+    """Delete sync-owned edges the snapshot proves are gone. Returns the count.
+
+    ``ayla_specialist_service_id__isnull=False`` is the whole safety story for
+    co-ownership: operator rows carry NULL and are therefore outside this
+    queryset by construction.
+
+    Self-vetoes whenever the snapshot cannot prove absence — an empty snapshot
+    or a partially failed batch. Requirement 8: a partial upstream failure must
+    never leave knowingly-false state behind, and deleting a live relation on
+    incomplete evidence is exactly that.
+
+    ``protected_ayla_ids`` carries edges that were present upstream but could
+    not be resolved locally this beat. They are emphatically NOT absent, so
+    they must survive; without this a beat where N edges fail to resolve would
+    delete N live relations.
+    """
+    # LOAD-BEARING: ``ayla_specialist_service_id__isnull=False`` is the single
+    # guard between this delete and every operator-owned row in the tenant.
+    # Removing it deletes the entire MM4 matrix. (Django renders the exclude
+    # below as ``NOT (f IN (…) AND f IS NOT NULL)``, so NULL-stamped rows would
+    # survive the exclude and land in the delete.)
+    owned = edge_model.objects.filter(
+        tenant=tenant,
+        ayla_specialist_service_id__isnull=False,
+    )
+
+    if not seen_ayla_ids:
+        if owned.exists():
+            logger.warning(
+                "catalog.reconcile.vetoed model=MasterService reason=empty_snapshot "
+                "tenant_id=%s owned=%d — refusing to delete every edge; verify the "
+                "Ayla ?tenant= filter and Tenant.id mapping.",
+                tenant.id,
+                owned.count(),
+            )
+        return 0
+
+    if had_errors:
+        logger.warning(
+            "catalog.reconcile.vetoed model=MasterService reason=partial_batch "
+            "tenant_id=%s — snapshot incomplete, skipping deletion.",
+            tenant.id,
+        )
+        return 0
+
+    keep = seen_ayla_ids | protected_ayla_ids
+    deleted, _by_model = owned.exclude(ayla_specialist_service_id__in=keep).delete()
+    if deleted:
+        logger.info(
+            "catalog.reconcile.removed model=MasterService tenant_id=%s count=%d protected=%d",
+            tenant.id,
+            deleted,
+            len(protected_ayla_ids),
+        )
+    return deleted

@@ -284,3 +284,182 @@ class TestFetchSpecialists:
         assert rows[0].external_updated_at is not None
         assert rows[0].experience == ""
         assert rows[0].rating is None
+
+
+_SPEC_SVC_URL = f"{_BASE}/api/v1/internal/catalog/specialist-services/"
+
+
+def _edge_row(**overrides: Any) -> dict[str, Any]:
+    """A specialist-services row per CATALOG_INTERNAL_API_CONTRACT.md §2."""
+    row = {
+        "id": "a4e00000-0000-4000-8000-000000000010",
+        "salon_service": "6f1c0000-0000-4000-8000-000000000011",
+        "specialist": "77aa0000-0000-4000-8000-000000000012",
+        "user_id": "33cc0000-0000-4000-8000-000000000013",
+        "tenant": _TID,
+        "template": "9d3f0000-0000-4000-8000-000000000002",
+        "name": "Спортивный массаж",
+        "category_slug": "massage",
+        "duration_minutes": 45,
+        "resolved_duration": 45,
+        "requires_health_check": False,
+        "resolved_requires_health_check": True,
+        "price": "1500.00",
+        "buffer_after_minutes": 0,
+        "is_active": True,
+        "yclients_staff_id": "9001",
+        "reviews_count": 17,
+        "rating": "4.7",
+        "created_at": "2026-07-09T18:31:00Z",
+        "updated_at": "2026-07-09T18:31:00Z",
+    }
+    row.update(overrides)
+    return row
+
+
+class TestFetchSpecialistServices:
+    """The bookable master↔service edge feed (DRF-945)."""
+
+    def test_edge_dto_fields(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={"count": 1, "next": None, "previous": None, "results": [_edge_row()]},
+        )
+
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
+
+        assert snap.complete is True
+        assert len(snap.edges) == 1
+        dto = snap.edges[0]
+        assert dto.ayla_specialist_service_id == "a4e00000-0000-4000-8000-000000000010"
+        assert dto.salon_service == "6f1c0000-0000-4000-8000-000000000011"
+        assert dto.specialist == "77aa0000-0000-4000-8000-000000000012"
+        assert dto.user_id == "33cc0000-0000-4000-8000-000000000013"
+        assert dto.tenant == _TID
+        assert dto.name == "Спортивный массаж"
+        assert dto.category_slug == "massage"
+        assert dto.is_active is True
+        # Booking-gate fields stay in raw — no fail-open mirror column.
+        assert dto.raw["resolved_requires_health_check"] is True
+
+    def test_tenant_filter_is_sent(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={"count": 0, "next": None, "previous": None, "results": []},
+        )
+
+        _client().fetch_specialist_services(tenant_id=_TID)
+
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.url.params["tenant"] == _TID
+        assert request.headers["Authorization"] == f"Bearer {_TOKEN}"
+        # page_size is a correctness requirement, not a tweak: reconciliation
+        # deletes rows absent from this snapshot, and upstream orders by a
+        # non-unique created_at, so fewer page seams means fewer chances for a
+        # row to fall out of the snapshot and read as "deleted upstream".
+        assert request.url.params["page_size"] == "100"
+
+    def test_inactive_edge_preserved(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={
+                "count": 1,
+                "next": None,
+                "previous": None,
+                "results": [_edge_row(is_active=False)],
+            },
+        )
+
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
+
+        assert snap.edges[0].is_active is False
+
+    def test_missing_updated_at_falls_back_to_now(self, httpx_mock: HTTPXMock) -> None:
+        row = _edge_row()
+        del row["updated_at"]
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={"count": 1, "next": None, "previous": None, "results": [row]},
+        )
+
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
+
+        assert snap.edges[0].external_updated_at is not None
+
+    def test_optional_text_fields_tolerate_null(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={
+                "count": 1,
+                "next": None,
+                "previous": None,
+                "results": [_edge_row(name=None, category_slug=None, user_id=None)],
+            },
+        )
+
+        dto = _client().fetch_specialist_services(tenant_id=_TID).edges[0]
+
+        assert dto.name == ""
+        assert dto.category_slug == ""
+        assert dto.user_id is None
+
+    def test_missing_join_key_raises(self, httpx_mock: HTTPXMock) -> None:
+        """An edge without its join keys is unmirrorable — fail loudly, not silently."""
+        row = _edge_row()
+        del row["specialist"]
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={"count": 1, "next": None, "previous": None, "results": [row]},
+        )
+
+        with pytest.raises(KeyError):
+            _client().fetch_specialist_services(tenant_id=_TID)
+
+    def test_auth_failure_maps_to_auth_error(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100", status_code=403)
+
+        with pytest.raises(CatalogAuthError):
+            _client().fetch_specialist_services(tenant_id=_TID)
+
+    def test_snapshot_flagged_incomplete_when_count_disagrees(self, httpx_mock: HTTPXMock) -> None:
+        """count=2 but one row delivered ⇒ the page window shifted mid-walk.
+
+        The caller DELETEs rows on absence, so it must learn that this
+        snapshot cannot prove absence.
+        """
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={"count": 2, "next": None, "previous": None, "results": [_edge_row()]},
+        )
+
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
+
+        assert snap.complete is False
+        assert len(snap.edges) == 1
+
+    def test_snapshot_complete_across_pages(self, httpx_mock: HTTPXMock) -> None:
+        page2 = f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100&page=2"
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={
+                "count": 2,
+                "next": page2,
+                "previous": None,
+                "results": [_edge_row()],
+            },
+        )
+        httpx_mock.add_response(
+            url=page2,
+            json={
+                "count": 2,
+                "next": None,
+                "previous": None,
+                "results": [_edge_row(id="a4e00000-0000-4000-8000-000000000099")],
+            },
+        )
+
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
+
+        assert snap.complete is True
+        assert len(snap.edges) == 2

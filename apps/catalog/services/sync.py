@@ -5,11 +5,18 @@ under a Redis advisory lock. Called by the Celery beat every 15 minutes
 (``apps.catalog.tasks.sync_catalog_for_all_tenants``) and by the admin
 "force resync" action.
 
-**S3B STAGE 2 PR-1 scope:** ``CatalogService`` ← ``salon-services`` only.
-The tenant-scoped master mirror (``CatalogMaster`` ← ``/internal/specialists/``)
-and the bookable ``MasterService`` mirror (← ``specialist-services``) land in
-PR-2. ``CatalogFaq`` / ``CatalogHelpArticle`` are retired from the sync cycle
-(no Ayla internal source; the mirror tables stay, unsynced).
+Three mirrors, pulled in FK order so each one's dependencies already exist:
+
+1. ``CatalogService`` ← ``salon-services``
+2. ``CatalogMaster`` ← ``/internal/specialists/``
+3. ``MasterService`` ← ``specialist-services`` (bookable edge, DRF-945)
+
+``CatalogFaq`` / ``CatalogHelpArticle`` are retired from the sync cycle (no
+Ayla internal source; the mirror tables stay, unsynced).
+
+Each mirror's fetch is isolated: a transport/auth failure on one must not
+discard the mirrors that already landed, nor let reconciliation act on a
+snapshot that was never received.
 
 ### Lock semantics — Decision: skip, not queue
 
@@ -41,6 +48,7 @@ from apps.audit.services import write_audit
 from apps.catalog.services.http_client import CatalogHttpClient
 from apps.catalog.services.upserter import (
     UpsertResult,
+    upsert_master_services,
     upsert_salon_services,
     upsert_specialists,
 )
@@ -67,6 +75,8 @@ class MirrorCounts:
     created: int = 0
     updated: int = 0
     skipped: int = 0
+    removed: int = 0
+    reparented: int = 0
     errors: int = 0
 
 
@@ -80,6 +90,9 @@ class SyncResult:
                without doing work.
       services: CatalogService (salon-services) mirror counters.
       masters: CatalogMaster (specialists) mirror counters — S3B masters.
+      master_services: MasterService (specialist-services) bookable-edge
+                       counters — the relation service discovery joins
+                       through (DRF-945).
       cursor_advanced_to: the new ``last_catalog_sync_at`` value (None when
                           ran=False or no rows touched).
     """
@@ -88,6 +101,7 @@ class SyncResult:
     skipped: bool = False
     services: MirrorCounts = field(default_factory=MirrorCounts)
     masters: MirrorCounts = field(default_factory=MirrorCounts)
+    master_services: MirrorCounts = field(default_factory=MirrorCounts)
     cursor_advanced_to: datetime | None = None
     error: str = ""
 
@@ -172,6 +186,47 @@ class CatalogSyncService:
         else:
             masters_res = upsert_specialists(tenant, specialist_dtos)
 
+        # Bookable master↔service edges (specialist-services → MasterService).
+        # Runs LAST: both FK sides must already be mirrored or every edge would
+        # skip as unknown_master / unknown_service. Same per-mirror isolation —
+        # a failure here must not undo the two mirrors that already landed, and
+        # crucially must not run reconciliation on a snapshot we never got.
+        master_services_res = UpsertResult()
+        try:
+            with http:
+                edge_snapshot = http.fetch_specialist_services(tenant_id=str(tenant.id))
+        except Exception as exc:  # noqa: BLE001 — per-mirror isolation
+            logger.exception(
+                "catalog.sync.fetch_specialist_services_failed tenant_id=%s", tenant.id
+            )
+            master_services_res.errors.append(
+                {"ayla_specialist_service_id": "?", "reason": str(exc)}
+            )
+        else:
+            try:
+                master_services_res = upsert_master_services(
+                    tenant,
+                    edge_snapshot.edges,
+                    # An incomplete page-walk downgrades the beat to
+                    # additive-only. Reconciliation deletes on absence, and a
+                    # row dropped by a shifted page window is indistinguishable
+                    # from one deleted upstream.
+                    reconcile=edge_snapshot.complete,
+                )
+            except Exception as exc:  # noqa: BLE001 — per-mirror isolation
+                # The upsert's own atomic block already rolled the edge batch
+                # back. Catching here keeps the run's bookkeeping alive: an
+                # escaping exception would skip the audit row, the cursor
+                # advance and the completed-log, so a beat that mirrored two
+                # of three surfaces would look like a total failure.
+                logger.exception(
+                    "catalog.sync.upsert_specialist_services_failed tenant_id=%s", tenant.id
+                )
+                master_services_res = UpsertResult()
+                master_services_res.errors.append(
+                    {"ayla_specialist_service_id": "?", "reason": str(exc)}
+                )
+
         # Freshness signal only — not a fetch cursor (Ayla has no ?since=).
         new_cursor = _max_upstream_ts(salon_dtos)
         if new_cursor is not None:
@@ -182,12 +237,14 @@ class CatalogSyncService:
             ran=True,
             services=_to_counts(services_res),
             masters=_to_counts(masters_res),
+            master_services=_to_counts(master_services_res),
             cursor_advanced_to=new_cursor,
         )
 
         _audit_and_emit(tenant, result)
         logger.info(
-            "catalog.sync.completed tenant_id=%s services=%s/%s/%s masters=%s/%s/%s cursor=%s",
+            "catalog.sync.completed tenant_id=%s services=%s/%s/%s masters=%s/%s/%s "
+            "master_services=%s/%s/%s/%s cursor=%s",
             tenant.id,
             result.services.created,
             result.services.updated,
@@ -195,6 +252,10 @@ class CatalogSyncService:
             result.masters.created,
             result.masters.updated,
             result.masters.skipped,
+            result.master_services.created,
+            result.master_services.updated,
+            result.master_services.skipped,
+            result.master_services.removed,
             new_cursor.isoformat() if new_cursor else "unchanged",
         )
         return result
@@ -210,6 +271,8 @@ def _to_counts(res: UpsertResult) -> MirrorCounts:
         created=res.created,
         updated=res.updated,
         skipped=res.skipped,
+        removed=res.removed,
+        reparented=res.reparented,
         errors=len(res.errors),
     )
 
@@ -228,6 +291,7 @@ def _audit_and_emit(tenant: "Tenant", result: SyncResult) -> None:
     counts_payload = {
         "services": _counts_dict(result.services),
         "masters": _counts_dict(result.masters),
+        "master_services": _counts_dict(result.master_services),
     }
     write_audit(
         EVENT_CATALOG_SYNCED,
@@ -253,6 +317,8 @@ def _counts_dict(c: MirrorCounts) -> dict[str, int]:
         "created": c.created,
         "updated": c.updated,
         "skipped": c.skipped,
+        "removed": c.removed,
+        "reparented": c.reparented,
         "errors": c.errors,
     }
 

@@ -52,9 +52,9 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
 
     Returns:
       Counter dict ``{tenants_run, tenants_skipped, tenants_failed,
-      total_created, total_updated, total_skipped}`` aggregated
-      across the fan-out. Surfaced to ``check_agents`` health (Sprint
-      8) for "last sync OK across N/M tenants".
+      total_created, total_updated, total_skipped, total_removed}``
+      aggregated across the fan-out. Surfaced to ``check_agents`` health
+      (Sprint 8) for "last sync OK across N/M tenants".
     """
     counters = {
         "tenants_run": 0,
@@ -63,6 +63,7 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
         "total_created": 0,
         "total_updated": 0,
         "total_skipped": 0,
+        "total_removed": 0,
     }
 
     service = CatalogSyncService()
@@ -89,13 +90,16 @@ def sync_catalog_for_all_tenants() -> dict[str, int]:
 
     logger.info(
         "catalog.sync.beat_completed run=%s skipped=%s failed=%s "
-        "created=%s updated=%s skipped_rows=%s",
+        "created=%s updated=%s skipped_rows=%s removed=%s",
         counters["tenants_run"],
         counters["tenants_skipped"],
         counters["tenants_failed"],
         counters["total_created"],
         counters["total_updated"],
         counters["total_skipped"],
+        # Removal is the one destructive action a beat can take — it must not
+        # be the only counter missing from the line an operator reads.
+        counters["total_removed"],
     )
     return counters
 
@@ -109,9 +113,13 @@ def _accumulate(counters: dict[str, int], result: SyncResult) -> None:
         counters["tenants_failed"] += 1
         return
     counters["tenants_run"] += 1
-    # PR-1 syncs only CatalogService (salon-services). PR-2 re-adds the
-    # master/bookable mirrors to this fan-out.
-    for mirror in (result.services,):
+    # All three mirrors count toward the beat totals (DRF-945). The masters
+    # mirror landed on dev without being wired in here; folding it and the new
+    # bookable-edge mirror in together keeps "last sync OK across N/M tenants"
+    # honest — otherwise a mirror could fail every cycle and the beat counters
+    # would still look clean.
+    for mirror in (result.services, result.masters, result.master_services):
         counters["total_created"] += mirror.created
         counters["total_updated"] += mirror.updated
         counters["total_skipped"] += mirror.skipped
+        counters["total_removed"] += mirror.removed

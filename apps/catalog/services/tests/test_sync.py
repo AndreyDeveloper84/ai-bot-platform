@@ -9,10 +9,12 @@ import pytest
 from django.core.cache import cache
 
 from apps.audit.models import AuditLog
-from apps.catalog.models import CatalogService
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.services.http_client import (
     CatalogSalonServiceDTO,
     CatalogSpecialistDTO,
+    CatalogSpecialistServiceDTO,
+    EdgeSnapshot,
 )
 from apps.catalog.services.sync import (
     EVENT_CATALOG_SYNCED,
@@ -54,14 +56,21 @@ class FakeHttpClient:
         *,
         services: list[CatalogSalonServiceDTO] | None = None,
         specialists: list[CatalogSpecialistDTO] | None = None,
+        specialist_services: list[CatalogSpecialistServiceDTO] | None = None,
+        edges_complete: bool = True,
         raise_on_fetch: type[Exception] | None = None,
         raise_on_specialists: type[Exception] | None = None,
+        raise_on_specialist_services: type[Exception] | None = None,
     ) -> None:
         self._services = services or []
         self._specialists = specialists or []
+        self._specialist_services = specialist_services or []
+        self._edges_complete = edges_complete
         self._raise = raise_on_fetch
         self._raise_specialists = raise_on_specialists
+        self._raise_specialist_services = raise_on_specialist_services
         self.tenant_ids_seen: list[str] = []
+        self.edge_tenant_ids_seen: list[str] = []
 
     def fetch_salon_services(self, *, tenant_id: str) -> list[CatalogSalonServiceDTO]:
         if self._raise is not None:
@@ -73,6 +82,12 @@ class FakeHttpClient:
         if self._raise_specialists is not None:
             raise self._raise_specialists("synthetic")
         return self._specialists
+
+    def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
+        if self._raise_specialist_services is not None:
+            raise self._raise_specialist_services("synthetic")
+        self.edge_tenant_ids_seen.append(tenant_id)
+        return EdgeSnapshot(edges=self._specialist_services, complete=self._edges_complete)
 
     def close(self) -> None: ...
 
@@ -233,3 +248,200 @@ class TestMastersMirror:
         assert log is not None
         assert "masters" in log.payload["counts"]
         assert log.payload["counts"]["masters"]["created"] == 1
+
+
+def _edge(
+    edge_id: str,
+    *,
+    specialist_id: str,
+    salon_service_id: str,
+    tenant_id: str,
+    is_active: bool = True,
+) -> CatalogSpecialistServiceDTO:
+    return CatalogSpecialistServiceDTO(
+        ayla_specialist_service_id=edge_id,
+        salon_service=salon_service_id,
+        specialist=specialist_id,
+        external_updated_at=_ts(),
+        tenant=tenant_id,
+        name="Спортивный массаж",
+        is_active=is_active,
+    )
+
+
+class TestMasterServicesMirror:
+    """Third mirror: specialist-services → MasterService (DRF-945)."""
+
+    def test_full_cycle_links_master_to_service(self, tenant: Tenant) -> None:
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        http = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[
+                _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+            ],
+        )
+
+        result = CatalogSyncService(http_client=http).run(tenant)
+
+        assert result.ran is True
+        assert result.master_services.created == 1
+        row = MasterService.all_tenants.get(tenant=tenant)
+        assert str(row.master_id) == mid
+        assert row.service.name == "Спортивный массаж"
+        assert row.ayla_specialist_service_id is not None
+
+    def test_edge_fetch_is_tenant_scoped(self, tenant: Tenant) -> None:
+        http = FakeHttpClient()
+        CatalogSyncService(http_client=http).run(tenant)
+        assert http.edge_tenant_ids_seen == [str(tenant.id)]
+
+    def test_edge_fetch_failure_isolated(self, tenant: Tenant) -> None:
+        """An edges failure must not undo the two mirrors that already landed."""
+        mid, sid = str(uuid.uuid4()), str(uuid.uuid4())
+        http = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            raise_on_specialist_services=RuntimeError,
+        )
+
+        result = CatalogSyncService(http_client=http).run(tenant)
+
+        assert result.ran is True
+        assert result.services.created == 1
+        assert result.masters.created == 1
+        assert result.master_services.errors == 1
+        assert result.master_services.created == 0
+
+    def test_edge_fetch_failure_does_not_remove_existing(self, tenant: Tenant) -> None:
+        """Requirement 8 — a failed fetch must not reconcile anything away."""
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        good = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[
+                _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+            ],
+        )
+        CatalogSyncService(http_client=good).run(tenant)
+
+        broken = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            raise_on_specialist_services=RuntimeError,
+        )
+        CatalogSyncService(http_client=broken).run(tenant)
+
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
+
+    def test_rerun_is_idempotent(self, tenant: Tenant) -> None:
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        http = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[
+                _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+            ],
+        )
+        svc = CatalogSyncService(http_client=http)
+        svc.run(tenant)
+        result = svc.run(tenant)
+
+        assert result.master_services.created == 0
+        assert result.master_services.updated == 1
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
+
+    def test_mirror_order_lets_edges_resolve_first_run(self, tenant: Tenant) -> None:
+        """Edges must resolve on the SAME beat that creates master + service."""
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        http = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[
+                _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+            ],
+        )
+
+        result = CatalogSyncService(http_client=http).run(tenant)
+
+        assert result.master_services.skipped == 0
+        assert result.master_services.created == 1
+        assert CatalogMaster.all_tenants.filter(id=mid).exists()
+
+    def test_audit_payload_carries_master_services_counts(self, tenant: Tenant) -> None:
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        http = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[
+                _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+            ],
+        )
+        CatalogSyncService(http_client=http).run(tenant)
+
+        log = AuditLog.all_tenants.filter(action=EVENT_CATALOG_SYNCED).first()
+        assert log is not None
+        assert log.payload["counts"]["master_services"]["created"] == 1
+        assert "removed" in log.payload["counts"]["master_services"]
+
+    def test_upsert_failure_preserves_run_bookkeeping(
+        self, tenant: Tenant, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An upsert blowup must not swallow the audit row + cursor advance.
+
+        The two mirrors that already landed committed in their own
+        transactions; if the exception escaped, the beat would look like a
+        total failure and the operator would lose the counters entirely.
+        """
+        import apps.catalog.services.sync as sync_mod
+
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        http = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[
+                _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+            ],
+        )
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("synthetic upsert failure")
+
+        monkeypatch.setattr(sync_mod, "upsert_master_services", _boom)
+
+        result = CatalogSyncService(http_client=http).run(tenant)
+
+        assert result.ran is True
+        assert result.services.created == 1
+        assert result.masters.created == 1
+        assert result.master_services.errors == 1
+        assert result.cursor_advanced_to is not None
+        assert AuditLog.all_tenants.filter(action=EVENT_CATALOG_SYNCED).exists()
+
+    def test_incomplete_snapshot_downgrades_to_additive_only(self, tenant: Tenant) -> None:
+        """A page-walk that lost a row must not license deletion.
+
+        Reconciliation infers "gone upstream" from absence; a row dropped by a
+        shifted page window is indistinguishable from a deleted one.
+        """
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        edge = _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+        seeded = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[edge],
+        )
+        CatalogSyncService(http_client=seeded).run(tenant)
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
+
+        # Next beat: the edge is missing AND the snapshot is flagged incomplete.
+        degraded = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[],
+            edges_complete=False,
+        )
+        result = CatalogSyncService(http_client=degraded).run(tenant)
+
+        assert result.master_services.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1

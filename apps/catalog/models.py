@@ -360,6 +360,31 @@ class MasterService(models.Model):
     Per master-management handoff §MM4 — admin maintains via matrix UI.
     Customer booking endpoints MUST check this mapping before assigning
     ``BookingRequest.master_id``.
+
+    ### Dual ownership (DRF-945 / P1 service discovery)
+
+    This table has **two writers** and they must not fight:
+
+    * **Operator** — the MM4 matrix (``apps/admin_api/views_services_mapping.py``)
+      and the invite seeder (``views_invite.py``). Rows they create leave
+      ``ayla_specialist_service_id`` NULL.
+    * **Catalog sync** — mirrors Ayla's canonical ``SpecialistService`` edge
+      (``GET /internal/catalog/specialist-services/``). Rows it owns carry a
+      non-NULL ``ayla_specialist_service_id``.
+
+    Sync only ever touches rows it created, so an operator-maintained mapping
+    can never be removed by a sync beat. Operator rows are deliberately NOT
+    adopted — adoption would hand an operator-authored row to reconciliation.
+
+    **Row existence is the contract.** Every reader — booking create and
+    reschedule, slot serving, the miniapp/master catalogs, the MM4 matrix —
+    treats the presence of a row as "this master performs this service", and
+    none of them filters a status column. So there is no ``is_active`` flag
+    here on purpose: an edge upstream marks inactive leaves no row, and a
+    vanished edge is deleted. A tombstone would read as "offered" everywhere
+    and would make a non-bookable service bookable. Delete also matches the
+    table's existing lifecycle — the MM4 matrix deletes the row when an
+    operator unchecks a cell.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -388,6 +413,22 @@ class MasterService(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # DRF-945 — provenance + Ayla's canonical bookable-edge id
+    # (``SpecialistService.id``). NULL ⇒ operator-owned (MM4 matrix / invite
+    # seeder); non-NULL ⇒ catalog-sync owns this row and may reconcile it.
+    # This is the ONLY discriminator sync uses to decide what it may touch.
+    ayla_specialist_service_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Canonical Ayla SpecialistService.id (UUID) — the bookable "
+            "master↔service edge. NULL means the row was created by an "
+            "operator (MM4 matrix / invite seeding) and catalog sync must "
+            "never reconcile it away."
+        ),
+    )
+
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
@@ -396,6 +437,17 @@ class MasterService(models.Model):
         verbose_name_plural = "Catalog: master-service mappings"
         ordering = ["master_id", "service_id"]
         unique_together = (("master", "service"),)
+        constraints = [
+            # One local row per Ayla edge, per tenant. Partial (WHERE NOT
+            # NULL) so operator rows — which are all NULL — are exempt. Same
+            # pattern as uq_catalog_service_tenant_ayla_service_id; applied
+            # while the column is all-NULL → instant validate, zero conflict.
+            models.UniqueConstraint(
+                fields=["tenant", "ayla_specialist_service_id"],
+                condition=models.Q(ayla_specialist_service_id__isnull=False),
+                name="uq_master_service_tenant_ayla_specialist_service_id",
+            ),
+        ]
         indexes = [
             models.Index(fields=["tenant", "master"]),
             models.Index(fields=["tenant", "service"]),
