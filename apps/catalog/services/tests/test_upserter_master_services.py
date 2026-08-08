@@ -357,6 +357,9 @@ class TestOwnership:
 
         assert not res.errors
         assert res.created == 1
+        # A move is not a destruction: it must not inflate ``removed``, which
+        # is the destructive-action signal the beat log surfaces.
+        assert (res.reparented, res.removed) == (1, 0)
         assert MasterService.all_tenants.filter(tenant=tenant, master=m2, service=s).exists()
         assert not MasterService.all_tenants.filter(tenant=tenant, master=m1, service=s).exists()
 

@@ -65,8 +65,12 @@ class UpsertResult:
                isn't mirrored yet, one carrying a foreign tenant, or a pair an
                operator already owns.
       removed: sync-owned rows deleted because upstream no longer offers them
-               (vanished from the snapshot, marked inactive, or re-parented).
-               Master-service only.
+               — vanished from the snapshot, or marked inactive. This is the
+               destructive-action signal the beat log surfaces, so a row that
+               merely MOVED is deliberately not counted here.
+      reparented: sync-owned rows deleted because upstream moved the edge to a
+               different (master, service) pair. The row is immediately
+               re-created at the new pair, so nothing is actually lost.
       errors: per-row failures with ``{ayla_service_id, reason}`` so the caller
               can blame the right input on a partial batch.
     """
@@ -75,6 +79,7 @@ class UpsertResult:
     updated: int = 0
     skipped: int = 0
     removed: int = 0
+    reparented: int = 0
     errors: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -368,7 +373,7 @@ def _upsert_one_master_service(
         .delete()
     )
     if reparented[0]:
-        result.removed += reparented[0]
+        result.reparented += reparented[0]
         logger.info(
             "catalog.upsert.reparented model=MasterService "
             "ayla_specialist_service_id=%s removed=%d tenant_id=%s",
@@ -412,6 +417,10 @@ def _upsert_one_master_service(
         result.created += 1
         return True
 
+    # NOTE: ``updated`` here means "present and verified correct after this
+    # beat", which includes the no-save path below — unlike the other two
+    # mirrors where it strictly means "written".
+    #
     # Already correct — do NOT save. ``updated_at`` is ``auto_now``, and the
     # MM4 matrix derives its optimistic-concurrency token from
     # MAX(updated_at) across the tenant's rows. An unconditional save would
@@ -447,6 +456,11 @@ def _reconcile_master_services(
     they must survive; without this a beat where N edges fail to resolve would
     delete N live relations.
     """
+    # LOAD-BEARING: ``ayla_specialist_service_id__isnull=False`` is the single
+    # guard between this delete and every operator-owned row in the tenant.
+    # Removing it deletes the entire MM4 matrix. (Django renders the exclude
+    # below as ``NOT (f IN (…) AND f IS NOT NULL)``, so NULL-stamped rows would
+    # survive the exclude and land in the delete.)
     owned = edge_model.objects.filter(
         tenant=tenant,
         ayla_specialist_service_id__isnull=False,

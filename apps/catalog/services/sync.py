@@ -76,6 +76,7 @@ class MirrorCounts:
     updated: int = 0
     skipped: int = 0
     removed: int = 0
+    reparented: int = 0
     errors: int = 0
 
 
@@ -193,7 +194,7 @@ class CatalogSyncService:
         master_services_res = UpsertResult()
         try:
             with http:
-                edge_dtos = http.fetch_specialist_services(tenant_id=str(tenant.id))
+                edge_snapshot = http.fetch_specialist_services(tenant_id=str(tenant.id))
         except Exception as exc:  # noqa: BLE001 — per-mirror isolation
             logger.exception(
                 "catalog.sync.fetch_specialist_services_failed tenant_id=%s", tenant.id
@@ -203,7 +204,15 @@ class CatalogSyncService:
             )
         else:
             try:
-                master_services_res = upsert_master_services(tenant, edge_dtos)
+                master_services_res = upsert_master_services(
+                    tenant,
+                    edge_snapshot.edges,
+                    # An incomplete page-walk downgrades the beat to
+                    # additive-only. Reconciliation deletes on absence, and a
+                    # row dropped by a shifted page window is indistinguishable
+                    # from one deleted upstream.
+                    reconcile=edge_snapshot.complete,
+                )
             except Exception as exc:  # noqa: BLE001 — per-mirror isolation
                 # The upsert's own atomic block already rolled the edge batch
                 # back. Catching here keeps the run's bookkeeping alive: an
@@ -263,6 +272,7 @@ def _to_counts(res: UpsertResult) -> MirrorCounts:
         updated=res.updated,
         skipped=res.skipped,
         removed=res.removed,
+        reparented=res.reparented,
         errors=len(res.errors),
     )
 
@@ -308,6 +318,7 @@ def _counts_dict(c: MirrorCounts) -> dict[str, int]:
         "updated": c.updated,
         "skipped": c.skipped,
         "removed": c.removed,
+        "reparented": c.reparented,
         "errors": c.errors,
     }
 

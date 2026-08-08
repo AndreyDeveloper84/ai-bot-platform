@@ -14,6 +14,7 @@ from apps.catalog.services.http_client import (
     CatalogSalonServiceDTO,
     CatalogSpecialistDTO,
     CatalogSpecialistServiceDTO,
+    EdgeSnapshot,
 )
 from apps.catalog.services.sync import (
     EVENT_CATALOG_SYNCED,
@@ -56,6 +57,7 @@ class FakeHttpClient:
         services: list[CatalogSalonServiceDTO] | None = None,
         specialists: list[CatalogSpecialistDTO] | None = None,
         specialist_services: list[CatalogSpecialistServiceDTO] | None = None,
+        edges_complete: bool = True,
         raise_on_fetch: type[Exception] | None = None,
         raise_on_specialists: type[Exception] | None = None,
         raise_on_specialist_services: type[Exception] | None = None,
@@ -63,6 +65,7 @@ class FakeHttpClient:
         self._services = services or []
         self._specialists = specialists or []
         self._specialist_services = specialist_services or []
+        self._edges_complete = edges_complete
         self._raise = raise_on_fetch
         self._raise_specialists = raise_on_specialists
         self._raise_specialist_services = raise_on_specialist_services
@@ -80,11 +83,11 @@ class FakeHttpClient:
             raise self._raise_specialists("synthetic")
         return self._specialists
 
-    def fetch_specialist_services(self, *, tenant_id: str) -> list[CatalogSpecialistServiceDTO]:
+    def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
         if self._raise_specialist_services is not None:
             raise self._raise_specialist_services("synthetic")
         self.edge_tenant_ids_seen.append(tenant_id)
-        return self._specialist_services
+        return EdgeSnapshot(edges=self._specialist_services, complete=self._edges_complete)
 
     def close(self) -> None: ...
 
@@ -414,3 +417,31 @@ class TestMasterServicesMirror:
         assert result.master_services.errors == 1
         assert result.cursor_advanced_to is not None
         assert AuditLog.all_tenants.filter(action=EVENT_CATALOG_SYNCED).exists()
+
+    def test_incomplete_snapshot_downgrades_to_additive_only(self, tenant: Tenant) -> None:
+        """A page-walk that lost a row must not license deletion.
+
+        Reconciliation infers "gone upstream" from absence; a row dropped by a
+        shifted page window is indistinguishable from a deleted one.
+        """
+        mid, sid, eid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+        edge = _edge(eid, specialist_id=mid, salon_service_id=sid, tenant_id=str(tenant.id))
+        seeded = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[edge],
+        )
+        CatalogSyncService(http_client=seeded).run(tenant)
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
+
+        # Next beat: the edge is missing AND the snapshot is flagged incomplete.
+        degraded = FakeHttpClient(
+            services=[_salon(sid, name="Спортивный массаж")],
+            specialists=[_specialist(mid)],
+            specialist_services=[],
+            edges_complete=False,
+        )
+        result = CatalogSyncService(http_client=degraded).run(tenant)
+
+        assert result.master_services.removed == 0
+        assert MasterService.all_tenants.filter(tenant=tenant).count() == 1

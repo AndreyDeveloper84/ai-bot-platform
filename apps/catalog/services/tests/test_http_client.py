@@ -326,10 +326,11 @@ class TestFetchSpecialistServices:
             json={"count": 1, "next": None, "previous": None, "results": [_edge_row()]},
         )
 
-        dtos = _client().fetch_specialist_services(tenant_id=_TID)
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
 
-        assert len(dtos) == 1
-        dto = dtos[0]
+        assert snap.complete is True
+        assert len(snap.edges) == 1
+        dto = snap.edges[0]
         assert dto.ayla_specialist_service_id == "a4e00000-0000-4000-8000-000000000010"
         assert dto.salon_service == "6f1c0000-0000-4000-8000-000000000011"
         assert dto.specialist == "77aa0000-0000-4000-8000-000000000012"
@@ -370,9 +371,9 @@ class TestFetchSpecialistServices:
             },
         )
 
-        dtos = _client().fetch_specialist_services(tenant_id=_TID)
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
 
-        assert dtos[0].is_active is False
+        assert snap.edges[0].is_active is False
 
     def test_missing_updated_at_falls_back_to_now(self, httpx_mock: HTTPXMock) -> None:
         row = _edge_row()
@@ -382,9 +383,9 @@ class TestFetchSpecialistServices:
             json={"count": 1, "next": None, "previous": None, "results": [row]},
         )
 
-        dtos = _client().fetch_specialist_services(tenant_id=_TID)
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
 
-        assert dtos[0].external_updated_at is not None
+        assert snap.edges[0].external_updated_at is not None
 
     def test_optional_text_fields_tolerate_null(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
@@ -397,7 +398,7 @@ class TestFetchSpecialistServices:
             },
         )
 
-        dto = _client().fetch_specialist_services(tenant_id=_TID)[0]
+        dto = _client().fetch_specialist_services(tenant_id=_TID).edges[0]
 
         assert dto.name == ""
         assert dto.category_slug == ""
@@ -420,3 +421,45 @@ class TestFetchSpecialistServices:
 
         with pytest.raises(CatalogAuthError):
             _client().fetch_specialist_services(tenant_id=_TID)
+
+    def test_snapshot_flagged_incomplete_when_count_disagrees(self, httpx_mock: HTTPXMock) -> None:
+        """count=2 but one row delivered ⇒ the page window shifted mid-walk.
+
+        The caller DELETEs rows on absence, so it must learn that this
+        snapshot cannot prove absence.
+        """
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={"count": 2, "next": None, "previous": None, "results": [_edge_row()]},
+        )
+
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
+
+        assert snap.complete is False
+        assert len(snap.edges) == 1
+
+    def test_snapshot_complete_across_pages(self, httpx_mock: HTTPXMock) -> None:
+        page2 = f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100&page=2"
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={
+                "count": 2,
+                "next": page2,
+                "previous": None,
+                "results": [_edge_row()],
+            },
+        )
+        httpx_mock.add_response(
+            url=page2,
+            json={
+                "count": 2,
+                "next": None,
+                "previous": None,
+                "results": [_edge_row(id="a4e00000-0000-4000-8000-000000000099")],
+            },
+        )
+
+        snap = _client().fetch_specialist_services(tenant_id=_TID)
+
+        assert snap.complete is True
+        assert len(snap.edges) == 2

@@ -149,6 +149,20 @@ class CatalogSpecialistServiceDTO:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class EdgeSnapshot:
+    """A tenant's bookable edges plus whether the snapshot is trustworthy.
+
+    ``complete`` is the licence to delete. Reconciliation infers "this edge no
+    longer exists upstream" from absence, and absence is only meaningful in a
+    snapshot known to be whole — so an incomplete walk downgrades the beat to
+    additive-only instead of deleting rows that were merely missed.
+    """
+
+    edges: list[CatalogSpecialistServiceDTO]
+    complete: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -240,15 +254,19 @@ class CatalogHttpClient:
         rows = self._fetch_all("internal/specialists/", params={})
         return [_parse_specialist(row) for row in rows]
 
-    def fetch_specialist_services(self, *, tenant_id: str) -> list[CatalogSpecialistServiceDTO]:
+    def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
         """Bookable master↔service edges for one tenant (→ ``MasterService``).
 
         Unlike ``/internal/specialists/`` this endpoint DOES support the
         ``?tenant=`` filter (contract §2), so the pull is properly scoped and
-        the returned list is the tenant's **full** edge snapshot — which is
-        what makes sync reconciliation safe (DRF-945).
+        the returned list is the tenant's edge snapshot — which is what makes
+        sync reconciliation possible (DRF-945).
+
+        Returns an :class:`EdgeSnapshot` rather than a bare list because the
+        caller deletes rows on absence and therefore needs to know whether
+        absence can be trusted.
         """
-        rows = self._fetch_all(
+        rows, complete = self._fetch_all_checked(
             "internal/catalog/specialist-services/",
             # page_size=100 (the contract's documented maximum) is a
             # correctness requirement, not a performance tweak: reconciliation
@@ -259,7 +277,10 @@ class CatalogHttpClient:
             # Fewer pages ⇒ fewer seams where that can happen.
             params={"tenant": tenant_id, "page_size": 100},
         )
-        return [_parse_specialist_service(row) for row in rows]
+        return EdgeSnapshot(
+            edges=[_parse_specialist_service(row) for row in rows],
+            complete=complete,
+        )
 
     # ------------------------------------------------------------------
     # Plumbing
@@ -267,7 +288,26 @@ class CatalogHttpClient:
 
     def _fetch_all(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Walk the pagination chain. Returns a flat list of raw row dicts."""
+        return self._fetch_all_checked(path, params=params)[0]
+
+    def _fetch_all_checked(
+        self, path: str, *, params: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Paginated fetch plus a completeness verdict.
+
+        The second element is False when the walk collected a different number
+        of rows than the first page's ``count`` advertised. That happens when
+        an upstream insert shifts the LIMIT/OFFSET window between page fetches
+        (upstream orders by a non-unique ``created_at``), which silently drops
+        a row from the snapshot.
+
+        Callers that only add rows can ignore the flag. Callers that DELETE on
+        absence must not: "no exception was raised" is not evidence that a
+        snapshot is complete, and a dropped row is indistinguishable from a
+        deleted one.
+        """
         rows: list[dict[str, Any]] = []
+        advertised: int | None = None
         try:
             url: str | None = AylaUrlBuilder(self._base_url).build(path)
         except AylaUrlError as exc:
@@ -283,10 +323,24 @@ class CatalogHttpClient:
         # string (tenant + page) baked in — pass no params.
         while url:
             payload = self._get_with_retry(url, params=request_params)
+            if advertised is None:
+                count = payload.get("count")
+                advertised = int(count) if isinstance(count, int) else None
             rows.extend(payload.get("results", []))
             url = payload.get("next") or None
             request_params = None
-        return rows
+
+        complete = advertised is None or advertised == len(rows)
+        if not complete:
+            logger.warning(
+                "catalog.http.snapshot_incomplete path=%s advertised=%s collected=%d — "
+                "upstream page window shifted mid-walk; reconciliation must not treat "
+                "this as proof of absence.",
+                path,
+                advertised,
+                len(rows),
+            )
+        return rows, complete
 
     def _get_with_retry(self, url: str, *, params: dict[str, Any] | None) -> dict[str, Any]:
         last_exc: Exception | None = None
