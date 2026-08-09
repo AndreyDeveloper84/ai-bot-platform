@@ -56,6 +56,18 @@ class SkillsConfig(AppConfig):
         # DRF-358 fallback card catches "Борщ 300г" before the LLM
         # gives a cold "не могу с заказом". Cheap regex, no network.
         from apps.skills.food_clarify import skill as _food_clarify  # noqa: F401
+
+        # DRF-963 — HelpSkill MUST precede faq. FAQ's keyword fallback
+        # claims anything question-shaped (a bare «?» is a signal), so
+        # «что ты умеешь?» became a KB lookup: two LLM calls to answer a
+        # question about the bot itself, and an operator handoff when the
+        # LLM is down. HelpSkill matches a CLOSED set of whole-message
+        # phrases, so the override can't swallow real salon questions.
+        # HelpSkill lives in its own module (apps.skills.menu.help_skill)
+        # precisely so this import does NOT also register its sibling
+        # MenuSkill — @register fires per module, and MenuSkill must land
+        # last, just before echo (see the bottom of this method).
+        from apps.skills.menu import help_skill as _help  # noqa: F401
         from apps.skills.faq import skill as _faq  # noqa: F401
 
         # Phase 1 / B3 (DRF-839) — booking skill: LLM-tool-use flow over
@@ -109,7 +121,8 @@ class SkillsConfig(AppConfig):
         # additive: it cannot take a turn away from booking, FAQ or any
         # wellness skill, which is what keeps CG-1..CG-8 regression-free.
         # Echo stays registered after it and keeps the empty-text /
-        # attachment-only replies.
+        # attachment-only replies. (Its sibling HelpSkill was registered
+        # far earlier, before faq — separate module, separate position.)
         from apps.skills.menu import skill as _menu  # noqa: F401
 
         from apps.skills.echo import skill as _echo  # noqa: F401

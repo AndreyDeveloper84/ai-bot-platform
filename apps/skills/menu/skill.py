@@ -1,13 +1,16 @@
 """Menu / honest-fallback skill (DRF-963 / Wave 1, variant A).
 
-Last responder for TEXT turns before the echo catch-all. Three jobs:
+:class:`MenuSkill` is the last responder for TEXT turns before the echo
+catch-all, with three jobs. Its sibling
+:class:`apps.skills.menu.help_skill.HelpSkill` registers much earlier
+(before faq) and owns the «что ты умеешь» vocabulary.
 
 1. **Main-menu taps** (``cb:menu:*``) — translate the tapped slug into the
    canonical phrase an existing skill already claims and re-dispatch, so a
    button and the equivalent typed message take the identical route.
 2. **U-1 — widened booking coverage** — a turn that names a service
    («Хочу массаж», «Мне бы маникюр») or asks about availability («есть
-   окошко?») is re-dispatched with an explicit booking
+   окошко») is re-dispatched with an explicit booking
    :class:`~apps.orchestrator.intent_router.IntentDecision` so the booking
    skill claims it through its documented intent gate.
 3. **U-5 — honest fallback** — anything still unrecognised gets «Я пока не
@@ -60,40 +63,19 @@ from apps.skills.menu.matching import (
     MENU_CALLBACK_TEXT,
     looks_like_booking_request,
     looks_like_help_request,
-    main_menu_action_data,
     tenant_service_stems,
+)
+
+# Re-exported for callers and tests that read the pilot's user-facing copy.
+from apps.skills.menu.replies import (  # noqa: F401
+    FALLBACK_TEXT,
+    HELP_TEXT,
+    fallback_result as _fallback_result,
+    help_result as _help_result,
 )
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
-
-
-# U-5 — the honest fallback. Says plainly that the bot did not understand,
-# then shows what it CAN do. Never echoes the user's text back.
-FALLBACK_TEXT = (
-    "Я пока не понял 🤔\n\n"
-    "Вот что я умею:\n"
-    "• записать к мастеру\n"
-    "• показать ваши записи\n"
-    "• перенести или отменить запись\n"
-    "• ответить на вопросы об услугах, ценах и адресе\n\n"
-    "Выберите действие или напишите своими словами — например, «хочу массаж»."
-)
-
-# «Помощь» / «что ты умеешь» — same menu, but framed as an answer rather
-# than as a miss, so the customer isn't told they were misunderstood when
-# they weren't.
-HELP_TEXT = (
-    "Я бот салона «Формула тела». Вот что я умею:\n\n"
-    "• 📅 Записаться — подберу мастера и время\n"
-    "• 📋 Мои записи — покажу ваши ближайшие визиты\n"
-    "• 🔄 Перенести запись — поменяю дату или время\n"
-    "• ❌ Отменить запись\n"
-    "• ❓ Вопросы об услугах, ценах, адресе и режиме работы\n\n"
-    "Можно нажать кнопку или написать своими словами — например, "
-    "«хочу массаж спины» или «когда у меня запись?».\n"
-    "Если что-то срочное — напишите «оператор», и я передам вас администратору."
-)
 
 
 def _booking_intent() -> object:
@@ -139,10 +121,8 @@ class MenuSkill:
         if text.startswith(MENU_CALLBACK_PREFIX):
             return self._handle_menu_callback(context, text)
 
-        # Help before booking: «помощь» carries no service word, but a
-        # phrase like «помогите записаться на массаж» would satisfy both —
-        # and it was already claimed upstream by the booking keyword
-        # «записаться», so it never reaches here anyway.
+        # Defensive: HelpSkill claims these upstream, so this branch only
+        # fires when the registry is partial (isolated unit tests).
         if looks_like_help_request(text):
             return _help_result()
 
@@ -211,23 +191,3 @@ def _redispatch(context: SkillContext, *, message_text: str) -> SkillResult | No
         intent=_booking_intent(),  # type: ignore[arg-type]
     )
     return dispatch(routed_context)
-
-
-def _fallback_result() -> SkillResult:
-    return SkillResult(
-        reply_text=FALLBACK_TEXT,
-        action_type="menu_fallback",
-        action_data=main_menu_action_data(),
-        meta={"reply_kind": "menu_fallback"},
-        confidence=None,
-    )
-
-
-def _help_result() -> SkillResult:
-    return SkillResult(
-        reply_text=HELP_TEXT,
-        action_type="menu_help",
-        action_data=main_menu_action_data(),
-        meta={"reply_kind": "menu_help"},
-        confidence=None,
-    )

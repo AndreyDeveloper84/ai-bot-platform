@@ -275,28 +275,45 @@ def tenant_service_stems(tenant: Any) -> tuple[str, ...]:
 # Help / menu vocabulary
 # ---------------------------------------------------------------------------
 
-_HELP_SIGNALS: tuple[str, ...] = (
-    " помощь ",
-    " помоги ",
-    " помогите ",
-    " справка ",
-    " меню ",
-    " что ты умеешь ",
-    " что умеешь ",
-    " что ты можешь ",
-    " что можешь ",
-    " что здесь можно ",
-    " команды ",
-    " help ",
-    " menu ",
-    " start ",
+# EXACT normalized phrases only — never substrings.
+#
+# The help skill registers BEFORE faq (a bot-capability question is not a
+# salon-KB question), so its claim overrides the generic FAQ question
+# signals. That override MUST stay surgical: a substring match on «помоги»
+# would swallow «помогите подобрать массаж», which belongs to booking, and
+# «меню» would swallow a question about a spa menu. Requiring the whole
+# message to BE the help phrase keeps the override predictable for the
+# operator and impossible to trip accidentally.
+#
+# Slash commands normalise to their bare word («/help» → «help»).
+_HELP_PHRASES: frozenset[str] = frozenset(
+    {
+        "помощь",
+        "помоги",
+        "помогите",
+        "справка",
+        "меню",
+        "команды",
+        "help",
+        "menu",
+        "что ты умеешь",
+        "что умеешь",
+        "что ты можешь",
+        "что можешь",
+        "что вы умеете",
+        "что умеет бот",
+        "что тут можно",
+        "что здесь можно",
+        "что я могу",
+        "твои возможности",
+        "возможности",
+    }
 )
 
 
 def looks_like_help_request(text: str) -> bool:
-    """True for «помощь» / «что ты умеешь» / «меню» and their variants."""
-    normalized = normalize(text)
-    return any(signal in normalized for signal in _HELP_SIGNALS)
+    """True when the WHOLE message is a request for the capability list."""
+    return normalize(text).strip() in _HELP_PHRASES
 
 
 # ---------------------------------------------------------------------------
