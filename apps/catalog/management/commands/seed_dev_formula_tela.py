@@ -200,14 +200,20 @@ class Command(BaseCommand):
 
             for svc_ext in spec["service_external_ids"]:
                 service = services_by_ext[svc_ext]
-                MasterService.all_tenants.update_or_create(
+                seed_edge_id = _seed_edge_id(tenant, mst, service)
+                edge, edge_created = MasterService.all_tenants.get_or_create(
                     tenant=tenant,
                     master=mst,
                     service=service,
-                    defaults={
-                        "ayla_specialist_service_id": _seed_edge_id(tenant, mst, service),
-                    },
+                    defaults={"ayla_specialist_service_id": seed_edge_id},
                 )
+                # Stamp only what we may stamp: adopt a NULL row left by an
+                # older seed run, but never overwrite a real Ayla edge id — on a
+                # --force run over a live mirror that would replace canonical
+                # provenance with a synthetic one.
+                if not edge_created and edge.ayla_specialist_service_id is None:
+                    edge.ayla_specialist_service_id = seed_edge_id
+                    edge.save(update_fields=["ayla_specialist_service_id", "updated_at"])
 
             for day, is_working, start, end, lunch_start, lunch_end in WORKING_HOURS:
                 WorkingHours.all_tenants.update_or_create(

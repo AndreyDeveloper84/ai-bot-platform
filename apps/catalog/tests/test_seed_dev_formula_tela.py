@@ -87,6 +87,21 @@ def test_rerun_adopts_legacy_unstamped_rows() -> None:
 
 
 @pytest.mark.django_db
+def test_force_never_overwrites_a_real_ayla_stamp() -> None:
+    """A --force run over a live mirror must not replace canonical provenance."""
+    _run()
+    tenant = Tenant.objects.get(slug="formula-tela")
+    edge = MasterService.all_tenants.filter(tenant=tenant).first()
+    real_ayla_id = uuid.uuid4()
+    MasterService.all_tenants.filter(id=edge.id).update(ayla_specialist_service_id=real_ayla_id)
+
+    _run(force=True)
+
+    edge.refresh_from_db()
+    assert edge.ayla_specialist_service_id == real_ayla_id
+
+
+@pytest.mark.django_db
 def test_refuses_to_seed_over_a_live_ayla_mirror() -> None:
     tenant = Tenant.objects.create(slug="formula-tela", name="Формула тела")
     CatalogService.all_tenants.create(

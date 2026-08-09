@@ -101,6 +101,81 @@ def test_apply_deletes_orphans_and_keeps_sync_owned(tenant: Tenant, tmp_path) ->
 
 
 @pytest.mark.django_db
+def test_a_row_created_after_the_dump_is_not_deleted(tenant: Tenant, tmp_path, monkeypatch) -> None:
+    """Everything deleted must be in the backup.
+
+    The MM4 matrix creates NULL-provenance rows live from the admin UI. A
+    delete driven by the bare predicate would take a row created between the
+    dump and the delete — an operator's freshly-ticked cell, gone with no
+    entry in the backup.
+    """
+    master = _master(tenant, external_id=1, name="Анна")
+    _edge(tenant, master, _service(tenant, external_id=1, name="LPG"))
+    late_service = _service(tenant, external_id=2, name="Добавлено оператором")
+
+    from apps.catalog.management.commands import cleanup_orphan_master_services as mod
+
+    original = mod.Command._write_dump
+
+    def _write_then_race(self, path, **kwargs):
+        original(self, path, **kwargs)
+        _edge(tenant, master, late_service)
+
+    monkeypatch.setattr(mod.Command, "_write_dump", _write_then_race)
+
+    _run(tenant_slug=tenant.slug, apply=True, dump=str(tmp_path / "dump.json"))
+
+    survivors = MasterService.all_tenants.filter(tenant=tenant)
+    assert [row.service.name for row in survivors] == ["Добавлено оператором"]
+
+
+@pytest.mark.django_db
+def test_existing_dump_file_is_not_clobbered(tenant: Tenant, tmp_path) -> None:
+    master = _master(tenant, external_id=1, name="Анна")
+    _edge(tenant, master, _service(tenant, external_id=1, name="LPG"))
+    dump = tmp_path / "dump.json"
+    dump.write_text("previous backup", encoding="utf-8")
+
+    with pytest.raises(CommandError, match="refusing to overwrite"):
+        _run(tenant_slug=tenant.slug, apply=True, dump=str(dump))
+
+    assert dump.read_text(encoding="utf-8") == "previous backup"
+    assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
+
+
+@pytest.mark.django_db
+def test_operator_authored_rows_are_flagged(tenant: Tenant, django_user_model) -> None:
+    """created_by proves a human ticked the cell — the report must say so."""
+    user = django_user_model.objects.create(username="operator")
+    master = _master(tenant, external_id=1, name="Анна")
+    edge = _edge(tenant, master, _service(tenant, external_id=1, name="LPG"))
+    MasterService.all_tenants.filter(id=edge.id).update(created_by=user)
+
+    output = _run(tenant_slug=tenant.slug)
+
+    assert "carry created_by" in output
+
+
+@pytest.mark.django_db
+def test_stranded_masters_are_not_merged_by_name(tenant: Tenant) -> None:
+    """Two masters can share a name; a namesake's kept edges must not hide one."""
+    stranded = _master(tenant, external_id=1, name="Ольга")
+    namesake = _master(tenant, external_id=2, name="Ольга")
+    _edge(tenant, stranded, _service(tenant, external_id=1, name="LPG"))
+    _edge(tenant, namesake, _service(tenant, external_id=2, name="Массаж"))
+    _edge(
+        tenant,
+        namesake,
+        _service(tenant, external_id=3, name="Прессотерапия"),
+        ayla_id=uuid.uuid4(),
+    )
+
+    output = _run(tenant_slug=tenant.slug)
+
+    assert "1 master(s) will have ZERO edges" in output
+
+
+@pytest.mark.django_db
 def test_apply_requires_a_dump_path(tenant: Tenant) -> None:
     master = _master(tenant, external_id=1, name="Анна")
     _edge(tenant, master, _service(tenant, external_id=1, name="LPG"))
