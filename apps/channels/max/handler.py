@@ -745,12 +745,21 @@ def _discovery_handoff_reply(
             raise ValueError(f"expected 2 or 3 ids, got {len(parts)}")
         tenant_id = uuid.UUID(parts[0])
         master_id = uuid.UUID(parts[1])
-        service_id = uuid.UUID(parts[2]) if len(parts) == 3 else None
     except (ValueError, AttributeError):
         logger.warning("channels.max.global.handoff.bad_payload payload=%r", payload)
         return DiscoveryReply(
             text="Не удалось открыть запись — попробуйте выбрать мастера ещё раз."
         )
+
+    # The service part is genuinely optional: a corrupt third segment must not
+    # throw away two valid ids — degrade to the serviceless handoff (which
+    # asks for the service) instead of the generic error.
+    service_id: uuid.UUID | None = None
+    if len(parts) == 3:
+        try:
+            service_id = uuid.UUID(parts[2])
+        except (ValueError, AttributeError):
+            logger.warning("channels.max.global.handoff.bad_service_part payload=%r", payload)
 
     return handoff_to_booking(
         global_bot_user=global_bot_user,

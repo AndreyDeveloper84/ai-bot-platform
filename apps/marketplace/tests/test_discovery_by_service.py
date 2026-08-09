@@ -20,6 +20,7 @@ quietly sets it would prove nothing.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -81,13 +82,19 @@ def _master(tenant: Tenant, name: str, *, specialization: str = "", **kw) -> Cat
 
 
 def _service(
-    tenant: Tenant, name: str, *, slug: str = "svc", is_active: bool = True
+    tenant: Tenant,
+    name: str,
+    *,
+    slug: str = "svc",
+    is_active: bool = True,
+    ayla_service_id=None,
 ) -> CatalogService:
     return CatalogService.all_tenants.create(
         tenant=tenant,
         slug=slug,
         name=name,
         is_active=is_active,
+        ayla_service_id=ayla_service_id,
         external_updated_at=_ts(),
     )
 
@@ -162,11 +169,20 @@ class TestResolvedServiceContext:
     Without this the discovery→booking tap dispatched a serviceless
     ``pick_master`` and the booking skill's stale-context guard dead-ended
     every card tap with «Контекст записи устарел».
+
+    A stamped service is a promise the button must keep, so resolution also
+    requires deliverability: ``BOOKING_VIA_AYLA_REST`` ON and a non-NULL
+    ``ayla_service_id`` (the one proven native id family). Every positive
+    test here sets both; the negative deliverability tests pin the gate.
     """
+
+    @pytest.fixture(autouse=True)
+    def _ayla_flag_on(self, settings) -> None:
+        settings.BOOKING_VIA_AYLA_REST = True
 
     def test_unambiguous_match_stamps_service_on_card(self, penza: Tenant) -> None:
         master = _master(penza, "Массажист", specialization="")
-        svc = _service(penza, "Спортивный массаж", slug="sport")
+        svc = _service(penza, "Спортивный массаж", slug="sport", ayla_service_id=uuid4())
         _link(penza, master, svc)
 
         cards = discover_masters(
@@ -182,8 +198,16 @@ class TestResolvedServiceContext:
         would book a service the user never chose. The card must stay
         serviceless; the handoff answers it by asking for the service."""
         master = _master(penza, "Массажист", specialization="")
-        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
-        _link(penza, master, _service(penza, "Классический массаж", slug="classic"))
+        _link(
+            penza,
+            master,
+            _service(penza, "Спортивный массаж", slug="sport", ayla_service_id=uuid4()),
+        )
+        _link(
+            penza,
+            master,
+            _service(penza, "Классический массаж", slug="classic", ayla_service_id=uuid4()),
+        )
 
         cards = discover_masters(city="Пенза", specialization="массаж", resolve_service=True)
 
@@ -194,8 +218,10 @@ class TestResolvedServiceContext:
     def test_each_master_resolves_its_own_service(self, penza: Tenant) -> None:
         sport = _master(penza, "Спортивный мастер", specialization="")
         classic = _master(penza, "Классический мастер", specialization="")
-        sport_svc = _service(penza, "Спортивный массаж", slug="sport")
-        classic_svc = _service(penza, "Классический массаж", slug="classic")
+        sport_svc = _service(penza, "Спортивный массаж", slug="sport", ayla_service_id=uuid4())
+        classic_svc = _service(
+            penza, "Классический массаж", slug="classic", ayla_service_id=uuid4()
+        )
         _link(penza, sport, sport_svc)
         _link(penza, classic, classic_svc)
 
@@ -205,11 +231,33 @@ class TestResolvedServiceContext:
         assert by_name["Спортивный мастер"].service_id == sport_svc.id
         assert by_name["Классический мастер"].service_id == classic_svc.id
 
+    def test_mixed_services_resolve_only_the_matching_one(self, penza: Tenant) -> None:
+        """Join-reuse pin: a master with one matching and one NON-matching
+        service must resolve to the matching one. Correctness requires the
+        resolver's values_list to read from the same joined MasterService row
+        its conditions bound to — if a Django upgrade or refactor breaks join
+        reuse, the non-matching service leaks in, the pair set doubles, and
+        every card silently goes serviceless with a green suite."""
+        master = _master(penza, "Универсал", specialization="")
+        massage = _service(penza, "Спортивный массаж", slug="sport", ayla_service_id=uuid4())
+        _link(penza, master, massage)
+        _link(penza, master, _service(penza, "Маникюр", slug="nails", ayla_service_id=uuid4()))
+
+        cards = discover_masters(city="Пенза", specialization="массаж", resolve_service=True)
+
+        assert len(cards) == 1
+        assert cards[0].service_id == massage.id
+        assert cards[0].service_name == "Спортивный массаж"
+
     def test_default_call_does_not_resolve(self, penza: Tenant) -> None:
         """The HTTP directory and other list readers keep the old shape (and
         skip the extra query) unless they opt in."""
         master = _master(penza, "Массажист", specialization="")
-        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+        _link(
+            penza,
+            master,
+            _service(penza, "Спортивный массаж", slug="sport", ayla_service_id=uuid4()),
+        )
 
         cards = discover_masters(city="Пенза", specialization="спортивный массаж")
 
@@ -230,7 +278,17 @@ class TestResolvedServiceContext:
 
     def test_inactive_service_is_not_resolved(self, penza: Tenant) -> None:
         master = _master(penza, "Массажист", specialization="спортивный массаж")
-        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport", is_active=False))
+        _link(
+            penza,
+            master,
+            _service(
+                penza,
+                "Спортивный массаж",
+                slug="sport",
+                is_active=False,
+                ayla_service_id=uuid4(),
+            ),
+        )
 
         cards = discover_masters(
             city="Пенза", specialization="спортивный массаж", resolve_service=True
@@ -238,6 +296,39 @@ class TestResolvedServiceContext:
 
         # Master still surfaces via the specialization fallback, but the
         # inactive service must not ride the callback into booking.
+        assert len(cards) == 1
+        assert cards[0].service_id is None
+
+    def test_null_ayla_service_id_is_not_stamped(self, penza: Tenant) -> None:
+        """Deliverability: a service the handoff cannot ground (NULL
+        ayla_service_id — e.g. a legacy mysite row) must not be advertised on
+        the card; the promise would dead-end in the ask-the-service loop."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(
+            city="Пенза", specialization="спортивный массаж", resolve_service=True
+        )
+
+        assert len(cards) == 1
+        assert cards[0].service_id is None
+
+    def test_legacy_flag_never_stamps_a_service(self, penza: Tenant, settings) -> None:
+        """Under BOOKING_VIA_AYLA_REST=False the mirror's external_id is the
+        mysite pk — an unverified id family for the YClients booking contract
+        — so no service is ever advertised on that path."""
+        settings.BOOKING_VIA_AYLA_REST = False
+        master = _master(penza, "Массажист", specialization="")
+        _link(
+            penza,
+            master,
+            _service(penza, "Спортивный массаж", slug="sport", ayla_service_id=uuid4()),
+        )
+
+        cards = discover_masters(
+            city="Пенза", specialization="спортивный массаж", resolve_service=True
+        )
+
         assert len(cards) == 1
         assert cards[0].service_id is None
 

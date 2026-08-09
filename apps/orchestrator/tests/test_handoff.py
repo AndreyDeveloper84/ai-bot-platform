@@ -5,11 +5,14 @@ commercial native ids; the per-tenant booking entrypoint runs scoped to T; the
 nullable yclients_staff_id is handled gracefully; and the bridge-read invariant
 (commercial read at current_tenant()=None raises CrossTenantError) holds.
 
-DRF-962 additions: a booking dispatch ALWAYS carries master + service (the
-booking skill's pick_master guard refuses a serviceless tap with the
-stale-context text — that was the live pilot dead-end). A tap without a
-resolvable service — legacy two-id keyboard, forged/foreign service, inactive
-service, unlinked native id — gets the ask-the-service reply and NO dispatch.
+DRF-962 additions: a booking dispatch ALWAYS carries master + service, and
+service grounding is Ayla-REST-only — ``ayla_service_id`` is the one proven
+native id family (the mirror's ``external_id`` is the mysite pk, not a
+verified YClients service id, so the legacy flag path never dispatches a
+service). A tap without a resolvable service — legacy two-id keyboard,
+forged/foreign service, inactive service, NULL ayla id, or the legacy flag —
+gets the ask-the-service reply (listing the master's real services when it
+has any) and NO dispatch.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ def _tenant(slug: str = "t-handoff") -> Tenant:
     return Tenant.objects.create(slug=slug, name=slug, timezone="Europe/Moscow", city="Пенза")
 
 
-def _master(tenant: Tenant, *, staff_id, name: str = "Анна") -> CatalogMaster:
+def _master(tenant: Tenant, *, staff_id=None, name: str = "Анна") -> CatalogMaster:
     return CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_id=1,
@@ -50,8 +53,8 @@ def _master(tenant: Tenant, *, staff_id, name: str = "Анна") -> CatalogMaste
 def _service(
     tenant: Tenant,
     *,
-    external_id=None,
     ayla_service_id=None,
+    external_id=None,
     name: str = "Спортивный массаж",
     is_active: bool = True,
     slug: str = "svc",
@@ -72,11 +75,13 @@ def _link(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> Mas
 
 
 def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypatch) -> None:
+    """The primary (pilot) path: flag ON, canonical Ayla UUIDs for both ids."""
     settings.STRICT_TENANT_SCOPE = "strict"
-    settings.BOOKING_VIA_AYLA_REST = False
+    settings.BOOKING_VIA_AYLA_REST = True
     t = _tenant()
-    master = _master(t, staff_id=777)
-    service = _service(t, external_id=55)
+    master = _master(t)
+    ayla_uuid = uuid4()
+    service = _service(t, ayla_service_id=ayla_uuid)
     _link(t, master, service)
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="500", chat_id="500")
     assert current_tenant() is None
@@ -101,42 +106,11 @@ def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypat
 
     assert reply.text == "Выберите дату"
     assert seen["tenant"].id == t.id  # dispatch ran INSIDE tenant_scope(T)
-    # Native ids (flag OFF): int staff_id + int mysite service external_id.
-    assert seen["text"] == "cb:book:pick_master:777:55"
+    # Native ids on the Ayla path: master mirror pk (= canonical Ayla
+    # specialist id, S3B rekey) + the service's ayla_service_id.
+    assert seen["text"] == f"cb:book:pick_master:{master.id}:{ayla_uuid}"
     assert seen["bot_user_tenant"] == t.id  # per-tenant BotUser bridged into T
     assert current_tenant() is None  # scope released after the handoff
-
-
-def test_handoff_ayla_flag_dispatches_canonical_uuids(settings, monkeypatch) -> None:
-    """Flag ON (the pilot path): both ids are canonical Ayla UUIDs — the
-    master's mirror pk and the service's ``ayla_service_id``."""
-    settings.STRICT_TENANT_SCOPE = "strict"
-    settings.BOOKING_VIA_AYLA_REST = True
-    t = _tenant("t-ayla")
-    master = _master(t, staff_id=None)  # native staff id irrelevant on this path
-    ayla_uuid = uuid4()
-    service = _service(t, ayla_service_id=ayla_uuid)
-    _link(t, master, service)
-    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="503", chat_id="503")
-
-    seen: dict = {}
-
-    def fake_dispatch(ctx):
-        seen["text"] = ctx.message_text
-        return SkillResult(reply_text="Выберите дату")
-
-    monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
-
-    reply = handoff_to_booking(
-        global_bot_user=gbu,
-        tenant_id=t.id,
-        master_id=master.id,
-        service_id=service.id,
-        chat_id="503",
-    )
-
-    assert reply.text == "Выберите дату"
-    assert seen["text"] == f"cb:book:pick_master:{master.id}:{ayla_uuid}"
 
 
 def test_handoff_should_handoff_creates_admin_task(settings, monkeypatch) -> None:
@@ -146,10 +120,10 @@ def test_handoff_should_handoff_creates_admin_task(settings, monkeypatch) -> Non
     from apps.handoff.models import AdminTask
 
     settings.STRICT_TENANT_SCOPE = "strict"
-    settings.BOOKING_VIA_AYLA_REST = False
+    settings.BOOKING_VIA_AYLA_REST = True
     t = _tenant()
-    master = _master(t, staff_id=888)
-    service = _service(t, external_id=56)
+    master = _master(t)
+    service = _service(t, ayla_service_id=uuid4())
     _link(t, master, service)
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="501", chat_id="501")
 
@@ -182,14 +156,17 @@ def test_handoff_should_handoff_creates_admin_task(settings, monkeypatch) -> Non
     assert current_tenant() is None  # scope released after the handoff
 
 
-def test_handoff_without_service_asks_and_does_not_dispatch(settings, monkeypatch) -> None:
+def test_handoff_without_service_asks_with_the_masters_real_services(settings, monkeypatch) -> None:
     """A serviceless tap (legacy 2-id keyboard / ambiguous query) must get the
-    ask-the-service reply — dispatching would only produce the booking skill's
-    stale-context dead-end (the DRF-962 live failure)."""
+    ask-the-service reply LISTING this master's actual services — a workable
+    next step, not a hardcoded example — and no dispatch (a serviceless
+    dispatch is the stale-context dead-end this fix removes)."""
     settings.STRICT_TENANT_SCOPE = "strict"
-    settings.BOOKING_VIA_AYLA_REST = False
+    settings.BOOKING_VIA_AYLA_REST = True
     t = _tenant("t-noservice")
-    master = _master(t, staff_id=777, name="Анна")
+    master = _master(t, name="Анна")
+    _link(t, master, _service(t, ayla_service_id=uuid4(), name="Классический массаж", slug="c"))
+    _link(t, master, _service(t, ayla_service_id=uuid4(), name="Спортивный массаж", slug="s"))
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="504")
 
     called: list = []
@@ -197,33 +174,54 @@ def test_handoff_without_service_asks_and_does_not_dispatch(settings, monkeypatc
 
     reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
 
-    assert "уточните услугу" in reply.text
     assert "Анна" in reply.text
+    assert "«Классический массаж»" in reply.text
+    assert "«Спортивный массаж»" in reply.text
     assert called == []
 
 
-@pytest.mark.parametrize("case", ["foreign", "no_edge", "inactive", "unlinked_native"])
+def test_handoff_without_service_and_without_menu_still_asks(settings, monkeypatch) -> None:
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-bare")
+    master = _master(t, name="Анна")  # no services linked at all
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="506")
+
+    called: list = []
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
+
+    reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
+
+    assert "какая услуга вас интересует" in reply.text
+    assert called == []
+
+
+@pytest.mark.parametrize("case", ["foreign", "no_edge", "inactive", "null_ayla_id", "legacy_flag"])
 def test_handoff_unresolvable_service_asks_and_does_not_dispatch(
     settings, monkeypatch, case: str
 ) -> None:
-    """Forged/stale service ids must not smuggle a service into booking:
-    foreign-tenant service, service without a MasterService edge, inactive
-    service, and a service with no native id for the active path all collapse
-    to the same honest ask-the-service reply, without a dispatch."""
+    """Forged/stale/ungroundable service ids must not smuggle a service into
+    booking: foreign-tenant service, service without a MasterService edge,
+    inactive service, NULL ayla_service_id, and the legacy YClients flag
+    (external_id is the mysite pk — an unverified id family) all collapse to
+    the same honest ask-the-service reply, without a dispatch."""
     settings.STRICT_TENANT_SCOPE = "strict"
-    settings.BOOKING_VIA_AYLA_REST = False
+    settings.BOOKING_VIA_AYLA_REST = case != "legacy_flag"
     t = _tenant("t-badservice")
     master = _master(t, staff_id=777)
     if case == "foreign":
         other = _tenant("t-other")
-        service = _service(other, external_id=55)
+        service = _service(other, ayla_service_id=uuid4())
     elif case == "no_edge":
-        service = _service(t, external_id=55)  # exists in T, master doesn't offer it
+        service = _service(t, ayla_service_id=uuid4())  # in T, master doesn't offer it
     elif case == "inactive":
-        service = _service(t, external_id=55, is_active=False)
+        service = _service(t, ayla_service_id=uuid4(), is_active=False)
         _link(t, master, service)
-    else:  # unlinked_native: edge ok, but no mysite external_id under flag OFF
-        service = _service(t, external_id=None)
+    elif case == "null_ayla_id":
+        service = _service(t, ayla_service_id=None, external_id=55)
+        _link(t, master, service)
+    else:  # legacy_flag: everything valid, but flag OFF never grounds a service
+        service = _service(t, ayla_service_id=uuid4(), external_id=55)
         _link(t, master, service)
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="505")
 
@@ -234,25 +232,46 @@ def test_handoff_unresolvable_service_asks_and_does_not_dispatch(
         global_bot_user=gbu, tenant_id=t.id, master_id=master.id, service_id=service.id
     )
 
-    assert "уточните услугу" in reply.text
+    assert "напишите" in reply.text  # the ask-the-service family of replies
     assert called == []
 
 
+def test_handoff_unresolved_service_emits_funnel_event(settings, monkeypatch) -> None:
+    """Ops visibility: a cohort whose every tap fails to resolve must be
+    distinguishable from zero traffic on the funnel dashboard."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-funnel")
+    master = _master(t)
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="507")
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "apps.orchestrator.handoff.emit",
+        lambda name, payload=None, **kw: events.append((name, payload or {})),
+    )
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: None)
+
+    handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
+
+    names = [name for name, _ in events]
+    assert "marketplace.handoff.service_unresolved" in names
+    assert "marketplace.handoff.entered" not in names
+
+
 def test_handoff_nullable_staff_id_is_graceful_no_dispatch(settings, monkeypatch) -> None:
+    """Legacy YClients flag: a master without a native staff id stays the
+    graceful 'unavailable' reply (master resolution precedes the service gate)."""
     settings.STRICT_TENANT_SCOPE = "strict"
     settings.BOOKING_VIA_AYLA_REST = False
     t = _tenant("t-null")
     master = _master(t, staff_id=None)  # master not linked to YClients
-    service = _service(t, external_id=55)
-    _link(t, master, service)
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="501")
 
     called: list = []
     monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
 
-    reply = handoff_to_booking(
-        global_bot_user=gbu, tenant_id=t.id, master_id=master.id, service_id=service.id
-    )
+    reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
     assert "недоступна" in reply.text
     assert called == []  # no booking dispatch when the master has no native id
 

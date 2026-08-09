@@ -179,7 +179,8 @@ def _service_match_q(tokens: list[str]) -> Q:
 
 
 def _matched_services(master_ids: list[UUID], tokens: list[str]) -> dict[UUID, tuple[UUID, str]]:
-    """Resolve which service matched the query, per master — when unambiguous.
+    """Resolve which service matched the query, per master — when unambiguous
+    AND deliverable to the booking flow.
 
     Returns ``{master_id: (service_id, service_name)}`` ONLY for masters whose
     query-matching active services collapse to exactly one distinct service.
@@ -188,15 +189,36 @@ def _matched_services(master_ids: list[UUID], tokens: list[str]) -> dict[UUID, t
     would carry a service the user never chose straight into the booking
     preview. Absent masters fall back to the ask-the-service handoff reply.
 
+    Deliverability gate (review of DRF-962): a stamped service becomes a
+    promise on the card — the button must be able to keep it. The booking
+    handoff can only ground a service on the Ayla REST path via
+    ``ayla_service_id``, so resolution requires ``BOOKING_VIA_AYLA_REST`` ON
+    and a non-NULL ``ayla_service_id``. Under the legacy YClients flag the
+    mirror's ``external_id`` is the *mysite* pk, not a proven YClients
+    service id (`apps/catalog/models.py` vs `apps/skills/booking/skill.py`
+    disagree about its family), so no service is ever advertised there —
+    cards stay serviceless and the handoff asks for the service instead of
+    dispatching an id from an unverified family.
+
     One query for the whole card set (bounded by the discovery ``limit``);
     the same ``all_tenants`` carve-out and the same match ``Q`` as
     :func:`_bookable_qs`, so resolution can never disagree with discovery.
     """
+    from django.conf import settings
+
     if not master_ids or not tokens:
         return {}
+    if not bool(getattr(settings, "BOOKING_VIA_AYLA_REST", False)):
+        return {}
+    # ONE .filter() call for the whole condition set: a second filter() on a
+    # multi-valued relation would open a SECOND MasterService join, and the
+    # values_list below must read from the same joined row the conditions
+    # bound to (pinned by the mixed-services test in test_discovery_by_service).
     rows = (
         CatalogMaster.all_tenants.filter(id__in=master_ids)
-        .filter(_service_match_q(tokens))
+        .filter(
+            _service_match_q(tokens) & Q(services_offered__service__ayla_service_id__isnull=False)
+        )
         .values_list(
             "id",
             "services_offered__service_id",

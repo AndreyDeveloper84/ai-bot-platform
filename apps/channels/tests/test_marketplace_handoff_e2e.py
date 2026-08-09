@@ -70,6 +70,9 @@ def fake_redis(monkeypatch):
     return fake
 
 
+_AYLA_SERVICE_ID = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+
 def _fixture(t: Tenant) -> tuple[CatalogMaster, CatalogService]:
     ts = datetime(2026, 5, 18, tzinfo=timezone.utc)
     master = CatalogMaster.all_tenants.create(
@@ -85,7 +88,7 @@ def _fixture(t: Tenant) -> tuple[CatalogMaster, CatalogService]:
         slug="manicure",
         name="Маникюр",
         is_active=True,
-        external_id=55,
+        ayla_service_id=_AYLA_SERVICE_ID,
         external_updated_at=ts,
     )
     MasterService.all_tenants.create(tenant=t, master=master, service=service)
@@ -96,7 +99,7 @@ def test_handoff_callback_enters_tenant_and_delegates(
     settings, monkeypatch, mock_send, fake_redis
 ) -> None:
     settings.STRICT_TENANT_SCOPE = "strict"
-    settings.BOOKING_VIA_AYLA_REST = False
+    settings.BOOKING_VIA_AYLA_REST = True
     t = Tenant.objects.create(slug="t-e2e", name="Salon", timezone="Europe/Moscow", city="Пенза")
     master, service = _fixture(t)
 
@@ -121,8 +124,9 @@ def test_handoff_callback_enters_tenant_and_delegates(
     # The booking entrypoint ran INSIDE tenant_scope(T) with the native
     # master + service ids (DRF-962: the service is REQUIRED by the pick
     # contract — serviceless dispatch dead-ends on the stale-context guard).
+    # On the Ayla path both natives are canonical UUIDs.
     assert seen["tenant"].id == t.id
-    assert seen["text"] == "cb:book:pick_master:42:55"
+    assert seen["text"] == f"cb:book:pick_master:{master.id}:{_AYLA_SERVICE_ID}"
     # A per-tenant BotUser was bridged into T (distinct from the global sentinel one).
     assert BotUser.all_tenants.filter(tenant=t, channel="max", channel_user_id="600").exists()
     # Reply sent; no tenant scope leaked out of the handler.
@@ -134,10 +138,11 @@ def test_legacy_serviceless_callback_asks_for_service(
     settings, monkeypatch, mock_send, fake_redis
 ) -> None:
     """A pre-DRF-962 keyboard (2-id payload) must get the honest
-    ask-the-service reply — not a dispatch that the booking skill would
-    refuse with «Контекст записи устарел»."""
+    ask-the-service reply — listing the master's real services — not a
+    dispatch that the booking skill would refuse with «Контекст записи
+    устарел»."""
     settings.STRICT_TENANT_SCOPE = "strict"
-    settings.BOOKING_VIA_AYLA_REST = False
+    settings.BOOKING_VIA_AYLA_REST = True
     t = Tenant.objects.create(slug="t-e2e-2", name="Salon", timezone="Europe/Moscow", city="Пенза")
     master, _service = _fixture(t)
 
@@ -151,5 +156,31 @@ def test_legacy_serviceless_callback_asks_for_service(
 
     assert called == []
     assert len(mock_send) == 1
-    assert "уточните услугу" in mock_send[0]["text"]
+    assert "«Маникюр»" in mock_send[0]["text"]
+    assert current_tenant() is None
+
+
+def test_corrupt_service_part_degrades_to_serviceless_ask(
+    settings, monkeypatch, mock_send, fake_redis
+) -> None:
+    """A trailing colon («T:M:») must not discard two valid ids: the handler
+    degrades to the serviceless handoff (master-aware ask-the-service reply)
+    instead of the generic parse error."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = Tenant.objects.create(slug="t-e2e-3", name="Salon", timezone="Europe/Moscow", city="Пенза")
+    master, _service = _fixture(t)
+
+    called: list = []
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
+
+    payload = _callback_payload(
+        payload=f"cb:discover:book:{t.id}:{master.id}:", user_id=602, chat_id=702
+    )
+    GlobalMaxHandler()(_raw_entry(payload))
+
+    assert called == []
+    assert len(mock_send) == 1
+    assert "Анна" in mock_send[0]["text"]
+    assert "Не удалось открыть запись" not in mock_send[0]["text"]
     assert current_tenant() is None

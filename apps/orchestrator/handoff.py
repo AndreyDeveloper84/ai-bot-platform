@@ -45,13 +45,20 @@ _UNAVAILABLE_REPLY = (
 # The tap carried no bookable service (pre-DRF-962 keyboard, an ambiguous
 # query like bare «массаж», or a service that went inactive between render and
 # tap). Booking cannot start without one — asking is honest and keeps the user
-# in the discovery loop, where a service-specific query renders cards that DO
-# carry the service. Never dispatch a serviceless pick_master: the booking
-# skill will only answer it with the stale-context text.
-_ASK_SERVICE_REPLY = (
-    "Чтобы записаться к мастеру {name}, уточните услугу — напишите, например: «{example} у {name}»."
+# in the discovery loop. The reply lists THIS master's real services (they are
+# one tenant-scoped queryset away), so following the bot's own suggestion
+# produces an exact-name query that discovery resolves unambiguously — a
+# hardcoded example would send the user chasing a service the master may not
+# even offer. Never dispatch a serviceless pick_master: the booking skill will
+# only answer it with the stale-context text.
+_ASK_SERVICE_REPLY_WITH_MENU = (
+    "Чтобы записаться к мастеру {name}, напишите желаемую услугу. У мастера можно "
+    "выбрать, например: {services}."
 )
-_ASK_SERVICE_EXAMPLE = "спортивный массаж"
+_ASK_SERVICE_REPLY_BARE = (
+    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует."
+)
+_ASK_SERVICE_MENU_LIMIT = 3
 
 
 def handoff_to_booking(
@@ -138,22 +145,27 @@ def handoff_to_booking(
 
         # ── Service context (DRF-962). Verify the tapped service inside the
         # ── same scope: it must exist in T, be active, and actually be offered
-        # ── by THIS master (MasterService edge) — a forged/stale callback must
-        # ── not smuggle a foreign service into the booking flow. Then resolve
-        # ── the native id the booking entrypoint expects, mirroring the
-        # ── master's flag handling above. Any miss → honest ask-the-service
-        # ── reply; NEVER a serviceless dispatch (guaranteed stale-context
-        # ── dead-end on the booking side).
+        # ── by THIS master (MasterService edge — the same all_tenants +
+        # ── explicit-ids shape the booking-side guards use) — a forged/stale
+        # ── callback must not smuggle a foreign service into the booking
+        # ── flow. Native grounding is Ayla-REST-only: ``ayla_service_id`` is
+        # ── the one proven native family; the legacy mirror ``external_id``
+        # ── is the mysite pk, NOT a verified YClients service id (the model
+        # ── docstring and the booking skill disagree about it), so the
+        # ── YClients-flag path never dispatches a service and falls back to
+        # ── asking. Any miss → honest ask-the-service reply; NEVER a
+        # ── serviceless dispatch (guaranteed stale-context dead-end on the
+        # ── booking side).
         native_service_id: str | None = None
-        if service_id is not None:
+        if service_id is not None and flag_on:
             service = CatalogService.objects.filter(id=service_id, is_active=True).first()
             edge_exists = service is not None and (
-                MasterService.objects.filter(master=master, service=service).exists()
+                MasterService.all_tenants.filter(
+                    tenant=tenant, master_id=master.id, service_id=service.id
+                ).exists()
             )
-            if service is not None and edge_exists:
-                native_raw = service.ayla_service_id if flag_on else service.external_id
-                if native_raw is not None:
-                    native_service_id = str(native_raw)
+            if service is not None and edge_exists and service.ayla_service_id is not None:
+                native_service_id = str(service.ayla_service_id)
         if native_service_id is None:
             logger.info(
                 "marketplace.handoff.service_unresolved tenant=%s master=%s service=%s trace=%s",
@@ -162,9 +174,31 @@ def handoff_to_booking(
                 service_id,
                 trace_id,
             )
-            return DiscoveryReply(
-                text=_ASK_SERVICE_REPLY.format(name=master_name, example=_ASK_SERVICE_EXAMPLE)
+            # Funnel visibility (review): without an event, a cohort whose
+            # every tap fails to resolve is indistinguishable from zero
+            # traffic on the handoff.entered dashboard.
+            emit(
+                "marketplace.handoff.service_unresolved",
+                payload={
+                    "tenant_id": str(tenant_id),
+                    "master_id": str(master_id),
+                    "service_id": str(service_id),
+                    "booking_via_ayla_rest": flag_on,
+                },
             )
+            menu = list(
+                CatalogService.objects.filter(masters_offering__master=master, is_active=True)
+                .order_by("name")
+                .values_list("name", flat=True)[:_ASK_SERVICE_MENU_LIMIT]
+            )
+            if menu:
+                text = _ASK_SERVICE_REPLY_WITH_MENU.format(
+                    name=master_name,
+                    services=", ".join(f"«{name}»" for name in menu),
+                )
+            else:
+                text = _ASK_SERVICE_REPLY_BARE.format(name=master_name)
+            return DiscoveryReply(text=text)
 
         conversation = resolve_active_conversation(per_tenant_bot_user)
         if conversation is None:

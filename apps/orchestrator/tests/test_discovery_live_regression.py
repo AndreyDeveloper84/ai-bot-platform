@@ -21,6 +21,7 @@ The salon fixture is synthetic — no hardcoded formula-tela, no real master.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -98,6 +99,10 @@ def penza_massage_salon() -> CatalogMaster:
             slug=slug,
             name=name,
             is_active=True,
+            # The Ayla canonical id: the production shape (services are
+            # Ayla-synced) and the deliverability key the DRF-962 service
+            # resolution requires before stamping a service on the card.
+            ayla_service_id=uuid4(),
             external_updated_at=_ts(),
         )
         MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
@@ -125,13 +130,16 @@ def _run_turn(monkeypatch, *, tool_args: dict) -> discovery.DiscoveryReply:
     ids=["full-service-name", "adjective-only"],
 )
 def test_live_turn_returns_a_master_not_the_fallback(
-    monkeypatch, penza_massage_salon: CatalogMaster, specialization: str
+    settings, monkeypatch, penza_massage_salon: CatalogMaster, specialization: str
 ) -> None:
     """The regression itself: this turn must not produce the zero-result line.
 
     Parametrized over both argument shapes the tool call can plausibly carry,
     since the model's normalization of «хочу спортивный» is not contractual.
+    Flag ON = the pilot path; it is also the deliverability precondition for
+    the service to be stamped on the card (DRF-962).
     """
+    settings.BOOKING_VIA_AYLA_REST = True
     reply = _run_turn(
         monkeypatch,
         tool_args={"city": "Пенза", "specialization": specialization},
