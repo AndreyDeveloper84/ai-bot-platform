@@ -157,7 +157,7 @@ class TestHandoffIsGatedOnExplicitIntent:
     def test_inferred_intent_suppresses_the_handoff(self):
         booking = self._booking_that_handoffs()
         with patch("apps.skills.registry.registered", return_value=[booking]):
-            result = MenuSkill().handle(_ctx("Устала спина"))
+            result = MenuSkill().handle(_ctx("Хочу массаж"))
 
         assert result.should_handoff is False
         assert result.reply_text == FALLBACK_TEXT
@@ -187,7 +187,7 @@ class TestHandoffIsGatedOnExplicitIntent:
             handoff_reason="legally_sensitive",
         )
         with patch("apps.skills.registry.registered", return_value=[booking]):
-            result = MenuSkill().handle(_ctx("Устала спина"))
+            result = MenuSkill().handle(_ctx("Хочу массаж"))
 
         assert result.should_handoff is True
         assert result.handoff_reason == "legally_sensitive"

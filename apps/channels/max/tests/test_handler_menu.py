@@ -194,10 +194,12 @@ class TestWidenedBookingCoverage:
     def test_pain_complaint_still_goes_to_health_screening(
         self, tenant, sent, fake_redis, settings, mark_welcomed, booking_spy
     ):
-        """«спина» is a service word for a massage salon, so the widened
-        matcher COULD pull a health complaint into a booking flow. It
-        doesn't: health_screening registers far earlier and claims the
-        turn first. Pinned because the two vocabularies overlap by design.
+        """A health complaint must never become a booking flow.
+
+        Two independent guards, both pinned here because either one alone
+        would be fragile: health_screening registers far earlier and claims
+        the turn, AND bare body parts are deliberately not service words
+        (see `test_bare_body_parts_are_not_service_words`).
         """
         settings.STRICT_TENANT_SCOPE = "strict"
         with tenant_scope(tenant), trace_id_scope(str(uuid4())):

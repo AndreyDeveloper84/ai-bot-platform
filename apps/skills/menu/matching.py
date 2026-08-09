@@ -124,6 +124,14 @@ _SERVICE_STEMS: tuple[str, ...] = (
 )
 
 # Short or prefix-ambiguous service words — matched as WHOLE words only.
+#
+# BODY PARTS ARE NOT SERVICE WORDS. «спина» / «лицо» were here briefly and
+# came out again: they add no coverage — «массаж спины» already matches via
+# «массаж», «чистка лица» via «чистк» — while turning complaints into
+# booking flows. «Устала спина» and «Лицо устало после работы» are asking
+# for sympathy or advice, not for a slot, and answering them with a master
+# picker reads as a bot that doesn't listen. A bare body part now gets the
+# honest fallback, which at least offers the booking button.
 _SERVICE_WORDS: frozenset[str] = frozenset(
     {
         "спа",
@@ -131,10 +139,6 @@ _SERVICE_WORDS: frozenset[str] = frozenset(
         "бровь",
         "брови",
         "бровей",
-        "лицо",
-        "лица",
-        "спина",
-        "спины",
         "стоун",
         "стоунтерапия",
     }

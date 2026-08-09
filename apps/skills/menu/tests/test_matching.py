@@ -105,7 +105,17 @@ class TestBookingRequests:
 
     def test_short_service_words_match_as_whole_words(self):
         assert mentions_service("хочу спа") is True
+        assert mentions_service("хочу брови") is True
+
+    @pytest.mark.parametrize("text", ["Устала спина", "Лицо устало после работы", "болит спина"])
+    def test_bare_body_parts_are_not_service_words(self, text):
+        """A complaint about a body part is not a request for a slot;
+        «массаж спины» still matches through «массаж»."""
+        assert mentions_service(text) is False
+
+    def test_body_part_with_a_service_still_matches(self):
         assert mentions_service("массаж спины") is True
+        assert mentions_service("чистка лица") is True
 
     def test_word_start_anchored_not_arbitrary_substring(self):
         # «промассажировали» contains "массаж" mid-word — a naive substring
