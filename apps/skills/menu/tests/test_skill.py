@@ -19,11 +19,18 @@ from apps.skills.menu.matching import (
     CALLBACK_MENU_MY_BOOKINGS,
     CALLBACK_MENU_RESCHEDULE,
     MENU_CALLBACK_TEXT,
-    main_menu_buttons,
     tenant_service_stems,
 )
 from apps.skills.menu.replies import FALLBACK_TEXT, HELP_TEXT
 from apps.skills.menu.skill import MenuSkill
+
+_EXPECTED_MENU_CALLBACKS = [
+    "cb:menu:book",
+    "cb:menu:my_bookings",
+    "cb:menu:reschedule",
+    "cb:menu:cancel",
+    "cb:menu:help",
+]
 
 
 def _booking_stub(result: SkillResult | None = None) -> MagicMock:
@@ -76,9 +83,13 @@ class TestHonestFallback:
         assert result.meta["reply_kind"] == "menu_fallback"
 
     def test_fallback_carries_the_menu_keyboard(self):
+        # Assert the actual callback slugs, not `== main_menu_buttons()`:
+        # the builder literally calls that function, so comparing the two
+        # only proves the wiring exists, never that it ships the right
+        # buttons.
         result = MenuSkill().handle(_ctx("что-то непонятное"))
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
-        assert buttons == main_menu_buttons()
+        assert [b["callback"] for b in buttons] == _EXPECTED_MENU_CALLBACKS
 
     def test_stale_callback_payload_is_never_echoed(self):
         """A raw ``cb:`` payload leaking to the customer was the ugliest
@@ -93,7 +104,8 @@ class TestHelp:
         result = MenuSkill().handle(_ctx("что ты умеешь?"))
         assert result.reply_text == HELP_TEXT
         assert result.meta["reply_kind"] == "menu_help"
-        assert result.action_data["attachments"][0]["payload"]["buttons"] == main_menu_buttons()
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert [b["callback"] for b in buttons] == _EXPECTED_MENU_CALLBACKS
 
     def test_help_button_answers_locally_without_touching_booking(self):
         booking = _booking_stub()

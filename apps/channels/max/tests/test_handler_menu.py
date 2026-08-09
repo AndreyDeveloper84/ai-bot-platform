@@ -20,7 +20,7 @@ would need an LLM provider plus a YClients/Ayla backend.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -166,6 +166,18 @@ class TestWidenedBookingCoverage:
 
         assert booking_spy == [text], "booking skill did not claim the turn"
         assert sent[0]["text"] == _BOOKING_SENTINEL
+        # …and prove MenuSkill is why: booking's OWN matcher declines this
+        # phrase. Without this the test would stay green if booking ever
+        # widened its keywords, silently losing MenuSkill coverage.
+        from apps.skills.base import SkillContext
+        from apps.skills.booking.skill import BookingSkill
+
+        probe = SkillContext(
+            conversation=MagicMock(skill_state={}),
+            bot_user=MagicMock(),
+            message_text=text,
+        )
+        assert BookingSkill().matches(probe) is False
 
     def test_small_talk_still_does_not_reach_booking(
         self, tenant, sent, fake_redis, settings, mark_welcomed, booking_spy
@@ -193,8 +205,45 @@ class TestWidenedBookingCoverage:
             max_handler.handle_max_event(_payload(text="у меня болит спина"))
 
         assert booking_spy == []
+        # Deliberately NOT asserting the screening copy itself — that text
+        # belongs to another skill and rewording it must not fail DRF-963.
         assert sent[0]["text"] != FALLBACK_TEXT
-        assert "болит" in sent[0]["text"]  # the screening question
+
+
+class TestRollbackFlagEndToEnd:
+    """DRF-963, ось `tests` finding F3.
+
+    ``PILOT_CONVERSATIONAL_UX=false`` is the ONLY way to undo this change
+    without a deploy, so the contract — «OFF restores the pre-DRF-963
+    behaviour» — is worth a real trip through the handler rather than a
+    ``matches()`` unit assertion.
+    """
+
+    def test_off_hands_text_back_to_echo(
+        self, tenant, sent, events, fake_redis, settings, mark_welcomed
+    ):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        settings.PILOT_CONVERSATIONAL_UX = False
+        with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            mark_welcomed(user_id=31001, chat_id=41001)
+            max_handler.handle_max_event(_payload(text="ыаывпаып"))
+
+        assert sent[0]["text"] == "ыаывпаып"  # verbatim echo, as before
+        assert sent[0]["attachments"] is None
+        outbound = [p for name, p in events if name == "channels.max.outbound.sent"]
+        assert outbound and outbound[0]["reply_kind"] == "echo"
+
+    def test_off_returns_help_questions_to_faq(
+        self, tenant, sent, fake_redis, settings, mark_welcomed
+    ):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        settings.PILOT_CONVERSATIONAL_UX = False
+        with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            mark_welcomed(user_id=31001, chat_id=41001)
+            max_handler.handle_max_event(_payload(text="помощь"))
+
+        # Whatever FAQ answers with, it is NOT the DRF-963 help surface.
+        assert sent[0]["text"] != HELP_TEXT
 
 
 class TestMenuTaps:

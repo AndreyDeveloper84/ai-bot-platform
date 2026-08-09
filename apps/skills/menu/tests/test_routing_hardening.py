@@ -205,7 +205,10 @@ class TestCatalogReadIsFailSoftForReal:
     """Finding #2 — the guard covered building the queryset, not running it."""
 
     @pytest.mark.django_db
-    def test_execution_failure_degrades_instead_of_propagating(self):
+    def test_construction_failure_degrades_instead_of_propagating(self):
+        """Failure while BUILDING the queryset. The lazy-iteration path —
+        the one the original guard actually missed — is the sibling test
+        below, which patches ``QuerySet.__iter__``."""
         from django.db import OperationalError
 
         from apps.catalog.models import CatalogService
@@ -213,7 +216,6 @@ class TestCatalogReadIsFailSoftForReal:
         from apps.tenancy.models import Tenant
 
         tenant = Tenant.objects.create(slug="menu-lazy", name="Menu Lazy")
-        # A sliced values_list is lazy: iterating it is what runs the SQL.
         with (
             patch.object(
                 CatalogService.objects.__class__,

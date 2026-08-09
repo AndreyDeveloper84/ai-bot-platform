@@ -13,7 +13,7 @@ import pytest
 
 from apps.skills.base import SkillContext
 from apps.skills.menu.help_skill import HelpSkill
-from apps.skills.menu.matching import CALLBACK_MENU_HELP, main_menu_buttons
+from apps.skills.menu.matching import CALLBACK_MENU_HELP
 from apps.skills.menu.replies import HELP_TEXT
 
 
@@ -78,7 +78,16 @@ class TestHandle:
         assert result.reply_text == HELP_TEXT
         assert result.action_type == "menu_help"
         assert result.meta["reply_kind"] == "menu_help"
-        assert result.action_data["attachments"][0]["payload"]["buttons"] == main_menu_buttons()
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        # Concrete slugs — comparing against main_menu_buttons() would only
+        # assert that the builder calls the builder.
+        assert [b["callback"] for b in buttons] == [
+            "cb:menu:book",
+            "cb:menu:my_bookings",
+            "cb:menu:reschedule",
+            "cb:menu:cancel",
+            "cb:menu:help",
+        ]
 
     def test_names_the_handoff_escape_hatch(self):
         """The operator doc tells staff customers can type «оператор»;
