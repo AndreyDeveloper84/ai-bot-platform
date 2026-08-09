@@ -153,8 +153,10 @@ class Command(BaseCommand):
             slug=TENANT_SLUG,
             defaults={"name": TENANT_NAME, "timezone": "Europe/Moscow"},
         )
-        if not created and not force:
-            self._refuse_if_mirrored(tenant)
+        if not force:
+            self._refuse_outside_dev()
+            if not created:
+                self._refuse_if_mirrored(tenant)
         self.stdout.write(
             self.style.SUCCESS(f"{'created' if created else 'reused'} Tenant({tenant.slug})")
         )
@@ -247,6 +249,27 @@ class Command(BaseCommand):
             )
 
         self.stdout.write(self.style.SUCCESS("seed complete"))
+
+    @staticmethod
+    def _refuse_outside_dev() -> None:
+        """Abort when this does not look like a dev environment (DRF-967).
+
+        ``TENANT_SLUG`` here is the *live pilot's* slug, and the fixture creates
+        ``is_active`` + ``ACCEPTED`` masters — i.e. nationwide-discoverable
+        cards with no ``ayla_service_id``, whose tap lands in booking without a
+        service. The data-shaped guard below is the stronger check when the
+        mirror already exists, but it cannot fire on a tenant whose catalog was
+        built by hand or whose services predate the S3B re-key. An environment
+        check has no such blind spot, so both run.
+        """
+        from django.conf import settings
+
+        if not settings.DEBUG:
+            raise CommandError(
+                "DEBUG is False — this is dev fixture data and its tenant slug "
+                f"({TENANT_SLUG!r}) is also the live pilot's. Pass --force if you "
+                "really mean to seed here."
+            )
 
     @staticmethod
     def _refuse_if_mirrored(tenant: Tenant) -> None:

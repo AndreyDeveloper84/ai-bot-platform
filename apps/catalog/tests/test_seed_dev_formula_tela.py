@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone as dt_timezone
 from io import StringIO
+from types import SimpleNamespace
 
 import pytest
 from django.core.management import call_command
@@ -12,6 +13,12 @@ from django.core.management.base import CommandError
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.tenancy.models import Tenant
+
+
+@pytest.fixture(autouse=True)
+def _dev_environment(settings):
+    """The command refuses to run outside DEBUG; these tests exercise the dev path."""
+    settings.DEBUG = True
 
 
 def _run(**kwargs) -> str:
@@ -84,6 +91,56 @@ def test_rerun_adopts_legacy_unstamped_rows() -> None:
     assert not MasterService.all_tenants.filter(
         tenant=tenant, ayla_specialist_service_id__isnull=True
     ).exists()
+
+
+@pytest.mark.django_db
+def test_refuses_to_run_outside_debug(settings) -> None:
+    settings.DEBUG = False
+
+    with pytest.raises(CommandError, match="DEBUG is False"):
+        _run()
+
+    assert not Tenant.objects.filter(slug="formula-tela").exists()
+
+
+@pytest.mark.django_db
+def test_seeded_edges_are_reconciled_by_a_real_sync_beat() -> None:
+    """The whole justification for stamping: sync OWNS these rows afterwards.
+
+    Writing a synthetic id into a field documented as Ayla's canonical id is
+    only defensible if it really hands the row to sync — so drive the actual
+    upserter, not a description of it. One seeded pair is published upstream and
+    must end up carrying Ayla's real edge id; the rest are absent upstream and
+    must be reconciled away.
+    """
+    from apps.catalog.services.upserter import upsert_master_services
+
+    _run()
+    tenant = Tenant.objects.get(slug="formula-tela")
+    survivor = MasterService.all_tenants.filter(tenant=tenant).first()
+    # The upserter resolves an edge's service by ayla_service_id, so the
+    # published pair needs a grounded service — exactly as on a synced tenant.
+    real_service_id = uuid.uuid4()
+    CatalogService.all_tenants.filter(id=survivor.service_id).update(
+        ayla_service_id=real_service_id
+    )
+    real_edge_id = uuid.uuid4()
+
+    dto = SimpleNamespace(
+        ayla_specialist_service_id=str(real_edge_id),
+        specialist=str(survivor.master_id),
+        salon_service=str(real_service_id),
+        tenant=str(tenant.id),
+        is_active=True,
+    )
+
+    result = upsert_master_services(tenant, [dto])
+
+    survivor.refresh_from_db()
+    assert survivor.ayla_specialist_service_id == real_edge_id
+    # Every other seeded edge was absent from the snapshot → reconciled away.
+    assert MasterService.all_tenants.filter(tenant=tenant).count() == 1
+    assert result.removed >= 1
 
 
 @pytest.mark.django_db

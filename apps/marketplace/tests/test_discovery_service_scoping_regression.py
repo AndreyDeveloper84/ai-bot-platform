@@ -12,10 +12,15 @@ came back without a resolvable service, and booking never started.
 That specific incident was **data**, not code — Ayla's own snapshot published
 the full grid, so the local mirror faithfully reflected it. These tests pin the
 other half of the contract: given correct edges, the discovery filter really
-does discriminate. Without them a future regression in ``_bookable_qs`` would
-reproduce the same user-visible symptom from a healthy mirror, and nothing
-would catch it — the existing negative tests each hold a single master, so they
-pass even when the filter returns "everyone".
+does discriminate.
+
+Scope, honestly: ``test_discovery_by_service`` already covers the core of this
+— ``test_broad_query_matches_every_massage`` holds three masters and demands a
+two-master subset, so a filter that degenerated to "everyone" would fail there
+too. What lives here is the named DoD regression for DRF-967 plus the cases
+that suite does not make: the count assertion against the tenant's full master
+roster, an unlinked master standing beside a linked peer in the same tenant,
+and scoping proven together with the DRF-962 service stamp.
 
 ``apps/marketplace/discovery.py`` itself is deliberately untouched here.
 """
@@ -89,23 +94,6 @@ def _link(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> Mas
 
 
 class TestQueriedServiceScopesTheResult:
-    def test_only_the_master_who_performs_it_comes_back(self, penza: Tenant) -> None:
-        """Three masters, three disjoint services, one queried → one card."""
-        masseur = _master(penza, "Массажист")
-        manicurist = _master(penza, "Ногтевой мастер")
-        cosmetologist = _master(penza, "Косметолог")
-        _link(penza, masseur, _service(penza, "Классический массаж", slug="classic-massage"))
-        _link(penza, manicurist, _service(penza, "Маникюр", slug="manicure"))
-        _link(
-            penza,
-            cosmetologist,
-            _service(penza, "RF-лифтинг — Лицо/шея/декольте", slug="rf-lifting"),
-        )
-
-        cards = discover_masters(city="Пенза", specialization="классический массаж")
-
-        assert [c.name for c in cards] == ["Массажист"]
-
     def test_result_is_a_strict_subset_when_several_masters_share_a_service(
         self, penza: Tenant
     ) -> None:

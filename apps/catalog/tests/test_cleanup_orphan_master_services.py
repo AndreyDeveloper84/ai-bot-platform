@@ -144,16 +144,20 @@ def test_existing_dump_file_is_not_clobbered(tenant: Tenant, tmp_path) -> None:
 
 
 @pytest.mark.django_db
-def test_operator_authored_rows_are_flagged(tenant: Tenant, django_user_model) -> None:
-    """created_by proves a human ticked the cell — the report must say so."""
-    user = django_user_model.objects.create(username="operator")
+def test_provenance_caveat_is_unconditional(tenant: Tenant) -> None:
+    """No writer populates created_by, so the caveat must never be conditioned on it.
+
+    A warning that only fires when created_by is set would never fire at all,
+    and its silence would read as "no human MM4 edits among these rows" —
+    exactly the false confidence that gets a destructive run approved.
+    """
     master = _master(tenant, external_id=1, name="Анна")
-    edge = _edge(tenant, master, _service(tenant, external_id=1, name="LPG"))
-    MasterService.all_tenants.filter(id=edge.id).update(created_by=user)
+    _edge(tenant, master, _service(tenant, external_id=1, name="LPG"))
 
     output = _run(tenant_slug=tenant.slug)
 
-    assert "carry created_by" in output
+    assert "does NOT distinguish a human MM4 matrix edit" in output
+    assert "AuditLog MASTER_SERVICES_CHANGED" in output
 
 
 @pytest.mark.django_db
