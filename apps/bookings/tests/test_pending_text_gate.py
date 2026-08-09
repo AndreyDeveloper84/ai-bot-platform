@@ -17,6 +17,8 @@ These tests lock the boundary:
 
 from __future__ import annotations
 
+import contextlib
+
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -95,6 +97,33 @@ def _ctx(conversation: Conversation, bot_user: BotUser, text: str) -> SkillConte
         message_text=text,
         trace_id="t-gate-text",
     )
+
+
+@contextlib.contextmanager
+def _booking_handle_spy():
+    """Record every entry into ``BookingSkill.handle`` for the block.
+
+    DRF-963 review, ось `tests` (F1): «the reply was the menu fallback» is
+    NOT evidence that booking stayed out of a turn. The menu skill emits
+    the identical fallback when it DOES route into booking and booking
+    escalates — and in this test environment booking always escalates,
+    because ``YCLIENTS_PARTNER_TOKEN`` is empty, so every entry collapses
+    to the same text. Asserting on the entry itself is the only proxy that
+    survives a matcher regression (proven by mutation: widening the
+    service vocabulary to swallow «спасибо» / «Подтверждаю» / «Первую»
+    left the text-only assertions green).
+    """
+    from apps.skills.booking.skill import BookingSkill
+
+    entered: list[str] = []
+    original = BookingSkill.handle
+
+    def _spy(self, context):
+        entered.append(context.message_text)
+        return original(self, context)
+
+    with patch.object(BookingSkill, "handle", _spy):
+        yield entered
 
 
 def _make_booking(tenant: Tenant, bot_user: BotUser, *, yc_id: int = 555) -> BookingRequest:
@@ -472,13 +501,22 @@ class TestGateTextDispatch:
         assert result.reply_text != "Подтверждаю"
         assert client.cancel_calls == [555]
 
-    def test_confirm_without_pending_falls_through_to_echo(
+    def test_confirm_without_pending_is_not_claimed_by_the_gate(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
     ) -> None:
-        with tenant_scope(tenant):
+        """Confirmation vocabulary with no pending row must not mutate.
+
+        The observable proxy used to be a verbatim echo; DRF-963 replaced
+        the last-resort reply with the honest menu fallback. The invariant
+        — the gate does not claim the turn, zero mutation — is unchanged.
+        """
+        from apps.skills.menu.replies import FALLBACK_TEXT
+
+        with tenant_scope(tenant), _booking_handle_spy() as entered:
             result = dispatch(_ctx(conversation, bot_user, "Подтверждаю"))
+        assert entered == []
         assert result is not None
-        assert result.reply_text == "Подтверждаю"  # echo, zero mutation
+        assert result.reply_text == FALLBACK_TEXT  # not the gate, not echo
         assert PendingBookingAction.all_tenants.count() == 0
 
     def test_stale_consumed_pending_does_not_hijack_yes(
@@ -490,10 +528,15 @@ class TestGateTextDispatch:
         PendingBookingAction.all_tenants.filter(pk=row.pk).update(
             consumed_at=timezone.now() - timedelta(minutes=5),
         )
-        with tenant_scope(tenant):
+        from apps.skills.menu.replies import FALLBACK_TEXT
+
+        with tenant_scope(tenant), _booking_handle_spy() as entered:
             result = dispatch(_ctx(conversation, bot_user, "да"))
+        assert entered == []
         assert result is not None
-        assert result.reply_text == "да"  # echo — the gate no longer claims
+        # The gate no longer claims it; the last-resort reply is the
+        # honest menu fallback since DRF-963 (was a verbatim echo).
+        assert result.reply_text == FALLBACK_TEXT
 
     def test_callback_tap_routes_to_gate_not_echo(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation

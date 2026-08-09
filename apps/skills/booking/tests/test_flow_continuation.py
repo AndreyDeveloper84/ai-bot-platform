@@ -25,6 +25,8 @@ boundaries.
 
 from __future__ import annotations
 
+import contextlib
+
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -227,6 +229,33 @@ def _future_iso(hours: int = 72) -> str:
 
 def _slot_for(iso_dt: str) -> AvailableTime:
     return AvailableTime(time=iso_dt.split("T", 1)[1][:5], datetime=iso_dt, seance_length_s=3600)
+
+
+@contextlib.contextmanager
+def _booking_handle_spy():
+    """Record every entry into ``BookingSkill.handle`` for the block.
+
+    DRF-963 review, ось `tests` (F1): «the reply was the menu fallback» is
+    NOT evidence that booking stayed out of a turn. The menu skill emits
+    the identical fallback when it DOES route into booking and booking
+    escalates — and in this test environment booking always escalates,
+    because ``YCLIENTS_PARTNER_TOKEN`` is empty, so every entry collapses
+    to the same text. Asserting on the entry itself is the only proxy that
+    survives a matcher regression (proven by mutation: widening the
+    service vocabulary to swallow «спасибо» / «Подтверждаю» / «Первую»
+    left the text-only assertions green).
+    """
+    from apps.skills.booking.skill import BookingSkill
+
+    entered: list[str] = []
+    original = BookingSkill.handle
+
+    def _spy(self, context):
+        entered.append(context.message_text)
+        return original(self, context)
+
+    with patch.object(BookingSkill, "handle", _spy):
+        yield entered
 
 
 def _flow_state(conversation: Conversation) -> dict[str, Any] | None:
@@ -752,16 +781,29 @@ class TestSequenceD:
 
 
 class TestNegatives:
-    def test_selection_without_flow_state_goes_to_echo(
+    def test_selection_without_flow_state_is_not_claimed_by_booking(
         self,
         tenant: Tenant,
         bot_user: BotUser,
         conversation: Conversation,
     ) -> None:
-        with tenant_scope(tenant):
+        """A selection-shaped turn with no live flow must NOT enter booking.
+
+        The observable proxy used to be a verbatim echo; DRF-963 replaced
+        the last-resort reply with the honest menu fallback. That reply
+        alone is NOT sufficient evidence any more: the menu skill produces
+        the identical text when it DOES route into booking and booking
+        fails with ``should_handoff`` (and in this test env booking always
+        fails — ``YCLIENTS_PARTNER_TOKEN`` is empty). So assert on the
+        thing that actually matters: booking's ``handle`` is never entered.
+        """
+        from apps.skills.menu.replies import FALLBACK_TEXT
+
+        with tenant_scope(tenant), _booking_handle_spy() as entered:
             result = dispatch(_ctx(conversation, bot_user, "Первую"))
+        assert entered == []
         assert result is not None
-        assert result.reply_text == "Первую"  # echo
+        assert result.reply_text == FALLBACK_TEXT  # not booking, not echo
         assert _pending_rows() == []
 
     def test_foreign_record_id_rejected_no_pending(
@@ -982,21 +1024,32 @@ class TestRoutingBoundaries:
         assert result.meta.get("skill") == "faq"
         assert _flow_state(conversation) is None
 
-    def test_offtopic_turn_with_fresh_flow_goes_to_echo(
+    def test_offtopic_turn_with_fresh_flow_is_not_claimed_by_booking(
         self,
         tenant: Tenant,
         bot_user: BotUser,
         conversation: Conversation,
     ) -> None:
-        """Review D-10 #2 — an off-topic turn while the flow is fresh
-        keeps its previous routing (echo, zero LLM calls) and the flow
-        state survives for the next selection-shaped turn."""
-        with tenant_scope(tenant):
+        """Review D-10 #2 — an off-topic turn while the flow is fresh must
+        not be pulled into booking (zero LLM calls) and the flow state
+        survives for the next selection-shaped turn.
+
+        DRF-963 changed only the last-resort REPLY (echo → honest menu
+        fallback); «спасибо» must still cost zero LLM calls, which also
+        pins that the widened U-1 matcher doesn't over-claim gratitude.
+        The ``handle`` spy is the load-bearing assertion — booking bails
+        out before its LLM call when the provider is unconfigured, so a
+        zero call count alone would not notice an over-claiming matcher.
+        """
+        from apps.skills.menu.replies import FALLBACK_TEXT
+
+        with tenant_scope(tenant), _booking_handle_spy() as entered:
             _write_flow_state(conversation, flow="reschedule", bookings=[])
             with patch.object(OpenAIProvider, "complete") as llm:
                 result = dispatch(_ctx(conversation, bot_user, "спасибо"))
+        assert entered == []
         assert result is not None
-        assert result.reply_text == "спасибо"  # echo
+        assert result.reply_text == FALLBACK_TEXT  # not booking, not echo
         assert llm.call_count == 0
         assert _flow_state(conversation) is not None
 

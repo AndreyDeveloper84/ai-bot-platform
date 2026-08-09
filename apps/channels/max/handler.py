@@ -356,6 +356,45 @@ def _dispatch_skill_handoff(
     )
 
 
+def _reply_kind(event: CanonicalEvent, skill_result: Any, reply_text: str) -> str:
+    """Label for the ``channels.max.outbound.sent`` analytics event.
+
+    Prefers the responding skill's own ``meta["reply_kind"]`` — every skill
+    that cares already sets one (``welcome``, ``menu_fallback``,
+    ``menu_help``, ``welcome_ask_prompt``, …). The Sprint-2 positional
+    guess below it labelled EVERY non-empty text turn ``"echo"``, which
+    since DRF-963 is simply wrong: the honest fallback, a booking reply and
+    a real echo all reported the same kind, so «how often does the bot
+    still miss?» — the pilot's headline conversational metric — was not
+    answerable from the bus.
+
+    **This widens the vocabulary for every surface, not just menu.** Most
+    skills already set ``meta["reply_kind"]`` — food_scanner, water,
+    nutrition_anketa, health_screening, cross_domain, food_clarify,
+    food_correction and the welcome family all do — so a photo turn that
+    used to report ``"no_echo"`` now reports ``"food_scanner_card"``, and a
+    ``cb:welcome:consent_yes`` tap that used to report ``"echo"`` now
+    reports ``"welcome_s5_first_action"``. That is the intent (the old
+    labels were positional guesses, not facts), but a dashboard counting
+    the ``echo`` / ``no_echo`` share will show a step change at deploy.
+
+    The positional branch below is now reached only when the responding
+    skill sets no meta at all, or on the registry-empty fallback path.
+    """
+    skill_kind = (
+        (getattr(skill_result, "meta", None) or {}).get("reply_kind") if skill_result else ""
+    )
+    if skill_kind:
+        return str(skill_kind)
+    if reply_text == _WELCOME_TEXT:
+        return "welcome"
+    if event.text.strip():
+        return "echo"
+    if event.attachments:
+        return "no_echo"
+    return "empty_prompt"
+
+
 def _echo_text(event: CanonicalEvent) -> str:
     """Decide the assistant reply text for a Sprint 2 echo turn."""
 
@@ -995,15 +1034,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         payload={
             "conversation_id": str(conversation.id),
             "chat_id": event.chat_id,
-            "reply_kind": (
-                "welcome"
-                if reply_text == _WELCOME_TEXT
-                else "echo"
-                if event.text.strip()
-                else "no_echo"
-                if event.attachments
-                else "empty_prompt"
-            ),
+            "reply_kind": _reply_kind(event, skill_result, reply_text),
             "has_keyboard": bool(attachments),
         },
     )

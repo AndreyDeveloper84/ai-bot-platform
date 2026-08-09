@@ -59,62 +59,65 @@ class TestHandleStart:
         assert result.action_type == "welcome_menu"
         assert result.meta["reply_kind"] == "welcome"
 
-    def test_zero_config_ships_wellness_and_faq_only(self, settings):
-        """When neither MAX_BOT_WEB_APP nor MAX_MINIAPP_URL is set, the
-        salon buttons drop out but the wellness + FAQ row remains."""
+    def test_zero_config_still_ships_the_booking_entry(self, settings):
+        """DRF-963: «Записаться» / «Мои записи» are bot-native, so a
+        deployment with no Mini App config is no longer left without any
+        booking entry point. Only «Профиль» (Mini-App-only) drops out."""
 
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # No salon buttons; 4 wellness/FAQ + 1 S1 «Начать» = 5.
-        assert len(buttons) == 5
+        # 2 bot-native salon + 5 wellness/FAQ/help + 1 S1 «Начать» = 8.
+        assert len(buttons) == 8
         callbacks = [b["callback"] for b in buttons]
         assert callbacks == [
+            "cb:menu:book",
+            "cb:menu:my_bookings",
             "cb:welcome:food",
             "cb:welcome:water",
             "cb:anketa:start",
             "cb:welcome:ask",
+            "cb:menu:help",
             "cb:welcome:start_s2",
         ]
+        # Everything is a bot callback — nothing needs a Mini App.
+        assert all("web_app" not in b and "url" not in b for b in buttons)
 
-    def test_web_app_config_emits_open_app_buttons(self, settings):
+    def test_web_app_config_emits_open_app_profile_button(self, settings):
         settings.MAX_BOT_WEB_APP = "id583_bot"
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 3 salon nav + 4 wellness/FAQ + 1 S1 «Начать» = 8 total.
-        assert len(buttons) == 8
-        nav = buttons[:3]
-        # Flat slug payloads — MAX rejects open_app payloads with `=`
+        # 2 bot-native salon + 1 Mini App profile + 5 wellness/FAQ/help
+        # + 1 S1 «Начать» = 9 total.
+        assert len(buttons) == 9
+        # DRF-963: booking actions route into the bot, not the Mini App.
+        assert buttons[0]["callback"] == "cb:menu:book"
+        assert buttons[1]["callback"] == "cb:menu:my_bookings"
+        assert "web_app" not in buttons[0] and "web_app" not in buttons[1]
+        # Flat slug payload — MAX rejects open_app payloads with `=`
         # (HTTP 400 proto.payload). Mini App's parseStartRoute resolves
         # these by direct lookup.
-        expected_payloads = ["open_catalog", "open_visits", "open_profile"]
-        for btn, expected in zip(nav, expected_payloads):
-            assert btn["web_app"] == "id583_bot"
-            assert btn["callback"] == expected
-        # Wellness + FAQ + S1 row: never carries web_app.
+        profile = buttons[2]
+        assert profile["web_app"] == "id583_bot"
+        assert profile["callback"] == "open_profile"
+        # Wellness + FAQ + help + S1 row: never carries web_app.
         for btn in buttons[3:]:
             assert "web_app" not in btn
             assert btn["callback"].startswith("cb:")
 
-    def test_miniapp_url_fallback_emits_link_buttons(self, settings):
+    def test_miniapp_url_fallback_emits_link_profile_button(self, settings):
         """When the bot has no web_app username but a base URL is
-        configured, fall back to link buttons for the salon nav. Routes
-        are appended cleanly regardless of trailing/leading slashes."""
+        configured, fall back to a link button for the Mini App nav.
+        Routes are appended cleanly regardless of trailing/leading slashes."""
 
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 3 salon nav + 4 wellness/FAQ + 1 S1 «Начать» = 8 total.
-        assert len(buttons) == 8
-        urls = [b.get("url") for b in buttons[:3]]
-        assert urls == [
-            "https://miniapp-dev.example/catalog",
-            "https://miniapp-dev.example/visits",
-            "https://miniapp-dev.example/profile",
-        ]
+        assert len(buttons) == 9
+        assert buttons[2]["url"] == "https://miniapp-dev.example/profile"
 
     def test_web_app_takes_precedence_over_miniapp_url(self, settings):
         """If both are set, the native ``open_app`` UX wins."""
@@ -122,8 +125,19 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        assert all("web_app" in b for b in buttons[:3])
-        assert not any("url" in b for b in buttons[:3])
+        assert "web_app" in buttons[2]
+        assert "url" not in buttons[2]
+
+    def test_brief_minimum_actions_always_present(self, settings):
+        """DRF-963 brief: welcome must offer «Записаться», «Мои записи»
+        and «Помощь» regardless of Mini App configuration."""
+        for web_app, miniapp_url in (("", ""), ("id583_bot", ""), ("", "https://m.example/")):
+            settings.MAX_BOT_WEB_APP = web_app
+            settings.MAX_MINIAPP_URL = miniapp_url
+            buttons = WelcomeSkill().handle(_ctx("/start")).action_data["buttons"]
+            # Link-type buttons carry ``url`` instead of ``callback``.
+            callbacks = {b.get("callback") for b in buttons}
+            assert {"cb:menu:book", "cb:menu:my_bookings", "cb:menu:help"} <= callbacks
 
     def test_anketa_button_routes_directly_to_anketa_skill(self, settings):
         """The 📊 Анкета button payload is ``cb:anketa:start`` — that lets

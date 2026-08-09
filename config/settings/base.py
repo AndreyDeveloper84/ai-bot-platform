@@ -1105,6 +1105,18 @@ GLOBAL_BOT_ONBOARDING = os.environ.get("GLOBAL_BOT_ONBOARDING", "false").lower()
 # services are not even called. The concierge dialog itself keeps working.
 CONCIERGE_MEMORY_ENABLED = os.environ.get("CONCIERGE_MEMORY_ENABLED", "true").lower() == "true"
 
+# DRF-963 (Wave 1, variant A) — rollback switch for the pilot conversational
+# UX. Default ON (the feature ships enabled); set "false" to roll back WITHOUT
+# a deploy. OFF restores the pre-DRF-963 behaviour exactly:
+#   * MenuSkill stands down, so unrecognised text falls through to the echo
+#     skill again and the widened U-1 service matcher never runs;
+#   * HelpSkill stands down, so «что ты умеешь?» goes back to the FAQ skill;
+#   * the welcome keyboard reverts to Mini-App salon buttons and drops «Помощь».
+# Worth having because the change claims 100% of non-empty text turns on BOTH
+# channels: a matcher false positive on an unfamiliar tenant catalog routes
+# small talk into booking's LLM flow, and before DRF-963 that cost one echo.
+PILOT_CONVERSATIONAL_UX = os.environ.get("PILOT_CONVERSATIONAL_UX", "true").lower() == "true"
+
 # Sprint 8 / T1 (DRF-705) — OpenTelemetry configuration.
 # Empty endpoint = no-op exporter (local dev + tests).
 # Sample rate is Decision 3 from sprint-8-observability-shadow.md.
