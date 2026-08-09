@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone as dt_timezone
 from io import StringIO
-from types import SimpleNamespace
 
 import pytest
 from django.core.management import call_command
@@ -113,11 +112,12 @@ def test_seeded_edges_are_reconciled_by_a_real_sync_beat() -> None:
     must end up carrying Ayla's real edge id; the rest are absent upstream and
     must be reconciled away.
     """
+    from apps.catalog.services.http_client import CatalogSpecialistServiceDTO
     from apps.catalog.services.upserter import upsert_master_services
 
     _run()
     tenant = Tenant.objects.get(slug="formula-tela")
-    survivor = MasterService.all_tenants.filter(tenant=tenant).first()
+    survivor = MasterService.all_tenants.filter(tenant=tenant)[0]
     # The upserter resolves an edge's service by ayla_service_id, so the
     # published pair needs a grounded service — exactly as on a synced tenant.
     real_service_id = uuid.uuid4()
@@ -126,12 +126,12 @@ def test_seeded_edges_are_reconciled_by_a_real_sync_beat() -> None:
     )
     real_edge_id = uuid.uuid4()
 
-    dto = SimpleNamespace(
+    dto = CatalogSpecialistServiceDTO(
         ayla_specialist_service_id=str(real_edge_id),
-        specialist=str(survivor.master_id),
         salon_service=str(real_service_id),
+        specialist=str(survivor.master_id),
+        external_updated_at=_ts(),
         tenant=str(tenant.id),
-        is_active=True,
     )
 
     result = upsert_master_services(tenant, [dto])
@@ -148,7 +148,7 @@ def test_force_never_overwrites_a_real_ayla_stamp() -> None:
     """A --force run over a live mirror must not replace canonical provenance."""
     _run()
     tenant = Tenant.objects.get(slug="formula-tela")
-    edge = MasterService.all_tenants.filter(tenant=tenant).first()
+    edge = MasterService.all_tenants.filter(tenant=tenant)[0]
     real_ayla_id = uuid.uuid4()
     MasterService.all_tenants.filter(id=edge.id).update(ayla_specialist_service_id=real_ayla_id)
 
