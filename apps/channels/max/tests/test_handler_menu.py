@@ -179,6 +179,23 @@ class TestWidenedBookingCoverage:
         assert booking_spy == []
         assert sent[0]["text"] == FALLBACK_TEXT
 
+    def test_pain_complaint_still_goes_to_health_screening(
+        self, tenant, sent, fake_redis, settings, mark_welcomed, booking_spy
+    ):
+        """«спина» is a service word for a massage salon, so the widened
+        matcher COULD pull a health complaint into a booking flow. It
+        doesn't: health_screening registers far earlier and claims the
+        turn first. Pinned because the two vocabularies overlap by design.
+        """
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            mark_welcomed(user_id=31001, chat_id=41001)
+            max_handler.handle_max_event(_payload(text="у меня болит спина"))
+
+        assert booking_spy == []
+        assert sent[0]["text"] != FALLBACK_TEXT
+        assert "болит" in sent[0]["text"]  # the screening question
+
 
 class TestMenuTaps:
     def test_book_button_routes_into_booking(
