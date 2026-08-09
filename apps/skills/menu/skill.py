@@ -60,8 +60,8 @@ from typing import ClassVar
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.menu.matching import (
     CALLBACK_MENU_HELP,
-    MENU_CALLBACK_PREFIX,
     MENU_CALLBACK_TEXT,
+    is_menu_callback,
     looks_like_booking_request,
     looks_like_help_request,
     pilot_ux_enabled,
@@ -111,7 +111,12 @@ class MenuSkill:
     def handle(self, context: SkillContext) -> SkillResult:
         text = (context.message_text or "").strip()
 
-        if text.startswith(MENU_CALLBACK_PREFIX):
+        # Shape check, not just the prefix: a customer can TYPE «cb:menu:…»
+        # because MAX delivers a tapped payload and a typed message in the
+        # same field. Anything that isn't a bare slug is ordinary user text
+        # and takes the ordinary path below — it never reaches the callback
+        # branch and never reaches a log line.
+        if is_menu_callback(text):
             return self._handle_menu_callback(context, text)
 
         # Defensive: HelpSkill claims these upstream, so this branch only
@@ -141,8 +146,11 @@ class MenuSkill:
         canonical = MENU_CALLBACK_TEXT.get(text)
         if canonical is None:
             # Unknown / stale menu slug — never echo the raw payload at
-            # the customer; show the menu instead.
-            logger.info("menu.unknown_callback payload=%r", text[:64])
+            # the customer; show the menu instead. Length only, never
+            # content: the shape check upstream makes user text unlikely
+            # here, but #842 W3 CRIT-2 says logs carry lengths, not text,
+            # and a log line is outside the erasure cascade.
+            logger.info("menu.unknown_callback payload_len=%d", len(text))
             return _fallback_result()
 
         logger.info(

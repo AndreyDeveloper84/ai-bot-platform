@@ -82,6 +82,57 @@ class TestNoSecondRegistryWalk:
         assert result.reply_text == FALLBACK_TEXT
 
 
+class TestTypedCallbackLookalikeIsNotACallback:
+    """Security finding N-1 — user text must never reach a log line.
+
+    On MAX a tapped payload and a typed message arrive in the SAME field,
+    so a customer can type «cb:menu:…». Matching on the bare prefix meant
+    arbitrary text was treated as a malformed callback and echoed into the
+    logs — against #842 W3 CRIT-2 (log lengths, never content), and logs
+    sit outside the 152-ФЗ erasure cascade.
+    """
+
+    def test_typed_lookalike_with_pii_is_treated_as_ordinary_text(self, caplog):
+        pii = "cb:menu:мой телефон +79001234567, Иванова Мария"
+        with caplog.at_level("INFO"):
+            result = MenuSkill().handle(_ctx(pii))
+
+        assert result.reply_text == FALLBACK_TEXT
+        logged = " ".join(record.getMessage() for record in caplog.records)
+        assert "79001234567" not in logged
+        assert "Иванова" not in logged
+
+    def test_unknown_but_well_formed_slug_logs_only_a_length(self, caplog):
+        with caplog.at_level("INFO"):
+            result = MenuSkill().handle(_ctx("cb:menu:retired_button"))
+
+        assert result.reply_text == FALLBACK_TEXT
+        logged = " ".join(record.getMessage() for record in caplog.records)
+        assert "retired_button" not in logged
+        assert "payload_len" in logged
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "cb:menu:book extra",
+            "cb:menu:BOOK",
+            "cb:menu:book:1",
+            "cb:menu:",
+            "cb:menu:книга",
+        ],
+    )
+    def test_malformed_payloads_are_not_callbacks(self, text):
+        from apps.skills.menu.matching import is_menu_callback
+
+        assert is_menu_callback(text) is False
+
+    def test_real_slugs_still_match(self):
+        from apps.skills.menu.matching import MENU_CALLBACK_TEXT, is_menu_callback
+
+        for callback in [*MENU_CALLBACK_TEXT, "cb:menu:help"]:
+            assert is_menu_callback(callback) is True, callback
+
+
 class TestHandoffIsGatedOnExplicitIntent:
     """Finding #3 — a backend blip could mute dialogues wholesale.
 

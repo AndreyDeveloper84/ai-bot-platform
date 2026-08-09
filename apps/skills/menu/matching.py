@@ -381,6 +381,22 @@ def pilot_ux_enabled() -> bool:
 
 MENU_CALLBACK_PREFIX = "cb:menu:"
 
+# A menu payload is the prefix plus a lowercase slug — nothing else.
+#
+# On MAX a button payload and a typed message arrive in the SAME field
+# (``CanonicalEvent.text``), so «cb:menu:» at the start of a line is not
+# proof that a button was tapped: a customer can type it. Without this
+# shape check, arbitrary user text — «cb:menu:мой телефон +7…» — would be
+# treated as a (malformed) callback and, worse, echoed into the logs,
+# against the #842 rule that only lengths are logged, never content.
+_MENU_CALLBACK_RE = re.compile(r"^cb:menu:[a-z_]+$")
+
+
+def is_menu_callback(text: str) -> bool:
+    """True when ``text`` is shaped like a menu-button payload."""
+    return bool(_MENU_CALLBACK_RE.match(text))
+
+
 CALLBACK_MENU_BOOK = "cb:menu:book"
 CALLBACK_MENU_MY_BOOKINGS = "cb:menu:my_bookings"
 CALLBACK_MENU_RESCHEDULE = "cb:menu:reschedule"
