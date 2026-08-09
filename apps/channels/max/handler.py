@@ -728,17 +728,24 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
 def _discovery_handoff_reply(
     event: CanonicalEvent, global_bot_user, trace_id: str | uuid.UUID | None
 ) -> DiscoveryReply:
-    """Parse the ``cb:discover:book:{tenant_id}:{master_id}`` callback and route
-    into tenant T's booking flow via the handoff layer (#1020).
+    """Parse the ``cb:discover:book:{tenant_id}:{master_id}[:{service_id}]``
+    callback and route into tenant T's booking flow via the handoff layer
+    (#1020, service context DRF-962).
 
-    Both ids are UUIDs (no ``:`` inside), so a single split after the prefix is
-    unambiguous. Malformed payloads degrade to a graceful reply.
+    All ids are UUIDs (no ``:`` inside), so colon splits are unambiguous. The
+    service part is optional: cards rendered before DRF-962 — or for a query
+    where no single service matched — carry only two ids, and the handoff
+    layer answers those with an ask-the-service reply instead of a doomed
+    booking dispatch. Malformed payloads degrade to a graceful reply.
     """
     payload = event.text[len(CALLBACK_DISCOVER_BOOK_PREFIX) :]
     try:
-        tenant_part, master_part = payload.split(":", 1)
-        tenant_id = uuid.UUID(tenant_part)
-        master_id = uuid.UUID(master_part)
+        parts = payload.split(":")
+        if len(parts) not in (2, 3):
+            raise ValueError(f"expected 2 or 3 ids, got {len(parts)}")
+        tenant_id = uuid.UUID(parts[0])
+        master_id = uuid.UUID(parts[1])
+        service_id = uuid.UUID(parts[2]) if len(parts) == 3 else None
     except (ValueError, AttributeError):
         logger.warning("channels.max.global.handoff.bad_payload payload=%r", payload)
         return DiscoveryReply(
@@ -749,6 +756,7 @@ def _discovery_handoff_reply(
         global_bot_user=global_bot_user,
         tenant_id=tenant_id,
         master_id=master_id,
+        service_id=service_id,
         chat_id=event.chat_id,
         trace_id=trace_id,
     )

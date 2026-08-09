@@ -48,9 +48,14 @@ _MAX_REPLY_CHARS = 600
 _MAX_MASTER_CARDS = 5
 
 # Callback prefix for the discovery → booking handoff button (#1020). Carries
-# the PUBLIC ids from the MasterCard DTO: ``cb:discover:book:{tenant_id}:{master_id}``.
-# The global handler detects this, enters tenant_scope(T), and routes into the
-# per-tenant booking flow. No commercial data is in the callback.
+# the PUBLIC ids from the MasterCard DTO:
+# ``cb:discover:book:{tenant_id}:{master_id}`` — plus, when discovery resolved
+# the queried service unambiguously (DRF-962),
+# ``cb:discover:book:{tenant_id}:{master_id}:{service_id}``. The global handler
+# detects this, enters tenant_scope(T), and routes into the per-tenant booking
+# flow WITH the service context — without it the booking skill's pick_master
+# guard correctly refuses the serviceless tap («Контекст записи устарел»).
+# No commercial data is in the callback.
 CALLBACK_DISCOVER_BOOK_PREFIX = "cb:discover:book:"
 
 # OpenAI-shaped function spec — the discovery LLM calls this when the user wants
@@ -176,8 +181,11 @@ def build_discovery_prompt(
 def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
     """Render discovered masters as a reply + a one-button-per-card keyboard.
 
-    PUBLIC fields only (the DTO carries nothing else). Each button's callback is
-    ``cb:discover:book:{tenant_id}:{master_id}`` — the handoff seam (#1020).
+    PUBLIC fields only (the DTO carries nothing else). Each button's callback
+    is ``cb:discover:book:{tenant_id}:{master_id}`` — the handoff seam
+    (#1020) — extended with ``:{service_id}`` when discovery resolved the
+    queried service unambiguously (DRF-962), so the tap enters booking with
+    the service context instead of the stale-context dead-end.
     """
     if not cards:
         return DiscoveryReply(
@@ -195,11 +203,18 @@ def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
         # is the COMMON one — an unconditional dash renders every card as
         # «• Массажист —  · Пенза».
         spec = f" — {card.specialization}" if card.specialization else ""
-        lines.append(f"• {card.name}{spec}{rating}{city}")
+        # Surface the resolved service on the card line: the button will carry
+        # it into booking, so the user must SEE what they are tapping into.
+        service = f" · {card.service_name}" if card.service_id is not None else ""
+        lines.append(f"• {card.name}{spec}{service}{rating}{city}")
+        service_suffix = f":{card.service_id}" if card.service_id is not None else ""
         buttons.append(
             {
                 "label": f"Записаться к {card.name}",
-                "callback": f"{CALLBACK_DISCOVER_BOOK_PREFIX}{card.tenant_id}:{card.master_id}",
+                "callback": (
+                    f"{CALLBACK_DISCOVER_BOOK_PREFIX}"
+                    f"{card.tenant_id}:{card.master_id}{service_suffix}"
+                ),
             }
         )
     action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
@@ -246,6 +261,7 @@ def generate_discovery_reply(
                 city=args.get("city") or None,
                 specialization=args.get("specialization") or None,
                 limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+                resolve_service=True,
             )
             logger.info(
                 "orchestrator.discovery.show_masters count=%d trace=%s", len(cards), trace_id

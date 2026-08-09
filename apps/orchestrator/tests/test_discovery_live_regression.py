@@ -141,12 +141,18 @@ def test_live_turn_returns_a_master_not_the_fallback(
     # Assert the WHOLE rendered line, not just that the name appears somewhere.
     # A substring check happily passes on «• Массажист Пилот —  · Пенза», the
     # dangling-dash rendering an empty specialization used to produce — and an
-    # empty specialization is the common case on this very path.
-    assert "• Массажист Пилот · Пенза" in reply.text
+    # empty specialization is the common case on this very path. The resolved
+    # service rides the line since DRF-962: the button carries it into
+    # booking, so the user must see what they are tapping into.
+    assert "• Массажист Пилот · Спортивный массаж · Пенза" in reply.text
     assert " —  " not in reply.text
     assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
-    assert buttons[0]["callback"].startswith("cb:discover:book:")
+    # DRF-962: the callback must carry tenant + master + the resolved service —
+    # a two-id payload dead-ends on the booking skill's stale-context guard.
+    callback = buttons[0]["callback"]
+    assert callback.startswith("cb:discover:book:")
+    assert len(callback.removeprefix("cb:discover:book:").split(":")) == 3
 
 
 def test_master_is_reachable_without_any_specialization_text(

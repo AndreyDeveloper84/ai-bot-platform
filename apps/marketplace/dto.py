@@ -20,7 +20,17 @@ from uuid import UUID
 class MasterCard:
     """A single public master card. Exactly the fields #1018 sanctions:
     name, specialization, rating, photo, city, tenant_id (+ the master id
-    so a caller can deep-link / proceed to booking)."""
+    so a caller can deep-link / proceed to booking).
+
+    ``service_id`` / ``service_name`` (DRF-962): the public id + display name
+    of the ONE service that matched the user's discovery query, when that
+    match is unambiguous — so the booking handoff can carry the service
+    context and the card tap does not dead-end on the booking skill's
+    stale-context guard. ``service_id`` is the catalog mirror row id (the
+    same public id family as ``master_id``), never a commercial/native id.
+    ``None``/empty when the query had no service filter or several of the
+    master's services matched — auto-picking one of several would silently
+    book a service the user never chose."""
 
     tenant_id: UUID
     master_id: UUID
@@ -29,3 +39,5 @@ class MasterCard:
     rating: Decimal | None
     photo_url: str
     city: str
+    service_id: UUID | None = None
+    service_name: str = ""

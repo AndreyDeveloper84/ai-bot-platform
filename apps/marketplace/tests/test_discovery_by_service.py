@@ -156,6 +156,92 @@ class TestServiceRelationMatch:
         assert len(discover_masters(specialization="СПОРТИВНЫЙ массаж")) == 1
 
 
+class TestResolvedServiceContext:
+    """DRF-962 — cards carry the matched service so the booking handoff can.
+
+    Without this the discovery→booking tap dispatched a serviceless
+    ``pick_master`` and the booking skill's stale-context guard dead-ended
+    every card tap with «Контекст записи устарел».
+    """
+
+    def test_unambiguous_match_stamps_service_on_card(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="")
+        svc = _service(penza, "Спортивный массаж", slug="sport")
+        _link(penza, master, svc)
+
+        cards = discover_masters(
+            city="Пенза", specialization="спортивный массаж", resolve_service=True
+        )
+
+        assert len(cards) == 1
+        assert cards[0].service_id == svc.id
+        assert cards[0].service_name == "Спортивный массаж"
+
+    def test_ambiguous_match_carries_no_service(self, penza: Tenant) -> None:
+        """«массаж» matches two of the master's services — auto-picking one
+        would book a service the user never chose. The card must stay
+        serviceless; the handoff answers it by asking for the service."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+        _link(penza, master, _service(penza, "Классический массаж", slug="classic"))
+
+        cards = discover_masters(city="Пенза", specialization="массаж", resolve_service=True)
+
+        assert len(cards) == 1
+        assert cards[0].service_id is None
+        assert cards[0].service_name == ""
+
+    def test_each_master_resolves_its_own_service(self, penza: Tenant) -> None:
+        sport = _master(penza, "Спортивный мастер", specialization="")
+        classic = _master(penza, "Классический мастер", specialization="")
+        sport_svc = _service(penza, "Спортивный массаж", slug="sport")
+        classic_svc = _service(penza, "Классический массаж", slug="classic")
+        _link(penza, sport, sport_svc)
+        _link(penza, classic, classic_svc)
+
+        cards = discover_masters(city="Пенза", specialization="массаж", resolve_service=True)
+
+        by_name = {c.name: c for c in cards}
+        assert by_name["Спортивный мастер"].service_id == sport_svc.id
+        assert by_name["Классический мастер"].service_id == classic_svc.id
+
+    def test_default_call_does_not_resolve(self, penza: Tenant) -> None:
+        """The HTTP directory and other list readers keep the old shape (and
+        skip the extra query) unless they opt in."""
+        master = _master(penza, "Массажист", specialization="")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
+
+        cards = discover_masters(city="Пенза", specialization="спортивный массаж")
+
+        assert cards[0].service_id is None
+
+    def test_specialization_fallback_match_carries_no_service(self, penza: Tenant) -> None:
+        """A master surfaced via the legacy free-text specialization OR-branch
+        has no matching service row — the card must not invent one."""
+        master = _master(penza, "Ветеран", specialization="спортивный массаж")
+        assert master.services_offered.count() == 0
+
+        cards = discover_masters(
+            city="Пенза", specialization="спортивный массаж", resolve_service=True
+        )
+
+        assert len(cards) == 1
+        assert cards[0].service_id is None
+
+    def test_inactive_service_is_not_resolved(self, penza: Tenant) -> None:
+        master = _master(penza, "Массажист", specialization="спортивный массаж")
+        _link(penza, master, _service(penza, "Спортивный массаж", slug="sport", is_active=False))
+
+        cards = discover_masters(
+            city="Пенза", specialization="спортивный массаж", resolve_service=True
+        )
+
+        # Master still surfaces via the specialization fallback, but the
+        # inactive service must not ride the callback into booking.
+        assert len(cards) == 1
+        assert cards[0].service_id is None
+
+
 class TestNoFalsePositives:
     def test_wrong_city_returns_nothing(self, penza: Tenant, moscow: Tenant) -> None:
         master = _master(moscow, "Массажист", specialization="")

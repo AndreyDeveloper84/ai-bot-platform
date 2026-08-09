@@ -339,6 +339,7 @@ def generate_concierge_reply(
             city=args.get("city") or None,
             specialization=args.get("specialization") or None,
             limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+            resolve_service=True,
         )
         logger.info(
             "orchestrator.concierge.show_masters count=%d trace=%s",
