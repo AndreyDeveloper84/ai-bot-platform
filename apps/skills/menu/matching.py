@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ _SERVICE_STEMS: tuple[str, ...] = (
     "укладк",
     "ресниц",
     "космето",
-    "чистка",
+    "чистк",
     "пилинг",
     "депиляц",
     "эпиляц",
@@ -166,22 +167,41 @@ def _mentions_stem(normalized: str, stem: str) -> bool:
     return f" {stem}" in normalized
 
 
-def mentions_service(text: str, *, extra_stems: tuple[str, ...] = ()) -> bool:
+ExtraStems = tuple[str, ...] | Callable[[], tuple[str, ...]]
+
+
+def _resolve_extra_stems(extra_stems: ExtraStems) -> tuple[str, ...]:
+    """Allow the caller to defer an expensive stem source.
+
+    The tenant catalog lookup is a DB round-trip, and most turns that reach
+    the matcher are answered without ever needing it (an availability
+    phrasing matches earlier; an unrecognised turn matches nothing). Passing
+    a callable lets the caller pay only when the cheap signals have already
+    failed.
+    """
+    return extra_stems() if callable(extra_stems) else extra_stems
+
+
+def mentions_service(text: str, *, extra_stems: ExtraStems = ()) -> bool:
     """True when the text names a bookable service.
 
     ``extra_stems`` carries the tenant's own catalog titles (see
     :func:`tenant_service_stems`) so a salon whose services aren't in the
-    seed list still routes correctly.
+    seed list still routes correctly. It may be a tuple or a zero-arg
+    callable returning one — the callable is invoked only if the seed
+    vocabulary hasn't already decided the answer.
     """
     normalized = normalize(text)
     if not normalized.strip():
         return False
     if _SERVICE_WORDS.intersection(normalized.split()):
         return True
-    return any(_mentions_stem(normalized, stem) for stem in _SERVICE_STEMS + extra_stems)
+    if any(_mentions_stem(normalized, stem) for stem in _SERVICE_STEMS):
+        return True
+    return any(_mentions_stem(normalized, stem) for stem in _resolve_extra_stems(extra_stems))
 
 
-def looks_like_booking_request(text: str, *, extra_stems: tuple[str, ...] = ()) -> bool:
+def looks_like_booking_request(text: str, *, extra_stems: ExtraStems = ()) -> bool:
     """True when the turn is a booking request the other skills didn't claim.
 
     Only ever consulted for text that already fell through every registered
@@ -198,29 +218,31 @@ def looks_like_booking_request(text: str, *, extra_stems: tuple[str, ...] = ()) 
 
 
 # Generic words that show up in service titles but carry no service meaning.
-# Kept deliberately small: over-filtering costs coverage, under-filtering
-# costs precision, and precision failures here are visible to the customer.
-_CATALOG_STOPWORDS: frozenset[str] = frozenset(
-    {
-        "минут",
-        "минута",
-        "минуты",
-        "часов",
-        "сеанс",
-        "сеанса",
-        "абонемент",
-        "программа",
-        "комплекс",
-        "стандарт",
-        "премиум",
-        "базовый",
-        "полный",
-        "рублей",
-        "скидка",
-        "акция",
-        "новинка",
-        "хит",
-    }
+# STEMS, matched as prefixes (see :func:`_is_stopword`) so every inflected
+# form is covered by one entry — «программ» drops «программа» / «программы»
+# / «программу» alike.
+#
+# «подароч» / «карт» / «сертификат» are here because a gift-card row is a
+# routine catalog entry, and the resulting stem «карта» would pull every
+# payment-card complaint into the booking flow.
+_CATALOG_STOPWORD_STEMS: tuple[str, ...] = (
+    "минут",
+    "часов",
+    "сеанс",
+    "абонемент",
+    "программ",
+    "комплекс",
+    "стандарт",
+    "премиум",
+    "базов",
+    "полн",
+    "рубл",
+    "скидк",
+    "акци",
+    "новинк",
+    "подароч",
+    "карт",
+    "сертификат",
 )
 
 
@@ -252,10 +274,22 @@ def tenant_service_stems(tenant: Any) -> tuple[str, ...]:
     try:
         from apps.catalog.models import CatalogService
 
-        titles = CatalogService.objects.filter(
-            tenant=tenant,
-            is_active=True,
-        ).values_list("name", flat=True)[:200]
+        # ``list()`` INSIDE the try: a sliced ``values_list`` is a lazy
+        # QuerySet, so iterating it outside would run the SQL outside the
+        # guard and let a mid-turn DB failure propagate into the channel
+        # consumer (PEL retention → retry storm) instead of degrading.
+        # ``order_by`` because a LIMIT without an ORDER BY has no stable
+        # row order in Postgres — for a tenant with more than the cap,
+        # the same phrase could route to booking on one turn and to the
+        # menu on the next, which is unreproducible for an operator.
+        titles = list(
+            CatalogService.objects.filter(
+                tenant=tenant,
+                is_active=True,
+            )
+            .order_by("name")
+            .values_list("name", flat=True)[:200]
+        )
     except Exception:  # noqa: BLE001 — routing must never break on a catalog read
         logger.warning("menu.tenant_service_stems_failed", exc_info=True)
         return ()
@@ -265,10 +299,23 @@ def tenant_service_stems(tenant: Any) -> tuple[str, ...]:
         for word in normalize(str(title)).split():
             if len(word) < _MIN_PREFIX_STEM or word.isdigit():
                 continue
-            if word in _CATALOG_STOPWORDS:
+            if _is_stopword(word):
                 continue
             stems.add(word)
     return tuple(sorted(stems))
+
+
+def _is_stopword(word: str) -> bool:
+    """True when a catalog word carries no service meaning.
+
+    Prefix comparison, not equality: the words become PREFIX stems, so an
+    exact-match filter is systematically weaker than what it guards. It
+    would drop «программа» but keep «программы» — and the kept form then
+    matches everything the dropped one would have. Same asymmetry made
+    «Подарочная карта» contribute the stem «карта», routing «Карта не
+    прошла, что делать» into a booking flow.
+    """
+    return any(word.startswith(stem) for stem in _CATALOG_STOPWORD_STEMS)
 
 
 # ---------------------------------------------------------------------------

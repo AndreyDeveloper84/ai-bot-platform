@@ -25,6 +25,20 @@ from apps.skills.menu.matching import (
 from apps.skills.menu.skill import FALLBACK_TEXT, HELP_TEXT, MenuSkill
 
 
+def _booking_stub(result: SkillResult | None = None) -> MagicMock:
+    """Stand-in for the registered booking skill.
+
+    MenuSkill resolves booking out of the registry and calls its ``handle``
+    contract directly — it deliberately does NOT re-enter dispatch (a second
+    registry walk let an upstream greedy skill swallow the canonical phrase;
+    see test_routing_hardening.py).
+    """
+    booking = MagicMock()
+    booking.name = "booking"
+    booking.handle.return_value = result if result is not None else SkillResult()
+    return booking
+
+
 def _ctx(text: str, *, intent=None) -> SkillContext:
     conversation = MagicMock()
     conversation.tenant = None  # skip the optional catalog widening
@@ -97,29 +111,32 @@ class TestBookingRouting:
     @pytest.mark.parametrize("text", ["Хочу массаж", "Мне бы маникюр", "есть окошко на завтра?"])
     def test_redispatches_with_booking_intent(self, text):
         booking_result = SkillResult(reply_text="Выберите мастера:")
-        with patch("apps.skills.registry.dispatch", return_value=booking_result) as dispatch:
+        booking = _booking_stub(booking_result)
+        with patch("apps.skills.registry.registered", return_value=[booking]):
             result = MenuSkill().handle(_ctx(text))
 
         assert result is booking_result
-        routed_ctx = dispatch.call_args.args[0]
+        routed_ctx = booking.handle.call_args.args[0]
         assert routed_ctx.intent is not None
         assert routed_ctx.intent.intent == "booking"
 
     def test_user_wording_is_preserved_for_the_booking_llm(self):
         """Rewriting the text would rob the booking skill of the service name."""
-        with patch("apps.skills.registry.dispatch", return_value=SkillResult()) as dispatch:
+        booking = _booking_stub()
+        with patch("apps.skills.registry.registered", return_value=[booking]):
             MenuSkill().handle(_ctx("Мне бы маникюр с покрытием"))
-        assert dispatch.call_args.args[0].message_text == "Мне бы маникюр с покрытием"
+        assert booking.handle.call_args.args[0].message_text == "Мне бы маникюр с покрытием"
 
-    def test_falls_back_to_menu_when_redispatch_finds_no_owner(self):
-        with patch("apps.skills.registry.dispatch", return_value=None):
+    def test_falls_back_to_menu_when_booking_is_unavailable(self):
+        with patch("apps.skills.registry.registered", return_value=[]):
             result = MenuSkill().handle(_ctx("Хочу массаж"))
         assert result.reply_text == FALLBACK_TEXT
 
-    def test_non_booking_text_does_not_redispatch(self):
-        with patch("apps.skills.registry.dispatch") as dispatch:
+    def test_non_booking_text_never_reaches_booking(self):
+        booking = _booking_stub()
+        with patch("apps.skills.registry.registered", return_value=[booking]):
             MenuSkill().handle(_ctx("ыаывпаып"))
-        dispatch.assert_not_called()
+        booking.handle.assert_not_called()
 
 
 class TestMenuCallbacks:
@@ -133,18 +150,20 @@ class TestMenuCallbacks:
         ],
     )
     def test_tap_is_translated_to_its_canonical_phrase(self, callback):
-        with patch("apps.skills.registry.dispatch", return_value=SkillResult()) as dispatch:
+        booking = _booking_stub()
+        with patch("apps.skills.registry.registered", return_value=[booking]):
             MenuSkill().handle(_ctx(callback))
 
-        routed_ctx = dispatch.call_args.args[0]
+        routed_ctx = booking.handle.call_args.args[0]
         assert routed_ctx.message_text == MENU_CALLBACK_TEXT[callback]
         assert routed_ctx.intent.intent == "booking"
 
     def test_tap_and_typed_phrase_take_the_same_route(self):
         """The button is a shortcut for typing, not a separate contract."""
-        with patch("apps.skills.registry.dispatch", return_value=SkillResult()) as dispatch:
+        booking = _booking_stub()
+        with patch("apps.skills.registry.registered", return_value=[booking]):
             MenuSkill().handle(_ctx(CALLBACK_MENU_MY_BOOKINGS))
-            tapped = dispatch.call_args.args[0]
+            tapped = booking.handle.call_args.args[0]
 
         assert tapped.message_text == "Покажи мои записи"
 
@@ -153,15 +172,16 @@ class TestCatalogWidening:
     def test_tenant_service_titles_widen_the_matcher(self):
         ctx = _ctx("хочу криолиполиз")
         ctx.conversation.tenant = MagicMock()
+        booking = _booking_stub()
         with (
             patch(
                 "apps.skills.menu.skill.tenant_service_stems",
                 return_value=("криолиполиз",),
             ),
-            patch("apps.skills.registry.dispatch", return_value=SkillResult()) as dispatch,
+            patch("apps.skills.registry.registered", return_value=[booking]),
         ):
             MenuSkill().handle(ctx)
-        dispatch.assert_called_once()
+        booking.handle.assert_called_once()
 
     @pytest.mark.django_db
     def test_reads_the_real_catalog_column(self):

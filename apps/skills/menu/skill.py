@@ -126,19 +126,18 @@ class MenuSkill:
         if looks_like_help_request(text):
             return _help_result()
 
-        if looks_like_booking_request(
-            text,
-            extra_stems=tenant_service_stems(_tenant_of(context)),
-        ):
+        # The catalog read is deliberately INSIDE the cheap-signal check
+        # (via the lazy callable) so an availability phrasing — or the far
+        # more common unrecognised turn — never pays for a DB round-trip.
+        if looks_like_booking_request(text, extra_stems=lambda: _tenant_stems(context)):
             logger.info(
                 "menu.routed_to_booking conversation=%s trace=%s",
                 getattr(context.conversation, "id", "?"),
                 context.trace_id,
             )
-            routed = _redispatch(context, message_text=text)
+            routed = _route_to_booking(context, message_text=text, explicit=False)
             if routed is not None:
                 return routed
-            logger.warning("menu.booking_redispatch_unclaimed — falling back to menu")
 
         return _fallback_result()
 
@@ -158,10 +157,10 @@ class MenuSkill:
             text,
             getattr(context.conversation, "id", "?"),
         )
-        routed = _redispatch(context, message_text=canonical)
+        routed = _route_to_booking(context, message_text=canonical, explicit=True)
         if routed is not None:
             return routed
-        logger.warning("menu.callback_redispatch_unclaimed payload=%s", text)
+        logger.warning("menu.callback_route_unclaimed payload=%s", text)
         return _fallback_result()
 
 
@@ -175,19 +174,79 @@ def _tenant_of(context: SkillContext) -> object | None:
     return getattr(context.conversation, "tenant", None)
 
 
-def _redispatch(context: SkillContext, *, message_text: str) -> SkillResult | None:
-    """Re-run registry dispatch with a booking intent attached.
+def _tenant_stems(context: SkillContext) -> tuple[str, ...]:
+    """Catalog-derived service words for this turn's tenant."""
+    return tenant_service_stems(_tenant_of(context))
 
-    ``SkillContext`` is frozen, so we build a copy rather than mutate. The
-    copy carries ``intent`` set, which both keeps :meth:`MenuSkill.matches`
-    out of the second walk (no recursion) and lets
-    :meth:`BookingSkill.matches` claim the turn through its intent gate.
+
+def _route_to_booking(
+    context: SkillContext,
+    *,
+    message_text: str,
+    explicit: bool,
+) -> SkillResult | None:
+    """Hand the turn to the booking skill's own ``handle`` contract.
+
+    ### Why we call the skill instead of re-running dispatch
+
+    The first implementation re-entered ``registry.dispatch`` with a
+    booking ``IntentDecision`` attached. That re-walked the registry FROM
+    THE TOP with a REWRITTEN message — and skills registered above booking
+    do not all honour ``intent``. :class:`NutritionAnketaSkill` claims any
+    non-``cb:`` text while its FSM is alive and ignores intent entirely, so
+    a «📅 Записаться» tap (``cb:menu:book``, which anketa declines on the
+    first pass) came back as the canonical «Хочу записаться» on the second
+    pass and was swallowed by an abandoned anketa — a FSM with no TTL, and
+    both buttons ship on the same welcome keyboard. The booking button was
+    dead until the FSM was completed.
+
+    Calling ``handle`` directly is also what the DRF-963 brief sanctions
+    («только вызывать существующие контракты»): booking's own code, its
+    own events, its own handoff reasons — just without a second registry
+    walk that nobody asked for. The free-text path was never at risk (a
+    skill that would claim the text already claimed it on the first walk,
+    since this skill registers last), but it takes the same route so there
+    is one behaviour to reason about.
+
+    The context still carries the booking ``IntentDecision``: ``handle``
+    doesn't read it, but it keeps the turn's provenance honest for anything
+    that inspects the context downstream.
+
+    ### Why ``explicit`` gates the handoff
+
+    ``should_handoff`` is not a reply — the channel turns it into an
+    AdminTask and flips the conversation to ``HUMAN_HANDOFF``, which MUTES
+    the bot until an operator closes the task. Booking raises it for every
+    provider failure (LLM router down, YClients/Ayla unreachable).
+
+    * ``explicit=True`` (the customer TAPPED «Записаться») — propagate.
+      They asked to book, the backend is down, a human should take over.
+    * ``explicit=False`` (we INFERRED a booking intent from a service
+      word) — swallow it and answer with the menu. Otherwise a backend
+      blip plus a matcher false positive («Устала спина», «Юридические
+      лица») would mint operator tasks and permanently mute dialogues
+      that, before DRF-963, cost nothing but an echo. We inferred the
+      intent; we are not confident enough to spend an operator on it.
     """
-    from apps.skills.registry import dispatch
+    from apps.skills.registry import registered
+
+    booking = next((skill for skill in registered() if skill.name == "booking"), None)
+    if booking is None:
+        # Defensive — a registry without booking (isolated unit tests).
+        logger.warning("menu.booking_skill_unavailable")
+        return None
 
     routed_context = dataclasses.replace(
         context,
         message_text=message_text,
         intent=_booking_intent(),  # type: ignore[arg-type]
     )
-    return dispatch(routed_context)
+    result = booking.handle(routed_context)
+    if result is not None and result.should_handoff and not explicit:
+        logger.warning(
+            "menu.speculative_handoff_suppressed reason=%s conversation=%s",
+            result.handoff_reason,
+            getattr(context.conversation, "id", "?"),
+        )
+        return _fallback_result()
+    return result

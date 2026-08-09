@@ -368,8 +368,18 @@ def _reply_kind(event: CanonicalEvent, skill_result: Any, reply_text: str) -> st
     still miss?» — the pilot's headline conversational metric — was not
     answerable from the bus.
 
-    The legacy branch stays for skills that set no meta and for the
-    registry-empty path, so existing dashboards keep their vocabulary.
+    **This widens the vocabulary for every surface, not just menu.** Most
+    skills already set ``meta["reply_kind"]`` — food_scanner, water,
+    nutrition_anketa, health_screening, cross_domain, food_clarify,
+    food_correction and the welcome family all do — so a photo turn that
+    used to report ``"no_echo"`` now reports ``"food_scanner_card"``, and a
+    ``cb:welcome:consent_yes`` tap that used to report ``"echo"`` now
+    reports ``"welcome_s5_first_action"``. That is the intent (the old
+    labels were positional guesses, not facts), but a dashboard counting
+    the ``echo`` / ``no_echo`` share will show a step change at deploy.
+
+    The positional branch below is now reached only when the responding
+    skill sets no meta at all, or on the registry-empty fallback path.
     """
     skill_kind = (
         (getattr(skill_result, "meta", None) or {}).get("reply_kind") if skill_result else ""
