@@ -43,6 +43,16 @@ procedures.
 - **draft** — all sections written but not exercised in a real incident
 - **complete** — survived at least one real exercise (game day or live incident)
 
+## Non-engineer operational docs
+
+Not every operational document is a runbook for on-call. These live in
+[`docs/operations/`](../operations/) and are written for the people running the
+business, not the platform:
+
+| Doc | Audience | Covers |
+|---|---|---|
+| [`pilot-bot-operator-guide.md`](../operations/pilot-bot-operator-guide.md) | Salon administrator on the pilot | What the bot understands, which buttons map to which phrases, and — the part that bites — that a handoff mutes the bot in that conversation and it does not come back on its own (DRF-963) |
+
 ## When you fill a skeleton
 
 1. Drop the TBD blocks for sections you're filling.
