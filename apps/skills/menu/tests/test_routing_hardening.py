@@ -121,6 +121,26 @@ class TestHandoffIsGatedOnExplicitIntent:
         assert result.should_handoff is True
         assert result.handoff_reason == "booking_yclients_failure"
 
+    def test_non_infrastructure_reasons_are_never_swallowed(self):
+        """Suppression is an allowlist of transient provider failures.
+
+        Booking's reason vocabulary is extensible; a future
+        legally-sensitive or payment-dispute escalation must not be eaten
+        by a routing helper just because the intent was inferred.
+        """
+        booking = MagicMock()
+        booking.name = "booking"
+        booking.handle.return_value = SkillResult(
+            reply_text="Передаю менеджеру.",
+            should_handoff=True,
+            handoff_reason="legally_sensitive",
+        )
+        with patch("apps.skills.registry.registered", return_value=[booking]):
+            result = MenuSkill().handle(_ctx("Устала спина"))
+
+        assert result.should_handoff is True
+        assert result.handoff_reason == "legally_sensitive"
+
     def test_normal_booking_replies_pass_through_on_both_paths(self):
         booking = MagicMock()
         booking.name = "booking"

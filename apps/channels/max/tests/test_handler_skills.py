@@ -136,7 +136,7 @@ class TestResumeAfterResolve:
 
         # 2 sends: handoff reply + the bot's reply to "привет снова".
         # DRF-963: that reply is the honest fallback, no longer an echo.
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         assert len(mock_send) == 2
         assert mock_send[1]["text"] == FALLBACK_TEXT

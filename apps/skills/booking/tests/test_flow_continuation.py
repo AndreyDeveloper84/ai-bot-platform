@@ -765,7 +765,7 @@ class TestNegatives:
         under test — booking does not claim the turn, no pending row —
         is unchanged.
         """
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         with tenant_scope(tenant):
             result = dispatch(_ctx(conversation, bot_user, "Первую"))
@@ -1005,7 +1005,7 @@ class TestRoutingBoundaries:
         fallback); «спасибо» must still cost zero LLM calls, which also
         pins that the widened U-1 matcher doesn't over-claim gratitude.
         """
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         with tenant_scope(tenant):
             _write_flow_state(conversation, flow="reschedule", bookings=[])

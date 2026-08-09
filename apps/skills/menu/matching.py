@@ -363,6 +363,18 @@ def looks_like_help_request(text: str) -> bool:
     return normalize(text).strip() in _HELP_PHRASES
 
 
+def pilot_ux_enabled() -> bool:
+    """Rollback switch for the whole DRF-963 surface (``PILOT_CONVERSATIONAL_UX``).
+
+    Read at call time, not at import, so flipping the env var takes effect on
+    worker restart without a redeploy. Default ON — see the settings comment
+    for exactly what OFF restores.
+    """
+    from django.conf import settings
+
+    return bool(getattr(settings, "PILOT_CONVERSATIONAL_UX", True))
+
+
 # ---------------------------------------------------------------------------
 # Canonical main menu
 # ---------------------------------------------------------------------------

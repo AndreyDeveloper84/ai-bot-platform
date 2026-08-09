@@ -142,7 +142,7 @@ class TestDispatcherGuard:
         # Now a normal text → the menu skill takes it as the last-resort
         # text responder (DRF-963 replaced the verbatim echo with the
         # honest fallback). What matters here is that the bot SPEAKS again.
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         ctx_again = SkillContext(
             conversation=conversation,

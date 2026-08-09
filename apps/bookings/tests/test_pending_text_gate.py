@@ -481,7 +481,7 @@ class TestGateTextDispatch:
         the last-resort reply with the honest menu fallback. The invariant
         — the gate does not claim the turn, zero mutation — is unchanged.
         """
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         with tenant_scope(tenant):
             result = dispatch(_ctx(conversation, bot_user, "Подтверждаю"))
@@ -498,7 +498,7 @@ class TestGateTextDispatch:
         PendingBookingAction.all_tenants.filter(pk=row.pk).update(
             consumed_at=timezone.now() - timedelta(minutes=5),
         )
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         with tenant_scope(tenant):
             result = dispatch(_ctx(conversation, bot_user, "да"))

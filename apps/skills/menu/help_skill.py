@@ -23,7 +23,11 @@ from __future__ import annotations
 from typing import ClassVar
 
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.menu.matching import CALLBACK_MENU_HELP, looks_like_help_request
+from apps.skills.menu.matching import (
+    CALLBACK_MENU_HELP,
+    looks_like_help_request,
+    pilot_ux_enabled,
+)
 from apps.skills.menu.replies import help_result
 from apps.skills.registry import register
 
@@ -35,6 +39,9 @@ class HelpSkill:
     name: ClassVar[str] = "help"
 
     def matches(self, context: SkillContext) -> bool:
+        # Rollback switch — OFF returns «что ты умеешь?» to the FAQ skill.
+        if not pilot_ux_enabled():
+            return False
         if context.intent is not None:
             # Orchestrator-driven turn (or a menu re-dispatch) — the
             # classifier owns routing.

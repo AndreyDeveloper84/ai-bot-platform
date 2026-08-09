@@ -28,7 +28,7 @@ import pytest
 from apps.channels.max import handler as max_handler
 from apps.orchestrator.memory import short_term
 from apps.skills.base import SkillResult
-from apps.skills.menu.skill import FALLBACK_TEXT, HELP_TEXT
+from apps.skills.menu.replies import FALLBACK_TEXT, HELP_TEXT
 from apps.tenancy.context import tenant_scope, trace_id_scope
 from apps.tenancy.models import Tenant
 

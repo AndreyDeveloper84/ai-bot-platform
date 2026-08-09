@@ -1,8 +1,8 @@
 """MenuSkill tests (DRF-963 / U-1 + U-5 + menu callbacks).
 
 Covers the three jobs: menu-tap translation, widened booking routing via
-the ``SkillContext.intent`` contract, and the honest fallback that replaced
-verbatim echo.
+the booking skill's own ``handle`` contract, and the honest fallback that
+replaced verbatim echo.
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ from apps.skills.menu.matching import (
     main_menu_buttons,
     tenant_service_stems,
 )
-from apps.skills.menu.skill import FALLBACK_TEXT, HELP_TEXT, MenuSkill
+from apps.skills.menu.replies import FALLBACK_TEXT, HELP_TEXT
+from apps.skills.menu.skill import MenuSkill
 
 
 def _booking_stub(result: SkillResult | None = None) -> MagicMock:
@@ -61,7 +62,7 @@ class TestMatches:
         assert MenuSkill().matches(_ctx("   ")) is False
 
     def test_stands_down_when_intent_already_set(self):
-        """Recursion guard — our own re-dispatch pass must not re-enter."""
+        """An orchestrator-driven turn is routed by its classifier."""
         assert MenuSkill().matches(_ctx("Хочу массаж", intent=MagicMock())) is False
 
 
@@ -94,10 +95,11 @@ class TestHelp:
         assert result.meta["reply_kind"] == "menu_help"
         assert result.action_data["attachments"][0]["payload"]["buttons"] == main_menu_buttons()
 
-    def test_help_button_answers_locally_without_redispatch(self):
-        with patch("apps.skills.registry.dispatch") as dispatch:
+    def test_help_button_answers_locally_without_touching_booking(self):
+        booking = _booking_stub()
+        with patch("apps.skills.registry.registered", return_value=[booking]):
             result = MenuSkill().handle(_ctx(CALLBACK_MENU_HELP))
-        dispatch.assert_not_called()
+        booking.handle.assert_not_called()
         assert result.reply_text == HELP_TEXT
 
     def test_help_is_not_framed_as_a_miss(self):
@@ -106,19 +108,18 @@ class TestHelp:
 
 
 class TestBookingRouting:
-    """U-1 — service phrasings reach booking through the intent contract."""
+    """U-1 — service phrasings reach the booking skill's handle contract."""
 
     @pytest.mark.parametrize("text", ["Хочу массаж", "Мне бы маникюр", "есть окошко на завтра?"])
-    def test_redispatches_with_booking_intent(self, text):
+    def test_service_phrasing_reaches_booking(self, text):
         booking_result = SkillResult(reply_text="Выберите мастера:")
         booking = _booking_stub(booking_result)
         with patch("apps.skills.registry.registered", return_value=[booking]):
             result = MenuSkill().handle(_ctx(text))
 
         assert result is booking_result
-        routed_ctx = booking.handle.call_args.args[0]
-        assert routed_ctx.intent is not None
-        assert routed_ctx.intent.intent == "booking"
+        # The user's own wording reaches booking untouched.
+        assert booking.handle.call_args.args[0].message_text == text
 
     def test_user_wording_is_preserved_for_the_booking_llm(self):
         """Rewriting the text would rob the booking skill of the service name."""
@@ -156,7 +157,6 @@ class TestMenuCallbacks:
 
         routed_ctx = booking.handle.call_args.args[0]
         assert routed_ctx.message_text == MENU_CALLBACK_TEXT[callback]
-        assert routed_ctx.intent.intent == "booking"
 
     def test_tap_and_typed_phrase_take_the_same_route(self):
         """The button is a shortcut for typing, not a separate contract."""

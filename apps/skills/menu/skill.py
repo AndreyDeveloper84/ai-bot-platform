@@ -6,31 +6,33 @@ catch-all, with three jobs. Its sibling
 (before faq) and owns the «что ты умеешь» vocabulary.
 
 1. **Main-menu taps** (``cb:menu:*``) — translate the tapped slug into the
-   canonical phrase an existing skill already claims and re-dispatch, so a
-   button and the equivalent typed message take the identical route.
+   canonical phrase and hand it to the booking skill, so a button and the
+   equivalent typed message take the identical route.
 2. **U-1 — widened booking coverage** — a turn that names a service
    («Хочу массаж», «Мне бы маникюр») or asks about availability («есть
-   окошко») is re-dispatched with an explicit booking
-   :class:`~apps.orchestrator.intent_router.IntentDecision` so the booking
-   skill claims it through its documented intent gate.
+   окошко») is handed to the booking skill instead of being echoed.
 3. **U-5 — honest fallback** — anything still unrecognised gets «Я пока не
    понял…» plus the main menu, never a verbatim echo.
 
-### Why re-dispatch instead of extending the booking matcher
+### Why we call booking instead of extending its matcher
 
 DRF-963 must not touch ``apps/skills/booking/`` (S1 anti-touch), and the
-booking vocabulary lives there. ``SkillContext.intent`` is the contract
-built exactly for this: per :mod:`apps.skills.base`, «Sprint 4+ adds the
-classifier without changing the skill protocol — skills stay agnostic to
-how they were selected». :meth:`BookingSkill.matches` already honours it
-(``intent.intent == "booking"``). So we classify, set the intent and let
-the registry route — booking's own code is untouched and its logs, events
-and handoff paths stay authoritative.
+booking vocabulary lives there. So this skill classifies the turn
+deterministically (keywords, no LLM) and calls booking's own ``handle``
+contract — which the brief sanctions («только вызывать существующие
+контракты»). Booking's code, events, audit rows and handoff reasons stay
+authoritative; nothing about it is reimplemented here.
+
+An earlier revision instead re-entered ``registry.dispatch`` with a
+synthesised booking ``IntentDecision``. That re-walked the registry from
+the top with a REWRITTEN message, and skills above booking don't all
+honour ``intent`` — an abandoned ``nutrition_anketa`` FSM swallowed the
+canonical «Хочу записаться» and killed the «Записаться» button. See
+:func:`_route_to_booking` for the full account.
 
 This is NOT the LLM orchestrator (variant B, explicitly out of scope for
-the pilot): the classification is deterministic keyword matching and the
-:class:`IntentDecision` is built locally. No LLM call is added by this
-skill; the booking skill's own Phase-1 call is the same one it always made.
+the pilot). No LLM call is added by this skill; the booking skill's own
+Phase-1 call is the same one it always made.
 
 ### Why registration order makes this zero-regression
 
@@ -41,13 +43,12 @@ booking, FAQ, health_screening or any wellness skill. The booking channel
 gates CG-1..CG-8 exercise flows that all match upstream skills, so they
 cannot reach this code path.
 
-### Recursion safety
+### Rollback
 
-:meth:`matches` returns False whenever ``context.intent`` is already set.
-The re-dispatch always sets an intent, so the second pass walks the registry
-without this skill in play and can never loop back. When the re-dispatch
-finds no owner (defensive — a registry without the booking skill, as in
-isolated unit tests) we fall back to the honest menu reply.
+``settings.PILOT_CONVERSATIONAL_UX`` (default ON) turns the whole surface
+off without a deploy — this skill stands down, echo takes text turns back,
+and the welcome keyboard reverts. Worth having because this claims 100% of
+non-empty text turns on both channels.
 """
 
 from __future__ import annotations
@@ -63,40 +64,29 @@ from apps.skills.menu.matching import (
     MENU_CALLBACK_TEXT,
     looks_like_booking_request,
     looks_like_help_request,
+    pilot_ux_enabled,
     tenant_service_stems,
 )
 
-# Re-exported for callers and tests that read the pilot's user-facing copy.
-from apps.skills.menu.replies import (  # noqa: F401
-    FALLBACK_TEXT,
-    HELP_TEXT,
-    fallback_result as _fallback_result,
-    help_result as _help_result,
-)
+from apps.skills.menu.replies import fallback_result as _fallback_result
+from apps.skills.menu.replies import help_result as _help_result
 from apps.skills.registry import register
 
 logger = logging.getLogger(__name__)
 
 
-def _booking_intent() -> object:
-    """Deterministic booking :class:`IntentDecision` for the re-dispatch.
-
-    Imported lazily: :mod:`apps.orchestrator.intent_router` pulls in the
-    LLM provider module at import time, and this skill is imported during
-    ``AppConfig.ready()``. ``confidence=1.0`` is honest here — the decision
-    comes from an exact keyword match, not from a model.
-    """
-    from apps.orchestrator.intent_router import IntentDecision
-
-    return IntentDecision(
-        intent="booking",
-        skill="booking",
-        confidence=1.0,
-        risk_level="low",
-        reply_mode="keyboard",
-        needs_tool=True,
-        raw={"source": "menu_skill", "classifier": "keyword"},
-    )
+# Handoff reasons this skill may swallow on the INFERRED path. Deliberately
+# an allowlist of transient infrastructure failures, not a blanket rule:
+# booking's reason vocabulary is extensible, and a future
+# legally-sensitive / payment-dispute escalation must never be silently
+# eaten by a routing helper. Anything not listed here propagates.
+_SUPPRESSIBLE_HANDOFF_REASONS: frozenset[str] = frozenset(
+    {
+        "booking_yclients_failure",
+        "booking_provider_failure",
+        "llm_error",
+    }
+)
 
 
 @register
@@ -106,9 +96,12 @@ class MenuSkill:
     name: ClassVar[str] = "menu"
 
     def matches(self, context: SkillContext) -> bool:
-        # Re-dispatch guard — a context that already carries an intent is
-        # our own second pass (or an orchestrator-driven turn, where the
-        # classifier owns routing). Either way this skill must stand down.
+        # Rollback switch — OFF hands every text turn back to echo, which
+        # is exactly the pre-DRF-963 behaviour.
+        if not pilot_ux_enabled():
+            return False
+        # An orchestrator-driven turn carries a classifier decision; that
+        # classifier owns routing, so this skill stands down.
         if context.intent is not None:
             return False
         # Empty / attachment-only turns stay with echo: it owns the
@@ -208,9 +201,14 @@ def _route_to_booking(
     since this skill registers last), but it takes the same route so there
     is one behaviour to reason about.
 
-    The context still carries the booking ``IntentDecision``: ``handle``
-    doesn't read it, but it keeps the turn's provenance honest for anything
-    that inspects the context downstream.
+    The routed context carries the user's (or the button's canonical) text
+    and nothing else. An earlier revision also attached a synthesised
+    booking ``IntentDecision``; it was removed once the direct call landed,
+    because ``BookingSkill.handle`` never reads ``intent`` (only
+    ``matches`` does) — so the field was dead weight that bought a runtime
+    ``apps.skills`` → ``apps.orchestrator.intent_router`` import edge,
+    which no import-boundary contract covers and which drags the LLM
+    provider module toward ``AppConfig.ready()``.
 
     ### Why ``explicit`` gates the handoff
 
@@ -222,11 +220,14 @@ def _route_to_booking(
     * ``explicit=True`` (the customer TAPPED «Записаться») — propagate.
       They asked to book, the backend is down, a human should take over.
     * ``explicit=False`` (we INFERRED a booking intent from a service
-      word) — swallow it and answer with the menu. Otherwise a backend
-      blip plus a matcher false positive («Устала спина», «Юридические
-      лица») would mint operator tasks and permanently mute dialogues
-      that, before DRF-963, cost nothing but an echo. We inferred the
-      intent; we are not confident enough to spend an operator on it.
+      word) — swallow, but ONLY for the transient-infrastructure reasons
+      in :data:`_SUPPRESSIBLE_HANDOFF_REASONS`. Otherwise a backend blip
+      plus a matcher false positive («Устала спина», «Юридические лица»)
+      would mint operator tasks and permanently mute dialogues that,
+      before DRF-963, cost nothing but an echo. Any other reason
+      propagates untouched: escalation policy belongs to the pipeline's
+      confidence gate, not to a routing helper, so this stays a narrow
+      carve-out rather than a veto.
     """
     from apps.skills.registry import registered
 
@@ -236,13 +237,14 @@ def _route_to_booking(
         logger.warning("menu.booking_skill_unavailable")
         return None
 
-    routed_context = dataclasses.replace(
-        context,
-        message_text=message_text,
-        intent=_booking_intent(),  # type: ignore[arg-type]
-    )
+    routed_context = dataclasses.replace(context, message_text=message_text)
     result = booking.handle(routed_context)
-    if result is not None and result.should_handoff and not explicit:
+    if (
+        result is not None
+        and result.should_handoff
+        and not explicit
+        and result.handoff_reason in _SUPPRESSIBLE_HANDOFF_REASONS
+    ):
         logger.warning(
             "menu.speculative_handoff_suppressed reason=%s conversation=%s",
             result.handoff_reason,

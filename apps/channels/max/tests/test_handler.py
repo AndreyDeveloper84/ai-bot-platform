@@ -94,7 +94,7 @@ class TestHappyPath:
     def test_unrecognised_text_creates_full_chain(self, tenant_a, mock_send, fake_redis, settings):
         """DRF-963 (U-5): an unrecognised turn no longer echoes — it gets
         the honest fallback + main menu. The persistence chain is unchanged."""
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         settings.STRICT_TENANT_SCOPE = "strict"
         trace = uuid4()
@@ -530,7 +530,7 @@ class TestOutboundFailure:
 
         monkeypatch.setattr(max_handler, "send_message", fake_send_raises)
 
-        from apps.skills.menu.skill import FALLBACK_TEXT
+        from apps.skills.menu.replies import FALLBACK_TEXT
 
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
             _mark_welcomed()  # isolate from the #85 auto-welcome
