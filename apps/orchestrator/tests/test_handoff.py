@@ -257,6 +257,30 @@ def test_handoff_unresolved_service_emits_funnel_event(settings, monkeypatch) ->
     names = [name for name, _ in events]
     assert "marketplace.handoff.service_unresolved" in names
     assert "marketplace.handoff.entered" not in names
+    payload = dict(events)["marketplace.handoff.service_unresolved"]
+    # A serviceless tap must serialize as a real null, not the string "None" —
+    # cohort queries over the event stream depend on it.
+    assert payload["service_id"] is None
+
+
+def test_ask_service_menu_lists_only_deliverable_services(settings, monkeypatch) -> None:
+    """The menu must not suggest a service the stamping gate cannot deliver:
+    under the Ayla flag a NULL-ayla_service_id service, when typed back,
+    still produces a serviceless card — naming it would keep the user in the
+    loop the reply exists to break."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-menu")
+    master = _master(t, name="Анна")
+    _link(t, master, _service(t, ayla_service_id=uuid4(), name="Спортивный массаж", slug="s"))
+    _link(t, master, _service(t, ayla_service_id=None, name="Легаси-услуга", slug="l"))
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="508")
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: None)
+
+    reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
+
+    assert "«Спортивный массаж»" in reply.text
+    assert "Легаси-услуга" not in reply.text
 
 
 def test_handoff_nullable_staff_id_is_graceful_no_dispatch(settings, monkeypatch) -> None:

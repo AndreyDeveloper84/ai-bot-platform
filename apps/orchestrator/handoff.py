@@ -182,14 +182,22 @@ def handoff_to_booking(
                 payload={
                     "tenant_id": str(tenant_id),
                     "master_id": str(master_id),
-                    "service_id": str(service_id),
+                    # Real null for the serviceless-tap cohort — the literal
+                    # string "None" would pollute the very stream this event
+                    # exists to make queryable.
+                    "service_id": str(service_id) if service_id is not None else None,
                     "booking_via_ayla_rest": flag_on,
                 },
             )
+            # Suggest only services the stamping gate can deliver: under the
+            # Ayla flag that means a non-NULL ayla_service_id — naming a
+            # service the user's next query still cannot resolve would keep
+            # them in the loop this reply exists to break.
+            menu_qs = CatalogService.objects.filter(masters_offering__master=master, is_active=True)
+            if flag_on:
+                menu_qs = menu_qs.filter(ayla_service_id__isnull=False)
             menu = list(
-                CatalogService.objects.filter(masters_offering__master=master, is_active=True)
-                .order_by("name")
-                .values_list("name", flat=True)[:_ASK_SERVICE_MENU_LIMIT]
+                menu_qs.order_by("name").values_list("name", flat=True)[:_ASK_SERVICE_MENU_LIMIT]
             )
             if menu:
                 text = _ASK_SERVICE_REPLY_WITH_MENU.format(
