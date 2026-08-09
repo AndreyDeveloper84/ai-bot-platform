@@ -21,6 +21,7 @@ The salon fixture is synthetic — no hardcoded formula-tela, no real master.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from django.conf import settings
@@ -98,6 +99,10 @@ def penza_massage_salon() -> CatalogMaster:
             slug=slug,
             name=name,
             is_active=True,
+            # The Ayla canonical id: the production shape (services are
+            # Ayla-synced) and the deliverability key the DRF-962 service
+            # resolution requires before stamping a service on the card.
+            ayla_service_id=uuid4(),
             external_updated_at=_ts(),
         )
         MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
@@ -125,13 +130,16 @@ def _run_turn(monkeypatch, *, tool_args: dict) -> discovery.DiscoveryReply:
     ids=["full-service-name", "adjective-only"],
 )
 def test_live_turn_returns_a_master_not_the_fallback(
-    monkeypatch, penza_massage_salon: CatalogMaster, specialization: str
+    settings, monkeypatch, penza_massage_salon: CatalogMaster, specialization: str
 ) -> None:
     """The regression itself: this turn must not produce the zero-result line.
 
     Parametrized over both argument shapes the tool call can plausibly carry,
     since the model's normalization of «хочу спортивный» is not contractual.
+    Flag ON = the pilot path; it is also the deliverability precondition for
+    the service to be stamped on the card (DRF-962).
     """
+    settings.BOOKING_VIA_AYLA_REST = True
     reply = _run_turn(
         monkeypatch,
         tool_args={"city": "Пенза", "specialization": specialization},
@@ -141,12 +149,18 @@ def test_live_turn_returns_a_master_not_the_fallback(
     # Assert the WHOLE rendered line, not just that the name appears somewhere.
     # A substring check happily passes on «• Массажист Пилот —  · Пенза», the
     # dangling-dash rendering an empty specialization used to produce — and an
-    # empty specialization is the common case on this very path.
-    assert "• Массажист Пилот · Пенза" in reply.text
+    # empty specialization is the common case on this very path. The resolved
+    # service rides the line since DRF-962: the button carries it into
+    # booking, so the user must see what they are tapping into.
+    assert "• Массажист Пилот · Спортивный массаж · Пенза" in reply.text
     assert " —  " not in reply.text
     assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
-    assert buttons[0]["callback"].startswith("cb:discover:book:")
+    # DRF-962: the callback must carry tenant + master + the resolved service —
+    # a two-id payload dead-ends on the booking skill's stale-context guard.
+    callback = buttons[0]["callback"]
+    assert callback.startswith("cb:discover:book:")
+    assert len(callback.removeprefix("cb:discover:book:").split(":")) == 3
 
 
 def test_master_is_reachable_without_any_specialization_text(

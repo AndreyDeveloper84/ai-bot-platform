@@ -20,6 +20,10 @@ _PUBLIC_FIELDS = {
     "rating",
     "photo_url",
     "city",
+    # DRF-962 — the unambiguously matched service (public catalog id + display
+    # name), carried so the booking handoff keeps the service context.
+    "service_id",
+    "service_name",
 }
 
 # Names that must NEVER appear on the public card.

@@ -31,7 +31,7 @@ class _Router:
         return self._provider
 
 
-def _card(name: str, tid=None, mid=None) -> MasterCard:
+def _card(name: str, tid=None, mid=None, sid=None, service_name: str = "") -> MasterCard:
     return MasterCard(
         tenant_id=tid or uuid4(),
         master_id=mid or uuid4(),
@@ -40,6 +40,8 @@ def _card(name: str, tid=None, mid=None) -> MasterCard:
         rating=Decimal("4.8"),
         photo_url="",
         city="Пенза",
+        service_id=sid,
+        service_name=service_name,
     )
 
 
@@ -56,6 +58,38 @@ def test_show_masters_tool_renders_cards_and_handoff_buttons(monkeypatch) -> Non
     assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
     assert buttons[0]["callback"] == f"cb:discover:book:{tid}:{mid}"
+
+
+def test_show_masters_resolved_service_rides_the_callback(monkeypatch) -> None:
+    """DRF-962: a card with an unambiguously matched service renders a 3-id
+    callback (tenant:master:service) and surfaces the service on the card
+    line, so the tap enters booking with the service context."""
+    tid, mid, sid = uuid4(), uuid4(), uuid4()
+    seen_kwargs: dict = {}
+
+    def fake_discover(**kw):
+        seen_kwargs.update(kw)
+        return [_card("Анна", tid, mid, sid, service_name="Спортивный массаж")]
+
+    monkeypatch.setattr(discovery, "discover_masters", fake_discover)
+    result = CompletionResult(
+        text="",
+        tool_calls=[
+            ToolCall(
+                id="t1",
+                name="show_masters",
+                arguments={"city": "Пенза", "specialization": "спортивный массаж"},
+            )
+        ],
+    )
+    monkeypatch.setattr(discovery, "get_router", lambda: _Router(_Provider(result)))
+
+    reply = discovery.generate_discovery_reply("Город Пенза, хочу спортивный")
+    assert seen_kwargs.get("resolve_service") is True
+    assert "Спортивный массаж" in reply.text
+    assert reply.action_data is not None
+    buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
+    assert buttons[0]["callback"] == f"cb:discover:book:{tid}:{mid}:{sid}"
 
 
 def test_show_masters_no_results_graceful(monkeypatch) -> None:

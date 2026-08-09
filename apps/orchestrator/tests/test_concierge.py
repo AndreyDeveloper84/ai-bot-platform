@@ -211,6 +211,8 @@ class TestGenerateConciergeReply:
             specialization="Массаж",
             rating=4.9,
             city="Пенза",
+            service_id=None,
+            service_name="",
         )
         monkeypatch.setattr(concierge, "discover_masters", lambda **kwargs: [card])
         bot_user, conversation = self._bot_user_and_conversation()

@@ -31,12 +31,34 @@ from apps.orchestrator.discovery import DiscoveryReply
 logger = logging.getLogger(__name__)
 
 # Booking skill's stable master-pick callback contract (apps/skills/booking —
-# S1 anti-touch). Under the YClients path it expects the int staff id.
+# S1 anti-touch). Format ``cb:book:pick_master:<master>:<service>`` — the
+# service part is REQUIRED: without it the skill's stale-context guard
+# (deliberately, RB1.1-D05) refuses the tap with «Контекст записи устарел»,
+# which on this path was a guaranteed dead-end (DRF-962). Under the YClients
+# path both ids are native ints; under Ayla REST both are canonical UUIDs.
 _CALLBACK_BOOK_PICK_MASTER = "cb:book:pick_master:"
 
 _UNAVAILABLE_REPLY = (
     "К сожалению, запись к этому мастеру сейчас недоступна — попробуйте выбрать другого."
 )
+
+# The tap carried no bookable service (pre-DRF-962 keyboard, an ambiguous
+# query like bare «массаж», or a service that went inactive between render and
+# tap). Booking cannot start without one — asking is honest and keeps the user
+# in the discovery loop. The reply lists THIS master's real services (they are
+# one tenant-scoped queryset away), so following the bot's own suggestion
+# produces an exact-name query that discovery resolves unambiguously — a
+# hardcoded example would send the user chasing a service the master may not
+# even offer. Never dispatch a serviceless pick_master: the booking skill will
+# only answer it with the stale-context text.
+_ASK_SERVICE_REPLY_WITH_MENU = (
+    "Чтобы записаться к мастеру {name}, напишите желаемую услугу. У мастера можно "
+    "выбрать, например: {services}."
+)
+_ASK_SERVICE_REPLY_BARE = (
+    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует."
+)
+_ASK_SERVICE_MENU_LIMIT = 3
 
 
 def handoff_to_booking(
@@ -44,6 +66,7 @@ def handoff_to_booking(
     global_bot_user,
     tenant_id: uuid.UUID,
     master_id: uuid.UUID,
+    service_id: uuid.UUID | None = None,
     chat_id: str = "",
     trace_id: str | uuid.UUID | None = None,
 ) -> DiscoveryReply:
@@ -52,6 +75,9 @@ def handoff_to_booking(
     Args:
       global_bot_user: the sentinel-scoped BotUser from the discovery turn.
       tenant_id / master_id: PUBLIC ids from the tapped ``MasterCard`` button.
+      service_id: PUBLIC catalog id of the service discovery matched
+        (DRF-962), or ``None`` for a serviceless card — answered with an
+        ask-the-service reply, never a doomed booking dispatch.
       chat_id: MAX chat id (outbound is chat-based, tenant-free).
 
     Returns:
@@ -60,7 +86,7 @@ def handoff_to_booking(
     """
     # Local imports keep app-load order clean + the tenant-scoped models out of
     # module import time.
-    from apps.catalog.models import CatalogMaster
+    from apps.catalog.models import CatalogMaster, CatalogService, MasterService
     from apps.conversations.services import resolve_active_conversation
     from apps.identity.services import resolve_or_create_bot_user
     from apps.skills.base import SkillContext
@@ -117,6 +143,71 @@ def handoff_to_booking(
         # below never touches a tenant-scoped model at current_tenant()=None.
         master_name = master.name
 
+        # ── Service context (DRF-962). Verify the tapped service inside the
+        # ── same scope: it must exist in T, be active, and actually be offered
+        # ── by THIS master (MasterService edge — the same all_tenants +
+        # ── explicit-ids shape the booking-side guards use) — a forged/stale
+        # ── callback must not smuggle a foreign service into the booking
+        # ── flow. Native grounding is Ayla-REST-only: ``ayla_service_id`` is
+        # ── the one proven native family; the legacy mirror ``external_id``
+        # ── is the mysite pk, NOT a verified YClients service id (the model
+        # ── docstring and the booking skill disagree about it), so the
+        # ── YClients-flag path never dispatches a service and falls back to
+        # ── asking. Any miss → honest ask-the-service reply; NEVER a
+        # ── serviceless dispatch (guaranteed stale-context dead-end on the
+        # ── booking side).
+        native_service_id: str | None = None
+        if service_id is not None and flag_on:
+            service = CatalogService.objects.filter(id=service_id, is_active=True).first()
+            edge_exists = service is not None and (
+                MasterService.all_tenants.filter(
+                    tenant=tenant, master_id=master.id, service_id=service.id
+                ).exists()
+            )
+            if service is not None and edge_exists and service.ayla_service_id is not None:
+                native_service_id = str(service.ayla_service_id)
+        if native_service_id is None:
+            logger.info(
+                "marketplace.handoff.service_unresolved tenant=%s master=%s service=%s trace=%s",
+                tenant_id,
+                master_id,
+                service_id,
+                trace_id,
+            )
+            # Funnel visibility (review): without an event, a cohort whose
+            # every tap fails to resolve is indistinguishable from zero
+            # traffic on the handoff.entered dashboard.
+            emit(
+                "marketplace.handoff.service_unresolved",
+                payload={
+                    "tenant_id": str(tenant_id),
+                    "master_id": str(master_id),
+                    # Real null for the serviceless-tap cohort — the literal
+                    # string "None" would pollute the very stream this event
+                    # exists to make queryable.
+                    "service_id": str(service_id) if service_id is not None else None,
+                    "booking_via_ayla_rest": flag_on,
+                },
+            )
+            # Suggest only services the stamping gate can deliver: under the
+            # Ayla flag that means a non-NULL ayla_service_id — naming a
+            # service the user's next query still cannot resolve would keep
+            # them in the loop this reply exists to break.
+            menu_qs = CatalogService.objects.filter(masters_offering__master=master, is_active=True)
+            if flag_on:
+                menu_qs = menu_qs.filter(ayla_service_id__isnull=False)
+            menu = list(
+                menu_qs.order_by("name").values_list("name", flat=True)[:_ASK_SERVICE_MENU_LIMIT]
+            )
+            if menu:
+                text = _ASK_SERVICE_REPLY_WITH_MENU.format(
+                    name=master_name,
+                    services=", ".join(f"«{name}»" for name in menu),
+                )
+            else:
+                text = _ASK_SERVICE_REPLY_BARE.format(name=master_name)
+            return DiscoveryReply(text=text)
+
         conversation = resolve_active_conversation(per_tenant_bot_user)
         if conversation is None:
             logger.warning(
@@ -132,18 +223,23 @@ def handoff_to_booking(
             payload={
                 "tenant_id": str(tenant_id),
                 "master_id": str(master_id),
+                "service_id": str(service_id),
                 "bot_user_id": str(per_tenant_bot_user.id),
                 "is_global_bot": True,
             },
         )
 
         # Delegate into the EXISTING per-tenant booking entrypoint — do not
-        # reimplement booking. Pass the master in the form it expects.
+        # reimplement booking. Pass master + service in the form it expects
+        # (both are required by the pick_master contract — see the prefix
+        # comment above).
         result = skill_dispatch(
             SkillContext(
                 conversation=conversation,
                 bot_user=per_tenant_bot_user,
-                message_text=f"{_CALLBACK_BOOK_PICK_MASTER}{native_master_id}",
+                message_text=(
+                    f"{_CALLBACK_BOOK_PICK_MASTER}{native_master_id}:{native_service_id}"
+                ),
                 trace_id=str(trace_id) if trace_id else "",
             )
         )

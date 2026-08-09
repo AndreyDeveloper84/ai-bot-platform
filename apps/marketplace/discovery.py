@@ -15,6 +15,7 @@ swappable to the Ayla provider-directory API (#249-#251) later.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import NamedTuple
 from uuid import UUID
 
@@ -148,6 +149,90 @@ class PageMeta(NamedTuple):
     num_pages: int
 
 
+def _service_match_q(tokens: list[str]) -> Q:
+    """The service-relation match for one token list.
+
+    One ``Q`` so every condition binds to the SAME joined MasterService row —
+    a master offering «Спортивный массаж» matches «спортивный массаж», but one
+    offering «Спортивный маникюр» plus a separate «Тайский массаж» does not
+    match on the split.
+
+    A MasterService row existing IS the statement that the master performs the
+    service (there is no status column — see the model); the service itself
+    must still be active to be offered.
+
+    Belt-and-braces on inherently cross-tenant querysets: the edge's service
+    must belong to the same tenant as the master. The sync path cannot create
+    a cross-tenant edge, but discovery is the one reader that sees every
+    tenant at once, so it should not depend on a writer-side guarantee to
+    avoid surfacing a master for a service they do not offer.
+
+    Shared by :func:`_bookable_qs` (who matches) and
+    :func:`_matched_services` (which service matched) so the two can never
+    drift apart — a master surfaced FOR a service must resolve TO it.
+    """
+    service_match = Q(services_offered__service__is_active=True)
+    service_match &= Q(services_offered__service__tenant_id=F("tenant_id"))
+    for token in tokens:
+        service_match &= Q(services_offered__service__name__icontains=token)
+    return service_match
+
+
+def _matched_services(master_ids: list[UUID], tokens: list[str]) -> dict[UUID, tuple[UUID, str]]:
+    """Resolve which service matched the query, per master — when unambiguous
+    AND deliverable to the booking flow.
+
+    Returns ``{master_id: (service_id, service_name)}`` ONLY for masters whose
+    query-matching active services collapse to exactly one distinct service.
+    A master with several matching services («массаж» → «Спортивный массаж» +
+    «Классический массаж») is deliberately absent: auto-picking one of them
+    would carry a service the user never chose straight into the booking
+    preview. Absent masters fall back to the ask-the-service handoff reply.
+
+    Deliverability gate (review of DRF-962): a stamped service becomes a
+    promise on the card — the button must be able to keep it. The booking
+    handoff can only ground a service on the Ayla REST path via
+    ``ayla_service_id``, so resolution requires ``BOOKING_VIA_AYLA_REST`` ON
+    and a non-NULL ``ayla_service_id``. Under the legacy YClients flag the
+    mirror's ``external_id`` is the *mysite* pk, not a proven YClients
+    service id (`apps/catalog/models.py` vs `apps/skills/booking/skill.py`
+    disagree about its family), so no service is ever advertised there —
+    cards stay serviceless and the handoff asks for the service instead of
+    dispatching an id from an unverified family.
+
+    One query for the whole card set (bounded by the discovery ``limit``);
+    the same ``all_tenants`` carve-out and the same match ``Q`` as
+    :func:`_bookable_qs`, so resolution can never disagree with discovery.
+    """
+    from django.conf import settings
+
+    if not master_ids or not tokens:
+        return {}
+    if not bool(getattr(settings, "BOOKING_VIA_AYLA_REST", False)):
+        return {}
+    # ONE .filter() call for the whole condition set: a second filter() on a
+    # multi-valued relation would open a SECOND MasterService join, and the
+    # values_list below must read from the same joined row the conditions
+    # bound to (pinned by the mixed-services test in test_discovery_by_service).
+    rows = (
+        CatalogMaster.all_tenants.filter(id__in=master_ids)
+        .filter(
+            _service_match_q(tokens) & Q(services_offered__service__ayla_service_id__isnull=False)
+        )
+        .values_list(
+            "id",
+            "services_offered__service_id",
+            "services_offered__service__name",
+        )
+    )
+    by_master: dict[UUID, set[tuple[UUID, str]]] = {}
+    for master_id, service_id, service_name in rows:
+        by_master.setdefault(master_id, set()).add((service_id, service_name or ""))
+    return {
+        master_id: next(iter(pairs)) for master_id, pairs in by_master.items() if len(pairs) == 1
+    }
+
+
 def _bookable_qs(
     *,
     city: str | None = None,
@@ -208,24 +293,7 @@ def _bookable_qs(
             # than an honest empty result.
             return qs.none()
 
-        # One filter() call, so every condition binds to the SAME joined
-        # MasterService row — a master offering «Спортивный массаж» matches
-        # «спортивный массаж», but one offering «Спортивный маникюр» plus a
-        # separate «Тайский массаж» does not match on the split.
-        #
-        # A MasterService row existing IS the statement that the master
-        # performs the service (there is no status column — see the model);
-        # the service itself must still be active to be offered.
-        service_match = Q(services_offered__service__is_active=True)
-        # Belt-and-braces on an inherently cross-tenant queryset: the edge's
-        # service must belong to the same tenant as the master. The sync
-        # path cannot create a cross-tenant edge, but discovery is the one
-        # reader that sees every tenant at once, so it should not depend on
-        # a writer-side guarantee to avoid surfacing a master for a service
-        # they do not offer.
-        service_match &= Q(services_offered__service__tenant_id=F("tenant_id"))
-        for token in tokens:
-            service_match &= Q(services_offered__service__name__icontains=token)
+        service_match = _service_match_q(tokens)
 
         specialization_match = Q()
         for token in tokens:
@@ -245,6 +313,7 @@ def discover_masters(
     city: str | None = None,
     specialization: str | None = None,
     limit: int = _DEFAULT_LIMIT,
+    resolve_service: bool = False,
 ) -> list[MasterCard]:
     """Return bookable masters across ALL tenants as public DTOs.
 
@@ -254,10 +323,31 @@ def discover_masters(
     narrow the result — the latter matches either a service the master
     actually performs or their free-text specialization (see
     :func:`_bookable_qs`). ``limit`` is clamped to ``_MAX_LIMIT``.
+
+    ``resolve_service`` (DRF-962): additionally stamp each card with the ONE
+    service that matched the query, when unambiguous (see
+    :func:`_matched_services`) — the discovery→booking handoff needs it so a
+    card tap lands in booking WITH the service context instead of the
+    stale-context dead-end. Off by default: the HTTP directory (#249) and
+    other list readers don't pay the extra query.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
     qs = _bookable_qs(city=city, specialization=specialization)
-    return [_to_card(master) for master in qs[:limit]]
+    masters = list(qs[:limit])
+    cards = [_to_card(master) for master in masters]
+    if resolve_service and specialization and specialization.strip():
+        matched = _matched_services(
+            [master.id for master in masters], _query_tokens(specialization)
+        )
+        cards = [
+            (
+                replace(card, service_id=pair[0], service_name=pair[1])
+                if (pair := matched.get(card.master_id)) is not None
+                else card
+            )
+            for card in cards
+        ]
+    return cards
 
 
 def discover_masters_page(
