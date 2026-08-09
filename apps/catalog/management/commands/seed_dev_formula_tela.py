@@ -12,15 +12,22 @@ Usage::
 
 The optional ``--max-user-id`` creates a BotUser row so a specific MAX
 account can pass ``/auth/verify`` without first DMing the bot.
+
+Dev fixture data only. It refuses to run against a tenant that already
+mirrors a real Ayla catalog (override with ``--force``), and the
+master↔service edges it writes are stamped so catalog sync owns — and can
+therefore later reconcile away — every row this command created. See
+``SEED_EDGE_NAMESPACE`` for why that matters (DRF-967).
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import time
 from decimal import Decimal
 from typing import Any
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
@@ -31,6 +38,18 @@ from apps.tenancy.models import Tenant
 
 TENANT_SLUG = "formula-tela"
 TENANT_NAME = "Формула тела"
+
+# Namespace for the synthetic ``MasterService.ayla_specialist_service_id`` this
+# seed stamps on the edges it creates (DRF-967).
+#
+# The field is sync's ownership discriminator: NULL ⇒ operator-owned, and sync
+# never touches operator rows. An unstamped seed edge is therefore **immortal**
+# — no sync beat can reconcile it away, and on a tenant that also mirrors Ayla
+# the leftovers accumulate into false master↔service relations that break
+# service-specific discovery. Stamping hands the rows to sync: the first beat
+# either re-stamps one with Ayla's real edge id (if the pair exists upstream)
+# or reconciles it away (if it doesn't). uuid5 keeps re-runs idempotent.
+SEED_EDGE_NAMESPACE = uuid.UUID("6f9c4b1e-2d3a-5c8f-9e1b-7a4d0c6e5b2f")
 
 # `Any` because the seed dicts mix str/int/Decimal/bool/list values.
 # TypedDicts would be more precise but this is one-shot dev seed data.
@@ -98,6 +117,11 @@ WORKING_HOURS = [
 ]
 
 
+def _seed_edge_id(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> uuid.UUID:
+    """Deterministic synthetic edge id for a seeded master↔service pair."""
+    return uuid.uuid5(SEED_EDGE_NAMESPACE, f"{tenant.id}:{master.pk}:{service.pk}")
+
+
 class Command(BaseCommand):
     help = "Seed the formula-tela tenant with minimum catalog + schedule for Mini App dev."
 
@@ -113,15 +137,26 @@ class Command(BaseCommand):
             default="Dev tester",
             help="display_name for the seeded BotUser. Ignored without --max-user-id.",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Seed even when the tenant already mirrors a real Ayla catalog. "
+            "Off by default: this is dev fixture data and it does not belong in a "
+            "tenant whose catalog is the canonical mirror.",
+        )
 
     @transaction.atomic
-    def handle(self, *, max_user_id, max_display_name, **opts) -> None:
+    def handle(self, *, max_user_id, max_display_name, force, **opts) -> None:
         now = timezone.now()
 
         tenant, created = Tenant.objects.get_or_create(
             slug=TENANT_SLUG,
             defaults={"name": TENANT_NAME, "timezone": "Europe/Moscow"},
         )
+        if not force:
+            self._refuse_outside_dev()
+            if not created:
+                self._refuse_if_mirrored(tenant)
         self.stdout.write(
             self.style.SUCCESS(f"{'created' if created else 'reused'} Tenant({tenant.slug})")
         )
@@ -166,11 +201,21 @@ class Command(BaseCommand):
             self.stdout.write(f"  {'+' if mst_created else '='} Master {mst.name}")
 
             for svc_ext in spec["service_external_ids"]:
-                MasterService.all_tenants.update_or_create(
+                service = services_by_ext[svc_ext]
+                seed_edge_id = _seed_edge_id(tenant, mst, service)
+                edge, edge_created = MasterService.all_tenants.get_or_create(
                     tenant=tenant,
                     master=mst,
-                    service=services_by_ext[svc_ext],
+                    service=service,
+                    defaults={"ayla_specialist_service_id": seed_edge_id},
                 )
+                # Stamp only what we may stamp: adopt a NULL row left by an
+                # older seed run, but never overwrite a real Ayla edge id — on a
+                # --force run over a live mirror that would replace canonical
+                # provenance with a synthetic one.
+                if not edge_created and edge.ayla_specialist_service_id is None:
+                    edge.ayla_specialist_service_id = seed_edge_id
+                    edge.save(update_fields=["ayla_specialist_service_id", "updated_at"])
 
             for day, is_working, start, end, lunch_start, lunch_end in WORKING_HOURS:
                 WorkingHours.all_tenants.update_or_create(
@@ -204,3 +249,47 @@ class Command(BaseCommand):
             )
 
         self.stdout.write(self.style.SUCCESS("seed complete"))
+
+    @staticmethod
+    def _refuse_outside_dev() -> None:
+        """Abort when this does not look like a dev environment (DRF-967).
+
+        ``TENANT_SLUG`` here is the *live pilot's* slug, and the fixture creates
+        ``is_active`` + ``ACCEPTED`` masters — i.e. nationwide-discoverable
+        cards with no ``ayla_service_id``, whose tap lands in booking without a
+        service. The data-shaped guard below is the stronger check when the
+        mirror already exists, but it cannot fire on a tenant whose catalog was
+        built by hand or whose services predate the S3B re-key. An environment
+        check has no such blind spot, so both run.
+        """
+        from django.conf import settings
+
+        if not settings.DEBUG:
+            raise CommandError(
+                "DEBUG is False — this is dev fixture data and its tenant slug "
+                f"({TENANT_SLUG!r}) is also the live pilot's. Pass --force if you "
+                "really mean to seed here."
+            )
+
+    @staticmethod
+    def _refuse_if_mirrored(tenant: Tenant) -> None:
+        """Abort when the tenant's catalog is a live Ayla mirror (DRF-967).
+
+        ``CatalogService.ayla_service_id`` is the signal: only the catalog sync
+        writes it, this seed never does, and a mirrored edge cannot exist
+        without one — ``upsert_master_services`` resolves an edge's service
+        *by* ``ayla_service_id`` and skips the edge when there is no match. So
+        grounded services alone prove the mirror, and — unlike counting stamped
+        edges — the check cannot trip over this command's own seeded rows,
+        which must stay re-runnable.
+        """
+        mirrored_services = CatalogService.all_tenants.filter(
+            tenant=tenant, ayla_service_id__isnull=False
+        ).count()
+        if mirrored_services:
+            raise CommandError(
+                f"tenant {tenant.slug} already mirrors Ayla "
+                f"({mirrored_services} Ayla-grounded services) — refusing to inject "
+                "dev fixture data. Pass --force if you really mean to seed on top "
+                "of a live mirror."
+            )

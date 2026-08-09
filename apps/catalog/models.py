@@ -376,6 +376,16 @@ class MasterService(models.Model):
     can never be removed by a sync beat. Operator rows are deliberately NOT
     adopted — adoption would hand an operator-authored row to reconciliation.
 
+    One deliberate exception to "non-NULL ⇒ an Ayla id" (DRF-967): the dev
+    fixture command ``seed_dev_formula_tela`` stamps its own edges with
+    synthetic uuid5 values from its ``SEED_EDGE_NAMESPACE``, precisely so sync
+    owns and can later reconcile them — an unstamped fixture row is immortal,
+    which is how a pilot tenant ended up with 232 unreconcilable edges. On a
+    tenant that does sync, such a stamp is replaced by the real edge id on the
+    first beat that publishes the pair. Note the consequence for repair work:
+    ``cleanup_orphan_master_services`` targets NULL rows only, so seeded rows on
+    a dev tenant where sync never runs are outside its reach by design.
+
     **Row existence is the contract.** Every reader — booking create and
     reschedule, slot serving, the miniapp/master catalogs, the MM4 matrix —
     treats the presence of a row as "this master performs this service", and
