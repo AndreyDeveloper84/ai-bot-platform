@@ -7,9 +7,11 @@ salon flow (booking + visits + profile) AND the Ayla wellness flow
 that ran in prod since 2026-04.
 
 Salon buttons (3):
-  * 📅 Записаться — Mini App catalog screen
-  * 📋 Мои визиты — Mini App visits screen
-  * 👤 Профиль     — Mini App profile screen
+  * 📅 Записаться  — bot-native booking entry (``cb:menu:book``, DRF-963;
+                     was a Mini App catalog route)
+  * 📋 Мои записи  — bot-native booking lookup (``cb:menu:my_bookings``,
+                     DRF-963; was a Mini App visits route)
+  * 👤 Профиль     — Mini App profile screen (config-gated)
 
 Ayla wellness buttons (3):
   * 🍽 Дневник еды — prompts the user to send a food photo / description.
@@ -104,6 +106,11 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.menu.matching import (
+    CALLBACK_MENU_BOOK,
+    CALLBACK_MENU_HELP,
+    CALLBACK_MENU_MY_BOOKINGS,
+)
 from apps.skills.registry import register
 from apps.tenancy.context import current_tenant
 
@@ -458,11 +465,30 @@ def _welcome_buttons() -> list[dict[str, str]]:
 
     Order matters — emoji-prefixed labels keep the visual rhythm aligned
     with the legacy maxbot welcome (parity with prod since 2026-04).
+
+    ### DRF-963 (Wave 1, variant A) — booking actions are bot-native
+
+    «📅 Записаться» and «📋 Мои записи» used to be Mini App routes, so on
+    a deployment without ``MAX_BOT_WEB_APP`` / ``MAX_MINIAPP_URL`` the
+    welcome shipped NO booking entry at all, and even with a Mini App the
+    chat itself offered no way in — the pilot complaint DRF-963 exists to
+    fix. They are now ``cb:menu:*`` callbacks handled by
+    :class:`apps.skills.menu.skill.MenuSkill`, which translates each tap
+    into the canonical phrase the booking skill already claims. They ship
+    unconditionally, config or not.
+
+    The Mini App is NOT lost: «👤 Профиль» keeps the config-gated ladder,
+    and the S5 first-action grid still opens the catalog directly
+    (``open_catalog`` in :func:`_s5_first_action_buttons`).
     """
     web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
     miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
 
-    salon_buttons: list[dict[str, str]] = []
+    # Bot-native booking actions — always present, always work in chat.
+    salon_buttons: list[dict[str, str]] = [
+        {"label": "📅 Записаться", "callback": CALLBACK_MENU_BOOK},
+        {"label": "📋 Мои записи", "callback": CALLBACK_MENU_MY_BOOKINGS},
+    ]
     if web_app:
         # In-MAX Mini App — native UX. ``callback`` carries the route
         # payload that the Mini App reads from initData.start_param.
@@ -472,28 +498,25 @@ def _welcome_buttons() -> list[dict[str, str]]:
         # ``route=catalog`` shape was rejected with HTTP 400
         # ``proto.payload``. Use a flat slug instead and let the Mini
         # App's parseStartRoute() resolve it via direct lookup.
-        salon_buttons = [
-            {"label": "📅 Записаться", "callback": "open_catalog", "web_app": web_app},
-            {"label": "📋 Мои визиты", "callback": "open_visits", "web_app": web_app},
+        salon_buttons.append(
             {"label": "👤 Профиль", "callback": "open_profile", "web_app": web_app},
-        ]
+        )
     elif miniapp_url:
         # External link fallback — opens in the user's browser.
-        salon_buttons = [
-            {"label": "📅 Записаться", "url": _join(miniapp_url, "catalog")},
-            {"label": "📋 Мои визиты", "url": _join(miniapp_url, "visits")},
-            {"label": "👤 Профиль", "url": _join(miniapp_url, "profile")},
-        ]
-    # Else: zero-config — no salon buttons (only wellness + FAQ ship).
+        salon_buttons.append({"label": "👤 Профиль", "url": _join(miniapp_url, "profile")})
+    # Else: zero-config — no Mini App button; the bot-native pair still ships.
 
     # Wellness + FAQ buttons are always callback-typed — they trigger a
     # follow-up bot turn rather than a Mini App route. Anketa jumps
     # straight into the nutrition_anketa FSM via its own callback prefix.
+    # «❓ Помощь» (DRF-963) lists what the bot can do; «❓ Задать вопрос»
+    # stays the FAQ entry — the two are complementary, not duplicates.
     wellness_buttons = [
         {"label": "🍽 Дневник еды", "callback": "cb:welcome:food"},
         {"label": "💧 Вода", "callback": "cb:welcome:water"},
         {"label": "📊 Анкета", "callback": "cb:anketa:start"},
         {"label": "❓ Задать вопрос", "callback": "cb:welcome:ask"},
+        {"label": "❓ Помощь", "callback": CALLBACK_MENU_HELP},
     ]
     # S1 → S2 ack button (task #85). Sits под основными разделами —
     # «Начать» = ack «я готов(а)» → bot route к S2 privacy consent.

@@ -83,8 +83,8 @@ class SkillsConfig(AppConfig):
 
         # 2026-05-20 — welcome skill ports the /start greeting into a
         # dedicated handler that emits an inline keyboard with Mini App
-        # quick-actions (📅 Записаться / 📋 Мои визиты / 👤 Профиль / ❓ Задать
-        # вопрос). Registered BEFORE echo so /start lands here; the
+        # quick-actions (📅 Записаться / 📋 Мои записи / 👤 Профиль / ❓ Задать
+        # вопрос / ❓ Помощь). Registered BEFORE echo so /start lands here; the
         # cb:welcome:* callbacks route the «❓ Задать вопрос» tap to a
         # helpful prompt rather than verbatim echo. Restores the inline-
         # keyboard UX that mysite's MAX SDK shipped pre-platform-cutover.
@@ -100,5 +100,16 @@ class SkillsConfig(AppConfig):
         # themselves — leaving the inline button dead (echo-claimed).
         # Registered BEFORE echo because echo always matches.
         from apps.skills.payment_failed import skill as _payment_failed  # noqa: F401
+
+        # DRF-963 (Wave 1, variant A) — menu / honest-fallback skill. MUST be
+        # the LAST registration before echo: it claims every non-empty text
+        # turn, so anything it sees is a turn no other skill wanted — i.e. a
+        # turn that used to be echoed back verbatim (findings U-1 / U-5).
+        # Registering it here makes the widened booking coverage strictly
+        # additive: it cannot take a turn away from booking, FAQ or any
+        # wellness skill, which is what keeps CG-1..CG-8 regression-free.
+        # Echo stays registered after it and keeps the empty-text /
+        # attachment-only replies.
+        from apps.skills.menu import skill as _menu  # noqa: F401
 
         from apps.skills.echo import skill as _echo  # noqa: F401

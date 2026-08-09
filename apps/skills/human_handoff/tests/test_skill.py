@@ -139,7 +139,11 @@ class TestDispatcherGuard:
         conversation.refresh_from_db()
         assert conversation.state == "idle"
 
-        # Now a normal text → echo skill takes it (catch-all).
+        # Now a normal text → the menu skill takes it as the last-resort
+        # text responder (DRF-963 replaced the verbatim echo with the
+        # honest fallback). What matters here is that the bot SPEAKS again.
+        from apps.skills.menu.skill import FALLBACK_TEXT
+
         ctx_again = SkillContext(
             conversation=conversation,
             bot_user=bot_user,
@@ -149,4 +153,4 @@ class TestDispatcherGuard:
             result = dispatch(ctx_again)
         assert result is not None
         assert result.should_send is True
-        assert result.reply_text == "hello again"
+        assert result.reply_text == FALLBACK_TEXT

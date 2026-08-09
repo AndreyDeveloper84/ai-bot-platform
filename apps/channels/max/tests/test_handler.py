@@ -91,11 +91,15 @@ def _mark_welcomed(*, user_id="12345", chat_id="67890"):
 
 
 class TestHappyPath:
-    def test_echo_text_creates_full_chain(self, tenant_a, mock_send, fake_redis, settings):
+    def test_unrecognised_text_creates_full_chain(self, tenant_a, mock_send, fake_redis, settings):
+        """DRF-963 (U-5): an unrecognised turn no longer echoes — it gets
+        the honest fallback + main menu. The persistence chain is unchanged."""
+        from apps.skills.menu.skill import FALLBACK_TEXT
+
         settings.STRICT_TENANT_SCOPE = "strict"
         trace = uuid4()
         with tenant_scope(tenant_a), trace_id_scope(str(trace)):
-            _mark_welcomed()  # isolate from the #85 auto-welcome → exercise echo
+            _mark_welcomed()  # isolate from the #85 auto-welcome
             max_handler.handle_max_event(_payload(text="Привет"), trace_id=trace)
 
         # 1 BotUser created.
@@ -118,13 +122,16 @@ class TestHappyPath:
         assert msgs[0].content == "Привет"
         assert msgs[0].trace_id == trace
         assert msgs[1].role == "assistant"
-        assert msgs[1].content == "Привет"
+        assert msgs[1].content == FALLBACK_TEXT
         assert msgs[1].trace_id == trace
 
-        # send_message called once with the echoed text.
+        # send_message called once with the honest fallback — never an echo.
         assert len(mock_send) == 1
         assert mock_send[0]["chat_id"] == "67890"
-        assert mock_send[0]["text"] == "Привет"
+        assert mock_send[0]["text"] == FALLBACK_TEXT
+        assert mock_send[0]["text"] != "Привет"
+        # …and it carries the main menu so the user has a way forward.
+        assert mock_send[0]["attachments"]
 
 
 class TestWelcomeBranch:
@@ -432,16 +439,20 @@ class TestKeyboardPassThrough:
         att = attachments[0]
         assert att["type"] == "inline_keyboard"
         buttons = att["payload"]["buttons"]
-        # 8 rows (default columns=1): 3 salon link + 4 wellness/FAQ callback
+        # 9 rows (default columns=1): 2 bot-native salon callbacks (DRF-963)
+        # + 1 Mini App profile link + 5 wellness/FAQ/help callbacks
         # + 1 «▶️ Начать» S1→S2 ack button (task #85).
-        assert len(buttons) == 8
-        # First button is the link to /catalog.
-        assert buttons[0][0]["type"] == "link"
-        assert buttons[0][0]["url"] == "https://miniapp-dev.example/catalog"
-        # The «❓ Задать вопрос» callback — now second-to-last (the #85 «Начать»
-        # ack button was appended after the wellness/FAQ block).
+        assert len(buttons) == 9
+        # DRF-963: booking entry is a bot callback, not a Mini App link.
+        assert buttons[0][0]["type"] == "callback"
+        assert buttons[0][0]["payload"] == "cb:menu:book"
+        # Third button is the surviving Mini App link to /profile.
+        assert buttons[2][0]["type"] == "link"
+        assert buttons[2][0]["url"] == "https://miniapp-dev.example/profile"
+        # The «❓ Помощь» callback — second-to-last (the #85 «Начать»
+        # ack button is appended after the wellness/FAQ block).
         assert buttons[-2][0]["type"] == "callback"
-        assert buttons[-2][0]["payload"] == "cb:welcome:ask"
+        assert buttons[-2][0]["payload"] == "cb:menu:help"
         # Last button is the S1→S2 ack «▶️ Начать» (task #85).
         assert buttons[-1][0]["payload"] == "cb:welcome:start_s2"
 
@@ -519,8 +530,10 @@ class TestOutboundFailure:
 
         monkeypatch.setattr(max_handler, "send_message", fake_send_raises)
 
+        from apps.skills.menu.skill import FALLBACK_TEXT
+
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
-            _mark_welcomed()  # isolate from the #85 auto-welcome → exercise echo path
+            _mark_welcomed()  # isolate from the #85 auto-welcome
             with pytest.raises(MaxAPIError):
                 max_handler.handle_max_event(_payload(text="hi"))
 
@@ -529,4 +542,4 @@ class TestOutboundFailure:
         # outbound failed.
         msgs = list(Message.all_tenants.all().order_by("created_at"))
         assert [m.role for m in msgs] == ["user", "assistant"]
-        assert msgs[1].content == "hi"
+        assert msgs[1].content == FALLBACK_TEXT

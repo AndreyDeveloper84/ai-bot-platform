@@ -752,16 +752,25 @@ class TestSequenceD:
 
 
 class TestNegatives:
-    def test_selection_without_flow_state_goes_to_echo(
+    def test_selection_without_flow_state_is_not_claimed_by_booking(
         self,
         tenant: Tenant,
         bot_user: BotUser,
         conversation: Conversation,
     ) -> None:
+        """A selection-shaped turn with no live flow must NOT enter booking.
+
+        The observable proxy used to be a verbatim echo; DRF-963 replaced
+        that last-resort reply with the honest menu fallback. The invariant
+        under test — booking does not claim the turn, no pending row —
+        is unchanged.
+        """
+        from apps.skills.menu.skill import FALLBACK_TEXT
+
         with tenant_scope(tenant):
             result = dispatch(_ctx(conversation, bot_user, "Первую"))
         assert result is not None
-        assert result.reply_text == "Первую"  # echo
+        assert result.reply_text == FALLBACK_TEXT  # not booking, not echo
         assert _pending_rows() == []
 
     def test_foreign_record_id_rejected_no_pending(
@@ -982,21 +991,28 @@ class TestRoutingBoundaries:
         assert result.meta.get("skill") == "faq"
         assert _flow_state(conversation) is None
 
-    def test_offtopic_turn_with_fresh_flow_goes_to_echo(
+    def test_offtopic_turn_with_fresh_flow_is_not_claimed_by_booking(
         self,
         tenant: Tenant,
         bot_user: BotUser,
         conversation: Conversation,
     ) -> None:
-        """Review D-10 #2 — an off-topic turn while the flow is fresh
-        keeps its previous routing (echo, zero LLM calls) and the flow
-        state survives for the next selection-shaped turn."""
+        """Review D-10 #2 — an off-topic turn while the flow is fresh must
+        not be pulled into booking (zero LLM calls) and the flow state
+        survives for the next selection-shaped turn.
+
+        DRF-963 changed only the last-resort REPLY (echo → honest menu
+        fallback); «спасибо» must still cost zero LLM calls, which also
+        pins that the widened U-1 matcher doesn't over-claim gratitude.
+        """
+        from apps.skills.menu.skill import FALLBACK_TEXT
+
         with tenant_scope(tenant):
             _write_flow_state(conversation, flow="reschedule", bookings=[])
             with patch.object(OpenAIProvider, "complete") as llm:
                 result = dispatch(_ctx(conversation, bot_user, "спасибо"))
         assert result is not None
-        assert result.reply_text == "спасибо"  # echo
+        assert result.reply_text == FALLBACK_TEXT  # not booking, not echo
         assert llm.call_count == 0
         assert _flow_state(conversation) is not None
 

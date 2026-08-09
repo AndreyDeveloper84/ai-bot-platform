@@ -131,12 +131,15 @@ class TestResumeAfterResolve:
             conv = Conversation.all_tenants.get(bot_user=bu)
             task = AdminTask.all_tenants.get(conversation=conv)
             resolve_admin_task(task, resolution_note="done")
-            # Next message — should echo normally now.
+            # Next message — the bot should answer normally again.
             max_handler.handle_max_event(_payload(text="привет снова", mid="r2"))
 
-        # 2 sends: handoff reply + echo of "привет снова".
+        # 2 sends: handoff reply + the bot's reply to "привет снова".
+        # DRF-963: that reply is the honest fallback, no longer an echo.
+        from apps.skills.menu.skill import FALLBACK_TEXT
+
         assert len(mock_send) == 2
-        assert mock_send[1]["text"] == "привет снова"
+        assert mock_send[1]["text"] == FALLBACK_TEXT
         # State back to idle.
         conv.refresh_from_db()
         assert conv.state == "idle"
