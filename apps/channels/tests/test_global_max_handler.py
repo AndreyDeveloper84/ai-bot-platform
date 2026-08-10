@@ -121,3 +121,75 @@ def test_commercial_read_before_booking_raises_crosstenanterror(settings) -> Non
         assert current_tenant() is None
         with pytest.raises(CrossTenantError):
             list(BookingRequest.objects.all())
+
+
+def test_booking_callback_routes_to_booking_pipeline_not_concierge(
+    settings, mock_send, fake_redis, monkeypatch
+) -> None:
+    """DRF-988: a post-handoff ``cb:book:*`` tap routes into the booking
+    pipeline (``route_booking_callback``) — never to the concierge LLM, which
+    previously received the raw payload as chat text (the «2026 год» refusal).
+    """
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    seen: dict = {}
+
+    def fake_route(**kwargs):
+        seen["routed"] = kwargs.get("callback_text")
+        return DiscoveryReply(text="Выберите время:")
+
+    def fake_concierge(*args, **kwargs):
+        seen["concierge"] = True
+        return DiscoveryReply(text="concierge")
+
+    monkeypatch.setattr(max_handler, "route_booking_callback", fake_route)
+    monkeypatch.setattr(max_handler, "generate_concierge_reply", fake_concierge)
+
+    GlobalMaxHandler()(
+        _raw_entry(
+            _payload(text="cb:book:pick_date:abc:2026-08-11:def", user_id=7779, chat_id=8889)
+        )
+    )
+
+    assert seen.get("routed") == "cb:book:pick_date:abc:2026-08-11:def"
+    assert "concierge" not in seen
+    assert mock_send[-1]["text"] == "Выберите время:"
+    assert current_tenant() is None
+
+    # Routed callbacks must NOT be persisted as global user messages — the
+    # raw payload must never re-enter the concierge's LLM history (№1/3).
+    from apps.conversations.models import Message
+
+    assert (
+        Message.all_tenants.filter(
+            role="user", content="cb:book:pick_date:abc:2026-08-11:def"
+        ).count()
+        == 0
+    )
+
+
+def test_foreign_callback_still_goes_to_concierge(
+    settings, mock_send, fake_redis, monkeypatch
+) -> None:
+    """Non-booking ``cb:*`` payloads (e.g. cb:foo:…) keep the pre-DRF-988
+    behaviour: a normal concierge turn with the user turn persisted."""
+    from apps.conversations.models import Message
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    seen: dict = {}
+
+    def fake_concierge(*args, **kwargs):
+        seen["concierge"] = True
+        return DiscoveryReply(text="concierge reply")
+
+    monkeypatch.setattr(max_handler, "generate_concierge_reply", fake_concierge)
+    monkeypatch.setattr(
+        max_handler,
+        "route_booking_callback",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("must not route cb:foo")),
+    )
+
+    GlobalMaxHandler()(_raw_entry(_payload(text="cb:foo:bar", user_id=7780, chat_id=8890)))
+
+    assert seen.get("concierge") is True
+    assert Message.all_tenants.filter(role="user", content="cb:foo:bar").count() == 1

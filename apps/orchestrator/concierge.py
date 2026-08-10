@@ -21,7 +21,8 @@ The nationwide (tenant-less) concierge DM now runs on
   wrapper's SYNC scope after ``asyncio.run`` returns, so no sync-ORM call
   ever lands inside the event loop.
 - **Prompt** — :func:`build_concierge_system_prompt` composes the frozen
-  ``AYLA_MARKETPLACE_VOICE`` with the boundary rules (no-sales, helpful
+  ``AYLA_MARKETPLACE_VOICE`` with the current-date grounding block
+  (DRF-988), the boundary rules (no-sales, helpful
   restraint, S8 medical boundary — Constitution Art. X/XII, Journey Spec
   Stage 8) and the consent-gated ai-core memory block (W5 task 2).
 
@@ -36,11 +37,13 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from datetime import date
 from types import SimpleNamespace
 from typing import Any
 
 from ayla_ai_core import ActionType, AIConcierge, ToolResult
 from asgiref.sync import sync_to_async
+from django.utils import timezone
 
 from apps.conversations.services import (
     record_global_message,
@@ -63,6 +66,10 @@ logger = logging.getLogger(__name__)
 # Provider-routing tier slug — reuse the discovery tier so operator
 # overrides (SKILL_LLM_PROVIDER["discovery"]) keep working unchanged.
 CONCIERGE_SKILL = "discovery"
+
+# Russian weekday names for the date-grounding block (DRF-988) — weekday()
+# indexed, locale-independent (``strftime("%A")`` follows the OS locale).
+_WEEKDAYS_RU = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
 
 # CandidateContext.tenant_id is mandatory non-empty in ai-core (v0.7.0).
 # The concierge is tenant-less by design; this sentinel is a log/scope
@@ -243,16 +250,30 @@ def build_concierge_system_prompt(
     *,
     memory_block: str = "",
     extra_system: str = "",
+    today: date | None = None,
 ) -> str:
     """Compose the concierge system prompt.
 
     Frozen ``AYLA_MARKETPLACE_VOICE`` fields (consumed, never modified) +
     discovery framing + boundary rules (no-sales, helpful restraint, S8
     medical boundary) + optional consent-gated memory block (W5 task 2).
+
+    ``today`` grounds the model in the current date (DRF-988): without it
+    the model lives at its training cutoff and rejects real near-future
+    booking dates (e.g. август 2026) as «далёкое будущее». Defaults to the
+    Django clock (``timezone.localdate()``, same as the legacy concierge);
+    tests pass an explicit date for determinism.
     """
+    if today is None:
+        today = timezone.localdate()
     voice = _discovery_voice_fields()
     parts = [
         f"Ты — {voice['assistant_name']}, AI-помощник «{voice['business_name']}».",
+        # DRF-988 — date grounding (date + weekday + timezone).
+        f"Сегодня: {today.isoformat()} ({_WEEKDAYS_RU[today.weekday()]}), "
+        f"часовой пояс {timezone.get_current_timezone()}. Используй эту дату "
+        "для парсинга относительных («завтра», «послезавтра») и конкретных "
+        "дат записи.",
         "Ты помогаешь клиенту по всей стране подобрать подходящего "
         f"{voice['domain']}-мастера и записаться — конкретный салон выбирается "
         "только в момент записи.",

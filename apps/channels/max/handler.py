@@ -130,7 +130,11 @@ from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
 )
-from apps.orchestrator.handoff import handoff_to_booking
+from apps.orchestrator.handoff import (
+    BOOKING_CALLBACK_PREFIXES,
+    handoff_to_booking,
+    route_booking_callback,
+)
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
@@ -569,11 +573,22 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # Prior short-term history (before this turn) feeds the discovery prompt.
     history = short_term.recall(conversation.id)
 
+    # DRF-988 — post-handoff booking taps are NOT chat text: they route into
+    # tenant T's booking pipeline (branch 2.5 below) and must not pollute the
+    # global dialog history that grounds the concierge LLM (raw cb:book:*
+    # payloads in history provoked hallucinated replies, e.g. the «2026 год»
+    # refusal). Skip user-turn persistence for them; the assistant reply is
+    # still recorded as usual.
+    is_booking_callback = event.text.startswith(BOOKING_CALLBACK_PREFIXES)
+
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    user_msg = record_global_message(
-        conversation, role="user", content=event.text, trace_id=trace_id
-    )
-    short_term.append(conversation.id, role="user", content=event.text)
+    if is_booking_callback:
+        user_msg = None
+    else:
+        user_msg = record_global_message(
+            conversation, role="user", content=event.text, trace_id=trace_id
+        )
+        short_term.append(conversation.id, role="user", content=event.text)
 
     logger.info(
         "channels.max.global.received bot_user=%s conversation=%s text_len=%d",
@@ -604,6 +619,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      generate_discovery_reply this turn.
     #   2. Discovery → booking handoff (the user tapped a master card → transition
     #      into tenant T's booking flow, #1020).
+    #   2.5. Post-handoff booking taps (DRF-988): pick_date / pick_slot /
+    #      confirm / cancel route back into tenant T's skill pipeline — before
+    #      this they fell through to the concierge as raw text (the «2026 год»
+    #      refusal instead of the next booking step).
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
     was_memory_command = False
@@ -620,6 +639,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
+    elif event.text.startswith(BOOKING_CALLBACK_PREFIXES):
+        reply = route_booking_callback(
+            global_bot_user=bot_user,
+            callback_text=event.text,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+        )
     else:
         # An active memory identity = canonical ayla_user_id + PERSONAL_DATA
         # consent (green's 152-ФЗ basis). While memory is dormant (no consent)
@@ -703,7 +729,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     event.text,
                     bot_user=bot_user,
                     conversation=conversation,
-                    user_message_id=user_msg.id,
+                    # Booking callbacks never reach this branch (2.5 above), so
+                    # the skipped user-turn persistence can't leak a None here.
+                    user_message_id=user_msg.id if user_msg is not None else None,
                     memory_block=memory_block,
                     extra_system=(
                         render_personal_context(personal_context) if personal_context else ""
