@@ -5,6 +5,7 @@ tool dispatcher, and the end-to-end concierge turn via ayla-ai-core AIConcierge.
 from __future__ import annotations
 
 import json
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -70,6 +71,23 @@ class TestDispatchTool:
         result = _dispatch_tool(self._tc("show_masters", "[1, 2]"), None)
         assert result.action_type == "show_masters"
         assert result.action_data["arguments"] == {}
+
+
+class TestBuildConciergeSystemPrompt:
+    """DRF-988 — the concierge system prompt must carry the current date."""
+
+    def test_today_grounding_block(self) -> None:
+        prompt = concierge.build_concierge_system_prompt(today=date(2026, 8, 10))
+
+        assert "Сегодня: 2026-08-10 (понедельник)" in prompt
+        assert "часовой пояс" in prompt
+
+    def test_today_defaults_to_clock(self, monkeypatch) -> None:
+        monkeypatch.setattr(concierge.timezone, "localdate", lambda: date(2026, 8, 10))
+
+        prompt = concierge.build_concierge_system_prompt()
+
+        assert "Сегодня: 2026-08-10" in prompt
 
 
 @pytest.mark.django_db(transaction=True)
@@ -198,6 +216,26 @@ class TestGenerateConciergeReply:
 
         system = captured["messages"][0]["content"]
         assert "[ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ]" not in system
+
+    def test_system_prompt_contains_current_date(self, monkeypatch) -> None:
+        captured: dict = {}
+
+        async def _complete(messages, model: str = "", tools=None):  # noqa: ANN001
+            captured["messages"] = messages
+            return CompletionResult(text="ok")
+
+        provider = AsyncMock()
+        provider.complete.side_effect = _complete
+        monkeypatch.setattr(concierge, "get_router", lambda: _router_returning(provider))
+        monkeypatch.setattr(concierge.timezone, "localdate", lambda: date(2026, 8, 10))
+        bot_user, conversation = self._bot_user_and_conversation()
+
+        generate_concierge_reply("привет", bot_user=bot_user, conversation=conversation)
+
+        system = captured["messages"][0]["content"]
+        # DRF-988: without the current date the model lives at its training
+        # cutoff and rejects real near-future booking dates as far future.
+        assert "Сегодня: 2026-08-10" in system
 
     def test_show_masters_renders_cards_in_sync_scope(self, monkeypatch) -> None:
         tc = ToolCall(id="c1", name="show_masters", arguments={"city": "Пенза"})
