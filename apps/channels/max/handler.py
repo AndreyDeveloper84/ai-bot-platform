@@ -573,11 +573,22 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # Prior short-term history (before this turn) feeds the discovery prompt.
     history = short_term.recall(conversation.id)
 
+    # DRF-988 — post-handoff booking taps are NOT chat text: they route into
+    # tenant T's booking pipeline (branch 2.5 below) and must not pollute the
+    # global dialog history that grounds the concierge LLM (raw cb:book:*
+    # payloads in history provoked hallucinated replies, e.g. the «2026 год»
+    # refusal). Skip user-turn persistence for them; the assistant reply is
+    # still recorded as usual.
+    is_booking_callback = event.text.startswith(BOOKING_CALLBACK_PREFIXES)
+
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    user_msg = record_global_message(
-        conversation, role="user", content=event.text, trace_id=trace_id
-    )
-    short_term.append(conversation.id, role="user", content=event.text)
+    if is_booking_callback:
+        user_msg = None
+    else:
+        user_msg = record_global_message(
+            conversation, role="user", content=event.text, trace_id=trace_id
+        )
+        short_term.append(conversation.id, role="user", content=event.text)
 
     logger.info(
         "channels.max.global.received bot_user=%s conversation=%s text_len=%d",
@@ -718,7 +729,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     event.text,
                     bot_user=bot_user,
                     conversation=conversation,
-                    user_message_id=user_msg.id,
+                    # Booking callbacks never reach this branch (2.5 above), so
+                    # the skipped user-turn persistence can't leak a None here.
+                    user_message_id=user_msg.id if user_msg is not None else None,
                     memory_block=memory_block,
                     extra_system=(
                         render_personal_context(personal_context) if personal_context else ""
