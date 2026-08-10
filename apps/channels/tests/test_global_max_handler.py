@@ -121,3 +121,37 @@ def test_commercial_read_before_booking_raises_crosstenanterror(settings) -> Non
         assert current_tenant() is None
         with pytest.raises(CrossTenantError):
             list(BookingRequest.objects.all())
+
+
+def test_booking_callback_routes_to_booking_pipeline_not_concierge(
+    settings, mock_send, fake_redis, monkeypatch
+) -> None:
+    """DRF-988: a post-handoff ``cb:book:*`` tap routes into the booking
+    pipeline (``route_booking_callback``) — never to the concierge LLM, which
+    previously received the raw payload as chat text (the «2026 год» refusal).
+    """
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    seen: dict = {}
+
+    def fake_route(**kwargs):
+        seen["routed"] = kwargs.get("callback_text")
+        return DiscoveryReply(text="Выберите время:")
+
+    def fake_concierge(*args, **kwargs):
+        seen["concierge"] = True
+        return DiscoveryReply(text="concierge")
+
+    monkeypatch.setattr(max_handler, "route_booking_callback", fake_route)
+    monkeypatch.setattr(max_handler, "generate_concierge_reply", fake_concierge)
+
+    GlobalMaxHandler()(
+        _raw_entry(
+            _payload(text="cb:book:pick_date:abc:2026-08-11:def", user_id=7779, chat_id=8889)
+        )
+    )
+
+    assert seen.get("routed") == "cb:book:pick_date:abc:2026-08-11:def"
+    assert "concierge" not in seen
+    assert mock_send[-1]["text"] == "Выберите время:"
+    assert current_tenant() is None

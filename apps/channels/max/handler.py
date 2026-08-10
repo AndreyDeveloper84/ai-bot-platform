@@ -130,7 +130,11 @@ from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
 )
-from apps.orchestrator.handoff import handoff_to_booking
+from apps.orchestrator.handoff import (
+    BOOKING_CALLBACK_PREFIXES,
+    handoff_to_booking,
+    route_booking_callback,
+)
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
@@ -604,6 +608,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      generate_discovery_reply this turn.
     #   2. Discovery → booking handoff (the user tapped a master card → transition
     #      into tenant T's booking flow, #1020).
+    #   2.5. Post-handoff booking taps (DRF-988): pick_date / pick_slot /
+    #      confirm / cancel route back into tenant T's skill pipeline — before
+    #      this they fell through to the concierge as raw text (the «2026 год»
+    #      refusal instead of the next booking step).
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
     was_memory_command = False
@@ -620,6 +628,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
+    elif event.text.startswith(BOOKING_CALLBACK_PREFIXES):
+        reply = route_booking_callback(
+            global_bot_user=bot_user,
+            callback_text=event.text,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+        )
     else:
         # An active memory identity = canonical ayla_user_id + PERSONAL_DATA
         # consent (green's 152-ФЗ basis). While memory is dormant (no consent)

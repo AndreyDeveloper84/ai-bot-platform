@@ -277,3 +277,157 @@ def handoff_to_booking(
     )
     action_data = result.action_data if result is not None else None
     return DiscoveryReply(text=reply_text, action_data=action_data)
+
+
+# ---------------------------------------------------------------------------
+# Post-handoff booking callbacks (DRF-988, Variant 1 — owner GO 2026-08-10)
+# ---------------------------------------------------------------------------
+
+# The booking callback namespace, routed back into tenant T's skill pipeline.
+# Same S1 anti-touch contract as ``_CALLBACK_BOOK_PICK_MASTER`` above —
+# literals mirroring apps/bookings/keyboards.py, never re-derived. The global
+# MAX handler matches on this tuple before falling through to the concierge.
+BOOKING_CALLBACK_PREFIXES = (
+    "cb:book:pick_master:",
+    "cb:book:pick_date:",
+    "cb:book:pick_slot:",
+    "cb:book:confirm:",
+    "cb:book:cancel:",
+)
+
+# Deterministic reply when the tap's tenant can no longer be resolved (stale
+# keyboard after pending-row cleanup, forged id, flag-off int ids). Mirrors
+# the booking skill's own stale-context reply — the user restarts selection.
+_STALE_BOOKING_CALLBACK_REPLY = "Контекст записи устарел. Начните выбор услуги заново."
+
+
+def _resolve_booking_callback_tenant(callback_text: str):
+    """Resolve tenant T for a post-handoff ``cb:book:*`` tap, or None.
+
+    pick_master / pick_date / pick_slot carry the master id as the first
+    payload segment (canonical Ayla UUID under the pilot flag — the same id
+    family the handoff dispatch stamps); confirm / cancel carry the
+    :class:`apps.booking.models.PendingBookingAction` token. The master
+    lookup goes through :func:`apps.marketplace.discovery.get_master` — the
+    SOLE sanctioned cross-tenant catalog carve-out (MKT1); the token lookup
+    uses the same ``all_tenants`` + explicit-id shape the gate skill uses.
+    Flag-off native int ids are deliberately NOT resolved: the pilot runs
+    ``BOOKING_VIA_AYLA_REST``, and an int staff id is not unique across
+    tenants.
+    """
+    from apps.booking.models import PendingBookingAction
+    from apps.marketplace.discovery import get_master
+    from apps.tenancy.models import Tenant
+
+    if callback_text.startswith(("cb:book:confirm:", "cb:book:cancel:")):
+        raw = callback_text.rsplit(":", 1)[-1].strip()
+        try:
+            token = uuid.UUID(raw)
+        except (ValueError, AttributeError):
+            return None
+        row = PendingBookingAction.all_tenants.filter(pk=token).only("tenant").first()
+        return row.tenant if row is not None else None
+
+    for prefix in ("cb:book:pick_master:", "cb:book:pick_date:", "cb:book:pick_slot:"):
+        if callback_text.startswith(prefix):
+            raw_master = callback_text[len(prefix) :].split(":", 1)[0].strip()
+            try:
+                master_id = uuid.UUID(raw_master)
+            except (ValueError, AttributeError):
+                return None
+            card = get_master(master_id)
+            if card is None:  # unknown or no longer bookable — never dispatch
+                return None
+            return Tenant.objects.filter(id=card.tenant_id).first()
+    return None
+
+
+def route_booking_callback(
+    *,
+    global_bot_user,
+    callback_text: str,
+    chat_id: str = "",
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply:
+    """Route a post-handoff ``cb:book:*`` tap back into tenant T's skill pipeline.
+
+    DRF-988: after the handoff, the booking skill renders its date / slot /
+    confirm keyboards INTO the global chat, but the global MAX handler only
+    routed ``cb:discover:book:`` — every booking tap fell through to the
+    concierge as raw text, where the model produced free-text answers (the
+    «2026 год» refusal) instead of the next booking step. This is the
+    multi-turn counterpart of :func:`handoff_to_booking` (the follow-up its
+    docstring named): resolve T from the callback, then delegate into the
+    SAME per-tenant entrypoint (``apps.skills.registry.dispatch``) with the
+    raw payload — the booking skill's deterministic pick_date / pick_slot
+    short-circuits and the gate skill's confirm / cancel do the rest.
+    """
+    from apps.conversations.services import resolve_active_conversation
+    from apps.identity.services import resolve_or_create_bot_user
+    from apps.skills.base import SkillContext
+    from apps.skills.registry import dispatch as skill_dispatch
+    from apps.tenancy.context import tenant_scope
+
+    tenant = _resolve_booking_callback_tenant(callback_text)
+    if tenant is None:
+        logger.info(
+            "marketplace.booking_callback.unresolved callback=%r trace=%s",
+            callback_text[:60],
+            trace_id,
+        )
+        return DiscoveryReply(text=_STALE_BOOKING_CALLBACK_REPLY)
+
+    with tenant_scope(tenant):
+        per_tenant_bot_user = resolve_or_create_bot_user(
+            channel=global_bot_user.channel,
+            channel_user_id=global_bot_user.channel_user_id,
+            chat_id=chat_id or global_bot_user.chat_id,
+            display_name=global_bot_user.display_name,
+            phone=global_bot_user.phone,
+        )
+        conversation = resolve_active_conversation(per_tenant_bot_user)
+        if conversation is None:
+            logger.warning(
+                "marketplace.booking_callback.no_conversation tenant=%s trace=%s",
+                tenant.id,
+                trace_id,
+            )
+            return DiscoveryReply(text=_STALE_BOOKING_CALLBACK_REPLY)
+
+        # Funnel visibility, symmetric with marketplace.handoff.entered.
+        emit(
+            "marketplace.booking_callback.routed",
+            payload={
+                "tenant_id": str(tenant.id),
+                "bot_user_id": str(per_tenant_bot_user.id),
+                "callback": ":".join(callback_text.split(":")[:3]),
+            },
+        )
+
+        result = skill_dispatch(
+            SkillContext(
+                conversation=conversation,
+                bot_user=per_tenant_bot_user,
+                message_text=callback_text,
+                trace_id=str(trace_id) if trace_id else "",
+            )
+        )
+
+        # Post-dispatch handoff (#1047), symmetric with handoff_to_booking:
+        # the booking/gate skill may escalate to a human; create_admin_task
+        # requires tenant_scope(T), which we are inside. The conversation
+        # already carries the booking turns here (unlike the freshly-resolved
+        # handoff conversation), so no extra context line is recorded.
+        if result is not None and getattr(result, "should_handoff", False):
+            from apps.handoff.models import AdminTask
+            from apps.handoff.services import create_admin_task
+
+            create_admin_task(
+                conversation,
+                task_type=AdminTask.TaskType.HANDOFF,
+                reason=result.handoff_reason or "booking_handoff",
+            )
+
+    reply_text = (result.reply_text if result is not None else "") or _STALE_BOOKING_CALLBACK_REPLY
+    action_data = result.action_data if result is not None else None
+    return DiscoveryReply(text=reply_text, action_data=action_data)

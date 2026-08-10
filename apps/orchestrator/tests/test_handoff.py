@@ -17,14 +17,15 @@ has any) and NO dispatch.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
+from apps.booking.models import PendingBookingAction
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
-from apps.identity.services import resolve_or_create_global_bot_user
-from apps.orchestrator.handoff import handoff_to_booking
+from apps.identity.services import resolve_or_create_bot_user, resolve_or_create_global_bot_user
+from apps.orchestrator.handoff import handoff_to_booking, route_booking_callback
 from apps.skills.base import SkillResult
 from apps.tenancy.context import current_tenant, tenant_scope
 from apps.tenancy.exceptions import CrossTenantError
@@ -320,3 +321,90 @@ def test_bridge_read_invariant_raises_at_no_tenant(settings) -> None:
         assert current_tenant() is None
         with pytest.raises(CrossTenantError):
             list(CatalogMaster.objects.all())
+
+
+# ---------------------------------------------------------------------------
+# DRF-988 — post-handoff cb:book:* taps route back into T's skill pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_route_pick_date_dispatches_into_tenant_pipeline(settings, monkeypatch) -> None:
+    """The DRF-988 funnel: a pick_date tap must reach the skill pipeline inside
+    tenant_scope(T) with the raw payload verbatim — not the concierge."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-route")
+    master = _master(t)
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="600", chat_id="600")
+
+    seen: dict = {}
+
+    def fake_dispatch(ctx):
+        seen["tenant"] = current_tenant()
+        seen["text"] = ctx.message_text
+        seen["bot_user_tenant"] = ctx.bot_user.tenant_id
+        return SkillResult(reply_text="Выберите время:", action_data={"keyboard": []})
+
+    monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
+    callback = f"cb:book:pick_date:{master.id}:2026-08-11:{uuid4()}"
+
+    reply = route_booking_callback(global_bot_user=gbu, callback_text=callback, chat_id="600")
+
+    assert reply.text == "Выберите время:"
+    assert reply.action_data == {"keyboard": []}
+    assert seen["tenant"].id == t.id  # dispatch ran INSIDE tenant_scope(T)
+    assert seen["text"] == callback  # raw payload, verbatim
+    assert seen["bot_user_tenant"] == t.id  # per-tenant BotUser bridged into T
+    assert current_tenant() is None  # scope released after routing
+
+
+def test_route_confirm_resolves_tenant_from_pending_token(settings, monkeypatch) -> None:
+    """confirm/cancel taps carry only the PendingBookingAction token — tenant
+    resolution goes through the row (globally-unique UUID pk, all_tenants)."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    t = _tenant("t-token")
+    with tenant_scope(t):
+        bu = resolve_or_create_bot_user(channel="max", channel_user_id="601", chat_id="601")
+    row = PendingBookingAction.all_tenants.create(
+        tenant=t,
+        bot_user=bu,
+        kind=PendingBookingAction.Kind.CONFIRM,
+        payload={},
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="601", chat_id="601")
+
+    seen: dict = {}
+
+    def fake_dispatch(ctx):
+        seen["tenant"] = current_tenant()
+        return SkillResult(reply_text="Записала вас!")
+
+    monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
+
+    reply = route_booking_callback(
+        global_bot_user=gbu, callback_text=f"cb:book:confirm:{row.pk}", chat_id="601"
+    )
+
+    assert reply.text == "Записала вас!"
+    assert seen["tenant"].id == t.id
+    assert current_tenant() is None
+
+
+def test_route_unresolvable_callbacks_reply_stale_without_dispatch(settings, monkeypatch) -> None:
+    """Unknown master id, unknown token, flag-off int ids and garbage payloads
+    never reach the skill pipeline — deterministic stale-context reply."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="602", chat_id="602")
+    called: list = []
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
+
+    for callback in (
+        f"cb:book:pick_date:{uuid4()}:2026-08-11:{uuid4()}",  # unknown master
+        f"cb:book:confirm:{uuid4()}",  # unknown token
+        "cb:book:pick_date:12345:2026-08-11:678",  # flag-off int ids — never resolved
+        "cb:book:confirm:not-a-uuid",  # garbage
+    ):
+        reply = route_booking_callback(global_bot_user=gbu, callback_text=callback, chat_id="602")
+        assert "устарел" in reply.text, callback
+    assert called == []
