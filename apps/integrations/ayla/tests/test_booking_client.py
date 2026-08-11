@@ -646,7 +646,7 @@ class TestRateLimitRetry:
         assert [s.time for s in out] == ["14:00"]
 
     def test_429_retry_after_is_capped(self, monkeypatch) -> None:
-        """A huge Retry-After header must be clipped to RATE_LIMIT_MAX_WAIT_S."""
+        """A huge Retry-After header must be clipped to 1.5 s (RATE_LIMIT_MAX_WAIT_S)."""
         calls: list[httpx.Request] = []
         sleeps: list[float] = []
 
@@ -673,6 +673,31 @@ class TestRateLimitRetry:
         assert len(sleeps) == 1
         # Jitter clips the capped Retry-After to 75-100 % of the max wait.
         assert bc.RATE_LIMIT_MAX_WAIT_S * 0.75 <= sleeps[0] <= bc.RATE_LIMIT_MAX_WAIT_S
+        assert sleeps[0] <= 1.5
+
+    def test_429_total_sleep_budget_is_capped_at_three_seconds(self, monkeypatch) -> None:
+        """The worst-case per-call synchronous sleep is ≤ 3 s."""
+        calls: list[httpx.Request] = []
+        sleeps: list[float] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "300"},
+                json={"error": {"code": "RATE_LIMITED"}},
+            )
+
+        monkeypatch.setattr(bc, "RATE_LIMIT_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr(bc.time, "sleep", sleeps.append)
+        with pytest.raises(bc.BookingUnavailableError, match="rate_limited"):
+            _client_with(handler).get_available_times(
+                specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+            )
+        assert len(calls) == bc.RATE_LIMIT_MAX_RETRIES + 1
+        assert sum(sleeps) <= 3.0
+        for s in sleeps:
+            assert s <= bc.RATE_LIMIT_MAX_WAIT_S
 
 
 class TestSlotCache:

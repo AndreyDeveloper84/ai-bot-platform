@@ -59,9 +59,12 @@ _BREAKER_NAME = "ayla.booking"
 
 # DRF-997: bounded retry for transient 429 responses. Retry-After is respected
 # up to a cap so a single slow backend header cannot block the worker forever.
-RATE_LIMIT_MAX_RETRIES = 3
+# Total synchronous sleep budget per call is RATE_LIMIT_MAX_RETRIES sleeps,
+# each capped at RATE_LIMIT_MAX_WAIT_S, currently ≤ 3 s to keep the single-
+# threaded pilot consumer responsive.
+RATE_LIMIT_MAX_RETRIES = 2
 RATE_LIMIT_BACKOFF_BASE_S = 0.05
-RATE_LIMIT_MAX_WAIT_S = 5.0
+RATE_LIMIT_MAX_WAIT_S = 1.5
 
 # DRF-997: short-lived cache for slots/dates lookups. TTL is long enough to
 # absorb repeated picker renders / re-taps but short enough to keep the
@@ -533,10 +536,12 @@ class AylaBookingHTTPClient:
             The bounded 429 retry uses ``time.sleep``, which blocks the
             calling thread. This client is synchronous and is invoked from
             async skill code, so the sleep blocks the caller's coroutine
-            for up to :data:`RATE_LIMIT_MAX_WAIT_S` per attempt. The sleep
-            is bounded (≤{RATE_LIMIT_MAX_WAIT_S:.0f} s, ≤{RATE_LIMIT_MAX_RETRIES} retries),
-            but the proper long-term fix is to make the client async or run
-            it in a thread pool. That refactor is out of scope for DRF-997.
+            for up to :data:`RATE_LIMIT_MAX_WAIT_S` s per attempt. The total
+            synchronous sleep budget is ≤{RATE_LIMIT_MAX_RETRIES * RATE_LIMIT_MAX_WAIT_S:.1f} s
+            ({RATE_LIMIT_MAX_RETRIES} retries × {RATE_LIMIT_MAX_WAIT_S} s cap), which keeps the
+            single-threaded pilot consumer responsive. The proper long-term fix
+            is to make the client async or run it in a thread pool; that
+            refactor is out of scope for DRF-997.
         """
         now = time.monotonic()
         if self._circuit.is_open(now=now):
