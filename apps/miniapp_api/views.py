@@ -1266,6 +1266,9 @@ def _cancel_via_ayla(bot_user, booking_id: str) -> HttpResponse:
             external_user_id=external_user_id_for(bot_user),
             appointment_id=str(booking_id),
             idempotency_key=idempotency_key,
+            specialist_id=str(proxy.specialist_id) if proxy.specialist_id else None,
+            service_id=str(proxy.service_id) if proxy.service_id else None,
+            date=proxy.start_at.date().isoformat() if proxy.start_at else None,
         )
     except BookingBadRequestError as exc:
         if exc.status_code == 404 or (exc.code or "").upper() == "NOT_FOUND":

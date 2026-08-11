@@ -22,7 +22,8 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
-from apps.skills.booking.tools import cancel_booking, execute_cancel
+from apps.skills.booking.provider import YClientsScheduleUnavailableError
+from apps.skills.booking.tools import SCHEDULE_UNAVAILABLE_TEXT, cancel_booking, execute_cancel
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -262,6 +263,25 @@ class TestExecuteCancel:
                 bot_user=bot_user,
             )
         assert result.error == "yclients_cancel_failure"
+        booking.refresh_from_db()
+        assert booking.status == BookingRequest.Status.CONFIRMED
+
+    def test_schedule_unavailable_returns_retry_text(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """DRF-997: 429 on cancel is transient; do not flip status."""
+        booking = _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.cancel_exc = YClientsScheduleUnavailableError("429")
+        with tenant_scope(tenant):
+            result = execute_cancel(
+                client=client,
+                payload={"record_id": 555},
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
         booking.refresh_from_db()
         assert booking.status == BookingRequest.Status.CONFIRMED
 

@@ -92,6 +92,7 @@ from apps.skills.booking.lookup import (
     is_personal_booking_lookup,
     looks_like_flow_selection,
 )
+from apps.skills.booking.provider import YClientsScheduleUnavailableError
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
@@ -100,6 +101,7 @@ from apps.skills.booking.tools import (
     CANCEL_BOOKING_TOOL_SPEC,
     CONFIRM_BOOKING_TOOL_SPEC,
     RESCHEDULE_BOOKING_TOOL_SPEC,
+    SCHEDULE_UNAVAILABLE_TEXT,
     SHOW_MASTERS_TOOL_SPEC,
     SHOW_MY_BOOKINGS_TOOL_SPEC,
     SHOW_SLOTS_TOOL_SPEC,
@@ -356,6 +358,16 @@ class BookingSkill:
             # so the rest of this flow is provider-agnostic.
             yclients = get_booking_provider(bot_user=context.bot_user)
             services = yclients.get_services()
+        except YClientsScheduleUnavailableError as exc:
+            # DRF-997: transient 429/outage on the service catalog is NOT a
+            # manager handoff. Surface the deterministic retry message so the
+            # user can try again in a moment.
+            logger.warning("booking.prefetch.schedule_unavailable err=%s", exc)
+            return _build_skill_result(
+                text=SCHEDULE_UNAVAILABLE_TEXT,
+                tool_calls_made=[],
+                confidence=_CONFIDENCE_OK,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("booking.prefetch.failed err=%s", exc)
             return _handoff(
@@ -610,6 +622,15 @@ class BookingSkill:
             tenant_id=tenant_id,
         )
 
+        # DRF-997: transient schedule-service outage is surfaced as a
+        # deterministic retry message. Do NOT hand off to a manager.
+        if tool_result.error == "schedule_unavailable":
+            return _build_skill_result(
+                text=tool_result.text,
+                tool_calls_made=tool_calls_made,
+                confidence=_CONFIDENCE_OK,
+            )
+
         if handoff_reason:
             return _handoff(
                 tool_calls_made=tool_calls_made,
@@ -765,9 +786,46 @@ def _execute_tool(
     service_lookup: dict[int | str, str],
     tenant_id: str,
 ) -> tuple[BookingToolResult, str]:
-    """Run the chosen tool. Returns ``(result, handoff_reason_or_empty)``."""
+    """Run the chosen tool. Returns ``(result, handoff_reason_or_empty)``.
+
+    Catches :class:`YClientsScheduleUnavailableError` raised while building the
+    anti-hallucination allow-sets (e.g. a 429 on ``get_staff``) and surfaces it
+    as the deterministic retry message instead of letting it propagate.
+    """
+    try:
+        return _dispatch_tool(
+            tool_name=tool_name,
+            arguments=arguments,
+            tenant=tenant,
+            bot_user=bot_user,
+            yclients=yclients,
+            allowed_service_ids=allowed_service_ids,
+            service_lookup=service_lookup,
+            tenant_id=tenant_id,
+        )
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.tool.schedule_unavailable tool=%s err=%s", tool_name, exc)
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable"), ""
+
+
+def _dispatch_tool(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    tenant: Any,
+    bot_user: Any,
+    yclients: Any,
+    allowed_service_ids: AbstractSet[int | str],
+    service_lookup: dict[int | str, str],
+    tenant_id: str,
+) -> tuple[BookingToolResult, str]:
+    """Tool dispatch implementation (wrapped by :func:`_execute_tool`)."""
     if tool_name == SHOW_MASTERS_TOOL_SPEC["name"]:
         result = show_masters(client=yclients, arguments=arguments, tenant_id=tenant_id)
+        # DRF-997: transient schedule outage (e.g. 429) is returned to the
+        # user as a retry message, not a manager handoff.
+        if result.error == "schedule_unavailable":
+            return result, ""
         if result.error:
             return result, "booking_yclients_failure"
         if not result.masters:
@@ -789,6 +847,10 @@ def _execute_tool(
         )
         if result.error == "invalid_master_id":
             return result, "booking_invalid_master_id"
+        # DRF-997: transient schedule outage (e.g. 429) is returned to the
+        # user as a retry message, not a manager handoff.
+        if result.error == "schedule_unavailable":
+            return result, ""
         if result.error:
             return result, "booking_yclients_failure"
         return result, ""
@@ -810,6 +872,10 @@ def _execute_tool(
             return result, "booking_invalid_master_id"
         if result.error == "invalid_service_id":
             return result, "booking_invalid_service_id"
+        # DRF-997: transient schedule outage (e.g. 429) is returned to the
+        # user as a retry message, not a manager handoff.
+        if result.error == "schedule_unavailable":
+            return result, ""
         if result.error in {"yclients_unavailable", "yclients_api_error"}:
             return result, "booking_yclients_failure"
         if result.error:
@@ -825,6 +891,10 @@ def _execute_tool(
         )
         if result.error == "invalid_record_id":
             return result, "booking_invalid_record_id"
+        # DRF-997: transient schedule outage (e.g. 429) is returned to the
+        # user as a retry message, not a manager handoff.
+        if result.error == "schedule_unavailable":
+            return result, ""
         if result.error:
             return result, "booking_yclients_failure"
         return result, ""
@@ -838,6 +908,10 @@ def _execute_tool(
         )
         if result.error == "invalid_record_id":
             return result, "booking_invalid_record_id"
+        # DRF-997: transient schedule outage (e.g. 429) is returned to the
+        # user as a retry message, not a manager handoff.
+        if result.error == "schedule_unavailable":
+            return result, ""
         if result.error == "slot_unavailable":
             # NOT a handoff — the LLM should phrase the clarification
             # itself ("на это время уже занято — могу подобрать
@@ -895,6 +969,10 @@ def _execute_tool(
 def _fetch_master_ids(yclients: Any) -> set[int | str]:
     try:
         return {_id_key(s.id) for s in yclients.get_staff(staff_id=None)}
+    except YClientsScheduleUnavailableError:
+        # DRF-997: do not silently disable the anti-hallucination guard on a
+        # transient 429. Let the caller surface the retry text.
+        raise
     except Exception:  # noqa: BLE001 — defensive; caller handles handoff
         return set()
 
@@ -902,6 +980,9 @@ def _fetch_master_ids(yclients: Any) -> set[int | str]:
 def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
     try:
         return build_master_lookup(yclients.get_staff(staff_id=None))
+    except YClientsScheduleUnavailableError:
+        # DRF-997: same guard as _fetch_master_ids.
+        raise
     except Exception:  # noqa: BLE001
         return {}
 
@@ -1252,6 +1333,13 @@ def _handle_pick_slot_callback(
             date=target_date,
             service_ids=[service_id],
         )
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.pick_slot.schedule_unavailable master=%s err=%s", master_id, exc)
+        return _build_skill_result(
+            text=SCHEDULE_UNAVAILABLE_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
     except (YClientsAPIError, YClientsUnavailableError) as exc:
         logger.warning("booking.pick_slot.slots_failed master=%s err=%s", master_id, exc)
         return _handoff(
@@ -1455,6 +1543,16 @@ def _render_date_picker(
     try:
         service_ids = [service_id] if service_id is not None else None
         dates = yclients.get_available_dates(staff_id=master_id, service_ids=service_ids)
+    except YClientsScheduleUnavailableError as exc:
+        # DRF-997: transient 429 / rate-limit on the date picker. Keep the
+        # bot in the conversation with an honest retry message instead of
+        # handing off to a manager.
+        logger.warning("booking.pick_master.schedule_unavailable master=%s err=%s", master_id, exc)
+        return _build_skill_result(
+            text=SCHEDULE_UNAVAILABLE_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
     except (YClientsAPIError, YClientsUnavailableError) as exc:
         logger.warning("booking.pick_master.yclients_failed master=%s err=%s", master_id, exc)
         return _handoff(

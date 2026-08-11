@@ -380,6 +380,33 @@ class TestCancel:
         assert resp.status_code == 502
         assert resp.json()["error"] == "upstream_unavailable"
 
+    def test_cancel_passes_specialist_service_date_for_cache_invalidation(
+        self, client, tenant, bot_user, master, service, stub_cancel
+    ) -> None:
+        """DRF-997: the view must supply enough context for the Ayla booking
+        client to invalidate the affected slot/dates cache on cancel."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        start = timezone.now() + timedelta(days=7)
+        proxy = _proxy(
+            tenant,
+            bot_user,
+            service_id=SERVICE_AYLA_ID,
+            specialist_id=master.id,
+            days_ahead=7,
+        )
+        # Override the auto-generated start_at with a known date.
+        proxy.start_at = start
+        proxy.save()
+        resp = _post(client, self._url(proxy.appointment_id))
+        assert resp.status_code == 200
+        (call,) = stub_cancel.calls
+        assert call["specialist_id"] == str(master.id)
+        assert call["service_id"] == str(SERVICE_AYLA_ID)
+        assert call["date"] == start.date().isoformat()
+
     def test_cancel_confirm_409_on_ayla_path(self, client, tenant, bot_user) -> None:
         proxy = _proxy(tenant, bot_user)
         resp = _post(client, f"/api/v1/customer/bookings/{proxy.appointment_id}/cancel/confirm")

@@ -32,8 +32,12 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
-from apps.skills.booking.provider import YClientsStaleVersionError
-from apps.skills.booking.tools import execute_reschedule, reschedule_booking
+from apps.skills.booking.provider import YClientsScheduleUnavailableError, YClientsStaleVersionError
+from apps.skills.booking.tools import (
+    SCHEDULE_UNAVAILABLE_TEXT,
+    execute_reschedule,
+    reschedule_booking,
+)
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -279,6 +283,46 @@ class TestReschedulePreview:
             )
         assert result.error == "record_not_found"
 
+    def test_schedule_unavailable_on_slot_lookup_returns_retry_text(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.user_records = [_user_record(id_=555)]
+        client.times_exc = YClientsScheduleUnavailableError("429")
+        with tenant_scope(tenant):
+            result = reschedule_booking(
+                client=client,
+                arguments={
+                    "record_id": 555,
+                    "new_datetime": _future_iso(48),
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
+
+    def test_schedule_unavailable_on_record_lookup_returns_retry_text(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """DRF-997: 429 during get_user_records must not become record_not_found."""
+        _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.user_records_exc = YClientsScheduleUnavailableError("429")
+        with tenant_scope(tenant):
+            result = reschedule_booking(
+                client=client,
+                arguments={
+                    "record_id": 555,
+                    "new_datetime": _future_iso(48),
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
+
 
 # ---------------------------------------------------------------------------
 # execute_reschedule — the actual cancel-and-create
@@ -520,6 +564,41 @@ class TestExecuteReschedule:
         assert result.error == "invalid_payload"
         assert client.cancel_calls == []
         assert client.create_calls == []
+
+    def test_create_schedule_unavailable_returns_retry_text(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """DRF-997: 429 on the create after a successful cancel is transient;
+        surface a deterministic retry message instead of a partial-failure
+        handoff. The old row stays RESCHEDULED (not CANCELLED).
+        """
+        booking = _make_booking(tenant, bot_user, yc_id=555)
+        client = FakeClient()
+        client.create_exc = YClientsScheduleUnavailableError("429")
+        new_dt = _future_iso(72)
+        client.times = [_slot_at(new_dt)]
+        with tenant_scope(tenant):
+            result = execute_reschedule(
+                client=client,
+                payload={
+                    "record_id": 555,
+                    "new_datetime": new_dt,
+                    "master_id": 11,
+                    "service_id": 22,
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
+        assert client.cancel_calls == [555]
+        assert len(client.create_calls) == 1
+        booking.refresh_from_db()
+        assert booking.status == BookingRequest.Status.RESCHEDULED
 
 
 # ──────────────────────────────────────────────────────────────────────────

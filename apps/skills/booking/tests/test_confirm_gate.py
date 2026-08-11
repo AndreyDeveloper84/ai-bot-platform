@@ -21,7 +21,8 @@ from apps.bookings.pending_actions import (
 )
 from apps.identity.models import BotUser
 from apps.integrations.yclients import BookingRecord
-from apps.skills.booking.tools import execute_confirm
+from apps.skills.booking.provider import YClientsScheduleUnavailableError
+from apps.skills.booking.tools import SCHEDULE_UNAVAILABLE_TEXT, execute_confirm
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -49,9 +50,12 @@ class FakeClient:
     def __init__(self) -> None:
         self.create_calls: list[dict] = []
         self.create_response: BookingRecord | None = None
+        self.create_exc: Exception | None = None
 
     def create_record(self, **kwargs):
         self.create_calls.append(kwargs)
+        if self.create_exc is not None:
+            raise self.create_exc
         return self.create_response or BookingRecord(record_id=777, record_hash="h", raw={})
 
 
@@ -240,6 +244,33 @@ class TestExecuteConfirm:
         # The slug carries no debt semantics.
         assert "past_due" not in result.error
         assert "subscription" not in result.error
+
+    def test_schedule_unavailable_returns_retry_text(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """DRF-997: 429 on create is transient; return a deterministic retry
+        message instead of an outage/handoff error."""
+        client = FakeClient()
+        client.create_exc = YClientsScheduleUnavailableError("429")
+        with tenant_scope(tenant):
+            result = execute_confirm(
+                client=client,
+                payload={
+                    "master_id": 11,
+                    "service_id": 22,
+                    "slot_datetime": "2026-05-20T14:00:00",
+                    "client_phone": "79991234567",
+                    "client_name": "Anna",
+                    "master_name": "Ольга",
+                    "service_name": "Массаж",
+                },
+                tenant=tenant,
+                bot_user=bot_user,
+            )
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
+        # No BookingRequest written for the transient failure.
+        assert BookingRequest.all_tenants.filter(tenant=tenant, bot_user=bot_user).count() == 0
 
     def test_invalid_payload(self, tenant: Tenant, bot_user: BotUser) -> None:
         client = FakeClient()

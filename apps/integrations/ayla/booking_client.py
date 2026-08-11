@@ -31,15 +31,18 @@ consenting client (``IsBotServiceWithVerifiedClient``) and verify the
 
 from __future__ import annotations
 
+import email.utils
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from datetime import date as date_cls
-from datetime import timedelta
+from datetime import timedelta, timezone as tz
 from typing import Any, NoReturn, Protocol, runtime_checkable
 
 import httpx
 from django.conf import settings
+from django.core.cache import cache
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
 
@@ -53,6 +56,18 @@ CIRCUIT_FAILURE_WINDOW_S = 60.0
 CIRCUIT_FAILURE_THRESHOLD = 5
 CIRCUIT_OPEN_DURATION_S = 30.0
 _BREAKER_NAME = "ayla.booking"
+
+# DRF-997: bounded retry for transient 429 responses. Retry-After is respected
+# up to a cap so a single slow backend header cannot block the worker forever.
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BACKOFF_BASE_S = 0.05
+RATE_LIMIT_MAX_WAIT_S = 5.0
+
+# DRF-997: short-lived cache for slots/dates lookups. TTL is long enough to
+# absorb repeated picker renders / re-taps but short enough to keep the
+# calendar fresh. Key includes specialist + service + date/window.
+SLOT_CACHE_TTL_S = 60
+SLOT_CACHE_KEY_PREFIX = "ayla.booking.slots.v1"
 
 # Ayla's internal slots endpoint is single-day; ``get_available_dates`` fans
 # out over this many days from today to derive the "which days are free"
@@ -135,6 +150,14 @@ class BookingUnavailableError(BookingAPIError):
     """Ayla is unreachable or the circuit is open — caller shows a fallback.
 
     5xx / timeout / network / circuit-open. **Trips** the breaker.
+    """
+
+
+class BookingRateLimitedError(BookingUnavailableError):
+    """429 Too Many Requests after bounded retries — transient, no breaker trip.
+
+    Surfaced to the user as a short "schedule service unavailable" message
+    rather than a handoff, and must NOT be confused with "no slots".
     """
 
 
@@ -279,6 +302,9 @@ class AylaBookingClient(Protocol):
         external_user_id: str,
         appointment_id: str,
         idempotency_key: str | None = ...,
+        specialist_id: str | None = ...,
+        service_id: str | None = ...,
+        date: str | None = ...,
     ) -> bool: ...
 
     def reschedule_appointment(
@@ -289,6 +315,9 @@ class AylaBookingClient(Protocol):
         new_start_datetime: str,
         expected_version: int | None = ...,
         idempotency_key: str | None = ...,
+        specialist_id: str | None = ...,
+        service_id: str | None = ...,
+        old_date: str | None = ...,
     ) -> AylaBookingRecord: ...
 
     def get_user_appointments(
@@ -376,6 +405,16 @@ def _iso_hhmm(iso: Any) -> str:
     if "T" in text and len(text) >= text.index("T") + 6:
         return text[text.index("T") + 1 : text.index("T") + 6]
     return ""
+
+
+def _iso_date(iso: Any) -> str:
+    """Extract ``YYYY-MM-DD`` from an ISO-8601 datetime string, best-effort."""
+    if not iso:
+        return ""
+    text = str(iso)
+    if "T" in text:
+        return text.split("T", 1)[0]
+    return text[:10] if len(text) >= 10 else text
 
 
 def _user_record_from_wire(d: dict[str, Any]) -> AylaUserRecord:
@@ -485,7 +524,20 @@ class AylaBookingHTTPClient:
         idempotency_key: str | None = None,
     ) -> httpx.Response:
         """Issue one request through the breaker. Maps network/timeout to
-        :class:`BookingUnavailableError`; status handling is the caller's."""
+        :class:`BookingUnavailableError`; 429 is retried with backoff.
+
+        Status handling for non-429 responses is the caller's.
+
+        .. note::
+
+            The bounded 429 retry uses ``time.sleep``, which blocks the
+            calling thread. This client is synchronous and is invoked from
+            async skill code, so the sleep blocks the caller's coroutine
+            for up to :data:`RATE_LIMIT_MAX_WAIT_S` per attempt. The sleep
+            is bounded (≤{RATE_LIMIT_MAX_WAIT_S:.0f} s, ≤{RATE_LIMIT_MAX_RETRIES} retries),
+            but the proper long-term fix is to make the client async or run
+            it in a thread pool. That refactor is out of scope for DRF-997.
+        """
         now = time.monotonic()
         if self._circuit.is_open(now=now):
             raise BookingUnavailableError("circuit_open")
@@ -497,12 +549,46 @@ class AylaBookingHTTPClient:
 
         try:
             http = self._client()
-            resp = http.request(method, url, headers=headers, params=params, json=json_body)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            # Client construction only touches local state; treat as network.
             self._circuit.record_failure(now=now)
             logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
             raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
-        return resp
+
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            try:
+                resp = http.request(method, url, headers=headers, params=params, json=json_body)
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                self._circuit.record_failure(now=now)
+                logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
+                raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
+
+            if resp.status_code != 429:
+                return resp
+
+            retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+            wait = max(retry_after, RATE_LIMIT_BACKOFF_BASE_S * (2**attempt))
+            wait = min(wait, RATE_LIMIT_MAX_WAIT_S)
+            # DRF-997: jitter the exponential backoff so concurrent workers do
+            # not stampede the backend the moment Retry-After / cap expires.
+            wait = random.uniform(0.75, 1.0) * wait
+            logger.warning(
+                "booking_client.429 attempt=%d/%d retry_after=%.2f wait=%.2f endpoint=%s",
+                attempt,
+                RATE_LIMIT_MAX_RETRIES,
+                retry_after,
+                wait,
+                endpoint,
+            )
+            if attempt < RATE_LIMIT_MAX_RETRIES and wait:
+                # Sync sleep — blocks the caller's thread/coroutine. See the
+                # method docstring for the async-refactor caveat.
+                time.sleep(wait)
+
+        # All retries consumed — surface as transient unavailability without
+        # opening the breaker. The provider layer maps this to a user-facing
+        # "schedule service unavailable" message instead of a handoff.
+        raise BookingRateLimitedError(f"rate_limited_{resp.status_code}")
 
     def _fail_status(self, resp: httpx.Response, *, now: float) -> NoReturn:
         """Map a non-success status to an error (CR-SF2 — single source).
@@ -526,14 +612,17 @@ class AylaBookingHTTPClient:
 
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
         """Validate status + unwrap the body. Maps 5xx→Unavailable (trips),
-        4xx→BadRequest (no trip)."""
+        4xx→BadRequest (no trip). A successful status with unparseable JSON
+        is treated as unavailable so it can never be silently read as "empty".
+        """
         now = time.monotonic()
         if resp.status_code in success:
             self._circuit.record_success()
             try:
                 return _unwrap(resp.json())
-            except ValueError:
-                return {}
+            except ValueError as exc:
+                logger.warning("booking_client.malformed_json status=%d", resp.status_code)
+                raise BookingUnavailableError("malformed_response") from exc
         self._fail_status(resp, now=now)
 
     # ── reads ────────────────────────────────────────────────────────────────
@@ -568,11 +657,19 @@ class AylaBookingHTTPClient:
         # service-less case fail cleanly, it does not itself order the flow.
         if not service_id:
             raise BookingBadRequestError("service_id_required")
+
+        cache_key = _slots_cache_key(specialist_id, service_id, date)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         params: dict[str, Any] = {"date": date, "service_id": service_id}
         resp = self._request("GET", f"specialists/{specialist_id}/slots/", params=params)
         payload = self._ok(resp)
         slots = payload.get("slots") if isinstance(payload, dict) else payload
-        return [_slot_from_wire(s) for s in slots] if isinstance(slots, list) else []
+        result = [_slot_from_wire(s) for s in slots] if isinstance(slots, list) else []
+        cache.set(cache_key, result, SLOT_CACHE_TTL_S)
+        return result
 
     def get_available_dates(
         self,
@@ -590,18 +687,31 @@ class AylaBookingHTTPClient:
         #1051: ``service_id`` is REQUIRED — validated once up front so a
         service-less request fails immediately (one clear BookingBadRequestError,
         zero HTTP) rather than entering the per-day fan-out loop at all.
+
+        DRF-997: failures during the fan-out are propagated instead of being
+        silently dropped from the calendar (no "error day" == "busy day").
         """
         if not service_id:
             raise BookingBadRequestError("service_id_required")
+
+        cache_key = _dates_cache_key(specialist_id, service_id, window_days)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         today = date_cls.today()
         out: list[str] = []
         clamped_window = min(max(window_days, 0), MAX_AVAILABLE_DATES_WINDOW_DAYS)
         for offset in range(clamped_window):
             day = (today + timedelta(days=offset)).isoformat()
-            if self.get_available_times(
+            # get_available_times is cached; any failure raises and stops the
+            # fan-out so we never present a partial/error result as "no slots".
+            times = self.get_available_times(
                 specialist_id=specialist_id, date=day, service_id=service_id
-            ):
+            )
+            if times:
                 out.append(day)
+        cache.set(cache_key, out, SLOT_CACHE_TTL_S)
         return out
 
     # ── writes ───────────────────────────────────────────────────────────────
@@ -635,6 +745,14 @@ class AylaBookingHTTPClient:
             idempotency_key=idempotency_key,
         )
         data = self._ok(resp, success=(200, 201))
+        # DRF-997: a successful write may consume the slot we cached, so
+        # drop the affected date(s) from the short-lived slot/dates cache.
+        _invalidate_slot_date_caches(
+            specialist_id=specialist_id,
+            service_id=service_id,
+            dates=[_iso_date(start_datetime)],
+            window_days=AVAILABLE_DATES_WINDOW_DAYS,
+        )
         return AylaBookingRecord(
             appointment_id=str(data.get("id") or "") if isinstance(data, dict) else "",
             raw=data if isinstance(data, dict) else {},
@@ -646,6 +764,9 @@ class AylaBookingHTTPClient:
         external_user_id: str,
         appointment_id: str,
         idempotency_key: str | None = None,
+        specialist_id: str | None = None,
+        service_id: str | None = None,
+        date: str | None = None,
     ) -> bool:
         resp = self._request(
             "POST",
@@ -657,12 +778,24 @@ class AylaBookingHTTPClient:
         now = time.monotonic()
         if resp.status_code in (200, 204):
             self._circuit.record_success()
-            return True
-        if resp.status_code == 404:
+            succeeded = True
+        elif resp.status_code == 404:
             # Already gone — idempotent from the caller's perspective.
             self._circuit.record_success()
-            return False
-        self._fail_status(resp, now=now)
+            succeeded = False
+        else:
+            self._fail_status(resp, now=now)
+
+        # DRF-997: the cancelled slot is free again; invalidate it when the
+        # caller supplies enough context to build the cache key.
+        if specialist_id and service_id and date:
+            _invalidate_slot_date_caches(
+                specialist_id=specialist_id,
+                service_id=service_id,
+                dates=[date],
+                window_days=AVAILABLE_DATES_WINDOW_DAYS,
+            )
+        return succeeded
 
     def reschedule_appointment(
         self,
@@ -672,6 +805,9 @@ class AylaBookingHTTPClient:
         new_start_datetime: str,
         expected_version: int | None = None,
         idempotency_key: str | None = None,
+        specialist_id: str | None = None,
+        service_id: str | None = None,
+        old_date: str | None = None,
     ) -> AylaBookingRecord:
         json_body: dict[str, Any] = {"new_start_datetime": new_start_datetime}
         if expected_version is not None:
@@ -684,6 +820,15 @@ class AylaBookingHTTPClient:
             idempotency_key=idempotency_key,
         )
         data = self._ok(resp, success=(200, 201))
+        # DRF-997: both the old and new dates may have changed occupancy.
+        if specialist_id and service_id:
+            dates = {d for d in (_iso_date(new_start_datetime), old_date) if d}
+            _invalidate_slot_date_caches(
+                specialist_id=specialist_id,
+                service_id=service_id,
+                dates=sorted(dates),
+                window_days=AVAILABLE_DATES_WINDOW_DAYS,
+            )
         # Native reschedule preserves the canonical appointment id; fall back
         # to the id we moved if the body omits it.
         return AylaBookingRecord(
@@ -719,6 +864,60 @@ def _err_code(resp: httpx.Response) -> str:
         return (resp.json().get("error") or {}).get("code", "") or "unknown"
     except (ValueError, AttributeError):
         return "unknown"
+
+
+def _parse_retry_after(value: str | None) -> float:
+    """Parse a Retry-After header.
+
+    First tries an integer/decimal second delta. If that fails, tries an
+    HTTP-date string (e.g. ``Retry-After: Wed, 21 Oct 2025 07:28:00 GMT``)
+    and returns the seconds until that instant. Non-parseable values fall
+    back to 0.0 so the caller uses exponential backoff.
+    """
+    if not value:
+        return 0.0
+    try:
+        return max(float(value), 0.0)
+    except (ValueError, TypeError):
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=tz.utc)
+        delta = when.timestamp() - time.time()
+        return max(delta, 0.0)
+    except (ValueError, TypeError, OverflowError):
+        # Non-parseable values are treated as "no hint".
+        return 0.0
+
+
+def _slots_cache_key(specialist_id: str, service_id: str, date: str) -> str:
+    return f"{SLOT_CACHE_KEY_PREFIX}:times:{specialist_id}:{service_id}:{date}"
+
+
+def _dates_cache_key(specialist_id: str, service_id: str, window_days: int) -> str:
+    return f"{SLOT_CACHE_KEY_PREFIX}:dates:{specialist_id}:{service_id}:{window_days}"
+
+
+def _invalidate_slot_date_caches(
+    *,
+    specialist_id: str,
+    service_id: str,
+    dates: list[str],
+    window_days: int | None = None,
+) -> None:
+    """DRF-997: drop stale slot/dates cache entries after a write.
+
+    ``dates`` are the ISO ``YYYY-MM-DD`` strings whose per-day slot cache
+    may now be wrong. ``window_days`` controls which dates-cache key is
+    cleared; callers commonly use :data:`AVAILABLE_DATES_WINDOW_DAYS`.
+    Other window sizes may leave stale entries — that is accepted because
+    the cache TTL is short (60 s) and non-default windows are rare.
+    """
+    for day in dates:
+        cache.delete(_slots_cache_key(specialist_id, service_id, day))
+    if window_days is not None:
+        cache.delete(_dates_cache_key(specialist_id, service_id, window_days))
 
 
 # ─── singleton ─────────────────────────────────────────────────────────────

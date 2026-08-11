@@ -29,6 +29,7 @@ from apps.integrations.ayla.booking_client import (
     AylaSlot,
     AylaUserRecord,
     BookingBadRequestError,
+    BookingRateLimitedError,
     BookingUnavailableError,
 )
 from apps.integrations.yclients import (
@@ -39,6 +40,7 @@ from apps.integrations.yclients import (
 )
 from apps.skills.booking.provider import (
     AylaYClientsAdapter,
+    YClientsScheduleUnavailableError,
     YClientsStaleVersionError,
     get_booking_provider,
 )
@@ -136,7 +138,14 @@ class FakeAylaBooking:
         return self.create_response or AylaBookingRecord(appointment_id="appt-999", raw={})
 
     def cancel_appointment(
-        self, *, external_user_id: str, appointment_id: str, idempotency_key: str | None = None
+        self,
+        *,
+        external_user_id: str,
+        appointment_id: str,
+        idempotency_key: str | None = None,
+        specialist_id: str | None = None,
+        service_id: str | None = None,
+        date: str | None = None,
     ) -> bool:
         self.calls.append(
             {
@@ -144,6 +153,9 @@ class FakeAylaBooking:
                 "external_user_id": external_user_id,
                 "appointment_id": appointment_id,
                 "idempotency_key": idempotency_key,
+                "specialist_id": specialist_id,
+                "service_id": service_id,
+                "date": date,
             }
         )
         self._maybe_raise()
@@ -157,6 +169,9 @@ class FakeAylaBooking:
         new_start_datetime: str,
         expected_version: int | None = None,
         idempotency_key: str | None = None,
+        specialist_id: str | None = None,
+        service_id: str | None = None,
+        old_date: str | None = None,
     ) -> AylaBookingRecord:
         self.calls.append(
             {
@@ -165,6 +180,9 @@ class FakeAylaBooking:
                 "new_start_datetime": new_start_datetime,
                 "expected_version": expected_version,
                 "idempotency_key": idempotency_key,
+                "specialist_id": specialist_id,
+                "service_id": service_id,
+                "old_date": old_date,
             }
         )
         self._maybe_raise()
@@ -345,11 +363,13 @@ class TestWrites:
                 client_name="Anna",
             )
 
+    @pytest.mark.django_db
     def test_cancel_record_stringifies_uuid_id(self) -> None:
         fake = FakeAylaBooking()
         assert _adapter(fake).cancel_record(record_id=_APPT_UUID) is True
         assert fake.calls[0]["appointment_id"] == _APPT_UUID
 
+    @pytest.mark.django_db
     def test_reschedule_record_native_preserves_uuid(self) -> None:
         fake = FakeAylaBooking()
         fake.create_response = AylaBookingRecord(
@@ -374,6 +394,13 @@ class TestErrorTranslation:
         fake = FakeAylaBooking()
         fake.raise_exc = BookingUnavailableError("circuit_open")
         with pytest.raises(YClientsUnavailableError):
+            _adapter(fake).get_services()
+
+    def test_rate_limited_translated_to_schedule_unavailable(self) -> None:
+        """DRF-997: 429 after retries → a distinct no-handoff outage type."""
+        fake = FakeAylaBooking()
+        fake.raise_exc = BookingRateLimitedError("rate_limited_429")
+        with pytest.raises(YClientsScheduleUnavailableError):
             _adapter(fake).get_services()
 
     def test_bad_request_translated_to_api_error(self) -> None:
@@ -417,6 +444,7 @@ class TestErrorTranslation:
                 client_name="Anna",
             )
 
+    @pytest.mark.django_db
     def test_stale_version_translated_to_structured_error(self) -> None:
         """Ayla 409 stale_version → structured YClientsStaleVersionError."""
         fake = FakeAylaBooking()
