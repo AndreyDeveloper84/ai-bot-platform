@@ -299,11 +299,18 @@ class AnthropicProvider:
 
         from anthropic import AsyncAnthropic  # type: ignore[import-not-found]
 
-        kwargs: dict[str, Any] = {"api_key": self._api_key}
+        timeout = getattr(settings, "LLM_REQUEST_TIMEOUT_S", 30.0)
+        kwargs: dict[str, Any] = {
+            "api_key": self._api_key,
+            "timeout": timeout,
+            # DRF-989: disable SDK-level retries symmetric with OpenAI.
+            # apps.llm.retry owns the retry policy and budget.
+            "max_retries": 0,
+        }
         if self._proxy:
             import httpx
 
-            kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy)
+            kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
         self._client = AsyncAnthropic(**kwargs)
         return self._client
 
