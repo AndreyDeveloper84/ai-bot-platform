@@ -25,6 +25,8 @@ import httpx
 import pytest
 
 from apps.integrations.ayla import booking_client as bc
+from apps.tenancy.context import tenant_scope
+from apps.tenancy.models import Tenant
 
 
 @pytest.fixture(autouse=True)
@@ -717,6 +719,23 @@ class TestSlotCache:
         # First call fans out to 3 days; second call must be served from cache.
         assert len(calls) == 3
         cache.clear()
+
+    def test_cache_keys_are_tenant_isolated(self, db) -> None:
+        """Two tenants with the same specialist/service/date must not share a cache key."""
+        t1 = Tenant.objects.create(slug="cache-tenant-1", name="T1")
+        t2 = Tenant.objects.create(slug="cache-tenant-2", name="T2")
+
+        with tenant_scope(t1):
+            key1_times = bc._slots_cache_key("spec-1", "svc-1", "2026-06-10")
+            key1_dates = bc._dates_cache_key("spec-1", "svc-1", 14)
+        with tenant_scope(t2):
+            key2_times = bc._slots_cache_key("spec-1", "svc-1", "2026-06-10")
+            key2_dates = bc._dates_cache_key("spec-1", "svc-1", 14)
+
+        assert key1_times != key2_times
+        assert key1_dates != key2_dates
+        assert str(t1.id) in key1_times
+        assert str(t2.id) in key2_times
 
 
 class TestWriteCacheInvalidation:

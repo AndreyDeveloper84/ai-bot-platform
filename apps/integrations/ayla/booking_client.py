@@ -891,12 +891,38 @@ def _parse_retry_after(value: str | None) -> float:
         return 0.0
 
 
+def _tenant_id_for_cache() -> str:
+    """Return the current tenant id for cache-key scoping, or a sentinel.
+
+    Lazy-imported to avoid a circular import: ``apps.tenancy.context`` is
+    cross-cutting and this module is imported from booking provider/tests.
+    """
+    from apps.tenancy.context import current_tenant
+
+    tenant = current_tenant()
+    return str(tenant.id) if tenant is not None else "_none_"
+
+
 def _slots_cache_key(specialist_id: str, service_id: str, date: str) -> str:
-    return f"{SLOT_CACHE_KEY_PREFIX}:times:{specialist_id}:{service_id}:{date}"
+    """Cache key for a single day's slots.
+
+    Isolation invariant: the key is scoped by ``tenant.id`` *and* by the
+    specialist/service/date tuple. On the Ayla path those identifiers are
+    UUIDs, so two tenants that happen to share a numeric-looking YClients id
+    cannot collide. The ``_none_`` sentinel keeps the key deterministic when
+    no tenant context is active (tests / management commands).
+    """
+    tenant_id = _tenant_id_for_cache()
+    return f"{SLOT_CACHE_KEY_PREFIX}:times:{tenant_id}:{specialist_id}:{service_id}:{date}"
 
 
 def _dates_cache_key(specialist_id: str, service_id: str, window_days: int) -> str:
-    return f"{SLOT_CACHE_KEY_PREFIX}:dates:{specialist_id}:{service_id}:{window_days}"
+    """Cache key for the free-day calendar over a window.
+
+    Same tenant-scoping invariant as :func:`_slots_cache_key`.
+    """
+    tenant_id = _tenant_id_for_cache()
+    return f"{SLOT_CACHE_KEY_PREFIX}:dates:{tenant_id}:{specialist_id}:{service_id}:{window_days}"
 
 
 def _invalidate_slot_date_caches(
