@@ -94,8 +94,10 @@ class Route:
 # row (contract asserted).
 ROUTE_TABLE: tuple[Route, ...] = (
     # booking_client (#1016) — Bearer; writes + ``me`` also carry X-External-User-ID.
-    Route("GET", "/api/v1/internal/services/", Auth.BEARER),
-    Route("GET", "/api/v1/internal/specialists/{id}/services/", Auth.BEARER),
+    # DRF-1004: the service catalog moved off the dead legacy ``services/``
+    # feed (queryset empty upstream) onto the canonical catalog endpoints.
+    Route("GET", "/api/v1/internal/catalog/salon-services/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/catalog/specialist-services/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/slots/", Auth.BEARER),
@@ -306,11 +308,17 @@ def _exercise_booking() -> None:
         get_ayla_booking_client,
         reset_ayla_booking_client,
     )
+    from apps.tenancy.context import tenant_scope
+    from apps.tenancy.models import Tenant
 
     reset_ayla_booking_client()
     c = get_ayla_booking_client()  # reads settings.AYLA_INTERNAL_API_TOKEN
-    _swallow(lambda: c.get_services())
-    _swallow(lambda: c.get_services(specialist_id="SPECID"))
+    # DRF-1004: catalog reads require an active tenant scope (unsaved instance —
+    # only ``.id`` is read, no DB hit).
+    tenant = Tenant(id=uuid.uuid4(), slug="route-table", name="Route Table")
+    with tenant_scope(tenant):
+        _swallow(lambda: c.get_services())
+        _swallow(lambda: c.get_services(specialist_id="SPECID"))
     _swallow(lambda: c.get_masters())
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
     _swallow(

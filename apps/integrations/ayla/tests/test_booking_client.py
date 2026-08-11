@@ -137,7 +137,10 @@ def _client_with(handler) -> bc.AylaBookingHTTPClient:
 
 
 class TestReadRoundTrip:
-    def test_get_services_catalog_unwraps_data(self) -> None:
+    def test_get_services_reads_canonical_catalog(self, db) -> None:
+        """DRF-1004: the catalog comes from ``catalog/salon-services/`` scoped
+        to the active tenant — not from the dead legacy ``services/`` feed."""
+        tenant = Tenant.objects.create(slug="svc-cat", name="T")
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -145,39 +148,190 @@ class TestReadRoundTrip:
             return httpx.Response(
                 200,
                 json={
-                    "data": [
+                    "count": 1,
+                    "next": None,
+                    "results": [
                         {
                             "id": "svc-uuid-1",
-                            "name": "Массаж",
-                            "price": "1500.00",
-                            "duration_minutes": 60,
+                            "tenant": str(tenant.id),
+                            "template": None,
                             "category": "cat-uuid",
+                            "name": "Массаж",
+                            "duration_minutes": 60,
+                            "base_price": "1500.00",
                         }
-                    ]
+                    ],
                 },
             )
 
-        out = _client_with(handler).get_services()
-        assert captured[0].url.path == "/api/v1/internal/services/"
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_services()
+        assert captured[0].url.path == "/api/v1/internal/catalog/salon-services/"
+        assert captured[0].url.params["tenant"] == str(tenant.id)
+        assert captured[0].url.params["is_active"] == "true"
         assert captured[0].headers["Authorization"] == "Bearer secret-tok"
         assert "X-External-User-ID" not in captured[0].headers
         assert len(out) == 1
         svc = out[0]
         assert (svc.id, svc.title, svc.duration_s) == ("svc-uuid-1", "Массаж", 3600)
-        assert svc.price_min == 1500.0 and svc.category_id == "cat-uuid"
+        assert svc.price_min == 1500.0 and svc.price_max == 1500.0
+        assert svc.category_id == "cat-uuid"
 
-    def test_get_services_for_specialist_hits_nested_path_raw_list(self) -> None:
+    def test_get_services_walks_pagination(self, db) -> None:
+        """DRF-1004: 58 services do not fit the default DRF page — the client
+        must follow ``next`` until the advertised ``count`` is collected."""
+        tenant = Tenant.objects.create(slug="svc-pages", name="T")
+        page_size = 25
+        requested_pages: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            page = int(req.url.params.get("page", "1"))
+            requested_pages.append(str(page))
+            start = (page - 1) * page_size
+            batch = [
+                {
+                    "id": f"svc-{i}",
+                    "name": f"Service {i}",
+                    "base_price": "100.00",
+                    "duration_minutes": 30,
+                }
+                for i in range(start, min(start + page_size, 58))
+            ]
+            has_next = start + page_size < 58
+            return httpx.Response(
+                200,
+                json={
+                    "count": 58,
+                    "next": f"https://ayla.test/...?page={page + 1}" if has_next else None,
+                    "results": batch,
+                },
+            )
+
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_services()
+        assert len(out) == 58
+        assert requested_pages == ["1", "2", "3"]
+
+    def test_get_services_incomplete_catalog_raises(self, db) -> None:
+        """DRF-1004: silently losing part of the catalog is the exact defect
+        class being fixed — a count/rows mismatch must fail loudly."""
+        tenant = Tenant.objects.create(slug="svc-short", name="T")
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 58,
+                    "next": None,
+                    "results": [
+                        {"id": "svc-1", "name": "X", "base_price": "10", "duration_minutes": 30}
+                    ],
+                },
+            )
+
+        with tenant_scope(tenant):
+            with pytest.raises(bc.BookingUnavailableError, match="catalog_incomplete"):
+                _client_with(handler).get_services()
+
+    def test_get_services_base_price_preferred_over_legacy_price(self, db) -> None:
+        tenant = Tenant.objects.create(slug="svc-price", name="T")
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 2,
+                    "next": None,
+                    "results": [
+                        {
+                            "id": "svc-new",
+                            "name": "New",
+                            "base_price": "2800.00",
+                            "price": "10",
+                            "duration_minutes": 40,
+                        },
+                        {
+                            "id": "svc-old",
+                            "name": "Old",
+                            "price": "1500.00",
+                            "duration_minutes": 60,
+                        },
+                    ],
+                },
+            )
+
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_services()
+        by_id = {s.id: s for s in out}
+        assert by_id["svc-new"].price_min == 2800.0
+        assert by_id["svc-old"].price_min == 1500.0
+
+    def test_get_services_requires_tenant_scope(self) -> None:
+        """DRF-1004: no tenant in scope is a call error, not an empty catalog."""
+
+        def handler(req: httpx.Request) -> httpx.Response:  # pragma: no cover
+            raise AssertionError("no wire call may happen without a tenant")
+
+        with pytest.raises(bc.BookingBadRequestError, match="tenant_scope_required"):
+            _client_with(handler).get_services()
+
+    def test_get_services_for_specialist_uses_bookable_edges(self, db) -> None:
+        """DRF-1004: the specialist branch reads canonical
+        ``catalog/specialist-services/`` edges and joins them with the
+        salon-services catalog — the legacy nested path returned count=0."""
+        tenant = Tenant.objects.create(slug="svc-spec", name="T")
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
             captured.append(req)
-            return httpx.Response(
-                200, json=[{"id": "s1", "name": "X", "price": "10", "duration_minutes": 30}]
-            )
+            if req.url.path.endswith("catalog/specialist-services/"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "count": 1,
+                        "next": None,
+                        "results": [
+                            {
+                                "id": "edge-1",
+                                "salon_service": "svc-uuid-1",
+                                "specialist": "spec-1",
+                                "tenant": str(tenant.id),
+                            }
+                        ],
+                    },
+                )
+            if req.url.path.endswith("catalog/salon-services/"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "count": 2,
+                        "next": None,
+                        "results": [
+                            {
+                                "id": "svc-uuid-1",
+                                "name": "Массаж",
+                                "base_price": "100.00",
+                                "duration_minutes": 60,
+                            },
+                            {
+                                "id": "svc-uuid-2",
+                                "name": "Другое",
+                                "base_price": "50.00",
+                                "duration_minutes": 30,
+                            },
+                        ],
+                    },
+                )
+            return httpx.Response(404, json={})
 
-        out = _client_with(handler).get_services(specialist_id="spec-1")
-        assert captured[0].url.path == "/api/v1/internal/specialists/spec-1/services/"
-        assert out[0].id == "s1"
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_services(specialist_id="spec-1")
+        edge_req = next(r for r in captured if r.url.path.endswith("specialist-services/"))
+        assert edge_req.url.params["specialist"] == "spec-1"
+        assert edge_req.url.params["tenant"] == str(tenant.id)
+        assert edge_req.url.params["is_active"] == "true"
+        assert [s.id for s in out] == ["svc-uuid-1"]
+        assert out[0].title == "Массаж"
 
     def test_get_masters_paginated_results(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
@@ -408,34 +562,44 @@ class TestWriteRoundTrip:
 
 
 class TestErrorMapping:
-    def test_5xx_raises_unavailable_and_trips_breaker(self) -> None:
+    def test_5xx_raises_unavailable_and_trips_breaker(self, db) -> None:
+        tenant = Tenant.objects.create(slug="err-5xx", name="T")
+
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(503, json={})
 
         client = _client_with(handler)
-        for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
-            with pytest.raises(bc.BookingUnavailableError):
-                client.get_services()
+        with tenant_scope(tenant):
+            for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
+                with pytest.raises(bc.BookingUnavailableError):
+                    client.get_services()
         assert client._circuit.is_open(now=time.monotonic()) is True
 
-    def test_4xx_raises_bad_request_no_trip(self) -> None:
+    def test_4xx_raises_bad_request_no_trip(self, db) -> None:
+        tenant = Tenant.objects.create(slug="err-4xx", name="T")
+
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(400, json={"error": {"code": "SLOT_TAKEN", "message": "x"}})
 
         client = _client_with(handler)
-        for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD + 2):
-            with pytest.raises(bc.BookingBadRequestError):
-                client.get_services()
+        with tenant_scope(tenant):
+            for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD + 2):
+                with pytest.raises(bc.BookingBadRequestError):
+                    client.get_services()
         assert client._circuit.is_open(now=time.monotonic()) is False
 
-    def test_network_error_raises_unavailable(self) -> None:
+    def test_network_error_raises_unavailable(self, db) -> None:
+        tenant = Tenant.objects.create(slug="err-net", name="T")
+
         def handler(req: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("boom")
 
-        with pytest.raises(bc.BookingUnavailableError):
-            _client_with(handler).get_services()
+        with tenant_scope(tenant):
+            with pytest.raises(bc.BookingUnavailableError):
+                _client_with(handler).get_services()
 
-    def test_circuit_open_short_circuits_without_transport(self) -> None:
+    def test_circuit_open_short_circuits_without_transport(self, db) -> None:
+        tenant = Tenant.objects.create(slug="err-circuit", name="T")
         calls = {"n": 0}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -443,12 +607,13 @@ class TestErrorMapping:
             return httpx.Response(500, json={})
 
         client = _client_with(handler)
-        for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
-            with pytest.raises(bc.BookingUnavailableError):
+        with tenant_scope(tenant):
+            for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
+                with pytest.raises(bc.BookingUnavailableError):
+                    client.get_services()
+            before = calls["n"]
+            with pytest.raises(bc.BookingUnavailableError, match="circuit_open"):
                 client.get_services()
-        before = calls["n"]
-        with pytest.raises(bc.BookingUnavailableError, match="circuit_open"):
-            client.get_services()
         assert calls["n"] == before  # short-circuited, no new wire call
 
 
