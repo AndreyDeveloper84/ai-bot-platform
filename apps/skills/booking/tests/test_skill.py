@@ -1030,6 +1030,101 @@ class TestSlotPickCallback:
             {"staff_id": master_uuid, "date": "2026-09-22", "service_ids": [service_uuid]}
         ]
 
+    def test_pick_slot_with_canonical_catalog_service_accepted(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """DRF-1004 regression: through the REAL Ayla HTTP client + adapter,
+        a service served by the canonical ``catalog/salon-services/`` feed
+        must pass the pick_slot catalog check. Pre-fix the client read the
+        dead legacy ``services/`` feed (empty upstream), so EVERY pick_slot
+        ended in ``unknown_service`` / stale-context."""
+        from django.utils import timezone as dj_timezone
+
+        from apps.booking.models import PendingBookingAction
+        from apps.catalog.models import CatalogService
+        from apps.integrations.ayla.booking_client import AylaBookingHTTPClient
+        from apps.skills.booking.provider import AylaYClientsAdapter
+
+        master_uuid = "11111111-1111-4111-8111-111111111111"
+        service_uuid = "22222222-2222-4222-8222-222222222222"
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="svc-22",
+                name="Service 22",
+                requires_health_check=False,
+                ayla_service_id=__import__("uuid").UUID(service_uuid),
+            )
+        catalog_requests: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            path = req.url.path
+            if path.endswith("catalog/salon-services/"):
+                catalog_requests.append(req)
+                return httpx.Response(
+                    200,
+                    json={
+                        "count": 1,
+                        "next": None,
+                        "results": [
+                            {
+                                "id": service_uuid,
+                                "tenant": str(tenant.id),
+                                "template": None,
+                                "category": None,
+                                "name": "УЗ-кавитация — 1 зона",
+                                "duration_minutes": 40,
+                                "base_price": "2800.00",
+                            }
+                        ],
+                    },
+                )
+            if path.endswith("internal/specialists/"):
+                return httpx.Response(
+                    200, json=[{"id": master_uuid, "display_name": "Ольга", "rating": 4.9}]
+                )
+            if path.endswith(f"specialists/{master_uuid}/slots/"):
+                return httpx.Response(200, json={"slots": ["2026-09-22T14:00:00"]})
+            return httpx.Response(404, json={})
+
+        client = AylaBookingHTTPClient(
+            base_url="https://ayla.test",
+            api_token="secret-tok",  # noqa: S106  # pragma: allowlist secret
+            transport=httpx.MockTransport(handler),
+        )
+        adapter = AylaYClientsAdapter(client=client, external_user_id="bot:max:u1")
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
+        )
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=adapter,
+                ),
+                patch(
+                    "apps.skills.booking.skill._service_requires_health_check",
+                    return_value=False,
+                ),
+                _patch_provider_complete([]) as mock_complete,
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "Подтверждаете?" in result.reply_text
+        assert result.action_data is not None
+        token = result.action_data["pending_action"]["token"]
+        row = PendingBookingAction.all_tenants.get(pk=token)
+        assert row.payload["service_id"] == service_uuid
+        # The catalog read was scoped to the active tenant (DRF-1004 §4.1).
+        assert catalog_requests
+        assert catalog_requests[0].url.params["tenant"] == str(tenant.id)
+
     def test_staff_fetch_failure_handoffs_not_stale(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
