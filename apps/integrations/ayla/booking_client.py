@@ -157,7 +157,9 @@ class BookingAPIError(Exception):
 class BookingUnavailableError(BookingAPIError):
     """Ayla is unreachable or the circuit is open — caller shows a fallback.
 
-    5xx / timeout / network / circuit-open. **Trips** the breaker.
+    5xx / timeout / network / circuit-open. **Trips** the breaker. Exception:
+    ``catalog_incomplete`` (DRF-1004) is a data-integrity verdict, not a
+    connectivity failure — it is raised without recording a breaker failure.
     """
 
 
@@ -362,8 +364,12 @@ def _as_rows(payload: Any) -> list[dict[str, Any]]:
 def _service_from_wire(d: dict[str, Any]) -> AylaService:
     # DRF-1004: the canonical catalog (``catalog/salon-services/``) exposes the
     # price as ``base_price`` (string); the legacy feed used ``price``. Prefer
-    # the canonical field, tolerate the old one.
-    price = float(d.get("base_price") or d.get("price") or 0.0)
+    # the canonical field, tolerate the old one. ``is not None`` (not truthiness)
+    # so a numeric zero price can't fall through to the legacy field.
+    raw_price = d.get("base_price")
+    if raw_price is None:
+        raw_price = d.get("price")
+    price = float(raw_price or 0.0)
     dur_min = int(d.get("duration_minutes") or 0)
     category = d.get("category")
     return AylaService(
@@ -688,7 +694,10 @@ class AylaBookingHTTPClient:
             batch = [r for r in payload.get("results") or [] if isinstance(r, dict)]
             if advertised is None:
                 count = payload.get("count")
-                advertised = int(count) if isinstance(count, int) else None
+                try:
+                    advertised = int(count) if count is not None else None
+                except (TypeError, ValueError):
+                    advertised = None
             rows.extend(batch)
             if not payload.get("next") or not batch:
                 break

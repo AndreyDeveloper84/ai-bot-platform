@@ -1038,6 +1038,8 @@ class TestSlotPickCallback:
         must pass the pick_slot catalog check. Pre-fix the client read the
         dead legacy ``services/`` feed (empty upstream), so EVERY pick_slot
         ended in ``unknown_service`` / stale-context."""
+        import uuid as _uuid
+
         from django.utils import timezone as dj_timezone
 
         from apps.booking.models import PendingBookingAction
@@ -1055,7 +1057,7 @@ class TestSlotPickCallback:
                 slug="svc-22",
                 name="Service 22",
                 requires_health_check=False,
-                ayla_service_id=__import__("uuid").UUID(service_uuid),
+                ayla_service_id=_uuid.UUID(service_uuid),
             )
         catalog_requests: list[httpx.Request] = []
 
