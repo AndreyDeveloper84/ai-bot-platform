@@ -6,6 +6,7 @@ skill's two-call tool-use loop runs end-to-end in-process.
 
 from __future__ import annotations
 
+import httpx
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -35,7 +36,9 @@ from apps.llm.protocol import (
 from apps.llm.router import reset_router_cache
 from apps.orchestrator.intent_router import IntentDecision
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.booking.provider import AylaYClientsAdapter, YClientsScheduleUnavailableError
 from apps.skills.booking.skill import BookingSkill
+from apps.skills.booking.tools import SCHEDULE_UNAVAILABLE_TEXT
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -145,7 +148,10 @@ class FakeYClients:
         service_ids: list[int] | None = None,
     ) -> list[AvailableTime]:
         self.times_calls.append({"staff_id": staff_id, "date": date, "service_ids": service_ids})
-        return list(self.times)
+        # Approximate the real provider: a slot belongs to the requested day
+        # when its ISO datetime starts with that day. Slots with no datetime
+        # are treated as belonging to any day (legacy stub behaviour).
+        return [t for t in self.times if not t.datetime or str(t.datetime).startswith(date)]
 
     def create_record(self, **kwargs: Any) -> BookingRecord:
         self.create_calls.append(kwargs)
@@ -513,6 +519,115 @@ class TestDatePickCallback:
                 result = BookingSkill().handle(ctx)
         assert "дату" in result.reply_text.lower() or "ещё раз" in result.reply_text.lower()
         assert result.tool_calls_made == []
+
+    def test_pick_date_does_not_call_get_available_dates(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """DRF-997: when the user already tapped a date, show_slots must
+        fetch the day's times directly — no 14-day fan-out via
+        get_available_dates."""
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        # Deliberately empty: if show_slots still called get_available_dates,
+        # it would conclude there are no dates and never reach get_available_times.
+        client.dates = []
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_date:11:2026-09-22:22",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert result.should_handoff is False
+        assert result.reply_text == "Выберите время:"
+        assert client.dates_calls == []
+        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
+
+
+class TestRateLimitedScheduleUnavailable:
+    """DRF-997: a backend 429 must not be misclassified as "no slots" and
+    must not hand the user off to a manager."""
+
+    def test_429_on_date_pick_does_not_handoff(
+        self, context: SkillContext, tenant: Tenant, settings: Any
+    ) -> None:
+        settings.BOOKING_VIA_AYLA_REST = True
+
+        from apps.integrations.ayla import booking_client as bc
+
+        bc.reset_ayla_booking_client()
+        slot_attempts: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            path = req.url.path
+            if path == "/api/v1/internal/services/":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {
+                                "id": "svc-uuid-1",
+                                "name": "Массаж",
+                                "price": "1500.00",
+                                "duration_minutes": 60,
+                            }
+                        ]
+                    },
+                )
+            if path == "/api/v1/internal/specialists/":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {
+                                "id": "master-uuid",
+                                "display_name": "Ольга",
+                                "specialization": "Массаж",
+                                "rating": 4.5,
+                                "position": "master",
+                            }
+                        ]
+                    },
+                )
+            slot_attempts.append(req)
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "0"},
+                json={"error": {"code": "RATE_LIMITED"}},
+            )
+
+        ayla_client = bc.AylaBookingHTTPClient(
+            base_url="https://ayla.test",
+            api_token="secret-tok",
+            transport=httpx.MockTransport(handler),
+        )
+        adapter = AylaYClientsAdapter(
+            client=ayla_client,
+            external_user_id="bot:telegram:42",
+            client_id="client-uuid",
+        )
+
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_date:master-uuid:2026-09-22:svc-uuid-1",
+        )
+        with (
+            patch("apps.skills.booking.provider.get_booking_provider", return_value=adapter),
+            _patch_provider_complete([]) as mock_complete,
+        ):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "переключаю" not in result.reply_text.lower()
+        assert "сервис расписания" in result.reply_text.lower()
+        assert len(slot_attempts) == bc.RATE_LIMIT_MAX_RETRIES + 1
 
 
 class TestShowSlotsFlow:
@@ -1873,3 +1988,127 @@ class TestServiceRequiresHealthCheck:
         with override_settings(BOOKING_VIA_AYLA_REST=False):
             with tenant_scope(tenant):
                 assert _service_requires_health_check(tenant, 22) is False
+
+
+# ---------------------------------------------------------------------------
+# DRF-997: transient 429 schedule outage must not hand off
+# ---------------------------------------------------------------------------
+
+
+class TestScheduleUnavailableNoHandoff:
+    """YClientsScheduleUnavailableError (bounded 429 retry exceeded) is a
+    transient infrastructure blip, not a reason to escalate to a manager.
+    The skill must surface the deterministic retry text and keep
+    ``should_handoff`` false.
+    """
+
+    def test_prefetch_services_schedule_unavailable_no_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """DRF-997 Critical: a 429 on the initial service-catalog fetch is the
+        first step of the booking funnel and must NOT become a manager handoff.
+        """
+        client = FakeYClients()
+        client.services_exc = YClientsScheduleUnavailableError("429")
+        with _patch_yclients(client):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is False
+        assert not result.handoff_reason
+        assert SCHEDULE_UNAVAILABLE_TEXT in result.reply_text
+
+    def test_show_masters_schedule_unavailable_no_handoff(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_exc = YClientsScheduleUnavailableError("429")
+        tc = ToolCall(id="c1", name="show_masters", arguments={"service_name": "массаж"})
+        with _patch_yclients(client), _patch_provider_complete([_completion(tool_calls=[tc])]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is False
+        assert result.reply_text == SCHEDULE_UNAVAILABLE_TEXT
+
+    def test_execute_tool_confirm_schedule_unavailable_no_handoff(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        from apps.skills.booking.skill import (
+            CONFIRM_BOOKING_TOOL_SPEC,
+            _execute_tool,
+        )
+        from apps.skills.booking.tools import BookingToolResult
+
+        schedule_unavailable = BookingToolResult(
+            text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable"
+        )
+        with patch("apps.skills.booking.skill.confirm_booking", return_value=schedule_unavailable):
+            result, handoff_reason = _execute_tool(
+                tool_name=CONFIRM_BOOKING_TOOL_SPEC["name"],
+                arguments={},
+                tenant=tenant,
+                bot_user=bot_user,
+                yclients=FakeYClients(),
+                allowed_service_ids=set(),
+                service_lookup={},
+                tenant_id=str(tenant.id),
+            )
+        assert handoff_reason == ""
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
+
+    def test_execute_tool_cancel_schedule_unavailable_no_handoff(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        from apps.skills.booking.skill import (
+            CANCEL_BOOKING_TOOL_SPEC,
+            _execute_tool,
+        )
+        from apps.skills.booking.tools import BookingToolResult
+
+        schedule_unavailable = BookingToolResult(
+            text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable"
+        )
+        with patch("apps.skills.booking.skill.cancel_booking", return_value=schedule_unavailable):
+            result, handoff_reason = _execute_tool(
+                tool_name=CANCEL_BOOKING_TOOL_SPEC["name"],
+                arguments={},
+                tenant=tenant,
+                bot_user=bot_user,
+                yclients=FakeYClients(),
+                allowed_service_ids=set(),
+                service_lookup={},
+                tenant_id=str(tenant.id),
+            )
+        assert handoff_reason == ""
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
+
+    def test_execute_tool_reschedule_schedule_unavailable_no_handoff(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        from apps.skills.booking.skill import (
+            RESCHEDULE_BOOKING_TOOL_SPEC,
+            _execute_tool,
+        )
+        from apps.skills.booking.tools import BookingToolResult
+
+        schedule_unavailable = BookingToolResult(
+            text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable"
+        )
+        with patch(
+            "apps.skills.booking.skill.reschedule_booking", return_value=schedule_unavailable
+        ):
+            result, handoff_reason = _execute_tool(
+                tool_name=RESCHEDULE_BOOKING_TOOL_SPEC["name"],
+                arguments={},
+                tenant=tenant,
+                bot_user=bot_user,
+                yclients=FakeYClients(),
+                allowed_service_ids=set(),
+                service_lookup={},
+                tenant_id=str(tenant.id),
+            )
+        assert handoff_reason == ""
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT

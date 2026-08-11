@@ -151,24 +151,51 @@ def _extract_external_event_id(payload: dict[str, Any]) -> str:
     """Find the channel's own dedup ID inside the MAX payload.
 
     MAX webhooks vary: `update_id` at the top level is most common,
-    but some events use `message.body.mid` / `.seq`. We try in order;
-    if all three are absent, fall back to a **deterministic** hash of
-    the payload (Sprint 2.5 review H5) so true replays of the same
-    payload still dedup against `WebhookJournal.unique_together`.
-    Before the fix, the fallback used `uuid.uuid4()` which guaranteed
-    a fresh value on every retry, defeating the dedup contract for
-    MAX events that omit all idempotency hints.
+    but some events use `message.body.mid` / `.seq`. Callback updates
+    (`message_callback`) additionally carry `callback.callback_id`, which
+    is unique per button tap even when `update_id` and `message.body.mid`
+    are identical for the same source message (DRF-998). We try in order:
+
+      1. `callback.callback_id` — per-tap unique id.
+      2. `update_id` — envelope-level id for message_created etc.
+      3. `message.body.mid` / `.seq` — message-level ids.
+      4. Deterministic hash of the payload (Sprint 2.5 review H5).
+
+    The result is capped to `WebhookJournal.external_event_id.max_length`
+    (200) so it always fits the unique constraint. Before the fix, the
+    fallback used `uuid.uuid4()` which guaranteed a fresh value on every
+    retry, defeating the dedup contract for MAX events that omit all
+    idempotency hints.
     """
 
+    callback_id = (payload.get("callback") or {}).get("callback_id")
     for candidate in (
+        callback_id,
         payload.get("update_id"),
         ((payload.get("message") or {}).get("body") or {}).get("mid"),
         ((payload.get("message") or {}).get("body") or {}).get("seq"),
     ):
         if candidate:
-            return str(candidate)
+            return _normalize_event_id(str(candidate))
     # Deterministic fallback — same payload bytes always produce the
     # same id. Use json.dumps with sort_keys for stable serialization.
     payload_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     digest = hashlib.sha256(payload_bytes).hexdigest()[:32]
-    return f"synth-{digest}"
+    return _normalize_event_id(f"synth-{digest}")
+
+
+_EXTERNAL_EVENT_ID_MAX_LENGTH = 200
+
+
+def _normalize_event_id(value: str) -> str:
+    """Ensure the extracted event id fits the DB column.
+
+    Callback ids are normally short UUID-like strings, but we guard
+    against pathological upstream values by hashing anything that would
+    overflow `external_event_id max_length=200`. Hashing is deterministic,
+    so a replay of the same oversized id still dedups correctly.
+    """
+    if len(value) <= _EXTERNAL_EVENT_ID_MAX_LENGTH:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+    return f"long-{digest}"

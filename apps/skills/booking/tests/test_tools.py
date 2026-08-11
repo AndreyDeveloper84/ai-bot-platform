@@ -24,9 +24,11 @@ from apps.integrations.yclients import (
     YClientsAPIError,
     YClientsUnavailableError,
 )
+from apps.skills.booking.provider import YClientsScheduleUnavailableError
 from apps.skills.booking.tools import (
     BOOKING_TOOL_SPECS,
     BUY_CERTIFICATE_TOOL_SPEC,
+    SCHEDULE_UNAVAILABLE_TEXT,
     build_master_lookup,
     build_service_lookup,
     confirm_booking,
@@ -111,7 +113,10 @@ class FakeYClients:
         date: str,
         service_ids: list[int] | None = None,
     ) -> list[AvailableTime]:
-        return list(self.times)
+        # Approximate the real provider: a slot belongs to the requested day
+        # when its ISO datetime starts with that day. Slots with no datetime
+        # are treated as belonging to any day (legacy stub behaviour).
+        return [t for t in self.times if not t.datetime or str(t.datetime).startswith(date)]
 
     def create_record(
         self,
@@ -249,6 +254,13 @@ class TestShowMasters:
         client.staff_exc = YClientsUnavailableError("circuit_open")
         result = show_masters(client=client, arguments={}, tenant_id=str(tenant.id))
         assert result.error == "yclients_unavailable"
+
+    def test_schedule_unavailable_returns_retry_text(self, tenant: Tenant) -> None:
+        client = FakeYClients()
+        client.staff_exc = YClientsScheduleUnavailableError("429")
+        result = show_masters(client=client, arguments={}, tenant_id=str(tenant.id))
+        assert result.error == "schedule_unavailable"
+        assert result.text == SCHEDULE_UNAVAILABLE_TEXT
 
     def test_yclients_api_error_sets_error(self, tenant: Tenant) -> None:
         client = FakeYClients()

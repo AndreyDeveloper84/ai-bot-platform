@@ -108,6 +108,7 @@ from apps.integrations.yclients import (
     YClientsUnavailableError,
 )
 from apps.skills.booking.provider import (
+    YClientsScheduleUnavailableError,
     YClientsSpecialistUnavailableError,
     YClientsStaleVersionError,
 )
@@ -424,6 +425,10 @@ EVENT_CERTIFICATE_CHECKOUT_FAILED = "booking.certificate_checkout_failed"
 CERTIFICATE_AMOUNT_MIN = Decimal("500")
 CERTIFICATE_AMOUNT_MAX = Decimal("100000")
 
+# DRF-997: transient schedule-service outage (e.g. backend 429). The bot
+# keeps ownership of the conversation and asks the user to retry shortly.
+SCHEDULE_UNAVAILABLE_TEXT = "Сервис расписания сейчас недоступен, попробуйте через минуту."
+
 
 # B6 / DRF-842 — promo_status values reported by ``calc_price``.
 # Adds ``not_supplied`` on top of the validate_promo taxonomy.
@@ -627,6 +632,10 @@ def show_masters(
 
     try:
         staff_rows = client.get_staff(staff_id=None)
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.show_masters.schedule_unavailable err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="show_masters", outcome="schedule_unavailable")
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except YClientsUnavailableError as exc:
         logger.warning("booking.show_masters.unavailable err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="show_masters", outcome="unavailable")
@@ -724,35 +733,71 @@ def show_slots(
 
     date_from = str(arguments.get("date_from") or "").strip()
 
-    try:
-        dates = client.get_available_dates(
-            staff_id=master_id,
-            service_ids=service_ids,
-        )
-    except YClientsUnavailableError:
-        _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="unavailable")
-        return BookingToolResult(error="yclients_unavailable")
-    except YClientsAPIError:
-        _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="api_error")
-        return BookingToolResult(error="yclients_api_error")
+    # DRF-997: if the user already picked a date (date-pick callback), fetch
+    # the day's slots directly. This removes the ~14-request get_available_dates
+    # fan-out from the pick_date path. When ``date_from`` is just a lower bound
+    # from the LLM and the day itself has no slots, we fall back to the calendar
+    # lookup so existing semantics (first date >= date_from) stay intact.
+    times: list[AvailableTime] | None = None
+    target_date: str | None = None
 
-    target_date = _pick_target_date(dates, date_from)
+    if date_from:
+        try:
+            times = client.get_available_times(
+                staff_id=master_id,
+                date=date_from,
+                service_ids=service_ids,
+            )
+        except YClientsScheduleUnavailableError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="schedule_unavailable")
+            return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
+        except YClientsUnavailableError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="unavailable")
+            return BookingToolResult(error="yclients_unavailable")
+        except YClientsAPIError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="api_error")
+            return BookingToolResult(error="yclients_api_error")
+
+        if times:
+            target_date = date_from
+
     if target_date is None:
-        _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="no_dates")
-        return BookingToolResult(text="Нет свободных дат у мастера в ближайшее время.")
+        try:
+            dates = client.get_available_dates(
+                staff_id=master_id,
+                service_ids=service_ids,
+            )
+        except YClientsScheduleUnavailableError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="schedule_unavailable")
+            return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
+        except YClientsUnavailableError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="unavailable")
+            return BookingToolResult(error="yclients_unavailable")
+        except YClientsAPIError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="api_error")
+            return BookingToolResult(error="yclients_api_error")
 
-    try:
-        times = client.get_available_times(
-            staff_id=master_id,
-            date=target_date,
-            service_ids=service_ids,
-        )
-    except YClientsUnavailableError:
-        _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="unavailable")
-        return BookingToolResult(error="yclients_unavailable")
-    except YClientsAPIError:
-        _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="api_error")
-        return BookingToolResult(error="yclients_api_error")
+        target_date = _pick_target_date(dates, date_from)
+        if target_date is None:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="no_dates")
+            return BookingToolResult(text="Нет свободных дат у мастера в ближайшее время.")
+
+    if times is None:
+        try:
+            times = client.get_available_times(
+                staff_id=master_id,
+                date=target_date,
+                service_ids=service_ids,
+            )
+        except YClientsScheduleUnavailableError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="schedule_unavailable")
+            return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
+        except YClientsUnavailableError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="unavailable")
+            return BookingToolResult(error="yclients_unavailable")
+        except YClientsAPIError:
+            _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="api_error")
+            return BookingToolResult(error="yclients_api_error")
 
     slots: list[SlotCandidate] = []
     for t in times:
@@ -1041,6 +1086,19 @@ def execute_confirm(
             # трактуются как «с предоплатой», поведение как раньше).
             payment_required=bool(payload.get("payment_required", True)),
         )
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.confirm.exec.schedule_unavailable err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_confirm",
+            outcome="schedule_unavailable",
+        )
+        write_audit(
+            EVENT_BOOKING_CONFIRM_FAILED,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "reason": "schedule_unavailable"},
+        )
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except YClientsUnavailableError as exc:
         logger.warning("booking.confirm.exec.unavailable err=%s", exc)
         _audit_tool(
@@ -1436,6 +1494,19 @@ def execute_cancel(
 
     try:
         client.cancel_record(record_id=record_id)
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.cancel.exec.schedule_unavailable err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="execute_cancel", outcome="schedule_unavailable")
+        write_audit(
+            EVENT_BOOKING_CANCEL_FAILED,
+            target="BookingSkill",
+            payload={
+                "tenant_id": tenant_id,
+                "record_id": record_id,
+                "reason": "schedule_unavailable",
+            },
+        )
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except YClientsUnavailableError as exc:
         logger.warning("booking.cancel.exec.unavailable err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="execute_cancel", outcome="yclients_unavailable")
@@ -1583,7 +1654,16 @@ def reschedule_booking(
         staff_id, service_id = _proxy_master_service(tenant=tenant, record_id=record_id)
         expected_version = _proxy_expected_version(tenant=tenant, record_id=record_id)
     else:
-        user_record = _find_yclients_user_record(client=client, record_id=record_id)
+        try:
+            user_record = _find_yclients_user_record(client=client, record_id=record_id)
+        except YClientsScheduleUnavailableError as exc:
+            logger.warning(
+                "booking.reschedule.preview.record_lookup.schedule_unavailable err=%s", exc
+            )
+            _audit_tool(
+                tenant_id=tenant_id, tool="reschedule_booking", outcome="schedule_unavailable"
+            )
+            return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
         if user_record is None:
             _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="record_not_found")
             return BookingToolResult(error="record_not_found")
@@ -1603,6 +1683,10 @@ def reschedule_booking(
             date=target_date,
             service_ids=[service_id],
         )
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.reschedule.preview.schedule_unavailable err=%s", exc)
+        _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="schedule_unavailable")
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except YClientsUnavailableError:
         _audit_tool(tenant_id=tenant_id, tool="reschedule_booking", outcome="yclients_unavailable")
         return BookingToolResult(error="yclients_unavailable")
@@ -1728,6 +1812,14 @@ def _execute_reschedule_ayla(
                 date=visit_at_dt.date().isoformat(),
                 service_ids=[service_id],
             )
+        except YClientsScheduleUnavailableError as exc:
+            logger.warning("booking.reschedule.ayla.recheck.schedule_unavailable err=%s", exc)
+            _audit_tool(
+                tenant_id=tenant_id,
+                tool="execute_reschedule",
+                outcome="recheck_schedule_unavailable",
+            )
+            return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
         except YClientsUnavailableError:
             _audit_tool(
                 tenant_id=tenant_id, tool="execute_reschedule", outcome="recheck_unavailable"
@@ -1748,6 +1840,12 @@ def _execute_reschedule_ayla(
             datetime=new_datetime,
             expected_version=expected_version,
         )
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.reschedule.ayla.schedule_unavailable err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_schedule_unavailable"
+        )
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except YClientsUnavailableError as exc:
         logger.warning("booking.reschedule.ayla.unavailable err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="execute_reschedule", outcome="ayla_unavailable")
@@ -1945,6 +2043,14 @@ def execute_reschedule(
             date=visit_at_dt.date().isoformat(),
             service_ids=[service_id],
         )
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.reschedule.recheck.schedule_unavailable err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="recheck_schedule_unavailable",
+        )
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except YClientsUnavailableError as exc:
         logger.warning("booking.reschedule.recheck.unavailable err=%s", exc)
         _audit_tool(
@@ -1984,6 +2090,14 @@ def execute_reschedule(
     # Step 1: cancel the old record.
     try:
         client.cancel_record(record_id=record_id)
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.reschedule.cancel.schedule_unavailable err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_reschedule",
+            outcome="cancel_schedule_unavailable",
+        )
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except YClientsUnavailableError as exc:
         logger.warning("booking.reschedule.cancel.unavailable err=%s", exc)
         _audit_tool(
@@ -2045,6 +2159,18 @@ def execute_reschedule(
             client_phone=phone,
             client_name=client_name,
         )
+    except YClientsScheduleUnavailableError as exc:
+        # DRF-997: transient 429 on the create must NOT be treated as a
+        # partial failure (we already cancelled the old record above). The
+        # old row is already RESCHEDULED; leave it alone and surface the
+        # deterministic retry message. The customer can retry the
+        # reschedule; if the slot is gone by then they'll see
+        # slot_unavailable on the next preview.
+        logger.warning("booking.reschedule.create.schedule_unavailable err=%s", exc)
+        _audit_tool(
+            tenant_id=tenant_id, tool="execute_reschedule", outcome="create_schedule_unavailable"
+        )
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except (YClientsUnavailableError, YClientsAPIError) as exc:
         # Partial failure — old cancelled, new failed. Flip the old
         # row to CANCELLED (not RESCHEDULED, because there's no new
@@ -2431,6 +2557,10 @@ def _find_yclients_user_record(*, client: Any, record_id: int | str) -> Any:
     """
     try:
         records = client.get_user_records()
+    except YClientsScheduleUnavailableError:
+        # Let the caller (reschedule preview) surface the deterministic
+        # retry message instead of misreporting this as "record not found".
+        raise
     except (YClientsUnavailableError, YClientsAPIError):
         return None
     for rec in records:
@@ -2559,6 +2689,10 @@ def show_my_bookings(
     try:
         for rec in client.get_user_records():
             live_records[rec.id] = rec
+    except YClientsScheduleUnavailableError:
+        # DRF-997: a 429 on the live-records lookup is transient; surface the
+        # retry text instead of showing a possibly stale local list.
+        return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except (YClientsUnavailableError, YClientsAPIError):
         # Empty live_records → fall back to comment-marker only.
         pass

@@ -785,3 +785,30 @@ class TestRetryExhaustedFallback:
         )()
         assert len(rows) >= 1
         assert rows[0].payload["trace_id"] == result.trace_id
+
+    async def test_retry_exhausted_does_not_create_handoff_admin_task(self, tenant):
+        """DRF-989: timeout/retry exhaustion must serve a fallback reply
+        to the user without creating any AdminTask/handoff.
+        """
+        from apps.llm.retry import RetriableLLMError
+        from apps.orchestrator.pipeline import _FALLBACK_RETRY_EXHAUSTED
+
+        class _FakeUpstream(Exception):
+            pass
+
+        _FakeUpstream.__name__ = "APITimeoutError"
+
+        def _raise(*args, **kwargs):
+            raise RetriableLLMError(attempts=2, last_error=_FakeUpstream("timed out"))
+
+        with patch("apps.orchestrator.pipeline.classify", side_effect=_raise):
+            result = await turn(_message(text="hi"))
+
+        assert result.ok is True
+        assert result.reply is not None
+        assert result.reply.text == _FALLBACK_RETRY_EXHAUSTED
+        assert result.error == "llm_retry_exhausted"
+        from apps.handoff.models import AdminTask
+
+        count = await sync_to_async(lambda: AdminTask.objects.filter(tenant=tenant).count())()
+        assert count == 0

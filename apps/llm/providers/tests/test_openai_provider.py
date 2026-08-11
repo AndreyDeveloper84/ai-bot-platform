@@ -569,5 +569,82 @@ class TestRetryOpenAI:
         assert client.embeddings.create.await_count == 2
 
 
+# ---------------------------------------------------------------------------
+# DRF-989 — LLM timeout + disable SDK retries
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutAndSdkRetryConfig:
+    """Verify the SDK client is wired with a bounded timeout and no
+    built-in retries. Our own retry layer in ``apps.llm.retry`` owns
+    the retry policy so we can audit each attempt.
+    """
+
+    def test_client_created_with_timeout_and_max_retries_zero(self, settings):
+        from unittest.mock import patch
+
+        from apps.llm.providers.openai_provider import OpenAIProvider
+
+        settings.LLM_REQUEST_TIMEOUT_S = 30.0
+        provider = OpenAIProvider(api_key="ci-fake-key")
+
+        with patch("openai.AsyncOpenAI") as mock_client_cls:
+            provider._get_client()
+
+        mock_client_cls.assert_called_once()
+        _, kwargs = mock_client_cls.call_args
+        assert kwargs["timeout"] == 30.0
+        assert kwargs["max_retries"] == 0
+
+    def test_proxy_http_client_also_gets_timeout(self, settings):
+        from unittest.mock import patch
+
+        import httpx
+
+        from apps.llm.providers.openai_provider import OpenAIProvider
+
+        settings.LLM_REQUEST_TIMEOUT_S = 30.0
+        provider = OpenAIProvider(api_key="ci-fake-key", proxy="http://proxy.example:8080")
+
+        with patch("openai.AsyncOpenAI") as mock_client_cls:
+            provider._get_client()
+
+        mock_client_cls.assert_called_once()
+        _, kwargs = mock_client_cls.call_args
+        assert kwargs["max_retries"] == 0
+        http_client = kwargs["http_client"]
+        assert http_client.timeout == httpx.Timeout(30.0)
+
+    @pytest.mark.asyncio
+    async def test_timeout_error_is_retried_then_exhausted(self):
+        """APITimeoutError is retriable. With a fast zero-delay policy
+        the call must fail within the configured budget instead of
+        hanging for the SDK default (600s).
+        """
+        from apps.llm.retry import RetriableLLMError, RetryPolicy
+
+        from apps.llm.providers.openai_provider import OpenAIProvider
+
+        policy = RetryPolicy(max_attempts=2, base_delay_s=0.0, max_delay_s=0.0, jitter=0.0)
+        provider = OpenAIProvider(api_key="ci-fake-key", retry_policy=policy)
+        fake_client = MagicMock()
+
+        class _FakeTimeoutError(Exception):
+            pass
+
+        _FakeTimeoutError.__name__ = "APITimeoutError"
+
+        fake_client.chat.completions.create = AsyncMock(
+            side_effect=_FakeTimeoutError("request timed out")
+        )
+        provider._client = fake_client  # type: ignore[attr-defined]
+
+        with pytest.raises(RetriableLLMError) as exc_info:
+            await provider.complete([{"role": "user", "content": "hi"}])
+
+        assert exc_info.value.attempts == 2
+        assert fake_client.chat.completions.create.await_count == 2
+
+
 # sync_to_async used by the audit test above.
 from asgiref.sync import sync_to_async  # noqa: E402  (test-helper, end of file)

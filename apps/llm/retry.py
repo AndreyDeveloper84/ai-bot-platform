@@ -94,14 +94,15 @@ T = TypeVar("T")
 class RetryPolicy:
     """Tunable knobs for :func:`run_with_retry`.
 
-    Defaults match the documented Phase 1 acceptance criteria:
-    3 attempts, 1s base delay, 30s cap, ±25% jitter. Override in
+    Defaults updated by DRF-989 to keep the interactive worst-case
+    budget under ~90s when combined with ``LLM_REQUEST_TIMEOUT_S=30``:
+    2 attempts, 1s base delay, 30s cap, ±25% jitter. Override in
     settings via ``LLM_RETRY_MAX_ATTEMPTS`` / ``LLM_RETRY_BASE_DELAY_S``
     / ``LLM_RETRY_MAX_DELAY_S`` env vars (config/settings/base.py).
 
     Attributes:
-      max_attempts: total attempts including the first. ``3`` means
-        the call is made up to 3 times — initial + 2 retries.
+      max_attempts: total attempts including the first. ``2`` means
+        the call is made up to 2 times — initial + 1 retry.
       base_delay_s: starting backoff. Doubles with each attempt
         (``base``, ``base * 2``, ``base * 4``, …).
       max_delay_s: hard cap on a single backoff window. With
@@ -113,7 +114,7 @@ class RetryPolicy:
         off in lockstep. Set to ``0`` for deterministic tests.
     """
 
-    max_attempts: int = 3
+    max_attempts: int = 2
     base_delay_s: float = 1.0
     max_delay_s: float = 30.0
     jitter: float = 0.25
@@ -516,7 +517,7 @@ def policy_from_settings() -> RetryPolicy:
     """Build a :class:`RetryPolicy` from Django settings.
 
     Reads:
-      * ``LLM_RETRY_MAX_ATTEMPTS`` (default 3)
+      * ``LLM_RETRY_MAX_ATTEMPTS`` (default 2)
       * ``LLM_RETRY_BASE_DELAY_S`` (default 1.0)
       * ``LLM_RETRY_MAX_DELAY_S`` (default 30.0)
 
@@ -528,7 +529,7 @@ def policy_from_settings() -> RetryPolicy:
     from django.conf import settings
 
     return RetryPolicy(
-        max_attempts=int(getattr(settings, "LLM_RETRY_MAX_ATTEMPTS", 3)),
+        max_attempts=int(getattr(settings, "LLM_RETRY_MAX_ATTEMPTS", 2)),
         base_delay_s=float(getattr(settings, "LLM_RETRY_BASE_DELAY_S", 1.0)),
         max_delay_s=float(getattr(settings, "LLM_RETRY_MAX_DELAY_S", 30.0)),
     )

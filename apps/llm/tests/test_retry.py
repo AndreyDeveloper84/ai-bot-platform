@@ -523,8 +523,8 @@ class TestIsRetriableAnthropic:
 
 class TestRetryPolicyDefaults:
     def test_default_policy_matches_acceptance_criteria(self) -> None:
-        # Per DRF-858 brief: 3 attempts, 1s base, 30s cap, ±25% jitter.
-        assert DEFAULT_POLICY.max_attempts == 3
+        # Per DRF-989 budget: 2 attempts, 1s base, 30s cap, ±25% jitter.
+        assert DEFAULT_POLICY.max_attempts == 2
         assert DEFAULT_POLICY.base_delay_s == 1.0
         assert DEFAULT_POLICY.max_delay_s == 30.0
         assert DEFAULT_POLICY.jitter == 0.25
@@ -534,7 +534,26 @@ class TestRetryPolicyDefaults:
 
         policy = policy_from_settings()
         # The defaults configured in config/settings/base.py match the
-        # acceptance criteria. Test settings inherit from base.
-        assert policy.max_attempts == 3
+        # DRF-989 interactive-path budget (see test below).
+        assert policy.max_attempts == 2
         assert policy.base_delay_s == 1.0
         assert policy.max_delay_s == 30.0
+
+    def test_worst_case_retry_budget_within_ninety_seconds(self, settings) -> None:
+        """DRF-989: timeout × attempts + backoff delays must stay under
+        the ~90s interactive-path ceiling. With the new defaults
+        (timeout=30s, max_attempts=2, base_delay=1s) the worst case is
+        ~61s even with full positive jitter.
+        """
+        from apps.llm.retry import policy_from_settings
+
+        timeout = float(settings.LLM_REQUEST_TIMEOUT_S)
+        policy = policy_from_settings()
+        max_jitter_multiplier = 1.0 + policy.jitter  # +25%
+        # Sum of sleeps between attempts (base * 2^0, base * 2^1, ...).
+        total_backoff = sum(
+            min(policy.base_delay_s * (2**i), policy.max_delay_s)
+            for i in range(policy.max_attempts - 1)
+        )
+        worst_case = timeout * policy.max_attempts + total_backoff * max_jitter_multiplier
+        assert worst_case <= 90.0

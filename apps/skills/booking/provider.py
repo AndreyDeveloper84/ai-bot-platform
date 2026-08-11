@@ -34,9 +34,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from typing import Any
 
 from django.conf import settings
+
+from apps.booking.models import RemoteBookingProxy
 
 from apps.integrations.ayla.booking_client import (
     AylaBookingClient,
@@ -47,6 +50,7 @@ from apps.integrations.ayla.booking_client import (
     AylaUserRecord,
     BookingAPIError,
     BookingBadRequestError,
+    BookingRateLimitedError,
     BookingUnavailableError,
 )
 from apps.integrations.yclients.client import (
@@ -205,11 +209,26 @@ class AylaYClientsAdapter:
 
     def cancel_record(self, *, record_id: int | str) -> bool:
         key = _idempotency_key(self._external_user_id, "cancel", record_id)
+        # DRF-997: pass the proxy's specialist/service/date so the client can
+        # invalidate the short-lived slot/dates cache after a successful cancel.
+        specialist_id: str | None = None
+        service_id: str | None = None
+        date: str | None = None
+        try:
+            proxy = RemoteBookingProxy.all_tenants.get(appointment_id=uuid.UUID(str(record_id)))
+            specialist_id = str(proxy.specialist_id) if proxy.specialist_id else None
+            service_id = str(proxy.service_id) if proxy.service_id else None
+            date = proxy.start_at.date().isoformat() if proxy.start_at else None
+        except (RemoteBookingProxy.DoesNotExist, ValueError):
+            pass
         with _translate_errors():
             return self._client.cancel_appointment(
                 external_user_id=self._external_user_id,
                 appointment_id=str(record_id),
                 idempotency_key=key,
+                specialist_id=specialist_id,
+                service_id=service_id,
+                date=date,
             )
 
     def reschedule_record(
@@ -226,6 +245,18 @@ class AylaYClientsAdapter:
         mirror keeps one stable identity.
         """
         key = _idempotency_key(self._external_user_id, "reschedule", record_id, datetime)
+        # DRF-997: pass the proxy's specialist/service/old_date so the client can
+        # invalidate the short-lived slot/dates cache after a successful move.
+        specialist_id: str | None = None
+        service_id: str | None = None
+        old_date: str | None = None
+        try:
+            proxy = RemoteBookingProxy.all_tenants.get(appointment_id=uuid.UUID(str(record_id)))
+            specialist_id = str(proxy.specialist_id) if proxy.specialist_id else None
+            service_id = str(proxy.service_id) if proxy.service_id else None
+            old_date = proxy.start_at.date().isoformat() if proxy.start_at else None
+        except (RemoteBookingProxy.DoesNotExist, ValueError):
+            pass
         with _translate_errors():
             record = self._client.reschedule_appointment(
                 external_user_id=self._external_user_id,
@@ -233,6 +264,9 @@ class AylaYClientsAdapter:
                 new_start_datetime=datetime,
                 expected_version=expected_version,
                 idempotency_key=key,
+                specialist_id=specialist_id,
+                service_id=service_id,
+                old_date=old_date,
             )
         return BookingRecord(record_id=0, record_hash="", raw=_mirror_raw(record))
 
@@ -256,6 +290,17 @@ class YClientsSpecialistUnavailableError(YClientsAPIError):
     debt semantics in its type or message beyond the neutral slug. It
     subclasses ``YClientsAPIError`` so unspecialised handlers keep
     working; the create path catches it FIRST.
+    """
+
+
+class YClientsScheduleUnavailableError(YClientsUnavailableError):
+    """Transient schedule-service outage (e.g. backend 429).
+
+    DRF-997: the bot must show an honest "schedule service is unavailable"
+    message and let the user retry shortly, NOT hand off to a manager.
+    Subclasses ``YClientsUnavailableError`` so generic outage handlers keep
+    working, but the booking skill catches this subtype first to avoid a
+    false handoff.
     """
 
 
@@ -303,6 +348,11 @@ class _translate_errors:
             raise YClientsSpecialistUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_stale_version(exc):
             raise YClientsStaleVersionError(str(exc)) from exc
+        # DRF-997: 429 after retries is a transient schedule outage, not a
+        # generic YClients outage, so the skill can reply "try again in a
+        # minute" instead of handing off to a manager.
+        if issubclass(exc_type, BookingRateLimitedError):
+            raise YClientsScheduleUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingUnavailableError):
             raise YClientsUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingAPIError):

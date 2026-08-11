@@ -25,6 +25,16 @@ import httpx
 import pytest
 
 from apps.integrations.ayla import booking_client as bc
+from apps.tenancy.context import tenant_scope
+from apps.tenancy.models import Tenant
+
+
+@pytest.fixture(autouse=True)
+def _clear_django_cache() -> None:
+    """DRF-997: slot/dates cache must not leak between tests."""
+    from django.core.cache import cache
+
+    cache.clear()
 
 
 # ─── construction guards ───────────────────────────────────────────────────
@@ -584,3 +594,269 @@ class TestCancelStatusMapping:
         with pytest.raises(bc.BookingBadRequestError):
             client.cancel_appointment(external_user_id="x", appointment_id="a1")
         assert client._circuit.is_open(now=time.monotonic()) is False
+
+
+class TestRateLimitRetry:
+    """DRF-997: 429 must be retried and, if it persists, surfaced as
+    transient unavailability without opening the circuit breaker."""
+
+    def test_429_retries_then_raises_unavailable(self, monkeypatch) -> None:
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "0"},
+                json={"error": {"code": "RATE_LIMITED"}},
+            )
+
+        # Speed the test up — the retry logic still exercises the loop.
+        monkeypatch.setattr(bc, "RATE_LIMIT_BACKOFF_BASE_S", 0.0)
+        client = _client_with(handler)
+        with pytest.raises(bc.BookingUnavailableError, match="rate_limited"):
+            client.get_available_times(
+                specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+            )
+        assert len(calls) == bc.RATE_LIMIT_MAX_RETRIES + 1
+        # 429 is a rate-limit, not a server failure — breaker must stay closed.
+        assert client._circuit.is_open(now=time.monotonic()) is False
+
+    def test_429_eventual_success_returns_payload(self, monkeypatch) -> None:
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            if len(calls) == 1:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "0"},
+                    json={"error": {"code": "RATE_LIMITED"}},
+                )
+            return httpx.Response(
+                200,
+                json={"date": "2026-06-10", "slots": ["2026-06-10T14:00:00+03:00"]},
+            )
+
+        monkeypatch.setattr(bc, "RATE_LIMIT_BACKOFF_BASE_S", 0.0)
+        out = _client_with(handler).get_available_times(
+            specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+        )
+        assert len(calls) == 2
+        assert [s.time for s in out] == ["14:00"]
+
+    def test_429_retry_after_is_capped(self, monkeypatch) -> None:
+        """A huge Retry-After header must be clipped to 1.5 s (RATE_LIMIT_MAX_WAIT_S)."""
+        calls: list[httpx.Request] = []
+        sleeps: list[float] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            if len(calls) == 1:
+                return httpx.Response(
+                    429,
+                    headers={"Retry-After": "300"},
+                    json={"error": {"code": "RATE_LIMITED"}},
+                )
+            return httpx.Response(
+                200,
+                json={"date": "2026-06-10", "slots": ["2026-06-10T14:00:00+03:00"]},
+            )
+
+        monkeypatch.setattr(bc, "RATE_LIMIT_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr(bc.time, "sleep", sleeps.append)
+        out = _client_with(handler).get_available_times(
+            specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+        )
+        assert len(calls) == 2
+        assert [s.time for s in out] == ["14:00"]
+        assert len(sleeps) == 1
+        # Jitter clips the capped Retry-After to 75-100 % of the max wait.
+        assert bc.RATE_LIMIT_MAX_WAIT_S * 0.75 <= sleeps[0] <= bc.RATE_LIMIT_MAX_WAIT_S
+        assert sleeps[0] <= 1.5
+
+    def test_429_total_sleep_budget_is_capped_at_three_seconds(self, monkeypatch) -> None:
+        """The worst-case per-call synchronous sleep is ≤ 3 s."""
+        calls: list[httpx.Request] = []
+        sleeps: list[float] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "300"},
+                json={"error": {"code": "RATE_LIMITED"}},
+            )
+
+        monkeypatch.setattr(bc, "RATE_LIMIT_BACKOFF_BASE_S", 0.0)
+        monkeypatch.setattr(bc.time, "sleep", sleeps.append)
+        with pytest.raises(bc.BookingUnavailableError, match="rate_limited"):
+            _client_with(handler).get_available_times(
+                specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+            )
+        assert len(calls) == bc.RATE_LIMIT_MAX_RETRIES + 1
+        assert sum(sleeps) <= 3.0
+        for s in sleeps:
+            assert s <= bc.RATE_LIMIT_MAX_WAIT_S
+
+
+class TestSlotCache:
+    """DRF-997: short-lived cache for slot/dates lookups prevents repeated
+    backend calls within the TTL window."""
+
+    def test_times_cache_hits_prevent_second_wire_call(self) -> None:
+        from django.core.cache import cache
+
+        cache.clear()
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(
+                200,
+                json={"date": "2026-06-10", "slots": ["2026-06-10T14:00:00+03:00"]},
+            )
+
+        client = _client_with(handler)
+        out1 = client.get_available_times(
+            specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+        )
+        out2 = client.get_available_times(
+            specialist_id="spec-1", date="2026-06-10", service_id="svc-1"
+        )
+        assert len(calls) == 1
+        assert len(out1) == len(out2) == 1
+        cache.clear()
+
+    def test_dates_cache_hits_prevent_second_fanout(self) -> None:
+        from django.core.cache import cache
+
+        cache.clear()
+        calls: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(200, json={"date": req.url.params.get("date"), "slots": []})
+
+        client = _client_with(handler)
+        client.get_available_dates(specialist_id="spec-1", service_id="svc-1", window_days=3)
+        client.get_available_dates(specialist_id="spec-1", service_id="svc-1", window_days=3)
+        # First call fans out to 3 days; second call must be served from cache.
+        assert len(calls) == 3
+        cache.clear()
+
+    def test_cache_keys_are_tenant_isolated(self, db) -> None:
+        """Two tenants with the same specialist/service/date must not share a cache key."""
+        t1 = Tenant.objects.create(slug="cache-tenant-1", name="T1")
+        t2 = Tenant.objects.create(slug="cache-tenant-2", name="T2")
+
+        with tenant_scope(t1):
+            key1_times = bc._slots_cache_key("spec-1", "svc-1", "2026-06-10")
+            key1_dates = bc._dates_cache_key("spec-1", "svc-1", 14)
+        with tenant_scope(t2):
+            key2_times = bc._slots_cache_key("spec-1", "svc-1", "2026-06-10")
+            key2_dates = bc._dates_cache_key("spec-1", "svc-1", 14)
+
+        assert key1_times != key2_times
+        assert key1_dates != key2_dates
+        assert str(t1.id) in key1_times
+        assert str(t2.id) in key2_times
+
+
+class TestWriteCacheInvalidation:
+    """DRF-997: successful writes drop the affected slot/dates cache keys."""
+
+    def test_create_appointment_invalidates_affected_cache(self) -> None:
+        from django.core.cache import cache
+
+        cache.clear()
+        slots_key = bc._slots_cache_key("spec-1", "svc-1", "2026-06-10")
+        dates_key = bc._dates_cache_key("spec-1", "svc-1", bc.AVAILABLE_DATES_WINDOW_DAYS)
+        cache.set(
+            slots_key,
+            [bc.AylaSlot(time="14:00", datetime="2026-06-10T14:00:00+03:00", duration_s=3600)],
+            bc.SLOT_CACHE_TTL_S,
+        )
+        cache.set(dates_key, ["2026-06-10"], bc.SLOT_CACHE_TTL_S)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                201,
+                json={"data": {"id": "appt-uuid", "start_datetime": "2026-06-10T14:00:00+03:00"}},
+            )
+
+        _client_with(handler).create_appointment(
+            external_user_id="bot:max:1",
+            client_id="client-uuid",
+            specialist_id="spec-1",
+            service_id="svc-1",
+            start_datetime="2026-06-10T14:00:00+03:00",
+        )
+        assert cache.get(slots_key) is None
+        assert cache.get(dates_key) is None
+        cache.clear()
+
+    def test_cancel_appointment_invalidates_affected_cache(self) -> None:
+        from django.core.cache import cache
+
+        cache.clear()
+        slots_key = bc._slots_cache_key("spec-1", "svc-1", "2026-06-10")
+        dates_key = bc._dates_cache_key("spec-1", "svc-1", bc.AVAILABLE_DATES_WINDOW_DAYS)
+        cache.set(
+            slots_key,
+            [bc.AylaSlot(time="14:00", datetime="2026-06-10T14:00:00+03:00", duration_s=3600)],
+            bc.SLOT_CACHE_TTL_S,
+        )
+        cache.set(dates_key, ["2026-06-10"], bc.SLOT_CACHE_TTL_S)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": {}})
+
+        _client_with(handler).cancel_appointment(
+            external_user_id="bot:max:1",
+            appointment_id="appt-uuid",
+            specialist_id="spec-1",
+            service_id="svc-1",
+            date="2026-06-10",
+        )
+        assert cache.get(slots_key) is None
+        assert cache.get(dates_key) is None
+        cache.clear()
+
+    def test_reschedule_appointment_invalidates_old_and_new_cache(self) -> None:
+        from django.core.cache import cache
+
+        cache.clear()
+        old_slots_key = bc._slots_cache_key("spec-1", "svc-1", "2026-06-10")
+        new_slots_key = bc._slots_cache_key("spec-1", "svc-1", "2026-06-11")
+        dates_key = bc._dates_cache_key("spec-1", "svc-1", bc.AVAILABLE_DATES_WINDOW_DAYS)
+        cache.set(
+            old_slots_key,
+            [bc.AylaSlot(time="14:00", datetime="2026-06-10T14:00:00+03:00", duration_s=3600)],
+            bc.SLOT_CACHE_TTL_S,
+        )
+        cache.set(
+            new_slots_key,
+            [bc.AylaSlot(time="15:00", datetime="2026-06-11T15:00:00+03:00", duration_s=3600)],
+            bc.SLOT_CACHE_TTL_S,
+        )
+        cache.set(dates_key, ["2026-06-10", "2026-06-11"], bc.SLOT_CACHE_TTL_S)
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"data": {"id": "appt-uuid", "start_datetime": "2026-06-11T15:00:00+03:00"}},
+            )
+
+        _client_with(handler).reschedule_appointment(
+            external_user_id="bot:max:1",
+            appointment_id="appt-uuid",
+            new_start_datetime="2026-06-11T15:00:00+03:00",
+            specialist_id="spec-1",
+            service_id="svc-1",
+            old_date="2026-06-10",
+        )
+        assert cache.get(old_slots_key) is None
+        assert cache.get(new_slots_key) is None
+        assert cache.get(dates_key) is None
+        cache.clear()

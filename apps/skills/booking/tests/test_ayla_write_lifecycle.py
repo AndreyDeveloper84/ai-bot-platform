@@ -107,7 +107,14 @@ class FakeAyla:
         return self.create_response or AylaBookingRecord(appointment_id=_APPT, raw={})
 
     def cancel_appointment(
-        self, *, external_user_id: str, appointment_id: str, idempotency_key: str | None = None
+        self,
+        *,
+        external_user_id: str,
+        appointment_id: str,
+        idempotency_key: str | None = None,
+        specialist_id: str | None = None,
+        service_id: str | None = None,
+        date: str | None = None,
     ) -> bool:
         self.cancel_calls.append(appointment_id)
         return True
@@ -120,12 +127,18 @@ class FakeAyla:
         new_start_datetime: str,
         expected_version: int | None = None,
         idempotency_key: str | None = None,
+        specialist_id: str | None = None,
+        service_id: str | None = None,
+        old_date: str | None = None,
     ) -> AylaBookingRecord:
         self.reschedule_calls.append(
             {
                 "appointment_id": appointment_id,
                 "new_start_datetime": new_start_datetime,
                 "expected_version": expected_version,
+                "specialist_id": specialist_id,
+                "service_id": service_id,
+                "old_date": old_date,
             }
         )
         return self.reschedule_response or AylaBookingRecord(appointment_id=appointment_id, raw={})
@@ -348,11 +361,15 @@ class TestRescheduleFlagOn:
         assert result.confirmation is not None and result.confirmation.ok
         # Same canonical id (native move, not cancel+create).
         assert result.confirmation.record_id == _APPT
+        old_date = (now + timedelta(days=1)).date().isoformat()
         assert fake.reschedule_calls == [
             {
                 "appointment_id": _APPT,
                 "new_start_datetime": _NEW_DT,
                 "expected_version": None,
+                "specialist_id": _SPEC,
+                "service_id": _SVC,
+                "old_date": old_date,
             }
         ]
         # Billing row stays CONFIRMED (not RESCHEDULED) — id unchanged.

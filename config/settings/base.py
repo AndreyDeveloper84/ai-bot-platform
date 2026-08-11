@@ -1051,18 +1051,24 @@ CELERY_BEAT_SCHEDULE = {
 # LLMProviderQuotaExceeded; the L5 router falls back to OpenAI.
 ANTHROPIC_DAILY_TOKEN_CAP = int(os.environ.get("ANTHROPIC_DAILY_TOKEN_CAP", "1000000"))
 
+# DRF-989 — per-request timeout for OpenAI / Anthropic SDK calls.
+# Default 30s replaces the SDK default of 600s, preventing one
+# stalled upstream request from blocking the single-threaded worker
+# for minutes. Read by both providers in _get_client().
+LLM_REQUEST_TIMEOUT_S = float(os.environ.get("LLM_REQUEST_TIMEOUT_S", "30.0"))
+
 # Phase 1 / PI7 (DRF-858) — exponential-backoff retry for OpenAI 429
 # and 5xx errors, applied uniformly to both OpenAI and Anthropic
 # providers via ``apps.llm.retry.run_with_retry``. Single set of
 # settings shared across both providers — per-provider tuning is
 # a future ticket if and when it becomes necessary.
 #
-# Defaults: 3 attempts (initial + 2 retries), 1s base delay with
-# exponential doubling (1s, 2s, 4s, …), 30s cap, ±25% jitter. With
-# these defaults the worst-case before exhaustion is ~3s of waiting
-# — well under the 4000ms p95 turn budget for the (~95%) of
-# transients that retry-successfully on the first or second retry.
-LLM_RETRY_MAX_ATTEMPTS = int(os.environ.get("LLM_RETRY_MAX_ATTEMPTS", "3"))
+# DRF-989 update: max_attempts lowered from 3 to 2 so the interactive
+# worst-case budget stays under ~90s: timeout(30s) × 2 attempts +
+# one 1s backoff ≈ 61s (even with +25% jitter). The SDK's own retries
+# are disabled via max_retries=0 in each provider; this layer owns the
+# only retry budget.
+LLM_RETRY_MAX_ATTEMPTS = int(os.environ.get("LLM_RETRY_MAX_ATTEMPTS", "2"))
 LLM_RETRY_BASE_DELAY_S = float(os.environ.get("LLM_RETRY_BASE_DELAY_S", "1.0"))
 LLM_RETRY_MAX_DELAY_S = float(os.environ.get("LLM_RETRY_MAX_DELAY_S", "30.0"))
 
