@@ -82,6 +82,11 @@ AVAILABLE_DATES_WINDOW_DAYS = 14
 # config drift) would hammer Ayla and stall the user. Clamp defensively.
 MAX_AVAILABLE_DATES_WINDOW_DAYS = 31
 
+# DRF-1004: hard ceiling on catalog pagination. A runaway ``next`` chain
+# (upstream bug) must not loop forever — hitting the ceiling with pages
+# still left is surfaced as ``catalog_incomplete``.
+MAX_CATALOG_PAGES = 100
+
 
 def _fire_breaker_alert(transition: str, failures: int) -> None:
     """Borrow the CR-3 Telegram alert path on a breaker state transition.
@@ -355,7 +360,10 @@ def _as_rows(payload: Any) -> list[dict[str, Any]]:
 
 
 def _service_from_wire(d: dict[str, Any]) -> AylaService:
-    price = float(d.get("price") or 0.0)
+    # DRF-1004: the canonical catalog (``catalog/salon-services/``) exposes the
+    # price as ``base_price`` (string); the legacy feed used ``price``. Prefer
+    # the canonical field, tolerate the old one.
+    price = float(d.get("base_price") or d.get("price") or 0.0)
     dur_min = int(d.get("duration_minutes") or 0)
     category = d.get("category")
     return AylaService(
@@ -633,9 +641,70 @@ class AylaBookingHTTPClient:
     # ── reads ────────────────────────────────────────────────────────────────
 
     def get_services(self, *, specialist_id: str | None = None) -> list[AylaService]:
-        endpoint = f"specialists/{specialist_id}/services/" if specialist_id else "services/"
-        resp = self._request("GET", endpoint)
-        return [_service_from_wire(r) for r in _as_rows(self._ok(resp))]
+        """Service catalog from Ayla's canonical catalog endpoints (DRF-1004).
+
+        The legacy ``services/`` / ``specialists/<id>/services/`` feeds are
+        dead upstream (legacy ``Service`` queryset is globally empty); the
+        live catalog is ``catalog/salon-services/``, plus the
+        ``catalog/specialist-services/`` bookable edges for the
+        per-specialist branch. Both reads are scoped by the active tenant —
+        a call without tenant scope is an error, not an empty catalog.
+        """
+        tenant_id = _require_tenant_id()
+        rows = self._get_all_rows(
+            "catalog/salon-services/",
+            params={"tenant": tenant_id, "is_active": "true"},
+        )
+        if specialist_id:
+            edges = self._get_all_rows(
+                "catalog/specialist-services/",
+                params={
+                    "tenant": tenant_id,
+                    "specialist": specialist_id,
+                    "is_active": "true",
+                },
+            )
+            allowed = {str(e.get("salon_service")) for e in edges if e.get("salon_service")}
+            rows = [r for r in rows if str(r.get("id")) in allowed]
+        return [_service_from_wire(r) for r in rows]
+
+    def _get_all_rows(self, endpoint: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Walk a paginated DRF list endpoint to completion.
+
+        Never returns a partial catalog silently: when the envelope advertises
+        ``count``, a mismatch with the collected rows raises
+        :class:`BookingUnavailableError` (DRF-1004 — a truncated catalog reads
+        downstream as spurious ``unknown_service`` on ``pick_slot``, the exact
+        defect class being fixed).
+        """
+        rows: list[dict[str, Any]] = []
+        advertised: int | None = None
+        page = 1
+        for _ in range(MAX_CATALOG_PAGES):
+            payload = self._ok(self._request("GET", endpoint, params={**params, "page": page}))
+            if not (isinstance(payload, dict) and "results" in payload):
+                # Non-paginated payload (raw list) — nothing to walk.
+                return _as_rows(payload)
+            batch = [r for r in payload.get("results") or [] if isinstance(r, dict)]
+            if advertised is None:
+                count = payload.get("count")
+                advertised = int(count) if isinstance(count, int) else None
+            rows.extend(batch)
+            if not payload.get("next") or not batch:
+                break
+            page += 1
+        else:
+            # Page ceiling hit with ``next`` still set — treat as incomplete.
+            raise BookingUnavailableError("catalog_incomplete")
+        if advertised is not None and advertised != len(rows):
+            logger.warning(
+                "booking_client.catalog_incomplete endpoint=%s advertised=%d collected=%d",
+                endpoint,
+                advertised,
+                len(rows),
+            )
+            raise BookingUnavailableError("catalog_incomplete")
+        return rows
 
     def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
         if specialist_id:
@@ -906,6 +975,21 @@ def _tenant_id_for_cache() -> str:
 
     tenant = current_tenant()
     return str(tenant.id) if tenant is not None else "_none_"
+
+
+def _require_tenant_id() -> str:
+    """Active tenant id for catalog scoping — or a loud call error.
+
+    Unlike :func:`_tenant_id_for_cache` (cache keys, where a sentinel is
+    harmless), a catalog read without a tenant must not degrade to anything
+    silent: an unscoped/empty catalog is exactly the DRF-1004 defect.
+    """
+    from apps.tenancy.context import current_tenant
+
+    tenant = current_tenant()
+    if tenant is None:
+        raise BookingBadRequestError("tenant_scope_required")
+    return str(tenant.id)
 
 
 def _slots_cache_key(specialist_id: str, service_id: str, date: str) -> str:
