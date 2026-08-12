@@ -30,6 +30,17 @@ from apps.eventbus.ingest_allowlist import (
     parse_tenant_allowlist as _parse_ingest_tenant_allowlist,
 )
 
+# DRF-1023 — strict parser for the CSRF_TRUSTED_ORIGINS wiring (see the
+# web-security block below). Imported under private aliases so they don't
+# leak into the settings namespace as pseudo-settings; the module is
+# stdlib-only, so importing it here is settings-load-safe.
+from config.security import (
+    OriginConfigurationError as _OriginConfigurationError,
+)
+from config.security import (
+    parse_trusted_origins as _parse_trusted_origins,
+)
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 SECRET_KEY = os.environ.get(
@@ -41,6 +52,53 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 
 ALLOWED_HOSTS: list[str] = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
 ALLOWED_HOSTS = [h.strip() for h in ALLOWED_HOSTS if h.strip()]
+
+# ---------------------------------------------------------------------------
+# DRF-1023 — web security block (admin login fix + pilot HTTPS awareness).
+#
+# Until DRF-1023 the project declared NO security directives at all. The
+# admin login at https://api-dev.gobeauty.site/admin/ answered «Ошибка
+# проверки CSRF» to everyone: the contour terminates TLS at nginx, Django
+# saw plain HTTP with an empty CSRF_TRUSTED_ORIGINS and rejected every
+# POST. This block wires the Django-core security settings to the
+# environment with unchanged-by-default values; HTTPS contours opt in
+# explicitly via the environment (pilot: .env.staging).
+#
+# DJANGO_CSRF_TRUSTED_ORIGINS — CSV of origins allowed to POST over HTTPS
+#   (admin login/session forms). Empty default = behaviour unchanged.
+#   Strict parsing (config/security.py): a malformed value raises
+#   ImproperlyConfigured at settings load — the same fail-safe as the
+#   T-02 / DRF-1005 allowlists. A half-parsed origin list is a login that
+#   "should work" and 403s, or worse one that trusts something unintended.
+try:
+    CSRF_TRUSTED_ORIGINS = _parse_trusted_origins(os.environ.get("DJANGO_CSRF_TRUSTED_ORIGINS", ""))
+except _OriginConfigurationError as exc:
+    raise ImproperlyConfigured(f"Invalid CSRF trusted-origins configuration: {exc}") from exc
+
+# DJANGO_BEHIND_TLS_PROXY=true tells Django the contour terminates TLS at
+# the front proxy (infra/nginx/ai-bot-platform-api.conf.template sets
+# ``X-Forwarded-Proto $scheme``): request.is_secure() then reflects the
+# client-facing scheme, which is what makes CSRF origin checking apply to
+# admin POSTs and Secure cookies behave correctly. A boolean rather than a
+# free-form tuple env: the header name is pinned to the one nginx actually
+# sends, so there is no misconfiguration axis. Default off = behaviour
+# unchanged (direct deployments, local dev).
+if os.environ.get("DJANGO_BEHIND_TLS_PROXY", "false").lower() == "true":
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# Secure cookies: browsers then only send the session/CSRF cookies over
+# HTTPS. Off by default (local dev has no TLS); HTTPS contours set both
+# true. Only meaningful together with DJANGO_BEHIND_TLS_PROXY.
+SESSION_COOKIE_SECURE = os.environ.get("DJANGO_SESSION_COOKIE_SECURE", "false").lower() == "true"
+CSRF_COOKIE_SECURE = os.environ.get("DJANGO_CSRF_COOKIE_SECURE", "false").lower() == "true"
+
+# SECURE_SSL_REDIRECT is deliberately NOT wired to the env: nginx already
+# 301s 80 → 443, and a Django-level redirect would also 301 the
+# container's own healthcheck (docker-compose.staging.yml curls
+# http://localhost:8000/healthz/ with no X-Forwarded-Proto), flipping the
+# container unhealthy. Enabling it requires teaching the probe about TLS
+# first — out of DRF-1023 scope.
+# ---------------------------------------------------------------------------
 
 # 20 platform apps scaffolded in Sprint 0 + apps.persona added in Sprint 2 / E1.
 # Each is empty (just AppConfig); models / views / migrations land
