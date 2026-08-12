@@ -2088,6 +2088,294 @@ class TestServiceRequiresHealthCheck:
 
 
 # ---------------------------------------------------------------------------
+# DRF-1005 — tenant-scoped health-check gate allowlist (Controlled Pilot)
+# ---------------------------------------------------------------------------
+
+
+class TestHealthCheckGateAllowlist:
+    """DRF-1005: ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` allowlist.
+
+    Owner decision 2026-08-12 (variant 3): for explicitly listed pilot
+    tenants the flag-ON (Ayla REST) health-check gate is DISABLED so the
+    automatic booking funnel works end-to-end; every other tenant keeps
+    the fail-closed default (#1034 / #1121). Every gate-disabled
+    evaluation must leave an audit trail. Controlled Pilot only — the
+    canonical resolved (master×service) source replaces this setting.
+    """
+
+    _AYLA_UUID = "11111111-1111-1111-1111-111111111111"
+    _OTHER_TENANT = "33333333-3333-3333-3333-333333333333"
+
+    def test_allowlisted_tenant_gate_opens(self, tenant: Tenant) -> None:
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is False
+
+    def test_tenant_not_in_allowlist_stays_fail_closed(self, tenant: Tenant) -> None:
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({self._OTHER_TENANT}),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+
+    def test_empty_allowlist_stays_fail_closed(self, tenant: Tenant) -> None:
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+
+    def test_malformed_injected_value_fails_closed(self, tenant: Tenant) -> None:
+        """A malformed value injected past settings load (e.g. a raw test
+        override) must neither crash the customer turn nor silently widen
+        access: the gate stays closed."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS="not-a-uuid",
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+
+    def test_no_tenant_scope_stays_fail_closed(self, tenant: Tenant) -> None:
+        """Outside an active ``tenant_scope`` there is no identity to match
+        against the allowlist → gate stays closed even when the tenant is
+        listed."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+
+    def test_gate_disabled_writes_audit(self, tenant: Tenant) -> None:
+        """Owner requirement: disabling a medical screening check must be
+        traceable — every gate-disabled evaluation writes an audit row."""
+        from apps.audit.models import AuditLog
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is False
+                row = AuditLog.all_tenants.get(
+                    tenant=tenant,
+                    action="booking.health_check_gate_disabled",
+                )
+        assert row.payload["tenant_id"] == str(tenant.id)
+        assert row.payload["service_id"] == self._AYLA_UUID
+
+    def test_gate_closed_writes_no_audit(self, tenant: Tenant) -> None:
+        """The fail-closed default is the status quo — no extra audit
+        noise for the regular handoff path."""
+        from apps.audit.models import AuditLog
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._AYLA_UUID) is True
+        assert not AuditLog.all_tenants.filter(action="booking.health_check_gate_disabled").exists()
+
+    def test_pick_slot_allowlisted_tenant_reaches_confirmation(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Acceptance: tenant in the allowlist → pick_slot reaches the
+        confirmation card; no handoff, hence no AdminTask downstream."""
+        import uuid as _uuid
+
+        from django.utils import timezone as dj_timezone
+
+        from apps.booking.models import PendingBookingAction
+        from apps.catalog.models import CatalogService
+        from apps.handoff.models import AdminTask
+
+        master_uuid = "11111111-1111-4111-8111-111111111111"
+        service_uuid = "22222222-2222-4222-8222-222222222222"
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="svc-22",
+                name="Service 22",
+                requires_health_check=False,
+                ayla_service_id=_uuid.UUID(service_uuid),
+            )
+        client = FakeYClients()
+        client.services_rows = [_service(service_uuid)]
+        client.staff_rows = [_staff(master_uuid, "Ольга")]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
+        )
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=client,
+                ),
+                _patch_provider_complete([]) as mock_complete,
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert "Подтверждаете?" in result.reply_text
+        assert PendingBookingAction.all_tenants.count() == 1
+        assert AdminTask.all_tenants.count() == 0
+
+    def test_pick_slot_non_allowlisted_tenant_still_handoffs(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Default-protection regression: flag-ON without an allowlist
+        entry keeps the fail-closed handoff on pick_slot."""
+        import uuid as _uuid
+
+        from django.utils import timezone as dj_timezone
+
+        from apps.booking.models import PendingBookingAction
+        from apps.catalog.models import CatalogService
+
+        master_uuid = "11111111-1111-4111-8111-111111111111"
+        service_uuid = "22222222-2222-4222-8222-222222222222"
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="svc-22",
+                name="Service 22",
+                requires_health_check=False,
+                ayla_service_id=_uuid.UUID(service_uuid),
+            )
+        client = FakeYClients()
+        client.services_rows = [_service(service_uuid)]
+        client.staff_rows = [_staff(master_uuid, "Ольга")]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=f"cb:book:pick_slot:{master_uuid}:{service_uuid}:2026-09-22T14:00:00",
+        )
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=client,
+                ),
+                _patch_provider_complete([]),
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_health_check_required"
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_health_check_handoff_uses_policy_text_pick_slot(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """DRF-1005 §3.3: the health-check handoff is a POLICY, not a
+        failure — the user must see the dedicated consultation text, not
+        the generic failure fallback."""
+        from django.utils import timezone as dj_timezone
+
+        from apps.catalog.models import CatalogService
+        from apps.skills.booking.skill import (
+            _FALLBACK_HANDOFF_TEXT,
+            _HEALTH_CHECK_HANDOFF_TEXT,
+        )
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="massage-gated",
+                name="Массаж (по показаниям)",
+                requires_health_check=True,
+            )
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_slot:11:22:2026-09-22T14:00:00",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(ctx)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_health_check_required"
+        assert result.reply_text == _HEALTH_CHECK_HANDOFF_TEXT
+        assert result.reply_text != _FALLBACK_HANDOFF_TEXT
+
+    def test_health_check_handoff_uses_policy_text_llm_path(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """Same policy text on the LLM confirm path (skill.py confirm
+        gate) — both health-check branches share the wording."""
+        from django.utils import timezone as dj_timezone
+
+        from apps.catalog.models import CatalogService
+        from apps.skills.booking.skill import (
+            _FALLBACK_HANDOFF_TEXT,
+            _HEALTH_CHECK_HANDOFF_TEXT,
+        )
+
+        with tenant_scope(tenant):
+            CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="massage-gated",
+                name="Массаж (по показаниям)",
+                requires_health_check=True,
+            )
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        tc = ToolCall(
+            id="c1",
+            name="confirm_booking",
+            arguments={
+                "master_id": 11,
+                "service_id": 22,
+                "slot_datetime": "2026-05-20T14:00:00",
+            },
+        )
+        completions = [_completion(tool_calls=[tc])]
+        with _patch_yclients(client), _patch_provider_complete(completions):
+            with tenant_scope(tenant):
+                result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_health_check_required"
+        assert result.reply_text == _HEALTH_CHECK_HANDOFF_TEXT
+        assert result.reply_text != _FALLBACK_HANDOFF_TEXT
+
+
+# ---------------------------------------------------------------------------
 # DRF-997: transient 429 schedule outage must not hand off
 # ---------------------------------------------------------------------------
 

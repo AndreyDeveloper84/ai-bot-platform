@@ -145,6 +145,13 @@ _DEFAULT_BRAND_VOICE = BrandVoiceConfig(
 
 _FALLBACK_HANDOFF_TEXT = "Не получилось оформить запись — переключаю на менеджера, он подскажет."
 
+# DRF-1005 §3.3: the health-check handoff is a POLICY (the service needs a
+# consultation before booking), not a failure — the generic failure text
+# above would mislead the user into thinking something broke.
+_HEALTH_CHECK_HANDOFF_TEXT = (
+    "Для этой услуги нужна консультация — передаю менеджеру, он поможет с записью."
+)
+
 # Deterministic prompt shown when the master-cards keyboard is sent.
 # Buttons carry the data — text only frames the choice. Kept short
 # because MAX inline_keyboard wraps below the message body and the
@@ -201,6 +208,9 @@ _FLOW_ABORT_REPLIES = {
 # Audit / event slugs.
 EVENT_BOOKING_HANDLED = "booking.handled"
 EVENT_BOOKING_HANDOFF = "booking.handoff"
+# DRF-1005: owner-required trace for every evaluation where the pilot
+# allowlist disabled the health-check gate for a tenant.
+EVENT_BOOKING_HEALTH_GATE_DISABLED = "booking.health_check_gate_disabled"
 
 
 # Confidence values — booking is mostly deterministic so we report a
@@ -603,6 +613,9 @@ class BookingSkill:
         tool_calls_made = first.tool_calls
 
         if tool_name not in {spec["name"] for spec in BOOKING_TOOL_SPECS}:
+            # DRF-1005: was a silent handoff — log which tool the model
+            # hallucinated so the reason is diagnosable from logs alone.
+            logger.info("booking.unknown_tool tenant=%s tool=%s", tenant_id, tool_name)
             return _handoff(
                 tool_calls_made=tool_calls_made,
                 reason="booking_unknown_tool",
@@ -632,6 +645,13 @@ class BookingSkill:
             )
 
         if handoff_reason:
+            # DRF-1005: was a silent handoff — log the tool-error verdict.
+            logger.info(
+                "booking.tool_handoff tenant=%s tool=%s reason=%s",
+                tenant_id,
+                tool_name,
+                handoff_reason,
+            )
             return _handoff(
                 tool_calls_made=tool_calls_made,
                 reason=handoff_reason,
@@ -652,6 +672,8 @@ class BookingSkill:
                     str(first_call.arguments.get("service_name") or ""), service_lookup
                 )
             if service_id is None:
+                # DRF-1005: was a silent handoff.
+                logger.info("booking.show_masters.missing_service_context tenant=%s", tenant_id)
                 return _handoff(
                     tool_calls_made=tool_calls_made,
                     reason="booking_missing_service_context",
@@ -676,6 +698,8 @@ class BookingSkill:
             master_id = _coerce_id(first_call.arguments.get("master_id"))
             service_id = _coerce_id(first_call.arguments.get("service_id"))
             if master_id is None or service_id is None:
+                # DRF-1005: was a silent handoff.
+                logger.info("booking.show_slots.missing_context tenant=%s", tenant_id)
                 return _handoff(
                     tool_calls_made=tool_calls_made,
                     reason="booking_missing_service_context",
@@ -697,10 +721,18 @@ class BookingSkill:
         if tool_name == CONFIRM_BOOKING_TOOL_SPEC["name"]:
             service_id = _coerce_id(first_call.arguments.get("service_id"))
             if service_id is not None and _service_requires_health_check(tenant, service_id):
+                # DRF-1005: this branch used to hand off without a single
+                # log line — log the policy decision, and use the policy
+                # text (consultation), not the failure fallback.
+                logger.info(
+                    "booking.confirm.health_check_required tenant=%s service=%s",
+                    tenant_id,
+                    service_id,
+                )
                 return _handoff(
                     tool_calls_made=tool_calls_made,
                     reason="booking_health_check_required",
-                    text=_FALLBACK_HANDOFF_TEXT,
+                    text=_HEALTH_CHECK_HANDOFF_TEXT,
                     tenant_id=tenant_id,
                 )
 
@@ -992,27 +1024,86 @@ def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _health_check_gate_disabled_for_tenant() -> bool:
+    """DRF-1005: True when the ACTIVE tenant is in the pilot allowlist.
+
+    The tenant identity comes from the active ``tenant_scope`` (same
+    lazy-import pattern as ``apps/integrations/ayla/booking_client.py``,
+    DRF-997/1004) — never from caller-supplied data.
+
+    Fail-closed on every doubt: no tenant in scope, or a malformed
+    setting value injected past settings load (``override_settings`` /
+    live reload), keeps the gate CLOSED. A malformed value can never
+    silently widen access, and a settings-load-time malformed value never
+    boots at all (``config/settings/base.py`` raises
+    ``ImproperlyConfigured``).
+    """
+    from django.conf import settings
+
+    from apps.eventbus.ingest_allowlist import (
+        AllowlistConfigurationError,
+        parse_tenant_allowlist,
+    )
+    from apps.tenancy.context import current_tenant
+
+    tenant = current_tenant()
+    if tenant is None:
+        return False
+    raw: Any = getattr(settings, "BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", frozenset())
+    try:
+        allowed = parse_tenant_allowlist(
+            raw, setting_name="BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS"
+        )
+    except AllowlistConfigurationError as exc:
+        logger.warning("booking.health_gate.allowlist_malformed err=%s", exc)
+        return False
+    return str(tenant.id).lower() in allowed
+
+
 def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
-    """Lookup :class:`CatalogService.requires_health_check` for ``service_id``.
+    """Whether booking ``service_id`` must route through a human health check.
 
-    Catalog mirror is the source of truth.
+    **flag-OFF (legacy YClients path):** the catalog mirror is the source
+    of truth, keyed by the int ``external_id``. If we can't find the
+    service row (e.g. catalog isn't synced yet) we DEFAULT to ``False`` —
+    better UX to attempt the booking than to dead-end every flow.
 
-    **flag-OFF (legacy YClients path):** the mirror is keyed by the int
-    ``external_id``. If we can't find the service row (e.g. catalog isn't
-    synced yet) we DEFAULT to ``False`` — better UX to attempt the booking
-    than to dead-end every flow.
-
-    **flag-ON (Ayla REST path): FAIL CLOSED unconditionally (#1034 / #1121).**
+    **flag-ON (Ayla REST path): FAIL CLOSED by default (#1034 / #1121).**
     The correct source is the RESOLVED (master×service) requires-health-check
     that S3B PR-2 populates on the catalog mirror (``CatalogMaster`` /
     ``MasterService``). Until that source exists we must NOT trust the
     service-level ``CatalogService.requires_health_check``: a service flagged
-    ``False`` can still need screening for a specific master, so trusting it is a
-    fail-OPEN risk (#1121). So every Ayla-path booking routes to a human health
-    check. Swap this stub for the ``resolved_requires_health_check`` read the
-    moment S3B PR-2 lands the resolved column.
+    ``False`` can still need screening for a specific master, so trusting it
+    is a fail-OPEN risk (#1121).
+
+    **DRF-1005 Controlled Pilot exception:** tenants explicitly listed in
+    ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` bypass the gate
+    (owner decision 2026-08-12, variant 3 — the pilot tenant's catalog
+    has zero ``requires_health_check=True`` rows, so the blanket
+    fail-closed stub only broke the booking funnel). Every bypass is
+    logged and audited (``booking.health_check_gate_disabled``). This is
+    a TEMPORARY measure: the canonical path remains the resolved
+    (master×service) ``resolved_requires_health_check`` read, and this
+    allowlist must be retired when it lands.
     """
     if _booking_via_ayla():
+        if _health_check_gate_disabled_for_tenant():
+            # DRF-1005: owner-mandated audit trail — disabling a medical
+            # screening check must be traceable, never invisible.
+            logger.info(
+                "booking.health_check_gate.disabled tenant=%s service=%s",
+                getattr(tenant, "id", "?"),
+                service_id,
+            )
+            write_audit(
+                EVENT_BOOKING_HEALTH_GATE_DISABLED,
+                target="BookingSkill",
+                payload={
+                    "tenant_id": str(getattr(tenant, "id", "")),
+                    "service_id": str(service_id),
+                },
+            )
+            return False
         # No resolved (master×service) source yet → fail closed. See #1034.
         return True
 
@@ -1286,10 +1377,18 @@ def _handle_pick_slot_callback(
     # Health-check gate — same rule as the LLM confirm path: gated
     # services route to a human instead of rendering a preview.
     if _service_requires_health_check(tenant, service_id):
+        # DRF-1005: log the policy decision (this branch used to hand off
+        # silently) and use the policy text, not the failure fallback.
+        logger.info(
+            "booking.pick_slot.health_check_required tenant=%s master=%s service=%s",
+            tenant_id,
+            master_id,
+            service_id,
+        )
         return _handoff(
             tool_calls_made=[],
             reason="booking_health_check_required",
-            text=_FALLBACK_HANDOFF_TEXT,
+            text=_HEALTH_CHECK_HANDOFF_TEXT,
             tenant_id=tenant_id,
         )
 
@@ -1401,6 +1500,8 @@ def _handle_pick_slot_callback(
             confidence=_CONFIDENCE_OK,
         )
     if result.error:
+        # DRF-1005: was a silent handoff — log the confirm_booking error.
+        logger.info("booking.pick_slot.confirm_failed tenant=%s err=%s", tenant_id, result.error)
         return _handoff(
             tool_calls_made=[synth_call],
             reason="booking_yclients_failure",

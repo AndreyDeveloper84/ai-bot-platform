@@ -555,6 +555,35 @@ NUTRITION_SERVICE_TOKEN = (
 # production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
+# DRF-1005 — Controlled Pilot: per-tenant kill-switch for the booking
+# health-check gate.
+#
+# Under ``BOOKING_VIA_AYLA_REST`` the gate fails CLOSED unconditionally
+# (#1034 / #1121) because the resolved (master×service)
+# requires-health-check source does not exist yet — which makes automatic
+# booking impossible for ANY tenant. Owner decision 2026-08-12 (variant 3):
+# an explicit, empty-by-default allowlist of tenant UUIDs for which the
+# gate is disabled, with an audit record on every gate-disabled
+# evaluation.
+#
+# Empty/unset = gate closed for every tenant (behaviour unchanged).
+# Parsing reuses the strict T-02 allowlist parser: malformed input raises
+# ImproperlyConfigured at settings load — a process must not boot with a
+# half-parsed allowlist whose operator believes a tenant is listed when
+# it is not. Controlled Pilot ONLY; the canonical resolved
+# (master×service) ``resolved_requires_health_check`` source replaces
+# this setting.
+try:
+    BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS = _parse_ingest_tenant_allowlist(
+        os.environ.get("BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", ""),
+        setting_name="BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS",
+    )
+except _IngestAllowlistConfigurationError as exc:
+    # Same fail-safe as the ingest allowlists below: refuse to boot.
+    raise ImproperlyConfigured(
+        f"Invalid booking health-check gate allowlist configuration: {exc}"
+    ) from exc
+
 # Wellness MVP scaled pilot (memory ``project_wellness_mvp_scaled_pilot``).
 #
 # Two-gate model per founder verdict 2026-06-02:
