@@ -21,6 +21,7 @@ routed back through the global bot is a follow-up (after the P0 Ayla reground).
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 
 from django.conf import settings
@@ -431,3 +432,158 @@ def route_booking_callback(
     reply_text = (result.reply_text if result is not None else "") or _STALE_BOOKING_CALLBACK_REPLY
     action_data = result.action_data if result is not None else None
     return DiscoveryReply(text=reply_text, action_data=action_data)
+
+
+# ─── Global-path human handoff (DRF-1015) ─────────────────────────────────
+#
+# The tenant-less discovery path used to send a «нужен человек» turn straight
+# to the concierge LLM — no AdminTask, no mute, no way to reach a human at
+# all. This block adds the deterministic pre-LLM trigger (same pattern as the
+# ``cb:book:*`` branch in the MAX global handler), the queue-addressing rule
+# (brief §3) and the mute guard that keeps the bot silent while an operator
+# drives ANY of the user's dialogs.
+
+# A keyword occurrence is rejected when a standalone negation particle sits
+# within this many characters before it («мне не нужен оператор»). Word-boundary
+# matching: Cyrillic letters are word chars, so «ненужен» does not false-trip.
+_NEGATION_WINDOW = 15
+_NEGATION_RE = re.compile(r"\b(?:не|без)\b")
+
+
+def matches_human_handoff_request(text: str) -> bool:
+    """Deterministic «user asks for a human» check for the global path (DRF-1015).
+
+    Reuses the tenant skill's ``_HANDOFF_KEYWORDS`` — imported, NEVER
+    duplicated, so DRF-972's dictionary extension lands on both paths at once.
+    Plain substring matching would fire on «мне не нужен оператор», so an
+    occurrence is rejected when a standalone «не»/«без» appears in the short
+    window before it; the text counts as a request when at least one
+    occurrence is NOT negated. Deliberately a small deterministic filter, not
+    a classifier — the pilot needs a working exit to a human, not perfect NLU.
+    """
+    from apps.skills.human_handoff.skill import _HANDOFF_KEYWORDS
+
+    lower = text.lower()
+    for keyword in _HANDOFF_KEYWORDS:
+        start = 0
+        while True:
+            idx = lower.find(keyword, start)
+            if idx < 0:
+                break
+            window = lower[max(0, idx - _NEGATION_WINDOW) : idx]
+            if not _NEGATION_RE.search(window):
+                return True
+            start = idx + len(keyword)
+    return False
+
+
+def global_handoff_muted(*, conversation, channel: str, channel_user_id: str) -> bool:
+    """True while a human operator drives ANY of this user's dialogs (DRF-1015).
+
+    Two cases:
+      * the GLOBAL conversation itself is in HUMAN_HANDOFF — the platform-queue
+        task anchors it (``create_admin_task`` flipped the state);
+      * an OPEN/IN_PROGRESS HANDOFF AdminTask exists for ANY BotUser of this
+        channel identity — the task went to a salon's queue, and the global
+        chat must not answer in parallel with the operator.
+
+    Mute radius — conscious decision (REPLY_DRF-1015 №1): mute EVERYWHERE, not
+    only for global-born tasks. A false escalation mutes wider than before, but
+    a bot talking over a human operator is the worse failure; release needs no
+    bookkeeping — closing the task (DRF-980) flips the tenant conversation back
+    and empties this open-task query, so both dialogs resume on their own.
+
+    Cost: one query — an indexed BotUser id subquery + an AdminTask EXISTS
+    filtered by ``task_type``/``status`` (``status`` is db_indexed).
+    """
+    from apps.conversations.models import Conversation
+    from apps.handoff.models import AdminTask
+    from apps.identity.models import BotUser
+
+    if conversation.state == Conversation.State.HUMAN_HANDOFF:
+        return True
+    return AdminTask.all_tenants.filter(
+        bot_user_id__in=BotUser.all_tenants.filter(
+            channel=channel, channel_user_id=channel_user_id
+        ).values("id"),
+        task_type=AdminTask.TaskType.HANDOFF,
+        status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
+    ).exists()
+
+
+def route_global_human_handoff(
+    *,
+    global_bot_user,
+    global_conversation,
+    message_text: str,
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply:
+    """Escalate a tenant-less «нужен человек» turn to a human (DRF-1015).
+
+    Queue addressing (brief §3): when the channel identity has active
+    per-tenant conversation(s), the task lands on the MOST RECENT tenant's
+    conversation — that salon is the side that can actually help, and
+    ``create_admin_task`` mutes the tenant dialog for free. Without a tenant
+    context the task lands on the GLOBAL conversation under the sentinel
+    tenant — the platform queue. Either way the user gets the same
+    confirmation line the tenant skill uses (``_HANDOFF_REPLY`` — reused, not
+    reworded).
+    """
+    from apps.handoff.models import AdminTask
+    from apps.handoff.services import create_admin_task
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+    from apps.skills.human_handoff.skill import _HANDOFF_REPLY
+    from apps.tenancy.context import tenant_scope
+
+    reason = f"Global-path trigger phrase: {message_text[:80]}"
+    target = _latest_tenant_conversation(global_bot_user)
+    if target is not None:
+        with tenant_scope(target.tenant):
+            task = create_admin_task(
+                target,
+                task_type=AdminTask.TaskType.HANDOFF,
+                reason=reason,
+            )
+    else:
+        sentinel = get_global_bot_tenant()
+        with tenant_scope(sentinel):
+            task = create_admin_task(
+                global_conversation,
+                task_type=AdminTask.TaskType.HANDOFF,
+                reason=reason,
+            )
+    logger.info(
+        "marketplace.human_handoff.routed task=%s tenant=%s global_conversation=%s trace=%s",
+        task.id,
+        task.tenant_id,
+        global_conversation.id,
+        trace_id,
+    )
+    return DiscoveryReply(text=_HANDOFF_REPLY)
+
+
+def _latest_tenant_conversation(global_bot_user):
+    """Most recently active per-tenant Conversation for this channel identity.
+
+    ``None`` when the user has never talked to a salon — the caller then falls
+    back to the platform queue (sentinel). «Most recent» = latest
+    ``last_message_at`` (tie-break ``created_at``): the salon the user spoke
+    with last is the most plausible addressee, and asking «which salon?» would
+    add a round-trip to the emergency path.
+    """
+    from apps.conversations.models import Conversation
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+
+    sentinel = get_global_bot_tenant()
+    return (
+        Conversation.all_tenants.filter(
+            bot_user__channel=global_bot_user.channel,
+            bot_user__channel_user_id=global_bot_user.channel_user_id,
+            is_active=True,
+            deleted_at__isnull=True,
+        )
+        .exclude(tenant_id=sentinel.id)
+        .order_by("-last_message_at", "-created_at")
+        .select_related("tenant")
+        .first()
+    )

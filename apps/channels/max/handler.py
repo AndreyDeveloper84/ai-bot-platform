@@ -80,12 +80,14 @@ is distinguishable in the Message table regardless of path.
 Two divergences are INTENTIONAL (and pinned by
 ``apps/channels/tests/test_handler_safety_parity.py``): the global tenant-less
 path creates NO AdminTask on a red-flag (Variant A, #1076), and only the
-per-tenant gate carries the HUMAN_HANDOFF barge-guard (the global path has no
-operator state). The remaining split — the per-tenant ``record_message`` vs
-sentinel ``record_global_message`` FUNCTIONS themselves — is intrinsic to tenant
-vs tenant-less persistence and is deliberately NOT merged, but they now emit
-parity rows (same ``action_type``). The parity test fails CI if the two paths
-ever drift on the shared safety verdict, reply, or marker.
+per-tenant gate carries the safety HUMAN_HANDOFF barge-guard — the global path
+mutes pre-gate via ``global_handoff_muted`` (DRF-1015), which also covers tasks
+sitting in a salon's queue. The remaining split — the per-tenant
+``record_message`` vs sentinel ``record_global_message`` FUNCTIONS themselves —
+is intrinsic to tenant vs tenant-less persistence and is deliberately NOT
+merged, but they now emit parity rows (same ``action_type``). The parity test
+fails CI if the two paths ever drift on the shared safety verdict, reply, or
+marker.
 """
 
 from __future__ import annotations
@@ -132,8 +134,11 @@ from apps.orchestrator.discovery import (
 )
 from apps.orchestrator.handoff import (
     BOOKING_CALLBACK_PREFIXES,
+    global_handoff_muted,
     handoff_to_booking,
+    matches_human_handoff_request,
     route_booking_callback,
+    route_global_human_handoff,
 )
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
@@ -608,11 +613,32 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         },
     )
 
+    # DRF-1015 — human-handoff mute on the global path. While an operator
+    # drives ANY of this user's dialogs (the global one under a platform-queue
+    # task, or a salon's under a tenant task), the bot stays silent here too:
+    # the user turn is already recorded above (parity with the per-tenant
+    # path), but nothing is sent. The mute lifts on its own when the operator
+    # closes the task (DRF-980) — no linkage bookkeeping.
+    if global_handoff_muted(
+        conversation=conversation,
+        channel=event.channel,
+        channel_user_id=event.channel_user_id,
+    ):
+        logger.info(
+            "channels.max.global.silenced_by_handoff conversation=%s",
+            conversation.id,
+        )
+        return
+
     # Reply, in priority order:
     #   0. Safety pre-check (#1053) — a red-flag phrase (suicide / self-harm /
     #      emergency) or a BLOCK phrase (drugs / diagnosis / legal) short-circuits
     #      to a canned reply BEFORE discovery. Variant A on the tenant-less path:
     #      canned reply only, NO AdminTask (founder decision 2026-07-03, #1076).
+    #   0.5. Human handoff (DRF-1015) — a deterministic «нужен человек» trigger
+    #      BEFORE the concierge LLM (same pattern as the cb:book:* branch):
+    #      creates the AdminTask (salon's queue when a tenant context exists,
+    #      else the platform queue) and confirms the handoff to the user.
     #   1. Onboarding (#1046, behind GLOBAL_BOT_ONBOARDING flag) — welcome + 152-ФЗ
     #      consent capture. Variant A «soft gate»: we greet + capture consent but
     #      do NOT block discovery on it. When onboarding runs we do NOT call
@@ -633,6 +659,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # Tag the safety turn so it is distinguishable in the Message table on the
         # global path too — parity with the per-tenant handler (#1053 de-drift).
         assistant_action_type = "safety_pre_check"
+    elif matches_human_handoff_request(event.text):
+        reply = route_global_human_handoff(
+            global_bot_user=bot_user,
+            global_conversation=conversation,
+            message_text=event.text,
+            trace_id=trace_id,
+        )
+        assistant_action_type = "human_handoff"
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text
     ):

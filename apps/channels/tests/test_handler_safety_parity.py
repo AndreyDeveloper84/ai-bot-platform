@@ -15,7 +15,8 @@ can't silently regress:
     founder 2026-07-03 / #1076) — the per-tenant path's AdminTask/handoff is a
     separate ticket (S1-C, #1047);
   * the per-tenant safety gate has a HUMAN_HANDOFF barge-guard (don't speak over
-    an operator); the global path has no such state.
+    an operator); the global path mutes earlier, via ``global_handoff_muted``
+    (DRF-1015) — including while the handoff task sits in a salon's queue.
 """
 
 from __future__ import annotations
@@ -229,8 +230,9 @@ class TestIntentionalDivergence:
         assert last.action_type == "safety_pre_check"
 
     def test_per_tenant_gate_does_not_barge_operator(self, mock_send, fake_redis):
-        # Per-tenant-only divergence: HUMAN_HANDOFF guard keeps the gate silent
-        # while an operator is driving. The global path has no such state.
+        # Per-tenant gate: the HUMAN_HANDOFF guard keeps the gate silent while an
+        # operator is driving. (The global path now mutes too — earlier, via
+        # global_handoff_muted / DRF-1015 — covered by test_global_human_handoff.)
         tenant = Tenant.objects.create(slug="parity-hh", name="HH")
         _run_per_tenant(tenant, "привет", mid="a")
         conv = Conversation.all_tenants.get(tenant=tenant)
