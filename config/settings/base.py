@@ -584,6 +584,33 @@ except _IngestAllowlistConfigurationError as exc:
         f"Invalid booking health-check gate allowlist configuration: {exc}"
     ) from exc
 
+# DRF-1007 — Controlled Pilot runs WITHOUT prepayment: per-tenant switch
+# for the ``payment_required`` flag on bot-created bookings.
+#
+# Backend (Ayla) supports both schemes (AMD-002 / D6): ``payment_required``
+# False creates the appointment directly CONFIRMED without a Payment row;
+# True parks it in ``awaiting_payment`` — and reminders go out ONLY for
+# CONFIRMED bookings, so a pilot client booked with the wrong default
+# never gets a single reminder.
+#
+# Owner decision 2026-08-12: the pilot goes without prepayment, but the
+# payment model will change — so this is a setting, not a hardcode, and
+# it comes off as easily as it goes on. Empty/unset = behaviour unchanged
+# (``payment_required=True`` everywhere, as before). An explicit
+# ``payment_required`` in the confirm payload still wins over this
+# setting — a deliberate caller choice beats a deployment default.
+# Same strict parser as above: a malformed value refuses to boot rather
+# than silently parsing to an empty allowlist.
+try:
+    BOOKING_NO_PREPAYMENT_TENANTS = _parse_ingest_tenant_allowlist(
+        os.environ.get("BOOKING_NO_PREPAYMENT_TENANTS", ""),
+        setting_name="BOOKING_NO_PREPAYMENT_TENANTS",
+    )
+except _IngestAllowlistConfigurationError as exc:
+    raise ImproperlyConfigured(
+        f"Invalid booking no-prepayment allowlist configuration: {exc}"
+    ) from exc
+
 # Wellness MVP scaled pilot (memory ``project_wellness_mvp_scaled_pilot``).
 #
 # Two-gate model per founder verdict 2026-06-02:

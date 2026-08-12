@@ -1015,6 +1015,50 @@ def _format_confirm_preview(
     return "\n".join(parts)
 
 
+def _resolve_payment_required(tenant: Any, payload: dict[str, Any]) -> bool:
+    """DRF-1007: the ``payment_required`` flag for a bot-created booking.
+
+    Priority:
+
+    1. An explicit ``payment_required`` in the payload wins — a
+       deliberate caller choice beats a deployment default.
+    2. Otherwise tenants in the ``BOOKING_NO_PREPAYMENT_TENANTS``
+       allowlist book WITHOUT prepayment (Controlled Pilot, owner
+       decision 2026-08-12): the backend then creates the appointment
+       directly CONFIRMED, which is also what reminder delivery keys on.
+    3. Default ``True`` — behaviour unchanged for everyone else.
+
+    Fail-closed on a malformed setting injected past settings load
+    (``override_settings`` / live reload): keeps the historical default
+    rather than silently dropping prepayment.
+    """
+    explicit = payload.get("payment_required")
+    if explicit is not None:
+        return bool(explicit)
+
+    from django.conf import settings
+
+    from apps.eventbus.ingest_allowlist import (
+        AllowlistConfigurationError,
+        parse_tenant_allowlist,
+    )
+
+    raw: Any = getattr(settings, "BOOKING_NO_PREPAYMENT_TENANTS", frozenset())
+    try:
+        allowed = parse_tenant_allowlist(raw, setting_name="BOOKING_NO_PREPAYMENT_TENANTS")
+    except AllowlistConfigurationError as exc:
+        logger.warning("booking.no_prepayment.allowlist_malformed err=%s", exc)
+        return True
+    tenant_id = str(getattr(tenant, "id", "")).lower()
+    if tenant_id and tenant_id in allowed:
+        logger.info(
+            "booking.no_prepayment.applied tenant=%s payment_required=False",
+            tenant_id,
+        )
+        return False
+    return True
+
+
 def execute_confirm(
     *,
     client: Any,
@@ -1081,10 +1125,11 @@ def execute_confirm(
             datetime=slot_datetime,
             client_phone=phone,
             client_name=client_name,
-            # AMD-002 (D6): выбор оплаты из диалогового намерения; default
-            # true — обратная совместимость (старые payload'ы без поля
-            # трактуются как «с предоплатой», поведение как раньше).
-            payment_required=bool(payload.get("payment_required", True)),
+            # AMD-002 (D6): выбор оплаты из диалогового намерения.
+            # DRF-1007: без явного поля в payload решает настройка
+            # BOOKING_NO_PREPAYMENT_TENANTS (пилот без предоплаты);
+            # вне allowlist — прежний дефолт «с предоплатой».
+            payment_required=_resolve_payment_required(tenant, payload),
         )
     except YClientsScheduleUnavailableError as exc:
         logger.warning("booking.confirm.exec.schedule_unavailable err=%s", exc)
@@ -2158,6 +2203,13 @@ def execute_reschedule(
             datetime=new_datetime,
             client_phone=phone,
             client_name=client_name,
+            # DRF-1007: the re-created record follows the same
+            # no-prepayment allowlist as a fresh booking — a rescheduled
+            # pilot appointment must not silently become awaiting_payment
+            # (reminders only fire for CONFIRMED). The flag-ON path never
+            # reaches this line (native Ayla move preserves the original
+            # appointment, payment terms included).
+            payment_required=_resolve_payment_required(tenant, payload),
         )
     except YClientsScheduleUnavailableError as exc:
         # DRF-997: transient 429 on the create must NOT be treated as a

@@ -12,6 +12,12 @@ Three entry points the rest of the platform uses to manage handoffs:
     resolution_note + flips Conversation.state back to IDLE so the bot
     resumes (D4 dispatcher checks state != HUMAN_HANDOFF before skill
     execution).
+  * :func:`cancel_admin_task` — admin-side cancel (DRF-980). Same
+    conversation release, but ``resolved_at`` stays NULL (no completed
+    work) and the audit action is ``handoff.cancelled``.
+  * :func:`release_conversation_to_bot` — idempotent conversation
+    release shared by both close paths; also heals a conversation stuck
+    in HUMAN_HANDOFF after an out-of-band status flip.
 
 ### Why a service layer, not model methods
 
@@ -236,21 +242,73 @@ def create_admin_task(
     return task
 
 
+def release_conversation_to_bot(task: AdminTask) -> bool:
+    """Flip the task's conversation HUMAN_HANDOFF → IDLE, idempotently.
+
+    Returns True when the flip actually happened.
+
+    Two guards make this safe to call from anywhere (DRF-980):
+
+    * Another OPEN/IN_PROGRESS task on the same conversation still holds
+      it — the bot must stay muted until the LAST open task closes.
+    * The conditional ``state=HUMAN_HANDOFF`` update makes the call a
+      no-op when the conversation is already back under bot control, so
+      re-saving an already-closed task never clobbers a fresh state.
+
+    Cross-tenant by design (``all_tenants``): the admin spans tenants,
+    and the tenant identity is carried by the task itself.
+    """
+
+    from apps.conversations.models import Conversation as ConversationModel
+
+    if task.conversation_id is None:
+        return False
+    another_open_task = (
+        AdminTask.all_tenants.filter(
+            conversation_id=task.conversation_id,
+            status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
+        )
+        .exclude(pk=task.pk)
+        .exists()
+    )
+    if another_open_task:
+        logger.info(
+            "handoff.conversation_release.deferred task=%s conversation=%s "
+            "reason=another_open_task",
+            task.id,
+            task.conversation_id,
+        )
+        return False
+    updated = ConversationModel.all_tenants.filter(
+        pk=task.conversation_id,
+        state=ConversationModel.State.HUMAN_HANDOFF,
+    ).update(state=ConversationModel.State.IDLE)
+    if updated:
+        logger.info(
+            "handoff.conversation_release.ok task=%s conversation=%s",
+            task.id,
+            task.conversation_id,
+        )
+    return bool(updated)
+
+
 def resolve_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
     """Mark `task` RESOLVED, stamp metadata, return conversation to IDLE.
 
-    Idempotent on already-RESOLVED tasks: returns silently (the
-    transition already happened; second call would zero out the
-    resolution_note and reset resolved_at, which is wrong).
+    Idempotent on already-RESOLVED tasks: the note/timestamp from the
+    first call survive (a second call must not clobber them) — but the
+    conversation invariant is still healed (DRF-980): a RESOLVED task
+    whose conversation is stuck in HUMAN_HANDOFF (e.g. the status was
+    flipped directly via ORM/admin, bypassing this service) releases
+    the dialog instead of returning silently.
 
     The bot resumes autonomy once Conversation.state flips back to
     IDLE — D4 dispatcher (Sprint 3) short-circuits skill execution
     while state == HUMAN_HANDOFF.
     """
 
-    from apps.conversations.models import Conversation as ConversationModel
-
     if task.status == AdminTask.Status.RESOLVED:
+        release_conversation_to_bot(task)
         return
 
     tenant = current_tenant()
@@ -264,9 +322,7 @@ def resolve_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
             resolved_at=now,
             resolution_note=resolution_note,
         )
-        ConversationModel.all_tenants.filter(pk=task.conversation_id).update(
-            state=ConversationModel.State.IDLE
-        )
+        release_conversation_to_bot(task)
 
     # Refresh in-memory instance so callers reflect the new state.
     task.status = AdminTask.Status.RESOLVED
@@ -287,6 +343,66 @@ def resolve_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
     transaction.on_commit(_emit_resolved)
     logger.info(
         "handoff.resolved task=%s conversation=%s tenant=%s",
+        task.id,
+        task.conversation_id,
+        tenant.id,
+    )
+
+
+def cancel_admin_task(task: AdminTask, *, resolution_note: str = "") -> None:
+    """Mark `task` CANCELLED and return the conversation to the bot (DRF-980).
+
+    Semantics differ from resolve on purpose: ``resolved_at`` stays NULL
+    (no work was completed), but the conversation MUST still flip back to
+    IDLE — the operator closed the question, so the bot resumes answering.
+
+    Idempotent: re-cancelling an already-CANCELLED task keeps the first
+    note and still heals a stuck conversation (same invariant as
+    :func:`resolve_admin_task`). Cancelling an already-RESOLVED task is
+    refused — completed work is not reclassified downwards; use the admin
+    status field deliberately if a reclass is ever needed.
+    """
+
+    if task.status == AdminTask.Status.RESOLVED:
+        logger.warning(
+            "handoff.cancel.refused task=%s conversation=%s reason=already_resolved",
+            task.id,
+            task.conversation_id,
+        )
+        return
+    if task.status == AdminTask.Status.CANCELLED:
+        release_conversation_to_bot(task)
+        return
+
+    tenant = current_tenant()
+    if tenant is None:
+        raise ValueError("handoff.cancel_admin_task requires a tenant in scope.")
+
+    with transaction.atomic():
+        AdminTask.all_tenants.filter(pk=task.pk).update(
+            status=AdminTask.Status.CANCELLED,
+            resolution_note=resolution_note,
+        )
+        release_conversation_to_bot(task)
+
+    # Refresh in-memory instance so callers reflect the new state.
+    task.status = AdminTask.Status.CANCELLED
+    task.resolution_note = resolution_note
+
+    def _emit_cancelled() -> None:
+        write_audit(
+            "handoff.cancelled",
+            target="AdminTask",
+            target_id=task.id,
+            payload={
+                "conversation_id": str(task.conversation_id),
+                "resolution_note": (resolution_note or "")[:200],
+            },
+        )
+
+    transaction.on_commit(_emit_cancelled)
+    logger.info(
+        "handoff.cancelled task=%s conversation=%s tenant=%s",
         task.id,
         task.conversation_id,
         tenant.id,
