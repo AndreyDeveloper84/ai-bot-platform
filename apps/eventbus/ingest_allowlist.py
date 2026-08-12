@@ -144,8 +144,10 @@ def _reject_wildcard(element: str, *, setting_name: str) -> None:
         )
 
 
-def parse_tenant_allowlist(raw: Any) -> frozenset[str]:
-    """Parse ``EVENT_INGEST_ALLOWED_TENANTS`` into canonical tenant UUIDs.
+def parse_tenant_allowlist(
+    raw: Any, *, setting_name: str = "EVENT_INGEST_ALLOWED_TENANTS"
+) -> frozenset[str]:
+    """Parse a tenant-UUID allowlist setting into canonical tenant UUIDs.
 
     Returns an empty frozenset for an unset/empty value — **deny all**.
     Raises :class:`AllowlistConfigurationError` on any malformed element;
@@ -153,8 +155,11 @@ def parse_tenant_allowlist(raw: Any) -> frozenset[str]:
     UUIDs parsed" is exactly the state where an operator believes a tenant
     is onboarded and it silently is not (or worse, believes one is excluded
     when the typo landed elsewhere).
+
+    ``setting_name`` only labels error messages; the default keeps the
+    original ``EVENT_INGEST_ALLOWED_TENANTS`` wording. DRF-1005 reuses this
+    parser for ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS``.
     """
-    setting_name = "EVENT_INGEST_ALLOWED_TENANTS"
     normalized: set[str] = set()
     for element in _split_raw(raw):
         if not element:
