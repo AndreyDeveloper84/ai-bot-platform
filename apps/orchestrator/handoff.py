@@ -587,3 +587,161 @@ def _latest_tenant_conversation(global_bot_user):
         .select_related("tenant")
         .first()
     )
+
+
+# ─── Global-path personal booking lookup (DRF-911) ──────────────────────────
+#
+# The tenant-less discovery path sent «покажи мои записи» / «когда я записан?»
+# straight to the concierge LLM, which answered with reasoning instead of data
+# (or escalated to a human). The machinery was already built on the tenant
+# side — the detector (``apps.skills.booking.lookup.is_personal_booking_lookup``,
+# matched by the global MAX handler BEFORE this router is called) and the
+# read-only tool (``show_my_bookings``) — but unreachable from the global
+# route. This block is the bridge, same pattern as the DRF-1015 human-handoff
+# branch: deterministic, pre-LLM, tenant scope entered only inside.
+#
+# §3 decision (brief, REPORT_DRF-911): AGGREGATE across every tenant where
+# the caller has CONFIRMED bookings, sectioned per salon. The «latest tenant
+# dialog» rule from DRF-1015 is wrong here — for a user booked into two
+# salons it would show one salon's list and the user would read it as
+# complete (the worst outcome: a missed visit). A section that FAILS to load
+# is marked explicitly, so the list never looks complete when it is not.
+
+# Section footer for a salon whose lookup failed (e.g. schedule_unavailable)
+# in a multi-salon answer. Single-salon answers return the tool's own error
+# text instead (byte-parity with the tenant path).
+_LOOKUP_SECTION_UNAVAILABLE = "• не удалось загрузить записи — попробуйте позже"
+
+
+def _booking_lookup_scopes(global_bot_user) -> list[tuple]:
+    """``(tenant, per_tenant_bot_user)`` pairs where this identity has bookings.
+
+    Driven by CONFIRMED ``BookingRequest`` rows — exactly the set of tenants
+    where ``show_my_bookings`` can return anything (the tool reads the same
+    rows). The per-tenant BotUser comes from the booking row itself: the
+    lookup creates NO identities (read-only acceptance, brief §4.4). The
+    sentinel tenant is excluded defensively (symmetric with
+    ``_latest_tenant_conversation``) — it never owns bookings.
+    """
+    from apps.booking.models import BookingRequest
+    from apps.identity.models import BotUser
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+    from apps.tenancy.models import Tenant
+
+    sentinel = get_global_bot_tenant()
+    rows = (
+        BookingRequest.all_tenants.filter(
+            bot_user__channel=global_bot_user.channel,
+            bot_user__channel_user_id=global_bot_user.channel_user_id,
+            status=BookingRequest.Status.CONFIRMED,
+        )
+        .exclude(tenant_id=sentinel.id)
+        .values_list("tenant_id", "bot_user_id")
+        .distinct()
+    )
+    pairs = []
+    for tenant_id, bot_user_id in rows:
+        tenant = Tenant.objects.filter(id=tenant_id).first()
+        bot_user = BotUser.all_tenants.filter(id=bot_user_id).first()
+        if tenant is not None and bot_user is not None:
+            pairs.append((tenant, bot_user))
+    return pairs
+
+
+def _lookup_in_tenant(tenant, per_tenant_bot_user):
+    """Run the tenant-side read-only tool inside ``tenant_scope(T)``."""
+    from apps.skills.booking.provider import get_booking_provider
+    from apps.skills.booking.tools import _booking_via_ayla, show_my_bookings
+    from apps.tenancy.context import tenant_scope
+
+    with tenant_scope(tenant):
+        # The Ayla path reads the local mirror only — the client is never
+        # touched, so don't construct it: a read-only lookup must not die
+        # on booking-client configuration it has no use for. Flag OFF keeps
+        # the real provider (the YClients path reads live records).
+        provider = (
+            None if _booking_via_ayla() else get_booking_provider(bot_user=per_tenant_bot_user)
+        )
+        return show_my_bookings(client=provider, tenant=tenant, bot_user=per_tenant_bot_user)
+
+
+def _compose_multi_tenant_text(sections: list[tuple]) -> str:
+    """Per-salon sectioned answer. ``sections`` = ``(tenant, result | None)``;
+    ``None`` marks a failed lookup, rendered as an explicit unavailable note.
+
+    The bullet shape mirrors ``_format_bookings_text`` (service / master /
+    visit time) — kept as a literal, never re-derived, so the multi-salon
+    rendering matches the single-salon one line for line.
+    """
+    lines = ["Ваши предстоящие записи:"]
+    for tenant, result in sections:
+        lines.append("")
+        lines.append(f"{tenant.name}:")
+        if result is None:
+            lines.append(_LOOKUP_SECTION_UNAVAILABLE)
+            continue
+        if not result.bookings:
+            lines.append("• нет предстоящих записей")
+            continue
+        for b in result.bookings[:5]:
+            parts = [b.service_name or "—"]
+            if b.master_name:
+                parts.append(f"с {b.master_name}")
+            if b.visit_at:
+                parts.append(f"в {b.visit_at}")
+            lines.append("• " + " ".join(parts))
+    return "\n".join(lines)
+
+
+def route_global_booking_lookup(
+    *,
+    global_bot_user,
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply:
+    """Answer «покажи мои записи» on the global path with real data (DRF-911).
+
+    Read-only end to end: the scopes come from existing booking rows, the
+    tool only reads, and no tenant identity is ever created here. A caller
+    with no bookings anywhere gets the same empty text the tenant path
+    produces (``_format_bookings_text([])`` — imported, not reworded).
+    """
+    from apps.skills.booking.tools import _format_bookings_text
+
+    scopes = _booking_lookup_scopes(global_bot_user)
+    emit(
+        "marketplace.booking_lookup.routed",
+        payload={
+            "bot_user_id": str(global_bot_user.id),
+            "tenant_count": len(scopes),
+        },
+    )
+    if not scopes:
+        return DiscoveryReply(text=_format_bookings_text([]))
+
+    if len(scopes) == 1:
+        # Single salon — byte-parity with the tenant path, including its
+        # error text (e.g. schedule_unavailable) when the lookup fails.
+        tenant, per_tenant_bot_user = scopes[0]
+        result = _lookup_in_tenant(tenant, per_tenant_bot_user)
+        return DiscoveryReply(text=result.text)
+
+    sections: list[tuple] = []
+    any_bookings = False
+    any_failure = False
+    for tenant, per_tenant_bot_user in scopes:
+        result = _lookup_in_tenant(tenant, per_tenant_bot_user)
+        if result.error:
+            # Never let a failed section pass for an empty one — the list
+            # must not look complete when it is not (brief §3 requirement).
+            any_failure = True
+            sections.append((tenant, None))
+            continue
+        any_bookings = any_bookings or bool(result.bookings)
+        sections.append((tenant, result))
+
+    if not any_bookings and not any_failure:
+        # Bookings existed at scope-discovery time but none are upcoming
+        # (all past / cancelled since) — the plain empty answer is complete
+        # and honest, no per-salon noise.
+        return DiscoveryReply(text=_format_bookings_text([]))
+    return DiscoveryReply(text=_compose_multi_tenant_text(sections))

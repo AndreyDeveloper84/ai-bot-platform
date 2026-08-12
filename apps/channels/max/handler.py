@@ -138,6 +138,7 @@ from apps.orchestrator.handoff import (
     handoff_to_booking,
     matches_human_handoff_request,
     route_booking_callback,
+    route_global_booking_lookup,
     route_global_human_handoff,
 )
 from apps.orchestrator.memory import short_term
@@ -145,6 +146,7 @@ from apps.orchestrator.memory.personal_context import record_explicit_green_fact
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.safety.gate import evaluate_inbound
+from apps.skills.booking.lookup import is_personal_booking_lookup
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
 logger = logging.getLogger(__name__)
@@ -639,6 +641,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      BEFORE the concierge LLM (same pattern as the cb:book:* branch):
     #      creates the AdminTask (salon's queue when a tenant context exists,
     #      else the platform queue) and confirms the handoff to the user.
+    #   0.7. Personal booking lookup (DRF-911) — «покажи мои записи» /
+    #      «когда я записан?» answered deterministically with the caller's REAL
+    #      bookings (aggregated across salons) BEFORE onboarding and the
+    #      concierge LLM. Before onboarding for the same reason the booking
+    #      handoff wins there (``needs_onboarding``: «booking handoff wins over
+    #      onboarding, unconditionally») — a data question must not be
+    #      swallowed by the welcome greeting; the cohort of pre-existing
+    #      global BotUsers has ``welcomed_at IS NULL`` (the pilot owner
+    #      included). The detector is IMPORTED from the booking skill, never
+    #      re-implemented — FAQ («как записаться?») and mutation phrasings
+    #      («перенеси мою запись») keep their previous routing.
     #   1. Onboarding (#1046, behind GLOBAL_BOT_ONBOARDING flag) — welcome + 152-ФЗ
     #      consent capture. Variant A «soft gate»: we greet + capture consent but
     #      do NOT block discovery on it. When onboarding runs we do NOT call
@@ -667,6 +680,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
         )
         assistant_action_type = "human_handoff"
+    elif is_personal_booking_lookup(event.text):
+        reply = route_global_booking_lookup(
+            global_bot_user=bot_user,
+            trace_id=trace_id,
+        )
+        assistant_action_type = "booking_lookup"
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text
     ):
