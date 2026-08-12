@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 
-from django.contrib import admin
+from django.contrib import admin, messages
 
 from apps.handoff.models import AdminTask
 from apps.handoff.services import (
@@ -85,6 +85,20 @@ class AdminTaskAdmin(admin.ModelAdmin):
         # Admin spans tenants — use `all_tenants` instead of the default
         # tenant-scoped manager so superusers see the whole queue.
         return AdminTask.all_tenants.all()
+
+    def changelist_view(self, request, extra_context=None):  # type: ignore[override]
+        # DRF-1023 — the whole admin is CROSS-TENANT (see get_queryset):
+        # anyone logged in here sees every salon's tasks. The banner must
+        # be seen by the next person BEFORE they hand an account to salon
+        # staff — with it they would also get every other salon's data.
+        # Tenant-restricted operator access is a separate task (DRF-1022).
+        messages.warning(
+            request,
+            "ВНИМАНИЕ: админка кросс-тенантная — здесь видны задачи и данные "
+            "ВСЕХ салонов. Учётную запись выдаём только внутренней команде; "
+            "сотруднику салона она откроет чужие данные.",
+        )
+        return super().changelist_view(request, extra_context)
 
     def save_model(self, request, obj: AdminTask, form, change):  # type: ignore[override]
         """Route close transitions through the handoff services (DRF-980).

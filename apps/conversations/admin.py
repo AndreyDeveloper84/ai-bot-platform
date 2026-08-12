@@ -12,9 +12,19 @@ the operator always knows which tenant they're looking at.
 
 from __future__ import annotations
 
-from django.contrib import admin
+from django.contrib import admin, messages
 
 from apps.conversations.models import Conversation, Message
+
+# DRF-1023 — both admins below are CROSS-TENANT (get_queryset uses
+# ``all_tenants``): anyone logged in sees every salon's conversations,
+# and MessageAdmin even searches message TEXT. The banner must be seen by
+# the next person BEFORE they hand an account to salon staff.
+_CROSS_TENANT_WARNING = (
+    "ВНИМАНИЕ: админка кросс-тенантная — здесь видны переписки клиентов "
+    "ВСЕХ салонов. Учётную запись выдаём только внутренней команде; "
+    "сотруднику салона она откроет чужие данные."
+)
 
 
 @admin.register(Conversation)
@@ -72,6 +82,10 @@ class ConversationAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return Conversation.all_tenants.all()
 
+    def changelist_view(self, request, extra_context=None):  # type: ignore[override]
+        messages.warning(request, _CROSS_TENANT_WARNING)  # DRF-1023
+        return super().changelist_view(request, extra_context)
+
 
 @admin.register(Message)
 class MessageAdmin(admin.ModelAdmin):
@@ -115,3 +129,7 @@ class MessageAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         return Message.all_tenants.all()
+
+    def changelist_view(self, request, extra_context=None):  # type: ignore[override]
+        messages.warning(request, _CROSS_TENANT_WARNING)  # DRF-1023
+        return super().changelist_view(request, extra_context)
