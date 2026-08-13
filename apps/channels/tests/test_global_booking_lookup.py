@@ -215,6 +215,43 @@ class TestMultiTenantAggregation:
         assert "SALON-ONE" in text
         assert "SALON-TWO" in text
 
+    def test_partial_failure_shows_ok_salon_and_marks_failed(
+        self, mock_send, fake_redis, spy_concierge, monkeypatch
+    ):
+        """The §3 guarantee: bookings in two salons, one lookup fails → the
+        reply shows the healthy salon's bookings AND an explicit marker for
+        the failed one. Both facts in one test — only together do they tell
+        an honest partial list apart from a silently truncated one."""
+        from apps.skills.booking import tools as booking_tools
+
+        _make_booking("salon-ok", service="УЗ-кавитация", master="Анна")
+        _make_booking("salon-broken", service="Солярий", master="Вера")
+
+        real_show = booking_tools.show_my_bookings
+
+        def flaky_show(*, client, tenant, bot_user):
+            if tenant.slug == "salon-broken":
+                return booking_tools.BookingToolResult(
+                    text="расписание временно недоступно",
+                    error="schedule_unavailable",
+                )
+            return real_show(client=client, tenant=tenant, bot_user=bot_user)
+
+        monkeypatch.setattr(booking_tools, "show_my_bookings", flaky_show)
+
+        _run_global("покажи мои записи", mid="a2")
+
+        text = mock_send[-1]["text"]
+        # The healthy salon's bookings ARE shown…
+        assert "SALON-OK" in text
+        assert "УЗ-кавитация" in text
+        # …AND the failed salon is marked explicitly — the list must never
+        # look complete when it is not.
+        assert "SALON-BROKEN" in text
+        assert "не удалось загрузить записи" in text
+        # The failed salon's own booking must not leak in as a live entry.
+        assert "Солярий" not in text
+
 
 # --------------------------------------------------------------------------- #
 # Acceptance: isolation + freshness                                            #
