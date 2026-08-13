@@ -452,6 +452,21 @@ MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
 MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 
+# DRF-1029 — handoff escalation notifications to MAX operator chats.
+#
+# HANDOFF_NOTIFY_MAX_CHAT_IDS: comma-separated MAX chat_ids that receive
+# a best-effort push whenever an AdminTask is created (apps/handoff/
+# notify.py). EMPTY (default) disables the mechanism completely — no
+# network calls, no warning-level log noise. CI and local dev keep it
+# empty; the pilot sets it in .env.staging at deploy time.
+# HANDOFF_ADMIN_BASE_URL: public base URL of the Django admin used to
+# build the direct task link in the notification text
+# (<base>/admin/handoff/admintask/<uuid>/change/). Empty → no link line.
+HANDOFF_NOTIFY_MAX_CHAT_IDS = [
+    p.strip() for p in os.environ.get("HANDOFF_NOTIFY_MAX_CHAT_IDS", "").split(",") if p.strip()
+]
+HANDOFF_ADMIN_BASE_URL = os.environ.get("HANDOFF_ADMIN_BASE_URL", "")
+
 # Phase 5 lazy-onboarding (apps/miniapp_api/views.py:require_init_data).
 # Single-bot mode binds the bot's HMAC token to exactly one tenant; this
 # slug picks which one. Multi-tenant ingress will replace this with the

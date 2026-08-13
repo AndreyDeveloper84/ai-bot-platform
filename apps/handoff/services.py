@@ -50,6 +50,7 @@ from apps.audit.services import write_audit
 from apps.events.services import emit
 from apps.events.vocabulary import HANDOFF_INITIATED
 from apps.handoff.models import AdminTask
+from apps.handoff.notify import notify_admin_task_created
 from apps.tenancy.context import current_tenant
 
 if TYPE_CHECKING:
@@ -232,6 +233,9 @@ def create_admin_task(
         )
 
     transaction.on_commit(_emit_handoff)
+    # DRF-1029 — operator notification fires only after the task row
+    # actually commits; a rolled-back handoff must never notify.
+    transaction.on_commit(lambda: notify_admin_task_created(task))
     logger.info(
         "handoff.created task=%s type=%s conversation=%s tenant=%s",
         task.id,
