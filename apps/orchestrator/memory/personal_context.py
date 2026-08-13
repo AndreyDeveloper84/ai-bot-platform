@@ -24,6 +24,7 @@ import uuid
 
 from apps.consent.memory import can_store_green_memory
 from apps.identity.models import MemoryEntry
+from apps.identity.services.ayla_link import ensure_ayla_link
 from apps.identity.services.memory_reader import (
     get_or_create_personal_context,
     read_personal_context,
@@ -40,13 +41,17 @@ _WRITE_PURPOSE = "discovery:explicit_green_fact"
 def record_explicit_green_facts(bot_user, text: str) -> int:
     """Extract + persist explicit green facts from a user turn. Returns count written.
 
-    No-op (returns 0) when: no ``ayla_user_id``, no active PERSONAL_DATA consent,
-    nothing extracted, or every extracted fact already exists live.
+    No-op (returns 0) when: no active PERSONAL_DATA consent, nothing extracted,
+    identity could not be resolved, or every extracted fact already exists live.
+
+    DRF-1035 — gate order is deliberate: consent, then extraction, then identity.
+    Persisting memory needs a permanent Ayla subject, so this is an
+    identity-dependent action; but a turn that ends up storing nothing must not
+    mint one. Resolving last means «hello» never creates an identity, while the
+    first turn that actually has a fact to keep does (owner ruling J-O3,
+    identity-on-first-dependent-action).
     """
 
-    ayla_user_id = getattr(bot_user, "ayla_user_id", None)
-    if not ayla_user_id:
-        return 0
     if not can_store_green_memory(bot_user):
         return 0
 
@@ -55,9 +60,12 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
         if not candidates:
             return 0
 
-        user_id = (
-            ayla_user_id if isinstance(ayla_user_id, uuid.UUID) else uuid.UUID(str(ayla_user_id))
-        )
+        user_id = ensure_ayla_link(bot_user, trigger="memory_write")
+        if user_id is None:
+            # Ayla unreachable, or resolution failed. Dropping the fact is the
+            # correct degradation: memory is keyed on this id, so there is no
+            # valid key to write under. The next turn retries.
+            return 0
 
         # Dedup against facts already stored live (read gate applied).
         existing = read_personal_context(user_id)
