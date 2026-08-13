@@ -12,6 +12,7 @@ Two properties are locked here, and the second matters as much as the first:
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 
@@ -29,12 +30,13 @@ pytestmark = pytest.mark.django_db(transaction=True)
 def resolver(monkeypatch: pytest.MonkeyPatch):
     """Stub the identity read-back and count how often it is called."""
     calls: list[str] = []
-    state = {"uuid": uuid.uuid4(), "error": None}
+    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None}
 
     def _fake(external_user_id: str) -> ResolvedIdentity:
         calls.append(external_user_id)
-        if state["error"] is not None:
-            raise state["error"]
+        error = state["error"]
+        if error is not None:
+            raise error
         return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=True)
 
     monkeypatch.setattr(
@@ -68,6 +70,7 @@ class TestMemoryEstablishesIdentity:
         record_explicit_green_facts(bot_user, "я веган")
 
         reloaded = resolve_or_create_global_bot_user(channel="max", channel_user_id="drf1035-mem-2")
+        assert reloaded.ayla_user_id is not None  # the write established the link
         view = read_personal_context(reloaded.ayla_user_id)
         assert any(f.content.get("value") == "vegan" for f in view.green_facts)
 
