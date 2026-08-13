@@ -38,11 +38,15 @@ def _handler(seen: list[tuple[str, str]]):
                 json={"data": {"id": _APPT, "start_datetime": "2026-07-01T16:00:00+03:00"}},
             )
         if req.method == "GET" and path == "/api/v1/internal/me/bookings/":
+            # DRF-1032: the canonical envelope is ``{items, next_cursor}``
+            # (``records_api.py:346-349``). The previous ``{upcoming, history}``
+            # mock described a shape Ayla never returned, so this smoke test
+            # passed while the real round trip would have shown no booking.
             return httpx.Response(
                 200,
                 json={
                     "data": {
-                        "upcoming": [
+                        "items": [
                             {
                                 "id": _APPT,
                                 "start_datetime": "2026-07-01T16:00:00+03:00",
@@ -51,7 +55,7 @@ def _handler(seen: list[tuple[str, str]]):
                                 "specialist": {"id": _SPEC},
                             }
                         ],
-                        "history": [],
+                        "next_cursor": None,
                     }
                 },
             )

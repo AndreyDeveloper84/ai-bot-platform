@@ -122,6 +122,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
         frozenset({"x-idempotency-key"}),
     ),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
+    # DRF-1032 customer records: visit card + «Записаться ещё» prefill.
+    Route("GET", "/api/v1/internal/me/bookings/{id}/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/me/bookings/{id}/repeat-intent/", Auth.BEARER_EXT),
     # profile_client (#978).
     Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
     # personal_context_client (M-B1, frozen contract v1.0 2026-07-09).
@@ -351,6 +354,9 @@ def _exercise_booking() -> None:
         )
     )
     _swallow(lambda: c.get_user_appointments(external_user_id=_EXT_USER))
+    # DRF-1032 records reads.
+    _swallow(lambda: c.get_booking_detail(external_user_id=_EXT_USER, booking_id="APPTID"))
+    _swallow(lambda: c.get_repeat_intent(external_user_id=_EXT_USER, booking_id="APPTID"))
 
 
 def _exercise_profile() -> None:
