@@ -352,6 +352,64 @@ class TestHandoffMute:
 
 
 # --------------------------------------------------------------------------- #
+# Acceptance: DRF-1033 — one tenant's bookings must render as ONE section      #
+# --------------------------------------------------------------------------- #
+
+
+class TestDuplicateSectionRegression:
+    def test_two_bookings_same_tenant_render_as_single_section(
+        self, mock_send, fake_redis, spy_concierge
+    ):
+        """``_booking_lookup_scopes`` used ``.values_list(...).distinct()`` on a
+        queryset carrying ``BookingRequest``'s default ``ordering =
+        ["-created_at"]``. Django folds ordering columns into a DISTINCT
+        SELECT, so two CONFIRMED bookings in the SAME tenant (different
+        ``created_at``) surfaced as two "different" scopes — the reply then
+        rendered the same salon's bookings as two duplicate sections instead
+        of the single-tenant format."""
+        tenant = _make_booking(
+            "salon-dup", service="УЗ-кавитация — 1 зона", master="Тихонова Ольга"
+        )
+        with tenant_scope(tenant):
+            bot_user = BotUser.objects.get(channel_user_id="222")
+            start = timezone.now() + timedelta(days=3)
+            appt = uuid.uuid4()
+            second = BookingRequest.objects.create(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_name="Массаж",
+                master_name="Ольга",
+                client_name="Иван",
+                client_phone="+70000000000",
+                status=BookingRequest.Status.CONFIRMED,
+                comment=f"yclients_record_id={appt}",
+            )
+            RemoteBookingProxy.objects.create(
+                appointment_id=appt,
+                tenant=tenant,
+                bot_user=bot_user,
+                start_at=start,
+                end_at=start + timedelta(hours=1),
+                status=RemoteBookingProxy.Status.CONFIRMED,
+            )
+            # Force a distinct created_at from the first row — auto_now_add
+            # would otherwise collapse both inserts into the same instant and
+            # mask the bug this test pins.
+            BookingRequest.objects.filter(pk=second.pk).update(
+                created_at=timezone.now() + timedelta(seconds=5)
+            )
+
+        _run_global("покажи мои записи", mid="dup1")
+
+        text = mock_send[-1]["text"]
+        # Single-tenant byte-parity format: no salon-name section header…
+        assert "SALON-DUP" not in text
+        # …and each booking listed exactly once, not duplicated.
+        assert text.count("УЗ-кавитация") == 1
+        assert text.count("Массаж") == 1
+
+
+# --------------------------------------------------------------------------- #
 # Acceptance: the detector is NOT bypassed                                     #
 # --------------------------------------------------------------------------- #
 

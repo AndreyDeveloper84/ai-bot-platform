@@ -233,3 +233,34 @@ class TestFalsePositives:
         assert AdminTask.all_tenants.count() == 0
         assert mock_send[-1]["text"] == "Какая услуга интересует?"
         spy_concierge.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# Acceptance: DRF-972 — русские формулировки эскалируют на глобальном пути     #
+# --------------------------------------------------------------------------- #
+class TestRussianKeywordsOnGlobalPath:
+    """``matches_human_handoff_request`` imports ``_HANDOFF_KEYWORDS`` from the
+    tenant skill (never a copy) — DRF-972's dictionary extension must reach
+    this route for free. These pin that the shared import actually works end
+    to end, not just at the unit level."""
+
+    def test_menedzher_escalates(self, mock_send, fake_redis, spy_concierge):
+        _run_global("позовите менеджера", mid="g1")
+
+        assert AdminTask.all_tenants.count() == 1
+        assert mock_send[-1]["text"] == ("Передаю менеджеру — ответят в течение 30 минут.")
+        spy_concierge.assert_not_called()
+
+    def test_administrator_escalates(self, mock_send, fake_redis, spy_concierge):
+        _run_global("нужен администратор", mid="g2")
+
+        assert AdminTask.all_tenants.count() == 1
+        spy_concierge.assert_not_called()
+
+    def test_human_word_not_added_no_false_escalation(self, mock_send, fake_redis, spy_concierge):
+        """«человек» сознательно не в словаре — бытовая фраза не должна
+        создавать задачу оператору."""
+        _run_global("я человек занятой, давайте по делу", mid="g3")
+
+        assert AdminTask.all_tenants.count() == 0
+        spy_concierge.assert_called_once()
