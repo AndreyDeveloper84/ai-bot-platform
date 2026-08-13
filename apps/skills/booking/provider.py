@@ -73,16 +73,28 @@ def get_booking_provider(*, bot_user: Any) -> Any:
     :class:`AylaYClientsAdapter` bound to ``bot_user``'s Ayla external id.
     """
     if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        from apps.identity.services.ayla_link import ensure_ayla_link
         from apps.integrations.ayla.booking_client import get_ayla_booking_client
         from apps.integrations.ayla.user_proxy import external_user_id_for
+
+        # DRF-1035: creating a booking is the archetypal identity-dependent
+        # action, so this is where the link gets established if it does not
+        # exist yet. Reading the field directly (the pre-DRF-1035 behaviour)
+        # was fatal for every user Ayla had never resolved — which, absent a
+        # writer for the field, was everyone who was not provisioned by hand.
+        #
+        # `ensure_ayla_link` never raises: on an Ayla outage it returns None,
+        # client_id stays empty, and `create_record` degrades exactly as
+        # before (ayla_client_id_missing → AdminTask → operator notified).
+        ayla_user_id = ensure_ayla_link(bot_user, trigger="booking")
 
         return AylaYClientsAdapter(
             client=get_ayla_booking_client(),
             external_user_id=external_user_id_for(bot_user),
             # client_id = the Ayla user UUID the bearer + X-External-User-ID
             # resolves to (must match server-side or create 403s). Empty when
-            # the BotUser isn't linked to Ayla yet → create fails gracefully.
-            client_id=str(getattr(bot_user, "ayla_user_id", "") or ""),
+            # identity could not be resolved → create fails gracefully.
+            client_id=str(ayla_user_id or ""),
         )
 
     from apps.integrations.yclients import get_yclients_client

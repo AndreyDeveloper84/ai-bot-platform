@@ -208,6 +208,28 @@ def _resolve_person_link(bot_user: BotUser) -> _PersonLink:
             len(candidates),  # count only, never the ids themselves
         )
         return _PersonLink(conflict=True)
+
+    if not candidates:
+        # DRF-1035. A blank link used to mean «upstream is unaddressable»:
+        # export silently omitted the Ayla section and delete reported
+        # `not_linked`. That is not the same as «there is nothing upstream» —
+        # other bot surfaces (the food scanner and the booking-lookup read)
+        # already send X-External-User-ID, which makes Ayla lazily create the
+        # proxy and accrete real personal data against it, all without ever
+        # populating this field. Those food logs were therefore reachable by
+        # neither export nor erasure.
+        #
+        # Exercising a 152-ФЗ right is an identity-dependent action, so we
+        # resolve here — one call on the boundary both export and delete share.
+        # Resolution is read-only for an already-existing proxy (the common
+        # case); when none exists it creates an empty, PII-free row, which is a
+        # far better outcome than reporting an erasure we never attempted.
+        from apps.identity.services.ayla_link import ensure_ayla_link
+
+        resolved = ensure_ayla_link(bot_user, trigger="personal_data")
+        if resolved is not None:
+            return _PersonLink(ayla_user_id=resolved)
+
     return _PersonLink(ayla_user_id=next(iter(candidates), None))
 
 
