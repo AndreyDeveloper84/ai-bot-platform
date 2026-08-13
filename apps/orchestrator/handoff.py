@@ -636,6 +636,7 @@ def _booking_lookup_scopes(global_bot_user) -> list[tuple]:
             status=BookingRequest.Status.CONFIRMED,
         )
         .exclude(tenant_id=sentinel.id)
+        .order_by()
         .values_list("tenant_id", "bot_user_id")
         .distinct()
     )
