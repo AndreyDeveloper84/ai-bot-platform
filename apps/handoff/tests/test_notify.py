@@ -21,6 +21,7 @@ from apps.audit.models import AuditLog
 from apps.channels.max.outbound import MaxAPIError
 from apps.conversations.models import Conversation, Message
 from apps.handoff.models import AdminTask
+from apps.handoff.notify import build_admin_task_notification
 from apps.handoff.services import create_admin_task
 from apps.identity.models import BotUser
 from apps.tenancy.context import tenant_scope
@@ -254,3 +255,28 @@ class TestNotifyAfterCommit:
         assert len(send.calls) == 1
         assert send.calls[0]["chat_id"] == "111222"
         assert str(task.id) in send.calls[0]["text"]
+
+
+class TestBuildNotificationNoQueries:
+    def test_build_text_makes_zero_db_queries(
+        self, tenant, bot_user, conversation, settings, django_assert_num_queries
+    ):
+        """Building the notification text must touch the DB ZERO times.
+
+        The on_commit callback may run outside ``tenant_scope``, and on the
+        pilot STRICT_TENANT_SCOPE is unset (audit mode), where a
+        tenant-scoped queryset without context silently returns emptiness
+        instead of raising (apps/tenancy/managers.py). A query added to the
+        formatter would not fail loudly in production — it would quietly
+        render wrong data. Every value in the text comes from attributes
+        and FKs cached at AdminTask creation; this test turns that into a
+        rule rather than a lucky property of the current implementation.
+        """
+
+        _configure(settings, ["111222"])
+        task = _create(tenant, conversation, reason="zero queries")
+        with django_assert_num_queries(0):
+            text = build_admin_task_notification(task)
+        assert "HSvc Notify Salon" in text
+        assert str(task.id) in text
+        assert str(conversation.id) in text
