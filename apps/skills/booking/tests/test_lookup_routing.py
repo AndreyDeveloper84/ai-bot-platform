@@ -95,6 +95,12 @@ LOOKUP_PHRASES: tuple[str, ...] = (
     "мои визиты",
     "что у меня записано",
     "мои брони",
+    # OD-IR1 — the two corpus phrasings the DRF-1055 detector still
+    # missed. Kept here as well as in OD_IR1_CORPUS below so they run
+    # through the full routing matrix and the production dispatch
+    # integration, not only through the predicate.
+    "куда я записан",
+    "к кому я записан",
 )
 
 # DRF-1055 — the exact table from the brief: thirteen phrasings run
@@ -119,6 +125,80 @@ DRF1055_TABLE: tuple[tuple[str, bool], ...] = (
     ("Покажи по записи", True),  # typo — optional per brief §2
     ("покажи мои записи", True),  # already worked before the fix
     ("когда я записан", True),  # already worked before the fix
+)
+
+# OD-IR1 (owner decision «Pilot routing», docs/Ayla-intent-routing —
+# «Owner Decision OD-IR1 — Pilot routing») — the owner's minimal
+# regression corpus for «Мои записи», verbatim and in the decision's own
+# order. Requirement 2 of that decision is the corpus ITSELF, not the
+# two phrasings it happened to expose: until Controlled Pilot the
+# deterministic router stays, so the next lexical / word-order /
+# synonym gap has to be found by this table on CI rather than by a
+# person on the pilot.
+#
+# State on 2026-08-14 before this patch: 11/13. «куда я записан» and
+# «к кому я записан» failed on the lookup-signal gate alone — the list
+# carried «когда» but neither the WHERE nor the TO-WHOM question.
+#
+# Add to this tuple — never trim it — when the owner extends the
+# corpus; the eight other pilot-critical intents named in OD-IR1
+# (booking, appointments, history, repeat, escalation, cancel,
+# reschedule, help) are separate work and deliberately not started here.
+OD_IR1_CORPUS: tuple[str, ...] = (
+    "покажи мои записи",
+    "мои записи покажи",
+    "мои записи",
+    "покажи записи",
+    "мои визиты",
+    "покажи мои визиты",
+    "когда я записан",
+    "что у меня записано",
+    "мои брони",
+    "покажи мои брони",
+    "куда я записан",
+    "к кому я записан",
+    "есть ли у меня записи",
+)
+
+# OD-IR1 — the nearest relatives of the two phrasings closed above,
+# covered by CLOSED-class extensions only (two exact past-reflexive
+# forms in the booked-state class, two word-bounded question words in
+# the signal list). No open ``\w+`` slot was introduced: that is what
+# produced the left-re-scoping regression pinned by
+# LEFT_RESCOPED_PHRASES.
+OD_IR1_RELATED_PHRASES: tuple[str, ...] = (
+    "куда я записана",
+    "к кому я записался",
+    "куда я записался",
+    "к кому я записалась",
+    # The new question words also compose with the existing «у меня»
+    # personal marker for free.
+    "куда у меня запись",
+    "к кому у меня запись",
+)
+
+# OD-IR1 requirement 3 — collisions. The «запис» root must not
+# intercept foreign semantics, and the two new question words are broad
+# enough to deserve their own negatives:
+#
+#   * «куда идти» / «к кому обратиться» carry the new signal and NO
+#     booking noun — the noun gate rejects them;
+#   * «куда записаться» / «к кому записаться» carry the new signal AND
+#     the root, but they are the intent to CREATE a booking — the worst
+#     false positive in the product (DRF-1055 §2), rejected by
+#     _CREATE_INTENT_SIGNAL before any positive test runs;
+#   * «куда я записал видео» is the recording domain: «записал» is not
+#     «записался», and the closed booked-state class keeps them apart.
+DIRECTION_QUESTION_NON_LOOKUP_PHRASES: tuple[str, ...] = (
+    "куда идти",
+    "к кому обратиться",
+    "куда записаться",
+    "к кому записаться",
+    "куда мне записаться",
+    "куда идти к мастеру",
+    "куда я записал видео",
+    "куда я записался на вебинар",
+    "куда пропали мои записи с диктофона",
 )
 
 # DRF-1055 §2 — the negation window that must NOT break. A person who
@@ -392,6 +472,48 @@ class TestLookupPredicate:
         order, verb-less requests, possessive-less imperatives and the
         «визит» / «бронь» synonyms are all covered now."""
         assert is_personal_booking_lookup(phrase) is expected
+
+    @pytest.mark.parametrize("phrase", OD_IR1_CORPUS)
+    def test_od_ir1_corpus(self, phrase: str) -> None:
+        """OD-IR1 requirement 2 — the owner's regression corpus.
+
+        Owner Decision OD-IR1 («Pilot routing») keeps the deterministic
+        router until Controlled Pilot on the condition that it closes
+        the known lexical / word-order / synonym gaps AND carries a
+        regression corpus of natural phrasings. This table IS that
+        corpus for «Мои записи», verbatim from the decision.
+
+        It was 11/13 on 2026-08-14: «куда я записан» and «к кому я
+        записан» failed the lookup-signal gate, which knew «когда» but
+        not the WHERE / TO-WHOM question. The point of pinning all
+        thirteen — not just those two — is that the NEXT gap is found
+        here rather than by a person on the pilot.
+        """
+        assert is_personal_booking_lookup(phrase) is True
+
+    @pytest.mark.parametrize("phrase", OD_IR1_RELATED_PHRASES)
+    def test_od_ir1_related_forms(self, phrase: str) -> None:
+        """OD-IR1 §1 — the nearest relatives of the corpus phrasings.
+
+        «к кому я записался» is what a male speaker says instead of «я
+        записан»; «куда у меня запись» composes the new question word
+        with the existing «у меня» marker. Both are covered by CLOSED
+        classes only — no open ``\\w+`` slot, which is what caused the
+        left-re-scoping regression pinned by LEFT_RESCOPED_PHRASES.
+        """
+        assert is_personal_booking_lookup(phrase) is True
+
+    @pytest.mark.parametrize("phrase", DIRECTION_QUESTION_NON_LOOKUP_PHRASES)
+    def test_direction_questions_do_not_collide(self, phrase: str) -> None:
+        """OD-IR1 requirement 3 — collisions for the new signals.
+
+        «куда» / «к кому» are as broad as «где», so they only ever
+        qualify together with a bare booking noun AND a personal
+        reference. «куда идти» has no noun; «куда записаться» is the
+        create intent (rejected one gate earlier); «куда я записал
+        видео» is the recording domain — «записал» is not «записался».
+        """
+        assert is_personal_booking_lookup(phrase) is False
 
     @pytest.mark.parametrize("phrase", CREATE_INTENT_PHRASES)
     def test_create_intent_never_matches(self, phrase: str) -> None:
