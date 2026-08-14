@@ -765,6 +765,12 @@ class RemoteBookingProxy(models.Model):
     «which event last touched this proxy» rather than the primary
     idempotency mechanism.
 
+    ``salon_notified_at`` / ``client_notified_at`` are a different kind
+    of idempotency: not «did we process this event» but «was this
+    appointment already announced», which must survive re-delivery
+    under a *fresh* ``event_id`` and must be answerable no matter who
+    wrote the row. DRF-1069.
+
     Pattern note: copies the catalog ``_MirrorBase`` shape
     (``TenantScopedManager`` + ``all_tenants`` + ``synced_at``) by
     composition, not inheritance — the base assumes a mysite
@@ -863,6 +869,35 @@ class RemoteBookingProxy(models.Model):
         blank=True,
         db_index=True,
         help_text="Ayla Master.id — analogous to ``service_id``.",
+    )
+
+    # ── Announcement claims (DRF-1069) ─────────────────────────────
+    #
+    # «Has this appointment already been announced, and to whom» — the
+    # ONE durable answer, per side. Before DRF-1069 the consumer
+    # inferred it from ``get_or_create``'s ``created`` flag, which is
+    # false for every booking made in the bot's own dialog (that path
+    # writes this mirror row itself, before Ayla's event arrives) — so
+    # the salon was never told about the product's main booking path.
+    # See ``apps.eventbus.consumers.booking._claim_announcement``.
+    salon_notified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When a handler claimed the one-shot salon "
+        "announcement for this appointment (DRF-1030 / DRF-1069). NULL "
+        "= nobody on the salon side has been told yet. Set inside the "
+        "ingest transaction, before the after-commit send: a rolled-back "
+        "ingest releases the claim, a re-delivered event finds it taken. "
+        "Records the claim, not delivery — the send itself is "
+        "best-effort and may still find no reachable recipient.",
+    )
+    client_notified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Same claim, for the client-facing «вы записаны» "
+        "confirmation (DRF-1066). NULL also stays NULL for a booking "
+        "made in the dialog: there ``execute_confirm`` already answered "
+        "in chat and this channel deliberately says nothing.",
     )
 
     # ── Audit / observability ──────────────────────────────────────

@@ -55,13 +55,19 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from django.utils import timezone
 
-from apps.booking.client_notify import schedule_client_booking_confirmation
-from apps.booking.master_notify import schedule_booking_created_notification
+from apps.booking.client_notify import (
+    schedule_client_booking_confirmation,
+    was_confirmed_in_chat,
+)
+from apps.booking.master_notify import (
+    CHAT_ORIGIN_SOURCE,
+    schedule_booking_created_notification,
+)
 from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.conversations.models import Conversation
 from apps.events.services import emit as emit_internal_event
@@ -91,6 +97,21 @@ _REMINDER_OFFSETS: Final[tuple[tuple[str, timedelta], ...]] = (
 _CREATED_ADVANCED_STATUSES: Final[frozenset[str]] = frozenset(
     {
         RemoteBookingProxy.Status.CONFIRMED,
+        RemoteBookingProxy.Status.CANCELLED,
+        RemoteBookingProxy.Status.COMPLETED,
+        RemoteBookingProxy.Status.NO_SHOW,
+    }
+)
+
+
+# Proxy states in which a ``booking.created`` must announce NOTHING.
+# A stale creation event arriving after the appointment was cancelled,
+# completed or marked no-show would otherwise page the salon with «🆕
+# Новая запись» about a booking that is over. CONFIRMED is deliberately
+# NOT here — it is the state the *dialog* booking path writes, and
+# announcing that one is the whole point of DRF-1069.
+_ANNOUNCEMENT_BLOCKED_STATUSES: Final[frozenset[str]] = frozenset(
+    {
         RemoteBookingProxy.Status.CANCELLED,
         RemoteBookingProxy.Status.COMPLETED,
         RemoteBookingProxy.Status.NO_SHOW,
@@ -349,6 +370,141 @@ def _touch_conversation_last_booking(
     )
 
 
+# ─── announcements (DRF-1030 / DRF-1066 / DRF-1069) ────────────────────────
+
+
+_AnnouncementSlot = Literal["salon_notified_at", "client_notified_at"]
+
+
+def _claim_announcement(*, appointment_id: UUID, slot: _AnnouncementSlot) -> bool:
+    """Take the one-shot announcement slot for this appointment.
+
+    ``UPDATE … SET <slot> = now() WHERE appointment_id = … AND <slot>
+    IS NULL`` — the claim and the test are one statement, so it is
+    atomic against a concurrent delivery of the same appointment
+    (the second transaction blocks on the row lock and then matches
+    zero rows). Returns True to exactly one caller, ever.
+
+    ### Why this replaces the ``created`` flag (DRF-1069)
+
+    Until this landed, both announcements were gated on
+    ``get_or_create``'s ``created`` — «we inserted the mirror row», read
+    as «this appointment is new to us». The two are not the same
+    statement, because this handler is **not** the only writer of
+    :class:`~apps.booking.models.RemoteBookingProxy`: the conversational
+    booking path writes the mirror itself
+    (``apps.skills.booking.tools._upsert_remote_booking_proxy``, inside
+    ``execute_confirm``) *before* Ayla's event reaches us. So every
+    booking made in the dialog — the product's main path — arrived here
+    as an update, and **the salon was never told about it** (verified on
+    the pilot 14.08: bookings that hour, salon notifications zero).
+
+    The claim says only what it means: «has anyone announced this
+    appointment yet». It is insert-agnostic, so a row someone else
+    wrote is announced exactly once; it is durable, so re-delivery under
+    a fresh ``event_id`` finds it taken; and it is transactional, so a
+    rolled-back ingest releases it and announces nothing.
+
+    Separating *that* question from «did this booking come from our own
+    chat» — the other meaning ``created`` was silently carrying — leaves
+    the second one to an explicit origin marker,
+    :func:`~apps.booking.client_notify.was_confirmed_in_chat`, which is
+    what the client-facing side actually needs.
+    """
+
+    return (
+        RemoteBookingProxy.all_tenants.filter(
+            appointment_id=appointment_id,
+            **{f"{slot}__isnull": True},
+        ).update(**{slot: timezone.now()})
+        == 1
+    )
+
+
+def _announce_booking_created(
+    *,
+    tenant: Tenant,
+    bot_user: BotUser | None,
+    appointment_id: UUID,
+    start_at: dt.datetime,
+    specialist_id: UUID | None,
+    service_id: UUID | None,
+    raw_source: str,
+    status: str,
+) -> None:
+    """Queue the after-commit announcements for a newly-seen booking.
+
+    Two audiences, two independent questions:
+
+    * **The salon** (DRF-1030) is told about *every* new booking,
+      whatever surface made it — that is the DRF-1069 fix. The only gate
+      is the claim: one appointment, one announcement.
+    * **The client** (DRF-1066) is told only when the booking is already
+      ``confirmed`` (with prepayment «вы записаны» would be untrue until
+      :func:`handle_booking_confirmed`) **and** the booking did not come
+      from the dialog, where ``execute_confirm`` has already replied
+      «Готово! Записала.». That second condition is now read from the
+      explicit chat-origin marker instead of being inferred from the
+      insert. :mod:`apps.booking.client_notify` re-checks it inside the
+      callback as well — defence in depth, and it sees the latest
+      committed state.
+
+    Chat origin also fixes the salon message's own «Источник:» line: the
+    event cannot carry it (the bot does not pass a ``source`` through
+    ``provider.create_record``, and ``RemoteBookingProxy.Source`` has no
+    bot value at all), so local knowledge substitutes it.
+
+    Nothing here sends anything — both callees register
+    ``transaction.on_commit`` callbacks.
+    """
+
+    if status in _ANNOUNCEMENT_BLOCKED_STATUSES:
+        # A stale creation event for an appointment that is already
+        # over. Announcing «новая запись» here would be worse than
+        # silence, and the claim is left free on purpose: nothing was
+        # announced, so nothing is recorded as announced.
+        logger.info(
+            "eventbus.consumer.booking.created.announcement_skipped_terminal "
+            "appointment_id=%s status=%s",
+            appointment_id,
+            status,
+        )
+        return
+
+    chat_origin = was_confirmed_in_chat(tenant=tenant, appointment_id=appointment_id)
+
+    if _claim_announcement(appointment_id=appointment_id, slot="salon_notified_at"):
+        schedule_booking_created_notification(
+            tenant=tenant,
+            appointment_id=appointment_id,
+            start_at=start_at,
+            specialist_id=specialist_id,
+            service_id=service_id,
+            raw_source=CHAT_ORIGIN_SOURCE if chat_origin else raw_source,
+        )
+
+    if chat_origin:
+        logger.info(
+            "eventbus.consumer.booking.created.client_confirmation_skipped_chat_origin "
+            "appointment_id=%s — booked in the dialog, execute_confirm already replied there",
+            appointment_id,
+        )
+        return
+
+    if status != RemoteBookingProxy.Status.CONFIRMED:
+        return
+
+    if _claim_announcement(appointment_id=appointment_id, slot="client_notified_at"):
+        schedule_client_booking_confirmation(
+            tenant=tenant,
+            bot_user=bot_user,
+            appointment_id=appointment_id,
+            start_at=start_at,
+            specialist_id=specialist_id,
+            service_id=service_id,
+        )
+
+
 # ─── handlers ──────────────────────────────────────────────────────────────
 
 
@@ -361,12 +517,22 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
       3. Schedule T-24h + T-2h reminders (idempotent).
       4. Emit internal ``booking_created`` event for analytics fan-out.
       5. Set Conversation.last_booking_at = data.start_at.
-      6. DRF-1030 — queue the salon-facing MAX notification for after
-         commit, but only for an appointment we have not seen before.
+      6. DRF-1030 / DRF-1069 — queue the salon-facing MAX notification
+         for after commit, once per appointment, **whatever surface
+         created it** — including the bot's own dialog, whose mirror
+         write used to make this handler treat the booking as already
+         known and stay silent.
       7. DRF-1066 — queue the client-facing «вы записаны» confirmation
-         for after commit, for a new appointment that is already
-         ``confirmed``. Awaiting-payment bookings are announced on the
-         transition instead (:func:`handle_booking_confirmed`).
+         for after commit, for an appointment that is already
+         ``confirmed`` and did NOT come from the dialog (there the
+         customer has already been answered). Awaiting-payment bookings
+         are announced on the transition instead
+         (:func:`handle_booking_confirmed`).
+
+    Steps 6–7 live in :func:`_announce_booking_created` and are reached
+    from BOTH exits of the proxy upsert — including the
+    advanced-state no-op, which is precisely where a dialog booking
+    lands.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -457,6 +623,26 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
                 proxy.status,
                 envelope.event_id,
             )
+            # DRF-1069: «do not roll the state back» is not «say
+            # nothing». The overwhelmingly common way to reach this
+            # branch is NOT a stale event at all — it is a booking made
+            # in the dialog: ``execute_confirm`` writes the mirror row
+            # CONFIRMED before Ayla's event arrives, so the appointment
+            # is already in an «advanced» state the first time we ever
+            # see an event for it. Returning here is why the salon
+            # learned about none of them. The announcement decides for
+            # itself (terminal states say nothing; the claim keeps it to
+            # one) — everything else about this no-op is unchanged.
+            _announce_booking_created(
+                tenant=tenant,
+                bot_user=bot_user,
+                appointment_id=appointment_id,
+                start_at=start_at,
+                specialist_id=specialist_uuid,
+                service_id=service_uuid,
+                raw_source=raw_source,
+                status=proxy.status,
+            )
             return
         update_fields = {k: v for k, v in create_defaults.items() if k != "tenant"}
         RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(**update_fields)
@@ -492,52 +678,21 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         },
     )
 
-    # DRF-1030 — tell the salon about the booking over MAX. Gated on
-    # ``created`` so a re-delivery with a fresh ``event_id`` (which
-    # falls through the update branch above rather than the replay
-    # short-circuit) cannot announce the same appointment twice; the
-    # proxy is inserted by this handler and nothing else, so
-    # ``created`` is exactly «this appointment is new to us».
-    # Registered as an on_commit callback: the send must not run inside
-    # the dispatcher's transaction, and a rolled-back ingest must never
-    # announce a booking that does not exist.
-    if created:
-        schedule_booking_created_notification(
-            tenant=tenant,
-            appointment_id=appointment_id,
-            start_at=start_at,
-            specialist_id=specialist_uuid,
-            service_id=service_uuid,
-            raw_source=raw_source,
-        )
-
-        # DRF-1066 — and tell the CLIENT, in the chat. The Mini App's
-        # success screen failed silently on 14.08 and a customer, left
-        # guessing, booked twice. The bot is already in the conversation;
-        # a message here confirms the booking on every surface at once
-        # and does not depend on a frontend render.
-        #
-        # Same ``created`` gate as the salon notification above, for the
-        # same reason plus one more: a booking made in the dialog was
-        # already confirmed in the dialog by ``execute_confirm``, and
-        # that path writes the proxy mirror itself — so a chat booking
-        # arrives here as an update, never an insert. A second,
-        # independent chat-origin guard runs inside the callback; see
-        # :mod:`apps.booking.client_notify`.
-        #
-        # Gated on ``confirmed`` as well: with prepayment the
-        # appointment is born ``awaiting_payment`` and «вы записаны»
-        # would be untrue. That case is announced on the transition, by
-        # ``handle_booking_confirmed``.
-        if normalized_status == RemoteBookingProxy.Status.CONFIRMED:
-            schedule_client_booking_confirmation(
-                tenant=tenant,
-                bot_user=bot_user,
-                appointment_id=appointment_id,
-                start_at=start_at,
-                specialist_id=specialist_uuid,
-                service_id=service_uuid,
-            )
+    # DRF-1030 (salon) + DRF-1066 (client) — queue both announcements
+    # for after commit. NOT gated on ``created``: that flag answers «did
+    # WE insert the row», which stopped being the same question as «is
+    # this appointment new to us» the moment the dialog path started
+    # writing the mirror itself. See :func:`_claim_announcement`.
+    _announce_booking_created(
+        tenant=tenant,
+        bot_user=bot_user,
+        appointment_id=appointment_id,
+        start_at=start_at,
+        specialist_id=specialist_uuid,
+        service_id=service_uuid,
+        raw_source=raw_source,
+        status=normalized_status,
+    )
 
 
 def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
@@ -1244,7 +1399,14 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     # short-circuits it. The chat path likewise writes its mirror row
     # CONFIRMED, so a dialog booking never reaches the send here either
     # — and the chat-origin guard inside the callback backs that up.
-    if not was_confirmed:
+    #
+    # DRF-1069: the same claim the creation path takes, so «the client
+    # has been told about this appointment» is one durable fact shared
+    # by both call sites instead of two handlers each reasoning from
+    # their own local view of the state machine.
+    if not was_confirmed and _claim_announcement(
+        appointment_id=appointment_id, slot="client_notified_at"
+    ):
         schedule_client_booking_confirmation(
             tenant=tenant,
             bot_user=bot_user,
