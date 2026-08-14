@@ -5,9 +5,11 @@ booking lifecycle:
 
 * ``booking.created`` — upsert :class:`RemoteBookingProxy`, schedule
   T-24h and T-2h reminders, set ``Conversation.last_booking_at``,
-  emit internal analytics event, and (DRF-1030) announce the booking
+  emit internal analytics event, (DRF-1030) announce the booking
   to the salon in MAX after commit — see
-  :mod:`apps.booking.master_notify` for the addressing cascade.
+  :mod:`apps.booking.master_notify` for the addressing cascade — and
+  (DRF-1066) confirm the booking to the CLIENT in chat, see
+  :mod:`apps.booking.client_notify` for the anti-duplicate guards.
 * ``booking.cancelled`` — flip proxy status to ``cancelled``, cancel
   pending reminders.
 * ``booking.rescheduled`` (:func:`handle_booking_rescheduled`) —
@@ -58,6 +60,7 @@ from uuid import UUID
 
 from django.utils import timezone
 
+from apps.booking.client_notify import schedule_client_booking_confirmation
 from apps.booking.master_notify import schedule_booking_created_notification
 from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.conversations.models import Conversation
@@ -360,6 +363,10 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
       5. Set Conversation.last_booking_at = data.start_at.
       6. DRF-1030 — queue the salon-facing MAX notification for after
          commit, but only for an appointment we have not seen before.
+      7. DRF-1066 — queue the client-facing «вы записаны» confirmation
+         for after commit, for a new appointment that is already
+         ``confirmed``. Awaiting-payment bookings are announced on the
+         transition instead (:func:`handle_booking_confirmed`).
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -503,6 +510,34 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
             service_id=service_uuid,
             raw_source=raw_source,
         )
+
+        # DRF-1066 — and tell the CLIENT, in the chat. The Mini App's
+        # success screen failed silently on 14.08 and a customer, left
+        # guessing, booked twice. The bot is already in the conversation;
+        # a message here confirms the booking on every surface at once
+        # and does not depend on a frontend render.
+        #
+        # Same ``created`` gate as the salon notification above, for the
+        # same reason plus one more: a booking made in the dialog was
+        # already confirmed in the dialog by ``execute_confirm``, and
+        # that path writes the proxy mirror itself — so a chat booking
+        # arrives here as an update, never an insert. A second,
+        # independent chat-origin guard runs inside the callback; see
+        # :mod:`apps.booking.client_notify`.
+        #
+        # Gated on ``confirmed`` as well: with prepayment the
+        # appointment is born ``awaiting_payment`` and «вы записаны»
+        # would be untrue. That case is announced on the transition, by
+        # ``handle_booking_confirmed``.
+        if normalized_status == RemoteBookingProxy.Status.CONFIRMED:
+            schedule_client_booking_confirmation(
+                tenant=tenant,
+                bot_user=bot_user,
+                appointment_id=appointment_id,
+                start_at=start_at,
+                specialist_id=specialist_uuid,
+                service_id=service_uuid,
+            )
 
 
 def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
@@ -1124,6 +1159,13 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     Side-effect: if ``data.payment_id`` is present, the handler also
     upserts the payment mirror via ``upsert_payment_mirror`` so the
     local copy stays in sync with the Ayla payment state.
+
+    DRF-1066 side-effect: on a genuine transition into ``confirmed``
+    (the proxy was not already confirmed) the client is told «вы
+    записаны» in chat after commit. A booking that was born confirmed
+    was announced by :func:`handle_booking_created`; this call site
+    exists for the prepayment flow, where the appointment is created
+    ``awaiting_payment`` and only becomes real here.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -1176,6 +1218,10 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
         )
         return
 
+    # DRF-1066: read the pre-flip state — the client confirmation below
+    # announces the *transition into* confirmed, not the state.
+    was_confirmed = proxy.status == RemoteBookingProxy.Status.CONFIRMED
+
     proxy.status = RemoteBookingProxy.Status.CONFIRMED
     proxy.last_synced_event_id = envelope.event_id
     proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
@@ -1187,6 +1233,25 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
             bot_user=bot_user,
             appointment_id=appointment_id,
             start_at=proxy.start_at,
+        )
+
+    # DRF-1066 — «вы записаны» to the client, for the prepayment flow:
+    # the appointment was created ``awaiting_payment`` (nothing was said
+    # then, because nothing was true yet) and only becomes real here.
+    # Mutually exclusive with the ``handle_booking_created`` call site by
+    # construction: a booking born confirmed was announced there and is
+    # already CONFIRMED when this handler runs, so ``was_confirmed``
+    # short-circuits it. The chat path likewise writes its mirror row
+    # CONFIRMED, so a dialog booking never reaches the send here either
+    # — and the chat-origin guard inside the callback backs that up.
+    if not was_confirmed:
+        schedule_client_booking_confirmation(
+            tenant=tenant,
+            bot_user=bot_user,
+            appointment_id=appointment_id,
+            start_at=proxy.start_at,
+            specialist_id=proxy.specialist_id,
+            service_id=proxy.service_id,
         )
 
     if data.get("payment_id"):
