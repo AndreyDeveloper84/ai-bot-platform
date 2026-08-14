@@ -84,6 +84,76 @@ LOOKUP_PHRASES: tuple[str, ...] = (
     "Когда у меня запись на завтра в салоне?",
     "Покажи мои записи, пожалуйста",
     "Покажи мои записи 🙂",
+    # DRF-1055 — the phrasings the pilot owner and the live-acceptance
+    # run actually produced. Kept in the main list (not only in the
+    # table below) so they run through the routing matrix and the
+    # production dispatch integration too, not just the predicate.
+    "Мои записи покажи",
+    "мои записи",
+    "покажи записи",
+    "покажи мои визиты",
+    "мои визиты",
+    "что у меня записано",
+    "мои брони",
+)
+
+# DRF-1055 — the exact table from the brief: thirteen phrasings run
+# against ``is_personal_booking_lookup`` in the pilot worker container
+# on 2026-08-13. Nine of them were NOT recognised and the turn fell
+# through to the concierge LLM, which has no bookings tool and answered
+# «я не могу показать ваши записи».
+#
+# The ``expected`` flag is the post-fix contract. «Покажи по записи» is
+# a typo of «покажи мои записи»; the brief leaves it optional (and
+# explicitly not at the cost of a false positive) — it now matches as a
+# free side effect of the show-imperative rule, and is pinned here so a
+# future change to that rule surfaces the consequence.
+DRF1055_TABLE: tuple[tuple[str, bool], ...] = (
+    ("Мои записи покажи", True),  # ← the owner's own phrasing
+    ("мои записи", True),
+    ("покажи записи", True),
+    ("покажи мои визиты", True),
+    ("мои визиты", True),
+    ("что у меня записано", True),
+    ("мои брони", True),
+    ("Покажи по записи", True),  # typo — optional per brief §2
+    ("покажи мои записи", True),  # already worked before the fix
+    ("когда я записан", True),  # already worked before the fix
+)
+
+# DRF-1055 §2 — the negation window that must NOT break. A person who
+# wants to BOOK must never be answered with the list of bookings they
+# already have: that is a dead end, and worse than not recognising the
+# turn at all. These are the phrasings the brief names plus the
+# availability question, which has the exact shape of a lookup
+# («покажи» + bare booking noun + temporal complement) and is the one
+# new false-positive risk the widened detector introduces.
+CREATE_INTENT_PHRASES: tuple[str, ...] = (
+    "хочу записаться",
+    "запиши меня",
+    "записаться на маникюр",
+    "можно записаться?",
+    "Хочу записаться на маникюр",
+    "Можно записаться к Анне?",
+    "Запишите меня на массаж",
+    "покажи свободные записи",
+    "покажи свободные визиты",
+    "Какие свободные записи на завтра?",
+    "есть свободные визиты на завтра?",
+)
+
+# DRF-1055 — the synonyms widen the vocabulary, so the domain guard has
+# to hold for them too: «визит» and «бронь» re-scoped by a complement
+# are no more a salon booking than «запись вебинара» is. Plus the
+# compound trap the closed declension list exists to avoid («визитка»
+# is not a declension of «визит»).
+SYNONYM_NON_BOOKING_PHRASES: tuple[str, ...] = (
+    "покажи мои визиты вебинара",
+    "мои брони в отеле",
+    "покажи бронь авиабилета",
+    "покажи визитку",
+    "Когда у меня визит к врачу?",
+    "Какие у меня брони на диктофоне?",
 )
 
 FAQ_PHRASES: tuple[str, ...] = (
@@ -256,6 +326,45 @@ class TestLookupPredicate:
     def test_personal_lookup_phrases_match(self, phrase: str) -> None:
         assert is_personal_booking_lookup(phrase) is True
 
+    @pytest.mark.parametrize(("phrase", "expected"), DRF1055_TABLE)
+    def test_drf1055_live_acceptance_table(self, phrase: str, expected: bool) -> None:
+        """DRF-1055 — the thirteen-phrasing table from the live pilot run.
+
+        Nine of these were unrecognised on 2026-08-13 and the turn went
+        to the concierge LLM, which cannot list bookings. Reverse word
+        order, verb-less requests, possessive-less imperatives and the
+        «визит» / «бронь» synonyms are all covered now."""
+        assert is_personal_booking_lookup(phrase) is expected
+
+    @pytest.mark.parametrize("phrase", CREATE_INTENT_PHRASES)
+    def test_create_intent_never_matches(self, phrase: str) -> None:
+        """DRF-1055 §2 — the negation window. A request to MAKE a
+        booking (or to see free slots) must never be answered with the
+        caller's existing bookings: that is a dead end for the person
+        who wanted an appointment, and a worse outcome than a miss."""
+        assert is_personal_booking_lookup(phrase) is False
+
+    @pytest.mark.parametrize("phrase", SYNONYM_NON_BOOKING_PHRASES)
+    def test_synonyms_keep_the_domain_guard(self, phrase: str) -> None:
+        """DRF-1055 — «визит» / «бронь» are matched as closed declension
+        lists inside the same standalone-word guard as «запись», so a
+        re-scoping complement («визиты вебинара», «брони в отеле») and a
+        compound («визитка») reject exactly as they do for «запись»."""
+        assert is_personal_booking_lookup(phrase) is False
+
+    @pytest.mark.parametrize(
+        "phrase",
+        (
+            "МОИ ЗАПИСИ ПОКАЖИ",
+            "Мои Записи Покажи",
+            "мОи ЗаПиСи пОкАжИ",
+        ),
+    )
+    def test_case_and_word_order_are_irrelevant(self, phrase: str) -> None:
+        """DRF-1055 §4 — the owner's phrasing was capitalised AND in
+        reverse word order; both had to stop mattering."""
+        assert is_personal_booking_lookup(phrase) is True
+
     @pytest.mark.parametrize("phrase", FAQ_PHRASES)
     def test_booking_rules_faq_does_not_match(self, phrase: str) -> None:
         assert is_personal_booking_lookup(phrase) is False
@@ -357,7 +466,10 @@ class TestRoutingMatrix:
     ) -> None:
         assert _first_matching_skill_name(phrase, context) == "faq"
 
-    @pytest.mark.parametrize("phrase", COMPOUND_NON_BOOKING_PHRASES + NON_BOOKING_TAIL_PHRASES)
+    @pytest.mark.parametrize(
+        "phrase",
+        COMPOUND_NON_BOOKING_PHRASES + NON_BOOKING_TAIL_PHRASES + SYNONYM_NON_BOOKING_PHRASES,
+    )
     def test_compound_phrases_do_not_route_to_booking(
         self, context: SkillContext, phrase: str
     ) -> None:
@@ -404,7 +516,10 @@ class TestAmbiguousDispatchNegatives:
         booking_handle.assert_not_called()
         assert "show_my_bookings" not in [tc.name for tc in result.tool_calls_made]
 
-    @pytest.mark.parametrize("phrase", COMPOUND_NON_BOOKING_PHRASES + NON_BOOKING_TAIL_PHRASES)
+    @pytest.mark.parametrize(
+        "phrase",
+        COMPOUND_NON_BOOKING_PHRASES + NON_BOOKING_TAIL_PHRASES + SYNONYM_NON_BOOKING_PHRASES,
+    )
     def test_compound_phrases_never_reach_show_my_bookings(
         self,
         context: SkillContext,
@@ -529,6 +644,52 @@ class TestProductionDispatchIntegration:
         assert result.meta["skill"] == "booking"
         assert result.tool_calls_made == []
         assert complete_mock.call_count == 1
+        assert "show_my_bookings" not in [tc.name for tc in result.tool_calls_made]
+
+    @pytest.mark.parametrize(
+        "phrase",
+        (
+            "хочу записаться",
+            "запиши меня",
+            "записаться на маникюр",
+            "можно записаться?",
+            "Хочу записаться на маникюр",
+            "Можно записаться к Анне?",
+            "Запишите меня на массаж",
+        ),
+    )
+    def test_create_intent_is_not_hijacked_into_lookup(
+        self,
+        context: SkillContext,
+        tenant: Tenant,
+        phrase: str,
+    ) -> None:
+        """DRF-1055 §2 through the REAL registry: a create-intent turn
+        never reaches the deterministic show_my_bookings fast path, so
+        nobody who asked to BOOK is answered with the list of bookings
+        they already have.
+
+        Which skill claims the turn is the pre-existing boundary and
+        deliberately not asserted here: «хочу записаться» goes to the
+        booking skill's LLM tool-choice path, while the process
+        question «можно записаться?» is claimed by FAQ (registered
+        first) exactly as it was before this change."""
+        client = _FakeYClients()
+        with (
+            patch(
+                "apps.integrations.yclients.get_yclients_client",
+                return_value=client,
+            ),
+            patch.object(
+                OpenAIProvider,
+                "complete",
+                return_value=_completion(text="На какую услугу вас записать?"),
+            ),
+            tenant_scope(tenant),
+        ):
+            result = dispatch(_with_text(context, phrase))
+
+        assert result is not None
         assert "show_my_bookings" not in [tc.name for tc in result.tool_calls_made]
 
     def test_dispatch_result_log_proves_skill_action_and_tools(
