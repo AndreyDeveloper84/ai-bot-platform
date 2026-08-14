@@ -156,6 +156,63 @@ SYNONYM_NON_BOOKING_PHRASES: tuple[str, ...] = (
     "Какие у меня брони на диктофоне?",
 )
 
+# DRF-1055 (review) — the domain guard has to be SYMMETRIC. Russian
+# re-scopes a noun from the left as readily as from the right, and the
+# phrase-final guard cannot see any of it: in «покажи мои аудио записи»
+# the noun still stands phrase-final, so the widened detector (the
+# show-imperative rule + the possessive-with-adjective marker) accepted
+# it until the closed safe-LEAD class was added. These are the mirror
+# image of COMPOUND_NON_BOOKING_PHRASES / NON_BOOKING_TAIL_PHRASES and
+# exist so a future widening cannot trade the round-3..7 guard away.
+LEFT_RESCOPED_PHRASES: tuple[str, ...] = (
+    "покажи мои аудио записи",
+    "покажи мои видео записи",
+    "покажи мои голосовые записи",
+    "покажи мои рабочие записи",
+    "покажи мои дневниковые записи",
+    "какие мои экранные записи",
+    "покажи телефонные записи",
+    "покажи запись экрана",
+    # Not the caller's own bookings — the show-imperative rule reads
+    # «покажи <booking noun>» as personal precisely because a 1:1 chat
+    # has no other referent; an explicit third-party modifier removes
+    # that premise.
+    "покажи чужие записи",
+    "покажи мои старые записи",
+)
+
+# Routing-level subset of the list above. «покажи запись экрана» carries
+# the literal «запись», which the booking skill's own legacy keyword
+# fallback claims (``apps.skills.booking.skill._BOOKING_KEYWORDS``)
+# independently of this detector — and, being an imperative, it is not
+# question-shaped, so FAQ does not intercept it first the way it does
+# for «Когда у меня запись к врачу?». The turn therefore reaches the
+# booking skill and takes the LLM tool-choice path (NOT the lookup fast
+# path — the predicate assertion above is what pins that). This is the
+# tenant-path keyword fallback having no negation window; pre-existing,
+# owned by DRF-1042, deliberately NOT widened here.
+LEFT_RESCOPED_ROUTING_PHRASES: tuple[str, ...] = tuple(
+    phrase for phrase in LEFT_RESCOPED_PHRASES if "запись" not in phrase.lower()
+)
+
+# DRF-1055 (review) — the verb-less personal noun phrase is the shape
+# the pilot produced («мои записи»), and it does not stop at the bare
+# two-word form. These variants are all CLOSED-class extensions of it:
+# a safe adjective, an allow-listed complement, a politeness marker,
+# «где». Pinned so the next reviewer sees which shapes are covered on
+# purpose rather than by accident.
+VERBLESS_LOOKUP_PHRASES: tuple[str, ...] = (
+    "мои ближайшие записи",
+    "мои следующие записи",
+    "мои прошлые записи",
+    "мои записи на завтра",
+    "мои записи на 15 августа",
+    "мои визиты на этой неделе",
+    "мои записи на завтра, пожалуйста",
+    "где мои записи",
+    "покажи мои ближайшие записи",
+)
+
 FAQ_PHRASES: tuple[str, ...] = (
     "Как записаться?",
     "Как работает запись?",
@@ -344,6 +401,25 @@ class TestLookupPredicate:
         who wanted an appointment, and a worse outcome than a miss."""
         assert is_personal_booking_lookup(phrase) is False
 
+    @pytest.mark.parametrize("phrase", LEFT_RESCOPED_PHRASES)
+    def test_modifier_before_the_noun_rescopes_it_too(self, phrase: str) -> None:
+        """DRF-1055 (review) — the domain guard is symmetric.
+
+        The pre-DRF-1055 matcher got this for free: the noun had to end
+        the message, and a personal marker had to be adjacent to it.
+        Widening both (show-imperative rule, adjective between the
+        possessive and the noun) removed that accident, so the guard is
+        now stated explicitly on the left as well — «покажи мои аудио
+        записи» is the same class of leak as «записи с диктофона»."""
+        assert is_personal_booking_lookup(phrase) is False
+
+    @pytest.mark.parametrize("phrase", VERBLESS_LOOKUP_PHRASES)
+    def test_verbless_personal_noun_phrases_match(self, phrase: str) -> None:
+        """DRF-1055 — «мои записи» has no lookup verb to find, and the
+        shape generalises: a closed-class adjective, an allow-listed
+        complement or a politeness marker keeps it a personal lookup."""
+        assert is_personal_booking_lookup(phrase) is True
+
     @pytest.mark.parametrize("phrase", SYNONYM_NON_BOOKING_PHRASES)
     def test_synonyms_keep_the_domain_guard(self, phrase: str) -> None:
         """DRF-1055 — «визит» / «бронь» are matched as closed declension
@@ -468,7 +544,10 @@ class TestRoutingMatrix:
 
     @pytest.mark.parametrize(
         "phrase",
-        COMPOUND_NON_BOOKING_PHRASES + NON_BOOKING_TAIL_PHRASES + SYNONYM_NON_BOOKING_PHRASES,
+        COMPOUND_NON_BOOKING_PHRASES
+        + NON_BOOKING_TAIL_PHRASES
+        + SYNONYM_NON_BOOKING_PHRASES
+        + LEFT_RESCOPED_ROUTING_PHRASES,
     )
     def test_compound_phrases_do_not_route_to_booking(
         self, context: SkillContext, phrase: str
@@ -518,7 +597,10 @@ class TestAmbiguousDispatchNegatives:
 
     @pytest.mark.parametrize(
         "phrase",
-        COMPOUND_NON_BOOKING_PHRASES + NON_BOOKING_TAIL_PHRASES + SYNONYM_NON_BOOKING_PHRASES,
+        COMPOUND_NON_BOOKING_PHRASES
+        + NON_BOOKING_TAIL_PHRASES
+        + SYNONYM_NON_BOOKING_PHRASES
+        + LEFT_RESCOPED_ROUTING_PHRASES,
     )
     def test_compound_phrases_never_reach_show_my_bookings(
         self,

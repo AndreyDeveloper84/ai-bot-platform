@@ -165,10 +165,11 @@ _CANCEL_SIGNAL = re.compile(
 # "пока[жз]" covers покажи / покажите / показать / показывай,
 # "посмотр" covers посмотреть / посмотри / посмотрю / посмотрим,
 # "глян" covers глянуть / глянь. "\bчто\b" carries «что у меня
-# записано»; it is a broad word, which is why it only ever qualifies
-# in conjunction with a bare booking noun AND a personal reference.
+# записано» and "\bгде\b" carries «где мои записи»; both are broad
+# words, which is why they only ever qualify in conjunction with a bare
+# booking noun AND a personal reference.
 _LOOKUP_SIGNAL = re.compile(
-    r"когда|во сколько|на когда|какая|какие|какой|какую|\bчто\b|"
+    r"когда|во сколько|на когда|какая|какие|какой|какую|\bчто\b|\bгде\b|"
     r"пока[жз]|посмотр|глян|список|\bесть\b",
     re.IGNORECASE,
 )
@@ -216,6 +217,41 @@ _ALLOWED_COMPLEMENT = (
     r"|к\s+мастеру"
 )
 
+# DRF-1055 (review) — adjectives that may sit in front of the booking
+# noun. A CLOSED temporal / ordinal / quantity class, NOT an open
+# ``\w+`` slot: an open slot re-opens from the LEFT exactly the domain
+# leak review rounds 3-7 closed from the right — «мои аудио записи»,
+# «мои дневниковые записи», «мои экранные записи», «мои рабочие
+# записи» would all qualify while «записи с диктофона» stays OUT.
+# These adjectives narrow WHICH of the caller's bookings are asked
+# about; they cannot move the noun into another domain.
+_SAFE_ADJECTIVE = (
+    r"(?:ближайш|следующ|предстоящ|будущ|прошл|последн|актуальн|текущ|оставш)\w*"
+    r"|все|всех"
+)
+
+# DRF-1055 (review) — words that may IMMEDIATELY PRECEDE the booking
+# noun. The domain guard has to be symmetric: Russian re-scopes a noun
+# from the left as readily as from the right («аудио записи»,
+# «дневниковые записи», «телефонные записи», «чужие записи»), and the
+# right-hand guard cannot see any of it. Without this, widening the
+# detector with the show-imperative rule («покажи <noun>») would have
+# traded the round-3..7 domain guard away: «покажи мои аудио записи»
+# passed, because the noun still stood phrase-FINAL.
+#
+# The closed class: possessives, the safe adjectives above, the
+# show-verbs and question words the lookup signal already knows, the
+# personal markers, and «по» (the owner's «Покажи по записи» typo).
+# Anything else in front of the noun — an unknown adjective or a
+# qualifying noun — rejects, exactly as an unknown word after it does.
+_SAFE_LEAD = (
+    r"мои|моя|мое|мою|моих|моей|моим|моими"
+    r"|свои|своя|свое|свою|своих|своей|своим|своими"
+    r"|" + _SAFE_ADJECTIVE + r"|пока[жз]\w*|посмотр\w*|глян\w*|список"
+    r"|когда|какая|какие|какой|какую|что|где|есть"
+    r"|меня|я|мне|по|и|а"
+)
+
 # DRF-1055 — words that may follow the booking noun WITHOUT re-scoping
 # it out of the appointment domain. This is the half of the matcher
 # that the owner's own phrasing («Мои записи покажи») hit: the domain
@@ -247,8 +283,11 @@ _SAFE_TAIL = (
 # check (review round 3) and the strict phrase-final anchor (review
 # round 4):
 #
-#   * word-initial ``\b`` rejects compounds — "аудиозапись" and
-#     "звукозапись" have no word boundary before "запис";
+#   * the closed safe-LEAD list (DRF-1055 review) rejects a re-scoping
+#     modifier in front of the noun ("аудио записи", "дневниковые
+#     записи", "чужие записи") and, as a side effect, the compounds
+#     "аудиозапись" / "звукозапись" — they are neither at the start of
+#     the message nor preceded by a lead word plus a separator;
 #   * the closed allow-listed complement keeps "записи на этой
 #     неделе" / "записи на 15 августа" / "запись на завтра в салоне"
 #     IN while a re-scoped noun stays OUT — in "запись вебинара" /
@@ -264,7 +303,8 @@ _SAFE_TAIL = (
 #   * the suffix alternation rejects verb forms — "записаться",
 #     "записываться" never match a noun declension.
 _BARE_BOOKING_WORD = re.compile(
-    r"\b(?:" + _BOOKING_NOUN + r")\b"
+    r"(?:^|\b(?:" + _SAFE_LEAD + r")\W+)"
+    r"(?:" + _BOOKING_NOUN + r")\b"
     r"(?:,?\s+(?:" + _ALLOWED_COMPLEMENT + r"|" + _SAFE_TAIL + r")){0,3}"
     r"[^\w]*$",
     re.IGNORECASE,
@@ -272,13 +312,13 @@ _BARE_BOOKING_WORD = re.compile(
 
 # Possessive pronoun qualifying a booking noun: "мои записи", "свою
 # запись", "моих записей", "мои визиты", "мои брони". DRF-1055 allows
-# ONE intervening word so an adjective does not break the marker
-# («мои ближайшие записи»); the domain guard and the lookup-signal
-# requirement still have to pass independently.
+# ONE intervening adjective from the closed class above so «мои
+# ближайшие записи» does not break the marker; the domain guard and the
+# lookup-signal requirement still have to pass independently.
 _POSSESSIVE_BOOKING = re.compile(
     r"\b(?:мои|моя|мое|мою|моих|моей|моим|моими"
     r"|свои|своя|свое|свою|своих|своей|своим|своими)"
-    r"(?:\s+\w+)?\s+(?:" + _BOOKING_NOUN + r")",
+    r"(?:\s+(?:" + _SAFE_ADJECTIVE + r"))?\s+(?:" + _BOOKING_NOUN + r")",
     re.IGNORECASE,
 )
 
@@ -286,12 +326,17 @@ _POSSESSIVE_BOOKING = re.compile(
 # записи», «мои визиты», «мои брони». There is no lookup verb to find
 # and none is needed; a message that consists of nothing but "my
 # bookings" is a request to see them. Deliberately strict (whole-string
-# ``fullmatch``, no intervening word, no extra clause) so that the
-# lookup-signal requirement keeps rejecting everything it rejects
-# today — «Мне нравится моя запись?», «У меня шесть записей».
+# ``fullmatch``, every slot a CLOSED class — the same safe adjectives
+# and the same allow-listed complements the domain guard uses) so that
+# the lookup-signal requirement keeps rejecting everything it rejects
+# today: «Мне нравится моя запись?» and «У меня шесть записей» carry
+# words outside those classes, «мои записи в тетради» / «мои брони в
+# отеле» carry a complement outside the allow-list.
 _BARE_POSSESSIVE_REQUEST = re.compile(
     r"(?:мои|моя|мое|мою|моих|моей|свои|своя|свое|свою|своих|своей)\s+"
+    r"(?:(?:" + _SAFE_ADJECTIVE + r")\s+)?"
     r"(?:" + _BOOKING_NOUN + r")"
+    r"(?:,?\s+(?:" + _ALLOWED_COMPLEMENT + r")){0,2}"
     r"(?:,?\s+пожалуйста)?[^\w]*",
     re.IGNORECASE,
 )
