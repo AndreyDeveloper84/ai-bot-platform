@@ -283,6 +283,14 @@ LOYALTY_BONUS_ELIGIBLE = "loyalty_bonus_eligible"
 LOYALTY_REFUND_REVERSE = "loyalty_refund_reverse"
 PAYMENT_FAILED_SKILL_TRIGGERED = "payment_failed_skill_triggered"
 
+# --- Customer visits / repeat (DRF-1032) --------------------------------
+# The pilot questions these must answer: does anyone use the history, do
+# they tap repeat, how many repeat intents are still valid, and how many
+# die on a master or service that went away.
+VISITS_LISTED = "marketplace.visits.listed"
+VISIT_CARD_OPENED = "marketplace.visit_card.opened"
+REPEAT_CHECKED = "marketplace.repeat.checked"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -341,6 +349,9 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         LOYALTY_BONUS_ELIGIBLE,
         LOYALTY_REFUND_REVERSE,
         PAYMENT_FAILED_SKILL_TRIGGERED,
+        VISITS_LISTED,
+        VISIT_CARD_OPENED,
+        REPEAT_CHECKED,
     }
 )
 
