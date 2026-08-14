@@ -75,11 +75,15 @@ Consumers:
   * :meth:`apps.skills.booking.skill.BookingSkill.handle` — selects
     the read-only ``show_my_bookings`` tool deterministically.
 
-The module also hosts two sibling pure-text detectors used by the
-booking skill's D-10 flow continuation: :func:`booking_mutation_flow`
-(tags the continuation state with the requested verb) and
-:func:`looks_like_flow_selection` (bounds which follow-up turns the
-continuation may claim).
+The module also hosts three sibling pure-text detectors:
+:func:`booking_mutation_flow` (tags the D-10 continuation state with the
+requested verb), :func:`looks_like_flow_selection` (bounds which
+follow-up turns the continuation may claim) and — DRF-1060 —
+:func:`is_cancel_request`, which recognises the natural refusals people
+type instead of «отмени»: «не приду», «не смогу прийти», «снимите
+меня», «передумала». That one is a MUTATION predicate, so its risk
+profile is the mirror image of the lookup detector's and every gate is
+written to reject first; see its own section below.
 
 Pure text processing, no Django imports — safe to import from any
 skill module at registration time.
@@ -154,10 +158,273 @@ _RESCHEDULE_SIGNAL = re.compile(
     r"перенес|поменя|замен|измени|сдвин",
     re.IGNORECASE,
 )
+
+# DRF-1060 — the EXPLICIT cancel verbs. This root pair is all the
+# detector knew until 2026-08-14; the natural refusal phrasings below
+# («не приду», «не смогу прийти», «передумала») carry no cancel verb at
+# all and were invisible. Kept as a separate name because the two halves
+# have different guards: an explicit «отмени» states its own object, a
+# refusal has to be read from the shape of the clause.
 _CANCEL_SIGNAL = re.compile(
     r"отмен|удал",
     re.IGNORECASE,
 )
+
+
+# ─── DRF-1060 — natural cancellation phrasings (OD-IR1) ──────────────
+#
+# Owner decision OD-IR1 requires a regression corpus of natural
+# phrasings for every pilot-critical intent. Cancellation is a MUTATION,
+# so the risk profile is the mirror image of the lookup detector's:
+# there, a miss costs a list the person does not get; here, a FALSE
+# POSITIVE puts a "shall I cancel your visit?" card in front of someone
+# who asked about something else. Every gate below is therefore written
+# to reject first.
+#
+# Construction is the one DRF-1055 arrived at after seven review rounds,
+# and for the same reasons:
+#
+#   * CLOSED classes of word forms, never an open ``\w+`` slot — an open
+#     slot is exactly what produced the left-re-scoping regression there;
+#   * the domain guard stated DIRECTLY (which complements may close the
+#     refusal) rather than via phrase position;
+#   * negation windows EXPLICIT and running BEFORE any positive test, so
+#     a rejection is visible in the code and testable, not a side effect
+#     of phrase shape.
+#
+# One asymmetry vs. DRF-1055 is deliberate. There, the guarded token was
+# a domain-AMBIGUOUS NOUN («запись» is equally an appointment and an
+# audio file), so the guard had to be symmetric — a modifier on either
+# side re-scopes it. Here the guarded token is a FIRST-PERSON VERB
+# PHRASE. Its subject is fixed by morphology («не приду» / «не смогу» can
+# only be the speaker — «не придёт» / «не сможет» are different forms and
+# are not in the class), so the left side cannot re-scope it the way an
+# adjective re-scopes a noun. What CAN re-scope it from the left is a
+# hypothetical framing («а что если я не приду?»), and that is handled by
+# an explicit window rather than by a lead-word class. The two branches
+# that are NOT self-identifying — a bare modal («не смогу», which also
+# fits «оплатить не смогу») and the mind-change verbs («передумал», which
+# also fits «насчёт цвета передумал») — DO carry a closed lead class and
+# are anchored to the start of the message.
+
+# Objects that are not a booking. The «отмен» / «удал» roots are
+# domain-blind: VERIFIED on 2026-08-14, «удали мои данные» (verbatim a
+# privacy-skill phrase — ``apps.skills.privacy_consent.skill``) and
+# «отмени напоминание» both classified as a booking cancellation. The
+# salon has exactly one cancellable object, so the cheap and stable
+# statement is which objects are foreign to it.
+_CANCEL_FOREIGN_OBJECT = re.compile(
+    r"данн(?:ые|ых|ыми)|аккаунт|профил|подписк|рассылк"
+    r"|уведомлен|напоминан|сообщени|переписк|истори|отзыв|оплат|платеж"
+    r"|заказ|билет|\bотел(?:ь|я|е)\b|гостиниц"
+    r"|удал\w*\s+меня",
+    re.IGNORECASE,
+)
+
+# Negation window — the turn asks ABOUT cancellation (hypothetically, or
+# about the policy or its price) instead of requesting one. «а что если я
+# не приду?», «какие правила отмены?», «сколько стоит отмена?» must never
+# be answered with a cancel card: the person asked how it works, and
+# offering to drop their visit is the false positive this whole detector
+# is shaped to avoid.
+_CANCEL_QUESTION_FRAME = re.compile(
+    r"\bесли\b|что\s+будет|\bвдруг\b|правил|услови|штраф|\bсгор(?:ит|ают)\b"
+    r"|деньги\s+вернут|вернут\s+ли|сколько\s+(?:стоит|будет)|когда\s+можно",
+    re.IGNORECASE,
+)
+
+# Negation window — an alternative time proposed in the SAME turn makes
+# it a RESCHEDULE. «Не смогу прийти в среду, можно в четверг?» is the
+# canonical example from the brief: the visit is not being dropped, it is
+# being moved, and answering it with a cancellation loses the booking.
+# _RESCHEDULE_SIGNAL above catches the explicit verbs; this catches the
+# proposal without one.
+_RESCHEDULE_PROPOSAL = re.compile(
+    r"\bа\s+можно\b|\bможно\s+(?:ли\s+)?(?:в|во|на)\b|\bдава(?:й|йте)\b"
+    r"|друг(?:ой|ое|ую|ие)\s+(?:день|дня|дату|дате|время|раз)"
+    r"|\bпопозже\b|\bпораньше\b|\bвместо\b|\bлучше\s+(?:в|во|на)\b"
+    r"|перезапиш",
+    re.IGNORECASE,
+)
+
+# Negation window — double negation is a CONFIRMATION, the exact
+# opposite: «я не передумал» / «не отказываюсь» keeps the booking.
+_CANCEL_DOUBLE_NEGATION = re.compile(
+    r"\bне\s+(?:переду\w*|раздума\w*|отказ\w*|снима\w*)",
+    re.IGNORECASE,
+)
+
+# Words that may open the message in front of an anchored refusal —
+# greetings, apologies, hedges, the first-person subject, a day. A CLOSED
+# class: this is the lead guard for the two branches whose core is not
+# self-identifying.
+_REFUSAL_LEAD = (
+    r"я|мне|у\s+меня|но|а|и|ой|эх|увы|жаль|к\s+сожалению"
+    r"|извините|извини|простите|прости|прошу\s+прощения|пожалуйста"
+    r"|здравствуйте|привет|добрый\s+день|добрый\s+вечер|доброе\s+утро"
+    r"|наверное|наверно|похоже|видимо|боюсь|кажется|скорее\s+всего"
+    r"|завтра|сегодня|послезавтра"
+    r"|в(?:о)?\s+(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье)"
+)
+
+# Complements that may CLOSE a refusal without moving it out of the
+# appointment domain — a CLOSED list, the same shape as the lookup
+# detector's ``_ALLOWED_COMPLEMENT`` and for the same reason: an open
+# «на <слово>» branch would re-open the foreign domains («не смогу
+# прийти на вебинар»), and a service name is not lexically
+# distinguishable from an event name, so services are not recognised at
+# all (the DRF-1055 product rule, unchanged here).
+#
+# Note what is NOT here: «в другой салон». «не приду в другой салон» is
+# the brief's negative — «в салон» closes the refusal, «в другой салон»
+# does not, because the allow-list matches the whole prepositional group
+# and not just its head.
+_REFUSAL_TAIL = (
+    r"завтра|сегодня|послезавтра|сейчас|уже|больше|вообще|совсем|точно|пока"
+    r"|наверное|наверно|похоже|видимо|скорее\s+всего|к\s+сожалению|увы|жаль"
+    r"|извините|извини|простите|прости|пожалуйста|спасибо"
+    r"|в\s+салон|в\s+салоне|к\s+вам|к\s+мастеру"
+    r"|на\s+(?:запись|записи|визит|прием|сеанс|процедуру)"
+    r"|от\s+(?:запис\w+|визита|брони|бронирован\w+|приема|сеанса|процедуры)"
+    r"|с\s+(?:запис\w+|визита|брони|приема|сеанса)"
+    r"|из\s+(?:запис\w+|брони)"
+    r"|на\s+(?:завтра|сегодня|послезавтра)"
+    r"|в(?:о)?\s+(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье)"
+    r"|на\s+(?:этой|следующей)\s+неделе"
+    r"|в\s+это\s+время|в\s+этот\s+раз|вовремя"
+    r"|в\s+\d{1,2}(?:[:.]\d{2})?"
+    r"|\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля"
+    r"|августа|сентября|октября|ноября|декабря)"
+)
+
+# Verbs of ARRIVING. Under negation each of these says «I will not be at
+# my appointment». Closed and first-person throughout — «придёт» /
+# «сможет» (third person) are not in the class, which is what keeps
+# «мастер не сможет прийти» out without a separate rule.
+_ARRIVE_INFINITIVE = r"прийти|придти|подойти|приехать|доехать|дойти|попасть|добраться|быть"
+_ARRIVE_FIRST_PERSON = r"приду|прийду|приеду|подойду|попаду|доеду|доберусь"
+# Modals of failure — «не смогу», «не получится», «не выйдет».
+_FAIL_MODAL = r"смогу|получится|выйдет|успею|удастся"
+
+# Branch 1 — the refusal names the act of arriving, so it identifies
+# itself and needs no lead guard: «не смогу прийти», «прийти не
+# получится», «я завтра не приду», «к сожалению, не приеду». Only the
+# RIGHT side is guarded (closed complement list + phrase-final anchor),
+# because only a complement can move the clause into another domain.
+_NOT_COMING = re.compile(
+    r"(?:^|\W)"
+    r"(?:"
+    r"не\s+(?:" + _FAIL_MODAL + r")\s+(?:" + _ARRIVE_INFINITIVE + r")"
+    r"|(?:" + _ARRIVE_INFINITIVE + r")\s+не\s+(?:" + _FAIL_MODAL + r")"
+    r"|не\s+(?:" + _ARRIVE_FIRST_PERSON + r")"
+    r")\b"
+    r"(?:[\s,]+(?:" + _REFUSAL_TAIL + r")){0,3}"
+    r"[^\w]*$",
+    re.IGNORECASE,
+)
+
+# Branch 2 — the bare modal («не смогу», «не получится») and the bare
+# «не буду». These do NOT name what is being refused, so they are
+# ANCHORED to the start of the message modulo the closed lead class:
+# «не смогу» IN, «оплатить не смогу» OUT (that is a payment problem, not
+# a cancellation), «маникюр делать не буду» OUT.
+_NOT_COMING_BARE = re.compile(
+    r"^(?:(?:" + _REFUSAL_LEAD + r")[\s,]+)*"
+    r"не\s+(?:" + _FAIL_MODAL + r"|буду)\b"
+    r"(?:[\s,]+(?:" + _REFUSAL_TAIL + r")){0,3}"
+    r"[^\w]*$",
+    re.IGNORECASE,
+)
+
+# Branch 3 — the mind changed. Both genders spelled out; anchored for
+# the same reason as branch 2 — «передумал» does not name its object, so
+# «передумал насчёт цвета» (the brief's negative) must be rejected by the
+# tail guard and «насчёт цвета передумал» by the lead anchor.
+_CHANGED_MIND = re.compile(
+    r"^(?:(?:" + _REFUSAL_LEAD + r")[\s,]+)*"
+    r"(?:передума(?:л|ла|ли)|раздума(?:л|ла|ли)"
+    r"|отказыва(?:юсь|емся)|откажусь|отказаться)\b"
+    r"(?:[\s,]+(?:" + _REFUSAL_TAIL + r")){0,3}"
+    r"[^\w]*$",
+    re.IGNORECASE,
+)
+
+# Branch 4 — "take me off the list". Note «удали меня» is deliberately
+# NOT in this class: it is a verbatim privacy-skill delete phrase
+# (``apps.skills.privacy_consent.skill._DELETE_KEYWORDS``) and belongs to
+# that skill, which is registered first. «отпишите меня» is accepted
+# BARE — in a 1:1 salon dialogue the only list the caller is on is the
+# appointment — but «отпишите меня от рассылки» is rejected twice over
+# (foreign object window, and «от рассылки» is not an allowed tail).
+_REMOVE_ME = re.compile(
+    r"^(?:(?:" + _REFUSAL_LEAD + r")[\s,]+)*"
+    r"(?:снимите|сними|снимете|уберите|убери|отпишите|отпиши"
+    r"|вычеркните|вычеркни|исключите|исключи)\s+меня\b"
+    r"(?:[\s,]+(?:" + _REFUSAL_TAIL + r")){0,3}"
+    r"[^\w]*$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_cancel(normalized: str) -> bool:
+    """Cancellation test over already-normalized text.
+
+    Gate order is load-bearing — every rejection runs before every
+    positive test, so a false positive needs a bug in a window rather
+    than a gap in one.
+    """
+
+    # Foreign object and hypothetical framing reject BOTH halves: an
+    # explicit «отмени напоминание» is as wrong a cancellation as an
+    # implicit one, and «какие правила отмены?» is a question.
+    if _CANCEL_FOREIGN_OBJECT.search(normalized):
+        return False
+    if _CANCEL_QUESTION_FRAME.search(normalized):
+        return False
+    # An explicit cancel verb states its own object; nothing further to
+    # prove. Behaviour of this branch is unchanged from before DRF-1060
+    # except for the two windows above.
+    if _CANCEL_SIGNAL.search(normalized):
+        return True
+    # The natural-refusal half carries three more windows.
+    if _CANCEL_DOUBLE_NEGATION.search(normalized):
+        return False
+    # «записаться не смогу» is a refusal to BOOK, not to attend — the
+    # same create-intent window the lookup detector runs, reused verbatim
+    # so the two cannot drift apart.
+    if _CREATE_INTENT_SIGNAL.search(normalized):
+        return False
+    if _RESCHEDULE_SIGNAL.search(normalized) or _RESCHEDULE_PROPOSAL.search(normalized):
+        return False
+    return bool(
+        _NOT_COMING.search(normalized)
+        or _NOT_COMING_BARE.match(normalized)
+        or _CHANGED_MIND.match(normalized)
+        or _REMOVE_ME.match(normalized)
+    )
+
+
+def is_cancel_request(text: str) -> bool:
+    """True when ``text`` asks to cancel the caller's own appointment.
+
+    DRF-1060 / OD-IR1. Covers the explicit verbs («отмени мою запись»)
+    and the natural refusals a person actually types instead of them:
+    «не приду», «не смогу прийти», «не получится прийти», «снимите
+    меня», «отпишите меня», «не буду», «передумал» / «передумала».
+
+    Conservative by design and deliberately more conservative than
+    :func:`is_personal_booking_lookup`: this predicate feeds a MUTATION
+    path, so a False only costs a miss (the turn keeps its previous
+    routing) while a True offers to cancel a visit. A turn that proposes
+    another time is a RESCHEDULE and returns False here — see
+    :func:`booking_mutation_flow`.
+    """
+
+    normalized = _normalize(text)
+    if not normalized:
+        return False
+    return _looks_like_cancel(normalized)
+
 
 # Lookup / time / list question signals. NOTE: a bare "?" is NOT a
 # signal — review P1 showed it makes any possessive "запись" question
@@ -440,13 +707,20 @@ def booking_mutation_flow(text: str) -> str | None:
     with a bookings listing (disambiguation) instead of a tool preview.
     Pure text processing, same module as the lookup detector so the two
     never drift apart.
+
+    Reschedule is tested FIRST and that order is load-bearing: «перенеси»
+    and «не смогу прийти в среду, можно в четверг?» both express an
+    inability to attend, but only one of them drops the visit. DRF-1060
+    additionally makes the cancel half reject a turn that proposes
+    another time WITHOUT a reschedule verb — such a turn returns ``None``
+    (no flow tagged) rather than being mis-tagged as a cancellation.
     """
     normalized = _normalize(text)
     if not normalized:
         return None
     if _RESCHEDULE_SIGNAL.search(normalized):
         return "reschedule"
-    if _CANCEL_SIGNAL.search(normalized):
+    if _looks_like_cancel(normalized):
         return "cancel"
     return None
 
