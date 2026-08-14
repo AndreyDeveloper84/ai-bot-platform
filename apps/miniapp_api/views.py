@@ -692,6 +692,7 @@ def _create_booking_via_ayla(
     import hashlib
 
     from apps.catalog.models import CatalogMaster, CatalogService
+    from apps.identity.services.ayla_link import ensure_ayla_link
     from apps.integrations.ayla.booking_client import (
         BookingAPIError,
         BookingBadRequestError,
@@ -700,8 +701,30 @@ def _create_booking_via_ayla(
     )
     from apps.integrations.ayla.user_proxy import external_user_id_for
 
-    ayla_user_id = getattr(bot_user, "ayla_user_id", None)
+    # DRF-1057: this path used to read ``bot_user.ayla_user_id`` and refuse
+    # outright, so a person whose link had never been established could never
+    # book from the Mini App — no matter how many times they tapped. DRF-1035
+    # gave the chat path a resolver (``get_booking_provider`` →
+    # ``ensure_ayla_link``) but left this surface on the pre-1035 behaviour;
+    # on the pilot the same woman was refused 4x here and booked successfully
+    # only after her chat turn minted the link.
+    #
+    # Reuse of the SAME resolver is deliberate — a second implementation would
+    # be a second set of tenant fan-out / conflict / never-overwrite rules.
+    #
+    # Security (DRF-1036): the subject is the SESSION ``BotUser`` (attached by
+    # ``@require_init_data`` from the verified initData HMAC). This function
+    # never reads an identity from the body or query, and ``ensure_ayla_link``
+    # names the subject only via the ``X-External-User-ID`` header derived from
+    # that row, so the resolve cannot be steered by the client.
+    #
+    # Latency: ``ensure_ayla_link`` never raises and is bounded by the identity
+    # client (``identity_client.TIMEOUT_S`` = 4s, plus an independent circuit
+    # breaker that short-circuits after 5 failures/60s), so a slow or dead Ayla
+    # degrades into the honest 403 below instead of hanging the web request.
+    ayla_user_id = ensure_ayla_link(bot_user, trigger="miniapp_booking")
     if not ayla_user_id:
+        # Last resort only — the link could not be established right now.
         return _error(
             "identity_not_linked",
             "user is not linked to Ayla yet — booking unavailable",
@@ -2147,7 +2170,12 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 # snapshot). Fields pass through verbatim.
 
 
-def _resolve_c7_ayla_user(request: HttpRequest, body: dict | None = None) -> Any:
+def _resolve_c7_ayla_user(
+    request: HttpRequest,
+    body: dict | None = None,
+    *,
+    establish_link: bool = False,
+) -> Any:
     """C7.6 verified customer binding.
 
     Returns the session-resolved ``ayla_user_id`` (str) on success, or a
@@ -2156,9 +2184,28 @@ def _resolve_c7_ayla_user(request: HttpRequest, body: dict | None = None) -> Any
     * 403 ``identity_not_linked`` — the BotUser has no Ayla link yet.
     * 403 ``forbidden`` — the client supplied an ``ayla_user_id`` that
       does not match the session identity (arbitrary id never trusted).
+
+    ``establish_link`` (DRF-1057) opts an endpoint into resolving the link
+    when it is missing, via the same ``ensure_ayla_link`` the chat booking
+    path uses. It is ON for the two identity-dependent WRITES (create a
+    payment, bind a card) and deliberately OFF for the reads/revoke — see
+    the call sites and the DRF-1035 J-O3 rationale in
+    ``apps/identity/services/ayla_link.py``: cards are keyed on
+    ``ayla_user_id``, so while it is NULL nothing can ever have been bound
+    and the answer is provably empty. Minting a permanent Ayla identity in
+    order to read an empty list — or to delete a card that cannot exist —
+    is exactly the over-reach that ruling rejects.
+
+    The subject is always the SESSION ``BotUser``; ``body`` / query are only
+    ever cross-checked against it, never used to select it.
     """
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     ayla_user_id = getattr(bot_user, "ayla_user_id", None)
+    if not ayla_user_id and establish_link:
+        from apps.identity.services.ayla_link import ensure_ayla_link
+
+        # Never raises; bounded by identity_client.TIMEOUT_S (4s) + breaker.
+        ayla_user_id = ensure_ayla_link(bot_user, trigger="miniapp_payments")
     if not ayla_user_id:
         return _error(
             "identity_not_linked",
@@ -2249,7 +2296,12 @@ def create_payment(request: HttpRequest) -> HttpResponse:
     body = _c7_json_body(request)
     if isinstance(body, JsonResponse):
         return body
-    binding = _resolve_c7_ayla_user(request, body)
+    # DRF-1057: identity-dependent write → establish the link if missing.
+    # Reachable unlinked only through the ``ensure_ayla_link`` persist-failure
+    # residue (the id is returned to the booking but the column write failed),
+    # which today strands a confirmed-awaiting-payment booking with no way to
+    # pay. The retry is idempotent on Ayla's side.
+    binding = _resolve_c7_ayla_user(request, body, establish_link=True)
     if isinstance(binding, JsonResponse):
         return binding
 
@@ -2302,7 +2354,11 @@ def cards_setup(request: HttpRequest) -> HttpResponse:
     body = _c7_json_body(request)
     if isinstance(body, JsonResponse):
         return body
-    binding = _resolve_c7_ayla_user(request, body)
+    # DRF-1057: card binding is a standalone voluntary action a person can take
+    # before ever booking, and the bound card hangs off the Ayla user — so this
+    # is a genuine first-touch identity-dependent write, the same defect class
+    # as the booking path. Without the resolve it is an unconditional 403.
+    binding = _resolve_c7_ayla_user(request, body, establish_link=True)
     if isinstance(binding, JsonResponse):
         return binding
     consent_version = str(body.get("consent_version") or "").strip()
@@ -2330,6 +2386,9 @@ def cards_setup(request: HttpRequest) -> HttpResponse:
 def cards_list(request: HttpRequest) -> HttpResponse:
     """C7.2 — list the customer's saved cards (verbatim upstream payload)."""
 
+    # DRF-1057: deliberately NO establish_link — a card cannot exist for an
+    # unlinked person, so this read is provably empty; resolving would mint a
+    # permanent identity for opening a screen (DRF-1035 J-O3).
     binding = _resolve_c7_ayla_user(request)
     if isinstance(binding, JsonResponse):
         return binding
@@ -2354,6 +2413,9 @@ def card_delete(request: HttpRequest, card_id) -> HttpResponse:
     """C7.2 — revoke a saved card. Idempotent: upstream 404 (already
     gone) counts as deleted (repeat → 204)."""
 
+    # DRF-1057: deliberately NO establish_link — nothing can be bound while the
+    # link is NULL, so there is nothing to revoke. Creating a permanent identity
+    # in response to a revoke is backwards (DRF-1035 J-O3, verbatim).
     binding = _resolve_c7_ayla_user(request)
     if isinstance(binding, JsonResponse):
         return binding

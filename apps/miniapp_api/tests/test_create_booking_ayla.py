@@ -4,6 +4,12 @@ Pins: payment_required passthrough (default FALSE for miniapp),
 verbatim Ayla status in the response, C1-neutral 409 on
 SUBSCRIPTION_PAST_DUE, fail-closed grounding, and the local default
 path staying untouched when BOOKING_VIA_AYLA_REST is off.
+
+DRF-1057 adds the identity-resolve pins: an unlinked person gets the
+link established here (same ``ensure_ayla_link`` the chat path uses)
+instead of an unconditional 403; a linked person costs no network; a
+failed resolve still refuses honestly; and the subject is never taken
+from the request body.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ import hmac
 import json
 import time as time_module
 import uuid
+from typing import Any
 from urllib.parse import urlencode
 
 import pytest
@@ -24,6 +31,7 @@ from apps.integrations.ayla.booking_client import (
     AylaBookingRecord,
     BookingBadRequestError,
 )
+from apps.integrations.ayla.identity_client import IdentityResolveError, ResolvedIdentity
 from apps.tenancy.models import Tenant
 
 
@@ -128,7 +136,38 @@ def stub_client(monkeypatch) -> _StubAylaClient:
     return stub
 
 
-def _post(client: DjangoClient, service, master, extra: dict | None = None):
+@pytest.fixture
+def stub_resolve(monkeypatch) -> Any:
+    """Patch the identity HTTP leg (DRF-1057).
+
+    Patched at the client module, because ``ensure_ayla_link`` imports
+    ``resolve_identity`` lazily from there — the same convention as
+    ``apps/identity/services/tests/test_ayla_link.py``.
+    """
+
+    calls: list[str] = []
+    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None}
+
+    def _fake(external_user_id: str) -> ResolvedIdentity:
+        calls.append(external_user_id)
+        if state["error"] is not None:
+            raise state["error"]
+        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=True)
+
+    monkeypatch.setattr(
+        "apps.integrations.ayla.identity_client.resolve_identity", _fake, raising=True
+    )
+    return type("Stub", (), {"calls": calls, "state": state})()
+
+
+def _post_as(
+    client: DjangoClient,
+    service,
+    master,
+    *,
+    user_id: str,
+    extra: dict | None = None,
+):
     body = {
         "service_id": str(service.id),
         "master_id": str(master.id),
@@ -140,8 +179,12 @@ def _post(client: DjangoClient, service, master, extra: dict | None = None):
         "/api/v1/customer/bookings",
         data=json.dumps(body),
         content_type="application/json",
-        HTTP_AUTHORIZATION=_init_data_header("12345"),
+        HTTP_AUTHORIZATION=_init_data_header(user_id),
     )
+
+
+def _post(client: DjangoClient, service, master, extra: dict | None = None):
+    return _post_as(client, service, master, user_id="12345", extra=extra)
 
 
 class TestPassthrough:
@@ -225,24 +268,102 @@ class TestErrors:
         assert resp.json()["error"] == "service_unbookable"
         assert stub_client.calls == []
 
-    def test_unlinked_user_403(self, client, tenant, service, master, stub_client) -> None:
+    def test_unresolvable_user_403(
+        self, client, tenant, service, master, stub_client, stub_resolve
+    ) -> None:
+        """DRF-1057: 403 is the LAST resort — only after the resolve is
+        attempted and Ayla could not answer."""
         BotUser.all_tenants.create(
             tenant=tenant, channel="max", channel_user_id="777", ayla_user_id=None
         )
-        body = {
-            "service_id": str(service.id),
-            "master_id": str(master.id),
-            "visit_at": "2026-08-01T14:00:00+03:00",
-        }
-        resp = client.post(
-            "/api/v1/customer/bookings",
-            data=json.dumps(body),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=_init_data_header("777"),
-        )
+        stub_resolve.state["error"] = IdentityResolveError("network: ReadTimeout")
+
+        resp = _post_as(client, service, master, user_id="777")
+
         assert resp.status_code == 403
         assert resp.json()["error"] == "identity_not_linked"
         assert stub_client.calls == []
+        # …and the resolve really was attempted (the pre-1057 defect was
+        # refusing without ever trying).
+        assert stub_resolve.calls == ["bot:max:777"]
+
+
+class TestIdentityResolve:
+    """DRF-1057 — the Mini App must establish the Ayla link the same way the
+    chat path does (``get_booking_provider`` → ``ensure_ayla_link``)."""
+
+    def test_unlinked_user_gets_linked_and_books(
+        self, client, tenant, service, master, stub_client, stub_resolve
+    ) -> None:
+        unlinked = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="777", ayla_user_id=None
+        )
+
+        resp = _post_as(client, service, master, user_id="777")
+
+        assert resp.status_code == 201
+        # The booking really went to Ayla, bound to the freshly resolved subject.
+        assert stub_client.calls[0]["client_id"] == str(stub_resolve.state["uuid"])
+        # …and the link was persisted, so the next call costs no network.
+        unlinked.refresh_from_db()
+        assert unlinked.ayla_user_id == stub_resolve.state["uuid"]
+
+    def test_second_booking_costs_no_network(
+        self, client, tenant, service, master, stub_client, stub_resolve
+    ) -> None:
+        BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="777", ayla_user_id=None
+        )
+
+        _post_as(client, service, master, user_id="777")
+        _post_as(client, service, master, user_id="777", extra={"payment_required": True})
+
+        assert len(stub_client.calls) == 2
+        assert len(stub_resolve.calls) == 1  # resolved once, then cache_hit
+
+    def test_already_linked_user_never_resolves(
+        self, client, bot_user, service, master, stub_client, stub_resolve
+    ) -> None:
+        resp = _post(client, service, master)
+
+        assert resp.status_code == 201
+        assert stub_client.calls[0]["client_id"] == str(AYLA_UID)
+        assert stub_resolve.calls == []  # no network for a linked person
+
+    def test_body_supplied_identity_is_ignored(
+        self, client, bot_user, service, master, stub_client, stub_resolve
+    ) -> None:
+        """DRF-1036 boundary: the subject comes from the SESSION BotUser.
+
+        A client-supplied ``ayla_user_id`` in the body must never select the
+        subject — the create still binds to the session identity.
+        """
+        foreign = str(uuid.uuid4())
+
+        resp = _post(client, service, master, {"ayla_user_id": foreign})
+
+        assert resp.status_code == 201
+        assert stub_client.calls[0]["client_id"] == str(AYLA_UID)
+        assert stub_client.calls[0]["client_id"] != foreign
+        assert stub_client.calls[0]["external_user_id"] == "bot:max:12345"
+        assert stub_resolve.calls == []
+
+    def test_unlinked_body_supplied_identity_is_ignored(
+        self, client, tenant, service, master, stub_client, stub_resolve
+    ) -> None:
+        """Same boundary on the resolve path: a body id cannot pre-empt or
+        steer the resolve, and cannot end up on the wire."""
+        BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="777", ayla_user_id=None
+        )
+        foreign = str(uuid.uuid4())
+
+        resp = _post_as(client, service, master, user_id="777", extra={"ayla_user_id": foreign})
+
+        assert resp.status_code == 201
+        assert stub_resolve.calls == ["bot:max:777"]  # subject from the session row
+        assert stub_client.calls[0]["client_id"] == str(stub_resolve.state["uuid"])
+        assert stub_client.calls[0]["client_id"] != foreign
 
 
 class TestLocalPathUnchanged:
