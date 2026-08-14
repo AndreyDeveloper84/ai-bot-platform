@@ -17,6 +17,9 @@ unset):
         "мои визиты" / "мои брони"  (synonyms — DRF-1055)
         "что у меня записано"     (DRF-1055)
         "На когда я записан?"
+        "куда я записан"          (OD-IR1 corpus)
+        "к кому я записан"        (OD-IR1 corpus)
+        "к кому я записался"      (OD-IR1, nearest relative form)
 
   * **OUT** — FAQ about the booking *process*, which carries no
     personal reference::
@@ -168,8 +171,20 @@ _CANCEL_SIGNAL = re.compile(
 # записано» and "\bгде\b" carries «где мои записи»; both are broad
 # words, which is why they only ever qualify in conjunction with a bare
 # booking noun AND a personal reference.
+#
+# OD-IR1 (owner decision «Pilot routing», §1 lexical gaps) — the list
+# knew the TIME question about one's own appointment («когда я
+# записан») but neither of the other two a person actually asks: WHERE
+# («куда я записан») and TO WHOM («к кому я записан»). Both are in the
+# owner's minimal corpus and this gate was the ONLY one they failed —
+# the bare booking noun («записан»), the safe lead («я») and the
+# personal reference (_I_AM_BOOKED) all matched already. Word-bounded
+# so «откуда» / «никуда» do not qualify; as broad as «где», and
+# harmless for the same reason — a bare booking noun AND a personal
+# reference are still required independently.
 _LOOKUP_SIGNAL = re.compile(
     r"когда|во сколько|на когда|какая|какие|какой|какую|\bчто\b|\bгде\b|"
+    r"\bкуда\b|\bк\s+кому\b|"
     r"пока[жз]|посмотр|глян|список|\bесть\b",
     re.IGNORECASE,
 )
@@ -186,8 +201,17 @@ _LOOKUP_SIGNAL = re.compile(
 # визиты / визитов / визитам / визитами / визитах / визите»,
 # «бронь / брони / броней / бронью / броням / бронями / бронях» and
 # «бронирование / бронирования / бронированию / бронированиях».
+#
+# OD-IR1 — «ался» / «алась» join the short participles «записан /
+# записана» as the SAME booked-state word: for a male speaker the past
+# reflexive («к кому я записался») is the more natural way to say what
+# «я записан» says, and it is the nearest relative of the two corpus
+# phrasings this patch closes. Added as two EXACT forms, keeping the
+# class closed — the create-intent roots («записать» / «записыва»)
+# still do not reach it, so «хочу записаться» / «куда записаться» stay
+# rejected by the negation window one gate earlier.
 _BOOKING_NOUN = (
-    r"запис(?:ь|и|ей|ью|ам|ям|ями|ях|ан|ана|ано|аны)"
+    r"запис(?:ь|и|ей|ью|ам|ям|ями|ях|ан|ана|ано|аны|ался|алась)"
     r"|визит(?:ы|а|ов|ам|ами|ах|е|у)?"
     r"|брон(?:ь|и|ей|ью|ям|ями|ях)"
     r"|бронирован(?:ие|ия|ий|ию|иям|иями|иях)"
@@ -357,8 +381,13 @@ _SHOW_REQUEST = re.compile(
 # "У меня есть запись?").
 _AT_ME = re.compile(r"у меня", re.IGNORECASE)
 
-# First-person booked state: "я записан", "я записана".
-_I_AM_BOOKED = re.compile(r"\bя\s+записан", re.IGNORECASE)
+# First-person booked state: "я записан", "я записана". OD-IR1 adds the
+# past reflexive "я записался" / "я записалась" — same state, the form
+# a male speaker reaches for first ("к кому я записался"). The two
+# forms are spelled out rather than left to a "записа\w*" tail: that
+# tail would also swallow "я записал" (recorded something) and
+# "я записался бы" is not a lookup either way.
+_I_AM_BOOKED = re.compile(r"\bя\s+запис(?:ан|ался|алась)", re.IGNORECASE)
 
 
 def is_personal_booking_lookup(text: str) -> bool:
