@@ -5,7 +5,9 @@ booking lifecycle:
 
 * ``booking.created`` — upsert :class:`RemoteBookingProxy`, schedule
   T-24h and T-2h reminders, set ``Conversation.last_booking_at``,
-  emit internal analytics event.
+  emit internal analytics event, and (DRF-1030) announce the booking
+  to the salon in MAX after commit — see
+  :mod:`apps.booking.master_notify` for the addressing cascade.
 * ``booking.cancelled`` — flip proxy status to ``cancelled``, cancel
   pending reminders.
 * ``booking.rescheduled`` (:func:`handle_booking_rescheduled`) —
@@ -56,6 +58,7 @@ from uuid import UUID
 
 from django.utils import timezone
 
+from apps.booking.master_notify import schedule_booking_created_notification
 from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.conversations.models import Conversation
 from apps.events.services import emit as emit_internal_event
@@ -355,6 +358,8 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
       3. Schedule T-24h + T-2h reminders (idempotent).
       4. Emit internal ``booking_created`` event for analytics fan-out.
       5. Set Conversation.last_booking_at = data.start_at.
+      6. DRF-1030 — queue the salon-facing MAX notification for after
+         commit, but only for an appointment we have not seen before.
     """
     assert_envelope_tenant_authorized(envelope)
 
@@ -392,15 +397,19 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
     # linked or orphan before the upsert fires.
     bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
 
+    service_uuid = UUID(data["service_id"]) if data.get("service_id") else None
+    specialist_uuid = UUID(data["specialist_id"]) if data.get("specialist_id") else None
+    raw_source = data.get("source", "")
+
     create_defaults = {
         "tenant": tenant,
         "bot_user": bot_user,  # may be None — orphan proxy
         "start_at": start_at,
         "end_at": end_at,
         "status": normalized_status,
-        "source": data.get("source", ""),
-        "service_id": UUID(data["service_id"]) if data.get("service_id") else None,
-        "specialist_id": (UUID(data["specialist_id"]) if data.get("specialist_id") else None),
+        "source": raw_source,
+        "service_id": service_uuid,
+        "specialist_id": specialist_uuid,
         "last_synced_event_id": envelope.event_id,
     }
 
@@ -471,10 +480,29 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         properties={
             "appointment_id": str(appointment_id),
             "status": normalized_status,
-            "source": data.get("source", ""),
+            "source": raw_source,
             "start_at": data["start_at"],
         },
     )
+
+    # DRF-1030 — tell the salon about the booking over MAX. Gated on
+    # ``created`` so a re-delivery with a fresh ``event_id`` (which
+    # falls through the update branch above rather than the replay
+    # short-circuit) cannot announce the same appointment twice; the
+    # proxy is inserted by this handler and nothing else, so
+    # ``created`` is exactly «this appointment is new to us».
+    # Registered as an on_commit callback: the send must not run inside
+    # the dispatcher's transaction, and a rolled-back ingest must never
+    # announce a booking that does not exist.
+    if created:
+        schedule_booking_created_notification(
+            tenant=tenant,
+            appointment_id=appointment_id,
+            start_at=start_at,
+            specialist_id=specialist_uuid,
+            service_id=service_uuid,
+            raw_source=raw_source,
+        )
 
 
 def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
