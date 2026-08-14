@@ -530,7 +530,15 @@ class TestWriteRoundTrip:
         )
         assert rec.appointment_id == "a1"
 
-    def test_me_bookings_groups_upcoming_and_history(self) -> None:
+    def test_me_bookings_reads_the_paginated_items_envelope(self) -> None:
+        """DRF-1032: the wire shape is ``{"data": {"items", "next_cursor"}}``.
+
+        This test used to mock ``{"upcoming": [...], "history": [...]}`` — a
+        shape Ayla has never returned (``records_api.py:346-349``). It passed
+        while the client silently returned an EMPTY list against the real
+        backend, which is precisely how the defect survived. The section
+        contract itself is covered in ``test_me_bookings_contract.py``.
+        """
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -539,7 +547,7 @@ class TestWriteRoundTrip:
                 200,
                 json={
                     "data": {
-                        "upcoming": [
+                        "items": [
                             {
                                 "id": "a1",
                                 "start_datetime": "2026-06-10T14:00:00+03:00",
@@ -548,7 +556,7 @@ class TestWriteRoundTrip:
                                 "specialist": {"id": "spec-1"},
                             }
                         ],
-                        "history": [],
+                        "next_cursor": None,
                     }
                 },
             )

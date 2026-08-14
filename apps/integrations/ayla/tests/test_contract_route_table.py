@@ -122,6 +122,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
         frozenset({"x-idempotency-key"}),
     ),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
+    # DRF-1032 customer records: visit card + «Записаться ещё» prefill.
+    Route("GET", "/api/v1/internal/me/bookings/{id}/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/me/bookings/{id}/repeat-intent/", Auth.BEARER_EXT),
     # identity_client (DRF-1035) — identity read-back. BEARER_EXT is the whole
     # point: the subject is named ONLY by the header, and there is no request
     # body a caller could use to substitute a different one.
@@ -356,6 +359,9 @@ def _exercise_booking() -> None:
         )
     )
     _swallow(lambda: c.get_user_appointments(external_user_id=_EXT_USER))
+    # DRF-1032 records reads.
+    _swallow(lambda: c.get_booking_detail(external_user_id=_EXT_USER, booking_id="APPTID"))
+    _swallow(lambda: c.get_repeat_intent(external_user_id=_EXT_USER, booking_id="APPTID"))
 
 
 def _exercise_profile() -> None:

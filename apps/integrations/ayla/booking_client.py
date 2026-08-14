@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import email.utils
 import logging
+import math
 import random
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import timedelta, timezone as tz
@@ -76,6 +78,11 @@ SLOT_CACHE_KEY_PREFIX = "ayla.booking.slots.v1"
 # out over this many days from today to derive the "which days are free"
 # calendar the booking tools expect (S1 decision — no range endpoint exists).
 AVAILABLE_DATES_WINDOW_DAYS = 14
+
+# The only two sections ``me/bookings`` accepts (``records_api.py:295-300``);
+# anything else is a 400 upstream. Validated here so a typo fails at the call
+# site instead of costing a round trip.
+_ME_BOOKINGS_SECTIONS = frozenset({"upcoming", "history"})
 
 # S5-LOW2: hard ceiling on the fan-out. ``get_available_dates`` issues one
 # HTTP call per day, so an oversized ``window_days`` (caller bug, future
@@ -195,6 +202,37 @@ class BookingBadRequestError(BookingAPIError):
         self.code = code
 
 
+class RepeatIntentUnusableError(BookingAPIError):
+    """``repeat-intent`` answered 200 with an id that is not a UUID.
+
+    Upstream defect DRF-1049: the endpoint reads only the marketplace
+    ``service_id`` and ignores the salon one, so for a salon booking — every
+    booking this bot creates — it returns the literal string ``"None"`` with
+    HTTP 200. Raised rather than returned as an empty value so the failure
+    cannot be mistaken for "no prefill available"; the caller owes the user a
+    graceful alternative, not a dead end. Not an outage: does **not** trip the
+    breaker.
+
+    Carries ``field`` (which id was bad) and ``value`` (what arrived) so an
+    operator can tell the known DRF-1049 ``"None"`` from any other garbage —
+    they are different tickets. Both are ids, never personal data.
+
+    .. warning::
+
+        Going through ``AylaYClientsAdapter``, ``_translate_errors``
+        (``provider.py:341-359``) collapses every ``BookingAPIError`` into a
+        generic ``YClientsAPIError``, which would make this indistinguishable
+        from a transient failure. A caller that needs the graceful-alternative
+        branch must catch this **before** the adapter, or the adapter needs its
+        own translation arm — a follow-up this transport change leaves alone.
+    """
+
+    def __init__(self, field_name: str, *, value: str | None = None) -> None:
+        super().__init__(f"repeat_intent_unusable:{field_name}")
+        self.field = field_name
+        self.value = value
+
+
 # ─── DTOs ──────────────────────────────────────────────────────────────────
 #
 # Decoupled from the Ayla wire shape; the booking skill's adapter (provider.py)
@@ -248,13 +286,65 @@ class AylaBookingRecord:
 
 @dataclass(frozen=True)
 class AylaUserRecord:
-    """An existing appointment from ``get_user_appointments`` (me/bookings)."""
+    """An existing appointment from ``get_user_appointments`` (me/bookings).
+
+    ``derived_status`` and ``price`` are declared explicitly (rather than left
+    to ``raw``) because the customer-facing display policy keys off them:
+    DRF-1032 shows only visits that actually happened, and the visit line
+    carries the historical price. Reading policy inputs out of ``raw`` hides
+    that dependency from anyone reading the display code. Both fields sit at
+    the end so existing positional construction keeps working.
+    """
 
     appointment_id: str
     services: list[dict[str, Any]]
     master: dict[str, Any]
     datetime: str
     duration_s: int
+    # ``repr=False``: ``get_booking_detail`` puts ``notes``,
+    # ``cancellation_reason`` and payment rows in here. Nothing logs the DTO
+    # today, but a future ``logger.info("...%s", record)`` would spill all of
+    # it verbatim — cheap insurance against a leak nobody meant to write.
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    # Both ``None`` = the field was absent, which is NOT the same as an empty
+    # or zero value. Zero is a real price on the payment-free pilot, and a
+    # missing ``derived_status`` would silently fail the completed-only filter
+    # for every row — indistinguishable from "this customer has no visits"
+    # unless the two cases stay separable.
+    derived_status: str | None = None
+    price: float | None = None
+
+
+@dataclass(frozen=True)
+class AylaBookingPage:
+    """One page of ``me/bookings`` — records plus the backend's cursor.
+
+    The cursor is kept because the completed-only display policy filters
+    client-side: a page of history may contain cancellations and no-shows, so
+    reaching N shown visits can need a second page. That is an internal
+    top-up, NOT user-facing pagination (owner decision OD-H3 forbids the
+    latter and says nothing about the former).
+    """
+
+    records: list[AylaUserRecord]
+    next_cursor: str | None = None
+
+
+@dataclass(frozen=True)
+class AylaRepeatIntent:
+    """Prefill for the «Записаться ещё» CTA (``me/bookings/{id}/repeat-intent/``).
+
+    Historical facts only: the endpoint performs NO eligibility check — it does
+    not verify that the service or the specialist is still active, nor that
+    they are still linked (verified against ``records_api.py:413-431``). The
+    caller must re-validate against current backend state before booking, and
+    ``last_price`` must never be used as the price of a new appointment.
+    """
+
+    service_id: str
+    specialist_id: str
+    last_price: float | None
+    suggested_slots: list[str]
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -434,6 +524,27 @@ def _iso_date(iso: Any) -> str:
     return text[:10] if len(text) >= 10 else text
 
 
+def _parse_price(value: Any) -> float | None:
+    """Best-effort price parse, tolerant of number and string.
+
+    The records views build plain dicts and hand them to ``success_response``,
+    so DRF's serializers never run and its encoder maps ``Decimal`` → float —
+    the wire carries a NUMBER even though the declared schema says string.
+    Accept both rather than betting on either. Unparseable → ``None`` (absent),
+    never ``0.0``: a silent zero would read as "free" in the UI.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    # ``inf``/``nan`` would render as "inf ₽" in a chat message. Unreachable
+    # from a ``DecimalField(max_digits=10)`` today, but the cost of the guard
+    # is one call and the cost of missing it is a nonsense price.
+    return parsed if math.isfinite(parsed) else None
+
+
 def _user_record_from_wire(d: dict[str, Any]) -> AylaUserRecord:
     start = str(d.get("start_datetime") or d.get("datetime") or "")
     end = str(d.get("end_datetime") or "")
@@ -447,6 +558,8 @@ def _user_record_from_wire(d: dict[str, Any]) -> AylaUserRecord:
         datetime=start,
         duration_s=_duration_s(start, end),
         raw=d,
+        derived_status=(str(raw_status) if (raw_status := d.get("derived_status")) else None),
+        price=_parse_price(d.get("price")),
     )
 
 
@@ -921,24 +1034,191 @@ class AylaBookingHTTPClient:
             raw=data if isinstance(data, dict) else {},
         )
 
+    def get_user_bookings_page(
+        self,
+        *,
+        external_user_id: str,
+        section: str = "upcoming",
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> AylaBookingPage:
+        """One page of the customer's bookings (DRF-1032).
+
+        ``section`` is ALWAYS sent. Omitting it makes the backend default to
+        ``upcoming`` (``records_api.py:295``), so a history read would silently
+        answer with future bookings — a wrong answer, not an error.
+
+        Note what ``section="history"`` means upstream: terminal statuses OR
+        anything already in the past (``records_api.py:331-337``). Cancellations,
+        no-shows and stale ``confirmed`` rows all land here. Selecting the
+        visits that actually happened is the CALLER's job, via
+        ``AylaUserRecord.derived_status`` — this client does not editorialise.
+        """
+        if section not in _ME_BOOKINGS_SECTIONS:
+            raise ValueError(
+                f"section must be one of {sorted(_ME_BOOKINGS_SECTIONS)}, got {section!r}"
+            )
+        params: dict[str, Any] = {"section": section}
+        if limit is not None:
+            try:
+                # Not clamped to the backend's MAX_LIMIT: the ceiling is Ayla's
+                # rule to own (it silently caps at 100, ``records_api.py:308``),
+                # and duplicating it here would drift the day it changes.
+                params["limit"] = int(limit)
+            except (TypeError, ValueError):
+                raise ValueError(f"limit must be an integer, got {limit!r}") from None
+        if cursor:
+            params["cursor"] = cursor
+        resp = self._request(
+            "GET", "me/bookings/", external_user_id=external_user_id, params=params
+        )
+        payload = self._ok(resp)
+        # Canonical shape after the ``{"data": ...}`` envelope is stripped:
+        # ``{"items": [...], "next_cursor": "<iso>"|null}``. A bare list is
+        # tolerated defensively.
+        #
+        # ANY other shape is an outage, not an empty result. That includes the
+        # ``{upcoming, history}`` shape this client used to expect: returning
+        # ``[]`` for an unrecognised body is exactly the failure this change
+        # exists to remove — the customer is told "you have no bookings" while
+        # the backend is answering with data, and nothing anywhere goes red.
+        # Same reasoning as ``_ok`` applies to unparseable JSON: a 200 we
+        # cannot read must never be silently read as "empty".
+        next_cursor: str | None = None
+        if isinstance(payload, list):
+            rows = [r for r in payload if isinstance(r, dict)]
+        elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            raw_items = payload["items"]
+            rows = [r for r in raw_items if isinstance(r, dict)]
+            raw_cursor = payload.get("next_cursor")
+            next_cursor = str(raw_cursor) if raw_cursor else None
+        else:
+            logger.warning(
+                "booking_client.me_bookings_unexpected_shape section=%s type=%s keys=%s",
+                section,
+                type(payload).__name__,
+                sorted(payload)[:10] if isinstance(payload, dict) else None,
+            )
+            raise BookingUnavailableError("malformed_response")
+        return AylaBookingPage(
+            records=[_user_record_from_wire(r) for r in rows],
+            next_cursor=next_cursor,
+        )
+
     def get_user_appointments(
         self,
         *,
         external_user_id: str,
+        section: str = "upcoming",
+        limit: int | None = None,
+        cursor: str | None = None,
     ) -> list[AylaUserRecord]:
-        resp = self._request("GET", "me/bookings/", external_user_id=external_user_id)
+        """Records of one page, cursor dropped — the ``AylaBookingClient`` seam.
+
+        The defaults keep ``AylaYClientsAdapter.get_user_records``
+        (``provider.py:273-276``) reading upcoming bookings and receiving a
+        plain list, exactly as before.
+
+        Worth stating precisely, because it explains how the parsing defect
+        survived: with ``BOOKING_VIA_AYLA_REST`` **on** — the pilot
+        configuration, and the only one in which this adapter is selected —
+        that method has no reachable caller at all. Both call sites branch
+        away first (``tools.py:1698-1703`` to ``_proxy_master_service``,
+        ``tools.py:2710-2712`` to ``_show_my_bookings_ayla``). So "unchanged
+        behaviour" here means the seam is preserved for the flag-off path and
+        for tests, not that live traffic depends on it.
+
+        The methods DRF-1032 adds (``get_user_bookings_page``,
+        ``get_booking_detail``, ``get_repeat_intent``) are deliberately absent
+        from the ``AylaBookingClient`` Protocol: widening it would break the
+        typed fakes in suites this change is scoped out of. A later change that
+        wants records through the seam has to widen the Protocol and update
+        those fakes together.
+        """
+        return self.get_user_bookings_page(
+            external_user_id=external_user_id,
+            section=section,
+            limit=limit,
+            cursor=cursor,
+        ).records
+
+    def get_booking_detail(
+        self,
+        *,
+        external_user_id: str,
+        booking_id: str,
+    ) -> AylaUserRecord:
+        """One booking's full card (``GET me/bookings/{id}/``).
+
+        The response carries more than a customer should see — ``notes``,
+        ``cancellation_reason``, payment rows, tenant ids. They stay in ``raw``;
+        picking the customer-relevant subset is the display layer's job.
+        A booking belonging to someone else answers 404, identically to one
+        that does not exist (info-hidden), and surfaces as a 4xx error here.
+        """
+        resp = self._request("GET", f"me/bookings/{booking_id}/", external_user_id=external_user_id)
         payload = self._ok(resp)
-        # me/bookings groups into {upcoming, history}; cancel/reschedule act on
-        # upcoming, but expose both so the tools can match any handle.
-        rows: list[dict[str, Any]] = []
-        if isinstance(payload, dict) and ("upcoming" in payload or "history" in payload):
-            for key in ("upcoming", "history"):
-                section = payload.get(key) or []
-                if isinstance(section, list):
-                    rows.extend(r for r in section if isinstance(r, dict))
-        else:
-            rows = _as_rows(payload)
-        return [_user_record_from_wire(r) for r in rows]
+        if not isinstance(payload, dict):
+            # Same rule as the list read: a 200 we cannot read is an outage,
+            # not an empty card. Building a record out of ``{}`` would show the
+            # customer a visit with no service, no master and no date.
+            logger.warning(
+                "booking_client.me_booking_detail_unexpected_shape type=%s",
+                type(payload).__name__,
+            )
+            raise BookingUnavailableError("malformed_response")
+        return _user_record_from_wire(payload)
+
+    def get_repeat_intent(
+        self,
+        *,
+        external_user_id: str,
+        booking_id: str,
+    ) -> AylaRepeatIntent:
+        """Prefill for «Записаться ещё» (``POST me/bookings/{id}/repeat-intent/``).
+
+        Guards the known upstream defect (DRF-1049): the endpoint reads only the
+        marketplace ``service_id`` and ignores the salon one, even though the two
+        are XOR at the schema level. For a salon booking — every booking the bot
+        creates — it answers HTTP 200 carrying the literal string ``"None"``.
+        Both ids are therefore validated as UUIDs, and a malformed one raises
+        :class:`RepeatIntentUnusableError` instead of travelling further: a
+        caller that got an object back may trust its ids.
+        """
+        resp = self._request(
+            "POST", f"me/bookings/{booking_id}/repeat-intent/", external_user_id=external_user_id
+        )
+        payload = self._ok(resp)
+        data = payload if isinstance(payload, dict) else {}
+        ids: dict[str, str] = {}
+        for field_name in ("service_id", "specialist_id"):
+            value = str(data.get(field_name) or "")
+            try:
+                # Normalised: ``uuid.UUID`` also accepts braced and dash-less
+                # forms, and passing those through unchanged would hand the
+                # booking flow an id shaped differently from every other one.
+                ids[field_name] = str(uuid.UUID(value))
+            except ValueError:
+                logger.warning(
+                    "booking_client.repeat_intent_unusable booking_id=%s field=%s value=%r",
+                    booking_id,
+                    field_name,
+                    value,
+                )
+                raise RepeatIntentUnusableError(field_name, value=value) from None
+        slots = data.get("suggested_slots")
+        return AylaRepeatIntent(
+            service_id=ids["service_id"],
+            specialist_id=ids["specialist_id"],
+            last_price=_parse_price(data.get("last_price")),
+            # Only strings: the field is typed as ISO-8601 slots, and
+            # stringifying whatever arrives would put ``"None"`` or
+            # ``"{'a': 1}"`` into a list the booking flow reads as timestamps.
+            suggested_slots=[s for s in slots if isinstance(s, str)]
+            if isinstance(slots, list)
+            else [],
+            raw=data,
+        )
 
 
 def _err_code(resp: httpx.Response) -> str:
