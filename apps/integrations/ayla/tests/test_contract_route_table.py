@@ -125,6 +125,10 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # DRF-1032 customer records: visit card + «Записаться ещё» prefill.
     Route("GET", "/api/v1/internal/me/bookings/{id}/", Auth.BEARER_EXT),
     Route("POST", "/api/v1/internal/me/bookings/{id}/repeat-intent/", Auth.BEARER_EXT),
+    # identity_client (DRF-1035) — identity read-back. BEARER_EXT is the whole
+    # point: the subject is named ONLY by the header, and there is no request
+    # body a caller could use to substitute a different one.
+    Route("GET", "/api/v1/internal/me/identity/", Auth.BEARER_EXT),
     # profile_client (#978).
     Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
     # personal_context_client (M-B1, frozen contract v1.0 2026-07-09).
@@ -282,7 +286,7 @@ def captured(
 
     # Teardown: drop the singletons/circuits built with sentinel config so no
     # sentinel-tokened client leaks into another test's process state.
-    from apps.integrations.ayla import profile_client, reset_nutrition_client
+    from apps.integrations.ayla import identity_client, profile_client, reset_nutrition_client
     from apps.integrations.ayla.booking_client import reset_ayla_booking_client
     from apps.integrations.ayla.recommendations_client import reset_recommendations_circuit
     from apps.integrations.ayla_payments import reset_ayla_payments_client
@@ -292,6 +296,7 @@ def captured(
     reset_ayla_payments_client()
     reset_recommendations_circuit()
     profile_client._circuit.record_success()
+    identity_client._circuit.record_success()
 
 
 def _swallow(fn: Any) -> None:
@@ -364,6 +369,13 @@ def _exercise_profile() -> None:
 
     profile_client._circuit.record_success()
     _swallow(lambda: profile_client.fetch_profile_fields(_PROFILE_UUID))
+
+
+def _exercise_identity() -> None:
+    from apps.integrations.ayla import identity_client
+
+    identity_client._circuit.record_success()
+    _swallow(lambda: identity_client.resolve_identity(_EXT_USER))
 
 
 def _exercise_personal_context() -> None:
@@ -502,6 +514,7 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     row must be produced by some client (bijection — no drift, no stale rows)."""
     _exercise_booking()
     _exercise_profile()
+    _exercise_identity()
     _exercise_personal_context()
     _exercise_billing()
     _exercise_client_payments()
