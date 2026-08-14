@@ -8,7 +8,10 @@ The Ayla wire is stubbed at the client level. Pins:
 * verbatim passthrough of contract fields;
 * C1 409 SUBSCRIPTION_PAST_DUE → neutral ``unavailable`` slug;
 * idempotent card delete (repeat → 204);
-* BookingItem.payment from the PaymentMirror (hold + payment.* events).
+* BookingItem.payment from the PaymentMirror (hold + payment.* events);
+* DRF-1057 — the identity-dependent WRITES (create payment, bind card)
+  establish the Ayla link before refusing; the reads/revoke deliberately
+  do not (nothing can exist while the link is NULL).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import json
 import time as time_module
 import uuid
 from datetime import timedelta
+from typing import Any
 from urllib.parse import urlencode
 
 import pytest
@@ -32,6 +36,7 @@ from apps.eventbus.consumers.payment import (
 )
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.identity.models import BotUser
+from apps.integrations.ayla.identity_client import IdentityResolveError, ResolvedIdentity
 from apps.integrations.ayla.payments_client import (
     ClientPaymentsConflictError,
     ClientPaymentsNotFoundError,
@@ -150,6 +155,25 @@ def stub_client(monkeypatch) -> _StubC7Client:
     return stub
 
 
+@pytest.fixture
+def stub_resolve(monkeypatch) -> Any:
+    """Patch the identity HTTP leg (DRF-1057) — see test_ayla_link.py."""
+
+    calls: list[str] = []
+    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None}
+
+    def _fake(external_user_id: str) -> ResolvedIdentity:
+        calls.append(external_user_id)
+        if state["error"] is not None:
+            raise state["error"]
+        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=True)
+
+    monkeypatch.setattr(
+        "apps.integrations.ayla.identity_client.resolve_identity", _fake, raising=True
+    )
+    return type("Stub", (), {"calls": calls, "state": state})()
+
+
 class TestBinding:
     def test_foreign_ayla_user_id_403(self, client: DjangoClient, bot_user, stub_client) -> None:
         foreign = str(uuid.uuid4())
@@ -173,7 +197,9 @@ class TestBinding:
         assert resp.status_code == 403
         assert stub_client.calls == []
 
-    def test_unlinked_user_403(self, client: DjangoClient, unlinked_user, stub_client) -> None:
+    def test_unlinked_user_403(
+        self, client: DjangoClient, unlinked_user, stub_client, stub_resolve
+    ) -> None:
         resp = client.get(
             "/api/v1/customer/me/cards/",
             HTTP_AUTHORIZATION=_init_data_header("777"),
@@ -181,6 +207,10 @@ class TestBinding:
         assert resp.status_code == 403
         assert resp.json()["error"] == "identity_not_linked"
         assert stub_client.calls == []
+        # DRF-1057: reads deliberately do NOT resolve — a card cannot exist
+        # while the link is NULL, so this answer is provably empty and
+        # minting an identity to produce it would be over-reach (J-O3).
+        assert stub_resolve.calls == []
 
     def test_matching_ayla_user_id_ok(self, client: DjangoClient, bot_user, stub_client) -> None:
         resp = client.get(
@@ -403,6 +433,115 @@ class TestCards:
             HTTP_AUTHORIZATION=_init_data_header("12345"),
         )
         assert resp.status_code == 204
+
+
+class TestIdentityResolve:
+    """DRF-1057 — writes establish the link; reads/revoke deliberately do not."""
+
+    def _own_appointment(self, tenant, bot_user) -> None:
+        from django.utils import timezone as tz
+
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=APPT_ID,
+            tenant=tenant,
+            bot_user=bot_user,
+            start_at=tz.now(),
+            end_at=tz.now(),
+            status="confirmed",
+        )
+
+    def test_cards_setup_resolves_and_binds(
+        self, client: DjangoClient, unlinked_user, stub_client, stub_resolve
+    ) -> None:
+        """Card binding is reachable before any booking — without the resolve
+        it was an unconditional 403 with no path forward."""
+        resp = client.post(
+            "/api/v1/customer/me/cards/setup/",
+            data=json.dumps({"consent_version": "offer-1.0"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("777"),
+        )
+        assert resp.status_code == 200
+        assert stub_resolve.calls == ["bot:max:777"]
+        (name, kwargs) = stub_client.calls[0]
+        assert name == "cards_setup"
+        assert kwargs["ayla_user_id"] == str(stub_resolve.state["uuid"])
+        unlinked_user.refresh_from_db()
+        assert unlinked_user.ayla_user_id == stub_resolve.state["uuid"]
+
+    def test_cards_setup_resolve_failure_403(
+        self, client: DjangoClient, unlinked_user, stub_client, stub_resolve
+    ) -> None:
+        stub_resolve.state["error"] = IdentityResolveError("server: HTTP 502")
+        resp = client.post(
+            "/api/v1/customer/me/cards/setup/",
+            data=json.dumps({"consent_version": "offer-1.0"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("777"),
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "identity_not_linked"
+        assert stub_client.calls == []
+        assert stub_resolve.calls == ["bot:max:777"]
+
+    def test_cards_setup_foreign_id_still_403(
+        self, client: DjangoClient, unlinked_user, stub_client, stub_resolve
+    ) -> None:
+        """C7.6 / DRF-1036 survives the resolve: a client-supplied id that
+        doesn't match the session identity is still refused."""
+        resp = client.post(
+            "/api/v1/customer/me/cards/setup/",
+            data=json.dumps({"consent_version": "offer-1.0", "ayla_user_id": str(uuid.uuid4())}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("777"),
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "forbidden"
+        assert stub_client.calls == []
+
+    def test_create_payment_resolves(
+        self, client: DjangoClient, tenant, unlinked_user, stub_client, stub_resolve
+    ) -> None:
+        """Recovers the ``ensure_ayla_link`` persist-failure residue: booking
+        confirmed + awaiting payment, but the link column never written."""
+        self._own_appointment(tenant, unlinked_user)
+        resp = client.post(
+            "/api/v1/customer/me/payments/",
+            data=json.dumps({"appointment_id": str(APPT_ID)}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("777"),
+        )
+        assert resp.status_code == 200
+        assert stub_resolve.calls == ["bot:max:777"]
+        assert stub_client.calls[0][1]["client_id"] == str(stub_resolve.state["uuid"])
+
+    def test_linked_user_never_resolves(
+        self, client: DjangoClient, tenant, bot_user, stub_client, stub_resolve
+    ) -> None:
+        self._own_appointment(tenant, bot_user)
+        resp = client.post(
+            "/api/v1/customer/me/payments/",
+            data=json.dumps({"appointment_id": str(APPT_ID)}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert stub_resolve.calls == []
+        assert stub_client.calls[0][1]["client_id"] == str(AYLA_UID)
+
+    def test_card_delete_does_not_resolve(
+        self, client: DjangoClient, unlinked_user, stub_client, stub_resolve
+    ) -> None:
+        """Revoke is not a first-touch action: nothing can be bound while the
+        link is NULL, so minting an identity here would be backwards."""
+        resp = client.delete(
+            f"/api/v1/customer/me/cards/{uuid.uuid4()}/",
+            HTTP_AUTHORIZATION=_init_data_header("777"),
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "identity_not_linked"
+        assert stub_resolve.calls == []
+        assert stub_client.calls == []
 
 
 def _make_booking(tenant, bot_user, *, ayla_marker_id=None) -> BookingRequest:
