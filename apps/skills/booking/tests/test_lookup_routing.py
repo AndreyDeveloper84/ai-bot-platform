@@ -37,7 +37,11 @@ from apps.llm.protocol import CompletionResult, ToolCall
 from apps.llm.providers.openai_provider import OpenAIProvider
 from apps.llm.router import reset_router_cache
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.booking.lookup import is_personal_booking_lookup
+from apps.skills.booking.lookup import (
+    booking_mutation_flow,
+    is_cancel_request,
+    is_personal_booking_lookup,
+)
 from apps.skills.booking.skill import BookingSkill
 from apps.skills.faq.skill import FAQSkill
 from apps.skills.registry import dispatch, registered
@@ -305,6 +309,179 @@ MUTATION_PHRASES: tuple[str, ...] = (
     "Перенеси мою запись",
     "Отмени мою запись",
     "Запиши меня на массаж",
+)
+
+# ---------------------------------------------------------------------------
+# DRF-1060 / OD-IR1 — the cancellation corpus.
+#
+# Owner decision OD-IR1 («Pilot routing») requires a regression corpus of
+# natural phrasings for every pilot-critical intent. «Мои записи» got one
+# (OD_IR1_CORPUS above); cancellation had none, and the price of a miss
+# is higher because cancellation is a MUTATION: the person writes that
+# they are not coming, the bot does not understand, the visit stays
+# `confirmed` and turns into a no-show — an occupied slot, a master
+# waiting, and a booking nobody ever closes (DRF-1048).
+#
+# State on 2026-08-14 before this patch (VERIFIED by running
+# ``booking_mutation_flow`` on the pre-patch module): the detector knew
+# the roots «отмен» / «удал» and NOTHING else — all seven phrasings in
+# the owner's list returned None, and «не приду» was not claimed by the
+# booking skill at all (no _BOOKING_KEYWORDS match either), so the turn
+# fell through to the menu fallback.
+#
+# ADD to these tuples — never trim them. That is the whole point of a
+# corpus: the next lexical / word-order / gender gap has to be found here
+# on CI rather than by a person on the pilot, and a phrase removed to
+# make a change pass is a defect shipped.
+# ---------------------------------------------------------------------------
+
+# The owner's list, verbatim and in its own order, plus the forms of both
+# genders and the polite wrappers a real message carries.
+OD_IR1_CANCEL_CORPUS: tuple[str, ...] = (
+    # ── verbatim from the brief ──
+    "не приду",
+    "не смогу прийти",
+    "не получится прийти",
+    "снимите меня",
+    "отпишите меня",
+    "не буду",
+    "передумал",
+    "передумала",
+    # ── nearest relatives: first-person subject, polite wrappers ──
+    "я не приду",
+    "я не смогу прийти",
+    "у меня не получится прийти",
+    "к сожалению, не смогу прийти",
+    "Извините, не приду",
+    "Здравствуйте, я не смогу прийти",
+    "я передумала",
+    "передумал, извините",
+    # ── word order: the infinitive first («прийти не смогу») ──
+    "прийти не смогу",
+    "прийти не получится",
+    "подойти не смогу",
+    # ── other arrival verbs of the same closed class ──
+    "не смогу подойти",
+    "не смогу приехать",
+    "не смогу быть",
+    "не успею прийти",
+    "не выйдет прийти",
+    "не приеду",
+    "не подойду",
+    # ── bare modals ──
+    "не смогу",
+    "не получится",
+    # ── temporal complements ──
+    "завтра не приду",
+    "не приду завтра",
+    "не приду сегодня",
+    "не смогу прийти в пятницу",
+    "не смогу прийти на этой неделе",
+    "не приду 15 августа",
+    "не приду в салон",
+    # ── "take me off the list" ──
+    "сними меня",
+    "отпиши меня",
+    "снимите меня с записи",
+    "уберите меня из записи",
+    "пожалуйста, снимите меня с записи",
+    # ── mind changed, stated as such ──
+    "отказываюсь от записи",
+    "отказываюсь от визита",
+    "я отказываюсь",
+    "раздумала",
+    # ── polite closings after the refusal ──
+    "не смогу прийти, извините",
+    "не смогу прийти, к сожалению",
+    "не буду, спасибо",
+    "не приду в это время",
+    "не приду в этот раз",
+    "не смогу прийти в 15:00",
+    "не смогу прийти на прием",
+    # ── the explicit verbs, which already worked and must keep working ──
+    "отмени мою запись",
+    "Отмените запись",
+    "отменить запись",
+    "удали мою запись",
+)
+
+# The negatives matter MORE here than for the read-only lookup, and the
+# brief names four of them explicitly. A cancellation false positive puts
+# «отменить ваш визит?» in front of somebody who asked about something
+# else — at best confusing, at worst a visit dropped on a
+# misunderstanding.
+CANCEL_NEGATIVE_PHRASES: tuple[str, ...] = (
+    # ── named in the brief ──
+    "не приду в другой салон",  # a complement outside the allow-list
+    "не смогу прийти на вебинар",  # foreign domain, same shape
+    "удали мои данные",  # privacy skill, not booking (was True before)
+    "отмени напоминание",  # a reminder is not a visit (was True before)
+    "передумал насчет цвета",  # the object is not the booking
+    # ── the question frame: asking ABOUT cancellation, not requesting it ──
+    "а что если я не приду?",
+    "что будет если я не приду",
+    "какие правила отмены?",
+    "условия отмены записи",
+    "сколько стоит отмена?",
+    "какой штраф за отмену?",
+    "когда можно отменить?",
+    # ── double negation is a CONFIRMATION ──
+    "я не передумал",
+    "не отказываюсь",
+    # ── refusing to BOOK is not cancelling an existing visit ──
+    "записаться не смогу",
+    "не смогу записаться",
+    # ── other things one can be unable to do ──
+    "оплатить не смогу",
+    "не смогу оплатить",
+    "маникюр делать не буду",
+    "насчет цвета передумал",
+    "я опоздаю на 10 минут",
+    # ── other lists one can be removed from, and other cancellable
+    #    objects the domain-blind «отмен» root used to swallow ──
+    "отпишите меня от рассылки",
+    "снимите меня с рассылки",
+    "сними меня с очереди",
+    "отпишите меня от новостей",
+    "отмени подписку",
+    "отмени рассылку",
+    "отмени уведомления",
+    "удали историю",
+    "отмени мой заказ",
+    "отмени билет",
+    "отмени бронь отеля",
+    # ── privacy owns «удали меня» verbatim ──
+    "удали меня",
+    "удалите мои данные",
+    # ── third person: not the caller's own attendance ──
+    "мастер не сможет прийти",
+    "она не придет",
+    # ── the opposite statement ──
+    "я приду",
+    "точно приду",
+    "приду завтра",
+    # ── neighbouring intents ──
+    "покажи мои записи",
+    "хочу записаться",
+    "перенеси мою запись",
+    "привет",
+    "спасибо",
+)
+
+# DRF-1060 §4 — the cancel / reschedule boundary. «Не смогу прийти в
+# среду, можно в четверг?» is a MOVE, not a DROP: the visit survives, and
+# answering it with a cancellation loses the booking the person was
+# trying to keep. ``booking_mutation_flow`` tests reschedule FIRST, and
+# the cancel half additionally rejects a turn that proposes another time
+# without carrying a reschedule verb.
+RESCHEDULE_NOT_CANCEL_PHRASES: tuple[str, ...] = (
+    "не смогу прийти в среду, можно в четверг?",
+    "не приду завтра, можно в пятницу?",
+    "не смогу прийти, давайте в пятницу",
+    "не получится прийти, а можно попозже?",
+    "не смогу в среду, можно другой день?",
+    "не приду, перенесите на четверг",
+    "не смогу прийти, перезапишите меня",
 )
 
 # Review P1 — phrases that LOOK personal but are not booking lookups:
@@ -612,6 +789,122 @@ class TestLookupPredicate:
 
 
 # ---------------------------------------------------------------------------
+# DRF-1060 / OD-IR1 — the cancellation predicate
+# ---------------------------------------------------------------------------
+
+
+class TestCancelPredicate:
+    @pytest.mark.parametrize("phrase", OD_IR1_CANCEL_CORPUS)
+    def test_od_ir1_cancel_corpus(self, phrase: str) -> None:
+        """OD-IR1 — the owner's regression corpus for CANCELLATION.
+
+        Owner decision OD-IR1 («Pilot routing») keeps the deterministic
+        router until Controlled Pilot on the condition that it closes the
+        known lexical / word-order / synonym gaps AND carries a corpus of
+        natural phrasings per pilot-critical intent. «Мои записи» has one
+        (``OD_IR1_CORPUS``); this is the same thing for cancellation,
+        where the cost of a miss is higher — the person says they are not
+        coming, the bot does not understand, and the visit stays
+        `confirmed` until it becomes a no-show (DRF-1048).
+
+        Before this patch the detector knew the roots «отмен» / «удал»
+        and nothing else: every natural refusal in this table returned
+        None from ``booking_mutation_flow`` and «не приду» was not
+        claimed by the booking skill at all.
+
+        Add to this tuple — never trim it. A phrase removed to make a
+        future change pass is a defect shipped.
+        """
+        assert is_cancel_request(phrase) is True
+
+    @pytest.mark.parametrize("phrase", CANCEL_NEGATIVE_PHRASES)
+    def test_cancel_negatives_never_match(self, phrase: str) -> None:
+        """DRF-1060 §3 — the negatives matter more than the positives.
+
+        A cancellation false positive offers to drop a visit the person
+        never asked to drop. Four of these are named in the brief; two
+        of the four («удали мои данные», «отмени напоминание») were TRUE
+        before this patch, because the «отмен» / «удал» roots were
+        domain-blind. The rest are the collision classes the new closed
+        word-form families open: the question frame, double negation,
+        refusing to BOOK rather than to attend, and other lists a person
+        can be removed from.
+        """
+        assert is_cancel_request(phrase) is False
+
+    @pytest.mark.parametrize("phrase", RESCHEDULE_NOT_CANCEL_PHRASES)
+    def test_reschedule_shaped_turns_are_not_cancellations(self, phrase: str) -> None:
+        """DRF-1060 §4 — a MOVE is not a DROP.
+
+        «Не смогу прийти в среду, можно в четверг?» carries the same
+        inability to attend as «не смогу прийти», but the visit is being
+        moved, not dropped. Treating it as a cancellation loses the
+        booking the person was trying to keep, so the predicate rejects a
+        turn that proposes another time.
+        """
+        assert is_cancel_request(phrase) is False
+
+    @pytest.mark.parametrize("phrase", RESCHEDULE_NOT_CANCEL_PHRASES)
+    def test_reschedule_shaped_turns_never_tag_a_cancel_flow(self, phrase: str) -> None:
+        """The same boundary through ``booking_mutation_flow``.
+
+        The flow tag drives the D-10 continuation copy («что переношу?» /
+        «что отменяю?»). It must never say «отменяю» for these. A turn
+        carrying an explicit reschedule verb tags ``reschedule``; a turn
+        that only proposes a time without one tags nothing at all, which
+        is the conservative outcome — deliberately NOT widened here, see
+        the report for DRF-1060.
+        """
+        assert booking_mutation_flow(phrase) != "cancel"
+
+    @pytest.mark.parametrize("phrase", OD_IR1_CANCEL_CORPUS)
+    def test_cancel_corpus_tags_the_cancel_flow(self, phrase: str) -> None:
+        """The corpus reaches the D-10 flow tag, not just the predicate."""
+        assert booking_mutation_flow(phrase) == "cancel"
+
+    @pytest.mark.parametrize("phrase", LOOKUP_PHRASES + VERBLESS_LOOKUP_PHRASES)
+    def test_read_only_lookups_are_never_cancellations(self, phrase: str) -> None:
+        """The two detectors must not overlap.
+
+        Every phrasing the read-only lookup claims («покажи мои записи»,
+        «куда я записан») must be invisible to the cancellation
+        predicate: a person asking to SEE their bookings being offered a
+        cancellation is the worst false positive this detector can
+        produce, and it would be produced on the most frequent intent on
+        the pilot.
+        """
+        assert is_cancel_request(phrase) is False
+
+    @pytest.mark.parametrize("phrase", CREATE_INTENT_PHRASES + FAQ_PHRASES)
+    def test_create_intent_and_faq_are_never_cancellations(self, phrase: str) -> None:
+        """The create-intent window is shared with the lookup detector
+        verbatim, so «записаться не смогу» / «хочу записаться» cannot be
+        read as a cancellation; the booking-rules FAQ («какие правила
+        отмены?») is rejected by the question frame."""
+        assert is_cancel_request(phrase) is False
+
+    @pytest.mark.parametrize(
+        "phrase",
+        (
+            "НЕ ПРИДУ",
+            "Не Приду",
+            "не  приду",
+            "не\tприду",
+            "не приду!!!",
+            "не приду 🙂",
+        ),
+    )
+    def test_case_whitespace_and_trailing_noise_are_irrelevant(self, phrase: str) -> None:
+        """Same normalisation contract as the lookup detector: case,
+        ё→е, collapsed whitespace, trailing non-word characters."""
+        assert is_cancel_request(phrase) is True
+
+    def test_empty_text_is_not_a_cancellation(self) -> None:
+        assert is_cancel_request("") is False
+        assert is_cancel_request("   ") is False
+
+
+# ---------------------------------------------------------------------------
 # Skill matchers
 # ---------------------------------------------------------------------------
 
@@ -629,6 +922,18 @@ class TestSkillMatchers:
 
     @pytest.mark.parametrize("phrase", LOOKUP_PHRASES + MUTATION_PHRASES)
     def test_booking_claims_lookups_and_mutations(self, context: SkillContext, phrase: str) -> None:
+        assert BookingSkill().matches(_with_text(context, phrase)) is True
+
+    @pytest.mark.parametrize("phrase", OD_IR1_CANCEL_CORPUS)
+    def test_booking_claims_natural_cancellations(self, context: SkillContext, phrase: str) -> None:
+        """DRF-1060 — recognising the phrasing is only half of it.
+
+        «не приду» carries none of the ``_BOOKING_KEYWORDS`` cancel verbs
+        («отмени» / «отменить»), so before this patch the booking skill's
+        matcher returned False and the turn fell through to the menu
+        fallback — the person believed they had cancelled and the visit
+        stayed `confirmed`.
+        """
         assert BookingSkill().matches(_with_text(context, phrase)) is True
 
 
@@ -657,6 +962,41 @@ class TestRoutingMatrix:
     @pytest.mark.parametrize("phrase", MUTATION_PHRASES)
     def test_mutation_phrases_route_to_booking(self, context: SkillContext, phrase: str) -> None:
         assert _first_matching_skill_name(phrase, context) == "booking"
+
+    @pytest.mark.parametrize("phrase", OD_IR1_CANCEL_CORPUS)
+    def test_cancel_corpus_routes_to_booking(self, context: SkillContext, phrase: str) -> None:
+        """DRF-1060 — through the REAL first-match-wins registry order.
+
+        Eight skills are registered before booking; the predicate being
+        True is not enough on its own. This pins that no earlier skill
+        intercepts a cancellation (privacy owns «удали меня», health
+        screening owns «не могу встать», FAQ owns question-shaped turns)
+        and that the menu fallback — registered after booking, claiming
+        every otherwise-unwanted turn — no longer swallows them.
+        """
+        assert _first_matching_skill_name(phrase, context) == "booking"
+
+    @pytest.mark.parametrize(
+        "phrase",
+        (
+            "удали мои данные",
+            "удалите мои данные",
+            "удали меня",
+        ),
+    )
+    def test_privacy_phrases_stay_with_the_privacy_skill(
+        self, context: SkillContext, phrase: str
+    ) -> None:
+        """DRF-1060 §3 — «удали мои данные» is a privacy request.
+
+        The «удал» root made it a cancellation at the predicate level
+        (VERIFIED before this patch). Routing was protected only by
+        registration order — privacy_consent is registered first. Both
+        halves are pinned now: the predicate rejects it AND the skill
+        boundary holds.
+        """
+        assert is_cancel_request(phrase) is False
+        assert _first_matching_skill_name(phrase, context) == "privacy_consent"
 
     @pytest.mark.parametrize("phrase", AMBIGUOUS_NON_LOOKUP_PHRASES)
     def test_ambiguous_phrases_do_not_route_to_booking(
@@ -849,6 +1189,55 @@ class TestProductionDispatchIntegration:
         assert result.tool_calls_made == []
         assert complete_mock.call_count == 1
         assert "show_my_bookings" not in [tc.name for tc in result.tool_calls_made]
+
+    @pytest.mark.parametrize(
+        "phrase",
+        (
+            "не приду",
+            "не смогу прийти",
+            "снимите меня с записи",
+            "передумала",
+        ),
+    )
+    def test_natural_cancellation_reaches_booking_without_mutating(
+        self,
+        context: SkillContext,
+        tenant: Tenant,
+        phrase: str,
+    ) -> None:
+        """DRF-1060 — through the REAL registry, end to end.
+
+        The turn must reach the booking skill (before this patch it fell
+        through to the menu fallback and the visit stayed `confirmed`),
+        and it must take the LLM tool-choice path — the deterministic
+        fast path belongs to the read-only lookup and must not fire for a
+        cancellation.
+
+        This patch changes RECOGNITION only: nothing is cancelled here.
+        The Phase-1 reply asks which booking, and the negative assertions
+        pin that no pending action and no booking row were written.
+        """
+        client = _FakeYClients()
+        with (
+            patch(
+                "apps.integrations.yclients.get_yclients_client",
+                return_value=client,
+            ),
+            patch.object(
+                OpenAIProvider,
+                "complete",
+                side_effect=[_completion(text="Уточните, пожалуйста, какую запись отменить?")],
+            ) as complete_mock,
+            tenant_scope(tenant),
+        ):
+            result = dispatch(_with_text(context, phrase))
+
+        assert result is not None
+        assert result.meta["skill"] == "booking"
+        assert complete_mock.call_count == 1
+        assert "show_my_bookings" not in [tc.name for tc in result.tool_calls_made]
+        assert PendingBookingAction.all_tenants.filter(tenant=tenant).count() == 0
+        assert BookingRequest.all_tenants.filter(tenant=tenant).count() == 0
 
     @pytest.mark.parametrize(
         "phrase",

@@ -89,6 +89,7 @@ from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.lookup import (
     booking_mutation_flow,
+    is_cancel_request,
     is_personal_booking_lookup,
     looks_like_flow_selection,
 )
@@ -326,6 +327,20 @@ class BookingSkill:
         # fallback path (production webhook dispatch sets no intent).
         if is_personal_booking_lookup(context.message_text):
             return True
+
+        # DRF-1060 / OD-IR1 — natural cancellation phrasings («не приду»,
+        # «не смогу прийти», «снимите меня», «передумала») carry none of
+        # the _BOOKING_KEYWORDS cancel verbs, so the keyword fallback
+        # below never claimed them: the turn fell through to the menu
+        # fallback, the person believed they had cancelled, and the visit
+        # stayed `confirmed` until it became a no-show (DRF-1048). The
+        # predicate is deliberately stricter than the lookup one — it
+        # feeds a mutation path — and rejects reschedule-shaped turns
+        # («не смогу в среду, можно в четверг?»), so this claim cannot
+        # turn a move into a drop.
+        if is_cancel_request(context.message_text):
+            return True
+
         return _legacy_keyword_match(context.message_text)
 
     def handle(self, context: SkillContext) -> SkillResult:
