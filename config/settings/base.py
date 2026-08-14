@@ -1012,7 +1012,13 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 # (e.g. apps.booking.services.create) register the task on the web
 # process, but the worker only autoloads INSTALLED_APPS; without this
 # list it would reject tasks with KeyError on dispatch.
-CELERY_IMPORTS = ("apps.integrations.yclients.tasks",)
+# DRF-1054/1056: apps.llm holds no models and is deliberately not a
+# Django app (see apps/llm/__init__.py), so its beat task needs the same
+# explicit registration.
+CELERY_IMPORTS = (
+    "apps.integrations.yclients.tasks",
+    "apps.llm.tasks",
+)
 
 # Beat schedule — keep retention tasks on separate cadences per the
 # 6A-split rule (AuditLog 90d daily sweep vs IdempotencyKey 7d hourly
@@ -1172,6 +1178,34 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.conversations.tasks.purge_old_ai_drafts",
         "schedule": crontab(hour="3", minute="15"),
     },
+    # DRF-1054 (availability monitor) + DRF-1056 (connection warm-up) —
+    # ONE cheap real completion down the production LLM path per tick.
+    # Its success is the warm-up; its verdict drives the state machine
+    # and the MAX alert. See apps/llm/health.py for why the two tickets
+    # share one request instead of firing two.
+    #
+    # Cadence 5 min, bounded from both sides:
+    #
+    #  * UPPER — must sit well inside the proxy's idle-decay window. That
+    #    window is UNKNOWN; all we measured on 13.08 is that after hours
+    #    idle the first call costs 20.7 s while a follow-up costs
+    #    0.8-1.4 s. Idle timeouts on HTTP CONNECT proxies and their
+    #    upstream keepalives typically land in the 60 s - 15 min band, so
+    #    5 min sits under the common floor of that band with margin. If
+    #    probe latency in the logs keeps showing cold-start numbers, the
+    #    window is tighter than assumed — shorten this, don't widen it.
+    #  * LOWER — cost and load. 288 ticks/day x ~13 tokens is under
+    #    0.001 USD/day on gpt-4o-mini, and one request per 5 min is
+    #    noise next to pilot traffic. There is no reason to go below
+    #    this, and going below it would trade real money for nothing.
+    #
+    # Detection latency that falls out of this: threshold(2) x 5 min +
+    # one probe (<= 60 s) ~= 10.5 min worst case, against the several
+    # hours the 13.08 outage actually ran undetected.
+    "llm.probe_availability": {
+        "task": "apps.llm.tasks.probe_llm_availability",
+        "schedule": crontab(minute="*/5"),
+    },
 }
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
@@ -1200,6 +1234,44 @@ LLM_REQUEST_TIMEOUT_S = float(os.environ.get("LLM_REQUEST_TIMEOUT_S", "30.0"))
 LLM_RETRY_MAX_ATTEMPTS = int(os.environ.get("LLM_RETRY_MAX_ATTEMPTS", "2"))
 LLM_RETRY_BASE_DELAY_S = float(os.environ.get("LLM_RETRY_BASE_DELAY_S", "1.0"))
 LLM_RETRY_MAX_DELAY_S = float(os.environ.get("LLM_RETRY_MAX_DELAY_S", "30.0"))
+
+# DRF-1054 (LLM availability monitor) + DRF-1056 (connection warm-up).
+# Beat entry: CELERY_BEAT_SCHEDULE["llm.probe_availability"], every 5
+# min. Logic + rationale: apps/llm/health.py.
+#
+# Note what is NOT here: no separate probe timeout knob. The probe uses
+# LLM_REQUEST_TIMEOUT_S above, unchanged, because a probe that measures
+# something other than the user path is not a monitor. On the 13.08
+# numbers that timeout (30 s) already covers the 20.7 s cold start with
+# ~9 s to spare, so the cold start does NOT eat the retry budget — see
+# the LLM_REQUEST_TIMEOUT_S comment above and DRF-1056's rationale.
+#
+# LLM_HEALTH_PROBE_ENABLED: master switch. On by default; with an empty
+#   HANDOFF_NOTIFY_MAX_CHAT_IDS (the CI / local default) it can still
+#   only log, never send.
+# LLM_HEALTH_PROBE_MODEL: empty → the provider's default completion
+#   model (gpt-4o-mini). Override only to probe a specific deployment.
+# LLM_HEALTH_PROBE_TIMEOUT_S: OUTER ceiling on one probe, not the SDK
+#   timeout. httpx applies its scalar timeout per phase (connect/read/
+#   write/pool), so a single request can outlive any one phase budget;
+#   this is the hard stop that keeps a beat tick bounded. 60 s = 2x the
+#   SDK timeout.
+# LLM_HEALTH_FAILURE_THRESHOLD: consecutive failed probes before the
+#   state flips to DOWN and MAX is told. 2 = one blip never pages
+#   anyone. Recovery is deliberately NOT debounced — first success
+#   clears immediately (slow to alarm, fast to clear).
+# LLM_HEALTH_STATE_TTL_S: how long the Redis state keys live. A week —
+#   comfortably longer than any plausible gap between ticks. Losing the
+#   state costs at most one duplicate alert on the next transition.
+LLM_HEALTH_PROBE_ENABLED = os.environ.get("LLM_HEALTH_PROBE_ENABLED", "1") not in {
+    "0",
+    "false",
+    "False",
+}
+LLM_HEALTH_PROBE_MODEL = os.environ.get("LLM_HEALTH_PROBE_MODEL", "")
+LLM_HEALTH_PROBE_TIMEOUT_S = float(os.environ.get("LLM_HEALTH_PROBE_TIMEOUT_S", "60.0"))
+LLM_HEALTH_FAILURE_THRESHOLD = int(os.environ.get("LLM_HEALTH_FAILURE_THRESHOLD", "2"))
+LLM_HEALTH_STATE_TTL_S = int(os.environ.get("LLM_HEALTH_STATE_TTL_S", str(7 * 24 * 3600)))
 
 
 # Sprint 1 / C1 channel token map. Format env CHANNEL_TOKEN_TO_TENANT_SLUG:

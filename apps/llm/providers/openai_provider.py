@@ -44,6 +44,7 @@ works through the same proxy.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from typing import Any
@@ -347,6 +348,34 @@ class OpenAIProvider:
             kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
         self._client = AsyncOpenAI(**kwargs)
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the cached SDK client (and its httpx pool), if built.
+
+        Long-lived callers (the web process, the consumer) keep one
+        provider for the process lifetime and never need this. Short-lived
+        callers that construct a provider per call — notably the DRF-1054
+        availability probe, which deliberately builds a FRESH client each
+        tick so it exercises a fresh proxy CONNECT — must close it, or
+        every tick leaks an ``httpx.AsyncClient`` plus its connection pool
+        inside the Celery worker.
+
+        Best-effort and idempotent: never raises, safe on an unbuilt or
+        already-closed client.
+        """
+        client = self._client
+        if client is None:
+            return
+        self._client = None
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 — teardown must never break the caller
+            logger.warning("llm.openai.aclose_failed", exc_info=True)
 
     def _reraise_as_llm_error(self, exc: Exception, *, op: str, model: str) -> None:
         """Map OpenAI SDK exceptions onto the L1 LLM* hierarchy.
