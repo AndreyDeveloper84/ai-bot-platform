@@ -82,15 +82,19 @@ _ITEM: dict[str, Any] = {
 }
 
 
-def _envelope(items: list[dict[str, Any]], next_cursor: str | None = None) -> dict:
-    """The real backend envelope — ``success_response({items, next_cursor})``."""
+def _envelope(items: list[Any], next_cursor: str | None = None) -> dict:
+    """The real backend envelope — ``success_response({items, next_cursor})``.
+
+    ``items`` is typed loosely on purpose: some tests feed it junk entries to
+    prove the parser skips them instead of blowing up.
+    """
     return {"data": {"items": items, "next_cursor": next_cursor}}
 
 
 class TestRealBackendShapeIsParsed:
     """The bug, stated as a test: the canonical shape must not read as empty."""
 
-    def test_history_items_are_returned(self, db) -> None:
+    def test_history_items_are_returned(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_envelope([_ITEM]))
 
@@ -101,7 +105,7 @@ class TestRealBackendShapeIsParsed:
 
         assert [r.appointment_id for r in out] == [_ITEM["id"]]
 
-    def test_empty_page_is_empty_list_not_error(self, db) -> None:
+    def test_empty_page_is_empty_list_not_error(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_envelope([]))
 
@@ -113,10 +117,56 @@ class TestRealBackendShapeIsParsed:
         assert out == []
 
 
+class TestUnreadableBodyIsAnOutage:
+    """The whole point of this change: an unreadable 200 is never "empty".
+
+    Every shape below used to yield ``[]`` with no log line and no error — the
+    customer would be told they have no bookings while Ayla was answering with
+    data, and nothing would go red. That is the incident this ticket exists to
+    prevent, so it must not survive on a neighbouring branch of the parser.
+    """
+
+    @pytest.mark.parametrize(
+        ("body", "label"),
+        [
+            (
+                {"data": {"upcoming": [_ITEM], "history": []}},
+                "the shape this client used to expect",
+            ),
+            ({"data": {"items": None}}, "items is null"),
+            ({"data": {"bookings": [_ITEM]}}, "items renamed upstream"),
+            ({"data": None}, "data is null"),
+            ({}, "empty body"),
+        ],
+    )
+    def test_unrecognised_shape_raises(self, body: dict, label: str) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=body)
+
+        with pytest.raises(bc.BookingUnavailableError, match="malformed_response"):
+            _client_with(handler).get_user_appointments(
+                external_user_id="bot:max:83146139",
+                section="history",
+            )
+
+    def test_non_dict_rows_are_skipped_not_fatal(self) -> None:
+        """A recognised page with junk entries still yields its real rows."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_envelope(["junk", None, _ITEM]))
+
+        out = _client_with(handler).get_user_appointments(
+            external_user_id="bot:max:83146139",
+            section="history",
+        )
+
+        assert [r.appointment_id for r in out] == [_ITEM["id"]]
+
+
 class TestSectionIsSent:
     """A history read that omits ``section`` silently returns FUTURE bookings."""
 
-    def test_section_history_reaches_the_wire(self, db) -> None:
+    def test_section_history_reaches_the_wire(self) -> None:
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -132,7 +182,7 @@ class TestSectionIsSent:
         assert captured[0].url.params.get("section") == "history"
         assert captured[0].headers["X-External-User-ID"] == "bot:max:83146139"
 
-    def test_section_upcoming_reaches_the_wire(self, db) -> None:
+    def test_section_upcoming_reaches_the_wire(self) -> None:
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -150,7 +200,7 @@ class TestSectionIsSent:
 class TestFieldsSurvivesTheMapping:
     """DRF-1032 needs the display policy fields the old DTO dropped."""
 
-    def test_derived_status_and_price_are_preserved(self, db) -> None:
+    def test_derived_status_and_price_are_preserved(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_envelope([_ITEM]))
 
@@ -166,7 +216,7 @@ class TestFieldsSurvivesTheMapping:
         assert row.master == _ITEM["specialist"]
         assert row.services == [_ITEM["service"]]
 
-    def test_price_as_string_is_tolerated(self, db) -> None:
+    def test_price_as_string_is_tolerated(self) -> None:
         """Schema declares a string; the running code emits a number."""
         item = {**_ITEM, "price": "2500.00"}
 
@@ -180,7 +230,43 @@ class TestFieldsSurvivesTheMapping:
 
         assert row.price == 2500.0
 
-    def test_zero_price_stays_distinguishable_from_unknown(self, db) -> None:
+    def test_missing_derived_status_is_none_not_empty_string(self) -> None:
+        """Absent must stay separable from present-but-empty.
+
+        The completed-only filter keys off this field. If a version skew ever
+        stripped it, every row would fail the filter and the customer would see
+        an empty history against a non-empty backend — a case worth being able
+        to tell apart from "no visits yet".
+        """
+        item = {k: v for k, v in _ITEM.items() if k != "derived_status"}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_envelope([item]))
+
+        row = _client_with(handler).get_user_appointments(
+            external_user_id="bot:max:83146139",
+            section="history",
+        )[0]
+
+        assert row.derived_status is None
+
+    def test_nonsense_price_is_none_not_a_number(self) -> None:
+        """«inf ₽» must never reach a chat message."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=_envelope([{**_ITEM, "price": "1e400"}, {**_ITEM, "price": "abc"}]),
+            )
+
+        rows = _client_with(handler).get_user_appointments(
+            external_user_id="bot:max:83146139",
+            section="history",
+        )
+
+        assert [r.price for r in rows] == [None, None]
+
+    def test_zero_price_stays_distinguishable_from_unknown(self) -> None:
         """Payment-free pilot bookings really do cost 0 — not the same as absent."""
         priced_zero = {**_ITEM, "price": 0}
         no_price = {k: v for k, v in _ITEM.items() if k != "price"}
@@ -200,7 +286,7 @@ class TestFieldsSurvivesTheMapping:
 class TestCursorIsExposed:
     """Client-side filtering may need a second page to reach five visits."""
 
-    def test_next_cursor_reaches_the_caller(self, db) -> None:
+    def test_next_cursor_reaches_the_caller(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_envelope([_ITEM], "2026-08-12T09:30:00+00:00"))
 
@@ -212,7 +298,7 @@ class TestCursorIsExposed:
         assert page.next_cursor == "2026-08-12T09:30:00+00:00"
         assert len(page.records) == 1
 
-    def test_last_page_has_no_cursor(self, db) -> None:
+    def test_last_page_has_no_cursor(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_envelope([_ITEM], None))
 
@@ -223,7 +309,7 @@ class TestCursorIsExposed:
 
         assert page.next_cursor is None
 
-    def test_limit_and_cursor_reach_the_wire(self, db) -> None:
+    def test_limit_and_cursor_reach_the_wire(self) -> None:
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -240,7 +326,7 @@ class TestCursorIsExposed:
         assert captured[0].url.params.get("limit") == "20"
         assert captured[0].url.params.get("cursor") == "2026-08-12T09:30:00+00:00"
 
-    def test_unknown_section_fails_at_the_call_site(self, db) -> None:
+    def test_unknown_section_fails_at_the_call_site(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:  # pragma: no cover
             raise AssertionError("must not reach the wire")
 
@@ -259,7 +345,7 @@ class TestExistingCallerUnchanged:
     reading UPCOMING bookings and keep getting a plain list.
     """
 
-    def test_default_section_is_upcoming_and_return_is_a_list(self, db) -> None:
+    def test_default_section_is_upcoming_and_return_is_a_list(self) -> None:
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -274,9 +360,35 @@ class TestExistingCallerUnchanged:
         assert isinstance(out, list)
         assert out[0].appointment_id == _ITEM["id"]
 
+    def test_through_the_adapter_the_caller_actually_uses(self) -> None:
+        """Exercise the real chain, not just the client seam.
+
+        Asserting on the client alone would stay green if someone later passed
+        ``section="history"`` from ``provider.py``. This drives
+        ``AylaYClientsAdapter.get_user_records`` — the caller whose behaviour
+        this PR promises to leave untouched — and checks the wire.
+        """
+        from apps.skills.booking.provider import AylaYClientsAdapter
+
+        captured: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(req)
+            return httpx.Response(200, json=_envelope([_ITEM]))
+
+        adapter = AylaYClientsAdapter(
+            client=_client_with(handler),
+            external_user_id="bot:max:83146139",
+            client_id="client-uuid",
+        )
+        records = adapter.get_user_records()
+
+        assert captured[0].url.params.get("section") == "upcoming"
+        assert len(records) == 1
+
 
 class TestBookingDetail:
-    def test_detail_is_fetched_by_id(self, db) -> None:
+    def test_detail_is_fetched_by_id(self) -> None:
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -294,11 +406,34 @@ class TestBookingDetail:
         # Sensitive extras stay in raw for the display layer to ignore.
         assert row.raw["notes"] == "личное"
 
-    def test_someone_elses_booking_is_a_4xx_not_an_empty_card(self, db) -> None:
+    def test_someone_elses_booking_is_a_4xx_not_an_empty_card(self) -> None:
+        """404 must stay a 4xx — asserting the base class would hide a real risk.
+
+        ``BookingUnavailableError`` also subclasses ``BookingAPIError``, so a
+        loose assert would still pass if 404 ever mapped into the 5xx arm of
+        ``_fail_status``. That arm records a breaker failure, and the breaker is
+        per-client, not per-endpoint: a customer tapping a stale booking id a
+        few times would open it for ALL booking traffic in the process.
+        """
+
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
 
-        with pytest.raises(bc.BookingAPIError):
+        with pytest.raises(bc.BookingBadRequestError) as excinfo:
+            _client_with(handler).get_booking_detail(
+                external_user_id="bot:max:83146139",
+                booking_id=_ITEM["id"],
+            )
+
+        assert excinfo.value.status_code == 404
+
+    def test_non_dict_body_is_an_outage_not_an_empty_card(self) -> None:
+        """A 200 we cannot read must not render as a visit with no fields."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": ["not", "a", "dict"]})
+
+        with pytest.raises(bc.BookingUnavailableError, match="malformed_response"):
             _client_with(handler).get_booking_detail(
                 external_user_id="bot:max:83146139",
                 booking_id=_ITEM["id"],
@@ -306,7 +441,7 @@ class TestBookingDetail:
 
 
 class TestRepeatIntent:
-    def test_prefill_is_parsed(self, db) -> None:
+    def test_prefill_is_parsed(self) -> None:
         captured: list[httpx.Request] = []
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -335,7 +470,7 @@ class TestRepeatIntent:
         assert intent.last_price == 2500.0
         assert intent.suggested_slots == []
 
-    def test_literal_none_service_id_is_rejected(self, db) -> None:
+    def test_literal_none_service_id_is_rejected(self) -> None:
         """DRF-1049: salon bookings come back with the string "None", HTTP 200."""
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -357,7 +492,79 @@ class TestRepeatIntent:
                 booking_id=_ITEM["id"],
             )
 
-    def test_garbage_specialist_id_is_rejected(self, db) -> None:
+    def test_error_carries_field_and_value_for_the_operator(self) -> None:
+        """«None» (DRF-1049) and other garbage are different tickets."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "service_id": "None",
+                        "specialist_id": _ITEM["specialist"]["id"],
+                        "last_price": 2500.0,
+                        "suggested_slots": [],
+                    }
+                },
+            )
+
+        with pytest.raises(bc.RepeatIntentUnusableError) as excinfo:
+            _client_with(handler).get_repeat_intent(
+                external_user_id="bot:max:83146139",
+                booking_id=_ITEM["id"],
+            )
+
+        assert excinfo.value.field == "service_id"
+        assert excinfo.value.value == "None"
+
+    def test_non_string_slots_are_dropped_not_stringified(self) -> None:
+        """The field is typed as ISO timestamps — «None» in it is worse than nothing."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "service_id": _ITEM["service"]["id"],
+                        "specialist_id": _ITEM["specialist"]["id"],
+                        "last_price": 2500.0,
+                        "suggested_slots": [None, 5, {"a": 1}, "2026-09-01T10:00:00+00:00"],
+                    }
+                },
+            )
+
+        intent = _client_with(handler).get_repeat_intent(
+            external_user_id="bot:max:83146139",
+            booking_id=_ITEM["id"],
+        )
+
+        assert intent.suggested_slots == ["2026-09-01T10:00:00+00:00"]
+
+    def test_ids_are_normalised(self) -> None:
+        """Braced / dash-less UUIDs must not reach the booking flow verbatim."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "service_id": "{5a1e0000-0000-4000-8000-000000000002}",
+                        "specialist_id": "7c2f000000004000800000000000_0003".replace("_", "0")[:32],
+                        "last_price": None,
+                        "suggested_slots": [],
+                    }
+                },
+            )
+
+        intent = _client_with(handler).get_repeat_intent(
+            external_user_id="bot:max:83146139",
+            booking_id=_ITEM["id"],
+        )
+
+        assert intent.service_id == "5a1e0000-0000-4000-8000-000000000002"
+        assert "-" in intent.specialist_id
+
+    def test_garbage_specialist_id_is_rejected(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,

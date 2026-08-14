@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import email.utils
 import logging
+import math
 import random
 import time
 import uuid
@@ -211,7 +212,25 @@ class RepeatIntentUnusableError(BookingAPIError):
     cannot be mistaken for "no prefill available"; the caller owes the user a
     graceful alternative, not a dead end. Not an outage: does **not** trip the
     breaker.
+
+    Carries ``field`` (which id was bad) and ``value`` (what arrived) so an
+    operator can tell the known DRF-1049 ``"None"`` from any other garbage —
+    they are different tickets. Both are ids, never personal data.
+
+    .. warning::
+
+        Going through ``AylaYClientsAdapter``, ``_translate_errors``
+        (``provider.py:341-359``) collapses every ``BookingAPIError`` into a
+        generic ``YClientsAPIError``, which would make this indistinguishable
+        from a transient failure. A caller that needs the graceful-alternative
+        branch must catch this **before** the adapter, or the adapter needs its
+        own translation arm — a follow-up this transport change leaves alone.
     """
+
+    def __init__(self, field_name: str, *, value: str | None = None) -> None:
+        super().__init__(f"repeat_intent_unusable:{field_name}")
+        self.field = field_name
+        self.value = value
 
 
 # ─── DTOs ──────────────────────────────────────────────────────────────────
@@ -282,10 +301,17 @@ class AylaUserRecord:
     master: dict[str, Any]
     datetime: str
     duration_s: int
-    raw: dict[str, Any] = field(default_factory=dict)
-    derived_status: str = ""
-    # ``None`` = the field was absent. Zero is a REAL price on the pilot
-    # (payment-free mode), so it must stay distinguishable from "unknown".
+    # ``repr=False``: ``get_booking_detail`` puts ``notes``,
+    # ``cancellation_reason`` and payment rows in here. Nothing logs the DTO
+    # today, but a future ``logger.info("...%s", record)`` would spill all of
+    # it verbatim — cheap insurance against a leak nobody meant to write.
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    # Both ``None`` = the field was absent, which is NOT the same as an empty
+    # or zero value. Zero is a real price on the payment-free pilot, and a
+    # missing ``derived_status`` would silently fail the completed-only filter
+    # for every row — indistinguishable from "this customer has no visits"
+    # unless the two cases stay separable.
+    derived_status: str | None = None
     price: float | None = None
 
 
@@ -510,9 +536,13 @@ def _parse_price(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    # ``inf``/``nan`` would render as "inf ₽" in a chat message. Unreachable
+    # from a ``DecimalField(max_digits=10)`` today, but the cost of the guard
+    # is one call and the cost of missing it is a nonsense price.
+    return parsed if math.isfinite(parsed) else None
 
 
 def _user_record_from_wire(d: dict[str, Any]) -> AylaUserRecord:
@@ -528,7 +558,7 @@ def _user_record_from_wire(d: dict[str, Any]) -> AylaUserRecord:
         datetime=start,
         duration_s=_duration_s(start, end),
         raw=d,
-        derived_status=str(d.get("derived_status") or ""),
+        derived_status=(str(raw_status) if (raw_status := d.get("derived_status")) else None),
         price=_parse_price(d.get("price")),
     )
 
@@ -1030,7 +1060,13 @@ class AylaBookingHTTPClient:
             )
         params: dict[str, Any] = {"section": section}
         if limit is not None:
-            params["limit"] = int(limit)
+            try:
+                # Not clamped to the backend's MAX_LIMIT: the ceiling is Ayla's
+                # rule to own (it silently caps at 100, ``records_api.py:308``),
+                # and duplicating it here would drift the day it changes.
+                params["limit"] = int(limit)
+            except (TypeError, ValueError):
+                raise ValueError(f"limit must be an integer, got {limit!r}") from None
         if cursor:
             params["cursor"] = cursor
         resp = self._request(
@@ -1039,20 +1075,31 @@ class AylaBookingHTTPClient:
         payload = self._ok(resp)
         # Canonical shape after the ``{"data": ...}`` envelope is stripped:
         # ``{"items": [...], "next_cursor": "<iso>"|null}``. A bare list is
-        # tolerated defensively; the ``{upcoming, history}`` shape this client
-        # used to expect never existed upstream and is deliberately NOT
-        # accepted — keeping it would preserve the false signal that let a
-        # silent empty result look like "this customer has no bookings".
+        # tolerated defensively.
+        #
+        # ANY other shape is an outage, not an empty result. That includes the
+        # ``{upcoming, history}`` shape this client used to expect: returning
+        # ``[]`` for an unrecognised body is exactly the failure this change
+        # exists to remove — the customer is told "you have no bookings" while
+        # the backend is answering with data, and nothing anywhere goes red.
+        # Same reasoning as ``_ok`` applies to unparseable JSON: a 200 we
+        # cannot read must never be silently read as "empty".
         next_cursor: str | None = None
-        if isinstance(payload, dict) and "items" in payload:
-            raw_items = payload.get("items")
-            rows = (
-                [r for r in raw_items if isinstance(r, dict)] if isinstance(raw_items, list) else []
-            )
+        if isinstance(payload, list):
+            rows = [r for r in payload if isinstance(r, dict)]
+        elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            raw_items = payload["items"]
+            rows = [r for r in raw_items if isinstance(r, dict)]
             raw_cursor = payload.get("next_cursor")
             next_cursor = str(raw_cursor) if raw_cursor else None
         else:
-            rows = _as_rows(payload)
+            logger.warning(
+                "booking_client.me_bookings_unexpected_shape section=%s type=%s keys=%s",
+                section,
+                type(payload).__name__,
+                sorted(payload)[:10] if isinstance(payload, dict) else None,
+            )
+            raise BookingUnavailableError("malformed_response")
         return AylaBookingPage(
             records=[_user_record_from_wire(r) for r in rows],
             next_cursor=next_cursor,
@@ -1068,9 +1115,25 @@ class AylaBookingHTTPClient:
     ) -> list[AylaUserRecord]:
         """Records of one page, cursor dropped — the ``AylaBookingClient`` seam.
 
-        Defaults keep the existing caller (``AylaYClientsAdapter.get_user_records``,
-        the cancel/reschedule handle lookup) reading upcoming bookings exactly
-        as before.
+        The defaults keep ``AylaYClientsAdapter.get_user_records``
+        (``provider.py:273-276``) reading upcoming bookings and receiving a
+        plain list, exactly as before.
+
+        Worth stating precisely, because it explains how the parsing defect
+        survived: with ``BOOKING_VIA_AYLA_REST`` **on** — the pilot
+        configuration, and the only one in which this adapter is selected —
+        that method has no reachable caller at all. Both call sites branch
+        away first (``tools.py:1698-1703`` to ``_proxy_master_service``,
+        ``tools.py:2710-2712`` to ``_show_my_bookings_ayla``). So "unchanged
+        behaviour" here means the seam is preserved for the flag-off path and
+        for tests, not that live traffic depends on it.
+
+        The methods DRF-1032 adds (``get_user_bookings_page``,
+        ``get_booking_detail``, ``get_repeat_intent``) are deliberately absent
+        from the ``AylaBookingClient`` Protocol: widening it would break the
+        typed fakes in suites this change is scoped out of. A later change that
+        wants records through the seam has to widen the Protocol and update
+        those fakes together.
         """
         return self.get_user_bookings_page(
             external_user_id=external_user_id,
@@ -1095,7 +1158,16 @@ class AylaBookingHTTPClient:
         """
         resp = self._request("GET", f"me/bookings/{booking_id}/", external_user_id=external_user_id)
         payload = self._ok(resp)
-        return _user_record_from_wire(payload if isinstance(payload, dict) else {})
+        if not isinstance(payload, dict):
+            # Same rule as the list read: a 200 we cannot read is an outage,
+            # not an empty card. Building a record out of ``{}`` would show the
+            # customer a visit with no service, no master and no date.
+            logger.warning(
+                "booking_client.me_booking_detail_unexpected_shape type=%s",
+                type(payload).__name__,
+            )
+            raise BookingUnavailableError("malformed_response")
+        return _user_record_from_wire(payload)
 
     def get_repeat_intent(
         self,
@@ -1118,24 +1190,33 @@ class AylaBookingHTTPClient:
         )
         payload = self._ok(resp)
         data = payload if isinstance(payload, dict) else {}
-        service_id = str(data.get("service_id") or "")
-        specialist_id = str(data.get("specialist_id") or "")
-        for field_name, value in (("service_id", service_id), ("specialist_id", specialist_id)):
+        ids: dict[str, str] = {}
+        for field_name in ("service_id", "specialist_id"):
+            value = str(data.get(field_name) or "")
             try:
-                uuid.UUID(value)
+                # Normalised: ``uuid.UUID`` also accepts braced and dash-less
+                # forms, and passing those through unchanged would hand the
+                # booking flow an id shaped differently from every other one.
+                ids[field_name] = str(uuid.UUID(value))
             except ValueError:
                 logger.warning(
-                    "booking_client.repeat_intent_unusable booking_id=%s field=%s",
+                    "booking_client.repeat_intent_unusable booking_id=%s field=%s value=%r",
                     booking_id,
                     field_name,
+                    value,
                 )
-                raise RepeatIntentUnusableError(field_name) from None
+                raise RepeatIntentUnusableError(field_name, value=value) from None
         slots = data.get("suggested_slots")
         return AylaRepeatIntent(
-            service_id=service_id,
-            specialist_id=specialist_id,
+            service_id=ids["service_id"],
+            specialist_id=ids["specialist_id"],
             last_price=_parse_price(data.get("last_price")),
-            suggested_slots=[str(s) for s in slots] if isinstance(slots, list) else [],
+            # Only strings: the field is typed as ISO-8601 slots, and
+            # stringifying whatever arrives would put ``"None"`` or
+            # ``"{'a': 1}"`` into a list the booking flow reads as timestamps.
+            suggested_slots=[s for s in slots if isinstance(s, str)]
+            if isinstance(slots, list)
+            else [],
             raw=data,
         )
 
