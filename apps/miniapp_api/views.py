@@ -50,6 +50,7 @@ from apps.integrations.ayla.payments_client import (
 from apps.integrations.ayla.user_proxy import external_user_id_for
 
 from django.conf import settings
+from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
@@ -419,6 +420,87 @@ def _collect_occupied(
     return intervals
 
 
+def _slots_from_ayla(
+    *,
+    master,
+    service,
+    date_from,
+    date_to,
+    tz,
+) -> tuple[list[dict[str, str]] | None, HttpResponse | None]:
+    """Slot starts read from Ayla, the system of record (DRF-1062).
+
+    Until this existed, the customer picker computed slots from the bot's
+    own ``apps.scheduling`` while bookings were written to Ayla — two
+    stores, and the one nobody could edit was the one being displayed.
+    The pilot's masters showed 10:00–19:00 seven days a week because that
+    is what the local ``WorkingHours`` rows said, whatever Ayla knew.
+
+    Ids, which are easy to get wrong here: ``CatalogMaster.id`` IS the
+    Ayla specialist id — the mirror upserts with ``id=dto.ayla_master_id``
+    (``catalog/services/upserter.py:161``). ``CatalogMaster.ayla_user_id``
+    is the Ayla *User* id and is NOT what the slots endpoint takes.
+
+    Returns ``(slots, None)`` or ``(None, error_response)``.
+    """
+    from apps.integrations.ayla.booking_client import get_ayla_booking_client
+
+    if not service.ayla_service_id:
+        # Not mirrored to Ayla → Ayla cannot price or size it, so there is
+        # nothing honest to show. Better a clear refusal than an empty
+        # picker that looks like "no free time".
+        return None, _error(
+            "service_unbookable",
+            "service is not linked to the booking system",
+            409,
+        )
+
+    client = get_ayla_booking_client()
+    out: list[dict[str, str]] = []
+    current = date_from
+    while current <= date_to:
+        try:
+            rows = client.get_available_times(
+                specialist_id=str(master.id),
+                date=current.isoformat(),
+                service_id=str(service.ayla_service_id),
+            )
+        except Exception:  # noqa: BLE001
+            # An upstream outage must not 500 the picker: the caller is a
+            # customer choosing a time, and a 503 they can retry is a far
+            # better answer than a stack trace. Deliberately broad — the
+            # client raises several unrelated transport/HTTP types and
+            # every one of them means the same thing here.
+            logger.exception(
+                "miniapp.slots.ayla_unavailable master=%s date=%s",
+                master.id,
+                current,
+            )
+            return None, _error(
+                "upstream_unavailable",
+                "booking system is temporarily unavailable",
+                503,
+            )
+
+        for row in rows:
+            start = row.datetime
+            if not start:
+                continue
+            parsed = parse_datetime(start)
+            if parsed is None:
+                continue
+            local = parsed.astimezone(tz)
+            out.append(
+                {
+                    "date": local.date().isoformat(),
+                    "start": local.isoformat(),
+                }
+            )
+        current += timedelta(days=1)
+
+    return out, None
+
+
 @require_http_methods(["GET"])
 @require_init_data
 @with_request_tenant
@@ -498,6 +580,24 @@ def slots(request: HttpRequest) -> HttpResponse:
         date_to = advance_cap
         if date_to < date_from:
             return JsonResponse({"slots": []})
+
+    # DRF-1062 — one source of truth per deployment. On the Ayla path the
+    # booking is written to Ayla, so the slots offered must come from Ayla
+    # too; showing times computed from the bot's own schedule while writing
+    # elsewhere is how the pilot ended up selling Sundays. Flag OFF keeps
+    # the local computation, which is correct there: that deployment also
+    # writes bookings locally.
+    if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        ayla_slots, error = _slots_from_ayla(
+            master=master,
+            service=service,
+            date_from=date_from,
+            date_to=date_to,
+            tz=tz,
+        )
+        if error is not None:
+            return error
+        return JsonResponse({"slots": ayla_slots})
 
     booking_occupied = _collect_occupied(
         tenant_id=tenant.id,
