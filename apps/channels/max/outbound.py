@@ -31,10 +31,15 @@ retains the entry for retry).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 import httpx
+
+from apps.channels.bot_context import current_bot
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from apps.channels.bot_registry import BotEntry
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +60,27 @@ def _api_base() -> str:
     return getattr(settings, "MAX_API_BASE", _DEFAULT_BASE)
 
 
-def _token() -> str:
+def _token(bot: "BotEntry | None" = None) -> str:
+    """The API token to send as (DRF-1061).
+
+    Precedence: explicit ``bot`` argument → the surrounding ``bot_scope``
+    → ``settings.MAX_BOT_TOKEN``. The last step is what keeps every existing
+    call site and deployment behaving exactly as before — a path that never
+    opts in still sends as the single configured bot.
+
+    Getting this wrong is not a crash but a wrong-sender message, so the
+    fallback is deliberately the *old* behaviour rather than an error: a
+    deployment with one bot has one possible answer, and guessing between
+    several is never better than the configured default.
+    """
+
+    if bot is not None:
+        return bot.api_token
+
+    scoped = current_bot()
+    if scoped is not None:
+        return scoped.api_token
+
     return getattr(settings, "MAX_BOT_TOKEN", "")
 
 
@@ -65,6 +90,7 @@ def send_message(
     text: str,
     attachments: list[dict[str, Any]] | None = None,
     timeout: float = 10.0,
+    bot: "BotEntry | None" = None,
 ) -> dict[str, Any]:
     """POST a message to a MAX chat.
 
@@ -78,6 +104,10 @@ def send_message(
                    MediaRef DTO contract lands in Sprint 3.
       timeout: request timeout seconds. Default 10s — well under any
                consumer-side budget for a single outbound.
+      bot: send as this bot (DRF-1061). Omit to use the surrounding
+           ``bot_scope``, then the single configured bot. Pass it explicitly
+           only when the sender is not implied by the context — otherwise
+           prefer scoping, so intermediate layers cannot forget to forward it.
 
     Returns:
       Parsed JSON response (typically the created message envelope).
@@ -86,7 +116,7 @@ def send_message(
       MaxAPIError: non-2xx OR network error.
     """
 
-    token = _token()
+    token = _token(bot)
     if not token:
         # Empty token — fail loudly. The legacy path returned False and
         # the caller had to inspect; in the new pipeline we'd rather
@@ -157,7 +187,13 @@ _CHAT_ACTIONS = {
 }
 
 
-def send_chat_action(*, chat_id: str, action: str, timeout: float = 5.0) -> None:
+def send_chat_action(
+    *,
+    chat_id: str,
+    action: str,
+    timeout: float = 5.0,
+    bot: "BotEntry | None" = None,
+) -> None:
     """Fire a MAX chat-indicator action (typing_on / mark_seen / …).
 
     Best-effort: any non-2xx or network failure logs a warning but does
@@ -174,7 +210,7 @@ def send_chat_action(*, chat_id: str, action: str, timeout: float = 5.0) -> None
         logger.warning("channels.max.outbound.unknown_action action=%r", action)
         return
 
-    token = _token()
+    token = _token(bot)
     if not token:
         return  # send_message would raise; indicators are silent.
 
