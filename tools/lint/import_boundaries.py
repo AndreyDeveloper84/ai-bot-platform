@@ -18,8 +18,17 @@ Division of labour (do not duplicate):
   - **this guard** — source→target edges TID251 can't express (G2.1,
     G5.1, G6.2) + the cross-repo `psycopg2` ban (ADR-0009 rule 2).
   - **Option C** (Code Reviewer checklist) — contracts not cheaply
-    AST-expressible (e.g. the G9 booking-ownership dual-source
-    divergence, which is a runtime-semantics invariant, not an edge).
+    AST-expressible.
+  - **G9 (this guard, DRF-1109)** — originally filed as "not cheaply
+    AST-expressible" (a runtime-semantics divergence, not an edge). The
+    2026-08-15 architecture review showed a WEAK edge form catches both
+    known instances anyway: BookingRequest is apps/booking/'s model: an
+    import of it from anywhere else risks reading a store that
+    BOOKING_VIA_AYLA_REST=ON stopped writing to (dual-source
+    divergence). The guard can't see the flag check — it flags the
+    import itself — so every existing crossing needs a BASELINE entry
+    (legitimate flag-gated reads and un-migrated debt alike); new
+    crossings must justify themselves the same way.
 
 # What this guard detects
 
@@ -99,6 +108,11 @@ class Contract:
     source_prefixes: tuple[str, ...]
     forbidden_modules: tuple[str, ...]
     message: str
+    # Repo-relative prefixes that are exempt even though they match
+    # ``source_prefixes`` — for contracts whose restricted source is
+    # "everywhere except X" rather than a positive list of source dirs
+    # (e.g. G9: everywhere except the module that owns the model).
+    exclude_prefixes: tuple[str, ...] = ()
 
 
 CONTRACTS: tuple[Contract, ...] = (
@@ -149,6 +163,21 @@ CONTRACTS: tuple[Contract, ...] = (
             "access (ADR-0009 rule 2). Use the Django ORM or Ayla REST."
         ),
     ),
+    Contract(
+        id="G9-booking-request-outside-owner",
+        issue="DRF-1109",
+        source_prefixes=("apps/",),
+        exclude_prefixes=("apps/booking/",),
+        forbidden_modules=("apps.booking.models.BookingRequest",),
+        message=(
+            "BookingRequest is owned by apps/booking/ — reading it elsewhere "
+            "risks dual-source divergence once BOOKING_VIA_AYLA_REST=ON stops "
+            "writing to it (the flag check itself is invisible to this guard). "
+            "If this is a legitimate flag-gated or historical read, add it to "
+            "BASELINE with a tracking issue; if not, route through apps/booking/ "
+            "or Ayla REST."
+        ),
+    ),
 )
 
 # ── Baseline: accepted crossings on origin/dev, each tied to its issue ─
@@ -194,6 +223,117 @@ BASELINE: frozenset[BaselineKey] = frozenset(
             "G6.2-eventbus-consumer-narrow",
             "apps/eventbus/consumers/payment.py",
             "apps.skills",
+        ),
+        # G9 — BookingRequest read outside apps/booking/ (DRF-1109). All 18
+        # pre-existing production crossings on origin/dev, generated the same
+        # way as the other contracts (empty baseline → observed crossings;
+        # see test_baseline_matches_reality). Three groups:
+        #
+        # (a) Confirmed flag-gated / dual-path by design — the file itself
+        #     references BOOKING_VIA_AYLA_REST near the read.
+        (
+            "G9-booking-request-outside-owner",
+            "apps/miniapp_api/views.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/integrations/yclients/webhooks.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/skills/booking/tools.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        # (b) Known LIVE defect, not legitimate — the periodic completion
+        #     scan reads BookingRequest with NO flag check at all (arch
+        #     review §2, A2). This is the DRF-1108 instance the rule is
+        #     required to catch; left unfixed here (out of this ticket's
+        #     scope, see IMPL_BRIEF_MECHANIZATION.md §4) but explicitly
+        #     called out — do not read this line as "legitimate".
+        (
+            "G9-booking-request-outside-owner",
+            "apps/bookings/tasks.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        # (c) Untriaged — zero BOOKING_VIA_AYLA_REST references in the file.
+        #     Neither confirmed-safe nor confirmed-broken; surfaced by this
+        #     contract for the first time (DRF-1109 investigation, 2026-08-15).
+        #     Candidates for a follow-up ticket per file/surface, not fixed
+        #     here. Includes master_api's booking-facing master surfaces
+        #     (dashboard/schedule/customers/conversations), which is the
+        #     same class of risk as A1 (Mini App slots) if BOOKING_VIA_AYLA_REST
+        #     is ON on the pilot — value UNKNOWN, not read this session.
+        (
+            "G9-booking-request-outside-owner",
+            "apps/admin_api/services/master_deactivation.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/bookings/followups.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/bookings/recheck.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/bookings/reminders_factory.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/eventbus/signals.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/integrations/yclients/tasks.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/loyalty/services.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/loyalty/subscribers.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/master_api/services/conversation_detail.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/master_api/services/conversations.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/master_api/services/customers.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/master_api/services/dashboard.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/master_api/services/schedule.py",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/master_api/tasks.py",
+            "apps.booking.models.BookingRequest",
         ),
     }
 )
@@ -457,7 +597,12 @@ def evaluate_file(
     violations: list[Violation] = []
     satisfied: set[BaselineKey] = set()
 
-    applicable = [c for c in contracts if any(rel_posix.startswith(p) for p in c.source_prefixes)]
+    applicable = [
+        c
+        for c in contracts
+        if any(rel_posix.startswith(p) for p in c.source_prefixes)
+        and not any(rel_posix.startswith(e) for e in c.exclude_prefixes)
+    ]
     # The catalog rule applies everywhere EXCEPT the sanctioned carve-out.
     catalog_applies = not rel_posix.startswith(marketplace_prefix)
     if not applicable and not catalog_applies:

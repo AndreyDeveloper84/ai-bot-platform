@@ -129,9 +129,11 @@ jobs:
       # ADR-0009 G-series module-boundary guard — source-scoped
       # forbidden-import-edge lint (#1001, Option B). Encodes G2.1
       # (skills↛yclients), G5.1 (api↛booking mutators), G6.2
-      # (eventbus consumer↛skills/channels) + the cross-repo psycopg2
-      # ban (rule 2). Replaces the never-created `.importlinter`
-      # baseline. See `tools/lint/import_boundaries.py` for the
+      # (eventbus consumer↛skills/channels), G9 (BookingRequest read
+      # outside apps/booking/ — DRF-1109, dual-source-with-Ayla risk)
+      # + the cross-repo psycopg2 ban (rule 2). Replaces the
+      # never-created `.importlinter` baseline. See
+      # `tools/lint/import_boundaries.py` for the
       # contracts, the on-`dev` baseline, and what is NOT detected.
       - name: Import-boundary guard (AST lint)
         run: uv run python tools/lint/import_boundaries.py apps/
