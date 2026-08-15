@@ -48,7 +48,13 @@ from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from apps.booking.models import BookingRequest
+from apps.master_api.services.visit_source import (
+    UPCOMING_STATUSES,
+    VisitRow,
+    master_client_ids,
+    master_visit_count,
+    master_visits,
+)
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.internal_chat.models import MasterAdminMessage
 from apps.scheduling.models import ScheduleChangeRequest, ScheduleException, WorkingHours
@@ -232,17 +238,22 @@ def _today_bounds(now: datetime, tz: ZoneInfo) -> tuple[datetime, datetime, date
     )
 
 
-def _resolve_duration(booking: BookingRequest) -> int:
-    """Pick the best-available duration for a booking row.
+def _resolve_duration(booking: VisitRow) -> int:
+    """Pick the best-available duration for a visit.
 
-    Order: ``BookingRequest.duration_min`` (snapshot) → linked
-    ``CatalogService.duration_min`` → :data:`DEFAULT_SERVICE_DURATION_MIN`.
+    Order: the visit's own window (``end_at - start_at``, which the mirror
+    always carries) → linked ``CatalogService.duration_min`` →
+    :data:`DEFAULT_SERVICE_DURATION_MIN`.
+
+    The catalog fallback is keyed on ``ayla_service_id``, not the local
+    primary key: on the Ayla path ``service_id`` is Ayla's id, and the
+    mirror stores it verbatim.
     """
 
     if booking.duration_min:
         return int(booking.duration_min)
     if booking.service_id:
-        svc = CatalogService.all_tenants.filter(id=booking.service_id).first()
+        svc = CatalogService.all_tenants.filter(ayla_service_id=booking.service_id).first()
         if svc and svc.duration_min:
             return int(svc.duration_min)
     return DEFAULT_SERVICE_DURATION_MIN
@@ -268,14 +279,13 @@ def get_active_visit(master: CatalogMaster, now: datetime) -> ActiveVisit | None
     # whose visit_at is within the last 8 hours (longer than any
     # realistic salon service) then Python-filter precisely.
     window_start = now - timedelta(hours=8)
-    candidates = list(
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            status=BookingRequest.Status.CONFIRMED,
-            visit_at__gte=window_start,
-            visit_at__lte=now,
-        ).order_by("-visit_at")[:10]
+    candidates = master_visits(
+        master,
+        start=window_start,
+        end=now,
+        statuses=UPCOMING_STATUSES,
+        newest_first=True,
+        limit=10,
     )
     for booking in candidates:
         visit_at = booking.visit_at
@@ -303,48 +313,57 @@ def get_active_visit(master: CatalogMaster, now: datetime) -> ActiveVisit | None
 # Next visit ------------------------------------------------------------
 
 
-def _is_returning_customer(master: CatalogMaster, booking: BookingRequest) -> bool:
-    """True when the client has more than one confirmed/completed
-    booking in history for this master."""
+def _is_returning_customer(master: CatalogMaster, booking: VisitRow) -> bool:
+    """True when the client has more than one live visit with this master.
+
+    Counts booked statuses — upcoming plus completed. Cancellations and
+    no-shows do not make someone a returning customer.
+    """
 
     if booking.bot_user_id is None:
         return False
-    count = BookingRequest.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        master_id=master.id,
-        bot_user_id=booking.bot_user_id,
-        status__in=[
-            BookingRequest.Status.CONFIRMED,
-            # COMPLETED is not in the enum — completed_at is the marker
-            # for «service done». Count any non-cancelled row.
-        ],
-    ).count()
-    # Add explicit completed_at rows (status may remain CONFIRMED for
-    # completed bookings — completed_at is the source of truth).
-    return count > 1
+    return master_visit_count(master, bot_user_id=booking.bot_user_id) > 1
 
 
-def _customer_intent_hint(booking: BookingRequest) -> str:
-    """Best-effort: last customer message text from the linked conversation.
+def _customer_intent_hint(booking: VisitRow) -> str:
+    """Best-effort: the customer's last message, for context before the visit.
 
-    Empty string when no conversation linked or no user-role messages
-    exist. The «AI summary» path (§M1 «Сказала: …») is out of scope —
+    Empty string when the customer has no conversation or no user-role
+    messages. The «AI summary» path (§M1 «Сказала: …») is out of scope —
     PR 7 ships raw last-message-excerpt only.
+
+    DRF-1085: the mirror has no ``conversation`` FK (the local model had a
+    snapshot one), so the conversation is found via the customer instead —
+    the same identity the inbox already groups by. Same answer whenever the
+    customer has one conversation with the salon, which is every pilot case.
 
     TODO(master mobile §M1, future PR): replace with an AI-summarised
     intent hint produced by the conversation summariser. Tracked
     alongside the M5 conversation list backend.
     """
 
-    if booking.conversation_id is None:
+    if booking.bot_user_id is None:
         return ""
     # Import locally to avoid an apps-loading cycle if conversations
     # isn't installed for some test runners.
-    from apps.conversations.models import Message
+    from apps.conversations.models import Conversation, Message
+
+    conversation_id = (
+        Conversation.all_tenants.filter(
+            bot_user_id=booking.bot_user_id,
+            deleted_at__isnull=True,
+            is_shadow=False,
+        )
+        .order_by("-last_message_at")
+        .values_list("id", flat=True)
+        .first()
+    )
+    if conversation_id is None:
+        return ""
 
     last = (
         Message.all_tenants.filter(
-            conversation_id=booking.conversation_id,
+            conversation_id=conversation_id,
             role=Message.Role.USER,
         )
         .order_by("-created_at")
@@ -370,17 +389,14 @@ def get_next_visit(master: CatalogMaster, now: datetime) -> NextVisit | None:
     tz = get_tenant_tz(master.tenant)
     _, end_of_today, _ = _today_bounds(now, tz)
 
-    booking = (
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            status=BookingRequest.Status.CONFIRMED,
-            visit_at__gt=now,
-            visit_at__lte=end_of_today,
-        )
-        .order_by("visit_at")
-        .first()
+    upcoming = master_visits(
+        master,
+        start=now + timedelta(microseconds=1),  # strictly after now
+        end=end_of_today,
+        statuses=UPCOMING_STATUSES,
+        limit=1,
     )
+    booking = upcoming[0] if upcoming else None
     if booking is None or booking.visit_at is None:
         return None
 
@@ -439,15 +455,7 @@ def get_inbox_preview(
 
     from apps.conversations.models import Conversation, Message
 
-    client_ids = (
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            bot_user_id__isnull=False,
-        )
-        .values_list("bot_user_id", flat=True)
-        .distinct()
-    )
+    client_ids = master_client_ids(master)
     if not client_ids:
         return []
 
@@ -523,13 +531,12 @@ def _occupied_intervals_today(
     """
 
     start_utc, end_utc, _ = _today_bounds(now, tz)
-    bookings = BookingRequest.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        master_id=master.id,
-        status=BookingRequest.Status.CONFIRMED,
-        visit_at__gte=start_utc,
-        visit_at__lte=end_utc,
-    ).order_by("visit_at")
+    bookings = master_visits(
+        master,
+        start=start_utc,
+        end=end_utc,
+        statuses=UPCOMING_STATUSES,
+    )
 
     intervals: list[tuple[time, time]] = []
     for b in bookings:
@@ -639,15 +646,15 @@ def get_today_summary(master: CatalogMaster, now: datetime) -> TodaySummary:
 
     tz = get_tenant_tz(master.tenant)
     start_utc, end_utc, _ = _today_bounds(now, tz)
-    today_qs = BookingRequest.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        master_id=master.id,
-        visit_at__gte=start_utc,
-        visit_at__lte=end_utc,
-    ).exclude(status__in=[BookingRequest.Status.CANCELLED, BookingRequest.Status.RESCHEDULED])
+    # Booked statuses only — cancelled and no-show rows are not clients the
+    # master is expecting. The mirror has no `rescheduled` state at all: a
+    # reschedule moves the existing row in place rather than superseding it.
+    today = master_visits(master, start=start_utc, end=end_utc)
 
-    total = today_qs.count()
-    completed = today_qs.filter(completed_at__isnull=False).count()
+    total = len(today)
+    # The mirror carries no completion timestamp, only the status — which
+    # is the more honest marker anyway.
+    completed = sum(1 for visit in today if visit.is_completed)
     window = _next_free_window(master, now)
     return TodaySummary(
         total_clients_today=total,
@@ -675,15 +682,7 @@ def get_tab_badges(master: CatalogMaster, now: datetime) -> TabBadges:
 
     # Customer-side unread — same definition as inbox_preview (no
     # assistant reply after last user message).
-    client_ids = list(
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            bot_user_id__isnull=False,
-        )
-        .values_list("bot_user_id", flat=True)
-        .distinct()
-    )
+    client_ids = master_client_ids(master)
     customer_unread = 0
     if client_ids:
         conversations = Conversation.all_tenants.filter(
@@ -757,17 +756,15 @@ def get_states(master: CatalogMaster, now: datetime) -> DashboardStates:
 
     tz = get_tenant_tz(master.tenant)
     start_utc, end_utc, _ = _today_bounds(now, tz)
-    last_today = (
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            status=BookingRequest.Status.CONFIRMED,
-            visit_at__gte=start_utc,
-            visit_at__lte=end_utc,
-        )
-        .order_by("-visit_at")
-        .first()
+    latest = master_visits(
+        master,
+        start=start_utc,
+        end=end_utc,
+        statuses=UPCOMING_STATUSES,
+        newest_first=True,
+        limit=1,
     )
+    last_today = latest[0] if latest else None
     is_day_done = False
     if last_today is not None and last_today.visit_at is not None:
         duration = _resolve_duration(last_today)
