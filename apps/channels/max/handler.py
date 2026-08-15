@@ -138,8 +138,13 @@ from apps.orchestrator.handoff import (
     handoff_to_booking,
     matches_human_handoff_request,
     route_booking_callback,
-    route_global_booking_lookup,
     route_global_human_handoff,
+)
+from apps.orchestrator.visits import (
+    CALLBACK_VISIT_REPEAT_PREFIX,
+    VISIT_CALLBACK_PREFIXES,
+    route_visit_callback,
+    route_visits,
 )
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
@@ -680,8 +685,26 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
         )
         assistant_action_type = "human_handoff"
+    elif event.text.startswith(VISIT_CALLBACK_PREFIXES):
+        # Cards and repeat taps carry an appointment id the bot itself
+        # rendered, so they resolve before the natural-language branches.
+        reply = route_visit_callback(
+            global_bot_user=bot_user,
+            callback_text=event.text,
+            trace_id=trace_id,
+        )
+        # A repeat tap is the start of a booking, not a lookup — the funnel
+        # these events exist to measure must not merge the two.
+        assistant_action_type = (
+            "booking_repeat"
+            if event.text.startswith(CALLBACK_VISIT_REPEAT_PREFIX)
+            else "visit_card"
+        )
     elif is_personal_booking_lookup(event.text):
-        reply = route_global_booking_lookup(
+        # DRF-1032: the answer now comes from the Ayla backend, not from the
+        # local mirror — a mirror row can outlive the booking it mirrors
+        # (DRF-1034), and history is where that error accumulates.
+        reply = route_visits(
             global_bot_user=bot_user,
             trace_id=trace_id,
         )

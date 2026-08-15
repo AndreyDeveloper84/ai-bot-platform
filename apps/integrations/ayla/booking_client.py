@@ -1034,6 +1034,34 @@ class AylaBookingHTTPClient:
             raw=data if isinstance(data, dict) else {},
         )
 
+    def get_specialist_service_edges(
+        self,
+        *,
+        specialist_id: str,
+        service_id: str,
+    ) -> list[dict[str, Any]]:
+        """Active bookable edges for ONE (specialist, salon service) pair.
+
+        Narrow on purpose. ``get_services`` already reads the same endpoint,
+        but it walks the whole tenant catalog, needs an active tenant scope,
+        and keeps only the ids — the row's own ``price`` (the amount Ayla
+        stamps onto a new appointment) is dropped. Repeat needs that price
+        and works on the tenant-less global path, so it asks for the single
+        row instead of filtering a catalog.
+
+        No tenant filter: ``(specialist, salon_service)`` is unique upstream
+        (``specialistservice_specialist_salon_uniq``), so the pair already
+        names at most one row.
+        """
+        return self._get_all_rows(
+            "catalog/specialist-services/",
+            params={
+                "specialist": specialist_id,
+                "salon_service": service_id,
+                "is_active": "true",
+            },
+        )
+
     def get_user_bookings_page(
         self,
         *,
