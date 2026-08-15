@@ -13,6 +13,14 @@ service). A tap without a resolvable service — legacy two-id keyboard,
 forged/foreign service, inactive service, NULL ayla id, or the legacy flag —
 gets the ask-the-service reply (listing the master's real services when it
 has any) and NO dispatch.
+
+DRF-1070 additions: that ask-the-service reply carries the services as
+BUTTONS, so nothing has to be spelled. The locks here are the ones the live
+2026-08-14 failure would have caught — a button that actually reaches the
+date/slot step, buttons (not only text) on a serviceless tap, a named answer
+when the master does not offer the tapped service, a truncated-but-honest
+list when the roster outgrows the keyboard, and a text list that stands on
+its own for a channel that drops keyboards.
 """
 
 from __future__ import annotations
@@ -24,7 +32,10 @@ import pytest
 
 from apps.booking.models import PendingBookingAction
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.channels.max.handler import _discovery_handoff_reply
+from apps.channels.max.parser import CanonicalEvent
 from apps.identity.services import resolve_or_create_bot_user, resolve_or_create_global_bot_user
+from apps.orchestrator.discovery import CALLBACK_DISCOVER_BOOK_PREFIX, DiscoveryReply
 from apps.orchestrator.handoff import handoff_to_booking, route_booking_callback
 from apps.skills.base import SkillResult
 from apps.tenancy.context import current_tenant, tenant_scope
@@ -73,6 +84,19 @@ def _service(
 
 def _link(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> MasterService:
     return MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+
+
+def _buttons(reply: DiscoveryReply) -> list[dict[str, str]]:
+    """The reply's inline-keyboard buttons, or ``[]`` when it carries none.
+
+    Reads the same ``action_data`` shape the MAX handler's
+    ``_build_attachments`` consumes — asserting on the rendered contract, not
+    on an internal helper's return value.
+    """
+    for attachment in (reply.action_data or {}).get("attachments", []):
+        if attachment.get("type") == "inline_keyboard":
+            return list(attachment["payload"]["buttons"])
+    return []
 
 
 def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypatch) -> None:
@@ -157,17 +181,26 @@ def test_handoff_should_handoff_creates_admin_task(settings, monkeypatch) -> Non
     assert current_tenant() is None  # scope released after the handoff
 
 
-def test_handoff_without_service_asks_with_the_masters_real_services(settings, monkeypatch) -> None:
-    """A serviceless tap (legacy 2-id keyboard / ambiguous query) must get the
-    ask-the-service reply LISTING this master's actual services — a workable
-    next step, not a hardcoded example — and no dispatch (a serviceless
-    dispatch is the stale-context dead-end this fix removes)."""
+def test_handoff_without_service_offers_the_masters_services_as_buttons(
+    settings, monkeypatch
+) -> None:
+    """DRF-1070: a serviceless tap (legacy 2-id keyboard / ambiguous query)
+    must answer with BUTTONS for this master's actual services — text alone is
+    what failed live on 2026-08-14 — and no dispatch (a serviceless dispatch is
+    the stale-context dead-end DRF-962 removed).
+
+    Each button carries the already-working
+    ``cb:discover:book:<tenant>:<master>:<service>`` contract, i.e. the same
+    grammar the master cards emit: no new callback namespace is introduced.
+    """
     settings.STRICT_TENANT_SCOPE = "strict"
     settings.BOOKING_VIA_AYLA_REST = True
     t = _tenant("t-noservice")
     master = _master(t, name="Анна")
-    _link(t, master, _service(t, ayla_service_id=uuid4(), name="Классический массаж", slug="c"))
-    _link(t, master, _service(t, ayla_service_id=uuid4(), name="Спортивный массаж", slug="s"))
+    classic = _service(t, ayla_service_id=uuid4(), name="Классический массаж", slug="c")
+    sport = _service(t, ayla_service_id=uuid4(), name="Спортивный массаж", slug="s")
+    _link(t, master, classic)
+    _link(t, master, sport)
     gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="504")
 
     called: list = []
@@ -175,10 +208,167 @@ def test_handoff_without_service_asks_with_the_masters_real_services(settings, m
 
     reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
 
+    buttons = _buttons(reply)
+    assert [b["label"] for b in buttons] == ["Классический массаж", "Спортивный массаж"]
+    assert [b["callback"] for b in buttons] == [
+        f"{CALLBACK_DISCOVER_BOOK_PREFIX}{t.id}:{master.id}:{classic.id}",
+        f"{CALLBACK_DISCOVER_BOOK_PREFIX}{t.id}:{master.id}:{sport.id}",
+    ]
     assert "Анна" in reply.text
-    assert "«Классический массаж»" in reply.text
-    assert "«Спортивный массаж»" in reply.text
     assert called == []
+
+
+def test_service_button_reaches_the_date_step(settings, monkeypatch) -> None:
+    """The whole point of the ticket: tapping one of those buttons must reach
+    booking's date/slot step, not loop back to the same question.
+
+    The tap is replayed through the REAL callback parser
+    (``_discovery_handoff_reply`` in the MAX global handler), so the button's
+    payload is proven parseable by the code that will receive it in production
+    — not merely well-formed to this test's eye.
+    """
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-button")
+    master = _master(t, name="Инна")
+    ayla_uuid = uuid4()
+    _link(
+        t,
+        master,
+        _service(t, ayla_service_id=ayla_uuid, name="Биоэнергетический массаж", slug="bio"),
+    )
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="509", chat_id="509")
+
+    seen: dict = {}
+
+    def fake_dispatch(ctx):
+        seen["text"] = ctx.message_text
+        seen["tenant"] = current_tenant()
+        return SkillResult(reply_text="Выберите дату:", action_data={"keyboard": []})
+
+    monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
+
+    serviceless = handoff_to_booking(
+        global_bot_user=gbu, tenant_id=t.id, master_id=master.id, chat_id="509"
+    )
+    buttons = _buttons(serviceless)
+    assert [b["label"] for b in buttons] == ["Биоэнергетический массаж"]
+    assert seen == {}, "the serviceless tap must not dispatch"
+
+    event = CanonicalEvent(
+        channel="max",
+        channel_user_id="509",
+        channel_message_id="42",
+        chat_id="509",
+        text=buttons[0]["callback"],
+    )
+    reply = _discovery_handoff_reply(event, gbu, None)
+
+    assert reply.text == "Выберите дату:"
+    assert reply.action_data == {"keyboard": []}
+    # Service context stamped from the button's id — the name was never typed.
+    assert seen["text"] == f"cb:book:pick_master:{master.id}:{ayla_uuid}"
+    assert seen["tenant"].id == t.id
+    assert current_tenant() is None
+
+
+def test_service_the_master_does_not_offer_says_so_and_offers_the_real_ones(
+    settings, monkeypatch
+) -> None:
+    """A service this master does not do must produce a NAMED answer plus the
+    real alternatives — the old reply re-asked the same question, leaving the
+    user to conclude their spelling was wrong when the master was.
+
+    The funnel event separates this cohort from every other miss.
+    """
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-notoffered")
+    master = _master(t, name="Инна")
+    offered = _service(t, ayla_service_id=uuid4(), name="Классический массаж", slug="c")
+    _link(t, master, offered)
+    # Exists in T (another master does it) but has no edge to THIS master.
+    foreign_to_master = _service(t, ayla_service_id=uuid4(), name="Маникюр", slug="m")
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="510")
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        "apps.orchestrator.handoff.emit",
+        lambda name, payload=None, **kw: events.append((name, payload or {})),
+    )
+    called: list = []
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
+
+    reply = handoff_to_booking(
+        global_bot_user=gbu,
+        tenant_id=t.id,
+        master_id=master.id,
+        service_id=foreign_to_master.id,
+    )
+
+    assert "нет услуги «Маникюр»" in reply.text
+    assert [b["label"] for b in _buttons(reply)] == ["Классический массаж"]
+    assert called == []
+    payload = dict(events)["marketplace.handoff.service_unresolved"]
+    assert payload["not_offered_by_master"] is True
+
+
+def test_menu_longer_than_the_keyboard_budget_is_truncated_and_says_so(
+    settings, monkeypatch
+) -> None:
+    """A long roster must not silently lose services: the keyboard is capped,
+    and the text says the list is partial and keeps typing as the escape
+    hatch. Silently showing 10 of 25 would be the old bug with better UI —
+    the user would never learn the missing service exists."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-long")
+    master = _master(t, name="Инна")
+    for i in range(12):
+        _link(
+            t,
+            master,
+            _service(t, ayla_service_id=uuid4(), name=f"Услуга {i:02d}", slug=f"s{i:02d}"),
+        )
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="511")
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: None)
+
+    reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
+
+    buttons = _buttons(reply)
+    # Capped, deterministically by name — never a random 10 of 12.
+    assert [b["label"] for b in buttons] == [f"Услуга {i:02d}" for i in range(10)]
+    assert "Показаны первые 10" in reply.text
+    assert "напишите" in reply.text  # typing stays available for the rest
+    assert "Услуга 11" not in reply.text
+
+
+def test_keyboardless_channel_gets_the_same_list_as_text(settings, monkeypatch) -> None:
+    """A channel that drops keyboards must still get a workable next step: the
+    text repeats every button's label verbatim, so typing one back is an exact
+    catalog name — the path that already resolves — instead of a guess."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    settings.BOOKING_VIA_AYLA_REST = True
+    t = _tenant("t-textonly")
+    master = _master(t, name="Инна")
+    _link(t, master, _service(t, ayla_service_id=uuid4(), name="Классический массаж", slug="c"))
+    _link(
+        t,
+        master,
+        _service(t, ayla_service_id=uuid4(), name="Биоэнергетический массаж", slug="bio"),
+    )
+    gbu = resolve_or_create_global_bot_user(channel="max", channel_user_id="512")
+    monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: None)
+
+    reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
+
+    buttons = _buttons(reply)
+    assert buttons, "precondition: the keyboard-capable rendering carries buttons"
+    for button in buttons:
+        assert f"• {button['label']}" in reply.text
+    # Text-only readers see the master and a list, not a bare keyboard header.
+    assert "Инна" in reply.text
+    assert reply.text.count("•") == len(buttons)
 
 
 def test_handoff_without_service_and_without_menu_still_asks(settings, monkeypatch) -> None:
@@ -233,7 +423,13 @@ def test_handoff_unresolvable_service_asks_and_does_not_dispatch(
         global_bot_user=gbu, tenant_id=t.id, master_id=master.id, service_id=service.id
     )
 
-    assert "напишите" in reply.text  # the ask-the-service family of replies
+    # ``no_edge`` is the one case the reply can name a cause for (DRF-1070):
+    # the service is real and visible in T, this master simply does not do it.
+    # The rest are ungroundable-for-other-reasons misses with no offerable
+    # alternative, so they stay the neutral ask.
+    expected = "нет услуги" if case == "no_edge" else "напишите"
+    assert expected in reply.text, case
+    assert _buttons(reply) == [], case  # nothing deliverable → no dead buttons
     assert called == []
 
 
@@ -265,10 +461,11 @@ def test_handoff_unresolved_service_emits_funnel_event(settings, monkeypatch) ->
 
 
 def test_ask_service_menu_lists_only_deliverable_services(settings, monkeypatch) -> None:
-    """The menu must not suggest a service the stamping gate cannot deliver:
-    under the Ayla flag a NULL-ayla_service_id service, when typed back,
-    still produces a serviceless card — naming it would keep the user in the
-    loop the reply exists to break."""
+    """The menu must not offer a service the stamping gate cannot deliver:
+    under the Ayla flag a NULL-ayla_service_id service, tapped or typed back,
+    still produces a serviceless card — offering it would keep the user in the
+    loop the reply exists to break (DRF-1070: as a button that would be the
+    same loop, one tap instead of one typo)."""
     settings.STRICT_TENANT_SCOPE = "strict"
     settings.BOOKING_VIA_AYLA_REST = True
     t = _tenant("t-menu")
@@ -280,7 +477,8 @@ def test_ask_service_menu_lists_only_deliverable_services(settings, monkeypatch)
 
     reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
 
-    assert "«Спортивный массаж»" in reply.text
+    assert [b["label"] for b in _buttons(reply)] == ["Спортивный массаж"]
+    assert "Спортивный массаж" in reply.text
     assert "Легаси-услуга" not in reply.text
 
 
