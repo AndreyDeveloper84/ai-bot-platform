@@ -376,7 +376,7 @@ def _touch_conversation_last_booking(
 _AnnouncementSlot = Literal["salon_notified_at", "client_notified_at"]
 
 
-def _claim_announcement(*, appointment_id: UUID, slot: _AnnouncementSlot) -> bool:
+def _claim_announcement(*, tenant: Tenant, appointment_id: UUID, slot: _AnnouncementSlot) -> bool:
     """Take the one-shot announcement slot for this appointment.
 
     ``UPDATE … SET <slot> = now() WHERE appointment_id = … AND <slot>
@@ -384,6 +384,17 @@ def _claim_announcement(*, appointment_id: UUID, slot: _AnnouncementSlot) -> boo
     atomic against a concurrent delivery of the same appointment
     (the second transaction blocks on the row lock and then matches
     zero rows). Returns True to exactly one caller, ever.
+
+    Scoped by ``tenant`` as well as by the appointment PK. Both call
+    sites have already run ``_assert_proxy_tenant``, so this cannot
+    change an outcome today; it is here so the claim is provably
+    tenant-safe *on its own* and a future caller cannot make it
+    otherwise by forgetting the assertion.
+
+    Records the claim, not the delivery: the sends are best-effort and
+    may still reach nobody. That is the intended trade — the failure
+    mode of a taken-but-undelivered claim is one missing message, the
+    failure mode of the reverse is telling a salon twice.
 
     ### Why this replaces the ``created`` flag (DRF-1069)
 
@@ -410,11 +421,17 @@ def _claim_announcement(*, appointment_id: UUID, slot: _AnnouncementSlot) -> boo
     the second one to an explicit origin marker,
     :func:`~apps.booking.client_notify.was_confirmed_in_chat`, which is
     what the client-facing side actually needs.
+
+    Mirror rows written before the columns existed are claimed by
+    migration ``booking.0018`` for the same reason: NULL means «free»,
+    and history must not become announceable the moment the feature
+    ships.
     """
 
     return (
         RemoteBookingProxy.all_tenants.filter(
             appointment_id=appointment_id,
+            tenant=tenant,
             **{f"{slot}__isnull": True},
         ).update(**{slot: timezone.now()})
         == 1
@@ -449,6 +466,14 @@ def _announce_booking_created(
       callback as well — defence in depth, and it sees the latest
       committed state.
 
+    A chat-origin booking leaves ``client_notified_at`` NULL rather
+    than claiming it silently: the column records what *this* channel
+    sent, and the dialog reply is not this channel's. The origin marker
+    is durable and appointment-keyed, so it — not the column — is what
+    keeps every later call site quiet, and it keeps working even if the
+    marker lookup is the thing that fails (it answers «already told» on
+    error).
+
     Chat origin also fixes the salon message's own «Источник:» line: the
     event cannot carry it (the bot does not pass a ``source`` through
     ``provider.create_record``, and ``RemoteBookingProxy.Source`` has no
@@ -473,7 +498,7 @@ def _announce_booking_created(
 
     chat_origin = was_confirmed_in_chat(tenant=tenant, appointment_id=appointment_id)
 
-    if _claim_announcement(appointment_id=appointment_id, slot="salon_notified_at"):
+    if _claim_announcement(tenant=tenant, appointment_id=appointment_id, slot="salon_notified_at"):
         schedule_booking_created_notification(
             tenant=tenant,
             appointment_id=appointment_id,
@@ -481,6 +506,17 @@ def _announce_booking_created(
             specialist_id=specialist_id,
             service_id=service_id,
             raw_source=CHAT_ORIGIN_SOURCE if chat_origin else raw_source,
+        )
+    else:
+        # Not a defect — someone already took this appointment's salon
+        # slot. Logged because «the salon was not told» is precisely the
+        # state DRF-1069 exists to make visible: an operator looking at
+        # a missing notification must be able to tell «already
+        # announced» from «announced by nobody».
+        logger.info(
+            "eventbus.consumer.booking.created.salon_announcement_already_claimed "
+            "appointment_id=%s",
+            appointment_id,
         )
 
     if chat_origin:
@@ -494,7 +530,7 @@ def _announce_booking_created(
     if status != RemoteBookingProxy.Status.CONFIRMED:
         return
 
-    if _claim_announcement(appointment_id=appointment_id, slot="client_notified_at"):
+    if _claim_announcement(tenant=tenant, appointment_id=appointment_id, slot="client_notified_at"):
         schedule_client_booking_confirmation(
             tenant=tenant,
             bot_user=bot_user,
@@ -1405,7 +1441,7 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     # by both call sites instead of two handlers each reasoning from
     # their own local view of the state machine.
     if not was_confirmed and _claim_announcement(
-        appointment_id=appointment_id, slot="client_notified_at"
+        tenant=tenant, appointment_id=appointment_id, slot="client_notified_at"
     ):
         schedule_client_booking_confirmation(
             tenant=tenant,

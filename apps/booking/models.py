@@ -766,10 +766,12 @@ class RemoteBookingProxy(models.Model):
     idempotency mechanism.
 
     ``salon_notified_at`` / ``client_notified_at`` are a different kind
-    of idempotency: not «did we process this event» but «was this
-    appointment already announced», which must survive re-delivery
-    under a *fresh* ``event_id`` and must be answerable no matter who
-    wrote the row. DRF-1069.
+    of idempotency: not «did we process this event» but «has the
+    announcement for this appointment already been claimed», which must
+    survive re-delivery under a *fresh* ``event_id`` and must be
+    answerable no matter who wrote the row. Rows that predate the
+    columns are claimed by migration ``0018`` so the deploy itself
+    cannot announce history. DRF-1069.
 
     Pattern note: copies the catalog ``_MirrorBase`` shape
     (``TenantScopedManager`` + ``all_tenants`` + ``synced_at``) by
@@ -895,9 +897,11 @@ class RemoteBookingProxy(models.Model):
         null=True,
         blank=True,
         help_text="Same claim, for the client-facing «вы записаны» "
-        "confirmation (DRF-1066). NULL also stays NULL for a booking "
-        "made in the dialog: there ``execute_confirm`` already answered "
-        "in chat and this channel deliberately says nothing.",
+        "confirmation (DRF-1066), taken by whichever handler decides "
+        "to send it. Stays NULL for a booking made in the bot's own "
+        "dialog: there ``execute_confirm`` already answered in chat, "
+        "this channel deliberately says nothing, and the chat-origin "
+        "marker — not this column — is what keeps it silent.",
     )
 
     # ── Audit / observability ──────────────────────────────────────

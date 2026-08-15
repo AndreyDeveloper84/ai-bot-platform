@@ -58,26 +58,43 @@ ticket exists because of a *duplicate*, so producing duplicates of our
 own would be a poor joke.
 
 Two independent guards, both erring towards silence (per brief:
-idempotency beats completeness — skipping is cheaper than doubling):
+idempotency beats completeness — skipping is cheaper than doubling).
+They answer **different** questions, and DRF-1069 exists because they
+used to be conflated:
 
-1. **``created`` at the call site.** The consumer only schedules this
-   when its ``get_or_create`` actually *inserted* the
-   :class:`~apps.booking.models.RemoteBookingProxy` row. The chat path
-   writes that mirror row itself
-   (``tools._upsert_remote_booking_proxy``) before Ayla's event ever
-   arrives, so a chat booking reaches the consumer as an *update*, not
-   an insert. The same gate also covers event re-delivery with a fresh
-   ``event_id``, which is the DRF-1030 guarantee already in place.
-2. **The chat-origin marker**, checked here in the callback —
-   :func:`was_confirmed_in_chat`. ``execute_confirm`` stamps every
-   booking it creates with ``comment = "Bot booking |
+1. **«Has this appointment's client confirmation already been
+   claimed?»** — ``RemoteBookingProxy.client_notified_at``, taken at
+   the call site by
+   ``apps.eventbus.consumers.booking._claim_announcement`` inside the
+   ingest transaction. One ``UPDATE … WHERE client_notified_at IS
+   NULL``, so exactly one caller ever wins: re-delivery under a fresh
+   ``event_id`` finds it taken, a rolled-back ingest releases it, and
+   the two call sites (``handle_booking_created`` /
+   ``handle_booking_confirmed``) share one durable fact instead of each
+   reasoning from its own view of the state machine.
+
+   This guard used to be ``get_or_create``'s ``created`` flag — «we
+   inserted the mirror row». That was never the same question, because
+   this consumer is not the only writer of the mirror: the chat path
+   writes it itself (``tools._upsert_remote_booking_proxy``) before
+   Ayla's event arrives. The flag therefore answered «not new» for
+   every dialog booking — which suppressed this message correctly by
+   accident, and suppressed the *salon* message wrongly for months
+   (DRF-1069). Nothing here may go back to reading the insert.
+
+2. **«Did this booking come from our own dialog?»** — the chat-origin
+   marker, :func:`was_confirmed_in_chat`, and this is the guard that
+   actually owns the no-duplicate rule. ``execute_confirm`` stamps
+   every booking it creates with ``comment = "Bot booking |
    yclients_record_id=<appointment id>"`` on
    :class:`~apps.booking.models.BookingRequest`, and writes that row
-   *before* the proxy mirror. Guard 1 alone would leak a duplicate if
-   the mirror write lost its race with the event or failed (it is
-   best-effort and swallows exceptions); this closes that window. It is
-   read in the ``on_commit`` callback, not at schedule time, so it sees
-   the latest committed state.
+   *before* the proxy mirror. It is checked twice: at the call site
+   (where a chat booking is skipped without even claiming the slot —
+   the claim records what *this* channel sent, and the dialog reply is
+   not this channel's) and again here in the ``on_commit`` callback,
+   which sees the latest committed state. The second check is what
+   holds when the mirror write loses its race with the event or fails
+   outright — it is best-effort and swallows exceptions.
 
 The event's own ``source`` field is deliberately **not** used as the
 discriminator: the bot does not send a source when it creates through
@@ -101,7 +118,10 @@ outstanding would be a lie. So:
 
 The two are mutually exclusive by construction: a booking created
 confirmed is announced by the first and is already ``CONFIRMED`` when
-the second runs, so the second no-ops.
+the second runs, so the second no-ops. Since DRF-1069 that reasoning is
+no longer load-bearing — both call sites take the same
+``client_notified_at`` claim, so even if the state machine ever let
+both run, only one of them would send.
 
 ### PII
 
