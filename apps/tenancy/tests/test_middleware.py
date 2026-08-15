@@ -284,3 +284,71 @@ class TestInternalEventsOptOut:
         response, _ = _call(request)
         assert response.status_code == 400
         assert b"TENANT_REQUIRED" in response.content
+
+
+class TestMasterAndIdentityOptOut:
+    """DRF-1104 — the master surface and /api/v1/me must not be strict-blocked.
+
+    Both resolve the tenant from verified initData → BotUser, exactly like
+    /api/v1/customer/ and /api/v1/admin/ which were already opted out. The
+    master surface was left opted-IN "to keep PR scope tight", which meant
+    every master endpoint answered 400 TENANT_REQUIRED before any view ran:
+    no master could reach a master screen, and /api/v1/me never returned a
+    role, so every Mini App fell back to the customer surface.
+    """
+
+    def test_master_surface_opt_out(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        request = RequestFactory().get("/api/v1/master/me")
+        response, _ = _call(request)
+        assert isinstance(response, tuple)
+
+    def test_master_nested_paths_opt_out(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        for path in (
+            "/api/v1/master/dashboard",
+            "/api/v1/master/schedule",
+            "/api/v1/master/onboarding/accept",
+        ):
+            response, _ = _call(RequestFactory().get(path))
+            assert isinstance(response, tuple), path
+
+    def test_identity_me_opt_out(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        request = RequestFactory().get("/api/v1/me")
+        response, _ = _call(request)
+        assert isinstance(response, tuple)
+
+    def test_identity_me_opt_out_tolerates_trailing_slash(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        response, _ = _call(RequestFactory().get("/api/v1/me/"))
+        assert isinstance(response, tuple)
+
+    def test_me_opt_out_is_exact_not_a_prefix(self, settings):
+        """Regression: "/api/v1/me" must not exempt /api/v1/me*.
+
+        Declared as an exact path precisely so a future /api/v1/media/ or
+        /api/v1/messages/ does not inherit the exemption by accident.
+        """
+        settings.STRICT_TENANT_SCOPE = "strict"
+        for path in ("/api/v1/media/upload", "/api/v1/messages/42", "/api/v1/members"):
+            response, _ = _call(RequestFactory().get(path))
+            assert response.status_code == 400, path
+            assert b"TENANT_REQUIRED" in response.content
+
+    def test_sibling_surfaces_still_require_tenant(self, settings):
+        """The exemption is scoped — unrelated /api/v1/ paths are unchanged."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+        response, _ = _call(RequestFactory().get("/api/v1/specialists/"))
+        assert response.status_code == 400
+        assert b"TENANT_REQUIRED" in response.content
+
+    def test_header_still_resolves_when_present_on_master(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        Tenant.objects.create(slug="formula", name="F")
+        request = RequestFactory().get("/api/v1/master/me", HTTP_X_TENANT="formula")
+        response, captured = _call(request)
+        # Opting out of the REQUIREMENT must not break header resolution.
+        assert request.tenant is not None
+        assert captured and captured[0] is not None
+        assert isinstance(response, tuple)
