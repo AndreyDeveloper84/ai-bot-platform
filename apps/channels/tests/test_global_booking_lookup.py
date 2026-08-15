@@ -309,26 +309,22 @@ class TestIsolationAndFreshness:
 
         assert backend["subjects"] == ["222", "222"]
 
-    def test_other_users_bookings_not_visible(self, mock_send, fake_redis, spy_concierge, backend):
-        _make_mirror_booking("salon-foreign", user_id=333, service="Чужая услуга")
-
-        _run_global("покажи мои записи", user_id=222, mid="i2")
-
-        text = mock_send[-1]["text"]
-        assert "Чужая услуга" not in text
-        assert "пока нет завершённых визитов" in text
-
-    def test_cancelled_and_past_rows_are_not_shown_as_live(
+    def test_the_mirror_is_not_the_source_any_more(
         self, mock_send, fake_redis, spy_concierge, backend
     ):
-        """The backend's ``upcoming`` section is active-status-and-future, and
-        the visit list is completed-only (OD-H2) — a cancelled or elapsed row
-        reaches neither, so an empty answer is the correct one."""
-        _make_mirror_booking("salon-stale", service="Отменённая услуга")
+        """A live mirror row must not surface — the backend is the source.
 
-        _run_global("покажи мои записи", mid="i3")
+        Named for what it actually proves. It seeds a mirror booking and
+        leaves the backend empty: if anything ever reads the mirror again,
+        this goes red.
+        """
+        _make_mirror_booking("salon-mirror", service="Зеркальная услуга")
 
-        assert "Отменённая услуга" not in mock_send[-1]["text"]
+        _run_global("покажи мои записи", mid="i2")
+
+        text = mock_send[-1]["text"]
+        assert "Зеркальная услуга" not in text
+        assert "пока нет завершённых визитов" in text
 
     def test_lookup_mutates_nothing(self, mock_send, fake_redis, spy_concierge, backend):
         _make_mirror_booking("salon-immutable")
@@ -433,50 +429,28 @@ class TestVisitCallbacks:
 
 
 class TestDuplicateSectionRegression:
-    def test_two_bookings_same_tenant_yield_one_scope(self, mock_send, fake_redis):
-        """``_booking_lookup_scopes`` used ``.values_list(...).distinct()`` on a
-        queryset carrying ``BookingRequest``'s default ``ordering =
-        ["-created_at"]``. Django folds ordering columns into a DISTINCT
-        SELECT, so two CONFIRMED bookings in the SAME tenant (different
-        ``created_at``) surfaced as two "different" scopes, and the reply
-        rendered that salon twice.
+    def test_one_salon_renders_once(self, mock_send, fake_redis, spy_concierge, backend):
+        """DRF-1033: two bookings in one salon used to render as two sections.
 
-        DRF-1032 moved the customer-facing read to the backend, so this helper
-        no longer drives the reply — but it is still in the tree (its removal
-        is gated on the owner accepting DRF-1033 on the pilot), so the fix is
-        pinned here directly instead of through the handler.
+        The scope-walking helper that caused it is gone with DRF-1032 — the
+        backend lists bookings across tenants itself, so there are no scopes
+        to duplicate. The user-visible guarantee is pinned here instead of the
+        deleted internals: two bookings, one list, each named once.
         """
-        from apps.orchestrator.handoff import _booking_lookup_scopes
+        backend["upcoming"] = VisitsResult(
+            status="ok",
+            visits=(
+                _visit(service="УЗ-кавитация — 1 зона", master="Тихонова Ольга"),
+                _visit(service="Массаж", master="Ольга"),
+            ),
+        )
 
-        tenant = _make_mirror_booking("salon-dup", service="УЗ-кавитация — 1 зона")
-        with tenant_scope(tenant):
-            bot_user = BotUser.objects.get(channel_user_id="222")
-            second = BookingRequest.objects.create(
-                tenant=tenant,
-                bot_user=bot_user,
-                service_name="Массаж",
-                master_name="Ольга",
-                client_name="Иван",
-                client_phone="+70000000000",
-                status=BookingRequest.Status.CONFIRMED,
-                comment=f"yclients_record_id={uuid.uuid4()}",
-            )
-            # Force a distinct created_at from the first row — auto_now_add
-            # would otherwise collapse both inserts into the same instant and
-            # mask the bug this test pins.
-            BookingRequest.objects.filter(pk=second.pk).update(
-                created_at=timezone.now() + timedelta(seconds=5)
-            )
-            global_user = BotUser.objects.get(channel_user_id="222")
+        _run_global("покажи мои записи", mid="dup1")
 
-        scopes = _booking_lookup_scopes(global_user)
-
-        assert len(scopes) == 1
-
-
-# --------------------------------------------------------------------------- #
-# Acceptance: the detector is NOT bypassed                                     #
-# --------------------------------------------------------------------------- #
+        text = mock_send[-1]["text"]
+        assert text.count("УЗ-кавитация — 1 зона") == 1
+        assert text.count("Массаж") == 1
+        assert text.count("Ваши предстоящие записи") == 1
 
 
 class TestDetectorBoundaries:

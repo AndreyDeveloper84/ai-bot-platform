@@ -18,6 +18,7 @@ import logging
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from apps.booking.services.records import (
     DEFAULT_VISIT_LIMIT,
@@ -43,6 +44,23 @@ CALLBACK_VISIT_REPEAT_PREFIX = "cb:visit:repeat:"
 
 # What the global handler matches to route a tap here.
 VISIT_CALLBACK_PREFIXES = (CALLBACK_VISIT_CARD_PREFIX, CALLBACK_VISIT_REPEAT_PREFIX)
+
+# The pilot's timezone. ``TIME_ZONE`` is UTC in this service, so
+# ``timezone.localtime`` would keep the bug DRF-1071 reported, and the
+# ``me/bookings`` response names the tenant without its zone. Same default
+# and same reasoning as ``apps.booking.client_notify.tenant_timezone``: an
+# unknown zone degrades to the pilot's real one, never to UTC.
+_DISPLAY_TZ = ZoneInfo("Europe/Moscow")
+
+_WEEKDAYS = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+)
 
 _MONTHS_GENITIVE = (
     "января",
@@ -85,8 +103,8 @@ def route_visits(
 
     emit(
         VISITS_LISTED,
-        payload={
-            "bot_user_id": str(global_bot_user.id),
+        distinct_id=str(global_bot_user.id),
+        properties={
             "upcoming_status": upcoming.status,
             "visits_status": visits.status,
             "upcoming_count": len(upcoming.visits),
@@ -152,7 +170,8 @@ def route_visit_card(
     visit = get_visit(bot_user=global_bot_user, appointment_id=appointment_id)
     emit(
         VISIT_CARD_OPENED,
-        payload={"bot_user_id": str(global_bot_user.id), "found": visit is not None},
+        distinct_id=str(global_bot_user.id),
+        properties={"found": visit is not None},
     )
     if visit is None:
         return DiscoveryReply(text=_UNAVAILABLE_TEXT)
@@ -186,7 +205,8 @@ def route_repeat(
     result = prepare_repeat(bot_user=global_bot_user, appointment_id=appointment_id)
     emit(
         REPEAT_CHECKED,
-        payload={"bot_user_id": str(global_bot_user.id), "status": result.status},
+        distinct_id=str(global_bot_user.id),
+        properties={"status": result.status},
     )
 
     if result.status == "ok" and result.entry is not None:
@@ -269,7 +289,7 @@ def _repeat_button(visit: Visit) -> dict:
                     "buttons": [
                         {
                             "label": "Записаться ещё",
-                            "callback": f"cb:visit:repeat:{visit.appointment_id}",
+                            "callback": f"{CALLBACK_VISIT_REPEAT_PREFIX}{visit.appointment_id}",
                         }
                     ]
                 },
@@ -317,7 +337,19 @@ def _repeat_refusal_text(result: RepeatResult) -> str:
 
 
 def _format_when(raw: str) -> str:
-    """ISO timestamp → «12 августа, 09:30». Empty string when unparseable."""
+    """ISO timestamp → «19 августа, среда, 14:00» in the salon's local time.
+
+    The backend serialises ``start_datetime`` straight from the database, so
+    the wire carries UTC (``...Z``). Printing it verbatim is the bug DRF-1071
+    caught on the pilot: someone booked for 14:00 Moscow time was shown
+    11:00 — the one formatting error that makes a person arrive on the wrong
+    hour. Converting is therefore not cosmetic.
+
+    The response names the tenant but not its timezone, so the pilot's zone
+    is the fallback, exactly as ``client_notify.tenant_timezone`` degrades.
+    A naive timestamp is left alone: inventing an offset for it would be the
+    same class of guess this fixes.
+    """
     if not raw:
         return ""
     try:
@@ -325,7 +357,10 @@ def _format_when(raw: str) -> str:
     except ValueError:
         logger.warning("visits.unparseable_datetime raw=%r", raw)
         return ""
-    return f"{moment.day} {_MONTHS_GENITIVE[moment.month - 1]}, {moment:%H:%M}"
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(_DISPLAY_TZ)
+    weekday = _WEEKDAYS[moment.weekday()]
+    return f"{moment.day} {_MONTHS_GENITIVE[moment.month - 1]}, {weekday}, {moment:%H:%M}"
 
 
 def _format_money(amount: Decimal | None) -> str:

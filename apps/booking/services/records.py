@@ -180,6 +180,8 @@ def list_visits(*, bot_user, limit: int = DEFAULT_VISIT_LIMIT) -> VisitsResult:
 
     collected: list[Visit] = []
     cursor: str | None = None
+    if limit <= 0:
+        return VisitsResult(status="empty")
     try:
         for _ in range(_MAX_PAGES):
             page = client.get_user_bookings_page(
@@ -189,19 +191,39 @@ def list_visits(*, bot_user, limit: int = DEFAULT_VISIT_LIMIT) -> VisitsResult:
                 cursor=cursor,
             )
             for record in page.records:
-                if record.derived_status not in COMPLETED_VISIT_STATUSES:
+                if record.derived_status is None:
+                    # The field the whole policy keys off is missing. Filtering
+                    # the row out would report "you have no visits" for what is
+                    # actually a contract change — the same silent-empty
+                    # failure this feature exists to avoid.
+                    logger.warning(
+                        "records.list_visits.status_missing booking_id=%s",
+                        record.appointment_id,
+                    )
+                    return VisitsResult(status="backend_unavailable")
+                if record.derived_status.lower() not in COMPLETED_VISIT_STATUSES:
                     continue
                 collected.append(_visit_from_record(record))
                 if len(collected) >= limit:
                     return VisitsResult(status="ok", visits=tuple(collected))
-            cursor = page.next_cursor
-            if not cursor:
+            next_cursor = page.next_cursor
+            # A cursor that does not move means the backend is not advancing;
+            # continuing would re-read the same page until the ceiling.
+            if not next_cursor or next_cursor == cursor:
+                cursor = None
                 break
+            cursor = next_cursor
     except BookingAPIError as exc:
         logger.warning("records.list_visits.unavailable err=%s", exc)
         return VisitsResult(status="backend_unavailable")
 
     if not collected:
+        if cursor:
+            # The ceiling stopped us with history still unread. Saying "you
+            # have no visits" here would be a confident falsehood — the
+            # customer may have visits on the very next page.
+            logger.warning("records.list_visits.ceiling_reached pages=%d", _MAX_PAGES)
+            return VisitsResult(status="backend_unavailable")
         return VisitsResult(status="empty")
     return VisitsResult(status="ok", visits=tuple(collected))
 
@@ -287,38 +309,60 @@ def prepare_repeat(*, bot_user, appointment_id: str) -> RepeatResult:
     entry = RepeatEntry(specialist_id=intent.specialist_id, service_id=intent.service_id)
     historical_price = _as_decimal(intent.last_price)
 
-    eligibility = _check_current_eligibility(
+    # Names come from the visit itself, and they matter in EVERY branch: a
+    # refusal that says «Мастер сейчас не принимает» instead of naming Инна is
+    # barely a repeat intent at all. The booking-time snapshot is also the
+    # right source — it is what the customer remembers happening.
+    past = get_visit(bot_user=bot_user, appointment_id=appointment_id)
+    service_name = past.service_name if past else ""
+    master_name = past.master_name if past else ""
+
+    eligibility, edge = _check_current_eligibility(
         client, specialist_id=entry.specialist_id, service_id=entry.service_id
     )
     if eligibility != "ok":
         return RepeatResult(
             status=eligibility,
             entry=entry,
+            service_name=service_name,
+            master_name=master_name,
             historical_price=historical_price,
         )
 
+    if edge is None:
+        edge = _specialist_service_edge(
+            client, specialist_id=entry.specialist_id, service_id=entry.service_id
+        )
     return RepeatResult(
         status="ok",
         entry=entry,
+        service_name=service_name,
+        master_name=master_name,
         historical_price=historical_price,
-        current_price=_current_price(
-            client, specialist_id=entry.specialist_id, service_id=entry.service_id
-        ),
+        current_price=_as_decimal(edge.get("price")) if edge else None,
     )
 
 
 # ── internals ───────────────────────────────────────────────────────────────
 
 
-def _check_current_eligibility(client, *, specialist_id: str, service_id: str) -> RepeatStatus:
+def _check_current_eligibility(
+    client, *, specialist_id: str, service_id: str
+) -> tuple[RepeatStatus, dict[str, Any] | None]:
     """Ask the authority, then name the reason if it says no.
 
-    A 404 whose body carries ``error.code`` came from the service resolver;
-    a 404 without one came from the specialist queryset, i.e. the master is
-    no longer bookable. The two shapes differ because Django's ``Http404``
-    bypasses the backend's envelope handler — a real distinction, but one
-    that rests on a side effect rather than a declared contract, so a
-    follow-up asks the backend to return the reason explicitly.
+    Returns the verdict and, when it had to look, the catalog edge — so the
+    happy path does not pay for the same lookup twice.
+
+    On refusal the reason is never guessed. A 404 carrying ``error.code``
+    came from the service resolver; a 404 without one came from Django's
+    ``Http404``, which bypasses the backend's envelope handler. That
+    difference is real but incidental — ``_err_code`` also yields
+    ``"unknown"`` for an nginx error page or a renamed route, and telling a
+    customer «мастер не принимает» because a proxy answered HTML would be an
+    infrastructure failure dressed as a fact about the salon. So the
+    master's absence is CONFIRMED with a direct question before it is
+    claimed.
     """
     probe_date = timezone.localdate().isoformat()
     try:
@@ -328,35 +372,74 @@ def _check_current_eligibility(client, *, specialist_id: str, service_id: str) -
     except BookingBadRequestError as exc:
         if exc.status_code != 404:
             logger.warning("records.repeat.probe_rejected code=%s", exc.code)
-            return "backend_unavailable"
+            return "backend_unavailable", None
         if not exc.code or exc.code == "unknown":
-            return "master_unavailable"
+            return _confirm_master_gone(client, specialist_id=specialist_id), None
         return _service_or_link(client, specialist_id=specialist_id, service_id=service_id)
     except BookingUnavailableError as exc:
         logger.warning("records.repeat.probe_unavailable err=%s", exc)
-        return "backend_unavailable"
+        return "backend_unavailable", None
     # An empty slot list is NOT a refusal: the pair is valid and the booking
     # flow will offer other days. Treating "no slots today" as "unavailable"
     # would send people away from a master who is free tomorrow.
-    return "ok"
+    return "ok", None
 
 
-def _service_or_link(client, *, specialist_id: str, service_id: str) -> RepeatStatus:
+def _confirm_master_gone(client, *, specialist_id: str) -> RepeatStatus:
+    """Second opinion before blaming the master.
+
+    ``specialists/{id}/`` answers 404 only from the catalog queryset
+    (``status=ACTIVE, is_available=True, user__is_active=True``), so a 404
+    here is a definite answer rather than an inference from the shape of an
+    error body. Anything else means we could not establish the reason, and
+    an honest outage beats a confident wrong sentence.
+    """
+    try:
+        client.get_masters(specialist_id=specialist_id)
+    except BookingBadRequestError as exc:
+        if exc.status_code == 404:
+            return "master_unavailable"
+        logger.warning("records.repeat.master_probe_rejected code=%s", exc.code)
+        return "backend_unavailable"
+    except BookingAPIError as exc:
+        logger.warning("records.repeat.master_probe_failed err=%s", exc)
+        return "backend_unavailable"
+    # The master is bookable, yet the slots resolver refused: the reason is
+    # on the service side after all.
+    return "service_unavailable"
+
+
+def _service_or_link(
+    client, *, specialist_id: str, service_id: str
+) -> tuple[RepeatStatus, dict[str, Any] | None]:
     """Distinguish a withdrawn service from a dissolved master↔service link.
 
     Only reached when the authority already refused — this call never grants
-    permission, it only picks the sentence the customer reads.
+    permission, it only picks the sentence the customer reads. A failed
+    lookup must NOT read as "the link is gone": that would turn a timeout
+    into a statement about the salon's catalog.
     """
-    edge = _specialist_service_edge(client, specialist_id=specialist_id, service_id=service_id)
-    if edge is None:
-        return "link_unavailable"
-    return "service_unavailable"
+    try:
+        rows = client.get_specialist_service_edges(
+            specialist_id=specialist_id, service_id=service_id
+        )
+    except BookingAPIError as exc:
+        logger.warning("records.repeat.edge_lookup_failed err=%s", exc)
+        return "backend_unavailable", None
+    if not rows:
+        return "link_unavailable", None
+    return "service_unavailable", rows[0]
 
 
 def _specialist_service_edge(
     client, *, specialist_id: str, service_id: str
 ) -> dict[str, Any] | None:
-    """The active bookable edge for this pair, if the catalog still has one."""
+    """The active bookable edge for this pair, or ``None`` when unknown.
+
+    Used only for the price, where "unknown" and "no edge" are equally
+    harmless: the price is simply not shown, and the historical one is never
+    passed off as current.
+    """
     try:
         rows = client.get_specialist_service_edges(
             specialist_id=specialist_id, service_id=service_id

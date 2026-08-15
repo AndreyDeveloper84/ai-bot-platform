@@ -141,6 +141,7 @@ from apps.orchestrator.handoff import (
     route_global_human_handoff,
 )
 from apps.orchestrator.visits import (
+    CALLBACK_VISIT_REPEAT_PREFIX,
     VISIT_CALLBACK_PREFIXES,
     route_visit_callback,
     route_visits,
@@ -692,7 +693,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             callback_text=event.text,
             trace_id=trace_id,
         )
-        assistant_action_type = "booking_lookup"
+        # A repeat tap is the start of a booking, not a lookup — the funnel
+        # these events exist to measure must not merge the two.
+        assistant_action_type = (
+            "booking_repeat"
+            if event.text.startswith(CALLBACK_VISIT_REPEAT_PREFIX)
+            else "visit_card"
+        )
     elif is_personal_booking_lookup(event.text):
         # DRF-1032: the answer now comes from the Ayla backend, not from the
         # local mirror — a mirror row can outlive the booking it mirrors

@@ -35,7 +35,7 @@ class _BotUser:
 def _record(
     *,
     appointment_id: str = "a1",
-    derived_status: str = "completed",
+    derived_status: str | None = "completed",
     service_name: str = "Массаж спины",
     master: str = "Инна",
     start: str = "2026-08-12T09:30:00+00:00",
@@ -63,7 +63,9 @@ class FakeClient:
         detail: AylaUserRecord | None = None,
         intent: AylaRepeatIntent | None = None,
         slots_error: Exception | None = None,
+        masters_error: Exception | None = None,
         edges: list[dict[str, Any]] | None = None,
+        edges_error: Exception | None = None,
         page_error: Exception | None = None,
         intent_error: Exception | None = None,
     ) -> None:
@@ -71,7 +73,9 @@ class FakeClient:
         self._detail = detail
         self._intent = intent
         self._slots_error = slots_error
+        self._masters_error = masters_error
         self._edges = edges if edges is not None else []
+        self._edges_error = edges_error
         self._page_error = page_error
         self._intent_error = intent_error
         self.calls: list[str] = []
@@ -86,7 +90,8 @@ class FakeClient:
 
     def get_booking_detail(self, **kwargs: Any) -> AylaUserRecord:
         self.calls.append("detail")
-        assert self._detail is not None
+        if self._detail is None:
+            raise BookingBadRequestError("http_404", status_code=404, code="NOT_FOUND")
         return self._detail
 
     def get_repeat_intent(self, **kwargs: Any) -> AylaRepeatIntent:
@@ -102,8 +107,16 @@ class FakeClient:
             raise self._slots_error
         return []
 
+    def get_masters(self, **kwargs: Any) -> list[Any]:
+        self.calls.append("masters")
+        if self._masters_error is not None:
+            raise self._masters_error
+        return [object()]
+
     def get_specialist_service_edges(self, **kwargs: Any) -> list[dict[str, Any]]:
         self.calls.append("edges")
+        if self._edges_error is not None:
+            raise self._edges_error
         return self._edges
 
 
@@ -200,7 +213,9 @@ class TestDepthAndTopUp:
 
         result = records.list_visits(bot_user=_BotUser())
 
-        assert result.status == "empty"
+        # Not "empty": history is still unread beyond the ceiling, and telling
+        # the customer they have never visited would be a confident falsehood.
+        assert result.status == "backend_unavailable"
         assert client.calls.count("page") == records._MAX_PAGES
 
     def test_history_section_is_requested(self, patch_client) -> None:
@@ -301,13 +316,15 @@ class TestRepeatHappyPath:
 
     def test_empty_slot_list_is_not_a_refusal(self, patch_client) -> None:
         """No slots TODAY says nothing about tomorrow."""
-        patch_client(FakeClient(intent=_intent(), edges=[{"price": "2500.00"}]))
+        patch_client(FakeClient(intent=_intent(), detail=_record(), edges=[{"price": "2500.00"}]))
 
         assert records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1").status == "ok"
 
     def test_current_price_comes_from_the_edge_and_change_is_visible(self, patch_client) -> None:
         """OD-H4 — historical price is a fact, never a quote."""
-        patch_client(FakeClient(intent=_intent(2500.0), edges=[{"price": "2900.00"}]))
+        patch_client(
+            FakeClient(intent=_intent(2500.0), detail=_record(), edges=[{"price": "2900.00"}])
+        )
 
         result = records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1")
 
@@ -316,7 +333,9 @@ class TestRepeatHappyPath:
         assert result.price_changed is True
 
     def test_unchanged_price_is_not_flagged(self, patch_client) -> None:
-        patch_client(FakeClient(intent=_intent(2500.0), edges=[{"price": "2500.0"}]))
+        patch_client(
+            FakeClient(intent=_intent(2500.0), detail=_record(), edges=[{"price": "2500.0"}])
+        )
 
         assert (
             records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1").price_changed is False
@@ -331,9 +350,11 @@ class TestRepeatRefusals:
         patch_client(
             FakeClient(
                 intent=_intent(),
+                detail=_record(),
                 slots_error=BookingBadRequestError(
                     "http_404_unknown", status_code=404, code="unknown"
                 ),
+                masters_error=BookingBadRequestError("http_404", status_code=404, code="unknown"),
             )
         )
 
@@ -347,6 +368,7 @@ class TestRepeatRefusals:
         patch_client(
             FakeClient(
                 intent=_intent(),
+                detail=_record(),
                 slots_error=BookingBadRequestError(
                     "http_404_NOT_FOUND", status_code=404, code="NOT_FOUND"
                 ),
@@ -364,6 +386,7 @@ class TestRepeatRefusals:
         patch_client(
             FakeClient(
                 intent=_intent(),
+                detail=_record(),
                 slots_error=BookingBadRequestError(
                     "http_404_NOT_FOUND", status_code=404, code="NOT_FOUND"
                 ),
@@ -410,12 +433,135 @@ class TestRepeatRefusals:
 
     def test_probe_outage_does_not_masquerade_as_unavailable_master(self, patch_client) -> None:
         """A 503 on the probe is OUR problem, not the master's."""
-        patch_client(FakeClient(intent=_intent(), slots_error=BookingUnavailableError("http_503")))
+        patch_client(
+            FakeClient(
+                intent=_intent(), detail=_record(), slots_error=BookingUnavailableError("http_503")
+            )
+        )
 
         assert (
             records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1").status
             == "backend_unavailable"
         )
+
+
+class TestNamesReachTheCaller:
+    """Every branch must name the service and the master.
+
+    The gap these tests close: the producer's own boundary test asserted the
+    fields carried no Cyrillic, which was vacuously true while they were
+    always empty — so a refusal read «Мастер сейчас не принимает» instead of
+    naming Инна, and nothing went red.
+    """
+
+    def test_happy_path_names_service_and_master(self, patch_client) -> None:
+        patch_client(FakeClient(intent=_intent(), detail=_record(), edges=[{"price": "2500"}]))
+
+        result = records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1")
+
+        assert result.service_name == "Массаж спины"
+        assert result.master_name == "Инна"
+
+    def test_refusal_names_them_too(self, patch_client) -> None:
+        patch_client(
+            FakeClient(
+                intent=_intent(),
+                detail=_record(),
+                slots_error=BookingBadRequestError(
+                    "http_404_NOT_FOUND", status_code=404, code="NOT_FOUND"
+                ),
+                edges=[],
+            )
+        )
+
+        result = records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1")
+
+        assert result.status == "link_unavailable"
+        assert result.service_name == "Массаж спины"
+        assert result.master_name == "Инна"
+
+
+class TestInfrastructureIsNeverStatedAsFact:
+    """OD-H1 — an outage must not be rendered as news about the salon."""
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            BookingUnavailableError("circuit_open"),
+            BookingUnavailableError("catalog_incomplete"),
+            BookingBadRequestError("http_403", status_code=403, code="FORBIDDEN"),
+        ],
+    )
+    def test_edge_lookup_failure_is_not_a_dissolved_link(
+        self, patch_client, failure: Exception
+    ) -> None:
+        """A blip while asking about the edge used to read as «мастер больше
+        не делает эту услугу» — a claim about the catalog we never verified."""
+        patch_client(
+            FakeClient(
+                intent=_intent(),
+                detail=_record(),
+                slots_error=BookingBadRequestError(
+                    "http_404_NOT_FOUND", status_code=404, code="NOT_FOUND"
+                ),
+                edges_error=failure,
+            )
+        )
+
+        result = records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1")
+
+        assert result.status == "backend_unavailable"
+
+    def test_master_absence_is_confirmed_before_it_is_claimed(self, patch_client) -> None:
+        """A code-less 404 can also be an nginx page or a renamed route.
+
+        The specialist endpoint answering 200 means the master is bookable,
+        so the refusal belongs to the service side, not to them.
+        """
+        client = patch_client(
+            FakeClient(
+                intent=_intent(),
+                detail=_record(),
+                slots_error=BookingBadRequestError(
+                    "http_404_unknown", status_code=404, code="unknown"
+                ),
+            )
+        )
+
+        result = records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1")
+
+        assert "masters" in client.calls
+        assert result.status == "service_unavailable"
+
+    def test_unreadable_master_probe_is_an_outage(self, patch_client) -> None:
+        patch_client(
+            FakeClient(
+                intent=_intent(),
+                detail=_record(),
+                slots_error=BookingBadRequestError(
+                    "http_404_unknown", status_code=404, code="unknown"
+                ),
+                masters_error=BookingUnavailableError("http_503"),
+            )
+        )
+
+        assert (
+            records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1").status
+            == "backend_unavailable"
+        )
+
+    def test_missing_status_field_is_not_an_empty_history(self, patch_client) -> None:
+        """The field the policy keys off vanishing is a contract change."""
+        page = AylaBookingPage(records=[_record(derived_status=None)])
+        patch_client(FakeClient(pages=[page]))
+
+        assert records.list_visits(bot_user=_BotUser()).status == "backend_unavailable"
+
+    def test_status_case_does_not_hide_a_visit(self, patch_client) -> None:
+        page = AylaBookingPage(records=[_record(derived_status="COMPLETED")])
+        patch_client(FakeClient(pages=[page]))
+
+        assert records.list_visits(bot_user=_BotUser()).status == "ok"
 
 
 class TestCapabilityBoundary:
@@ -426,7 +572,7 @@ class TestCapabilityBoundary:
         been broken and the concierge/Mini App callers would inherit MAX
         wording they cannot use.
         """
-        patch_client(FakeClient(intent=_intent(), edges=[{"price": "2500.00"}]))
+        patch_client(FakeClient(intent=_intent(), detail=_record(), edges=[{"price": "2500.00"}]))
 
         result = records.prepare_repeat(bot_user=_BotUser(), appointment_id="a1")
 
@@ -438,7 +584,8 @@ class TestCapabilityBoundary:
             "prefill_unusable",
             "backend_unavailable",
         }
-        assert not any(
-            isinstance(v, str) and any("а" <= ch <= "я" for ch in v.lower())
-            for v in (result.service_name, result.master_name)
-        )
+        # The names ARE Russian — they are data, not presentation. What must
+        # never appear is a rendered sentence: the status stays a machine slug
+        # so a concierge or Mini App caller can word it their own way.
+        assert result.status == "ok"
+        assert " " not in result.status

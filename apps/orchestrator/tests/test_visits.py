@@ -258,14 +258,24 @@ class TestFormatting:
     @pytest.mark.parametrize(
         ("raw", "expected"),
         [
-            ("2026-08-12T09:30:00+00:00", "12 августа, 09:30"),
-            ("2026-01-05T18:00:00+03:00", "5 января, 18:00"),
+            # The shape the wire actually carries: UTC with a trailing Z.
+            # DRF-1071 — a visit at 14:00 Moscow must not read as 11:00.
+            ("2026-08-19T11:00:00Z", "19 августа, среда, 14:00"),
+            ("2026-08-12T09:30:00+00:00", "12 августа, среда, 12:30"),
+            # Already in Moscow time — the conversion is a no-op, not a shift.
+            ("2026-01-05T18:00:00+03:00", "5 января, понедельник, 18:00"),
+            # Winter: Moscow has no DST, so the offset stays +03:00.
+            ("2026-01-05T15:00:00Z", "5 января, понедельник, 18:00"),
             ("", ""),
             ("not-a-date", ""),
         ],
     )
-    def test_dates_read_as_russian_not_as_iso(self, raw: str, expected: str) -> None:
+    def test_dates_read_as_russian_local_time_not_utc(self, raw: str, expected: str) -> None:
         assert visits_mod._format_when(raw) == expected
+
+    def test_naive_timestamp_is_not_given_an_invented_offset(self) -> None:
+        """No timezone on the wire means we do not know it — do not guess."""
+        assert visits_mod._format_when("2026-08-19T14:00:00") == "19 августа, среда, 14:00"
 
     @pytest.mark.parametrize(
         ("amount", "expected"),
@@ -278,3 +288,84 @@ class TestFormatting:
     )
     def test_money_has_no_stray_decimals(self, amount, expected: str) -> None:
         assert visits_mod._format_money(amount) == expected
+
+
+class TestCapabilityAndAdapterTogether:
+    """The seam both suites stopped talking across.
+
+    Everywhere else the adapter is driven by hand-built results and the
+    capability by a fake client — so a field the capability never fills can
+    look correct on one side and be asserted on the other. These tests drive
+    ONE fake HTTP client through the real capability into the real adapter,
+    which is the only shape that catches that class of defect.
+    """
+
+    @pytest.fixture
+    def wired(self, monkeypatch):
+        from apps.booking.services import records as records_mod
+        from apps.booking.services.tests.test_records import FakeClient, _intent, _record
+
+        def _install(**kwargs) -> FakeClient:
+            client = FakeClient(**kwargs)
+            monkeypatch.setattr(records_mod, "get_ayla_booking_client", lambda: client)
+            # Undo the module-level stubs the other tests rely on.
+            monkeypatch.setattr(visits_mod, "prepare_repeat", records_mod.prepare_repeat)
+            monkeypatch.setattr(visits_mod, "list_visits", records_mod.list_visits)
+            monkeypatch.setattr(visits_mod, "list_upcoming", records_mod.list_upcoming)
+            return client
+
+        _install.intent = _intent  # type: ignore[attr-defined]
+        _install.record = _record  # type: ignore[attr-defined]
+        return _install
+
+    def test_repeat_reply_names_the_service_and_the_master(self, wired, db) -> None:
+        wired(
+            intent=wired.intent(2500.0),
+            detail=wired.record(),
+            edges=[{"price": "2900.00"}],
+        )
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text="cb:visit:repeat:a1"
+        )
+
+        assert "Массаж спины" in reply.text
+        assert "Инна" in reply.text
+        assert "ту же услугу" not in reply.text
+        # And the price change survives the whole chain.
+        assert "2500 ₽" in reply.text
+        assert "2900 ₽" in reply.text
+
+    def test_refusal_reply_names_the_master(self, wired, db) -> None:
+        from apps.integrations.ayla.booking_client import BookingBadRequestError
+
+        wired(
+            intent=wired.intent(),
+            detail=wired.record(),
+            slots_error=BookingBadRequestError(
+                "http_404_NOT_FOUND", status_code=404, code="NOT_FOUND"
+            ),
+            edges=[],
+        )
+
+        reply = visits_mod.route_visit_callback(
+            global_bot_user=_BotUser(), callback_text="cb:visit:repeat:a1"
+        )
+
+        assert reply.text.startswith("Инна")
+        assert "больше не делает" in reply.text
+
+    def test_visits_list_survives_the_whole_chain(self, wired, db) -> None:
+        from apps.integrations.ayla.booking_client import AylaBookingPage
+
+        wired(
+            pages=[
+                AylaBookingPage(records=[wired.record()]),  # upcoming
+                AylaBookingPage(records=[wired.record(appointment_id="past")]),  # history
+            ]
+        )
+
+        reply = visits_mod.route_visits(global_bot_user=_BotUser())
+
+        assert "Массаж спины" in reply.text
+        assert "12 августа" in reply.text
