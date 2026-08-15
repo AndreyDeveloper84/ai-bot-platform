@@ -285,9 +285,19 @@ def with_legacy_fallback(
     listed in ``GLOBAL_BOT_TOKENS`` (the pilot's configuration), ``max``
     otherwise.
 
-    An unconfigured deployment (no secret or no token) yields ``()`` rather
-    than an error: that is dev/CI, where the webhook gate already rejects
-    everything, and raising here would break ``manage.py`` for everyone.
+    A deployment with no webhook secret yields ``()``: that is dev/CI, where
+    the gate rejected everything anyway, and raising here would break
+    ``manage.py`` for everyone.
+
+    **The secret alone is enough** to synthesize the entry — a missing
+    ``api_token`` does not suppress it. This mirrors the behaviour being
+    replaced exactly: the old gate compared the header against
+    ``MAX_WEBHOOK_SECRET`` and never consulted the bot token, so a
+    deployment with a secret but no token accepted webhooks and only failed
+    later, at send time. Requiring both here would turn that into a silent
+    401 on ingest — a behaviour change disguised as a refactor. Declared
+    bots are held to the stricter rule (see :func:`parse_registry`), because
+    there the configuration is explicit and can be complete.
     """
 
     if entries:
@@ -295,7 +305,7 @@ def with_legacy_fallback(
 
     secret = _clean(webhook_secret)
     token = _clean(api_token)
-    if not secret or not token:
+    if not secret:
         return ()
 
     raw_global = global_bot_tokens
@@ -316,6 +326,41 @@ def with_legacy_fallback(
             miniapp_url=_clean(miniapp_url),
             web_app=_clean(web_app),
         ),
+    )
+
+
+def effective_registry() -> tuple[BotEntry, ...]:
+    """The registry as it applies to the *current* settings.
+
+    Why this is not simply ``settings.MAX_BOT_REGISTRY``: that value is
+    computed once, when the settings module is imported. Anything that
+    changes the legacy settings afterwards — ``override_settings`` in the
+    large body of existing tests, a settings object assembled by hand — would
+    otherwise be invisible here, and the webhook gate would answer 401 to
+    requests the old code accepted.
+
+    So: prefer the parsed registry when a deployment declared one, and
+    otherwise synthesize the legacy entry from whatever the legacy settings
+    say *right now*. This is what makes the multi-bot gate a drop-in
+    replacement for the single-secret gate rather than a behavioural change.
+    """
+
+    from django.conf import settings
+
+    declared = getattr(settings, "MAX_BOT_REGISTRY", ()) or ()
+    if declared:
+        return tuple(declared)
+
+    return with_legacy_fallback(
+        (),
+        webhook_secret=getattr(settings, "MAX_WEBHOOK_SECRET", ""),
+        api_token=getattr(settings, "MAX_BOT_TOKEN", ""),
+        # Ingress resolves a legacy bot's tenant from the channel-token map,
+        # not from MAX_BOT_TENANT_SLUG — see config/settings/base.py.
+        tenant_slug="",
+        global_bot_tokens=getattr(settings, "GLOBAL_BOT_TOKENS", ""),
+        miniapp_url=getattr(settings, "MAX_MINIAPP_URL", ""),
+        web_app=getattr(settings, "MAX_BOT_WEB_APP", ""),
     )
 
 

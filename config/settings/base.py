@@ -1333,7 +1333,16 @@ try:
         _parse_bot_registry(os.environ),
         webhook_secret=MAX_WEBHOOK_SECRET,
         api_token=MAX_BOT_TOKEN,
-        tenant_slug=MAX_BOT_TENANT_SLUG,
+        # Deliberately NOT MAX_BOT_TENANT_SLUG. Ingress and the Mini App
+        # resolve tenancy from different sources today: ingress uses the
+        # CHANNEL_TOKEN_TO_TENANT_SLUG map, while the Mini App auth layer
+        # reads MAX_BOT_TENANT_SLUG. Feeding the Mini App's slug into the
+        # registry would silently change ingress behaviour for every existing
+        # deployment — on the pilot, from "tenant-less" to "formula-tela".
+        # A legacy bot therefore declares no tenant, and ingress keeps
+        # falling back to the token map exactly as before. Unifying the two
+        # sources is a real decision, not a side effect of this refactor.
+        tenant_slug="",
         global_bot_tokens=GLOBAL_BOT_TOKENS,
         miniapp_url=MAX_MINIAPP_URL,
         web_app=MAX_BOT_WEB_APP,

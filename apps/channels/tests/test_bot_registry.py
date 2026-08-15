@@ -231,15 +231,26 @@ class TestLegacyFallback:
         ("secret", "token"),
         [
             ("", ""),  # nothing configured at all — plain dev / CI
-            (SECRET, ""),  # secret present, token missing — half-configured
+            ("", TOKEN),  # token without a secret — nothing can authenticate
             (None, None),  # settings absent entirely
         ],
     )
-    def test_unconfigured_deployment_yields_empty_not_an_error(self, secret, token):
-        # A bot that cannot both receive and send is not a bot. Returning ()
-        # keeps manage.py working everywhere; raising here would break every
-        # developer machine and CI job that has no MAX credentials.
+    def test_no_webhook_secret_yields_empty_not_an_error(self, secret, token):
+        # Returning () keeps manage.py working everywhere; raising would
+        # break every developer machine and CI job with no MAX credentials.
         assert with_legacy_fallback((), webhook_secret=secret, api_token=token) == ()
+
+    def test_secret_without_token_still_registers_the_bot(self):
+        # Mirrors the gate being replaced: it compared the header against
+        # MAX_WEBHOOK_SECRET and never looked at the bot token. A deployment
+        # with a secret but no token accepted webhooks and failed later, at
+        # send time. Requiring both here would turn that into a silent 401 on
+        # ingest — a behaviour change disguised as a refactor.
+        entries = with_legacy_fallback((), webhook_secret=SECRET, api_token="")
+
+        assert len(entries) == 1
+        assert entries[0].webhook_secret == SECRET
+        assert entries[0].api_token == ""
 
     def test_explicit_registry_wins_over_legacy(self):
         explicit = parse_registry(TWO_BOTS)
