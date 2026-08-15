@@ -89,6 +89,21 @@ def is_global_bot_token(channel_token: str) -> bool:
     return bool(channel_token) and channel_token in _global_bot_tokens()
 
 
+def resolve_bot(channel_token: str):
+    """Find the registered bot a webhook secret belongs to (DRF-1061).
+
+    Returns a ``BotEntry`` or ``None``. ``None`` means the secret is not one
+    of ours, and the caller MUST answer 401 — this function is the webhook
+    authentication decision, not a hint.
+
+    Imported lazily so this module stays importable during settings load.
+    """
+
+    from apps.channels.bot_registry import effective_registry, resolve_by_webhook_secret
+
+    return resolve_by_webhook_secret(channel_token, effective_registry())
+
+
 def _resolve_tenant(channel_token: str):
     """Look up the Tenant for a channel token. Returns None if unknown."""
 
@@ -97,6 +112,26 @@ def _resolve_tenant(channel_token: str):
     # Global-bot tokens are tenant-less by design — never resolve a tenant.
     if is_global_bot_token(channel_token):
         return None
+
+    # DRF-1061: a bot declared in the registry carries its own tenant. This
+    # takes precedence over the token map — the registry is the explicit,
+    # per-bot statement, the map is the Sprint-1 stopgap. A legacy fallback
+    # entry declares no tenant (see config/settings/base.py), so existing
+    # deployments fall through to the map exactly as before.
+    bot = resolve_bot(channel_token)
+    if bot is not None and bot.tenant_slug:
+        from apps.tenancy.models import Tenant
+
+        try:
+            return Tenant.objects.get(slug=bot.tenant_slug)
+        except Tenant.DoesNotExist:
+            logger.warning(
+                "ingress.bot_tenant_unknown bot=%s slug=%s",
+                bot.slug,
+                bot.tenant_slug,
+            )
+            return None
+
     slug = _channel_token_map().get(channel_token)
     if not slug:
         return None

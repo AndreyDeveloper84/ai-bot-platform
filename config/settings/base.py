@@ -30,6 +30,15 @@ from apps.eventbus.ingest_allowlist import (
     parse_tenant_allowlist as _parse_ingest_tenant_allowlist,
 )
 
+# DRF-1061 multi-bot registry (MAX_BOT_REGISTRY block below). Same private-alias
+# convention and the same settings-load-safety property: apps/channels/__init__.py
+# is empty and bot_registry is stdlib-only (hmac, re, dataclasses).
+from apps.channels.bot_registry import (
+    BotRegistryConfigurationError as _BotRegistryConfigurationError,
+)
+from apps.channels.bot_registry import parse_registry as _parse_bot_registry
+from apps.channels.bot_registry import with_legacy_fallback as _bot_registry_with_legacy
+
 # DRF-1023 — strict parser for the CSRF_TRUSTED_ORIGINS wiring (see the
 # web-security block below). Imported under private aliases so they don't
 # leak into the settings namespace as pseudo-settings; the module is
@@ -1294,6 +1303,56 @@ CHANNEL_TOKEN_TO_TENANT_SLUG = os.environ.get("CHANNEL_TOKEN_TO_TENANT_SLUG", ""
 # (Per-tenant encrypted multi-token support is the Sprint 4 / ADR-0006 work; the
 # current single-secret gate is unchanged by #1019.)
 GLOBAL_BOT_TOKENS = os.environ.get("GLOBAL_BOT_TOKENS", "")
+
+# DRF-1061 — the registry of MAX bots this deployment serves.
+#
+# Supersedes the four single-bot assumptions documented in
+# ``apps/channels/bot_registry`` (webhook gate, outbound token, initData HMAC
+# key, tenant binding) with one enumerable structure. Declaring a bot:
+#
+#   MAX_BOTS=client,salon
+#   MAX_BOT_CLIENT_WEBHOOK_SECRET=...   MAX_BOT_SALON_WEBHOOK_SECRET=...
+#   MAX_BOT_CLIENT_API_TOKEN=...        MAX_BOT_SALON_API_TOKEN=...
+#   MAX_BOT_CLIENT_TENANT_SLUG=...      MAX_BOT_SALON_TENANT_SLUG=formula-tela
+#   MAX_BOT_CLIENT_STREAM=max_global    MAX_BOT_SALON_STREAM=max_salon
+#   MAX_BOT_CLIENT_MINIAPP_URL=...      MAX_BOT_SALON_MINIAPP_URL=...
+#
+# ADDITIVE BY CONSTRUCTION: with MAX_BOTS unset, the fallback synthesizes the
+# single legacy bot from MAX_WEBHOOK_SECRET / MAX_BOT_TOKEN / MAX_BOT_TENANT_SLUG
+# and reproduces today's ingress routing (``max_global`` iff the secret is in
+# GLOBAL_BOT_TOKENS, else ``max``). Existing deployments and the ~900 tests that
+# set those settings directly are unaffected — do not remove the legacy names as
+# part of this change.
+#
+# NOTE for readers of the GLOBAL_BOT_TOKENS comment above: the "single shared
+# secret" gate it describes is what DRF-1061 replaces. Once a deployment declares
+# MAX_BOTS, the gate matches against every registered secret and the matching
+# entry — not the GLOBAL_BOT_TOKENS membership test — decides the stream.
+try:
+    MAX_BOT_REGISTRY = _bot_registry_with_legacy(
+        _parse_bot_registry(os.environ),
+        webhook_secret=MAX_WEBHOOK_SECRET,
+        api_token=MAX_BOT_TOKEN,
+        # Deliberately NOT MAX_BOT_TENANT_SLUG. Ingress and the Mini App
+        # resolve tenancy from different sources today: ingress uses the
+        # CHANNEL_TOKEN_TO_TENANT_SLUG map, while the Mini App auth layer
+        # reads MAX_BOT_TENANT_SLUG. Feeding the Mini App's slug into the
+        # registry would silently change ingress behaviour for every existing
+        # deployment — on the pilot, from "tenant-less" to "formula-tela".
+        # A legacy bot therefore declares no tenant, and ingress keeps
+        # falling back to the token map exactly as before. Unifying the two
+        # sources is a real decision, not a side effect of this refactor.
+        tenant_slug="",
+        global_bot_tokens=GLOBAL_BOT_TOKENS,
+        miniapp_url=MAX_MINIAPP_URL,
+        web_app=MAX_BOT_WEB_APP,
+    )
+except _BotRegistryConfigurationError as exc:
+    # Refuse to boot rather than serve a half-configured bot: an ambiguous
+    # registry means webhooks authenticate against the wrong secret, replies go
+    # out as the wrong bot, or a Mini App silently 401s on every screen. All
+    # three are far more expensive to diagnose in production than at startup.
+    raise ImproperlyConfigured(f"Invalid MAX bot registry configuration: {exc}") from exc
 
 # #1046 — welcome + 152-ФЗ consent capture on the tenant-less global marketplace
 # path (`_handle_global_max_event_inner`). Default OFF so enabling is an explicit,

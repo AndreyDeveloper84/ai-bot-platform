@@ -74,7 +74,11 @@ class InitDataStale(InitDataError):
 
 
 class InitDataNotConfigured(InitDataError):
-    """``MAX_BOT_TOKEN`` is unset — server can't verify anything."""
+    """No bot token is configured — the server can't verify anything.
+
+    Either the bot registry is empty and ``MAX_BOT_TOKEN`` is unset, or an
+    explicit empty ``bot_token`` override was passed.
+    """
 
 
 @dataclass(frozen=True)
@@ -92,12 +96,74 @@ class VerifiedInitData:
     user: dict[str, Any]
     auth_date: int
     chat: dict[str, Any] | None = None
+    #: Slug of the bot whose token verified this payload (DRF-1061).
+    #:
+    #: This is the *only* trustworthy answer to "which bot did the user open
+    #: this Mini App from". With one Mini App address per bot the URL cannot
+    #: tell them apart, and initData carries no bot identifier — but the
+    #: signature does, because each bot signs with its own token. Callers use
+    #: it to pick the right tenant and to avoid showing one bot's surface to
+    #: the other's audience. Empty when a legacy single-token path verified.
+    bot_slug: str = ""
 
     @property
     def user_id(self) -> str:
         """Channel-side user id as string (MAX uses integers but we store str)."""
 
         return str(self.user.get("id", ""))
+
+
+def _candidate_tokens(bot_token: str | None) -> list[tuple[str, str]]:
+    """Return ``(bot_slug, token)`` pairs to try, in priority order.
+
+    Three sources, deliberately in this order:
+
+    1. An explicit ``bot_token`` argument — the pre-existing test override.
+       Kept first so existing callers and tests behave identically.
+    2. The bot registry (DRF-1061). One entry per bot this deployment
+       serves; each Mini App signs with its own bot's token.
+    3. ``settings.MAX_BOT_TOKEN`` — the pre-registry single-bot setting.
+
+    Source 3 is what makes the change additive: a deployment that never
+    declared ``MAX_BOTS`` keeps verifying against exactly the key it always
+    did. In practice the registry's legacy fallback already synthesizes an
+    entry from that same setting, so source 3 is belt-and-braces for a
+    settings object built without it (notably ``override_settings`` in tests
+    that set only ``MAX_BOT_TOKEN``).
+    """
+
+    if bot_token is not None:
+        return [("", bot_token)] if bot_token else []
+
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for entry in getattr(settings, "MAX_BOT_REGISTRY", ()) or ():
+        token = getattr(entry, "api_token", "")
+        if token and token not in seen:
+            seen.add(token)
+            pairs.append((getattr(entry, "slug", ""), token))
+
+    legacy = getattr(settings, "MAX_BOT_TOKEN", "")
+    if legacy and legacy not in seen:
+        pairs.append(("", legacy))
+
+    return pairs
+
+
+def _expected_hash(token: str, data_check_string: str) -> str:
+    """MAX/Telegram WebApp two-stage HMAC for one candidate bot token."""
+
+    secret_key = hmac.new(
+        key=b"WebAppData",
+        msg=token.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).digest()
+    return hmac.new(
+        key=secret_key,
+        msg=data_check_string.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).hexdigest()
 
 
 def extract_init_data(authorization_header: str | None) -> str:
@@ -127,16 +193,19 @@ def verify_init_data(
     raw
         The full URL-encoded query string from ``WebApp.initData``.
     bot_token
-        Override for testing. Defaults to ``settings.MAX_BOT_TOKEN``.
+        Verify against exactly this token and nothing else. Test override;
+        when omitted, every bot in the registry is tried (see
+        :func:`_candidate_tokens`) and the matching one is reported back as
+        ``VerifiedInitData.bot_slug``.
     now
         Override for testing. Defaults to ``time.time()``.
     max_age_seconds
         Reject if ``now - auth_date > max_age_seconds``. Default 60 min.
     """
 
-    token = bot_token if bot_token is not None else getattr(settings, "MAX_BOT_TOKEN", "")
-    if not token:
-        raise InitDataNotConfigured("MAX_BOT_TOKEN is not configured")
+    candidates = _candidate_tokens(bot_token)
+    if not candidates:
+        raise InitDataNotConfigured("no MAX bot token is configured")
 
     if not raw:
         raise InitDataMalformed("empty initData")
@@ -162,18 +231,20 @@ def verify_init_data(
     # the URL-decoded payload (parse_qsl already decoded them).
     data_check_string = "\n".join(f"{k}={params[k]}" for k in sorted(params))
 
-    secret_key = hmac.new(
-        key=b"WebAppData",
-        msg=token.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).digest()
-    expected_hash = hmac.new(
-        key=secret_key,
-        msg=data_check_string.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).hexdigest()
+    # Try every configured bot. A Mini App is opened *from a bot*, so its
+    # initData is signed with that bot's token — and neither the payload nor
+    # the HTTP request carries a bot identifier, so the only way to learn
+    # which bot it was is to find the key that verifies. The loop does not
+    # break early: an early exit would leak, via response timing, which
+    # registry position matched.
+    matched_slug = ""
+    matched = False
+    for slug, candidate in candidates:
+        if hmac.compare_digest(_expected_hash(candidate, data_check_string), received_hash):
+            matched = True
+            matched_slug = slug
 
-    if not hmac.compare_digest(expected_hash, received_hash):
+    if not matched:
         raise InitDataBadSignature("HMAC mismatch")
 
     # auth_date freshness — required field after HMAC passed.
@@ -210,6 +281,7 @@ def verify_init_data(
         user=user,
         auth_date=auth_date,
         chat=chat,
+        bot_slug=matched_slug,
     )
 
 

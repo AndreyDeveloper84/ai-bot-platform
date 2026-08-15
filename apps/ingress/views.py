@@ -39,17 +39,16 @@ on every inbound. See `apps/tenancy/middleware.py` exemption list.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import logging
 from typing import Any
 
-from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.ingress.services import is_global_bot_token, record_webhook
+from apps.channels.bot_registry import LEGACY_SLUG
+from apps.ingress.services import record_webhook, resolve_bot
 from apps.ingress.streams import enqueue
 
 logger = logging.getLogger(__name__)
@@ -74,16 +73,17 @@ def max_webhook(request: HttpRequest) -> HttpResponse:
     loop picks it up off the stream and handles in a worker.
     """
 
-    secret_expected = getattr(settings, "MAX_WEBHOOK_SECRET", "")
     secret_got = request.headers.get("X-Max-Bot-Api-Secret", "")
-    # Constant-time comparison: a `!=` compare leaks the matching prefix
-    # length via response timing; `hmac.compare_digest` is timing-safe.
-    # The empty-secret short-circuit stays — when MAX_WEBHOOK_SECRET is
-    # unset (dev / CI), every request is unauthorized regardless of header.
-    if not secret_expected or not hmac.compare_digest(
-        secret_got.encode("utf-8"), secret_expected.encode("utf-8")
-    ):
-        # Don't leak whether the secret is missing or wrong; both → 401.
+    # DRF-1061: the header is matched against every registered bot, not a
+    # single MAX_WEBHOOK_SECRET, and the matching entry IS the bot identity —
+    # the same value authenticates the request and names its sender. Matching
+    # is timing-safe (`hmac.compare_digest` per entry, no early break inside
+    # the registry lookup); an unconfigured deployment has an empty registry
+    # and rejects everything, as the empty-secret short-circuit did before.
+    bot = resolve_bot(secret_got)
+    if bot is None:
+        # Don't leak whether the secret is missing, wrong, or belongs to an
+        # unregistered bot; all → 401.
         logger.warning("channels.max.webhook.unauthorized header_present=%s", bool(secret_got))
         return JsonResponse({"error": "unauthorized"}, status=401)
 
@@ -103,6 +103,22 @@ def max_webhook(request: HttpRequest) -> HttpResponse:
 
     external_event_id = _extract_external_event_id(payload)
 
+    # DRF-1061 — namespace the dedup key per declared bot.
+    #
+    # The journal is unique on (channel, external_event_id), and `channel` is
+    # the literal "max" for every bot on this endpoint. Two bots therefore
+    # share one id space: if MAX ever issued the same update id to both, the
+    # second event would dedup against the first, return created=False, and
+    # never be enqueued — a silently dropped message. Whether MAX ids are
+    # globally unique across bots is not documented, so this does not rely on
+    # it.
+    #
+    # Only DECLARED bots get a namespace. The legacy fallback entry keeps the
+    # bare id, so existing deployments write the same journal rows they always
+    # did — and with one bot there is nothing to collide with anyway.
+    if bot.slug != LEGACY_SLUG:
+        external_event_id = f"{bot.slug}:{external_event_id}"
+
     journal_row, created = record_webhook(
         channel="max",
         external_event_id=external_event_id,
@@ -111,34 +127,27 @@ def max_webhook(request: HttpRequest) -> HttpResponse:
     )
 
     if created:
-        if is_global_bot_token(secret_got):
-            # Nationwide global bot (#1019) — route to the tenant-less stream.
-            # `tenant_id=None` → the consumer enters `tenant_scope(None)` and
-            # `GlobalMaxHandler(requires_tenant=False)` runs discovery without a
-            # tenant. A tenant is selected only at booking.
-            enqueue(
-                channel="max_global",
-                payload=payload,
-                tenant_id=None,
-            )
-            logger.info(
-                "channels.max.webhook.enqueued_global external_event_id=%s",
-                external_event_id,
-            )
-        else:
-            resolved_tenant_id = (
-                str(journal_row.resolved_tenant_id) if journal_row.resolved_tenant_id else None
-            )
-            enqueue(
-                channel="max",
-                payload=payload,
-                tenant_id=resolved_tenant_id,
-            )
-            logger.info(
-                "channels.max.webhook.enqueued external_event_id=%s tenant=%s",
-                external_event_id,
-                resolved_tenant_id,
-            )
+        # The stream comes from the bot's registry entry. For the nationwide
+        # bot that is `max_global` with `tenant_id=None`: the consumer enters
+        # `tenant_scope(None)` and `GlobalMaxHandler(requires_tenant=False)`
+        # runs discovery without a tenant, which is selected only at booking.
+        # For a tenant-bound bot (the salon bot) it is that bot's own stream,
+        # carrying the tenant resolved in `record_webhook`.
+        resolved_tenant_id = (
+            str(journal_row.resolved_tenant_id) if journal_row.resolved_tenant_id else None
+        )
+        enqueue(
+            channel=bot.stream,
+            payload=payload,
+            tenant_id=resolved_tenant_id,
+        )
+        logger.info(
+            "channels.max.webhook.enqueued external_event_id=%s bot=%s stream=%s tenant=%s",
+            external_event_id,
+            bot.slug,
+            bot.stream,
+            resolved_tenant_id,
+        )
     else:
         logger.info("channels.max.webhook.dedup external_event_id=%s", external_event_id)
 

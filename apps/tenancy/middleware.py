@@ -73,10 +73,20 @@ STRICT_OPT_OUT_PREFIXES = (
     "/api/v1/customer/",
     # Admin REST API (PR 2 / MM1-MM3): tenant resolved from verified
     # initData → BotUser → tenant inside @require_admin_role. The
-    # X-Tenant header is never sent. (Master surface /api/v1/master/
-    # follows the same pattern but is opted in to strict mode for
-    # parity with PR 1 — left as-is to keep PR scope tight.)
+    # X-Tenant header is never sent.
     "/api/v1/admin/",
+    # Master REST API (DRF-1104): same initData → BotUser → tenant
+    # pattern as /api/v1/customer/ and /api/v1/admin/ above, resolved
+    # inside @require_master_init_data. It was left opted-IN to strict
+    # mode "to keep PR scope tight" when the admin surface was added —
+    # an oversight, not a decision, and the comment here said so.
+    #
+    # Effect on the pilot: every master endpoint answered 400
+    # TENANT_REQUIRED before any view ran, so no master could ever reach
+    # a master screen. Strict mode was protecting nothing here — the
+    # tenant does not come from the header on this surface — while
+    # blocking the surface completely.
+    "/api/v1/master/",
     # #732 (PRE_PILOT) — temporary 410 Gone for retired YooKassa
     # webhook. YooKassa has no X-Tenant header (external webhook).
     # Without this opt-out the strict-mode flip (2026-05-28 per
@@ -96,6 +106,21 @@ STRICT_OPT_OUT_PREFIXES = (
     # legitimate booking.*/payment.*/billing.* delivery.
     "/api/v1/internal/events/",
 )
+
+# Exact paths (not prefixes) that opt out of strict mode.
+#
+# ``/api/v1/me`` (DRF-1104) is the shared identity endpoint every Mini App
+# calls on launch to learn its role and capabilities. It is mounted at the
+# bare ``/api/v1/`` prefix precisely because it is shared across the
+# customer, master and admin surfaces — all three of which resolve the
+# tenant from verified initData, never from a header. Strict mode answered
+# it 400 TENANT_REQUIRED, so the frontend never learned the caller's role
+# and fell back to the customer surface for everyone, including masters.
+#
+# Matched exactly rather than by prefix: ``"/api/v1/me"`` as a prefix would
+# also silently opt out any future ``/api/v1/me*`` path (``/api/v1/media/``,
+# ``/api/v1/messages/``…), widening the exemption by accident.
+STRICT_OPT_OUT_EXACT_PATHS = ("/api/v1/me",)
 
 # Tri-value setting (audit | strict | off). Default audit per ADR-0001.
 VALID_SCOPE_MODES = ("audit", "strict", "off")
@@ -122,6 +147,8 @@ def _strict_required(path: str) -> bool:
     """True if path falls under strict-mode enforcement (and is not opted out)."""
 
     if not any(path.startswith(p) for p in STRICT_REQUIRED_PREFIXES):
+        return False
+    if path.rstrip("/") in STRICT_OPT_OUT_EXACT_PATHS:
         return False
     if any(path.startswith(p) for p in STRICT_OPT_OUT_PREFIXES):
         return False
