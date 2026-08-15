@@ -45,6 +45,14 @@ no new queue, no dependency on the mobile app.
   registers :func:`notify_booking_created` through
   ``transaction.on_commit``; a rolled-back ``booking.created`` must
   never announce a booking that does not exist.
+* **Once per appointment — decided by the caller, not here.** This
+  module sends whatever it is handed; the «only once» guarantee is the
+  consumer's per-appointment claim on
+  ``RemoteBookingProxy.salon_notified_at``
+  (``apps.eventbus.consumers.booking._claim_announcement``). Until
+  DRF-1069 that gate was «we inserted the mirror row», which was false
+  for every booking made in the bot's own dialog — and so the salon
+  heard about none of them. Any new call site must take the claim too.
 * **Best-effort, hard.** Nothing here may break event ingestion. A
   failure would turn a *missing notification* into a *dead-lettered
   booking event* — strictly worse than the status quo. Everything is
@@ -63,6 +71,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass
+from typing import Final
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -97,6 +106,19 @@ _SOURCE_LABELS: dict[str, str] = {
     "bot": "бот Ayla",
     "miniapp": "мини-приложение",
 }
+
+# Source value the consumer substitutes when local state proves the
+# booking was made in the bot's own dialog (DRF-1069).
+#
+# The event cannot tell us this: the bot does not pass a ``source``
+# through ``apps.skills.booking.provider.create_record``, and
+# ``RemoteBookingProxy.Source`` carries no bot value at all — the mirror
+# row the dialog path writes labels itself ``automation``. Since the
+# conversational booking is the product's main path and DRF-1069 is what
+# first brings those bookings to the salon at all, «Источник:
+# автоматизация» would be the salon's introduction to them. It is a
+# label, nothing branches on it.
+CHAT_ORIGIN_SOURCE: Final[str] = "ayla_bot"
 
 
 @dataclass(frozen=True)

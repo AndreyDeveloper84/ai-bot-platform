@@ -14,7 +14,10 @@ Covered:
 * nobody else's data is in it;
 * **no duplicate for a booking made in the dialog** — where
   ``execute_confirm`` already replied — via both guards independently:
-  the consumer's ``created`` gate and the chat-origin marker;
+  the consumer's per-appointment ``client_notified_at`` claim (DRF-1069;
+  it replaced the ``get_or_create`` ``created`` flag, which answered a
+  different question and cost the salon every dialog booking) and the
+  chat-origin marker;
 * a client with no bot chat is skipped quietly, not warned about;
 * wiring: sent after commit for a Mini App booking, nothing on
   rollback, nothing on event re-delivery;
@@ -582,8 +585,9 @@ class TestConsumerWiring:
 
         ``_upsert_remote_booking_proxy`` is best-effort and swallows its
         exceptions, and it races the inbound event. When it loses or
-        fails, the consumer's ``created`` gate is open — the marker is
-        what keeps the customer from being told twice.
+        fails, this handler inserts the mirror row itself and the
+        ``client_notified_at`` claim is free for the taking — the marker
+        is what keeps the customer from being told twice.
         """
 
         _make_chat_booking_marker(tenant, client_bot_user)
@@ -591,7 +595,7 @@ class TestConsumerWiring:
             handle_booking_created(_created_envelope(source="ayla_bot"))
         assert send.calls == []
         # The proxy really was inserted by this handler — i.e. guard 1
-        # was genuinely open and guard 2 is what did the work.
+        # was genuinely available and guard 2 is what did the work.
         assert RemoteBookingProxy.all_tenants.filter(
             appointment_id=uuid.UUID(APPOINTMENT_ID)
         ).exists()
