@@ -54,6 +54,13 @@ _MAX_TOKENS = 5
 # Deliberately a short, literal list and NOT stemming, a stopword corpus, or
 # any NLP: it covers the observed phrasings at pilot scale and stays trivially
 # auditable. A word here can only ever widen results, never narrow them.
+#
+# «запиши» / «запишите» / «меня» (DRF-1102): the deterministic new-booking
+# branch (apps.orchestrator.concierge.generate_direct_show_masters_reply)
+# forwards the user's RAW turn as specialization, not a model-normalized
+# substring — so «запиши меня на массаж» arrives whole, and without these
+# three the imperative prefix alone zeroed out a query for a service the
+# salon actually offers, same failure mode as the «хочу» case above.
 _FILLER_TOKENS = frozenset(
     {
         "хочу",
@@ -63,10 +70,13 @@ _FILLER_TOKENS = frozenset(
         "нужна",
         "нужно",
         "мне",
+        "меня",
         "бы",
         "на",
         "записаться",
         "запись",
+        "запиши",
+        "запишите",
         "хотел",
         "хотела",
         "можно",

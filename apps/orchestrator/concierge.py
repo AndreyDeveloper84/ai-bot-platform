@@ -54,9 +54,11 @@ from apps.marketplace.discovery import discover_masters
 from apps.orchestrator.discovery import (
     _MAX_MASTER_CARDS,
     _MAX_REPLY_CHARS,
+    ASK_CLARIFICATION_TOOL_SPEC,
     SHOW_MASTERS_TOOL_SPEC,
     DiscoveryReply,
     _discovery_voice_fields,
+    _render_ask_clarification,
     _render_master_cards,
 )
 from apps.orchestrator.llm.templates import get_fallback
@@ -214,7 +216,7 @@ class GlobalConversationStore:
         return list(reversed(qs[:limit]))
 
 
-_KNOWN_TOOLS = frozenset({SHOW_MASTERS_TOOL_SPEC["name"]})
+_KNOWN_TOOLS = frozenset({SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]})
 
 
 def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
@@ -222,7 +224,11 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
 
     No I/O: the marketplace carve-out executes in the wrapper's sync scope
     (see module docstring). Unknown tools and malformed arguments degrade
-    to ``ask_clarification`` so the concierge rephrases instead of crashing.
+    to ``ask_clarification`` (question-less — ``generate_concierge_reply``
+    treats that as an internal failure and falls back to the safe line, same
+    as before this tool existed) so the concierge rephrases instead of
+    crashing. A genuine ``ask_clarification`` call (DRF-1102) carries the
+    model's own question + options through, distinct from that degrade path.
     """
     name = getattr(tool_call.function, "name", "")
     if name not in _KNOWN_TOOLS:
@@ -240,6 +246,14 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         )
     if not isinstance(args, dict):
         args = {}
+    if name == ASK_CLARIFICATION_TOOL_SPEC["name"]:
+        return ToolResult(
+            action_type=ActionType.ASK_CLARIFICATION,
+            action_data={
+                "question": args.get("question", ""),
+                "options": args.get("options") or [],
+            },
+        )
     return ToolResult(
         action_type=ActionType.SHOW_MASTERS,
         action_data={"arguments": args},
@@ -280,6 +294,12 @@ def build_concierge_system_prompt(
         "Это разговор-знакомство (discovery): отвечай тепло и кратко, "
         "задавай уточняющие вопросы про услугу, город и предпочтения. НЕ "
         "называй конкретный салон, цену или адрес — этих данных пока нет.",
+        # DRF-1102 — the tool exists now (see tool_definitions); without this
+        # line the model has no reason to prefer it over the plain-text habit
+        # the rest of this prompt otherwise establishes.
+        "Если нужно уточнение — вызывай инструмент ask_clarification с "
+        "вариантами ответа, а НЕ пиши уточняющий вопрос обычным текстом: "
+        "так клиент отвечает одним тапом, а не гадает формулировку.",
         f"Если вопрос не про запись к мастеру — мягко верни в тему: "
         f"«{voice['off_topic_redirect']}»",
         # Boundaries (W5 task 4) — Constitution Art. X (helpful restraint),
@@ -331,7 +351,7 @@ def generate_concierge_reply(
             summary_text="",
             tenant_id=GLOBAL_TENANT_ID,
         ),
-        tool_definitions=[SHOW_MASTERS_TOOL_SPEC],
+        tool_definitions=[SHOW_MASTERS_TOOL_SPEC, ASK_CLARIFICATION_TOOL_SPEC],
         tool_dispatcher=_dispatch_tool,
     )
 
@@ -374,7 +394,62 @@ def generate_concierge_reply(
             persisted=True,
         )
 
+    if dto.action_type == ActionType.ASK_CLARIFICATION:
+        data = dto.action_data or {}
+        question = str(data.get("question") or "").strip()
+        if not question:
+            # No question text: either _dispatch_tool's internal degrade path
+            # (unknown tool / malformed arguments — action_data carries only
+            # "reason") or a genuine ask_clarification call with a blank
+            # question. Same safe fallback as an LLM error — never send an
+            # empty clarification.
+            return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+        rendered = _render_ask_clarification(question, list(data.get("options") or []))
+        return DiscoveryReply(
+            text=rendered.text,
+            action_data=rendered.action_data,
+            persisted=True,
+        )
+
     text = (dto.content or "").strip()
     if not text:
         return DiscoveryReply(text=get_fallback("ru"), persisted=True)
     return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+
+
+def generate_direct_show_masters_reply(
+    message_text: str, *, trace_id: str | None = None
+) -> DiscoveryReply:
+    """Deterministic show-masters short-circuit for a general booking request.
+
+    DRF-1102 — the missing 8th branch in the pre-LLM detector chain in
+    :mod:`apps.channels.max.handler` (safety → human_handoff → visit-callbacks
+    → personal booking lookup → onboarding → discover-callbacks →
+    booking-callbacks → **this**). A turn like «запиши меня на массаж» names
+    a service/availability signal (:func:`apps.skills.menu.matching.
+    looks_like_booking_request`) but isn't any narrower intent above, so it
+    used to fall all the way to the concierge LLM — which, advertising only
+    ``show_masters`` and told to "ask clarifying questions", had no tool-call
+    path that didn't require a full free-text round trip, and would loop
+    re-asking instead of ever calling it (root cause per the DRF-1102 audit).
+
+    Skips the LLM entirely: the search layer already resolves free text fine
+    (``discover_masters`` token-matches the raw phrase — DRF-945), so there is
+    nothing for a model turn to decide here. Mirrors the per-tenant
+    ``MenuSkill``, which already treats the same signal as a last-resort
+    booking catch-all (``apps/skills/menu/skill.py``) — this is that same
+    catch-all, applied one level up (before the concierge instead of before
+    echo) because the global path has no salon-scoped booking skill to hand
+    off to yet; showing masters IS the equivalent next step here.
+    """
+    cards = discover_masters(
+        specialization=message_text,
+        limit=_MAX_MASTER_CARDS,
+        resolve_service=True,
+    )
+    logger.info(
+        "orchestrator.concierge.direct_show_masters count=%d trace=%s",
+        len(cards),
+        trace_id,
+    )
+    return _render_master_cards(cards)

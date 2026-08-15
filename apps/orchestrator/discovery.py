@@ -88,6 +88,44 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
     },
 }
 
+# OpenAI-shaped function spec (DRF-1102) — lets the concierge ask a clarifying
+# question AS A TOOL CALL, with tappable options, instead of the only other
+# option it has today: plain assistant text. Plain text doesn't move the
+# conversation state, so a user who can't guess the exact catalog wording
+# (e.g. a service name) gets stuck re-answering the same question forever
+# (DRF-1102 §1). Shape mirrors ayla-ai-core's own ``ask_clarification`` tool
+# (``ayla_ai_core.tools.ASK_CLARIFICATION``) — kept as a local FLAT spec, not
+# a direct import, because ``apps.llm.providers.openai_provider`` wraps every
+# entry of ``tools`` in ``{"type": "function", "function": spec}`` itself;
+# importing ai-core's already-nested constant here would double-wrap it.
+ASK_CLARIFICATION_TOOL_SPEC: dict[str, Any] = {
+    "name": "ask_clarification",
+    "description": (
+        "Ask a clarifying question with suggested answer options, when the "
+        "user's request is genuinely unclear. Prefer this over asking in "
+        "plain text — options let the user answer with one tap instead of "
+        "having to guess exact wording."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Up to 5 short tappable answer options (optional).",
+                "maxItems": 5,
+            },
+        },
+        "required": ["question"],
+    },
+}
+
+# Defensive cap on a clarification option's button label — these strings are
+# model-generated, unlike the catalog-bounded master names `_render_master_cards`
+# renders, so nothing upstream already bounds their length.
+_MAX_OPTION_LABEL_CHARS = 40
+
 
 @dataclass(frozen=True)
 class DiscoveryReply:
@@ -219,6 +257,29 @@ def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
         )
     action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
     return DiscoveryReply(text="\n".join(lines)[:_MAX_REPLY_CHARS], action_data=action_data)
+
+
+def _render_ask_clarification(question: str, options: list[str]) -> DiscoveryReply:
+    """Render an ``ask_clarification`` tool call as reply text + a tap keyboard.
+
+    Each option becomes a button whose callback is the option's OWN text —
+    the same "tap == typed answer" contract the master-card buttons above
+    already use on this path. MAX delivers a tapped payload through the same
+    field a typed message would (see ``is_menu_callback`` in
+    ``apps.skills.menu.matching`` for the established precedent), so a tap
+    simply re-enters the normal turn as if the user had typed that option —
+    no separate decode step, no server-side pending-question state to keep in
+    sync (unlike the legacy ``cb:ai:answer:{conv}:{idx}`` scheme).
+
+    No options → plain question text, no keyboard: the user answers freely.
+    """
+    text = (question or "Уточните, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
+    cleaned = [str(opt).strip() for opt in options if str(opt).strip()]
+    if not cleaned:
+        return DiscoveryReply(text=text)
+    buttons = [{"label": opt[:_MAX_OPTION_LABEL_CHARS], "callback": opt} for opt in cleaned[:5]]
+    action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
+    return DiscoveryReply(text=text, action_data=action_data)
 
 
 def generate_discovery_reply(
