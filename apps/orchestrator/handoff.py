@@ -27,7 +27,7 @@ import uuid
 from django.conf import settings
 
 from apps.events.services import emit
-from apps.orchestrator.discovery import DiscoveryReply
+from apps.orchestrator.discovery import CALLBACK_DISCOVER_BOOK_PREFIX, DiscoveryReply
 
 logger = logging.getLogger(__name__)
 
@@ -45,21 +45,111 @@ _UNAVAILABLE_REPLY = (
 
 # The tap carried no bookable service (pre-DRF-962 keyboard, an ambiguous
 # query like bare «массаж», or a service that went inactive between render and
-# tap). Booking cannot start without one — asking is honest and keeps the user
-# in the discovery loop. The reply lists THIS master's real services (they are
-# one tenant-scoped queryset away), so following the bot's own suggestion
-# produces an exact-name query that discovery resolves unambiguously — a
-# hardcoded example would send the user chasing a service the master may not
-# even offer. Never dispatch a serviceless pick_master: the booking skill will
-# only answer it with the stale-context text.
-_ASK_SERVICE_REPLY_WITH_MENU = (
-    "Чтобы записаться к мастеру {name}, напишите желаемую услугу. У мастера можно "
-    "выбрать, например: {services}."
+# tap). Booking cannot start without one, so this branch answers with THIS
+# master's real services — they are one tenant-scoped queryset away.
+#
+# DRF-1070: those services are rendered as BUTTONS, not as text examples.
+# Until now the reply named up to three of them and asked the user to type one
+# back, betting that they would reproduce the exact name. Live dialog
+# 2026-08-14 (owner, «Сазонова Инна») shows the bet losing: two typed attempts
+# («Лимфодренажный массаж», «Биоэнергетический») looped back to the same card
+# and the same question, and the funnel only moved on the third try, when the
+# long name was reproduced verbatim. A button carries the service id, so
+# nothing has to be spelled — and it reuses the ALREADY-WORKING contract
+# ``cb:discover:book:<tenant>:<master>:<service>`` (verified end-to-end in the
+# same dialog at 10:46: card button with a service → date → slot → booked).
+# The text keeps the same names as a bulleted list, mirroring
+# ``_render_master_cards``, so a channel that drops keyboards still shows a
+# workable next step.
+#
+# Never dispatch a serviceless pick_master: the booking skill will only answer
+# it with the stale-context text.
+_ASK_SERVICE_PICK = "Выберите услугу мастера {name}:"
+# The tap named a service this master does not offer (no MasterService edge).
+# Saying so is the whole point: the old reply re-asked the same question, and
+# the user had no way to learn that the name was fine but the master was wrong.
+_ASK_SERVICE_NOT_OFFERED = "У мастера {name} нет услуги «{service}». Вот что можно выбрать:"
+_ASK_SERVICE_NOT_OFFERED_BARE = (
+    "У мастера {name} нет услуги «{service}», а других доступных услуг у него сейчас нет — "
+    "попробуйте выбрать другого мастера."
 )
 _ASK_SERVICE_REPLY_BARE = (
     "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует."
 )
-_ASK_SERVICE_MENU_LIMIT = 3
+# Shown when the master offers more services than the keyboard carries. Typing
+# stays available as the escape hatch — it is a worse path (that is this
+# ticket), but for a long roster it is the only one left, so the message says
+# plainly that the list is partial instead of pretending it is complete.
+_ASK_SERVICE_TRUNCATED_NOTE = (
+    "Показаны первые {shown} услуг — если нужной нет в списке, напишите её название."
+)
+# Keyboard budget for the service menu. MAX hard-caps an inline_keyboard at
+# ``apps.channels.max.outbound.MAX_KEYBOARD_ROWS`` (29) and silently clamps
+# past it, so any limit must sit below that; 10 also keeps the mirrored text
+# list inside the ~600-char reply budget the discovery renderer works to and
+# keeps the keyboard scannable. Ordered by name — a stable, explainable order
+# (there is no popularity signal in the catalog mirror to rank by).
+_ASK_SERVICE_BUTTON_LIMIT = 10
+
+
+def _ask_service_reply(
+    *,
+    tenant_id: uuid.UUID,
+    master_id: uuid.UUID,
+    master_name: str,
+    rows: list[tuple[uuid.UUID, str]],
+    truncated: bool,
+    not_offered_name: str | None,
+) -> DiscoveryReply:
+    """Render the ask-the-service answer: buttons + a mirrored text list.
+
+    ``rows`` are ``(CatalogService.pk, name)`` pairs the caller already
+    filtered down to services this handoff can actually ground — the button
+    must not lead back here. Each becomes a
+    ``cb:discover:book:<tenant>:<master>:<service>`` tap, i.e. the SAME
+    keyboard contract ``_render_master_cards`` emits and the same one the
+    global MAX handler parses in ``_discovery_handoff_reply`` — this reply
+    adds no new callback grammar, it just re-enters the handoff with the id
+    the user could not be expected to spell.
+
+    The text repeats the identical names as a bulleted list (the
+    ``_render_master_cards`` shape). Two reasons: a channel that drops
+    keyboards still gets a workable next step — typing the exact name IS the
+    path that works today — and the bullets give the user that exact spelling
+    to copy instead of reconstructing it from memory.
+
+    Empty ``rows`` means there is nothing to offer, so no keyboard is built:
+    an empty ``buttons`` list is dropped by ``_build_attachments`` anyway, and
+    a header promising a list nobody can see would repeat this ticket's bug.
+    """
+    if not rows:
+        text = (
+            _ASK_SERVICE_NOT_OFFERED_BARE.format(name=master_name, service=not_offered_name)
+            if not_offered_name is not None
+            else _ASK_SERVICE_REPLY_BARE.format(name=master_name)
+        )
+        return DiscoveryReply(text=text)
+
+    header = (
+        _ASK_SERVICE_NOT_OFFERED.format(name=master_name, service=not_offered_name)
+        if not_offered_name is not None
+        else _ASK_SERVICE_PICK.format(name=master_name)
+    )
+    lines = [header]
+    lines.extend(f"• {name}" for _, name in rows)
+    if truncated:
+        lines.append(_ASK_SERVICE_TRUNCATED_NOTE.format(shown=len(rows)))
+    buttons = [
+        {
+            "label": name,
+            "callback": f"{CALLBACK_DISCOVER_BOOK_PREFIX}{tenant_id}:{master_id}:{service_pk}",
+        }
+        for service_pk, name in rows
+    ]
+    return DiscoveryReply(
+        text="\n".join(lines),
+        action_data={"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]},
+    )
 
 
 def handoff_to_booking(
@@ -175,6 +265,26 @@ def handoff_to_booking(
                 service_id,
                 trace_id,
             )
+            # Why the tap failed, for the user-facing wording (DRF-1070). The
+            # row is re-read WITHOUT ``is_active`` and WITHOUT the flag guard:
+            # the question here is only "does this master offer it", and the
+            # edge is a fact regardless of the pilot flag. Tenant-scoped, so a
+            # foreign/forged id simply misses and we stay on the neutral text —
+            # we never name a service we could not see inside T.
+            not_offered_name: str | None = None
+            if service_id is not None:
+                tapped = (
+                    CatalogService.objects.filter(id=service_id)
+                    .values_list("name", flat=True)
+                    .first()
+                )
+                if (
+                    tapped is not None
+                    and not MasterService.all_tenants.filter(
+                        tenant=tenant, master_id=master.id, service_id=service_id
+                    ).exists()
+                ):
+                    not_offered_name = tapped
             # Funnel visibility (review): without an event, a cohort whose
             # every tap fails to resolve is indistinguishable from zero
             # traffic on the handoff.entered dashboard.
@@ -188,26 +298,52 @@ def handoff_to_booking(
                     # exists to make queryable.
                     "service_id": str(service_id) if service_id is not None else None,
                     "booking_via_ayla_rest": flag_on,
+                    # Separates "master doesn't do this" from every other miss
+                    # (serviceless tap, forged id, legacy flag) — the two
+                    # cohorts need different product fixes.
+                    "not_offered_by_master": not_offered_name is not None,
                 },
             )
-            # Suggest only services the stamping gate can deliver: under the
-            # Ayla flag that means a non-NULL ayla_service_id — naming a
-            # service the user's next query still cannot resolve would keep
-            # them in the loop this reply exists to break.
-            menu_qs = CatalogService.objects.filter(masters_offering__master=master, is_active=True)
+            # Offer only services this very function could ground on the next
+            # tap, because the button re-enters HERE: active, offered by this
+            # master (the ``masters_offering`` edge — unique per
+            # (master, service), so no duplicate buttons), and carrying a
+            # non-NULL ``ayla_service_id``. A button that misses any of those
+            # would land the user back on this same reply — the DRF-1070 loop
+            # with a tap instead of a typo.
+            #
+            # Flag OFF ⇒ NO menu at all. The grounding gate above is
+            # ``service_id is not None and flag_on``, so with the legacy
+            # YClients flag NOTHING is deliverable (DRF-962: ``external_id``
+            # is the mysite pk, not a verified YClients service id). Listing
+            # services there — as buttons or as text — offers a path that
+            # provably cannot complete; the bare "which service?" line is the
+            # honest answer until the flag is on. Global-path booking under
+            # the legacy flag is already a dead end and is not this ticket.
+            rows: list[tuple[uuid.UUID, str]] = []
+            truncated = False
             if flag_on:
-                menu_qs = menu_qs.filter(ayla_service_id__isnull=False)
-            menu = list(
-                menu_qs.order_by("name").values_list("name", flat=True)[:_ASK_SERVICE_MENU_LIMIT]
-            )
-            if menu:
-                text = _ASK_SERVICE_REPLY_WITH_MENU.format(
-                    name=master_name,
-                    services=", ".join(f"«{name}»" for name in menu),
+                menu_qs = CatalogService.objects.filter(
+                    masters_offering__master=master,
+                    is_active=True,
+                    ayla_service_id__isnull=False,
                 )
-            else:
-                text = _ASK_SERVICE_REPLY_BARE.format(name=master_name)
-            return DiscoveryReply(text=text)
+                # +1 row to detect truncation without a second COUNT query.
+                rows = list(
+                    menu_qs.order_by("name").values_list("id", "name")[
+                        : _ASK_SERVICE_BUTTON_LIMIT + 1
+                    ]
+                )
+                truncated = len(rows) > _ASK_SERVICE_BUTTON_LIMIT
+                rows = rows[:_ASK_SERVICE_BUTTON_LIMIT]
+            return _ask_service_reply(
+                tenant_id=tenant_id,
+                master_id=master_id,
+                master_name=master_name,
+                rows=rows,
+                truncated=truncated,
+                not_offered_name=not_offered_name,
+            )
 
         conversation = resolve_active_conversation(per_tenant_bot_user)
         if conversation is None:
