@@ -19,6 +19,7 @@ through HTTP (e.g. notification rendering with custom templates).
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -40,7 +41,7 @@ from apps.admin_api.tests.conftest import (
     make_master,
 )
 from apps.audit.models import AuditLog
-from apps.booking.models import BookingRequest
+from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
@@ -122,6 +123,32 @@ def _make_booking(
         status=status,
         booking_source="ai_direct",
         attribution_metadata={"actor_type": "customer", "created_by": "test"},
+    )
+
+
+def _make_mirror_booking(
+    *,
+    tenant,
+    master,
+    start_at: datetime | None = None,
+    status: str = RemoteBookingProxy.Status.CONFIRMED,
+    duration_min: int = 60,
+) -> RemoteBookingProxy:
+    """One Ayla-side appointment as bot-platform mirrors it.
+
+    Deliberately carries no client name or phone — the mirror stores no
+    PII (event-contract §7), which is exactly why it can only ever answer
+    «how many», never «who».
+    """
+    if start_at is None:
+        start_at = datetime.now(tz=timezone.utc) + timedelta(days=3)
+    return RemoteBookingProxy.all_tenants.create(
+        appointment_id=uuid.uuid4(),
+        tenant=tenant,
+        start_at=start_at,
+        end_at=start_at + timedelta(minutes=duration_min),
+        status=status,
+        specialist_id=master.id,
     )
 
 
@@ -239,6 +266,9 @@ class TestPreview:
         assert data["summary"]["total_future_bookings"] == 0
         assert data["summary"]["bookings_with_fallback"] == 0
         assert data["summary"]["bookings_without_fallback"] == 0
+        # Nothing anywhere — the empty list is trustworthy.
+        assert data["summary"]["mirror_future_bookings"] == 0
+        assert data["summary"]["inventory_complete"] is True
 
     def test_future_bookings_with_fallback(
         self,
@@ -417,6 +447,159 @@ def cascade_setup(tenant: Tenant, master: CatalogMaster):
         "b1": b1,
         "b2": b2,
     }
+
+
+class TestInventoryIntegrity:
+    """DRF-1139 — the preview must not present a blind spot as «nothing to do».
+
+    Measured on the pilot 2026-08-16: every ``BookingRequest`` row has
+    ``master_id IS NULL``, so the actionable query returns nothing for
+    every master no matter what the salon actually has booked. The
+    preview answered `total_future_bookings: 0` for all four masters
+    while the Ayla mirror held a live future visit for one of them — and
+    then offered an irreversible «Deactivate» button on that basis.
+    """
+
+    def test_mirror_visit_with_no_actionable_row_marks_inventory_incomplete(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+    ) -> None:
+        """The exact pilot shape: mirror knows, the cascade does not."""
+        _make_mirror_booking(tenant=tenant, master=master)
+
+        resp = client.post(_preview_url(master.id), HTTP_AUTHORIZATION=init_data_header("5001"))
+        assert resp.status_code == 200
+        summary = resp.json()["summary"]
+        assert summary["total_future_bookings"] == 0
+        assert summary["mirror_future_bookings"] == 1
+        assert summary["inventory_complete"] is False
+
+    def test_settled_mirror_statuses_do_not_count(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+    ) -> None:
+        """Cancelled / completed / no-show visits disturb nobody."""
+        for status in (
+            RemoteBookingProxy.Status.CANCELLED,
+            RemoteBookingProxy.Status.COMPLETED,
+            RemoteBookingProxy.Status.NO_SHOW,
+        ):
+            _make_mirror_booking(tenant=tenant, master=master, status=status)
+
+        resp = client.post(_preview_url(master.id), HTTP_AUTHORIZATION=init_data_header("5001"))
+        summary = resp.json()["summary"]
+        assert summary["mirror_future_bookings"] == 0
+        assert summary["inventory_complete"] is True
+
+    def test_past_mirror_visits_do_not_count(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+    ) -> None:
+        _make_mirror_booking(
+            tenant=tenant,
+            master=master,
+            start_at=datetime.now(tz=timezone.utc) - timedelta(days=1),
+        )
+        resp = client.post(_preview_url(master.id), HTTP_AUTHORIZATION=init_data_header("5001"))
+        summary = resp.json()["summary"]
+        assert summary["mirror_future_bookings"] == 0
+        assert summary["inventory_complete"] is True
+
+    def test_another_masters_mirror_visit_does_not_count(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+    ) -> None:
+        other = make_master(tenant, name="Мария Соколова", external_id=20)
+        _make_mirror_booking(tenant=tenant, master=other)
+
+        resp = client.post(_preview_url(master.id), HTTP_AUTHORIZATION=init_data_header("5001"))
+        summary = resp.json()["summary"]
+        assert summary["mirror_future_bookings"] == 0
+        assert summary["inventory_complete"] is True
+
+    def test_deactivate_refused_while_inventory_incomplete(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+    ) -> None:
+        """The whole point: an unseen live visit blocks the irreversible step."""
+        _make_mirror_booking(tenant=tenant, master=master)
+
+        resp = client.post(
+            _deactivate_url(master.id),
+            data=json.dumps({"bookings_plan": [], "reason": "уволилась"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "inventory_incomplete"
+
+        master.refresh_from_db()
+        assert master.is_active is True
+        assert master.archived_at is None
+
+    def test_matching_counts_do_not_block_a_legitimate_cascade(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+    ) -> None:
+        """One mirror visit, one actionable booking — the guard stays out of the way."""
+        service = _make_service(tenant)
+        _link_master_service(tenant, master, service)
+        bu = _make_customer_bot_user(tenant, 1)
+        booking = _make_booking(tenant=tenant, master=master, service=service, bot_user=bu)
+        _make_mirror_booking(tenant=tenant, master=master, start_at=booking.visit_at)
+
+        resp = client.post(
+            _deactivate_url(master.id),
+            data=json.dumps(
+                {
+                    "bookings_plan": [{"booking_id": str(booking.id), "action": "cancel"}],
+                    "reason": "уволилась",
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 200, resp.content
+        master.refresh_from_db()
+        assert master.is_active is False
+
+    def test_stale_mirror_does_not_block(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        master: CatalogMaster,
+    ) -> None:
+        """A mirror lagging BEHIND is safe — we would move more, never fewer."""
+        service = _make_service(tenant)
+        _link_master_service(tenant, master, service)
+        bu = _make_customer_bot_user(tenant, 1)
+        _make_booking(tenant=tenant, master=master, service=service, bot_user=bu)
+        # No mirror row at all.
+
+        resp = client.post(_preview_url(master.id), HTTP_AUTHORIZATION=init_data_header("5001"))
+        summary = resp.json()["summary"]
+        assert summary["total_future_bookings"] == 1
+        assert summary["mirror_future_bookings"] == 0
+        assert summary["inventory_complete"] is True
 
 
 class TestExecute:
