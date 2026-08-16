@@ -46,6 +46,7 @@ from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
+from apps.identity.services.bot_user_resolver import resolve_bot_user
 from apps.miniapp_api.auth import (
     InitDataBadSignature,
     InitDataError,
@@ -282,6 +283,20 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
+def _resolve_bot_user(verified) -> BotUser | None:
+    """Find the BotUser this Mini App request belongs to (DRF-1083).
+
+    The rule itself now lives in
+    :func:`apps.identity.services.bot_user_resolver.resolve_bot_user` —
+    ``admin_api`` needed exactly the same resolution (DRF-1150) and two
+    surfaces answering «who is this» by two rules is how they drift apart
+    in the first place. This wrapper stays as the master surface's entry
+    point so call sites and tests keep their name.
+    """
+
+    return resolve_bot_user(verified, surface="master_api")
+
+
 def require_master_init_data(
     view_func: Callable[..., HttpResponse],
 ) -> Callable[..., HttpResponse]:
@@ -328,12 +343,7 @@ def require_master_init_data(
             except InitDataError as exc:
                 return _error("unauthorized", str(exc), 401)
 
-            bot_user = (
-                BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
-                .select_related("tenant")
-                .order_by("-last_seen")
-                .first()
-            )
+            bot_user = _resolve_bot_user(verified)
         if bot_user is None:
             return _error(
                 "user_not_registered",
@@ -413,12 +423,7 @@ def require_init_data_only(
             except InitDataError as exc:
                 return _error("unauthorized", str(exc), 401)
 
-            bot_user = (
-                BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
-                .select_related("tenant")
-                .order_by("-last_seen")
-                .first()
-            )
+            bot_user = _resolve_bot_user(verified)
         if bot_user is None:
             return _error(
                 "user_not_registered",

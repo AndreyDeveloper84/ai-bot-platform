@@ -218,7 +218,7 @@ class TestMeOwner:
         data = resp.json()
         assert resp.status_code == 200
         assert data["role"] == "owner"
-        assert data["landing_path"] == "/admin/dashboard"
+        assert data["landing_path"] == "/admin/team"
         caps = set(data["capabilities"])
         # Owner-only privileges per §4
         assert "manage_tenant_roles" in caps

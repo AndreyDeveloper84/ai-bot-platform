@@ -80,6 +80,28 @@ def consume_once(
         logger.info("workers.consume_once.no_streams_registered")
         return 0
 
+    # Every target must have its consumer group before we read, or the read
+    # fails for ALL of them.
+    #
+    # XREADGROUP is one command with one reply: if any single stream in the
+    # list has no group, Redis answers NOGROUP for the whole call — the other
+    # streams are not served. Groups are normally created lazily by `enqueue`,
+    # on the first webhook for that channel. So a NEWLY registered stream that
+    # has never received traffic has no group, and its mere presence in the
+    # registry stops the already-working streams from being drained at all.
+    #
+    # Verified against the pilot's Redis (DRF-1061): a mixed read of
+    # `ingress:max_global` (live, 246 entries) plus a non-existent stream
+    # returns NOGROUP and nothing else. Without this, registering the salon
+    # handler would have crash-looped the consumer and silently stopped the
+    # client bot.
+    #
+    # `_ensure_group` is idempotent (XGROUP CREATE ... MKSTREAM, BUSYGROUP
+    # swallowed), so paying it per poll is cheap and self-healing: a group
+    # deleted underneath us is recreated on the next tick.
+    for stream in targets:
+        ingress_streams._ensure_group(client, stream, group)
+
     # XREADGROUP wants {stream: ">"} to get only new entries.
     streams_dict = dict.fromkeys(targets, ">")
     consumer = _consumer_name()

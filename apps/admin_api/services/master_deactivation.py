@@ -63,7 +63,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
-from apps.booking.models import BookingRequest
+from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.booking.services.transitions import (
     InvalidBookingTransition,
     commit_cancel,
@@ -88,6 +88,18 @@ logger = logging.getLogger(__name__)
 
 MAX_FALLBACK_CANDIDATES = 5
 """Cap fallback candidates per booking — keeps payload small + UI scannable."""
+
+
+MIRROR_LIVE_STATUSES = (
+    RemoteBookingProxy.Status.CONFIRMED,
+    RemoteBookingProxy.Status.PENDING_PAYMENT,
+    RemoteBookingProxy.Status.TENTATIVE,
+)
+"""Mirror statuses that still represent a visit somebody expects to happen.
+
+``cancelled`` / ``completed`` / ``no_show`` are settled — deactivating a
+master does not disturb them.
+"""
 
 
 DEFAULT_CUSTOMER_NOTIFICATION_TEMPLATE = (
@@ -157,7 +169,14 @@ class FutureBookingPreview:
 
 @dataclass(frozen=True)
 class DeactivationPreview:
-    """Result of :func:`preview_deactivation`."""
+    """Result of :func:`preview_deactivation`.
+
+    ``future_bookings`` is the **actionable** set: rows the cascade can
+    reassign or cancel. ``mirror_future_bookings`` is what the Ayla
+    mirror says the master actually has coming up. When the second
+    exceeds the first, this screen cannot see everything it is about to
+    destroy — see :attr:`inventory_complete`.
+    """
 
     master_id: str
     master_name: str
@@ -167,6 +186,12 @@ class DeactivationPreview:
     total_future_bookings: int
     bookings_with_fallback: int
     bookings_without_fallback: int
+    #: Live future visits for this master according to the Ayla mirror
+    #: (:class:`RemoteBookingProxy`), independent of what the cascade can act on.
+    mirror_future_bookings: int = 0
+    #: False when the mirror knows about more live future visits than the
+    #: actionable set contains. Deactivation is refused while False.
+    inventory_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -341,6 +366,43 @@ def _query_future_confirmed_bookings(master: CatalogMaster) -> list[BookingReque
     )
 
 
+def _count_future_mirror_bookings(master: CatalogMaster) -> int:
+    """Live future visits for this master per the Ayla mirror.
+
+    ``RemoteBookingProxy`` is bot-platform's read-cache of Ayla's
+    canonical ``Appointment`` (ADR-0009). It is the only local table that
+    reliably carries the master link for bookings that came from Ayla,
+    which is what makes it the honest answer to «does this master have
+    anything coming up».
+    """
+
+    return RemoteBookingProxy.all_tenants.filter(
+        tenant_id=master.tenant_id,
+        specialist_id=master.id,
+        status__in=MIRROR_LIVE_STATUSES,
+        start_at__gte=timezone.now(),
+    ).count()
+
+
+def _assess_inventory(master: CatalogMaster, actionable_count: int) -> tuple[int, bool]:
+    """Return ``(mirror_future_count, inventory_complete)``.
+
+    Complete means the actionable set is at least as large as what the
+    mirror reports, so acting on it cannot leave a live visit stranded on
+    an archived master. A mirror that lags behind (fewer rows than
+    actionable) is safe in the other direction — we would move more than
+    strictly necessary, never fewer.
+
+    There is deliberately no per-row reconciliation: ``BookingRequest``
+    carries no Ayla appointment id, so the two sets cannot be joined by
+    key. Counting is the strongest claim the data supports, and claiming
+    more than the data supports is the bug being fixed here.
+    """
+
+    mirror_count = _count_future_mirror_bookings(master)
+    return mirror_count, mirror_count <= actionable_count
+
+
 def _find_fallback_masters(
     booking: BookingRequest,
     *,
@@ -457,6 +519,16 @@ def preview_deactivation(
 
     Emits :data:`MASTER_DEACTIVATION_STARTED` as a low-volume operator
     trace (lets us notice abandoned flows). No DB mutation.
+
+    Reports two counts, not one (DRF-1139). ``total_future_bookings`` is
+    what the cascade can act on; ``mirror_future_bookings`` is what the
+    Ayla mirror says the master actually has. On the pilot the first was
+    0 for every master while the second was not — every
+    ``BookingRequest`` row there has ``master_id IS NULL``, so the
+    actionable query returns nothing regardless of the data. The screen
+    said «0 future bookings» and offered an irreversible button on top of
+    that. Both numbers now travel to the UI, and a shortfall blocks
+    :func:`execute_deactivation`.
     """
 
     bookings = _query_future_confirmed_bookings(master)
@@ -465,12 +537,23 @@ def preview_deactivation(
     with_fb = sum(1 for p in previews if p.fallback_masters)
     without_fb = len(previews) - with_fb
 
+    mirror_count, inventory_complete = _assess_inventory(master, len(previews))
+    if not inventory_complete:
+        logger.warning(
+            "master_deactivation.inventory_incomplete master=%s actionable=%d mirror=%d",
+            master.id,
+            len(previews),
+            mirror_count,
+        )
+
     payload = {
         "master_id": str(master.id),
         "actor_id": str(actor.pk),
         "actor_role": actor_role,
         "tenant_id": str(master.tenant_id),
         "future_bookings_count": len(previews),
+        "mirror_future_bookings": mirror_count,
+        "inventory_complete": inventory_complete,
     }
     write_audit(
         MASTER_DEACTIVATION_STARTED,
@@ -490,6 +573,8 @@ def preview_deactivation(
         total_future_bookings=len(previews),
         bookings_with_fallback=with_fb,
         bookings_without_fallback=without_fb,
+        mirror_future_bookings=mirror_count,
+        inventory_complete=inventory_complete,
     )
 
 
@@ -589,6 +674,37 @@ def execute_deactivation(
 
         # Snapshot current future-confirmed bookings for race detection.
         current_bookings = _query_future_confirmed_bookings(master)
+
+        # DRF-1139 — refuse to act on an inventory we know is short.
+        #
+        # The plan is built from what the preview could see. If the Ayla
+        # mirror reports more live future visits than the actionable set
+        # holds, then covering every id in the plan does NOT mean every
+        # client has been taken care of, and archiving the master here
+        # would strand the difference on somebody who no longer works.
+        #
+        # This is checked under the same lock as the cascade, not just at
+        # preview time: an inbound `booking.created` for this master
+        # between preview and commit must stop the commit too.
+        #
+        # Switching the preview's data source alone would not have been
+        # enough. An empty result from a correct query and an empty result
+        # from a broken one look identical on screen, and the action they
+        # green-light is irreversible — so the check refuses rather than
+        # reports.
+        mirror_count, inventory_complete = _assess_inventory(master, len(current_bookings))
+        if not inventory_complete:
+            raise DeactivationError(
+                "inventory_incomplete",
+                (
+                    f"Ayla mirror reports {mirror_count} live future visit(s) for this "
+                    f"master but only {len(current_bookings)} can be reassigned or "
+                    "cancelled from here. Deactivating now would strand the difference. "
+                    "Resolve those visits in Ayla first."
+                ),
+                status=409,
+            )
+
         _validate_plan_covers_bookings(plan, current_bookings)
         by_id: dict[str, BookingRequest] = {str(b.id): b for b in current_bookings}
 

@@ -16,15 +16,18 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import patch
+from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+from django.utils import timezone as dj_timezone
 
 import pytest
 from django.test import Client
 from django.urls import reverse
 
 from apps.audit.models import AuditLog
-from apps.booking.models import BookingRequest
-from apps.catalog.models import CatalogMaster
+from apps.booking.models import RemoteBookingProxy
+from apps.catalog.models import CatalogMaster, CatalogService
 from apps.identity.models import BotUser
 from apps.master_api.services import schedule as sched
 from apps.master_api.tests.conftest import init_data_header, make_master
@@ -75,20 +78,47 @@ def _make_booking(
     master: CatalogMaster,
     visit_local: datetime,
     duration_min: int = 60,
-    status: str = BookingRequest.Status.CONFIRMED,
+    status: str = "confirmed",
     service_name: str = "маникюр гель-лак",
     client_name: str = "Мария Иванова",
     bot_user: BotUser | None = None,
-) -> BookingRequest:
-    return BookingRequest.all_tenants.create(
+) -> RemoteBookingProxy:
+    """Create a visit where the pilot actually has them (DRF-1085).
+
+    The schedule reads ``RemoteBookingProxy`` — what the Ayla event
+    consumers write — not the local ``BookingRequest``. Service and client
+    names are not columns on the mirror, so they are created where
+    production reads them from: a ``CatalogService`` keyed on
+    ``ayla_service_id``, and the ``BotUser``.
+    """
+
+    service_id = uuid4()
+    if service_name:
+        CatalogService.all_tenants.create(
+            tenant=tenant,
+            ayla_service_id=service_id,
+            external_id=None,
+            external_updated_at=dj_timezone.now(),
+            name=service_name,
+            duration_min=duration_min,
+        )
+
+    if bot_user is None and client_name:
+        bot_user = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=f"cust-{uuid4().hex[:12]}",
+            client_name=client_name,
+        )
+
+    return RemoteBookingProxy.all_tenants.create(
+        appointment_id=uuid4(),
         tenant=tenant,
-        master=master,
         bot_user=bot_user,
-        service_name=service_name,
-        client_name=client_name,
-        client_phone="+79000000000",
-        visit_at=_utc(visit_local),
-        duration_min=duration_min,
+        specialist_id=master.id,
+        service_id=service_id,
+        start_at=_utc(visit_local),
+        end_at=_utc(visit_local) + timedelta(minutes=duration_min),
         status=status,
     )
 

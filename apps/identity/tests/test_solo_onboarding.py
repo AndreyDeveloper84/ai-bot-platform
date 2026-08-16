@@ -703,12 +703,13 @@ class TestIsSoloProviderHelper:
         )
         assert is_solo_provider(tenant) is True
 
-    def test_master_without_linked_bot_user_excluded(self, bootstrap_tenant):
-        """Mysite-synced legacy masters (`linked_bot_user IS NULL`) excluded.
+    def test_single_unbridged_master_counts_as_one_person(self, bootstrap_tenant):
+        """DRF-1149 — a mysite-synced master IS a person, bridged or not.
 
-        Otherwise an empty tenant with one legacy mirror row would
-        report solo=True incorrectly (NULL ID would dedupe with itself
-        and count as 1 — semantically wrong).
+        Previously unlinked masters were excluded outright, so this
+        tenant counted 0 distinct people and reported False. Tau §3.1
+        counts people who work here, not people who installed the app:
+        one master row = one human = solo.
         """
         tenant = Tenant.objects.create(slug="legacy-master", name="Legacy")
         CatalogMaster.all_tenants.create(
@@ -719,4 +720,78 @@ class TestIsSoloProviderHelper:
             linked_bot_user=None,  # NOT bridged yet
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         )
+        assert is_solo_provider(tenant) is True
+
+    def test_salon_with_unbridged_masters_is_not_solo(self, bootstrap_tenant):
+        """DRF-1149 regression — the exact pilot shape, measured 2026-08-16.
+
+        `formula-tela`: one owner staff row whose BotUser is also linked
+        to master #1, plus three accepted active masters that were never
+        bridged to a BotUser. Four people work there. The old counter saw
+        one and hid the whole admin surface behind the solo UI.
+        """
+        tenant = Tenant.objects.create(slug="salon-4", name="Salon Four")
+        owner_bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="salon-4-owner"
+        )
+        TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=owner_bu, role=TenantStaff.Role.OWNER
+        )
+        # Master #1 — the owner herself, bridged.
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=_solo_external_id(owner_bu.id),
+            external_updated_at=timezone.now(),
+            name="Owner as master",
+            linked_bot_user=owner_bu,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+        # Masters #2-4 — accepted, active, never bridged.
+        for i in range(3):
+            CatalogMaster.all_tenants.create(
+                tenant=tenant,
+                external_id=100 + i,
+                external_updated_at=timezone.now(),
+                name=f"Master {i}",
+                linked_bot_user=None,
+                invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            )
         assert is_solo_provider(tenant) is False
+
+    def test_owner_who_is_her_own_bridged_master_stays_solo(self, bootstrap_tenant):
+        """DRF-1149 — the other side of the same fix must not regress.
+
+        One human wearing both hats, master row bridged to her BotUser:
+        de-duplication by `bot_user_id` still collapses her to one
+        person, so the solo surface keeps working for real solos.
+        """
+        tenant = Tenant.objects.create(slug="real-solo", name="Real Solo")
+        bu = BotUser.all_tenants.create(tenant=tenant, channel="max", channel_user_id="real-solo-1")
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=bu, role=TenantStaff.Role.OWNER)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=_solo_external_id(bu.id),
+            external_updated_at=timezone.now(),
+            name="Solo master",
+            linked_bot_user=bu,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        )
+        assert is_solo_provider(tenant) is True
+
+    def test_archived_unbridged_master_not_counted(self, bootstrap_tenant):
+        """Archived rows stay excluded on the unbridged branch too."""
+        tenant = Tenant.objects.create(slug="archived-unbridged", name="Archived Unbridged")
+        bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="archived-unbridged-1"
+        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=bu, role=TenantStaff.Role.OWNER)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=77,
+            external_updated_at=timezone.now(),
+            name="Gone",
+            linked_bot_user=None,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            archived_at=timezone.now(),
+        )
+        assert is_solo_provider(tenant) is True

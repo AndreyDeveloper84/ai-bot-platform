@@ -201,6 +201,23 @@ export interface DeactivationSummary {
   total_future_bookings: number;
   bookings_with_fallback: number;
   bookings_without_fallback: number;
+  /**
+   * Live future visits the Ayla mirror knows about for this master —
+   * independent of what the cascade can act on (DRF-1139).
+   */
+  mirror_future_bookings?: number;
+  /**
+   * False when the mirror reports more live future visits than
+   * `total_future_bookings`, i.e. this screen cannot see everything it
+   * would archive. The backend refuses `/deactivate/` with 409
+   * `inventory_incomplete` while this is false, and the UI must not
+   * offer the action.
+   *
+   * Optional so an older backend ship (no such field) degrades to the
+   * previous behaviour rather than blocking every deactivation —
+   * absence means «unknown», and only an explicit `false` blocks.
+   */
+  inventory_complete?: boolean;
 }
 
 export interface DeactivationPreview {

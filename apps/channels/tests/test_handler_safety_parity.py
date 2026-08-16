@@ -83,6 +83,20 @@ def spy_discovery(monkeypatch):
     return spy
 
 
+@pytest.fixture
+def spy_direct_show_masters(monkeypatch):
+    # DRF-1102 — the new deterministic branch (looks_like_booking_request →
+    # show masters, skipping the concierge LLM). A happy phrase now reaches
+    # ONE of {generate_concierge_reply, generate_direct_show_masters_reply}
+    # depending on whether it names a service — never neither, and a
+    # safety-blocked phrase must reach neither.
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    spy = MagicMock(return_value=DiscoveryReply(text="Вот мастера, которые могут подойти:"))
+    monkeypatch.setattr(max_handler, "generate_direct_show_masters_reply", spy)
+    return spy
+
+
 def _msg(text: str, *, user_id: int, chat_id: int, mid: str = "m-1") -> dict:
     return {
         "update_type": "message_created",
@@ -124,7 +138,7 @@ _SAFETY_CASES = [
 class TestSafetyParity:
     @pytest.mark.parametrize("text,expected", _SAFETY_CASES)
     def test_both_handlers_same_safety_reply(
-        self, text, expected, mock_send, fake_redis, spy_discovery
+        self, text, expected, mock_send, fake_redis, spy_discovery, spy_direct_show_masters
     ):
         tenant = Tenant.objects.create(slug="parity-a", name="A")
 
@@ -141,6 +155,7 @@ class TestSafetyParity:
         assert per_tenant_reply == global_reply
         # Neither path ran discovery on a blocked turn.
         spy_discovery.assert_not_called()
+        spy_direct_show_masters.assert_not_called()
 
     def test_safety_turn_action_type_parity(self, mock_send, fake_redis, spy_discovery):
         # De-drift (CR F1): the safety turn must be tagged action_type=
@@ -177,7 +192,7 @@ class TestSafetyParity:
         ],
     )
     def test_happy_phrase_blocked_on_neither(
-        self, text, mock_send, fake_redis, spy_discovery, monkeypatch
+        self, text, mock_send, fake_redis, spy_discovery, spy_direct_show_masters, monkeypatch
     ):
         # The gate must ALLOW these (handler proceeds past the safety short-circuit
         # on both paths). Stub the per-tenant skill dispatch to a deterministic
@@ -198,7 +213,13 @@ class TestSafetyParity:
         mock_send.clear()
         _run_global(text)
         assert mock_send[-1]["text"] not in (CRISIS_REPLY_TEXT, BLOCK_REPLY_TEXT)
-        spy_discovery.assert_called_once()  # global happy path reached discovery
+        # Global happy path reached the normal (non-safety) reply pipeline —
+        # DRF-1102 split that pipeline in two: a general booking/service phrase
+        # (every case here names one) now short-circuits straight to
+        # generate_direct_show_masters_reply instead of the concierge LLM, so
+        # exactly one of the two must have run, never neither.
+        assert spy_discovery.called != spy_direct_show_masters.called
+        assert spy_discovery.call_count + spy_direct_show_masters.call_count == 1
 
 
 # --------------------------------------------------------------------------- #

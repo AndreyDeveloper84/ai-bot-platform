@@ -62,10 +62,24 @@ _ROLE_PRIVILEGE: dict[PrimaryRole, int] = {
 # Mini App landing destination per role. Convenience only — the frontend
 # is free to override based on its own state (e.g. deep-link target).
 # Server-side capability checks are still authoritative for any action.
+#
+# DRF-1151 — every value here must be a route the Mini App actually
+# mounts. Two of them were not: `/admin/dashboard` and
+# `/admin/conversations` have never existed in `App.tsx`. Nothing broke
+# loudly because `AdminRoutes` has a catch-all that redirects to
+# `/admin/team`, so the wrong value was silently corrected on arrival —
+# which is exactly why it survived. A landing path that only works
+# because a catch-all cleans up after it is not a landing path; the next
+# surface to read this field without a catch-all inherits a dead link.
+#
+# `/admin/team` is the real admin landing (it is what the catch-all
+# already resolves to). Receptionists land there too: they see the roster
+# with owner-only actions disabled, and the conversations surface they
+# were pointed at is post-pilot work, not a route that exists today.
 _LANDING_PATH: dict[PrimaryRole, str] = {
-    "owner": "/admin/dashboard",
-    "admin": "/admin/dashboard",
-    "receptionist": "/admin/conversations",
+    "owner": "/admin/team",
+    "admin": "/admin/team",
+    "receptionist": "/admin/team",
     "master": "/master/dashboard",
     "customer": "/",
 }
