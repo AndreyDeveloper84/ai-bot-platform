@@ -8,11 +8,12 @@ The :func:`require_admin_role` decorator:
 
 1. Verifies the ``Authorization: MaxInitData <raw>`` header (HMAC bound
    to ``MAX_BOT_TOKEN``).
-2. Resolves the calling :class:`BotUser` within the bot's configured
-   tenant (``MAX_BOT_TENANT_SLUG``), same pattern as
-   :func:`apps.miniapp_api.views.require_init_data`. We do NOT
-   lazy-create a BotUser here — every admin caller has DM'd the
-   tenant's manager bot at least once during onboarding.
+2. Resolves the calling :class:`BotUser` via
+   :func:`apps.identity.services.bot_user_resolver.resolve_bot_user` —
+   the tenant of the bot whose token signed the initData first,
+   ``MAX_BOT_TENANT_SLUG`` second (DRF-1150). We do NOT lazy-create a
+   BotUser here — every admin caller has DM'd the tenant's manager bot
+   at least once during onboarding.
 3. Calls :func:`apps.identity.services.role_resolver.resolve_role` to
    build a :class:`RoleContext`.
 4. Rejects with 403 unless ``is_owner`` OR ``is_admin``. Receptionist,
@@ -39,10 +40,12 @@ import logging
 from functools import wraps
 from typing import Any, Callable
 
-from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from apps.identity.models import BotUser
+from apps.identity.services.bot_user_resolver import (
+    resolve_bot_user,
+    resolve_tenant_slug_for_init_data,
+)
 from apps.identity.services.role_resolver import RoleContext, resolve_role
 from apps.miniapp_api.auth import (
     InitDataBadSignature,
@@ -54,7 +57,6 @@ from apps.miniapp_api.auth import (
     verify_init_data,
 )
 from apps.tenancy.context import tenant_scope
-from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -106,36 +108,37 @@ def require_admin_role(
         except InitDataError as exc:
             return _error("unauthorized", str(exc), 401)
 
-        bot_tenant_slug = getattr(settings, "MAX_BOT_TENANT_SLUG", "")
-        if not bot_tenant_slug:
+        # DRF-1150 — resolve identity by the bot that signed, not by the
+        # bot-tenant setting alone. Shared with the master surface (the
+        # rule was written there for DRF-1083); see
+        # apps.identity.services.bot_user_resolver for why recency is the
+        # wrong tie-breaker and what it cost on the pilot.
+        #
+        # This surface used to treat MAX_BOT_TENANT_SLUG as the whole
+        # answer. That works only while the setting happens to name the
+        # salon's tenant, which it does today — the pilot owner has two
+        # BotUser rows (global_bot and formula-tela) and only the tenant
+        # filter kept the admin endpoints on the right one. The moment a
+        # second bot points elsewhere, every admin endpoint answers 404
+        # for a legitimate owner.
+        #
+        # The «no tenant configured at all» 500 is kept: that is a real
+        # deployment misconfiguration and should stay loud. The old
+        # «tenant row not found» 500 is gone — with a bot registry the
+        # setting may legitimately name a tenant this request is not for,
+        # and the resolver's fall-through plus the role gate below cover
+        # it. Cross-tenant escalation is not a risk here: resolve_role
+        # reads TenantStaff within the resolved row's OWN tenant, so a
+        # wrong pick can only under-privilege (403), never over.
+        if not resolve_tenant_slug_for_init_data(verified):
             logger.error("admin_api.auth.no_tenant_slug")
             return _error(
                 "server_misconfigured",
                 "Bot tenant not configured — contact support.",
                 500,
             )
-        bot_tenant = Tenant.objects.filter(slug=bot_tenant_slug).first()
-        if bot_tenant is None:
-            logger.error(
-                "admin_api.auth.tenant_not_found slug=%r",
-                bot_tenant_slug,
-            )
-            return _error(
-                "server_misconfigured",
-                "Bot tenant not found — contact support.",
-                500,
-            )
 
-        bot_user = (
-            BotUser.all_tenants.filter(
-                tenant=bot_tenant,
-                channel="max",
-                channel_user_id=verified.user_id,
-            )
-            .select_related("tenant")
-            .order_by("-last_seen")
-            .first()
-        )
+        bot_user = resolve_bot_user(verified, surface="admin_api")
         if bot_user is None:
             return _error(
                 "user_not_registered",
