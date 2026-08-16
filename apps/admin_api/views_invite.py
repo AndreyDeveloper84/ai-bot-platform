@@ -97,7 +97,6 @@ from apps.events.services import emit
 from apps.events.vocabulary import MASTER_INVITE_DISPATCHED, MASTER_INVITED
 from apps.identity.models import BotUser
 from apps.master_api.auth import generate_invite_token
-from apps.scheduling.models import Weekday, WorkingHours
 
 logger = logging.getLogger(__name__)
 
@@ -119,17 +118,6 @@ ALLOWED_MODES = {"invite", "catalog_only"}
 
 MAX_NAME_LEN = 200
 MAX_CONTACT_VALUE_LEN = 128
-
-# Default preset working-hours rows.
-DEFAULT_PRESET_START = "10:00"
-DEFAULT_PRESET_END = "19:00"
-DEFAULT_PRESET_DAYS = (
-    Weekday.MONDAY,
-    Weekday.TUESDAY,
-    Weekday.WEDNESDAY,
-    Weekday.THURSDAY,
-    Weekday.FRIDAY,
-)
 
 
 # --- helpers --------------------------------------------------------------
@@ -297,41 +285,6 @@ def _validate_services_in_tenant(
     return None
 
 
-def _seed_working_hours(
-    *, tenant_id: uuid.UUID, master: CatalogMaster, created_by_user_id: Any
-) -> None:
-    """Bulk-create 5 default Mon-Fri 10:00-19:00 rows.
-
-    Matches Q-SC1 handoff default. ``created_by`` is left ``None``: the
-    field is FK to ``settings.AUTH_USER_MODEL`` (Django User), NOT
-    :class:`BotUser`. Per the WorkingHours docstring (line 71-74),
-    ``None`` is explicitly allowed for "system / migration backfills"
-    — the admin-invite path is the third such case (no admin Django
-    User row exists for the MAX-only owner).
-    """
-
-    from datetime import time as _time
-
-    h, m = DEFAULT_PRESET_START.split(":")
-    start_t = _time(int(h), int(m))
-    h, m = DEFAULT_PRESET_END.split(":")
-    end_t = _time(int(h), int(m))
-
-    rows = [
-        WorkingHours(
-            tenant_id=tenant_id,
-            master=master,
-            day_of_week=day,
-            is_working=True,
-            start_time=start_t,
-            end_time=end_t,
-            created_by=None,
-        )
-        for day in DEFAULT_PRESET_DAYS
-    ]
-    WorkingHours.all_tenants.bulk_create(rows)
-
-
 def _seed_services(
     *,
     tenant_id: uuid.UUID,
@@ -486,8 +439,10 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     contact_method = clean["contact_method"]
     contact_value = clean["contact_value"]
     mode = clean["mode"]
-    schedule_preset = clean["schedule_preset"]
     service_ids = clean["services"]
+    # `schedule_preset` is validated in `_validate_invite_body` and echoed
+    # back, but is no longer read here: seeding was removed (DRF-1062). The
+    # field stays in the contract; it just has no side effect.
 
     # Cross-tenant guard for services.
     service_err = _validate_services_in_tenant(tenant.id, service_ids)
@@ -546,12 +501,19 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
                 raw=raw,
             )
 
-            if schedule_preset == "default_mon_fri_10_19":
-                _seed_working_hours(
-                    tenant_id=tenant.id,
-                    master=master,
-                    created_by_user_id=None,
-                )
+            # DRF-1062: no working-hours seeding here any more.
+            #
+            # This branch manufactured the 10:00-19:00 stub that all four
+            # pilot masters now carry — a schedule the salon never set,
+            # indistinguishable from one it did. Worse, `apps.scheduling`
+            # is not what serves slots: with BOOKING_VIA_AYLA_REST the
+            # backend answers, so the rows shaped nothing except the
+            # summary line in the master card.
+            #
+            # `schedule_preset` stays in the invite contract on purpose —
+            # it is part of the request shape the admin screen sends. It
+            # simply no longer has a side effect. Where a new master's
+            # schedule comes from is the schedule window's call.
             _seed_services(
                 tenant_id=tenant.id,
                 master=master,

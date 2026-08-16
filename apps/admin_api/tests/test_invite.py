@@ -202,32 +202,37 @@ class TestHappyPath:
         assert body["fallback_link"].endswith(f"?token={master.invite_token}")
         assert "/onboarding/master" in body["fallback_link"]
 
-    def test_default_preset_seeds_5_working_hours(
+    def test_default_preset_no_longer_seeds_working_hours(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
         patched_send_message,
     ) -> None:
+        """DRF-1062: the invite must not manufacture a schedule.
+
+        This branch used to bulk-create Mon-Fri 10:00-19:00 — the stub all
+        four pilot masters now carry, indistinguishable from a schedule the
+        salon actually set. It also shaped nothing: with
+        BOOKING_VIA_AYLA_REST the backend serves slots, not
+        `apps.scheduling`.
+
+        `schedule_preset` stays in the request contract and is still echoed
+        back; it simply has no side effect now.
+        """
+
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
             content_type="application/json",
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
+
+        # Accepted with the preset still in the request contract...
         assert resp.status_code == 201
+        # ...and no schedule manufactured behind it.
         master_id = uuid.UUID(resp.json()["master_id"])
-        rows = list(WorkingHours.all_tenants.filter(master_id=master_id).order_by("day_of_week"))
-        assert len(rows) == 5
-        assert [r.day_of_week for r in rows] == [0, 1, 2, 3, 4]
-        assert all(r.is_working for r in rows)
-        assert all(
-            r.start_time is not None
-            and r.end_time is not None
-            and r.start_time.hour == 10
-            and r.end_time.hour == 19
-            for r in rows
-        )
+        assert not WorkingHours.all_tenants.filter(master_id=master_id).exists()
 
     def test_schedule_preset_none_seeds_zero_working_hours(
         self,
@@ -665,23 +670,34 @@ class TestDispatch:
 
 
 class TestAtomicity:
-    def test_working_hours_failure_rolls_back_master(
+    def test_service_seeding_failure_rolls_back_master(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
+        service: CatalogService,
         patched_send_message,
     ) -> None:
-        """If WorkingHours.bulk_create raises, the master row must NOT persist."""
+        """A failure inside the transaction must not leave a half-made master.
+
+        Was written against WorkingHours seeding, which DRF-1062 removed.
+        Re-pointed at MasterService — the remaining bulk write in the same
+        atomic block — so the rollback guarantee stays covered rather than
+        quietly disappearing with the branch it happened to test.
+        """
 
         before = CatalogMaster.all_tenants.filter(tenant=tenant).count()
-        with patch("apps.admin_api.views_invite.WorkingHours.all_tenants") as mock_wh:
-            mock_wh.bulk_create.side_effect = RuntimeError("forced failure")
+        with patch("apps.admin_api.views_invite.MasterService.all_tenants") as mock_ms:
+            mock_ms.bulk_create.side_effect = RuntimeError("forced failure")
             resp = client.post(
                 _invite_url(),
-                data=_valid_body(),
+                # Non-empty services: _seed_services short-circuits on an
+                # empty list, so an empty body would never reach bulk_create
+                # and the test would pass without exercising anything.
+                data=_valid_body(services=[str(service.id)]),
                 content_type="application/json",
                 HTTP_AUTHORIZATION=init_data_header("5001"),
             )
+
         assert resp.status_code == 500
         assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == before
