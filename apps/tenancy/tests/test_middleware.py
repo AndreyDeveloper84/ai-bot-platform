@@ -352,3 +352,54 @@ class TestMasterAndIdentityOptOut:
         assert request.tenant is not None
         assert captured and captured[0] is not None
         assert isinstance(response, tuple)
+
+
+class TestInternalChatOptOut:
+    """DRF-1113 — the master↔admin internal chat must not be strict-blocked.
+
+    Same shape as the master surface above: tenancy comes from verified
+    initData inside @require_master_init_data / @require_admin_role, and
+    the Mini App never sends X-Tenant. Measured on the pilot 2026-08-16,
+    every internal-chat endpoint answered 400 TENANT_REQUIRED before any
+    view ran, so /admin/internal-chat and /admin/chats were dead screens.
+    """
+
+    def test_admin_threads_opt_out(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        response, _ = _call(RequestFactory().get("/api/v1/internal-chat/admin/threads/"))
+        assert isinstance(response, tuple)
+
+    def test_master_threads_opt_out(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        response, _ = _call(RequestFactory().get("/api/v1/internal-chat/master/threads/"))
+        assert isinstance(response, tuple)
+
+    def test_nested_internal_chat_paths_opt_out(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        for path in (
+            "/api/v1/internal-chat/admin/threads/abc/",
+            "/api/v1/internal-chat/admin/threads/abc/messages/",
+            "/api/v1/internal-chat/admin/threads/abc/close/",
+            "/api/v1/internal-chat/master/threads/abc/escalate-to-founder/",
+        ):
+            response, _ = _call(RequestFactory().get(path))
+            assert isinstance(response, tuple), path
+
+    def test_lookalike_prefix_still_requires_tenant(self, settings):
+        """The exemption is scoped to the hyphenated prefix, nothing near it."""
+        settings.STRICT_TENANT_SCOPE = "strict"
+        for path in ("/api/v1/internal-chats/", "/api/v1/internal/chat/"):
+            response, _ = _call(RequestFactory().get(path))
+            assert response.status_code == 400, path
+            assert b"TENANT_REQUIRED" in response.content
+
+    def test_header_still_resolves_when_present_on_internal_chat(self, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        Tenant.objects.create(slug="formula-ic", name="F")
+        request = RequestFactory().get(
+            "/api/v1/internal-chat/admin/threads/", HTTP_X_TENANT="formula-ic"
+        )
+        response, captured = _call(request)
+        assert request.tenant is not None
+        assert captured and captured[0] is not None
+        assert isinstance(response, tuple)
