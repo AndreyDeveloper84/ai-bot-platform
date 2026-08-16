@@ -28,7 +28,11 @@ jobs:
   test:
     name: pytest + ruff + mypy
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # DRF-1121 bumped this from 15: the new "pytest apps/ (full suite)"
+    # step alone measured ~30 min against Postgres locally (7246 tests).
+    # Flagged for tech-lead confirmation in REPORT_MECHANIZATION.md —
+    # this is a real CI-feedback-latency tradeoff, not a free win.
+    timeout-minutes: 45
 
     services:
       postgres:
@@ -129,9 +133,11 @@ jobs:
       # ADR-0009 G-series module-boundary guard — source-scoped
       # forbidden-import-edge lint (#1001, Option B). Encodes G2.1
       # (skills↛yclients), G5.1 (api↛booking mutators), G6.2
-      # (eventbus consumer↛skills/channels) + the cross-repo psycopg2
-      # ban (rule 2). Replaces the never-created `.importlinter`
-      # baseline. See `tools/lint/import_boundaries.py` for the
+      # (eventbus consumer↛skills/channels), G9 (BookingRequest read
+      # outside apps/booking/ — DRF-1109, dual-source-with-Ayla risk)
+      # + the cross-repo psycopg2 ban (rule 2). Replaces the
+      # never-created `.importlinter` baseline. See
+      # `tools/lint/import_boundaries.py` for the
       # contracts, the on-`dev` baseline, and what is NOT detected.
       - name: Import-boundary guard (AST lint)
         run: uv run python tools/lint/import_boundaries.py apps/
@@ -162,10 +168,84 @@ jobs:
       # lifecycle semantics (status normalization, reminder eligibility,
       # missing-proxy fail-loud). These tests were not exercised in CI and a
       # regression (strict normalizer rejecting `pending`) reached `dev`.
-      # Keeping this gate narrow (eventbus only) prevents similar silent
-      # regressions without ballooning the job duration.
+      # Kept as its own fast-fail step even now that "pytest apps/ (full
+      # suite)" below covers it too (DRF-1121) — this gate fails in
+      # seconds, the full suite takes ~30 min, and eventbus correctness
+      # is exactly the kind of regression worth not waiting on.
       - name: eventbus booking lifecycle tests
         run: uv run pytest apps/eventbus/tests/ -q
+
+      # DRF-1121 — CI ran 41 of 410 apps/ test files; everything else was
+      # green locally and defended nothing in CI. Full apps/ (7246 tests,
+      # measured against Postgres — the SQLite default that most of
+      # `dev` runs locally hides real failures, see
+      # project_test_db_sqlite_vs_postgres) is clean EXCEPT the 26 tests
+      # deselected below, grouped by root cause so the excluded set is
+      # legible instead of a wall of paths:
+      #
+      # (a) DRF-1044 — 3 pre-existing miniapp_api failures, same on
+      #     SQLite and Postgres, known before this ticket.
+      # (b) NEW (2026-08-15, DRF-1121 investigation) — 23 failures, ALL
+      #     the same root cause: `BookingRequest.all_tenants
+      #     .select_for_update().select_related("service")` in
+      #     apps/skills/booking/tools.py's execute_reschedule (the
+      #     flag-OFF local reschedule path) — BookingRequest.service is
+      #     nullable, select_related on a nullable FK is a LEFT OUTER
+      #     JOIN, and Postgres refuses FOR UPDATE through one:
+      #     `psycopg.errors.FeatureNotSupported: FOR UPDATE cannot be
+      #     applied to the nullable side of an outer join`. SQLite has no
+      #     such restriction, so this was invisible locally. Whether this
+      #     fires in the live pilot depends on BOOKING_VIA_AYLA_REST
+      #     (UNKNOWN, not read this session) — if the flag is OFF there,
+      #     every reschedule tap on that path 500s today. Candidate for
+      #     Linear, not fixed here (DRF-1121 is scoped to CI coverage,
+      #     not this bug) — deselected so the coverage expansion doesn't
+      #     regress CI red on a pre-existing, unrelated defect.
+      # (c) RESOLVED 2026-08-16 (DRF-1121 follow-up) — apps/skills/
+      #     payment_failed was deselected here for a Postgres
+      #     `DataError: integer out of range`. It was never "1 failure":
+      #     the fixture mask `hash(str(x)) & 0xFFFFFFFF` overflows the
+      #     `integer` column for roughly half of all `PYTHONHASHSEED`
+      #     values, so 1–6 tests of `TestMasterDMDispatch` failed per
+      #     run, each on its own INSERT — a flaky test, not a cascade.
+      #     Fixed at the root in the fixture (`_stable_external_id`,
+      #     SHA-256 truncated into signed-32-bit). The deselect is gone
+      #     and must not come back.
+      #
+      # Do NOT add new deselects here to make an unrelated failure go
+      # away — a new failure means something you touched broke; fix it
+      # or escalate. This list is pinned to reproduce a specific test
+      # invocation for each entry, not a directory-level skip, so a
+      # rename/removal of any of these tests must also touch this file.
+      - name: pytest apps/ (full suite)
+        run: |
+          uv run pytest apps/ -q \
+            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
+            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
+            --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_happy_path \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_over_90d_breaks_chain \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_owned_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_already_cancelled_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_cancel_requested_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_found_rejected \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_price_hike_breaks_chain_end_to_end \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_uses_select_for_update \
+            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self \
+            --deselect apps/bookings/tests/test_booking_callbacks.py::TestConfirmTapReschedule::test_happy_path_notifies_manager \
+            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_within_90d_same_service_continuation_chain \
+            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_over_90d_breaks_chain_billable_fresh_sale \
+            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_b1_null_service_id_does_not_falsely_flag_swap \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_happy_path \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_new_row_carries_ai_direct_attribution \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestIdempotencyMarkerAnchored::test_spoofed_substring_does_not_short_circuit_reschedule \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_succeeds_recovers_cleanly \
+            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_fails_alerts_critical \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation
 
       # mypy is blocking. `strict=False` keeps the bar reasonable while
       # apps/ are mostly empty AppConfigs; tighten to strict per-package

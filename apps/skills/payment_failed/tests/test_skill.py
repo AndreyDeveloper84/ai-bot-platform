@@ -32,6 +32,7 @@ Audit row schemas:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from typing import Any
@@ -120,6 +121,30 @@ TENANT_ID = "55555555-5555-5555-5555-555555555555"
 EVENT_ID = "66666666-6666-6666-6666-666666666666"
 
 
+# `external_id` on the catalog mirrors is a Django `IntegerField`
+# (`apps/catalog/models.py`, `_MirrorBase`) → Postgres `integer`, i.e.
+# signed 32-bit, max 2 147 483 647. This helper exists because the two
+# call sites below used `hash(str(x)) & 0xFFFFFFFF`, which is wrong twice:
+#
+#   1. `0xFFFFFFFF` = 4 294 967 295 — roughly half the values overflow
+#      `integer` and Postgres rejects them with `DataError: integer out
+#      of range`. SQLite (the no-docker local default) does not check
+#      integer width, so this was invisible outside CI.
+#   2. Python's `hash()` is salt-randomised per process (`PYTHONHASHSEED`),
+#      so whether a given run overflowed was a coin flip — a flaky test,
+#      not a stably red one. Same reasoning as `apps.skills.faq.tools
+#      ._cache_key`: when a value must be reproducible, use a digest.
+#
+# SHA-256 truncated into the signed-32-bit range is deterministic across
+# processes and always in range, and keeps the original semantics that
+# equal inputs map to equal `external_id`s (the mirrors carry
+# `unique_together = (("tenant", "external_id"),)`).
+def _stable_external_id(value: object) -> int:
+    """Deterministic, `integer`-safe surrogate id for mirror fixtures."""
+    digest = hashlib.sha256(str(value).encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+
+
 def _enriched_data(*, tenant_id_override=None, **override):
     """Phase 1 Option C consumer-enriched dict (Sequence #4).
 
@@ -205,7 +230,7 @@ def make_master(tenant, make_bot_user):
             )
         return CatalogMaster.all_tenants.create(
             tenant=tenant,
-            external_id=hash(str(ayla_user_id)) & 0xFFFFFFFF,
+            external_id=_stable_external_id(ayla_user_id),
             external_updated_at=datetime.now(dt_tz.utc),
             name=name,
             ayla_user_id=ayla_user_id,
@@ -227,7 +252,7 @@ def make_service(tenant):
         return CatalogService.all_tenants.create(
             tenant=tenant,
             slug=f"svc-{ayla_service_id}",
-            external_id=hash(str(ayla_service_id)) & 0xFFFFFFFF,
+            external_id=_stable_external_id(ayla_service_id),
             external_updated_at=datetime.now(dt_tz.utc),
             name=name,
             ayla_service_id=ayla_service_id,
