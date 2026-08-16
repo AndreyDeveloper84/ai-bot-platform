@@ -51,7 +51,7 @@ const SOLO_OWNER_ME: MeResponse = {
   is_admin: false,
   is_owner: true,
   master_id: "m-1",
-  landing_path: "/admin/dashboard",
+  landing_path: "/admin/team",
   is_solo_provider: true,
 };
 
