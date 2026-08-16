@@ -135,8 +135,14 @@ class TestOnboarding:
 
         text = sent.call_args.kwargs["text"]
         assert "не подошёл" in text
-        # Must not disclose whether it was unknown, used or expired.
-        assert "истёк" in text or "использован" in text
+        # Must not disclose WHICH failure it was. The copy deliberately
+        # hedges ("возможно, использован или истёк") so unknown, used and
+        # expired are indistinguishable; asserting the hedge is present
+        # would pass no matter what, so assert the reply is byte-identical
+        # to the single shared constant instead.
+        from apps.channels.max.salon_handler import CODE_NOT_ACCEPTED
+
+        assert text == CODE_NOT_ACCEPTED
         assert not TenantStaff.all_tenants.exists()
 
     def test_existing_staff_get_the_menu_not_the_code_prompt(self, tenant, sent):
@@ -195,3 +201,29 @@ class TestDefensive:
 
         sent.assert_not_called()
         assert not BotUser.all_tenants.filter(channel_user_id=CHANNEL_USER_ID).exists()
+
+
+class TestWrongBotGuard:
+    """Never answer as the client bot (DRF-1061).
+
+    `bot_scope(None)` is not neutral — outbound falls back to
+    settings.MAX_BOT_TOKEN, i.e. the CLIENT bot. If the registry has no
+    entry for this tenant, replying would send a staff message from the
+    customer-facing avatar: invisible in logs, alarming to the recipient.
+    """
+
+    def test_no_registry_entry_means_silence_not_a_wrong_sender(self, tenant, settings, sent):
+        # Registry declares a bot for a DIFFERENT salon.
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="other",
+                webhook_secret="wh-other",  # pragma: allowlist secret
+                api_token="token-other",  # pragma: allowlist secret
+                tenant_slug="some-other-salon",
+                stream="max_salon",
+            ),
+        )
+
+        _handle("привет", tenant)
+
+        sent.assert_not_called()

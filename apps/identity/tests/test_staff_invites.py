@@ -154,7 +154,7 @@ class TestRedeemStaffRoles:
     def test_admin_code_creates_the_staff_row(self, tenant, person):
         _, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
 
-        result = redeem_staff_invite(code=code, bot_user=person)
+        result = redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         assert result.role == "admin"
         assert result.already_had_role is False
@@ -168,7 +168,7 @@ class TestRedeemStaffRoles:
         assert resolve_role(person).is_admin is False
 
         _, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
-        redeem_staff_invite(code=code, bot_user=person)
+        redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         role_ctx = resolve_role(person)
         assert role_ctx.is_admin is True
@@ -177,7 +177,7 @@ class TestRedeemStaffRoles:
     def test_owner_code_grants_owner(self, tenant, person):
         _, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.OWNER)
 
-        redeem_staff_invite(code=code, bot_user=person)
+        redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         assert resolve_role(person).is_owner is True
 
@@ -185,8 +185,8 @@ class TestRedeemStaffRoles:
         _, admin_code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
         _, recep_code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.RECEPTIONIST)
 
-        redeem_staff_invite(code=admin_code, bot_user=person)
-        redeem_staff_invite(code=recep_code, bot_user=person)
+        redeem_staff_invite(code=admin_code, bot_user=person, tenant=tenant)
+        redeem_staff_invite(code=recep_code, bot_user=person, tenant=tenant)
 
         role_ctx = resolve_role(person)
         assert role_ctx.is_admin is True
@@ -197,10 +197,10 @@ class TestRedeemStaffRoles:
         # operator issuing a second owner code deserves an answer, not a 500.
         _, first = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.OWNER)
         _, second = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.OWNER)
-        redeem_staff_invite(code=first, bot_user=person)
+        redeem_staff_invite(code=first, bot_user=person, tenant=tenant)
 
         with pytest.raises(OwnerAlreadyExists):
-            redeem_staff_invite(code=second, bot_user=other_person)
+            redeem_staff_invite(code=second, bot_user=other_person, tenant=tenant)
 
 
 class TestRedeemMaster:
@@ -210,7 +210,7 @@ class TestRedeemMaster:
             tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
         )
 
-        result = redeem_staff_invite(code=code, bot_user=person)
+        result = redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         master.refresh_from_db()
         assert result.catalog_master_id == str(master.id)
@@ -224,7 +224,7 @@ class TestRedeemMaster:
             tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
         )
 
-        redeem_staff_invite(code=code, bot_user=person)
+        redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         # A duplicate would be invisible to the booking mirror, whose
         # specialist_id points at the original row.
@@ -239,7 +239,7 @@ class TestRedeemMaster:
             tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
         )
 
-        redeem_staff_invite(code=code, bot_user=person)
+        redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         master.refresh_from_db()
         assert master.is_active is True
@@ -252,20 +252,20 @@ class TestRedeemMaster:
         )
 
         with pytest.raises(InviteMasterMissing):
-            redeem_staff_invite(code=code, bot_user=person)
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
 
 class TestRedeemFailures:
     def test_unknown_code(self, tenant, person):
         with pytest.raises(InviteNotFound):
-            redeem_staff_invite(code="AYLA-2222", bot_user=person)
+            redeem_staff_invite(code="AYLA-2222", bot_user=person, tenant=tenant)
 
     def test_used_code_cannot_be_reused_by_someone_else(self, tenant, person, other_person):
         _, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
-        redeem_staff_invite(code=code, bot_user=person)
+        redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         with pytest.raises(InviteNotFound):
-            redeem_staff_invite(code=code, bot_user=other_person)
+            redeem_staff_invite(code=code, bot_user=other_person, tenant=tenant)
 
         assert not TenantStaff.all_tenants.filter(bot_user=other_person).exists()
 
@@ -275,13 +275,13 @@ class TestRedeemFailures:
         invite.save(update_fields=["expires_at"])
 
         with pytest.raises(InviteNotFound):
-            redeem_staff_invite(code=code, bot_user=person)
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
     def test_failure_modes_are_indistinguishable(self, tenant, person):
         # Unknown, used and expired must present identically: the person
         # cannot tell them apart, and neither should a guesser.
         used_invite, used_code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
-        redeem_staff_invite(code=used_code, bot_user=person)
+        redeem_staff_invite(code=used_code, bot_user=person, tenant=tenant)
         expired_invite, expired_code = issue_staff_invite(
             tenant=tenant, role=StaffInvite.Role.ADMIN
         )
@@ -292,7 +292,7 @@ class TestRedeemFailures:
         for candidate in ("AYLA-2222", used_code, expired_code):
             cache.clear()  # isolate from the attempt limiter
             with pytest.raises(InviteNotFound) as exc:
-                redeem_staff_invite(code=candidate, bot_user=person)
+                redeem_staff_invite(code=candidate, bot_user=person, tenant=tenant)
             raised.append(exc.value.slug)
 
         assert raised == ["invite_not_found"] * 3
@@ -304,9 +304,9 @@ class TestIdempotency:
         # here would be baffling.
         _, first = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
         _, second = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
-        redeem_staff_invite(code=first, bot_user=person)
+        redeem_staff_invite(code=first, bot_user=person, tenant=tenant)
 
-        result = redeem_staff_invite(code=second, bot_user=person)
+        result = redeem_staff_invite(code=second, bot_user=person, tenant=tenant)
 
         assert result.already_had_role is True
         assert (
@@ -322,9 +322,9 @@ class TestIdempotency:
         _, second = issue_staff_invite(
             tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=master
         )
-        redeem_staff_invite(code=first, bot_user=person)
+        redeem_staff_invite(code=first, bot_user=person, tenant=tenant)
 
-        result = redeem_staff_invite(code=second, bot_user=person)
+        result = redeem_staff_invite(code=second, bot_user=person, tenant=tenant)
 
         assert result.already_had_role is True
 
@@ -333,32 +333,76 @@ class TestRateLimit:
     def test_guessing_is_stopped(self, tenant, person):
         for _ in range(MAX_ATTEMPTS):
             with pytest.raises(InviteNotFound):
-                redeem_staff_invite(code="AYLA-2222", bot_user=person)
+                redeem_staff_invite(code="AYLA-2222", bot_user=person, tenant=tenant)
 
         with pytest.raises(InviteRateLimited):
-            redeem_staff_invite(code="AYLA-2222", bot_user=person)
+            redeem_staff_invite(code="AYLA-2222", bot_user=person, tenant=tenant)
 
     def test_the_limit_is_per_person(self, tenant, person, other_person):
         for _ in range(MAX_ATTEMPTS + 1):
             try:
-                redeem_staff_invite(code="AYLA-2222", bot_user=person)
+                redeem_staff_invite(code="AYLA-2222", bot_user=person, tenant=tenant)
             except (InviteNotFound, InviteRateLimited):
                 pass
 
         # A second person is unaffected by the first's fumbling.
         with pytest.raises(InviteNotFound):
-            redeem_staff_invite(code="AYLA-3333", bot_user=other_person)
+            redeem_staff_invite(code="AYLA-3333", bot_user=other_person, tenant=tenant)
 
     def test_a_valid_code_clears_the_counter(self, tenant, person):
         # Someone who mistyped twice and then got it right must not stay
         # penalised for the rest of the hour.
         for _ in range(2):
             with pytest.raises(InviteNotFound):
-                redeem_staff_invite(code="AYLA-2222", bot_user=person)
+                redeem_staff_invite(code="AYLA-2222", bot_user=person, tenant=tenant)
 
         _, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.ADMIN)
-        redeem_staff_invite(code=code, bot_user=person)
+        redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         for _ in range(MAX_ATTEMPTS):
             with pytest.raises(InviteNotFound):
-                redeem_staff_invite(code="AYLA-4444", bot_user=person)
+                redeem_staff_invite(code="AYLA-4444", bot_user=person, tenant=tenant)
+
+
+class TestCrossTenantIsolation:
+    """A code from another salon must not resolve here — and must not burn.
+
+    Reachable by one wrong `--tenant` flag at issue time. Before the tenant
+    filter, such a code was found, marked used (single-use, gone), and
+    created a TenantStaff row against the OTHER tenant — which resolve_role
+    never reads, because it filters by the bot user's own tenant. The person
+    was told "you are now the owner", still resolved as a customer on the
+    next message, and their code was spent. Recovery needed SQL.
+    """
+
+    @pytest.fixture
+    def other_tenant(self):
+        from apps.tenancy.models import Tenant
+
+        return Tenant.objects.create(slug="another-salon", name="Другой салон")
+
+    def test_a_code_issued_for_another_salon_is_not_found(self, tenant, other_tenant, person):
+        _, code = issue_staff_invite(tenant=other_tenant, role=StaffInvite.Role.OWNER)
+
+        with pytest.raises(InviteNotFound):
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+    def test_and_it_is_not_burned(self, tenant, other_tenant, person):
+        # The operator can still re-issue or use it in the right salon; the
+        # wrong attempt must cost nothing.
+        invite, code = issue_staff_invite(tenant=other_tenant, role=StaffInvite.Role.OWNER)
+
+        with pytest.raises(InviteNotFound):
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+        invite.refresh_from_db()
+        assert invite.used_at is None
+        assert invite.used_by_id is None
+
+    def test_no_staff_row_leaks_into_the_other_tenant(self, tenant, other_tenant, person):
+        _, code = issue_staff_invite(tenant=other_tenant, role=StaffInvite.Role.ADMIN)
+
+        with pytest.raises(InviteNotFound):
+            redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
+
+        assert not TenantStaff.all_tenants.exists()

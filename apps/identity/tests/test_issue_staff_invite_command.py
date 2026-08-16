@@ -65,7 +65,7 @@ class TestIssuing:
         code = _code_from(output)
 
         person = BotUser.all_tenants.create(tenant=tenant, channel="max", channel_user_id="1")
-        result = redeem_staff_invite(code=code, bot_user=person)
+        result = redeem_staff_invite(code=code, bot_user=person, tenant=tenant)
 
         assert result.role == "owner"
 
@@ -161,3 +161,50 @@ class TestTenantValidation:
     def test_unknown_tenant_lists_the_known_ones(self, tenant):
         with pytest.raises(CommandError, match="No tenant with slug"):
             _run(tenant="does-not-exist", role="owner")
+
+
+class TestMasterIdPath:
+    """--master-id is what the command recommends for the ambiguous case,
+    so it must be at least as safe as the by-name path, not less."""
+
+    def test_links_by_id(self, tenant):
+        master = _master(tenant)
+
+        _run(tenant="formula-tela", role="master", master_id=str(master.id))
+
+        assert StaffInvite.all_tenants.get().catalog_master_id == master.id
+
+    def test_warns_about_relinking_here_too(self, tenant):
+        # This warning used to fire only for --master-name, which is
+        # backwards: the operator most at risk of re-pointing someone
+        # else's link is the one disambiguating by id.
+        person = BotUser.all_tenants.create(tenant=tenant, channel="max", channel_user_id="3")
+        master = _master(tenant, linked_bot_user=person)
+
+        output = _run(tenant="formula-tela", role="master", master_id=str(master.id))
+
+        assert "already linked" in output
+
+    def test_malformed_id_is_an_error_not_a_traceback(self, tenant):
+        with pytest.raises(CommandError, match="not a valid master id"):
+            _run(tenant="formula-tela", role="master", master_id="не-uuid")
+
+    def test_archived_master_by_id_is_refused(self, tenant):
+        master = _master(tenant, archived_at=timezone.now())
+
+        with pytest.raises(CommandError, match="No active master"):
+            _run(tenant="formula-tela", role="master", master_id=str(master.id))
+
+
+class TestRoleMismatch:
+    @pytest.mark.parametrize("role", ["admin", "owner", "receptionist"])
+    def test_master_flags_with_a_non_master_role_are_refused(self, tenant, role):
+        # `--role admin --master-name "Ольга"` is a mistyped role. Issuing
+        # an ADMIN code while the operator believes they invited a master
+        # hands out more access than intended.
+        _master(tenant)
+
+        with pytest.raises(CommandError, match="only valid with --role=master"):
+            _run(tenant="formula-tela", role=role, master_name="Тихонова")
+
+        assert not StaffInvite.all_tenants.exists()

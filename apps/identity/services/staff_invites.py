@@ -12,13 +12,13 @@ cache, so there is nothing to invalidate.
 
 ### Code format
 
-``AYLA-7K3M`` — a fixed prefix plus four characters from a 28-symbol
+``AYLA-7K3M`` — a fixed prefix plus four characters from a 31-symbol
 alphabet with ``0/O`` and ``1/I/L`` removed, because these codes get read
 out loud and written down. Case and dashes are insignificant: the code is
 normalized before hashing, so ``ayla7k3m`` and ``AYLA-7K3M`` are the same
 code.
 
-~614k combinations is not cryptographic, and deliberately so — a code long
+31**4 = ~924k combinations is not cryptographic, and deliberately so — a code long
 enough to be unguessable is a code nobody will type. The entropy budget is
 spent on usability and the security comes from three other places: the code
 is single-use, it expires in 7 days, and redemption is rate-limited per
@@ -266,8 +266,25 @@ def _clear_rate_limit(bot_user: BotUser) -> None:
         pass
 
 
-def redeem_staff_invite(*, code: str, bot_user: BotUser) -> RedeemResult:
-    """Turn a code into staff access for ``bot_user``.
+def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult:
+    """Turn a code into staff access for ``bot_user`` in ``tenant``.
+
+    ``tenant`` is required, and it is the salon whose bot the person is
+    talking to — not a hint taken from the invite. A code issued for
+    another salon must not resolve here at all.
+
+    Why that matters concretely: without the filter, an invite mistakenly
+    issued for salon B (one wrong ``--tenant`` flag) and typed into salon
+    A's bot would be *found*, *burned* (``used_at`` set, single-use gone)
+    and would create a ``TenantStaff(tenant=B, bot_user=<A's row>)`` —
+    which ``resolve_role`` never reads, because it filters by the bot
+    user's own tenant. The person would be told "you are now the owner of
+    A", still resolve as a customer on the next message, and their code
+    would be spent. Recovering that needs SQL.
+
+    Filtering at lookup means the code is simply not found: the person
+    hears "this code did not work", the code stays valid, and the operator
+    can re-issue it for the right salon.
 
     Idempotent in the way that matters to a human: someone who already
     holds the role gets a success answer rather than an error, because from
@@ -288,7 +305,7 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser) -> RedeemResult:
     with transaction.atomic():
         invite = (
             StaffInvite.all_tenants.select_for_update()
-            .filter(code_hash=code_hash)
+            .filter(code_hash=code_hash, tenant=tenant)
             .select_related("tenant", "catalog_master")
             .first()
         )
