@@ -87,6 +87,19 @@ STRICT_OPT_OUT_PREFIXES = (
     # tenant does not come from the header on this surface — while
     # blocking the surface completely.
     "/api/v1/master/",
+    # Master↔admin internal chat (DRF-1113). Both sub-surfaces resolve the
+    # tenant from verified initData — `/master/...` inside
+    # @require_master_init_data, `/admin/...` inside @require_admin_role —
+    # exactly like the three prefixes above. The X-Tenant header is never
+    # sent by the Mini App on this surface either.
+    #
+    # Measured on the pilot 2026-08-16: every internal-chat endpoint
+    # answered 400 TENANT_REQUIRED before any view ran, which was read as
+    # a bug in apps.internal_chat. It was not — a control request to a
+    # deliberately non-existent `/api/v1/...` path returned the same 400,
+    # proving the middleware answers ahead of URL resolution. That check
+    # is the cheap way to tell "middleware refused" from "view refused".
+    "/api/v1/internal-chat/",
     # #732 (PRE_PILOT) — temporary 410 Gone for retired YooKassa
     # webhook. YooKassa has no X-Tenant header (external webhook).
     # Without this opt-out the strict-mode flip (2026-05-28 per

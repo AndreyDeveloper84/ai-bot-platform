@@ -102,6 +102,73 @@ VALID_STATUS_FILTERS = frozenset({STATUS_PENDING_FILTER, STATUS_DECIDED_FILTER, 
 # --- errors ---------------------------------------------------------------
 
 
+def _block_time_in_ayla(
+    *,
+    master,
+    tenant_id,
+    start_at,
+    end_at,
+    reason: str,
+) -> None:
+    """Write the approved absence into Ayla, the system of record (DRF-1062).
+
+    ``CatalogMaster.id`` IS the Ayla specialist id — the catalog mirror
+    upserts with ``id=dto.ayla_master_id``. ``ayla_user_id`` is the Ayla
+    *User* id and would address nobody here.
+
+    The exact requested interval is sent, not the whole covered days. The
+    local ``ScheduleException`` model is date-keyed and therefore rounds a
+    partial-day request up to full days; Ayla's ``SpecialistTimeOff`` is an
+    interval and can hold what the master actually asked for. Blocking
+    more time than requested would quietly cost the salon bookings.
+    """
+    from django.conf import settings
+
+    if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        # Flag OFF: this deployment's schedule really is the local one —
+        # the customer picker computes slots from apps.scheduling and
+        # bookings are written locally too. Reaching into Ayla there would
+        # block time in a system this deployment does not book against.
+        return
+
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        ScheduleBlockConflictError,
+        get_ayla_booking_client,
+    )
+
+    try:
+        get_ayla_booking_client().create_specialist_time_off(
+            specialist_id=str(master.id),
+            tenant_id=str(tenant_id),
+            start_at=start_at.isoformat(),
+            end_at=end_at.isoformat(),
+            reason=reason,
+        )
+    except ScheduleBlockConflictError as exc:
+        # Not a failure of the approval — the time is booked. Say so, so
+        # the administrator can settle those bookings on the surface built
+        # for it instead of guessing why "approve" did nothing.
+        raise AvailabilityDecisionError(
+            "has_active_appointments",
+            "There are active bookings in this period. Resolve them before approving the time off.",
+            status=409,
+        ) from exc
+    except BookingAPIError as exc:
+        # An outage must not silently approve a day off that never reached
+        # the schedule; refuse and leave the request pending.
+        logger.warning(
+            "availability.ayla_block_failed master=%s err=%s",
+            master.id,
+            type(exc).__name__,
+        )
+        raise AvailabilityDecisionError(
+            "schedule_unavailable",
+            "The booking system is temporarily unavailable. Try again.",
+            status=503,
+        ) from exc
+
+
 class AvailabilityDecisionError(Exception):
     """Decision-time validation failure with a stable HTTP-friendly slug.
 
@@ -559,6 +626,28 @@ def approve_availability_request(
                 f"existing exceptions conflict on dates: {sorted(conflicting_dates)}",
                 status=409,
             )
+
+        # DRF-1062 — Ayla owns the schedule, so the approval lands there
+        # FIRST. Written only into apps.scheduling it would change nothing
+        # a customer can see: the customer picker reads slots from Ayla,
+        # so the administrator would be told the day off was approved and
+        # the day would stay on sale.
+        #
+        # Ordering is deliberate. If Ayla refuses, nothing local changes
+        # and the request stays pending for a human to look at. If Ayla
+        # succeeds and the local work then fails, the roll-back leaves a
+        # block in Ayla with the request still pending — the schedule is
+        # closed (the conservative direction) and a retry is idempotent
+        # only in the sense that a second block would overlap harmlessly.
+        # The reverse order could mark a request approved while the time
+        # stayed bookable, which is the failure this task exists to end.
+        _block_time_in_ayla(
+            master=master,
+            tenant_id=tenant_id,
+            start_at=req.requested_start,
+            end_at=req.requested_end,
+            reason=req.reason_text or "",
+        )
 
         # Materialise — one ScheduleException per covered date.
         materialised_dates: list[date_cls] = []

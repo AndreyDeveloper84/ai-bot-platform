@@ -138,13 +138,19 @@ def test_legacy_serviceless_callback_asks_for_service(
     settings, monkeypatch, mock_send, fake_redis
 ) -> None:
     """A pre-DRF-962 keyboard (2-id payload) must get the honest
-    ask-the-service reply — listing the master's real services — not a
-    dispatch that the booking skill would refuse with «Контекст записи
-    устарел»."""
+    ask-the-service reply — this master's real services — not a dispatch that
+    the booking skill would refuse with «Контекст записи устарел».
+
+    DRF-1070: those services must reach the wire as a KEYBOARD. Asserted at the
+    outbound boundary, because that is where the rendering can still be lost —
+    ``_build_attachments`` silently drops an envelope it does not recognise, and
+    the resulting chat message would be indistinguishable from the pre-fix
+    text-only answer that made the owner type the service name three times.
+    """
     settings.STRICT_TENANT_SCOPE = "strict"
     settings.BOOKING_VIA_AYLA_REST = True
     t = Tenant.objects.create(slug="t-e2e-2", name="Salon", timezone="Europe/Moscow", city="Пенза")
-    master, _service = _fixture(t)
+    master, service = _fixture(t)
 
     called: list = []
     monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
@@ -156,7 +162,15 @@ def test_legacy_serviceless_callback_asks_for_service(
 
     assert called == []
     assert len(mock_send) == 1
-    assert "«Маникюр»" in mock_send[0]["text"]
+    assert "Маникюр" in mock_send[0]["text"]  # mirrored text list for keyboardless channels
+    # MAX wire shape: inline_keyboard attachment, one button carrying the
+    # service id back through the same cb:discover:book: contract.
+    attachments = mock_send[0]["attachments"]
+    assert attachments, "the service keyboard must survive the outbound builder"
+    buttons = attachments[0]["payload"]["buttons"]
+    flat = [b for row in buttons for b in row] if isinstance(buttons[0], list) else buttons
+    assert [b["text"] for b in flat] == ["Маникюр"]
+    assert [b["payload"] for b in flat] == [f"cb:discover:book:{t.id}:{master.id}:{service.id}"]
     assert current_tenant() is None
 
 

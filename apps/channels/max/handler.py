@@ -127,7 +127,10 @@ from apps.identity.services import (
 from apps.identity.services.memory_reader import read_personal_context
 from apps.persona.memory_commands import handle_memory_command
 from apps.persona.memory_surface import render_personal_context
-from apps.orchestrator.concierge import generate_concierge_reply
+from apps.orchestrator.concierge import (
+    generate_concierge_reply,
+    generate_direct_show_masters_reply,
+)
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
@@ -138,8 +141,13 @@ from apps.orchestrator.handoff import (
     handoff_to_booking,
     matches_human_handoff_request,
     route_booking_callback,
-    route_global_booking_lookup,
     route_global_human_handoff,
+)
+from apps.orchestrator.visits import (
+    CALLBACK_VISIT_REPEAT_PREFIX,
+    VISIT_CALLBACK_PREFIXES,
+    route_visit_callback,
+    route_visits,
 )
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
@@ -147,6 +155,7 @@ from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.skills.booking.lookup import is_personal_booking_lookup
+from apps.skills.menu.matching import looks_like_booking_request
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
 logger = logging.getLogger(__name__)
@@ -662,6 +671,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      confirm / cancel route back into tenant T's skill pipeline — before
     #      this they fell through to the concierge as raw text (the «2026 год»
     #      refusal instead of the next booking step).
+    #   2.7. New-booking intent (DRF-1102) — a general «запиши меня на
+    #      массаж»-shaped turn (looks_like_booking_request, the same signal
+    #      apps/skills/menu already uses as its last-resort booking
+    #      catch-all) shows masters straight away, deterministically. Sits
+    #      AFTER the memory-command / pending-answer checks inside the else
+    #      branch below (not a top-level elif here) so a forget-phrase that
+    #      happens to name a service — «забудь что я люблю массаж» — is
+    #      still processed as a memory command, not hijacked into cards.
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
     was_memory_command = False
@@ -680,8 +697,26 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
         )
         assistant_action_type = "human_handoff"
+    elif event.text.startswith(VISIT_CALLBACK_PREFIXES):
+        # Cards and repeat taps carry an appointment id the bot itself
+        # rendered, so they resolve before the natural-language branches.
+        reply = route_visit_callback(
+            global_bot_user=bot_user,
+            callback_text=event.text,
+            trace_id=trace_id,
+        )
+        # A repeat tap is the start of a booking, not a lookup — the funnel
+        # these events exist to measure must not merge the two.
+        assistant_action_type = (
+            "booking_repeat"
+            if event.text.startswith(CALLBACK_VISIT_REPEAT_PREFIX)
+            else "visit_card"
+        )
     elif is_personal_booking_lookup(event.text):
-        reply = route_global_booking_lookup(
+        # DRF-1032: the answer now comes from the Ayla backend, not from the
+        # local mirror — a mirror row can outlive the booking it mirrors
+        # (DRF-1034), and history is where that error accumulates.
+        reply = route_visits(
             global_bot_user=bot_user,
             trace_id=trace_id,
         )
@@ -749,6 +784,16 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 ask_reply = None
             if ask_reply is not None:
                 reply = ask_reply
+            elif looks_like_booking_request(event.text):
+                # DRF-1102 — the missing branch: skip the concierge LLM
+                # entirely for a general booking/service request. The search
+                # layer already resolves free text fine (discover_masters
+                # token-matches the raw phrase, DRF-945); the funnel just
+                # needs to reach it instead of the LLM re-asking forever.
+                reply = generate_direct_show_masters_reply(
+                    event.text, trace_id=str(trace_id) if trace_id else None
+                )
+                assistant_action_type = "discovery_show_masters_direct"
             else:
                 # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
                 # the discovery prompt. Best-effort: these DB reads run BEFORE the reply

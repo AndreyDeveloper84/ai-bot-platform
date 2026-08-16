@@ -27,7 +27,7 @@ import uuid
 from django.conf import settings
 
 from apps.events.services import emit
-from apps.orchestrator.discovery import DiscoveryReply
+from apps.orchestrator.discovery import CALLBACK_DISCOVER_BOOK_PREFIX, DiscoveryReply
 
 logger = logging.getLogger(__name__)
 
@@ -45,21 +45,111 @@ _UNAVAILABLE_REPLY = (
 
 # The tap carried no bookable service (pre-DRF-962 keyboard, an ambiguous
 # query like bare «массаж», or a service that went inactive between render and
-# tap). Booking cannot start without one — asking is honest and keeps the user
-# in the discovery loop. The reply lists THIS master's real services (they are
-# one tenant-scoped queryset away), so following the bot's own suggestion
-# produces an exact-name query that discovery resolves unambiguously — a
-# hardcoded example would send the user chasing a service the master may not
-# even offer. Never dispatch a serviceless pick_master: the booking skill will
-# only answer it with the stale-context text.
-_ASK_SERVICE_REPLY_WITH_MENU = (
-    "Чтобы записаться к мастеру {name}, напишите желаемую услугу. У мастера можно "
-    "выбрать, например: {services}."
+# tap). Booking cannot start without one, so this branch answers with THIS
+# master's real services — they are one tenant-scoped queryset away.
+#
+# DRF-1070: those services are rendered as BUTTONS, not as text examples.
+# Until now the reply named up to three of them and asked the user to type one
+# back, betting that they would reproduce the exact name. Live dialog
+# 2026-08-14 (owner, «Сазонова Инна») shows the bet losing: two typed attempts
+# («Лимфодренажный массаж», «Биоэнергетический») looped back to the same card
+# and the same question, and the funnel only moved on the third try, when the
+# long name was reproduced verbatim. A button carries the service id, so
+# nothing has to be spelled — and it reuses the ALREADY-WORKING contract
+# ``cb:discover:book:<tenant>:<master>:<service>`` (verified end-to-end in the
+# same dialog at 10:46: card button with a service → date → slot → booked).
+# The text keeps the same names as a bulleted list, mirroring
+# ``_render_master_cards``, so a channel that drops keyboards still shows a
+# workable next step.
+#
+# Never dispatch a serviceless pick_master: the booking skill will only answer
+# it with the stale-context text.
+_ASK_SERVICE_PICK = "Выберите услугу мастера {name}:"
+# The tap named a service this master does not offer (no MasterService edge).
+# Saying so is the whole point: the old reply re-asked the same question, and
+# the user had no way to learn that the name was fine but the master was wrong.
+_ASK_SERVICE_NOT_OFFERED = "У мастера {name} нет услуги «{service}». Вот что можно выбрать:"
+_ASK_SERVICE_NOT_OFFERED_BARE = (
+    "У мастера {name} нет услуги «{service}», а других доступных услуг у него сейчас нет — "
+    "попробуйте выбрать другого мастера."
 )
 _ASK_SERVICE_REPLY_BARE = (
     "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует."
 )
-_ASK_SERVICE_MENU_LIMIT = 3
+# Shown when the master offers more services than the keyboard carries. Typing
+# stays available as the escape hatch — it is a worse path (that is this
+# ticket), but for a long roster it is the only one left, so the message says
+# plainly that the list is partial instead of pretending it is complete.
+_ASK_SERVICE_TRUNCATED_NOTE = (
+    "Показаны первые {shown} услуг — если нужной нет в списке, напишите её название."
+)
+# Keyboard budget for the service menu. MAX hard-caps an inline_keyboard at
+# ``apps.channels.max.outbound.MAX_KEYBOARD_ROWS`` (29) and silently clamps
+# past it, so any limit must sit below that; 10 also keeps the mirrored text
+# list inside the ~600-char reply budget the discovery renderer works to and
+# keeps the keyboard scannable. Ordered by name — a stable, explainable order
+# (there is no popularity signal in the catalog mirror to rank by).
+_ASK_SERVICE_BUTTON_LIMIT = 10
+
+
+def _ask_service_reply(
+    *,
+    tenant_id: uuid.UUID,
+    master_id: uuid.UUID,
+    master_name: str,
+    rows: list[tuple[uuid.UUID, str]],
+    truncated: bool,
+    not_offered_name: str | None,
+) -> DiscoveryReply:
+    """Render the ask-the-service answer: buttons + a mirrored text list.
+
+    ``rows`` are ``(CatalogService.pk, name)`` pairs the caller already
+    filtered down to services this handoff can actually ground — the button
+    must not lead back here. Each becomes a
+    ``cb:discover:book:<tenant>:<master>:<service>`` tap, i.e. the SAME
+    keyboard contract ``_render_master_cards`` emits and the same one the
+    global MAX handler parses in ``_discovery_handoff_reply`` — this reply
+    adds no new callback grammar, it just re-enters the handoff with the id
+    the user could not be expected to spell.
+
+    The text repeats the identical names as a bulleted list (the
+    ``_render_master_cards`` shape). Two reasons: a channel that drops
+    keyboards still gets a workable next step — typing the exact name IS the
+    path that works today — and the bullets give the user that exact spelling
+    to copy instead of reconstructing it from memory.
+
+    Empty ``rows`` means there is nothing to offer, so no keyboard is built:
+    an empty ``buttons`` list is dropped by ``_build_attachments`` anyway, and
+    a header promising a list nobody can see would repeat this ticket's bug.
+    """
+    if not rows:
+        text = (
+            _ASK_SERVICE_NOT_OFFERED_BARE.format(name=master_name, service=not_offered_name)
+            if not_offered_name is not None
+            else _ASK_SERVICE_REPLY_BARE.format(name=master_name)
+        )
+        return DiscoveryReply(text=text)
+
+    header = (
+        _ASK_SERVICE_NOT_OFFERED.format(name=master_name, service=not_offered_name)
+        if not_offered_name is not None
+        else _ASK_SERVICE_PICK.format(name=master_name)
+    )
+    lines = [header]
+    lines.extend(f"• {name}" for _, name in rows)
+    if truncated:
+        lines.append(_ASK_SERVICE_TRUNCATED_NOTE.format(shown=len(rows)))
+    buttons = [
+        {
+            "label": name,
+            "callback": f"{CALLBACK_DISCOVER_BOOK_PREFIX}{tenant_id}:{master_id}:{service_pk}",
+        }
+        for service_pk, name in rows
+    ]
+    return DiscoveryReply(
+        text="\n".join(lines),
+        action_data={"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]},
+    )
 
 
 def handoff_to_booking(
@@ -175,6 +265,26 @@ def handoff_to_booking(
                 service_id,
                 trace_id,
             )
+            # Why the tap failed, for the user-facing wording (DRF-1070). The
+            # row is re-read WITHOUT ``is_active`` and WITHOUT the flag guard:
+            # the question here is only "does this master offer it", and the
+            # edge is a fact regardless of the pilot flag. Tenant-scoped, so a
+            # foreign/forged id simply misses and we stay on the neutral text —
+            # we never name a service we could not see inside T.
+            not_offered_name: str | None = None
+            if service_id is not None:
+                tapped = (
+                    CatalogService.objects.filter(id=service_id)
+                    .values_list("name", flat=True)
+                    .first()
+                )
+                if (
+                    tapped is not None
+                    and not MasterService.all_tenants.filter(
+                        tenant=tenant, master_id=master.id, service_id=service_id
+                    ).exists()
+                ):
+                    not_offered_name = tapped
             # Funnel visibility (review): without an event, a cohort whose
             # every tap fails to resolve is indistinguishable from zero
             # traffic on the handoff.entered dashboard.
@@ -188,26 +298,52 @@ def handoff_to_booking(
                     # exists to make queryable.
                     "service_id": str(service_id) if service_id is not None else None,
                     "booking_via_ayla_rest": flag_on,
+                    # Separates "master doesn't do this" from every other miss
+                    # (serviceless tap, forged id, legacy flag) — the two
+                    # cohorts need different product fixes.
+                    "not_offered_by_master": not_offered_name is not None,
                 },
             )
-            # Suggest only services the stamping gate can deliver: under the
-            # Ayla flag that means a non-NULL ayla_service_id — naming a
-            # service the user's next query still cannot resolve would keep
-            # them in the loop this reply exists to break.
-            menu_qs = CatalogService.objects.filter(masters_offering__master=master, is_active=True)
+            # Offer only services this very function could ground on the next
+            # tap, because the button re-enters HERE: active, offered by this
+            # master (the ``masters_offering`` edge — unique per
+            # (master, service), so no duplicate buttons), and carrying a
+            # non-NULL ``ayla_service_id``. A button that misses any of those
+            # would land the user back on this same reply — the DRF-1070 loop
+            # with a tap instead of a typo.
+            #
+            # Flag OFF ⇒ NO menu at all. The grounding gate above is
+            # ``service_id is not None and flag_on``, so with the legacy
+            # YClients flag NOTHING is deliverable (DRF-962: ``external_id``
+            # is the mysite pk, not a verified YClients service id). Listing
+            # services there — as buttons or as text — offers a path that
+            # provably cannot complete; the bare "which service?" line is the
+            # honest answer until the flag is on. Global-path booking under
+            # the legacy flag is already a dead end and is not this ticket.
+            rows: list[tuple[uuid.UUID, str]] = []
+            truncated = False
             if flag_on:
-                menu_qs = menu_qs.filter(ayla_service_id__isnull=False)
-            menu = list(
-                menu_qs.order_by("name").values_list("name", flat=True)[:_ASK_SERVICE_MENU_LIMIT]
-            )
-            if menu:
-                text = _ASK_SERVICE_REPLY_WITH_MENU.format(
-                    name=master_name,
-                    services=", ".join(f"«{name}»" for name in menu),
+                menu_qs = CatalogService.objects.filter(
+                    masters_offering__master=master,
+                    is_active=True,
+                    ayla_service_id__isnull=False,
                 )
-            else:
-                text = _ASK_SERVICE_REPLY_BARE.format(name=master_name)
-            return DiscoveryReply(text=text)
+                # +1 row to detect truncation without a second COUNT query.
+                rows = list(
+                    menu_qs.order_by("name").values_list("id", "name")[
+                        : _ASK_SERVICE_BUTTON_LIMIT + 1
+                    ]
+                )
+                truncated = len(rows) > _ASK_SERVICE_BUTTON_LIMIT
+                rows = rows[:_ASK_SERVICE_BUTTON_LIMIT]
+            return _ask_service_reply(
+                tenant_id=tenant_id,
+                master_id=master_id,
+                master_name=master_name,
+                rows=rows,
+                truncated=truncated,
+                not_offered_name=not_offered_name,
+            )
 
         conversation = resolve_active_conversation(per_tenant_bot_user)
         if conversation is None:
@@ -589,160 +725,19 @@ def _latest_tenant_conversation(global_bot_user):
     )
 
 
-# ─── Global-path personal booking lookup (DRF-911) ──────────────────────────
+# ─── Global-path personal booking lookup — REMOVED (DRF-1032) ───────────────
 #
-# The tenant-less discovery path sent «покажи мои записи» / «когда я записан?»
-# straight to the concierge LLM, which answered with reasoning instead of data
-# (or escalated to a human). The machinery was already built on the tenant
-# side — the detector (``apps.skills.booking.lookup.is_personal_booking_lookup``,
-# matched by the global MAX handler BEFORE this router is called) and the
-# read-only tool (``show_my_bookings``) — but unreachable from the global
-# route. This block is the bridge, same pattern as the DRF-1015 human-handoff
-# branch: deterministic, pre-LLM, tenant scope entered only inside.
+# What stood here answered «покажи мои записи» on the global path by walking
+# the caller's tenants and reading the local mirror: ``_booking_lookup_scopes``
+# (its DISTINCT-ordering fix was DRF-1033), ``_lookup_in_tenant``,
+# ``_compose_multi_tenant_text`` and ``route_global_booking_lookup``.
 #
-# §3 decision (brief, REPORT_DRF-911): AGGREGATE across every tenant where
-# the caller has CONFIRMED bookings, sectioned per salon. The «latest tenant
-# dialog» rule from DRF-1015 is wrong here — for a user booked into two
-# salons it would show one salon's list and the user would read it as
-# complete (the worst outcome: a missed visit). A section that FAILS to load
-# is marked explicitly, so the list never looks complete when it is not.
-
-# Section footer for a salon whose lookup failed (e.g. schedule_unavailable)
-# in a multi-salon answer. Single-salon answers return the tool's own error
-# text instead (byte-parity with the tenant path).
-_LOOKUP_SECTION_UNAVAILABLE = "• не удалось загрузить записи — попробуйте позже"
-
-
-def _booking_lookup_scopes(global_bot_user) -> list[tuple]:
-    """``(tenant, per_tenant_bot_user)`` pairs where this identity has bookings.
-
-    Driven by CONFIRMED ``BookingRequest`` rows — exactly the set of tenants
-    where ``show_my_bookings`` can return anything (the tool reads the same
-    rows). The per-tenant BotUser comes from the booking row itself: the
-    lookup creates NO identities (read-only acceptance, brief §4.4). The
-    sentinel tenant is excluded defensively (symmetric with
-    ``_latest_tenant_conversation``) — it never owns bookings.
-    """
-    from apps.booking.models import BookingRequest
-    from apps.identity.models import BotUser
-    from apps.identity.services.global_tenant import get_global_bot_tenant
-    from apps.tenancy.models import Tenant
-
-    sentinel = get_global_bot_tenant()
-    rows = (
-        BookingRequest.all_tenants.filter(
-            bot_user__channel=global_bot_user.channel,
-            bot_user__channel_user_id=global_bot_user.channel_user_id,
-            status=BookingRequest.Status.CONFIRMED,
-        )
-        .exclude(tenant_id=sentinel.id)
-        .order_by()
-        .values_list("tenant_id", "bot_user_id")
-        .distinct()
-    )
-    pairs = []
-    for tenant_id, bot_user_id in rows:
-        tenant = Tenant.objects.filter(id=tenant_id).first()
-        bot_user = BotUser.all_tenants.filter(id=bot_user_id).first()
-        if tenant is not None and bot_user is not None:
-            pairs.append((tenant, bot_user))
-    return pairs
-
-
-def _lookup_in_tenant(tenant, per_tenant_bot_user):
-    """Run the tenant-side read-only tool inside ``tenant_scope(T)``."""
-    from apps.skills.booking.provider import get_booking_provider
-    from apps.skills.booking.tools import _booking_via_ayla, show_my_bookings
-    from apps.tenancy.context import tenant_scope
-
-    with tenant_scope(tenant):
-        # The Ayla path reads the local mirror only — the client is never
-        # touched, so don't construct it: a read-only lookup must not die
-        # on booking-client configuration it has no use for. Flag OFF keeps
-        # the real provider (the YClients path reads live records).
-        provider = (
-            None if _booking_via_ayla() else get_booking_provider(bot_user=per_tenant_bot_user)
-        )
-        return show_my_bookings(client=provider, tenant=tenant, bot_user=per_tenant_bot_user)
-
-
-def _compose_multi_tenant_text(sections: list[tuple]) -> str:
-    """Per-salon sectioned answer. ``sections`` = ``(tenant, result | None)``;
-    ``None`` marks a failed lookup, rendered as an explicit unavailable note.
-
-    The bullet shape mirrors ``_format_bookings_text`` (service / master /
-    visit time) — kept as a literal, never re-derived, so the multi-salon
-    rendering matches the single-salon one line for line.
-    """
-    lines = ["Ваши предстоящие записи:"]
-    for tenant, result in sections:
-        lines.append("")
-        lines.append(f"{tenant.name}:")
-        if result is None:
-            lines.append(_LOOKUP_SECTION_UNAVAILABLE)
-            continue
-        if not result.bookings:
-            lines.append("• нет предстоящих записей")
-            continue
-        for b in result.bookings[:5]:
-            parts = [b.service_name or "—"]
-            if b.master_name:
-                parts.append(f"с {b.master_name}")
-            if b.visit_at:
-                parts.append(f"в {b.visit_at}")
-            lines.append("• " + " ".join(parts))
-    return "\n".join(lines)
-
-
-def route_global_booking_lookup(
-    *,
-    global_bot_user,
-    trace_id: str | uuid.UUID | None = None,
-) -> DiscoveryReply:
-    """Answer «покажи мои записи» on the global path with real data (DRF-911).
-
-    Read-only end to end: the scopes come from existing booking rows, the
-    tool only reads, and no tenant identity is ever created here. A caller
-    with no bookings anywhere gets the same empty text the tenant path
-    produces (``_format_bookings_text([])`` — imported, not reworded).
-    """
-    from apps.skills.booking.tools import _format_bookings_text
-
-    scopes = _booking_lookup_scopes(global_bot_user)
-    emit(
-        "marketplace.booking_lookup.routed",
-        payload={
-            "bot_user_id": str(global_bot_user.id),
-            "tenant_count": len(scopes),
-        },
-    )
-    if not scopes:
-        return DiscoveryReply(text=_format_bookings_text([]))
-
-    if len(scopes) == 1:
-        # Single salon — byte-parity with the tenant path, including its
-        # error text (e.g. schedule_unavailable) when the lookup fails.
-        tenant, per_tenant_bot_user = scopes[0]
-        result = _lookup_in_tenant(tenant, per_tenant_bot_user)
-        return DiscoveryReply(text=result.text)
-
-    sections: list[tuple] = []
-    any_bookings = False
-    any_failure = False
-    for tenant, per_tenant_bot_user in scopes:
-        result = _lookup_in_tenant(tenant, per_tenant_bot_user)
-        if result.error:
-            # Never let a failed section pass for an empty one — the list
-            # must not look complete when it is not (brief §3 requirement).
-            any_failure = True
-            sections.append((tenant, None))
-            continue
-        any_bookings = any_bookings or bool(result.bookings)
-        sections.append((tenant, result))
-
-    if not any_bookings and not any_failure:
-        # Bookings existed at scope-discovery time but none are upcoming
-        # (all past / cancelled since) — the plain empty answer is complete
-        # and honest, no per-salon noise.
-        return DiscoveryReply(text=_format_bookings_text([]))
-    return DiscoveryReply(text=_compose_multi_tenant_text(sections))
+# All four are gone because the customer-facing answer now comes from the Ayla
+# backend (OD-H1) via ``apps.booking.services.records`` and
+# ``apps.orchestrator.visits``. Two of their reasons for existing disappeared
+# with the source: the backend lists bookings across every tenant itself
+# (``records_api.py:312-323``), so nothing needs to aggregate them here, and
+# with one source there is no per-salon section that can fail on its own.
+#
+# DRF-1033 was accepted live on the pilot on 2026-08-14 before this removal;
+# its regression is still pinned, now against the backend-sourced reply.

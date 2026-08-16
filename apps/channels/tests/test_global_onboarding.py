@@ -70,6 +70,18 @@ def spy_discovery(monkeypatch):
     return spy
 
 
+@pytest.fixture
+def spy_direct_show_masters(monkeypatch):
+    """DRF-1102 — the deterministic show-masters branch. A general
+    booking/service phrase (e.g. «маникюр в Пензе») now reaches THIS
+    function instead of ``generate_concierge_reply``, skipping the LLM."""
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    spy = MagicMock(return_value=DiscoveryReply(text="Вот мастера, которые могут подойти:"))
+    monkeypatch.setattr(max_handler, "generate_direct_show_masters_reply", spy)
+    return spy
+
+
 @pytest.fixture(autouse=True)
 def _onboarding_on(settings):
     settings.GLOBAL_BOT_ONBOARDING = True
@@ -272,7 +284,9 @@ class TestHandlerIntegration:
         assert mock_send[0]["text"] == GLOBAL_WELCOME_TEXT
         assert current_tenant() is None
 
-    def test_full_consent_flow_then_discovery(self, mock_send, fake_redis, spy_discovery):
+    def test_full_consent_flow_then_discovery(
+        self, mock_send, fake_redis, spy_discovery, spy_direct_show_masters
+    ):
         uid = 4242
         # 1) first contact → welcome
         max_handler.handle_global_max_event(
@@ -290,18 +304,24 @@ class TestHandlerIntegration:
         )
         assert mock_send[-1]["text"] == GLOBAL_S5_TEXT
         spy_discovery.assert_not_called()
+        spy_direct_show_masters.assert_not_called()
 
         bot_user = resolve_or_create_global_bot_user(channel="max", channel_user_id=str(uid))
         assert bot_user.consent_at is not None
 
-        # 4) a normal message now flows to discovery
+        # 4) a normal message now flows to the normal reply pipeline — DRF-1102
+        # made «маникюр в Пензе» a deterministic show-masters short-circuit
+        # (it names a service), so THAT function runs, not the concierge LLM.
         max_handler.handle_global_max_event(
             _msg_payload(text="маникюр в Пензе", user_id=uid, mid="b"),
             trace_id=str(uuid.uuid4()),
         )
-        spy_discovery.assert_called_once()
+        spy_discovery.assert_not_called()
+        spy_direct_show_masters.assert_called_once()
 
-    def test_consent_refuse_then_can_still_search(self, mock_send, fake_redis, spy_discovery):
+    def test_consent_refuse_then_can_still_search(
+        self, mock_send, fake_redis, spy_discovery, spy_direct_show_masters
+    ):
         uid = 5151
         max_handler.handle_global_max_event(
             _msg_payload(text="привет", user_id=uid, mid="a"), trace_id=str(uuid.uuid4())
@@ -311,13 +331,17 @@ class TestHandlerIntegration:
             trace_id=str(uuid.uuid4()),
         )
         spy_discovery.assert_not_called()
+        spy_direct_show_masters.assert_not_called()
 
-        # Variant A: refused user can still search.
+        # Variant A: refused user can still search. «массаж завтра» names a
+        # service (DRF-1102 deterministic branch), so it short-circuits to
+        # show masters directly rather than the concierge LLM.
         max_handler.handle_global_max_event(
             _msg_payload(text="массаж завтра", user_id=uid, mid="b"),
             trace_id=str(uuid.uuid4()),
         )
-        spy_discovery.assert_called_once()
+        spy_discovery.assert_not_called()
+        spy_direct_show_masters.assert_called_once()
 
         bot_user = resolve_or_create_global_bot_user(channel="max", channel_user_id=str(uid))
         assert bot_user.consent_at is None

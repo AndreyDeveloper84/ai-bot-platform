@@ -202,6 +202,18 @@ class BookingBadRequestError(BookingAPIError):
         self.code = code
 
 
+class ScheduleBlockConflictError(BookingBadRequestError):
+    """Ayla refused to block a period because live bookings sit in it.
+
+    Separated from a plain 4xx because the caller owes the administrator a
+    different answer: the request was valid and permitted, the time simply
+    is not free. Retrying changes nothing — somebody has to decide what
+    happens to the people already booked, and that decision belongs on a
+    surface where a named human is the actor. Not an outage: does **not**
+    trip the breaker.
+    """
+
+
 class RepeatIntentUnusableError(BookingAPIError):
     """``repeat-intent`` answered 200 with an id that is not a UUID.
 
@@ -1032,6 +1044,73 @@ class AylaBookingHTTPClient:
             if isinstance(data, dict)
             else appointment_id,
             raw=data if isinstance(data, dict) else {},
+        )
+
+    def create_specialist_time_off(
+        self,
+        *,
+        specialist_id: str,
+        tenant_id: str,
+        start_at: str,
+        end_at: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Block a specialist's time in Ayla (DRF-1062).
+
+        Ayla owns the schedule, so an approved day-off has to land there:
+        written into the bot's own store it would change nothing a
+        customer can see, while telling the administrator it worked.
+
+        ``tenant_id`` is mandatory — the route treats it as a claim and
+        404s if the specialist does not belong to it, so a leaked bearer
+        cannot block time across tenants by iterating specialist ids.
+
+        Raises :class:`ScheduleBlockConflictError` when live bookings
+        overlap the period, which is a decision for a human rather than a
+        retry: somebody is booked into the time being closed.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/time-off/",
+            json_body={
+                "tenant_id": tenant_id,
+                "start_at": start_at,
+                "end_at": end_at,
+                "reason": reason,
+            },
+        )
+        if resp.status_code == 409:
+            # Distinct from a generic 4xx: the request was well-formed and
+            # the caller is allowed — the time simply is not free.
+            raise ScheduleBlockConflictError("has_active_appointments")
+        return self._ok(resp, success=(200, 201))
+
+    def get_specialist_service_edges(
+        self,
+        *,
+        specialist_id: str,
+        service_id: str,
+    ) -> list[dict[str, Any]]:
+        """Active bookable edges for ONE (specialist, salon service) pair.
+
+        Narrow on purpose. ``get_services`` already reads the same endpoint,
+        but it walks the whole tenant catalog, needs an active tenant scope,
+        and keeps only the ids — the row's own ``price`` (the amount Ayla
+        stamps onto a new appointment) is dropped. Repeat needs that price
+        and works on the tenant-less global path, so it asks for the single
+        row instead of filtering a catalog.
+
+        No tenant filter: ``(specialist, salon_service)`` is unique upstream
+        (``specialistservice_specialist_salon_uniq``), so the pair already
+        names at most one row.
+        """
+        return self._get_all_rows(
+            "catalog/specialist-services/",
+            params={
+                "specialist": specialist_id,
+                "salon_service": service_id,
+                "is_active": "true",
+            },
         )
 
     def get_user_bookings_page(

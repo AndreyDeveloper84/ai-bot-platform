@@ -461,19 +461,43 @@ def is_solo_provider(tenant: Tenant) -> bool:
 
     Per Tau policy §3.1 (pragmatic «1 distinct person = solo»):
 
-      distinct_people = active_staff_user_ids ∪ active_master_user_ids
+      distinct_people = active_staff ∪ active_masters
       return len(distinct_people) == 1
 
     Active = `TenantStaff.deactivated_at IS NULL` and
-    `CatalogMaster.archived_at IS NULL`. Master rows without a
-    `linked_bot_user` (mysite-synced legacy rows or pre-bridge state)
-    are EXCLUDED from the count — they don't correspond to a real
-    BotUser identity.
+    `CatalogMaster.archived_at IS NULL`.
+
+    Identity used for de-duplication:
+
+    * a person who has a `BotUser` is identified by `bot_user_id`, so an
+      owner who is also her own master collapses to one person;
+    * a master row WITHOUT `linked_bot_user` still counts as a person —
+      identified by the master row itself. The catalog does not create
+      two rows for one human, so row-identity is a sound stand-in.
+
+    Why the second bullet exists (DRF-1149, measured on the pilot
+    2026-08-16). The previous implementation excluded unlinked masters
+    on the grounds that they «don't correspond to a real BotUser
+    identity». That answered a different question than the policy asks:
+    Tau §3.1 counts *people who work here*, not *people who installed
+    our app*. On the pilot the salon had four active accepted masters,
+    three of them never bridged to a BotUser, so it reported
+    `solo=True` — and the Mini App consequently rendered the five-tab
+    solo surface, which has no entry point to any of the eleven admin
+    screens. The salon lost its whole admin surface to a counting bug.
+
+    Deliberate asymmetry when a person cannot be de-duplicated (an owner
+    with a staff row AND a separate unlinked master row for herself
+    counts as two): we prefer to over-count. Over-counting shows a solo
+    provider the team surface — mildly redundant, everything still
+    reachable. Under-counting hides the admin surface from a real salon
+    — the failure this function just caused. Bridge the master row to
+    the owner's BotUser and the count collapses back to one.
 
     Edge cases (accepted per Tau §3.1 «pragmatic»):
       - 1 staff row, 0 master rows → True (single distinct person)
-      - 0 staff rows, 1 master row → True
-      - Same person in both staff AND master → True (deduped via set)
+      - 0 staff rows, 1 master row (linked or not) → True
+      - Same person in both staff AND master, bridged → True (deduped)
       - Empty tenant (e.g. bootstrap) → False (0 distinct people)
       - 2+ distinct people → False
 
@@ -487,12 +511,18 @@ def is_solo_provider(tenant: Tenant) -> bool:
             deactivated_at__isnull=True,
         ).values_list("bot_user_id", flat=True)
     )
-    active_master_ids: set = set(
-        CatalogMaster.all_tenants.filter(
-            tenant=tenant,
-            linked_bot_user__isnull=False,
-            archived_at__isnull=True,
-        ).values_list("linked_bot_user_id", flat=True)
-    )
-    distinct_people = active_staff_ids | active_master_ids
-    return len(distinct_people) == 1
+    active_masters = CatalogMaster.all_tenants.filter(
+        tenant=tenant,
+        archived_at__isnull=True,
+    ).values_list("id", "linked_bot_user_id")
+
+    bridged_ids: set = set()
+    unbridged_count = 0
+    for _master_id, linked_bot_user_id in active_masters:
+        if linked_bot_user_id is None:
+            unbridged_count += 1
+        else:
+            bridged_ids.add(linked_bot_user_id)
+
+    distinct_people = len(active_staff_ids | bridged_ids) + unbridged_count
+    return distinct_people == 1
