@@ -303,10 +303,24 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
     now = timezone.now()
 
     with transaction.atomic():
+        # `select_related` must NOT include `catalog_master` here.
+        #
+        # It is a nullable FK, so Django renders it as a LEFT OUTER JOIN,
+        # and Postgres refuses: "FOR UPDATE cannot be applied to the
+        # nullable side of an outer join". The failure is unconditional —
+        # no code could be redeemed at all, whatever the data.
+        #
+        # SQLite does not enforce this, which is why the whole suite was
+        # green locally. Verified against the pilot's Postgres (DRF-1160).
+        #
+        # Nothing is lost by dropping it: `_link_master` re-reads the
+        # master under its own `select_for_update` anyway, because the row
+        # has to be locked before it is relinked. `tenant` stays — it is
+        # NOT NULL, so it joins INNER and is fine under FOR UPDATE.
         invite = (
             StaffInvite.all_tenants.select_for_update()
             .filter(code_hash=code_hash, tenant=tenant)
-            .select_related("tenant", "catalog_master")
+            .select_related("tenant")
             .first()
         )
         # One answer for "no such code", "already used" and "expired". The
