@@ -36,7 +36,7 @@
  */
 
 import type React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "./lib/api";
@@ -584,6 +584,49 @@ const SOLO_MORE_SHEET_ITEMS: ReadonlyArray<SoloMoreSheetItem> = [
 ];
 
 /**
+ * The «Салон» escape hatch — DRF-1149 safety net.
+ *
+ * The solo surface mounts every `/admin/*` route (see
+ * `UnifiedSoloSurface`) but the five-tab bar and the sheet above surface
+ * none of them, so until now the only way in was typing a URL. That was
+ * fine while «solo» meant «one person». It stopped being fine when the
+ * pilot salon — four masters, three of them never bridged to a BotUser —
+ * was mis-counted as solo and lost its entire admin surface.
+ *
+ * The counting bug itself is fixed in `is_solo_provider`; this item is
+ * the second lock on the same door. If the classifier is ever wrong
+ * again, an owner or admin can still reach the team screen instead of
+ * being stranded on a surface with no way out.
+ *
+ * Gated on the role flags, not on `is_solo_provider`: a genuine solo
+ * provider IS an owner, and «Салон» is where she manages her catalog and
+ * her services regardless of headcount. A master-only caller never sees
+ * it — same rule the backend enforces at `@require_admin_role`.
+ */
+const SOLO_ADMIN_SHEET_ITEM: SoloMoreSheetItem = {
+  path: "/admin/team",
+  label: "Салон",
+  icon: "🏢",
+  ariaLabel: "Управление салоном",
+  trailingDivider: true,
+};
+
+/**
+ * Sheet items for this caller: the Tau §3 base list, plus «Салон» when
+ * the caller holds an admin-side role. The divider moves onto «Салон» so
+ * the functional / settings split from the Tau mock is preserved.
+ */
+function soloMoreSheetItems(me: MeResponse): ReadonlyArray<SoloMoreSheetItem> {
+  const hasAdmin = me.is_owner || me.is_admin || me.is_receptionist;
+  if (!hasAdmin) return SOLO_MORE_SHEET_ITEMS;
+  return SOLO_MORE_SHEET_ITEMS.flatMap((it) =>
+    it.trailingDivider
+      ? [{ ...it, trailingDivider: false }, SOLO_ADMIN_SHEET_ITEM]
+      : [it],
+  );
+}
+
+/**
  * Bottom-bar nav for the solo surface. Five tabs; the «Ещё» tab does
  * NOT navigate — it toggles the sheet via the `onOpenSheet` callback.
  * Active-state highlighting tracks the actual route prefix so the
@@ -592,9 +635,11 @@ const SOLO_MORE_SHEET_ITEMS: ReadonlyArray<SoloMoreSheetItem> = [
 function SoloBottomNav({
   onOpenSheet,
   sheetOpen,
+  moreItems,
 }: {
   onOpenSheet: () => void;
   sheetOpen: boolean;
+  moreItems: ReadonlyArray<SoloMoreSheetItem>;
 }) {
   const location = useLocation();
   return (
@@ -606,9 +651,7 @@ function SoloBottomNav({
         const matchesPath = location.pathname.startsWith(t.path);
         const matchesSheetItem =
           isMore &&
-          SOLO_MORE_SHEET_ITEMS.some((it) =>
-            location.pathname.startsWith(it.path),
-          );
+          moreItems.some((it) => location.pathname.startsWith(it.path));
         const isActive = isMore
           ? sheetOpen || matchesSheetItem
           : matchesPath;
@@ -669,9 +712,11 @@ function SoloBottomNav({
 function SoloMoreSheet({
   open,
   onClose,
+  items,
 }: {
   open: boolean;
   onClose: () => void;
+  items: ReadonlyArray<SoloMoreSheetItem>;
 }) {
   const navigate = useNavigate();
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -767,7 +812,7 @@ function SoloMoreSheet({
         <div className="solo-more-sheet__grip" aria-hidden="true" />
         <h2 className="solo-more-sheet__title">Ещё</h2>
         <ul className="solo-more-sheet__list">
-          {SOLO_MORE_SHEET_ITEMS.map((it) => (
+          {items.map((it) => (
             <li key={it.path}>
               <button
                 type="button"
@@ -849,6 +894,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
   );
   const openSheet = useCallback(() => setMoreOpen(true), []);
   const closeSheet = useCallback(() => setMoreOpen(false), []);
+  // «Салон» appears for admin-side callers only — see soloMoreSheetItems.
+  const moreItems = useMemo(() => soloMoreSheetItems(me), [me]);
 
   // Defensive sync — if the user navigates TO /solo/more after mount
   // (e.g. via browser back to a stale URL), re-open the sheet. Initial
@@ -902,8 +949,12 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         {/* Catch-all → land on solo home. */}
         <Route path="*" element={<CatchAllRedirect to="/solo/my-day" />} />
       </Routes>
-      <SoloBottomNav onOpenSheet={openSheet} sheetOpen={moreOpen} />
-      <SoloMoreSheet open={moreOpen} onClose={closeSheet} />
+      <SoloBottomNav
+        onOpenSheet={openSheet}
+        sheetOpen={moreOpen}
+        moreItems={moreItems}
+      />
+      <SoloMoreSheet open={moreOpen} onClose={closeSheet} items={moreItems} />
     </div>
   );
 }
