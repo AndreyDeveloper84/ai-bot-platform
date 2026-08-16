@@ -276,19 +276,30 @@ def _detail_payload(master: CatalogMaster, *, include_audit: bool = False) -> di
 
 
 def _working_hours_summary(master: CatalogMaster) -> str:
-    """Compact one-liner for the detail screen.
+    """Compact one-liner for the detail screen. Empty when unknown.
 
     Reads :class:`apps.scheduling.models.WorkingHours` when present.
-    Phase 1 keeps this string-only — the proper structured payload
-    lives in the Schedule Management API (separate handoff). When no
-    rows exist (newly-invited master, no schedule seeded yet) we
-    return the placeholder the master_api also uses.
+    Phase 1 keeps this string-only — the proper structured payload lives
+    in the Schedule Management API (separate handoff).
+
+    DRF-1062: no rows now returns an empty string instead of «Расписание
+    уточнит салон». Since the invite stopped manufacturing a Mon-Fri
+    10:00-19:00 preset, a freshly invited master genuinely has no
+    schedule, and a reassuring sentence in that slot is a claim we cannot
+    back — the salon has not undertaken to clarify anything. Blank is the
+    honest rendering of "not set yet"; the screen can say so in its own
+    voice if it wants to.
+
+    Worth knowing when reading this value: `apps.scheduling` is NOT what
+    serves bookable slots on the pilot. With ``BOOKING_VIA_AYLA_REST`` the
+    backend answers, so this line describes the bot's local mirror, not
+    what a customer is offered.
     """
 
     try:
         from apps.scheduling.models import WorkingHours
     except ImportError:
-        return "Расписание уточнит салон"
+        return ""
 
     rows = list(
         WorkingHours.all_tenants.filter(tenant=master.tenant_id, master=master).order_by(
@@ -296,7 +307,7 @@ def _working_hours_summary(master: CatalogMaster) -> str:
         )
     )
     if not rows:
-        return "Расписание уточнит салон"
+        return ""
 
     working = [r for r in rows if r.is_working]
     if not working:
@@ -306,13 +317,13 @@ def _working_hours_summary(master: CatalogMaster) -> str:
     weekday_short = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     days = [weekday_short[r.day_of_week] for r in working if 0 <= r.day_of_week < 7]
     if not days:
-        return "Расписание уточнит салон"
+        return ""
     first, last = working[0], working[-1]
     # mypy: TimeField may be None on the model; narrow before strftime.
     start_t = first.start_time
     end_t = last.end_time
     if start_t is None or end_t is None:
-        return "Расписание уточнит салон"
+        return ""
     return f"{days[0]}-{days[-1]} {start_t.strftime('%H:%M')}–{end_t.strftime('%H:%M')}"
 
 
