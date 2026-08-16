@@ -35,7 +35,32 @@ Division of labour (do not duplicate):
 For every production `.py` file under a contract's `source_prefixes`,
 it flags an import whose target matches the contract's
 `forbidden_modules` (exact dotted module OR a submodule of it), unless
-the `(contract_id, file, forbidden_root)` triple is in `BASELINE`.
+the `(contract_id, file, qualname, forbidden_root)` quadruple is in
+`BASELINE`.
+
+# Why `qualname` is part of the baseline key (DRF-1157)
+
+The key used to be the `(contract_id, file, forbidden_root)` triple —
+i.e. **file**-granular. That is a hole in the sieve, and it was hiding
+exactly the defect G9 was written to catch:
+`apps/miniapp_api/views.py` imports `apps.booking.models.BookingRequest`
+from FOUR different function bodies. One of them (`_bookings_list`) is
+the legitimate flag-gated read; another (`_collect_occupied`) reads the
+booking store with no `BOOKING_VIA_AYLA_REST` check at all — the slots
+defect. A single file-granular baseline line covered all four, so the
+rule reported green over the crossing it existed to flag.
+
+Function-local imports are the normal shape in this repo (Django app
+loading order), so the enclosing scope is available for free from the
+AST: every import node is recorded with the dotted qualname of the
+`class`/`def` nesting it sits in, or `<module>` for a top-level import.
+Baselining one call site therefore no longer baselines its neighbours,
+and moving a forbidden import into a new function fails CI as new debt.
+
+The MKT1 catalog rule below deliberately stays file-granular (it reports
+one violation per file by design); its entries carry the synthetic
+qualname `<file>` so both rules can share the key type and the
+stale-entry machinery.
 
 Import shapes detected (the adversarial set #1001 / S5 asked for):
   - `import a.b.c`            / `import a.b.c as x`
@@ -181,158 +206,285 @@ CONTRACTS: tuple[Contract, ...] = (
 )
 
 # ── Baseline: accepted crossings on origin/dev, each tied to its issue ─
-# (contract_id, file POSIX relpath, forbidden_module_root)
-BaselineKey = tuple[str, str, str]
+# (contract_id, file POSIX relpath, qualname, forbidden_module_root)
+#
+# `qualname` is the dotted class/def nesting the import sits in, or
+# `<module>` for a top-level import. See the module docstring (DRF-1157)
+# for why file granularity was not enough.
+BaselineKey = tuple[str, str, str, str]
+
+# Synthetic qualname for an import at module level.
+MODULE_QUALNAME = "<module>"
+# Synthetic qualname for rules that are file-granular by design (MKT1).
+FILE_QUALNAME = "<file>"
 
 BASELINE: frozenset[BaselineKey] = frozenset(
     {
-        # G2.1 — skills → YClients (#928, 3 prod files; Phase 2.2 reroute via Ayla REST).
-        # provider.py is the strangler seam: behind BOOKING_VIA_AYLA_REST=OFF (default) it
-        # returns the unchanged YClients client; flag-ON routes through Ayla REST. Retired
-        # together with skill.py/tools.py when #928 completes the cutover.
-        ("G2.1-skills-no-yclients", "apps/skills/booking/skill.py", "apps.integrations.yclients"),
-        ("G2.1-skills-no-yclients", "apps/skills/booking/tools.py", "apps.integrations.yclients"),
+        # -- G2.1 - skills -> YClients (#928; Phase 2.2 reroute via Ayla REST) --
+        # provider.py is the strangler seam: behind BOOKING_VIA_AYLA_REST=OFF
+        # (default) it returns the unchanged YClients client; flag-ON routes
+        # through Ayla REST. Retired together with skill.py/tools.py when #928
+        # completes the cutover. DRF-1157 split the single file-level entry for
+        # provider.py into its two real sites (module header + the factory).
         (
             "G2.1-skills-no-yclients",
             "apps/skills/booking/provider.py",
+            "<module>",
             "apps.integrations.yclients",
         ),
-        # G5.1 — API surfaces → booking mutators (#925 create; #968 transitions/feedback)
+        (
+            "G2.1-skills-no-yclients",
+            "apps/skills/booking/provider.py",
+            "get_booking_provider",
+            "apps.integrations.yclients",
+        ),
+        (
+            "G2.1-skills-no-yclients",
+            "apps/skills/booking/skill.py",
+            "<module>",
+            "apps.integrations.yclients",
+        ),
+        (
+            "G2.1-skills-no-yclients",
+            "apps/skills/booking/tools.py",
+            "<module>",
+            "apps.integrations.yclients",
+        ),
+        # -- G5.1 - API surfaces -> booking mutators (#925 create; #968 rest) --
+        # DRF-1157: apps/miniapp_api/views.py used to carry three file-level
+        # entries (create / transitions / feedback). The `transitions` one alone
+        # covered SIX distinct view bodies; they are enumerated now so migrating
+        # one cancel/reschedule endpoint at a time ratchets the debt down,
+        # instead of leaving one line that never has to move.
         (
             "G5.1-api-no-booking-mutators",
             "apps/miniapp_api/views.py",
+            "create_booking",
             "apps.booking.services.create",
         ),
         (
             "G5.1-api-no-booking-mutators",
             "apps/miniapp_api/views.py",
-            "apps.booking.services.transitions",
-        ),
-        (
-            "G5.1-api-no-booking-mutators",
-            "apps/miniapp_api/views.py",
+            "submit_feedback",
             "apps.booking.services.feedback",
         ),
         (
             "G5.1-api-no-booking-mutators",
-            "apps/admin_api/services/master_deactivation.py",
+            "apps/miniapp_api/views.py",
+            "_booking_to_dict",
             "apps.booking.services.transitions",
         ),
-        # G6.2 — eventbus consumer → skill in-process (#927; fix = Celery task)
+        (
+            "G5.1-api-no-booking-mutators",
+            "apps/miniapp_api/views.py",
+            "booking_cancel_request",
+            "apps.booking.services.transitions",
+        ),
+        (
+            "G5.1-api-no-booking-mutators",
+            "apps/miniapp_api/views.py",
+            "booking_cancel_confirm",
+            "apps.booking.services.transitions",
+        ),
+        (
+            "G5.1-api-no-booking-mutators",
+            "apps/miniapp_api/views.py",
+            "booking_cancel_undo",
+            "apps.booking.services.transitions",
+        ),
+        (
+            "G5.1-api-no-booking-mutators",
+            "apps/miniapp_api/views.py",
+            "booking_reschedule_request",
+            "apps.booking.services.transitions",
+        ),
+        (
+            "G5.1-api-no-booking-mutators",
+            "apps/miniapp_api/views.py",
+            "booking_reschedule_confirm",
+            "apps.booking.services.transitions",
+        ),
+        (
+            "G5.1-api-no-booking-mutators",
+            "apps/admin_api/services/master_deactivation.py",
+            "<module>",
+            "apps.booking.services.transitions",
+        ),
+        # -- G6.2 - eventbus consumer -> skill in-process (#927; fix = Celery) --
         (
             "G6.2-eventbus-consumer-narrow",
             "apps/eventbus/consumers/payment.py",
+            "handle_payment_failed._dispatch_skill",
             "apps.skills",
         ),
-        # G9 — BookingRequest read outside apps/booking/ (DRF-1109). All 18
-        # pre-existing production crossings on origin/dev, generated the same
-        # way as the other contracts (empty baseline → observed crossings;
-        # see test_baseline_matches_reality). Three groups:
+        # -- G9 - BookingRequest read outside apps/booking/ (DRF-1109) --------
+        # 22 accepted crossings across the same 18 files as before. DRF-1157
+        # raised the entry count from 18 by splitting three multi-site files
+        # into their real call sites. No NEW file appeared: the file-level key
+        # was hiding unknown call sites inside known files, not unknown files.
         #
-        # (a) Confirmed flag-gated / dual-path by design — the file itself
-        #     references BOOKING_VIA_AYLA_REST near the read.
+        # (a) Confirmed flag-gated / dual-path by design - the file references
+        #     BOOKING_VIA_AYLA_REST at or above the read.
         (
             "G9-booking-request-outside-owner",
             "apps/miniapp_api/views.py",
+            "bookings_list",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/integrations/yclients/webhooks.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/skills/booking/tools.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
-        # (b) Known LIVE defect, not legitimate — the periodic completion
-        #     scan reads BookingRequest with NO flag check at all (arch
-        #     review §2, A2). This is the DRF-1108 instance the rule is
-        #     required to catch; left unfixed here (out of this ticket's
-        #     scope, see IMPL_BRIEF_MECHANIZATION.md §4) but explicitly
-        #     called out — do not read this line as "legitimate".
+        # (a2) DRF-1157 - the three OTHER miniapp_api/views.py sites the old
+        #      file-level key silenced along with `bookings_list`. Each is a
+        #      separate decision now:
+        #      * `_collect_occupied` - the local slot computation. Its CALLER
+        #        (`slots`) has gated it behind BOOKING_VIA_AYLA_REST since
+        #        DRF-1062 (commit 0860183, 2026-08-15): flag-ON returns Ayla
+        #        slots and never reaches this helper. Flag-gated in effect, but
+        #        the gate lives one frame up where this AST guard cannot see
+        #        it - hence a baseline line, not a fix.
+        #      * `_get_booking_owned` - a helper called from BOTH flag-guarded
+        #        endpoints (booking_cancel_*/booking_reschedule_* return early
+        #        on flag-ON) and unguarded ones. Untriaged, follow-up ticket.
+        #      * `customer_recent_activity` - documented as a read of the local
+        #        mirror populated by the Ayla booking-event consumer (ADR-0009
+        #        cached-canonical-state read). Untriaged.
+        (
+            "G9-booking-request-outside-owner",
+            "apps/miniapp_api/views.py",
+            "_collect_occupied",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/miniapp_api/views.py",
+            "_get_booking_owned",
+            "apps.booking.models.BookingRequest",
+        ),
+        (
+            "G9-booking-request-outside-owner",
+            "apps/miniapp_api/views.py",
+            "customer_recent_activity",
+            "apps.booking.models.BookingRequest",
+        ),
+        # (b) Known LIVE defect, not legitimate - the periodic completion scan
+        #     reads BookingRequest with NO flag check at all (arch review S2,
+        #     A2). This is the DRF-1108 instance the rule is required to catch;
+        #     left unfixed here (out of scope, IMPL_BRIEF_MECHANIZATION.md S4)
+        #     but explicitly called out - do NOT read this line as legitimate.
         (
             "G9-booking-request-outside-owner",
             "apps/bookings/tasks.py",
+            "detect_completed_bookings",
             "apps.booking.models.BookingRequest",
         ),
-        # (c) Untriaged — zero BOOKING_VIA_AYLA_REST references in the file.
+        # (c) Untriaged - zero BOOKING_VIA_AYLA_REST references in the file.
         #     Neither confirmed-safe nor confirmed-broken; surfaced by this
-        #     contract for the first time (DRF-1109 investigation, 2026-08-15).
-        #     Candidates for a follow-up ticket per file/surface, not fixed
-        #     here. Includes master_api's booking-facing master surfaces
-        #     (dashboard/schedule/customers/conversations), which is the
-        #     same class of risk as A1 (Mini App slots) if BOOKING_VIA_AYLA_REST
-        #     is ON on the pilot — value UNKNOWN, not read this session.
+        #     contract for the first time (DRF-1109, 2026-08-15). Candidates
+        #     for a follow-up ticket per file/surface, not fixed here. Includes
+        #     master_api's booking-facing master surfaces (dashboard/schedule/
+        #     customers/conversations), the same class of risk as A1 (Mini App
+        #     slots) if BOOKING_VIA_AYLA_REST is ON on the pilot - value
+        #     UNKNOWN, not read this session.
         (
             "G9-booking-request-outside-owner",
             "apps/admin_api/services/master_deactivation.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/bookings/followups.py",
+            "_b11_blocked_statuses_frozen_at_pr_time",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/bookings/recheck.py",
+            "_recheck_booking_state",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/bookings/reminders_factory.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/eventbus/signals.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/integrations/yclients/tasks.py",
+            "push_booking_to_yclients",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/loyalty/services.py",
+            "<module>",
+            "apps.booking.models.BookingRequest",
+        ),
+        # DRF-1157 split: credit and revoke are separate paths; migrating one
+        # must not silently keep the other baselined.
+        (
+            "G9-booking-request-outside-owner",
+            "apps/loyalty/subscribers.py",
+            "LoyaltySubscriber._credit_visit",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/loyalty/subscribers.py",
+            "LoyaltySubscriber._revoke_visit",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/master_api/services/conversation_detail.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/master_api/services/conversations.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/master_api/services/customers.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/master_api/services/dashboard.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/master_api/services/schedule.py",
+            "<module>",
             "apps.booking.models.BookingRequest",
         ),
         (
             "G9-booking-request-outside-owner",
             "apps/master_api/tasks.py",
+            "auto_generate_draft_for_inbound",
             "apps.booking.models.BookingRequest",
         ),
     }
@@ -380,7 +532,7 @@ _CATALOG_ROOT = "<catalog.all_tenants>"
 # ratcheting the surface down. Generated by running the rule with an
 # empty baseline against apps/ (same method as the import-edge BASELINE).
 CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
-    (CATALOG_CROSS_TENANT_CONTRACT_ID, _f, _CATALOG_ROOT)
+    (CATALOG_CROSS_TENANT_CONTRACT_ID, _f, FILE_QUALNAME, _CATALOG_ROOT)
     for _f in (
         # admin / master surfaces — explicit tenant_id scoping, admin authority
         "apps/admin_api/services/availability.py",
@@ -420,6 +572,10 @@ class Violation:
     lineno: int
     col_offset: int
     message: str
+    # The baseline key this violation would be silenced by. Carried so
+    # callers (notably the baseline-matches-reality regression test) can
+    # reconstruct the exact key without re-parsing the message text.
+    key: BaselineKey | None = None
 
     def format(self) -> str:
         return f"{self.file}:{self.lineno}:{self.col_offset}: {self.message}"
@@ -432,6 +588,9 @@ class ImportEdge:
     module: str
     lineno: int
     col_offset: int
+    # Dotted class/def nesting the reference sits in, `<module>` if
+    # top-level. Part of the baseline key (DRF-1157).
+    qualname: str = MODULE_QUALNAME
 
 
 class _ImportCollector(ast.NodeVisitor):
@@ -439,11 +598,40 @@ class _ImportCollector(ast.NodeVisitor):
 
     ``package_parts`` is the dotted package the file lives in, used to
     resolve relative imports to absolute module paths.
+
+    Each edge also records the qualname of the enclosing ``class``/``def``
+    scope, so the baseline can pin a single call site instead of a whole
+    file (DRF-1157). Function-local imports are the dominant shape for
+    the G-series crossings in this repo, which is exactly why file
+    granularity hid `_collect_occupied` behind its own module's
+    legitimate flag-gated read.
     """
 
     def __init__(self, package_parts: tuple[str, ...]) -> None:
         self.package_parts = package_parts
         self.edges: list[ImportEdge] = []
+        self._scope: list[str] = []
+
+    # ── Scope tracking ────────────────────────────────────────────────
+    @property
+    def qualname(self) -> str:
+        return ".".join(self._scope) if self._scope else MODULE_QUALNAME
+
+    def _visit_scope(self, node: ast.AST, name: str) -> None:
+        self._scope.append(name)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_scope(node, node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_scope(node, node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_scope(node, node.name)
 
     # `import a.b.c` / `import a.b.c as x`
     def visit_Import(self, node: ast.Import) -> None:
@@ -503,6 +691,7 @@ class _ImportCollector(ast.NodeVisitor):
                 module=module,
                 lineno=getattr(node, "lineno", 0),
                 col_offset=getattr(node, "col_offset", 0),
+                qualname=self.qualname,
             )
         )
 
@@ -614,8 +803,8 @@ def evaluate_file(
         # Broken syntax / unreadable is ruff's job, not ours.
         return [], set()
 
-    # De-dupe identical (contract, root) crossings reported on the same line.
-    seen: set[tuple[str, str, int]] = set()
+    # De-dupe identical (contract, root, scope) crossings on the same line.
+    seen: set[tuple[str, str, str, int]] = set()
 
     # ── Import-edge contracts (G-series) ──────────────────────────────
     if applicable:
@@ -626,23 +815,29 @@ def evaluate_file(
                 root = _matched_root(edge.module, contract.forbidden_modules)
                 if root is None:
                     continue
-                key: BaselineKey = (contract.id, rel_posix, root)
+                key: BaselineKey = (contract.id, rel_posix, edge.qualname, root)
                 if key in baseline:
                     satisfied.add(key)
                     continue
-                dedupe = (contract.id, root, edge.lineno)
+                dedupe = (contract.id, root, edge.qualname, edge.lineno)
                 if dedupe in seen:
                     continue
                 seen.add(dedupe)
+                where = (
+                    "at module level"
+                    if edge.qualname == MODULE_QUALNAME
+                    else f"in {edge.qualname}()"
+                )
                 violations.append(
                     Violation(
                         file=file_path,
                         lineno=edge.lineno,
                         col_offset=edge.col_offset,
                         message=(
-                            f"[{contract.id}] imports {edge.module!r} — {contract.message} "
-                            f"(tracked {contract.issue})"
+                            f"[{contract.id}] imports {edge.module!r} {where} — "
+                            f"{contract.message} (tracked {contract.issue})"
                         ),
+                        key=key,
                     )
                 )
 
@@ -650,7 +845,16 @@ def evaluate_file(
     if catalog_applies:
         cat_visitor = _CatalogAllTenantsVisitor(catalog_models, CATALOG_CROSS_TENANT_MANAGER)
         cat_visitor.visit(tree)
-        cat_key: BaselineKey = (CATALOG_CROSS_TENANT_CONTRACT_ID, rel_posix, _CATALOG_ROOT)
+        # This rule is file-granular BY DESIGN (one violation per file),
+        # so its key carries the synthetic FILE_QUALNAME rather than the
+        # enclosing scope. Only the import-edge contracts got the
+        # qualname split (DRF-1157).
+        cat_key: BaselineKey = (
+            CATALOG_CROSS_TENANT_CONTRACT_ID,
+            rel_posix,
+            FILE_QUALNAME,
+            _CATALOG_ROOT,
+        )
         if cat_visitor.hits and cat_key in catalog_baseline:
             satisfied.add(cat_key)
         else:
@@ -667,6 +871,7 @@ def evaluate_file(
                             "apps.marketplace.discovery (the sole sanctioned all_tenants carve-out, "
                             f"tracked {CATALOG_CROSS_TENANT_ISSUE})."
                         ),
+                        key=cat_key,
                     )
                 )
 
@@ -714,19 +919,22 @@ def scan_paths(
             satisfied |= s
 
     for key in sorted((baseline | catalog_baseline) - satisfied):
-        contract_id, rel_posix, root = key
+        contract_id, rel_posix, qualname, root = key
         if rel_posix not in scanned_rel:
             continue  # file outside the scanned paths — can't judge staleness
+        scope = "" if qualname in (MODULE_QUALNAME, FILE_QUALNAME) else f" ({qualname})"
         violations.append(
             Violation(
                 file=repo_root / rel_posix,
                 lineno=0,
                 col_offset=0,
                 message=(
-                    f"[{contract_id}] STALE BASELINE — {rel_posix} no longer matches "
-                    f"{root!r}. The debt was fixed/migrated; delete this line from "
-                    "the baseline in tools/lint/import_boundaries.py."
+                    f"[{contract_id}] STALE BASELINE — {rel_posix}{scope} no longer matches "
+                    f"{root!r}. The debt was fixed/migrated (or the enclosing function was "
+                    "renamed/moved); delete or update this line in the baseline in "
+                    "tools/lint/import_boundaries.py."
                 ),
+                key=key,
             )
         )
     return violations
