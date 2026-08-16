@@ -21,13 +21,16 @@ don't drift with wall-clock time.
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
+from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+from django.utils import timezone as dj_timezone
 
 from django.test import Client
 from django.urls import reverse
 
-from apps.booking.models import BookingRequest
-from apps.catalog.models import CatalogMaster
+from apps.booking.models import RemoteBookingProxy
+from apps.catalog.models import CatalogMaster, CatalogService
 from apps.conversations.models import Conversation, Message
 from apps.identity.models import BotUser
 from apps.internal_chat.models import (
@@ -60,25 +63,74 @@ def _make_booking(
     master: CatalogMaster,
     visit_local: datetime,
     duration_min: int = 60,
-    status: str = BookingRequest.Status.CONFIRMED,
+    status: str = "confirmed",
     service_name: str = "маникюр гель-лак",
     client_name: str = "Мария Иванова",
     bot_user: BotUser | None = None,
     completed_at: datetime | None = None,
     conversation: Conversation | None = None,
-) -> BookingRequest:
-    return BookingRequest.all_tenants.create(
+) -> RemoteBookingProxy:
+    """Create a visit the way the pilot actually has them (DRF-1085).
+
+    The dashboard reads ``RemoteBookingProxy`` — what the Ayla event
+    consumers write — not the local ``BookingRequest``, which on the pilot
+    holds 4 rows with ``master_id`` NULL on all of them.
+
+    The signature is kept from the old ``BookingRequest`` factory so the
+    tests below read unchanged, but three arguments are translated because
+    the mirror does not carry them:
+
+    * ``service_name`` → a ``CatalogService`` row keyed on
+      ``ayla_service_id``, which is how the name is resolved for real;
+    * ``client_name``  → written onto the ``BotUser``, same as production;
+    * ``completed_at`` → ``status="completed"``; the mirror has a status,
+      not a completion timestamp.
+
+    ``conversation`` is accepted and ignored: the mirror has no
+    conversation FK, and the intent hint now finds the conversation via the
+    customer instead.
+    """
+
+    end_at = _utc(visit_local) + timedelta(minutes=duration_min)
+
+    service_id = uuid4()
+    if service_name:
+        CatalogService.all_tenants.create(
+            tenant=tenant,
+            ayla_service_id=service_id,
+            external_id=None,
+            external_updated_at=dj_timezone.now(),
+            name=service_name,
+            duration_min=duration_min,
+        )
+
+    if bot_user is None and client_name:
+        # The mirror has no client_name column — the customer's name lives
+        # on the BotUser, which is where production reads it from. A visit
+        # with a named client therefore needs a customer row to hang it on.
+        # (Bookings genuinely without one exist — 3 of the pilot's 23 are
+        # "orphan" proxies made in the Ayla app by someone who never opened
+        # the bot — and those render as «Гость». Pass bot_user=None and
+        # client_name="" to model that case.)
+        bot_user = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=f"cust-{uuid4().hex[:12]}",
+            client_name=client_name,
+        )
+    elif bot_user is not None and client_name and not bot_user.client_name:
+        bot_user.client_name = client_name
+        bot_user.save(update_fields=["client_name"])
+
+    return RemoteBookingProxy.all_tenants.create(
+        appointment_id=uuid4(),
         tenant=tenant,
-        master=master,
         bot_user=bot_user,
-        service_name=service_name,
-        client_name=client_name,
-        client_phone="+79000000000",
-        visit_at=_utc(visit_local),
-        duration_min=duration_min,
-        status=status,
-        completed_at=completed_at,
-        conversation=conversation,
+        specialist_id=master.id,
+        service_id=service_id,
+        start_at=_utc(visit_local),
+        end_at=end_at,
+        status="completed" if completed_at is not None else status,
     )
 
 
@@ -222,7 +274,7 @@ class TestActiveVisit:
             master=accepted_master,
             visit_local=datetime(2026, 5, 21, 14, 0, tzinfo=MSK),
             duration_min=90,
-            status=BookingRequest.Status.CANCELLED,
+            status="cancelled",
         )
         assert ds.get_active_visit(accepted_master, _utc(now_local)) is None
 
@@ -249,7 +301,7 @@ class TestNextVisit:
         )
         result = ds.get_next_visit(accepted_master, _utc(now_local))
         assert result is not None
-        assert result.booking_id == str(soonest.id)
+        assert result.booking_id == str(soonest.appointment_id)
         assert result.client_first_name == "Анна"
         assert result.client_last_initial == "П."
         assert result.duration_min == 120
@@ -272,7 +324,7 @@ class TestNextVisit:
             tenant=tenant,
             master=accepted_master,
             visit_local=datetime(2026, 5, 21, 16, 0, tzinfo=MSK),
-            status=BookingRequest.Status.CANCELLED,
+            status="cancelled",
         )
         assert ds.get_next_visit(accepted_master, _utc(now_local)) is None
 

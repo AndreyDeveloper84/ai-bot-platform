@@ -317,3 +317,59 @@ class TestSecretHygiene:
         entry = parse_registry(TWO_BOTS)[0]
         with pytest.raises(Exception):
             entry.api_token = "swapped"  # type: ignore[misc]
+
+
+class TestPilotConfiguration:
+    """The exact shape proposed for .env.staging (DRF-1061, 5a).
+
+    Declaring MAX_BOTS stops the legacy fallback from being synthesized, so
+    the client bot has to be described explicitly — and its tenancy comes
+    from a different source than the Mini App's. Ingress reads the
+    channel-token map (zero pairs on the pilot); the Mini App reads
+    MAX_BOT_TENANT_SLUG (formula-tela). Copying the latter into the client
+    bot's registry entry would move the pilot from tenant-less to
+    formula-tela on ingest, silently.
+
+    The requirement from the main window is that the client bot behaves
+    exactly as today. This test is that requirement, executable.
+    """
+
+    PILOT_ENV = {
+        "MAX_BOTS": "client,salon",
+        "MAX_BOT_CLIENT_WEBHOOK_SECRET": "pilot-client-secret",  # pragma: allowlist secret
+        "MAX_BOT_CLIENT_API_TOKEN": "pilot-client-token",  # pragma: allowlist secret
+        "MAX_BOT_CLIENT_STREAM": "max_global",
+        # NO MAX_BOT_CLIENT_TENANT_SLUG — deliberately absent.
+        "MAX_BOT_SALON_WEBHOOK_SECRET": "pilot-salon-secret",  # pragma: allowlist secret
+        "MAX_BOT_SALON_API_TOKEN": "pilot-salon-token",  # pragma: allowlist secret
+        "MAX_BOT_SALON_STREAM": "max_salon",
+        "MAX_BOT_SALON_TENANT_SLUG": "formula-tela",
+    }
+
+    def test_client_bot_stays_global_and_tenant_less(self):
+        client = resolve_by_slug("client", parse_registry(self.PILOT_ENV))
+
+        assert client is not None
+        assert client.stream == "max_global", "client bot must keep the nationwide path"
+        assert client.tenant_slug == "", "client bot must stay tenant-less on ingress"
+        assert client.is_tenant_less is True
+
+    def test_salon_bot_is_tenant_bound_on_its_own_stream(self):
+        salon = resolve_by_slug("salon", parse_registry(self.PILOT_ENV))
+
+        assert salon is not None
+        assert salon.stream == "max_salon"
+        assert salon.tenant_slug == "formula-tela"
+
+    def test_each_secret_resolves_to_its_own_bot(self):
+        registry = parse_registry(self.PILOT_ENV)
+
+        assert resolve_by_webhook_secret("pilot-client-secret", registry).slug == "client"
+        assert resolve_by_webhook_secret("pilot-salon-secret", registry).slug == "salon"
+
+    def test_both_tokens_are_offered_to_initdata_verification(self):
+        # This is what lets the salon bot's Mini App authenticate at all.
+        assert api_tokens(parse_registry(self.PILOT_ENV)) == (
+            "pilot-client-token",
+            "pilot-salon-token",
+        )

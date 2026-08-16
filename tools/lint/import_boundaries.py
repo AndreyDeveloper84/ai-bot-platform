@@ -253,6 +253,14 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         "apps/master_api/services/catalog.py",
         "apps/master_api/services/dashboard.py",
         "apps/master_api/services/schedule.py",
+        # DRF-1085 — the visit read layer extracted out of dashboard.py /
+        # schedule.py, both already listed above. Same posture, not a new
+        # surface: every query filters on an explicit `tenant_id` taken
+        # from the master being viewed, and nothing here is reachable
+        # cross-tenant. `.objects` is unavailable because the service is
+        # also called outside a request (tests, and any future job), where
+        # no tenant ContextVar is set.
+        "apps/master_api/services/visit_source.py",
         "apps/master_api/tasks.py",
         "apps/master_api/views.py",
         # booking write paths (S1) — explicit-id reads before canonical write
