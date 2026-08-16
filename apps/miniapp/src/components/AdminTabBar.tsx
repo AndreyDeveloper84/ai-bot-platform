@@ -15,13 +15,34 @@ import { useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { hapticSelection } from "../lib/max-sdk";
 
-type TabKey = "team" | "services" | "chats" | "settings";
+type TabKey = "day" | "team" | "services" | "chats" | "settings";
 
 interface TabSpec {
   key: TabKey;
   label: string;
   to: string;
   icon: JSX.Element;
+}
+
+function IconDay() {
+  return (
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <path d="M16 2v4" />
+      <path d="M8 2v4" />
+      <path d="M3 10h18" />
+    </svg>
+  );
 }
 
 function IconTeam() {
@@ -107,6 +128,9 @@ export function AdminTabBar() {
   const location = useLocation();
 
   const tabs: TabSpec[] = [
+    // «День» leads because it is what the front desk opens first every
+    // morning — the roster is a setup screen, the day is the work.
+    { key: "day", label: "День", to: "/admin/day", icon: <IconDay /> },
     { key: "team", label: "Команда", to: "/admin/team", icon: <IconTeam /> },
     {
       key: "services",
