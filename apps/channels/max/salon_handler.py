@@ -38,6 +38,13 @@ import uuid
 from apps.channels.bot_context import bot_scope
 from apps.channels.max import outbound
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
+from apps.channels.max.staff_menu import (
+    CB_DAY,
+    CB_OPEN_APP,
+    CB_REQUESTS,
+    menu_attachments,
+    menu_header,
+)
 from apps.events.services import emit
 from apps.identity.services.role_resolver import resolve_role
 from apps.identity.services.staff_invites import (
@@ -225,8 +232,20 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
 
     with bot_scope(entry):
         role_ctx = resolve_role(bot_user)
+
         if role_ctx.primary_role != "customer":
-            _reply(event, _menu_text(role_ctx, tenant))
+            # A button tap arrives as the callback payload in `text`.
+            if event.text.startswith("cb:"):
+                _handle_button(event, role_ctx, bot_user, tenant, entry)
+            else:
+                _send_menu(event, role_ctx, tenant, entry)
+            return
+
+        # No role yet. A stray button tap from someone who lost their access
+        # must not be read as an invite code — it would burn a rate-limit
+        # attempt for a message they did not type.
+        if event.text.startswith("cb:"):
+            _reply(event, ASK_FOR_CODE)
             return
 
         code = _extract_code(event.text)
@@ -234,7 +253,69 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
             _reply(event, ASK_FOR_CODE)
             return
 
-        _redeem_and_greet(event, bot_user, code, tenant)
+        _redeem_and_greet(event, bot_user, code, tenant, entry)
+
+
+def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> None:
+    """Run the tapped action, then re-show the menu so the panel persists."""
+
+    from apps.channels.max import staff_actions
+
+    action = event.text
+    is_admin_side = role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist
+
+    if action == CB_DAY:
+        if is_admin_side:
+            body = staff_actions.salon_day(tenant)
+        else:
+            master = _master_of(bot_user)
+            body = (
+                staff_actions.master_day(master)
+                if master is not None
+                else "Ваша карточка мастера не найдена."
+            )
+    elif action == CB_REQUESTS and is_admin_side:
+        body = staff_actions.pending_requests(tenant)
+    elif action == CB_OPEN_APP:
+        # The Mini App opens client-side; nothing to do server-side. MAX
+        # still delivers the callback, and answering nothing would look
+        # like the bot ignored the tap.
+        return
+    else:
+        # Unknown or not-permitted action: show the menu rather than an
+        # error. A receptionist tapping an admin-only button from an old
+        # message should see what they CAN do, not a refusal.
+        _send_menu(event, role_ctx, tenant, entry)
+        return
+
+    _reply(event, body, attachments=menu_attachments(role_ctx, entry))
+
+
+def _master_of(bot_user):
+    """The catalog row this person is linked to, if any."""
+
+    from apps.catalog.models import CatalogMaster
+
+    # `.objects`, not `.all_tenants`: this runs inside the consumer's
+    # tenant_scope, so the scoped manager is both available and stricter —
+    # it makes reading another salon's catalog impossible here rather than
+    # merely unintended.
+    return (
+        CatalogMaster.objects.filter(
+            linked_bot_user=bot_user,
+            archived_at__isnull=True,
+        )
+        .select_related("tenant")
+        .first()
+    )
+
+
+def _send_menu(event: CanonicalEvent, role_ctx, tenant, entry) -> None:
+    _reply(
+        event,
+        menu_header(role_ctx, tenant),
+        attachments=menu_attachments(role_ctx, entry),
+    )
 
 
 def _sender_name(event: CanonicalEvent) -> str:
@@ -270,7 +351,7 @@ def _bot_slug_for(tenant) -> str:
     return ""
 
 
-def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant) -> None:
+def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant, entry) -> None:
     """Try the code and answer with the outcome, in the person's terms."""
 
     try:
@@ -310,28 +391,17 @@ def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant) -> Non
     # Re-resolve rather than infer from the invite: the person may hold
     # several roles, and the menu must reflect all of them.
     role_ctx = resolve_role(bot_user)
-    _reply(event, f"{greeting}\n\n{_menu_text(role_ctx, tenant)}")
+    _reply(
+        event,
+        f"{greeting}\n\n{menu_header(role_ctx, tenant)}",
+        attachments=menu_attachments(role_ctx, entry),
+    )
 
 
-def _menu_text(role_ctx, tenant) -> str:
-    """Placeholder menu body.
-
-    The button menu itself (``cb:staff:*`` callbacks, ``open_app`` into the
-    admin Mini App) is the next commit; this keeps the handler honest in
-    the meantime — a staff member who writes in gets an answer that names
-    their role rather than silence.
-    """
-
-    salon = tenant.name or tenant.slug
-    if role_ctx.is_master and not (role_ctx.is_owner or role_ctx.is_admin):
-        return f"Салон «{salon}». Ваш кабинет мастера открыт в приложении."
-    return f"Салон «{salon}». Кабинет салона открыт в приложении."
-
-
-def _reply(event: CanonicalEvent, text: str) -> None:
+def _reply(event: CanonicalEvent, text: str, attachments: list | None = None) -> None:
     """Send as the salon bot — identity comes from the surrounding scope."""
 
-    outbound.send_message(chat_id=event.chat_id, text=text)
+    outbound.send_message(chat_id=event.chat_id, text=text, attachments=attachments)
 
 
 __all__ = ["handle_salon_max_event"]
