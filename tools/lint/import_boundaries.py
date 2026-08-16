@@ -268,6 +268,11 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # because redemption also runs from a management command and from
         # the stream consumer, where no tenant ContextVar is set.
         "apps/identity/services/staff_invites.py",
+        # DRF-1061 — operator command listing and picking a master to invite.
+        # Every query is filtered on the --tenant the operator named, and it
+        # runs at a terminal with no request and therefore no tenant
+        # ContextVar. Same posture as the other management commands above.
+        "apps/identity/management/commands/issue_staff_invite.py",
         "apps/master_api/tasks.py",
         "apps/master_api/views.py",
         # booking write paths (S1) — explicit-id reads before canonical write

@@ -81,3 +81,31 @@ class GlobalMaxHandler(TenantAwareTask):
     def handle(self, payload: dict[str, Any]) -> None:
         trace_id = current_trace_id()
         max_handler.handle_global_max_event(payload, trace_id=trace_id)
+
+
+@register("ingress:max_salon")
+class SalonMaxHandler(TenantAwareTask):
+    """Dispatches salon-staff MAX entries (DRF-1061).
+
+    The third path alongside the per-tenant and nationwide handlers. The
+    ingress layer routes here by webhook secret: the salon bot is a
+    separate MAX bot with its own token, and the registry entry that
+    matched the secret names both this stream and the tenant.
+
+    ``requires_tenant`` stays True, unlike the global handler. The salon
+    bot is tenant-bound by construction — it belongs to one salon, and its
+    registry entry carries that tenant — so the base class enters
+    ``tenant_scope(tenant)`` and every read below is scoped normally.
+    That is the point of the separation: staff of one salon cannot reach
+    another's data even by accident.
+
+    Deliberately NOT the conversational pipeline. The handler runs no LLM
+    and dispatches no skills — staff get a control panel, not a chat
+    partner. See ``apps/channels/max/salon_handler.py``.
+    """
+
+    def handle(self, payload: dict[str, Any]) -> None:
+        from apps.channels.max import salon_handler
+
+        trace_id = current_trace_id()
+        salon_handler.handle_salon_max_event(payload, trace_id=trace_id)
