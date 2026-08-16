@@ -46,6 +46,7 @@ from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
+from apps.identity.services.bot_user_resolver import resolve_bot_user
 from apps.miniapp_api.auth import (
     InitDataBadSignature,
     InitDataError,
@@ -285,62 +286,15 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
 def _resolve_bot_user(verified) -> BotUser | None:
     """Find the BotUser this Mini App request belongs to (DRF-1083).
 
-    The same MAX account legitimately has several ``BotUser`` rows — one
-    per tenant, by the model's own uniqueness rule — and the staff link
-    lives on exactly one of them. Picking the wrong row is not a subtle
-    difference: the person is a master in one and a stranger in the other.
-
-    This surface used to pick ``order_by("-last_seen").first()`` across all
-    tenants, i.e. whichever row the person touched most recently. On the
-    pilot that is reliably the WRONG one: the owner talks to the client bot
-    daily (a ``global_bot`` row, no master link) and opens the cabinet
-    rarely (the ``formula-tela`` row, which holds the link and the
-    ``TenantStaff`` row). Result — the cabinet loaded, ``/api/v1/me``
-    answered 200 because it resolves per-tenant, and every master endpoint
-    answered 401 ``not_a_master``.
-
-    Resolution order:
-
-    1. **The tenant of the bot whose token signed this initData.** A Mini
-       App is opened from a bot, and the signature is the only trustworthy
-       statement of which one (DRF-1061) — the URL cannot say, and the
-       payload carries no bot id.
-    2. ``MAX_BOT_TENANT_SLUG`` — what the customer and admin surfaces have
-       always used, kept so a single-bot deployment behaves as before.
-    3. Only if neither is configured: the historical cross-tenant pick.
-       Not removed outright because a deployment with no registry and no
-       bot-tenant slug still has to resolve *something*, and for such a
-       deployment there is only one row anyway.
+    The rule itself now lives in
+    :func:`apps.identity.services.bot_user_resolver.resolve_bot_user` —
+    ``admin_api`` needed exactly the same resolution (DRF-1150) and two
+    surfaces answering «who is this» by two rules is how they drift apart
+    in the first place. This wrapper stays as the master surface's entry
+    point so call sites and tests keep their name.
     """
 
-    tenant_slug = ""
-
-    bot_slug = getattr(verified, "bot_slug", "") or ""
-    if bot_slug:
-        from apps.channels.bot_registry import effective_registry, resolve_by_slug
-
-        entry = resolve_by_slug(bot_slug, effective_registry())
-        if entry is not None:
-            tenant_slug = entry.tenant_slug
-
-    if not tenant_slug:
-        tenant_slug = getattr(settings, "MAX_BOT_TENANT_SLUG", "") or ""
-
-    qs = BotUser.all_tenants.filter(channel="max", channel_user_id=verified.user_id)
-    if tenant_slug:
-        scoped = qs.filter(tenant__slug=tenant_slug).select_related("tenant").first()
-        if scoped is not None:
-            return scoped
-        # Fall through rather than 404: a person may have been created
-        # under a different tenant and linked there. Better to answer with
-        # the row we can find than to deny someone who is genuinely staff.
-        logger.info(
-            "master_api.auth.no_bot_user_in_bot_tenant tenant=%s channel_user_id=%s",
-            tenant_slug,
-            verified.user_id,
-        )
-
-    return qs.select_related("tenant").order_by("-last_seen").first()
+    return resolve_bot_user(verified, surface="master_api")
 
 
 def require_master_init_data(
