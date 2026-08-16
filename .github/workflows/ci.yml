@@ -179,7 +179,7 @@ jobs:
       # green locally and defended nothing in CI. Full apps/ (7246 tests,
       # measured against Postgres — the SQLite default that most of
       # `dev` runs locally hides real failures, see
-      # project_test_db_sqlite_vs_postgres) is clean EXCEPT the 27 tests
+      # project_test_db_sqlite_vs_postgres) is clean EXCEPT the 26 tests
       # deselected below, grouped by root cause so the excluded set is
       # legible instead of a wall of paths:
       #
@@ -201,10 +201,16 @@ jobs:
       #     Linear, not fixed here (DRF-1121 is scoped to CI coverage,
       #     not this bug) — deselected so the coverage expansion doesn't
       #     regress CI red on a pre-existing, unrelated defect.
-      # (c) NEW — 1 failure, apps/skills/payment_failed: Postgres
-      #     `NumericValueOutOfRange: integer out of range` from a test
-      #     fixture value SQLite's untyped INTEGER silently accepted.
-      #     Same "candidate, not fixed here" treatment as (b).
+      # (c) RESOLVED 2026-08-16 (DRF-1121 follow-up) — apps/skills/
+      #     payment_failed was deselected here for a Postgres
+      #     `DataError: integer out of range`. It was never "1 failure":
+      #     the fixture mask `hash(str(x)) & 0xFFFFFFFF` overflows the
+      #     `integer` column for roughly half of all `PYTHONHASHSEED`
+      #     values, so 1–6 tests of `TestMasterDMDispatch` failed per
+      #     run, each on its own INSERT — a flaky test, not a cascade.
+      #     Fixed at the root in the fixture (`_stable_external_id`,
+      #     SHA-256 truncated into signed-32-bit). The deselect is gone
+      #     and must not come back.
       #
       # Do NOT add new deselects here to make an unrelated failure go
       # away — a new failure means something you touched broke; fix it
@@ -239,8 +245,7 @@ jobs:
             --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
             --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
             --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation \
-            --deselect apps/skills/payment_failed/tests/test_skill.py::TestMasterDMDispatch::test_happy_path_full_chain_dispatches_master_dm
+            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation
 
       # mypy is blocking. `strict=False` keeps the bar reasonable while
       # apps/ are mostly empty AppConfigs; tighten to strict per-package
