@@ -469,18 +469,12 @@ BASELINE: frozenset[BaselineKey] = frozenset(
             "<module>",
             "apps.booking.models.BookingRequest",
         ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/dashboard.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/schedule.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
+        # dashboard.py and schedule.py stood here until DRF-1085 (869285c,
+        # 205f2dd) moved both surfaces onto the RemoteBookingProxy mirror
+        # and the BookingRequest import left the files entirely. The
+        # ratchet then demanded the entries be deleted — debt paid, line
+        # removed. This is the baseline working as designed, not a
+        # relaxation: a stale entry is a lie about the shape of the code.
         (
             "G9-booking-request-outside-owner",
             "apps/master_api/tasks.py",
