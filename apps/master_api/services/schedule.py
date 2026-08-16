@@ -66,9 +66,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.utils import timezone as dj_timezone
 
-from apps.booking.models import BookingRequest
+from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.identity.models import BotUser
+from apps.master_api.services.visit_source import (
+    BOOKED_STATUSES,
+    UPCOMING_STATUSES,
+    VisitRow,
+    master_visits,
+)
 from apps.scheduling.models import (
     ScheduleChangeRequest,
     ScheduleException,
@@ -271,12 +277,17 @@ def get_tenant_tz(tenant: Any) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-def _resolve_duration(booking: BookingRequest, service_cache: dict[Any, int]) -> int:
+def _resolve_duration(booking: VisitRow, service_cache: dict[Any, int]) -> int:
     """Pick best-available duration; memoised lookup of CatalogService.duration_min.
 
     ``service_cache`` avoids the N+1 problem when the same service is
     booked multiple times across the date range. Caller passes a dict
     that survives the whole :func:`build_schedule` call.
+
+    DRF-1085: the visit's own window (``end_at - start_at``) answers this
+    almost always, since the mirror carries both ends. The catalog fallback
+    is keyed on ``ayla_service_id`` — on the Ayla path ``service_id`` is
+    Ayla's identifier, stored verbatim, not a local primary key.
     """
 
     if booking.duration_min:
@@ -285,7 +296,7 @@ def _resolve_duration(booking: BookingRequest, service_cache: dict[Any, int]) ->
     if sid is not None:
         if sid in service_cache:
             return service_cache[sid]
-        svc = CatalogService.all_tenants.filter(id=sid).first()
+        svc = CatalogService.all_tenants.filter(ayla_service_id=sid).first()
         cached = (
             int(svc.duration_min) if (svc and svc.duration_min) else DEFAULT_SERVICE_DURATION_MIN
         )
@@ -511,25 +522,27 @@ def _detect_conflicts(
 def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[Any]) -> set[Any]:
     """Return the subset of bot_user_ids who have >1 booking with this master.
 
-    One DB scan per range (not per booking). The CONFIRMED + COMPLETED
-    rule mirrors the dashboard's :func:`_is_returning_customer`. We treat
-    «completed» as «status==CONFIRMED with completed_at set» since
-    BookingRequest's status enum has no COMPLETED value (the post-visit
-    Celery beat stamps ``completed_at`` instead).
+    One DB scan per range (not per booking). Counts booked statuses —
+    upcoming plus completed — mirroring the dashboard's
+    :func:`_is_returning_customer`.
+
+    DRF-1085 changed the shape of this rule, not just its source. The old
+    version counted ``RESCHEDULED`` rows as separate visits because the
+    local model superseded a booking with a new row on reschedule. The
+    mirror has no such state: a reschedule **moves the existing row**, so
+    there is nothing extra to count — and counting it would have been
+    wrong anyway (one client moving one appointment is not two visits).
     """
 
     if not bot_user_ids:
         return set()
     from collections import Counter
 
-    rows = BookingRequest.all_tenants.filter(
+    rows = RemoteBookingProxy.all_tenants.filter(
         tenant_id=master.tenant_id,
-        master_id=master.id,
+        specialist_id=master.id,
         bot_user_id__in=list(bot_user_ids),
-        status__in=[
-            BookingRequest.Status.CONFIRMED,
-            BookingRequest.Status.RESCHEDULED,
-        ],
+        status__in=list(BOOKED_STATUSES),
     ).values_list("bot_user_id", flat=True)
     counts = Counter(rows)
     return {bid for bid, n in counts.items() if n > 1}
@@ -570,20 +583,13 @@ def build_schedule(
     range_start_utc, _ = _day_bounds_utc(from_date, tz)
     _, range_end_utc = _day_bounds_utc(to_date, tz)
 
-    bookings_qs = list(
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            visit_at__gte=range_start_utc,
-            visit_at__lte=range_end_utc,
-        )
-        .exclude(
-            status__in=[
-                BookingRequest.Status.CANCELLED,
-                BookingRequest.Status.RESCHEDULED,
-            ]
-        )
-        .order_by("visit_at")
+    # Booked statuses only. The mirror has no `rescheduled` state to
+    # exclude — a reschedule moves the row in place — and cancelled /
+    # no-show rows are filtered by asking for the booked set instead.
+    bookings_qs = master_visits(
+        master,
+        start=range_start_utc,
+        end=range_end_utc,
     )
 
     exceptions_qs = list(
@@ -614,7 +620,7 @@ def build_schedule(
     # Bucket bookings per local calendar date (using tenant-local
     # date of the visit_at — a booking at 23:30 MSK lives on its
     # local date).
-    bookings_by_date: dict[date_cls, list[BookingRequest]] = {}
+    bookings_by_date: dict[date_cls, list[VisitRow]] = {}
     for b in bookings_qs:
         if b.visit_at is None:
             continue
@@ -654,7 +660,7 @@ def _build_one_day(
     now: datetime,
     wh_by_weekday: dict[int, WorkingHours],
     exceptions_by_date: dict[date_cls, ScheduleException],
-    bookings_today: list[BookingRequest],
+    bookings_today: list[VisitRow],
     returning_set: set[Any],
     service_cache: dict[Any, int],
 ) -> ScheduleDay:
@@ -690,7 +696,7 @@ def _build_one_day(
         is_in_progress = b.visit_at <= now < end_at_utc
         booking_objs.append(
             ScheduleBooking(
-                booking_id=str(b.id),
+                booking_id=b.id,
                 visit_at=b.visit_at.isoformat(),
                 duration_min=duration,
                 service_name=b.service_name,
@@ -700,8 +706,8 @@ def _build_one_day(
                 is_returning_customer=b.bot_user_id in returning_set,
             )
         )
-        if b.status == BookingRequest.Status.CONFIRMED:
-            confirmed_intervals_local.append((str(b.id), local_start_time, local_end_time))
+        if b.status in UPCOMING_STATUSES:
+            confirmed_intervals_local.append((b.id, local_start_time, local_end_time))
             booking_intervals_local.append((local_start_time, local_end_time))
 
     # Blocks: approved time-off / custom-hours exceptions for this date.
