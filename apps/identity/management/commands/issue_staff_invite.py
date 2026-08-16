@@ -31,6 +31,7 @@ an empty day next to their real appointments.
 
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.catalog.models import CatalogMaster
@@ -88,6 +89,15 @@ class Command(BaseCommand):
         catalog_master = None
         if role == StaffInvite.Role.MASTER:
             catalog_master = self._get_master(tenant, options)
+        elif options.get("master_name") or options.get("master_id"):
+            # Refuse rather than ignore. `--role admin --master-name "Ольга"`
+            # is almost certainly a mistyped role, and silently issuing an
+            # ADMIN code while the operator believes they invited a master
+            # hands out more access than intended.
+            raise CommandError(
+                f"--master-name/--master-id are only valid with --role=master, "
+                f"got --role={role}. Did you mean --role=master?"
+            )
 
         invite, code = issue_staff_invite(
             tenant=tenant,
@@ -145,9 +155,14 @@ class Command(BaseCommand):
 
         qs = CatalogMaster.all_tenants.filter(tenant=tenant, archived_at__isnull=True)
         if master_id:
-            master = qs.filter(pk=master_id).first()
+            try:
+                master = qs.filter(pk=master_id).first()
+            except (ValidationError, ValueError) as exc:
+                # A malformed id is an operator typo, not a crash.
+                raise CommandError(f"{master_id!r} is not a valid master id.") from exc
             if master is None:
                 raise CommandError(f"No active master {master_id!r} in {tenant.slug}.")
+            self._warn_if_linked(master)
             return master
 
         matches = list(qs.filter(name__iexact=master_name))
@@ -166,13 +181,25 @@ class Command(BaseCommand):
             )
 
         master = matches[0]
-        if master.linked_bot_user_id:
-            # Not fatal — re-inviting is legitimate when someone changes
-            # their MAX account — but it should be a conscious act.
-            self.stdout.write(
-                self.style.WARNING(
-                    f"NOTE: {master.name} is already linked to a bot user. "
-                    "Redeeming this code will move the link to whoever uses it."
-                )
-            )
+        self._warn_if_linked(master)
         return master
+
+    def _warn_if_linked(self, master: CatalogMaster) -> None:
+        """Warn before handing out a code that would move an existing link.
+
+        Applies to BOTH lookup paths. It used to fire only for --master-name,
+        which is backwards: --master-id is what the command recommends for
+        the ambiguous case, so the operator most at risk of re-pointing the
+        wrong person's link was the one not being warned.
+        """
+
+        if not master.linked_bot_user_id:
+            return
+        # Not fatal — re-inviting is legitimate when someone changes their
+        # MAX account — but it should be a conscious act.
+        self.stdout.write(
+            self.style.WARNING(
+                f"NOTE: {master.name} is already linked to a bot user. "
+                "Redeeming this code will move the link to whoever uses it."
+            )
+        )

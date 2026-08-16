@@ -31,6 +31,7 @@ one who never left.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 
@@ -56,6 +57,13 @@ logger = logging.getLogger(__name__)
 #: parser folds that into the synthetic text «/start inv_AYLA7K3M».
 DEEPLINK_PREFIX = "inv_"
 
+#: The stream this handler is registered on. Used to pick OUR registry
+#: entry: a tenant may legitimately have more than one bot (a per-tenant
+#: client bot and this one), and matching on tenant alone would return
+#: whichever was declared first in MAX_BOTS — quite possibly the client
+#: bot, whose token cannot even post to this chat.
+SALON_STREAM = "max_salon"
+
 ASK_FOR_CODE = (
     "Это рабочий бот салона.\n\n"
     "Пришлите код приглашения — его выдаёт администратор салона. "
@@ -67,9 +75,13 @@ CODE_NOT_ACCEPTED = (
     "попросите администратора выдать новый."
 )
 
+# NB: the deeplink path goes through the very same limiter (same key,
+# keyed on the person, not on how they entered the code), so this must not
+# suggest a link as a way around the wait — it would send someone to tap a
+# link that fails identically.
 TOO_MANY_ATTEMPTS = (
-    "Слишком много попыток. Подождите час или попросите администратора "
-    "прислать ссылку — по ней код вводить не нужно."
+    "Слишком много попыток ввода кода. Попробуйте через час — "
+    "или попросите администратора выдать новый код."
 )
 
 MASTER_GONE = (
@@ -89,6 +101,11 @@ ROLE_GREETING = {
 }
 
 ALREADY_HAVE_ROLE = "У вас уже есть доступ к салону «{salon}»."
+
+#: Fallback for a role added later without a greeting of its own. Says
+#: "granted", not "already had" — inverting that would tell someone who
+#: just gained access that nothing happened.
+ROLE_GRANTED_GENERIC = "Готово, доступ к салону «{salon}» открыт."
 
 
 def handle_salon_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
@@ -117,8 +134,18 @@ def handle_salon_max_event(payload: dict, trace_id: str | uuid.UUID | None = Non
     callback_id = (event.raw or {}).get("callback_id", "") if isinstance(event.raw, dict) else ""
     if callback_id:
         idempotency_key = f"webhook:max_salon:callback:{callback_id}"
+    elif event.channel_message_id:
+        idempotency_key = f"webhook:max_salon:{event.channel_message_id}"
     else:
-        idempotency_key = f"webhook:max_salon:{event.channel_message_id or event.channel_user_id}"
+        # Never fall back to channel_user_id alone. The claim lives 24h, so
+        # a single update missing both `mid` and `seq` would swallow every
+        # later message from that person for a day — and their whole
+        # onboarding is one message. Hash the content instead, which still
+        # dedups a genuine redelivery but not a new message.
+        digest = hashlib.sha256(
+            f"{event.channel_user_id}:{event.timestamp}:{event.text}".encode()
+        ).hexdigest()[:32]
+        idempotency_key = f"webhook:max_salon:synthetic:{digest}"
 
     try:
         with with_idempotency(idempotency_key, ttl_seconds=86_400):
@@ -175,11 +202,26 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
     bot_user = resolve_or_create_bot_user(
         channel=event.channel,
         channel_user_id=event.channel_user_id,
-        display_name=event.raw.get("display_name", "") if isinstance(event.raw, dict) else "",
+        display_name=_sender_name(event),
         chat_id=event.chat_id,
     )
 
     entry = resolve_by_slug(_bot_slug_for(tenant), effective_registry())
+    if entry is None:
+        # Refuse to answer rather than answer as the wrong bot.
+        #
+        # `bot_scope(None)` is not neutral: outbound falls back to
+        # settings.MAX_BOT_TOKEN, which is the CLIENT bot. A staff member
+        # would get their salon reply from the customer-facing avatar —
+        # invisible in logs, obvious and alarming to them. Silence is the
+        # better failure, and the ERROR says exactly what to fix.
+        logger.error(
+            "channels.max.salon.no_registry_entry tenant=%s — refusing to reply; "
+            "declare a bot with MAX_BOT_<SLUG>_TENANT_SLUG=%s",
+            tenant.slug,
+            tenant.slug,
+        )
+        return
 
     with bot_scope(entry):
         role_ctx = resolve_role(bot_user)
@@ -195,18 +237,35 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
         _redeem_and_greet(event, bot_user, code, tenant)
 
 
+def _sender_name(event: CanonicalEvent) -> str:
+    """The person's channel-side name, from where MAX actually puts it.
+
+    ``message.sender.name`` — not a top-level ``display_name``, which MAX
+    never sends. Getting this wrong is silent: the BotUser is created
+    nameless and the opportunistic blank-fill never fires again, so the
+    salon sees an unnamed staff member forever.
+    """
+
+    raw = event.raw if isinstance(event.raw, dict) else {}
+    sender = (raw.get("message") or {}).get("sender") or {}
+    return (sender.get("name") or "").strip()
+
+
 def _bot_slug_for(tenant) -> str:
     """Find which registry entry serves this tenant.
 
-    The consumer knows the stream, not the slug, so the tenant is the link
-    back to the entry. One bot per tenant on this path today; if that ever
-    stops being true the stream name has to be threaded through instead.
+    Matched on BOTH tenant and stream. Tenant alone is not enough: nothing
+    in the registry forbids a salon from also having a per-tenant client bot
+    (`stream=max`), and picking that one would send staff replies from the
+    customer-facing token — which, since MAX chat_ids are per-bot, most
+    likely 4xxs, leaves the entry unacked in the PEL, and the person gets
+    nothing at all.
     """
 
     from apps.channels.bot_registry import effective_registry
 
     for entry in effective_registry():
-        if entry.tenant_slug == tenant.slug:
+        if entry.tenant_slug == tenant.slug and entry.stream == SALON_STREAM:
             return entry.slug
     return ""
 
@@ -215,7 +274,7 @@ def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant) -> Non
     """Try the code and answer with the outcome, in the person's terms."""
 
     try:
-        result = redeem_staff_invite(code=code, bot_user=bot_user)
+        result = redeem_staff_invite(code=code, bot_user=bot_user, tenant=tenant)
     except InviteRateLimited:
         _reply(event, TOO_MANY_ATTEMPTS)
         return
@@ -235,14 +294,18 @@ def _redeem_and_greet(event: CanonicalEvent, bot_user, code: str, tenant) -> Non
 
     emit(
         "channels.max.salon.invite_redeemed",
-        payload={"role": result.role, "already_had_role": result.already_had_role},
+        payload={
+            "role": result.role,
+            "already_had_role": result.already_had_role,
+            "bot_user_id": str(bot_user.id),
+        },
     )
 
     salon = tenant.name or tenant.slug
     if result.already_had_role:
         greeting = ALREADY_HAVE_ROLE.format(salon=salon)
     else:
-        greeting = ROLE_GREETING.get(result.role, ALREADY_HAVE_ROLE).format(salon=salon)
+        greeting = ROLE_GREETING.get(result.role, ROLE_GRANTED_GENERIC).format(salon=salon)
 
     # Re-resolve rather than infer from the invite: the person may hold
     # several roles, and the menu must reflect all of them.
