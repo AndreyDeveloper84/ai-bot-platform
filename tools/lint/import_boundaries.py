@@ -261,6 +261,13 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # also called outside a request (tests, and any future job), where
         # no tenant ContextVar is set.
         "apps/master_api/services/visit_source.py",
+        # DRF-1061 — invite redemption links a person to the master named
+        # by the invite. Reads exactly one row, by primary key, filtered on
+        # the invite's own tenant_id; there is no discovery here and no way
+        # to reach another tenant's catalog. `.objects` is unavailable
+        # because redemption also runs from a management command and from
+        # the stream consumer, where no tenant ContextVar is set.
+        "apps/identity/services/staff_invites.py",
         "apps/master_api/tasks.py",
         "apps/master_api/views.py",
         # booking write paths (S1) — explicit-id reads before canonical write
