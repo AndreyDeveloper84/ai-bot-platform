@@ -470,3 +470,136 @@ class TenantStaff(models.Model):
     def is_active(self) -> bool:
         """True if this row is the live assignment (not soft-deactivated)."""
         return self.deactivated_at is None
+
+
+class StaffInvite(models.Model):
+    """A one-shot code that turns a person into salon staff (DRF-1061).
+
+    ### Why this exists
+
+    Nothing in the platform could create a ``TenantStaff`` row. The master
+    invite flow (``apps/admin_api/views_invite.py``) covers exactly one
+    role and rejects the others outright — «only role='master' is accepted
+    in this PR; admin/receptionist invites land in a separate ticket
+    (TenantStaff model)». This is that ticket. The consequence of the gap
+    was concrete: the pilot salon had zero staff rows, so ``resolve_role``
+    answered *customer* for all 14 bot users, and the fully-built admin
+    Mini App was unreachable by anyone including the owner.
+
+    ### Why a code and not just a link
+
+    The salon bot is a chat. The person receives a link
+    (``max://bot/<bot>?start=inv_<code>``) and taps it — no typing. But the
+    code must also work typed, because a link cannot be read out over the
+    phone and does not survive being forwarded around. Both paths carry the
+    same secret; see ``redeem_staff_invite``.
+
+    ### Why the code is hashed
+
+    A code short enough to type is short enough to guess: the pilot format
+    has ~614k combinations. Storage is therefore SHA-256 and never the code
+    itself — a database dump does not hand out staff access — and guessing
+    is bounded by the redeem-side attempt limit rather than by entropy.
+
+    ### Master invites bind to an existing row
+
+    ``catalog_master`` is set for ``role="master"`` and points at the
+    master that already exists in the catalog mirror. On the pilot all four
+    masters are already there (``invite_status=accepted``, ``is_active``,
+    only ``linked_bot_user`` empty), so an invite that CREATED a master
+    would produce a duplicate — and the duplicate would be invisible to the
+    booking mirror, whose ``specialist_id`` points at the original row. The
+    master would then see an empty day next to their real appointments.
+    """
+
+    class Role(models.TextChoices):
+        """Roles an invite can grant.
+
+        Superset of :class:`TenantStaff.Role`: it adds ``master``, which is
+        not a ``TenantStaff`` row at all but a link on ``CatalogMaster``.
+        The invite is the single door; what it writes on the other side
+        differs per role.
+        """
+
+        RECEPTIONIST = "receptionist", "Receptionist"
+        ADMIN = "admin", "Admin"
+        OWNER = "owner", "Owner"
+        MASTER = "master", "Master"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="staff_invites",
+    )
+    role = models.CharField(max_length=16, choices=Role.choices, db_index=True)
+    code_hash = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text="SHA-256 of the normalized code. The code itself is shown "
+        "once at issue time and never stored.",
+    )
+    catalog_master = models.ForeignKey(
+        "catalog.CatalogMaster",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="staff_invites",
+        help_text="Required for role=master: the EXISTING catalog row this "
+        "invite links a person to. Never used to create a master.",
+    )
+    expires_at = models.DateTimeField(db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)
+    used_by = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="redeemed_staff_invites",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="Who issued it. NULL for invites issued by a management "
+        "command — the pilot's first owner has no one to be invited by.",
+    )
+    note = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="Free-form label for the issuer: who this code was meant "
+        "for. Not shown to the recipient.",
+    )
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Staff invite"
+        verbose_name_plural = "Staff invites"
+        ordering = ["-created_at"]
+        indexes = [
+            # Redeem hot path is the unique code_hash lookup above. This one
+            # serves the issuer's view: "outstanding invites for my salon".
+            models.Index(fields=["tenant", "used_at", "expires_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(role="master", catalog_master__isnull=False)
+                | ~models.Q(role="master") & models.Q(catalog_master__isnull=True),
+                name="staff_invite_master_requires_catalog_master",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        state = "used" if self.used_at else "outstanding"
+        return f"StaffInvite[{self.tenant_id}/{self.role}/{state}]"
+
+    @property
+    def is_used(self) -> bool:
+        return self.used_at is not None
