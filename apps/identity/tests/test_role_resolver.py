@@ -159,7 +159,7 @@ class TestResolveAdmin:
         assert ctx.is_admin is True
         assert ctx.is_master is False
         assert ctx.master_id is None
-        assert ctx.landing_path == "/admin/dashboard"
+        assert ctx.landing_path == "/admin/team"
         # Admin sees ALL conversations, can manage drafts, but no
         # owner-only privileges.
         assert "view_conversation_list_all" in ctx.capabilities
@@ -179,7 +179,10 @@ class TestResolveReceptionist:
         ctx = resolve_role(bot_user)
         assert ctx.primary_role == "receptionist"
         assert ctx.is_receptionist is True
-        assert ctx.landing_path == "/admin/conversations"
+        # DRF-1151 — was "/admin/conversations", a route App.tsx has never
+        # mounted. Receptionists land on the roster like every other
+        # admin-side role; the conversations surface is post-pilot.
+        assert ctx.landing_path == "/admin/team"
         # Receptionist caps: list + audited phone + send + safety promote.
         assert "view_conversation_list_all" in ctx.capabilities
         assert "view_customer_phone_audited" in ctx.capabilities
@@ -243,7 +246,7 @@ class TestMultiRole:
         assert ctx.is_master is True
         assert ctx.is_owner is True
         assert ctx.master_id is not None
-        assert ctx.landing_path == "/admin/dashboard"
+        assert ctx.landing_path == "/admin/team"
         assert "manage_tenant_roles" in ctx.capabilities
 
     def test_deactivated_staff_row_ignored(self, tenant_a, bot_user):
@@ -303,3 +306,49 @@ class TestHasCapability:
     def test_unknown_capability_is_false(self, tenant_a, bot_user):
         ctx = resolve_role(bot_user)
         assert has_capability(ctx, "no_such_capability") is False
+
+
+class TestLandingPathsAreRealRoutes:
+    """DRF-1151 — every landing path must be a route the Mini App mounts.
+
+    Two of them were not. ``/admin/dashboard`` and ``/admin/conversations``
+    have never existed in ``App.tsx``; the admin catch-all redirected to
+    ``/admin/team`` and quietly covered for them, which is why the dead
+    values survived. A value that only works because something downstream
+    cleans up after it is not a contract.
+
+    The route list below is mirrored by hand from ``App.tsx`` — routes
+    live in TypeScript and Python cannot read them. Mirrored deliberately:
+    a short list that must be edited in two places when a landing
+    destination changes is cheaper than the silent redirect that hid the
+    defect. When this fails, check ``adminRouteElements`` /
+    ``masterRouteElements`` before changing the expectation.
+    """
+
+    #: Routes ``App.tsx`` mounts that ``_LANDING_PATH`` may name.
+    MOUNTED_ROUTES = frozenset(
+        {
+            "/",
+            "/admin/team",
+            "/admin/services",
+            "/admin/availability-requests",
+            "/admin/internal-chat",
+            "/admin/settings",
+            "/master/dashboard",
+            "/master/schedule",
+            "/master/profile",
+        }
+    )
+
+    def test_every_landing_path_is_mounted(self):
+        from apps.identity.services.role_resolver import _LANDING_PATH
+
+        for role, path in _LANDING_PATH.items():
+            assert path in self.MOUNTED_ROUTES, (
+                f"landing_path for {role!r} is {path!r}, which App.tsx does not mount"
+            )
+
+    def test_every_role_has_a_landing_path(self):
+        from apps.identity.services.role_resolver import _LANDING_PATH, _ROLE_PRIVILEGE
+
+        assert set(_LANDING_PATH) == set(_ROLE_PRIVILEGE)
