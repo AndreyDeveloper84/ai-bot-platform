@@ -100,6 +100,11 @@ def _preview_to_payload(preview: DeactivationPreview) -> dict[str, Any]:
             "total_future_bookings": preview.total_future_bookings,
             "bookings_with_fallback": preview.bookings_with_fallback,
             "bookings_without_fallback": preview.bookings_without_fallback,
+            # DRF-1139 — what the cascade can act on is not necessarily
+            # everything the master has. The UI needs both numbers to
+            # avoid presenting an empty list as «nothing to worry about».
+            "mirror_future_bookings": preview.mirror_future_bookings,
+            "inventory_complete": preview.inventory_complete,
         },
     }
 
