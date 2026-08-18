@@ -15,6 +15,7 @@ from apps.admin_api import (
     views,
     views_availability,
     views_invite,
+    views_staff_invite,
     views_master_deactivation,
     views_services_mapping,
 )
@@ -30,6 +31,14 @@ urlpatterns = [
         "masters/invite/",
         views_invite.master_invite_create,
         name="master_invite_create",
+    ),
+    # DRF-1061 block 2.4 — staff access codes (owner/admin/receptionist,
+    # plus linking an EXISTING master). Separate from masters/invite/,
+    # which creates a catalog master rather than granting access.
+    path(
+        "staff/invite/",
+        views_staff_invite.staff_invite_create,
+        name="staff_invite_create",
     ),
     path(
         "masters/<str:master_id>/",

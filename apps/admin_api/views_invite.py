@@ -231,15 +231,20 @@ def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse |
                 400,
             )
 
-    # role guard — the handoff includes a `role` field but THIS PR is
-    # master-role only. Admin/Receptionist invites write TenantStaff (a
-    # different model + lifecycle) — separate ticket.
+    # role guard — this endpoint CREATES a catalog master. Granting access
+    # to a person is a different operation with a different write
+    # (TenantStaff, or a link on an existing master), and it lives at
+    # POST /api/v1/admin/staff/invite/ (DRF-1061 block 2.4).
+    #
+    # Kept separate rather than folded in: merging them would produce one
+    # endpoint whose required fields depend on a role flag and whose
+    # "create" is sometimes a create and sometimes a link.
     role = body.get("role", "master")
     if role != "master":
         return {}, _error(
             "bad_request",
-            "only role='master' is accepted in this PR; admin/receptionist "
-            "invites land in a separate ticket (TenantStaff model)",
+            "this endpoint creates a catalog master; to grant access to a "
+            "person use POST /api/v1/admin/staff/invite/ with the desired role",
             400,
         )
 
