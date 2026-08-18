@@ -111,6 +111,14 @@ MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 MASTER_INVITED = "master.invited"
 MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 
+# --- Staff invite codes (DRF-1061 block 2.4) -----------------------------
+# Emitted from apps.admin_api when an owner/admin issues a one-shot code
+# that grants salon access. Payload: {role, master_id?, expires_at}.
+# Deliberately carries NEITHER the code nor its hash — an audit row is a
+# place people look, and a credential that grants staff access does not
+# belong in one.
+STAFF_INVITE_ISSUED = "staff.invite_issued"
+
 # --- Admin services ↔ masters mapping (master-management MM4 / PR 4) -----
 # Emitted from apps.admin_api when an owner/admin toggles the M2M between
 # CatalogMaster and CatalogService. One event PER affected master with a
@@ -323,6 +331,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_PHOTO_UPDATED_BY_ADMIN,
         MASTER_INVITED,
         MASTER_INVITE_DISPATCHED,
+        STAFF_INVITE_ISSUED,
         MASTER_SERVICES_CHANGED,
         INTERNAL_CHAT_THREAD_CREATED,
         INTERNAL_CHAT_MESSAGE_SENT,

@@ -566,3 +566,151 @@ class TestRollback:
         assert not RemoteBookingProxy.all_tenants.filter(
             appointment_id=uuid.UUID(APPOINTMENT_ID)
         ).exists()
+
+
+class TestSenderIdentity:
+    """Whose avatar the booking notice arrives from (DRF-1030 + DRF-1061).
+
+    This message is work — "you have a new booking". Arriving from the
+    customer-facing bot it reads as a marketing push to the very people
+    meant to act on it, and a reply lands in the customer funnel. The two
+    conversations are separate bots precisely so this does not happen.
+    """
+
+    @pytest.fixture
+    def _tokens(self, settings):
+        settings.MAX_BOT_TOKEN = "token-client"  # pragma: allowlist secret
+
+    def _salon_entry(self, tenant_slug: str):
+        from apps.channels.bot_registry import BotEntry
+
+        return BotEntry(
+            slug="salon",
+            webhook_secret="wh-salon",  # pragma: allowlist secret
+            api_token="token-salon",  # pragma: allowlist secret
+            tenant_slug=tenant_slug,
+            stream="max_salon",
+        )
+
+    def _capture_token(self, monkeypatch) -> list[str]:
+        """Record the token outbound WOULD use at send time."""
+
+        seen: list[str] = []
+
+        def _fake_send(*, text, chat_ids, **kwargs):
+            from apps.channels.max.outbound import _token
+
+            seen.append(_token())
+            return 0
+
+        monkeypatch.setattr("apps.booking.master_notify.send_max_notification", _fake_send)
+        return seen
+
+    def test_sent_as_the_salon_bot_when_the_salon_has_one(
+        self, tenant, settings, monkeypatch, _tokens
+    ):
+        settings.MAX_BOT_REGISTRY = (self._salon_entry(tenant.slug),)
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["999"]
+        seen = self._capture_token(monkeypatch)
+
+        notify_booking_created(
+            tenant=tenant,
+            appointment_id=uuid.uuid4(),
+            start_at=timezone.now(),
+            specialist_id=None,
+            service_id=None,
+            raw_source="chat",
+        )
+
+        assert seen == ["token-salon"]
+
+    def test_falls_back_to_the_configured_bot_when_there_is_no_salon_bot(
+        self, tenant, settings, monkeypatch, _tokens
+    ):
+        # Deliberate: a notice from the wrong avatar beats no notice at
+        # all. Silence is what made this gap invisible for months.
+        settings.MAX_BOT_REGISTRY = ()
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["999"]
+        seen = self._capture_token(monkeypatch)
+
+        notify_booking_created(
+            tenant=tenant,
+            appointment_id=uuid.uuid4(),
+            start_at=timezone.now(),
+            specialist_id=None,
+            service_id=None,
+            raw_source="chat",
+        )
+
+        assert seen == ["token-client"]
+
+    def test_another_salons_bot_is_not_borrowed(self, tenant, settings, monkeypatch, _tokens):
+        settings.MAX_BOT_REGISTRY = (self._salon_entry("some-other-salon"),)
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["999"]
+        seen = self._capture_token(monkeypatch)
+
+        notify_booking_created(
+            tenant=tenant,
+            appointment_id=uuid.uuid4(),
+            start_at=timezone.now(),
+            specialist_id=None,
+            service_id=None,
+            raw_source="chat",
+        )
+
+        # Not token-salon: that bot belongs to a different salon.
+        assert seen == ["token-client"]
+
+    def test_a_client_bot_on_the_same_tenant_is_not_mistaken_for_the_staff_bot(
+        self, tenant, settings, monkeypatch, _tokens
+    ):
+        from apps.channels.bot_registry import BotEntry
+
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="client",
+                webhook_secret="wh-c",  # pragma: allowlist secret
+                api_token="token-per-tenant-client",  # pragma: allowlist secret
+                tenant_slug=tenant.slug,
+                stream="max",
+            ),
+        )
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["999"]
+        seen = self._capture_token(monkeypatch)
+
+        notify_booking_created(
+            tenant=tenant,
+            appointment_id=uuid.uuid4(),
+            start_at=timezone.now(),
+            specialist_id=None,
+            service_id=None,
+            raw_source="chat",
+        )
+
+        # Matched on tenant AND stream — a same-tenant client bot must not
+        # be picked up as the staff one.
+        assert seen == ["token-client"]
+
+    def test_identity_failure_never_breaks_the_notification(
+        self, tenant, settings, monkeypatch, _tokens
+    ):
+        # Hard containment: a broken registry must degrade to "sent by the
+        # default bot", never to "booking event dead-lettered".
+        settings.HANDOFF_NOTIFY_MAX_CHAT_IDS = ["999"]
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("registry exploded")
+
+        monkeypatch.setattr("apps.channels.bot_registry.effective_registry", _boom)
+        seen = self._capture_token(monkeypatch)
+
+        notify_booking_created(
+            tenant=tenant,
+            appointment_id=uuid.uuid4(),
+            start_at=timezone.now(),
+            specialist_id=None,
+            service_id=None,
+            raw_source="chat",
+        )
+
+        assert seen == ["token-client"]

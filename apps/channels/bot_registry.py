@@ -395,6 +395,30 @@ def resolve_by_slug(slug: str, registry: tuple[BotEntry, ...]) -> BotEntry | Non
     return None
 
 
+def resolve_by_tenant_stream(
+    tenant_slug: str, stream: str, registry: tuple[BotEntry, ...]
+) -> BotEntry | None:
+    """The bot serving ``tenant_slug`` on ``stream``, if any.
+
+    Both parts are required. Tenant alone is not enough: nothing forbids a
+    salon from having a per-tenant client bot (``stream=max``) as well as a
+    staff bot, and picking the wrong one sends staff messages from the
+    customer-facing token — which, since MAX chat ids are per-bot, most
+    likely fails outright rather than merely looking odd.
+
+    Returns ``None`` when the deployment has no such bot; callers must
+    treat that as "do not speak as anyone" rather than falling back to a
+    default identity.
+    """
+
+    if not tenant_slug or not stream:
+        return None
+    for entry in registry:
+        if entry.tenant_slug == tenant_slug and entry.stream == stream:
+            return entry
+    return None
+
+
 def api_tokens(registry: tuple[BotEntry, ...]) -> tuple[str, ...]:
     """Every outbound/HMAC token, in registry order.
 

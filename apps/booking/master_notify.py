@@ -79,11 +79,16 @@ from django.db import transaction
 from django.db.models import Q
 
 from apps.catalog.models import CatalogMaster, CatalogService
+from apps.channels.bot_context import bot_scope
 from apps.handoff.notify import get_notify_chat_ids, send_max_notification
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
+
+#: Stream of the staff-facing bot. Kept as a literal rather than imported
+#: from the handler to avoid apps.booking depending on apps.channels.max.
+SALON_STREAM = "max_salon"
 
 
 # Placeholder for any field the catalog mirror cannot resolve. The
@@ -266,6 +271,23 @@ def build_booking_created_notification(
     return "\n".join(lines)
 
 
+def _salon_bot_for(tenant: Tenant):
+    """The salon's staff bot, or ``None`` when it has none.
+
+    ``None`` means outbound keeps using the single configured token, i.e.
+    exactly the behaviour before DRF-1061 — see the call site for why that
+    is the right fallback for THIS message specifically.
+    """
+
+    try:
+        from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
+
+        return resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
+    except Exception:  # noqa: BLE001 — identity must never break ingest
+        logger.warning("booking.notify.registry_unavailable tenant=%s", tenant.slug)
+        return None
+
+
 def notify_booking_created(
     *,
     tenant: Tenant,
@@ -307,7 +329,22 @@ def notify_booking_created(
             raw_source=raw_source,
         )
 
-        failures = send_max_notification(text=text, chat_ids=target.chat_ids)
+        # Send as the SALON bot when the salon has one (DRF-1061).
+        #
+        # This message is work: "you have a new booking". Arriving from the
+        # customer-facing avatar it reads as a marketing push to the very
+        # people who are supposed to act on it, and a reply to it lands in
+        # the customer funnel. The staff bot exists precisely to keep those
+        # two conversations apart.
+        #
+        # bot_scope(None) is NOT neutral — outbound falls back to
+        # settings.MAX_BOT_TOKEN — so when no staff bot is configured we
+        # deliberately keep today's behaviour rather than inventing one:
+        # a notification from the client bot is worse than nothing only in
+        # tone, whereas silence is worse in substance. That is the one case
+        # where the wrong avatar beats no message.
+        with bot_scope(_salon_bot_for(tenant)):
+            failures = send_max_notification(text=text, chat_ids=target.chat_ids)
         if failures == 0:
             logger.info(
                 "booking.notify.sent tenant=%s appointment_id=%s channel=%s recipients=%d",
