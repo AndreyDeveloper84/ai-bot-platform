@@ -67,10 +67,26 @@ def reschedule_customer_booking(
 
     with tenant_scope(tenant), transaction.atomic():
         try:
-            old = (
-                BookingRequest.all_tenants.select_for_update()
-                .select_related("service", "master")
-                .get(id=old_booking_id, tenant_id=tenant.id)
+            # DRF-1130 — NO ``select_related`` under ``select_for_update``.
+            # ``service`` and ``master`` are both nullable FKs, so joining
+            # them produces a LEFT OUTER JOIN, and Postgres refuses:
+            # «FOR UPDATE cannot be applied to the nullable side of an
+            # outer join». The failure is unconditional — this path could
+            # never have locked a row on Postgres at all.
+            #
+            # It stayed invisible for two reasons: SQLite (the local
+            # default) does not enforce the restriction, and CI ran 41
+            # test files out of 410 until DRF-1121. Production never hit
+            # it either, because BOOKING_VIA_AYLA_REST routes reschedules
+            # to Ayla before reaching here — so the defect was armed, not
+            # firing. Turning the flag off would have fired it.
+            #
+            # Dropping the join costs two lazy fetches below and changes
+            # nothing else: ``select_related`` is a query-count
+            # optimisation, never a correctness one. Same shape and same
+            # fix as the staff-invite redemption (DRF-1160).
+            old = BookingRequest.all_tenants.select_for_update().get(
+                id=old_booking_id, tenant_id=tenant.id
             )
         except BookingRequest.DoesNotExist:
             raise BookingCreateError("not_found", "booking not found")
