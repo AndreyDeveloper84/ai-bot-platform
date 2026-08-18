@@ -83,10 +83,24 @@ export interface DraftWindow {
   end_at: string;
 }
 
-/** A concrete start the user picked from canonically-supplied options. */
+/**
+ * A concrete start the user picked from canonically-supplied options.
+ *
+ * Shaped after what the schedule actually returns, now that
+ * `/booking-slots/` is wired: `time` is always there, the full timestamp
+ * only sometimes. Neither is reconstructed from the other — filling in a
+ * missing `start_at` would mean the client choosing a timezone, and §17
+ * rules that out.
+ *
+ * There is no `end_at`: the appointment's length comes from the selected
+ * service, and storing a second copy here would be one more thing that
+ * can disagree with it.
+ */
 export interface DraftSlot {
-  start_at: string;
-  end_at: string;
+  /** `HH:MM` in the salon's timezone, as the schedule labelled it. */
+  time: string;
+  /** Full ISO start when the schedule sent one, otherwise null. */
+  start_at: string | null;
 }
 
 export interface BookingDraft {
