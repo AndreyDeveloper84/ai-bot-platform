@@ -120,6 +120,80 @@ def master_day(master, *, now: datetime | None = None) -> str:
     return "\n".join(lines)
 
 
+def pending_request_rows(tenant) -> list[tuple[str, str]]:
+    """``(request_id, label)`` for each pending request, capped.
+
+    Returned separately from the text so the caller can attach one
+    approve button per request without re-querying.
+    """
+
+    from apps.scheduling.models import ScheduleChangeRequest
+
+    tz = _tenant_tz(tenant)
+    rows = list(
+        ScheduleChangeRequest.objects.filter(
+            status=ScheduleChangeRequest.Status.PENDING,
+        )
+        .select_related("master")
+        .order_by("created_at")[:MAX_LISTED]
+    )
+    out: list[tuple[str, str]] = []
+    for row in rows:
+        master_name = getattr(row.master, "name", "мастер")
+        when = row.created_at.astimezone(tz).strftime("%d.%m") if row.created_at else ""
+        out.append((str(row.id), f"✅ {master_name} · {when}"))
+    return out
+
+
+def approve_request(*, tenant, request_id: str, actor) -> str:
+    """Approve one pending request from the chat. Returns what to reply.
+
+    Only approval is available here, deliberately. Rejection requires a
+    reason the master will read (`rejection_reason` is mandatory in the
+    service and surfaced in their DM), and asking for free text in chat
+    would mean an FSM — a "now send me the reason" state to get stuck in.
+    Approval needs no text, so it is the tap-sized half; rejection stays
+    where the person can type and see what they are refusing.
+    """
+
+    from uuid import UUID
+
+    from apps.admin_api.services.availability import (
+        AvailabilityDecisionError,
+        approve_availability_request,
+    )
+
+    try:
+        parsed = UUID(str(request_id))
+    except (ValueError, AttributeError):
+        return "Заявка не найдена."
+
+    try:
+        approve_availability_request(
+            request_id=parsed,
+            tenant_id=tenant.id,
+            # No Django User exists for a MAX-only owner; the service
+            # accepts None and records the BotUser as the audit actor,
+            # same as the Mini App path does.
+            actor=None,
+            actor_bot_user_id=getattr(actor, "id", None),
+            actor_role="admin",
+        )
+    except AvailabilityDecisionError as exc:
+        slug = getattr(exc, "slug", "")
+        if slug == "already_decided":
+            return "Эту заявку уже рассмотрели."
+        if slug == "not_found":
+            return "Заявка не найдена."
+        logger.warning("staff_actions.approve_failed slug=%s request=%s", slug, request_id)
+        return "Не получилось одобрить заявку. Попробуйте из кабинета салона."
+    except Exception:  # noqa: BLE001 — a chat tap must not raise
+        logger.exception("staff_actions.approve_crashed request=%s", request_id)
+        return "Не получилось одобрить заявку. Попробуйте из кабинета салона."
+
+    return "Заявка одобрена. Мастер получит уведомление."
+
+
 def pending_requests(tenant) -> str:
     """Schedule-change requests waiting on an admin.
 
@@ -150,5 +224,7 @@ def pending_requests(tenant) -> str:
         lines.append(f"• {master_name} · {when}")
     if len(rows) > MAX_LISTED:
         lines.append("…и ещё")
-    lines.append("\nОдобрить или отклонить — в кабинете салона.")
+    # Approve is a button below this message; rejection needs a written
+    # reason the master will read, so it stays where they can type it.
+    lines.append("\nОдобрить — кнопкой ниже. Отклонить с причиной — в кабинете салона.")
     return "\n".join(lines)

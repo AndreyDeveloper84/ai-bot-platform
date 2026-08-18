@@ -375,3 +375,89 @@ class TestTaps:
         # Must ask for a code, not burn a rate-limit attempt on a payload
         # the person never typed.
         assert "код приглашения" in sent.call_args.kwargs["text"]
+
+
+class TestApproveFromChat:
+    """Deciding a schedule request with one tap (DRF-1061 block 3.2).
+
+    Only APPROVAL lives in chat. Rejection requires a written reason the
+    master will read — the service makes `rejection_reason` mandatory and
+    surfaces it in their DM — and asking for free text in chat would mean
+    an FSM, i.e. a "now send me the reason" state to get stuck in.
+    Approval needs no text, so it is the tap-sized half.
+    """
+
+    def _pending(self, tenant, master):
+        from apps.scheduling.models import ScheduleChangeRequest
+
+        start = timezone.now() + timedelta(days=1)
+        return ScheduleChangeRequest.all_tenants.create(
+            tenant=tenant,
+            master=master,
+            status=ScheduleChangeRequest.Status.PENDING,
+            requested_start=start,
+            requested_end=start + timedelta(hours=2),
+            requested_change={},
+            reason_class="personal",
+        )
+
+    def test_approving_moves_the_request_out_of_pending(self, tenant):
+        from apps.scheduling.models import ScheduleChangeRequest
+
+        master = _make_master(tenant)
+        req = self._pending(tenant, master)
+
+        with tenant_scope(tenant):
+            outcome = staff_actions.approve_request(
+                tenant=tenant, request_id=str(req.id), actor=None
+            )
+
+        req.refresh_from_db()
+        assert req.status != ScheduleChangeRequest.Status.PENDING
+        assert "одобрена" in outcome
+
+    def test_approving_twice_says_so_instead_of_crashing(self, tenant):
+        master = _make_master(tenant)
+        req = self._pending(tenant, master)
+
+        with tenant_scope(tenant):
+            staff_actions.approve_request(tenant=tenant, request_id=str(req.id), actor=None)
+            second = staff_actions.approve_request(
+                tenant=tenant, request_id=str(req.id), actor=None
+            )
+
+        # Two people tapping the same button is normal, not an error.
+        assert "уже рассмотрели" in second
+
+    def test_unknown_id_is_answered_not_raised(self, tenant):
+        with tenant_scope(tenant):
+            assert "не найдена" in staff_actions.approve_request(
+                tenant=tenant, request_id=str(uuid4()), actor=None
+            )
+
+    def test_malformed_id_is_answered_not_raised(self, tenant):
+        with tenant_scope(tenant):
+            assert "не найдена" in staff_actions.approve_request(
+                tenant=tenant, request_id="не-uuid", actor=None
+            )
+
+    def test_one_button_per_pending_request(self, tenant):
+        master = _make_master(tenant)
+        first = self._pending(tenant, master)
+        second = self._pending(tenant, master)
+
+        with tenant_scope(tenant):
+            rows = staff_actions.pending_request_rows(tenant)
+
+        assert {r[0] for r in rows} == {str(first.id), str(second.id)}
+        assert all("Тихонова Ольга" in r[1] for r in rows)
+
+    def test_the_list_says_where_rejection_lives(self, tenant):
+        master = _make_master(tenant)
+        self._pending(tenant, master)
+
+        with tenant_scope(tenant):
+            text = staff_actions.pending_requests(tenant)
+
+        # The person must not hunt for a reject button that is not there.
+        assert "Отклонить" in text and "кабинете" in text
