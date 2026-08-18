@@ -19,8 +19,10 @@ import hmac
 import json
 import time as time_module
 import uuid
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.test import Client as DjangoClient, override_settings
@@ -40,6 +42,30 @@ pytestmark = pytest.mark.django_db
 BOT_TOKEN = "test-bot-token-xyz"
 AYLA_UID = uuid.uuid4()
 SERVICE_AYLA_ID = uuid.uuid4()
+
+SALON_TZ = ZoneInfo("Europe/Moscow")
+
+
+def visit_at() -> datetime:
+    """The visit time every request in this file books, 14:00 salon-local.
+
+    Relative on purpose. This used to be the literal
+    ``"2026-08-01T14:00:00+03:00"``, which stopped being a future date on
+    2026-08-02 — after which ``create_booking`` rejected it as a visit in
+    the past and three tests went red without anyone touching the code.
+    Nobody noticed for a fortnight because CI did not run this suite
+    until #1189 turned the full ``apps/`` run on.
+
+    A pinned future date is a test that schedules its own failure. The
+    only thing this one needs is «comfortably in the future», so it says
+    that instead of naming a day.
+    """
+
+    return (datetime.now(SALON_TZ) + timedelta(days=7)).replace(
+        hour=14, minute=0, second=0, microsecond=0
+    )
+
+
 MASTER_AYLA_ID = uuid.uuid4()
 
 
@@ -171,7 +197,7 @@ def _post_as(
     body = {
         "service_id": str(service.id),
         "master_id": str(master.id),
-        "visit_at": "2026-08-01T14:00:00+03:00",
+        "visit_at": visit_at().isoformat(),
     }
     if extra:
         body.update(extra)
@@ -379,11 +405,14 @@ class TestLocalPathUnchanged:
         from apps.scheduling.models import Weekday, WorkingHours
 
         MasterService.all_tenants.create(tenant=bot_user.tenant, master=master, service=service)
-        # 2026-08-01 is a Saturday — open the whole day for the slot check.
+        # Open the booked day for the slot check. The weekday is derived
+        # from the visit rather than named, so the setup follows the date
+        # instead of quietly disagreeing with it. `Weekday` is Mon=0…Sun=6,
+        # matching `date.weekday()` — see apps/scheduling/models.py.
         WorkingHours.all_tenants.create(
             tenant=bot_user.tenant,
             master=master,
-            day_of_week=Weekday.SATURDAY,
+            day_of_week=Weekday(visit_at().date().weekday()),
             start_time=dt.time(9, 0),
             end_time=dt.time(18, 0),
             is_working=True,
