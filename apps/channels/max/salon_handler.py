@@ -27,6 +27,16 @@ cannot reach — they are talking to a different bot with a different token.
 No FSM, no "awaiting code" state. There is nothing to get stuck in, and a
 person who reopens the bot a week later is in exactly the same position as
 one who never left.
+
+### What IS recorded (DRF-1061 step 0)
+
+A typed line from someone who holds a role — and the reply to it — are
+appended to their :class:`~apps.conversations.models.StaffAssistantThread`.
+Button taps are not: they are not speech, and the customer path already
+paid for treating raw callback payloads as if they were (DRF-988).
+
+That history is the foundation the assistant is built on in step 1. It
+does NOT make this handler a dialogue yet: the reply is still the menu.
 """
 
 from __future__ import annotations
@@ -239,7 +249,7 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
             if event.text.startswith("cb:"):
                 _handle_button(event, role_ctx, bot_user, tenant, entry)
             else:
-                _send_menu(event, role_ctx, tenant, entry)
+                _handle_talk(event, role_ctx, bot_user, tenant, entry)
             return
 
         # No role yet. A stray button tap from someone who lost their access
@@ -345,6 +355,62 @@ def _requests_attachments(tenant, role_ctx, entry):
     if not buttons:
         return None
     return [make_inline_keyboard_attachment(buttons, columns=1)]
+
+
+def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> None:
+    """Someone who holds a role typed a line rather than tapping.
+
+    Step 0 still answers with the menu — the assistant that reads these
+    lines lands in step 1. What changes here is that the exchange is
+    written down: until now the salon bot kept no history at all, so there
+    was nothing for an assistant to be built on.
+
+    Only typed lines are recorded. Button taps are not replies, and the
+    customer path already learned what happens when raw `cb:*` payloads
+    reach a model as if they were speech (DRF-988: the callback text in
+    history provoked hallucinated refusals).
+    """
+
+    thread = _open_thread(bot_user, role_ctx)
+    _remember(thread, role="user", content=event.text)
+
+    body = menu_header(role_ctx, tenant)
+    _reply(event, body, attachments=menu_attachments(role_ctx, entry))
+
+    _remember(thread, role="assistant", content=body)
+
+
+def _open_thread(bot_user, role_ctx):
+    """This person's working thread, or None if it cannot be opened.
+
+    Never raises. A thread is a place to write history, not a
+    precondition for answering — a staff member in the middle of a shift
+    must get their menu even if the write fails.
+    """
+
+    from apps.conversations.staff_assistant import resolve_active_staff_thread
+
+    try:
+        return resolve_active_staff_thread(bot_user, role_at_open=role_ctx.primary_role)
+    except Exception:  # noqa: BLE001 — history must never cost the reply
+        logger.exception("channels.max.salon.thread_open_failed bot_user=%s", bot_user.id)
+        return None
+
+
+def _remember(thread, *, role: str, content: str) -> None:
+    """Append one turn, swallowing failure for the same reason as above."""
+
+    if thread is None:
+        return
+
+    from apps.conversations.staff_assistant import record_staff_message
+
+    try:
+        record_staff_message(thread, role=role, content=content)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "channels.max.salon.thread_write_failed thread=%s role=%s", thread.id, role
+        )
 
 
 def _send_menu(event: CanonicalEvent, role_ctx, tenant, entry) -> None:

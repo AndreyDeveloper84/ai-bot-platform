@@ -625,3 +625,208 @@ class AiDraft(models.Model):
     def __str__(self) -> str:
         preview = (self.content or "")[:40]
         return f"AiDraft[{self.status}]({preview!r})"
+
+
+class StaffAssistantThread(models.Model):
+    """A salon employee's working dialogue with the assistant (DRF-1061 step 0).
+
+    ### Why not ``Conversation``
+
+    ``Conversation`` is the customer thread, and eighteen modules read it
+    on that assumption — the master's inbox, the handoff queue, the payment
+    consumer, the booking follow-up sweep. Putting staff dialogue in the
+    same table would make each of those a place where a missing filter
+    becomes a silent defect: an employee appearing in their own list of
+    customers, a follow-up chasing a colleague about a booking they never
+    made. Today a staff row would slip past the master's inbox by accident
+    (it filters on ``Exists(BookingRequest)``), and an accident is not a
+    boundary.
+
+    The two also want different columns. Half of ``Conversation`` is
+    payment state, SLA tier and who-read-it-last — meaningless for someone
+    asking how their Thursday looks.
+
+    ### Why the name
+
+    ``MasterAdminThread`` (apps.internal_chat) already means master↔admin.
+    This is employee↔assistant. Three threads live in this product and each
+    one needs a name that says who is talking.
+
+    ### One active thread per person per salon
+
+    Same partial-unique shape as ``conversation_one_active_per_bot_user_tenant``
+    — proven here already, and it lets a closed thread stay as history while
+    a new one opens.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="staff_assistant_threads",
+        help_text="Owning salon. PROTECT — dropping a tenant must not "
+        "silently erase what its staff were told.",
+    )
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.PROTECT,
+        related_name="staff_assistant_threads",
+        help_text="The employee. PROTECT mirrors Conversation.bot_user — "
+        "deletion goes through the 152-ФЗ service, not a cascade.",
+    )
+    role_at_open = models.CharField(
+        max_length=16,
+        blank=True,
+        default="",
+        help_text="Primary role when the thread opened (owner / admin / "
+        "receptionist / master). Not a duplicate of the resolver: it is "
+        "what explains WHY the assistant answered as it did. After access "
+        "is revoked (DRF-1227) the resolver returns 'customer', and "
+        "without this the history stops making sense.",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="False once closed. The active-uniqueness constraint depends on this flag.",
+    )
+    deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Soft-delete stamp (152-ФЗ «удалите мои данные»). "
+        "Excluded from the uniqueness constraint so a replacement thread "
+        "can open afterwards.",
+    )
+    last_message_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Bumped by record_staff_message via atomic UPDATE, never "
+        "instance .save() — concurrent turns must not trample each other.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Staff assistant thread"
+        verbose_name_plural = "Staff assistant threads"
+        ordering = ["-last_message_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["tenant", "is_active", "-last_message_at"]),
+            models.Index(fields=["bot_user", "-last_message_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "bot_user"],
+                condition=models.Q(is_active=True, deleted_at__isnull=True),
+                name="staff_assistant_thread_one_active",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"StaffAssistantThread[{self.id}]({self.role_at_open or 'no-role'})"
+
+    def mark_deleted(self) -> None:
+        """Soft-delete — same contract as ``Conversation.mark_deleted``."""
+
+        self.is_active = False
+        self.deleted_at = timezone.now()
+        self.save(update_fields=["is_active", "deleted_at"])
+
+
+class StaffAssistantMessage(models.Model):
+    """One turn inside a :class:`StaffAssistantThread`.
+
+    Stored in Postgres rather than the Redis short-term window the customer
+    path uses. That window expires in 24 hours, which suits a customer
+    conversation and does not suit a working one: an employee's dialogue is
+    interrupted — between clients, across shifts — and «I asked to take
+    Tuesday off yesterday» has to still be there.
+
+    ``tenant`` is denormalised off the thread, exactly as ``Message`` does
+    it, so tenant-scoped reads never need the join.
+    """
+
+    class Role(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+        TOOL = "tool", "Tool"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    thread = models.ForeignKey(
+        StaffAssistantThread,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    tenant = models.ForeignKey(
+        "tenancy.Tenant",
+        on_delete=models.PROTECT,
+        related_name="staff_assistant_messages",
+        help_text="Denormalised from thread.tenant; the service enforces "
+        "the mirror invariant on every write.",
+    )
+    seq = models.PositiveIntegerField(
+        help_text="Position within the thread, 0-based. Ordering on "
+        "``created_at`` alone is not enough: a tool round trip writes "
+        "user / tool / assistant within a few milliseconds, and on a clock "
+        "with coarse resolution those three share a timestamp — the history "
+        "then comes back shuffled, handing the model an answer before its "
+        "question. Assigned under a row lock on the thread.",
+    )
+    role = models.CharField(max_length=16, choices=Role.choices)
+    content = models.TextField(
+        blank=True,
+        default="",
+        help_text="What was said. For role=tool, the serialised result the assistant was handed.",
+    )
+    tool_name = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Which tool produced this turn. Empty for plain talk — "
+        "the field is what makes «why did it answer that» answerable later.",
+    )
+    trace_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Links the turn to its WebhookJournal row.",
+    )
+    tokens_in = models.IntegerField(default=0)
+    tokens_out = models.IntegerField(default=0)
+    latency_ms = models.IntegerField(null=True, blank=True)
+    llm_provider = models.CharField(max_length=32, blank=True, default="")
+    llm_model = models.CharField(max_length=64, blank=True, default="")
+    llm_cost_usd = models.DecimalField(
+        max_digits=8,
+        decimal_places=6,
+        default=0,
+        help_text="USD cost of the call that produced this turn. Present "
+        "from the start so the assistant's bill is answerable per person "
+        "on day one, not after a second migration.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = TenantScopedManager()
+    all_tenants = models.Manager()
+
+    class Meta:
+        verbose_name = "Staff assistant message"
+        verbose_name_plural = "Staff assistant messages"
+        ordering = ["created_at", "seq"]
+        indexes = [
+            models.Index(fields=["thread", "seq"]),
+            models.Index(fields=["tenant", "-created_at"]),
+        ]
+        constraints = [
+            # Belt to the row lock's braces: if two writers ever slip past
+            # it, the loser fails here instead of silently duplicating a
+            # position and reshuffling the history.
+            models.UniqueConstraint(
+                fields=["thread", "seq"],
+                name="staff_assistant_message_seq_unique",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        preview = (self.content or "")[:40]
+        return f"StaffAssistantMessage[{self.seq}/{self.role}]({preview!r})"
