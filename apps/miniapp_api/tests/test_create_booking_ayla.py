@@ -14,6 +14,7 @@ from the request body.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import hmac
 import json
@@ -33,6 +34,19 @@ from apps.integrations.ayla.booking_client import (
 )
 from apps.integrations.ayla.identity_client import IdentityResolveError, ResolvedIdentity
 from apps.tenancy.models import Tenant
+
+# A fixed calendar date silently rots: it is in the future when the test
+# is written and in the past forever after, at which point the view
+# rejects the booking (400) and the assertion fails for a reason that
+# has nothing to do with what the test covers. `2026-08-01` did exactly
+# that, and the failure only became visible once CI started running the
+# whole `apps/` suite (DRF-1121) instead of 41 files.
+#
+# Anchored 14 days out so the window stays clear of month/DST edges,
+# with the weekday derived from the date rather than asserted about it —
+# the schedule fixture below opens whichever day this lands on.
+_VISIT_DATE = dt.date.today() + dt.timedelta(days=14)
+_VISIT_AT = f"{_VISIT_DATE.isoformat()}T14:00:00+03:00"
 
 
 pytestmark = pytest.mark.django_db
@@ -171,7 +185,7 @@ def _post_as(
     body = {
         "service_id": str(service.id),
         "master_id": str(master.id),
-        "visit_at": "2026-08-01T14:00:00+03:00",
+        "visit_at": _VISIT_AT,
     }
     if extra:
         body.update(extra)
@@ -379,11 +393,16 @@ class TestLocalPathUnchanged:
         from apps.scheduling.models import Weekday, WorkingHours
 
         MasterService.all_tenants.create(tenant=bot_user.tenant, master=master, service=service)
-        # 2026-08-01 is a Saturday — open the whole day for the slot check.
+        # Open whichever weekday `_VISIT_DATE` happens to fall on, rather
+        # than naming one. The previous version hardcoded SATURDAY to match
+        # a hardcoded 2026-08-01; when the date rotted the two drifted apart
+        # independently, so the same test could fail for either reason.
+        # `Weekday` is Monday=0 like `date.weekday()`, so the index maps
+        # straight across.
         WorkingHours.all_tenants.create(
             tenant=bot_user.tenant,
             master=master,
-            day_of_week=Weekday.SATURDAY,
+            day_of_week=Weekday(_VISIT_DATE.weekday()),
             start_time=dt.time(9, 0),
             end_time=dt.time(18, 0),
             is_working=True,
