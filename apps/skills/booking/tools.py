@@ -2312,11 +2312,18 @@ def execute_reschedule(
         )
 
         with _db_transaction.atomic():
-            booking = (
-                BookingRequest.all_tenants.select_for_update()
-                .select_related("service")
-                .get(pk=booking.pk)
-            )
+            # DRF-1130 — no ``select_related`` here either. ``service`` is
+            # nullable, so the join is a LEFT OUTER JOIN and Postgres
+            # refuses the lock outright.
+            #
+            # The foot-gun was already documented forty lines below, in
+            # the chain-root read: «do NOT add ``.select_related(...)``
+            # here — would expand FOR UPDATE scope to joined tables on
+            # Postgres». The warning was written, and it did not protect
+            # the call site above it, nor the two in other modules. An
+            # invariant that can be checked has no business living in a
+            # comment — the guard belongs in the linter (DRF-1130 §3).
+            booking = BookingRequest.all_tenants.select_for_update().get(pk=booking.pk)
 
             # Q12-α continuation decision (issue #478, founder ACK
             # 2026-05-22). The LLM reschedule tool always keeps the
