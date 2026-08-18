@@ -38,6 +38,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
+from apps.internal_chat.notify import schedule_message_notification
 from apps.catalog.models import CatalogMaster
 from apps.events.services import emit
 from apps.events.vocabulary import (
@@ -174,6 +175,13 @@ def create_thread(
             distinct_id=str(actor.id),
         )
 
+        # A thread opened WITH a first message is the master-side create
+        # path — the salon must hear about it, exactly as it hears about
+        # any later message. A thread opened WITHOUT one is the admin's
+        # «summon master» path and has nothing to announce yet.
+        if first_message is not None:
+            schedule_message_notification(message=first_message)
+
     return thread
 
 
@@ -236,6 +244,14 @@ def send_message(
             properties=audit_payload,
             distinct_id=str(sender_user.id) if sender_user is not None else "",
         )
+        # DRF-1061: tell the other side in MAX. Registered on_commit, so a
+        # rolled-back message never announces itself, and best-effort, so a
+        # failed notice never costs the user their message.
+        #
+        # Until this existed the counterparty learned of a message only by
+        # opening the screen — which on the pilot nobody does, making the
+        # whole feature effectively absent.
+        schedule_message_notification(message=message)
 
     return message
 
