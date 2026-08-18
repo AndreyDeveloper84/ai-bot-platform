@@ -504,6 +504,14 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
   const masterName = preview.master.name;
   const masterFirst = firstName(masterName);
   const totalBookings = preview.summary.total_future_bookings;
+  // DRF-1139 — the booking list this screen can act on is not always the
+  // whole truth. When Ayla's mirror reports live future visits this flow
+  // cannot reassign or cancel, an empty list is a blind spot, not an
+  // all-clear, and archiving on top of it strands those clients on a
+  // master who no longer works. Only an explicit `false` blocks: an older
+  // backend that omits the field degrades to the previous behaviour.
+  const inventoryBlocked = preview.summary.inventory_complete === false;
+  const mirrorBookings = preview.summary.mirror_future_bookings ?? 0;
 
   // Step 4 — result.
   if (state.step === 4 && state.result) {
@@ -627,7 +635,11 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
           >
             {`Будущие записи ${masterFirst}`}
           </div>
-          {hasFutureBookings ? (
+          {inventoryBlocked ? (
+            <p style={{ margin: 0 }}>
+              {`В расписании салона есть ${mirrorBookings} будущих ${mirrorBookings === 1 ? "запись" : "записей"} к ${masterFirst}, ${mirrorBookings === 1 ? "которую" : "которые"} отсюда перенести нельзя. Деактивация недоступна, пока ${mirrorBookings === 1 ? "она не будет закрыта" : "они не будут закрыты"} в расписании.`}
+            </p>
+          ) : hasFutureBookings ? (
             <p style={{ margin: 0 }}>
               {`У ${masterFirst} ${totalBookings} будущих записей. Их нужно переназначить или отменить — иначе клиенты придут на закрытую дверь.`}
             </p>
@@ -658,6 +670,13 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
             className="cta-bar__button"
             style={{ flex: 1 }}
             onClick={handleStep1Continue}
+            disabled={inventoryBlocked}
+            aria-disabled={inventoryBlocked}
+            title={
+              inventoryBlocked
+                ? "Деактивация недоступна, пока в расписании есть будущие записи, которые нельзя перенести отсюда"
+                : undefined
+            }
           >
             {hasFutureBookings ? "Посмотреть и переназначить →" : "Продолжить →"}
           </button>

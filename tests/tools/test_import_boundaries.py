@@ -144,7 +144,7 @@ class TestAllowsLegitImports:
 class TestBaseline:
     def test_baselined_crossing_passes(self, tmp_path) -> None:
         _write(tmp_path, "apps/api/views.py", "from apps.secret import x\n")
-        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "apps.secret")})
+        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "<module>", "apps.secret")})
         assert _scan(tmp_path, baseline) == []
 
     def test_same_crossing_without_baseline_fails(self, tmp_path) -> None:
@@ -164,7 +164,7 @@ class TestBaseline:
         _write(
             tmp_path, "apps/api/views.py", "from apps.secret import a\nfrom apps.secret2 import b\n"
         )
-        baseline = frozenset({("T2", "apps/api/views.py", "apps.secret")})
+        baseline = frozenset({("T2", "apps/api/views.py", "<module>", "apps.secret")})
         v = ib.scan_paths([tmp_path / "apps"], tmp_path, contracts=(c,), baseline=baseline)
         assert len(v) == 1
         assert "apps.secret2" in v[0].message
@@ -172,7 +172,7 @@ class TestBaseline:
     def test_stale_baseline_entry_reported(self, tmp_path) -> None:
         # Baseline claims a crossing that the (clean) file no longer makes.
         _write(tmp_path, "apps/api/views.py", "from apps.public import x\n")
-        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "apps.secret")})
+        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "<module>", "apps.secret")})
         v = _scan(tmp_path, baseline)
         assert len(v) == 1
         assert "STALE BASELINE" in v[0].message
@@ -185,11 +185,88 @@ class TestBaseline:
         # entries and silently weaken enforcement.
         _write(tmp_path, "apps/api/views.py", "from apps.secret import x\n")
         _write(tmp_path, "apps/other/mod.py", "from apps.public import ok\n")
-        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "apps.secret")})
+        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "<module>", "apps.secret")})
         v = ib.scan_paths(
             [tmp_path / "apps" / "other"], tmp_path, contracts=_CONTRACTS, baseline=baseline
         )
         assert v == []
+
+
+# ── Qualname granularity (DRF-1157) ───────────────────────────────────
+#
+# The hole this closes: the baseline key used to be (contract, file,
+# root), so ONE accepted crossing in a file silenced EVERY other crossing
+# to the same root anywhere else in that file. apps/miniapp_api/views.py
+# imports BookingRequest from four different functions; a single line
+# covered all four, including the one G9 was written to surface.
+
+
+class TestQualnameGranularity:
+    _TWO_SITES = """
+        def legit():
+            from apps.secret import ok
+            return ok
+
+        def sneaky():
+            from apps.secret import bad
+            return bad
+        """
+
+    def test_module_level_import_keyed_as_module(self, tmp_path) -> None:
+        _write(tmp_path, "apps/api/views.py", "from apps.secret import x\n")
+        v = _scan(tmp_path)
+        assert v[0].key == ("T1-api-no-secret", "apps/api/views.py", "<module>", "apps.secret")
+
+    def test_function_local_import_keyed_by_function(self, tmp_path) -> None:
+        _write(tmp_path, "apps/api/views.py", "def f():\n    from apps.secret import x\n")
+        v = _scan(tmp_path)
+        assert v[0].key == ("T1-api-no-secret", "apps/api/views.py", "f", "apps.secret")
+
+    def test_nested_scopes_are_dotted(self, tmp_path) -> None:
+        _write(
+            tmp_path,
+            "apps/api/views.py",
+            """
+            class C:
+                async def m(self):
+                    def inner():
+                        from apps.secret import x
+                    return inner
+            """,
+        )
+        v = _scan(tmp_path)
+        assert v[0].key[2] == "C.m.inner"
+
+    def test_baselining_one_call_site_does_not_cover_its_neighbour(self, tmp_path) -> None:
+        """THE regression for DRF-1157 — this is what file granularity hid."""
+        _write(tmp_path, "apps/api/views.py", self._TWO_SITES)
+        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "legit", "apps.secret")})
+        v = _scan(tmp_path, baseline)
+        assert len(v) == 1, "the un-baselined sibling call site must still fail"
+        assert "sneaky" in v[0].message
+        assert v[0].key == ("T1-api-no-secret", "apps/api/views.py", "sneaky", "apps.secret")
+
+    def test_both_call_sites_baselined_passes(self, tmp_path) -> None:
+        _write(tmp_path, "apps/api/views.py", self._TWO_SITES)
+        baseline = frozenset(
+            {
+                ("T1-api-no-secret", "apps/api/views.py", "legit", "apps.secret"),
+                ("T1-api-no-secret", "apps/api/views.py", "sneaky", "apps.secret"),
+            }
+        )
+        assert _scan(tmp_path, baseline) == []
+
+    def test_moving_a_baselined_import_to_a_new_function_fails(self, tmp_path) -> None:
+        # A crossing that migrates to a different scope is NEW debt at the
+        # new site and STALE at the old one — both must be reported, so the
+        # baseline cannot be dodged by relocating the import.
+        _write(tmp_path, "apps/api/views.py", "def renamed():\n    from apps.secret import x\n")
+        baseline = frozenset({("T1-api-no-secret", "apps/api/views.py", "old", "apps.secret")})
+        v = _scan(tmp_path, baseline)
+        messages = " | ".join(x.message for x in v)
+        assert len(v) == 2, messages
+        assert "STALE BASELINE" in messages
+        assert "renamed" in messages
 
 
 # ── Integration: the real repo ────────────────────────────────────────
@@ -205,13 +282,16 @@ class TestRealReposClean:
     def test_baseline_matches_reality(self) -> None:
         """Regression: with an EMPTY baseline, the crossings the guard finds
         in apps/ are EXACTLY the shipped BASELINE — so the baseline neither
-        hides a new violation nor carries a stale entry."""
+        hides a new violation nor carries a stale entry.
+
+        Keys come off ``Violation.key`` rather than being re-parsed out of
+        the message text: since DRF-1157 the key carries the qualname, which
+        the human-readable message renders as prose."""
         found = ib.scan_paths([_PROJECT_ROOT / "apps"], _PROJECT_ROOT, baseline=frozenset())
         observed = {
-            (msg_id, v.file.resolve().relative_to(_PROJECT_ROOT).as_posix(), root)
+            v.key
             for v in found
-            for msg_id, root in [_parse_contract_and_root(v.message)]
-            if msg_id is not None
+            if v.key is not None and v.key[0] != ib.CATALOG_CROSS_TENANT_CONTRACT_ID
         }
         assert observed == set(ib.BASELINE)
 
@@ -221,15 +301,17 @@ class TestRealReposClean:
         CATALOG_CROSS_TENANT_BASELINE."""
         found = ib.scan_paths([_PROJECT_ROOT / "apps"], _PROJECT_ROOT, catalog_baseline=frozenset())
         observed = {
-            (
-                ib.CATALOG_CROSS_TENANT_CONTRACT_ID,
-                v.file.resolve().relative_to(_PROJECT_ROOT).as_posix(),
-                ib._CATALOG_ROOT,
-            )
+            v.key
             for v in found
-            if ib.CATALOG_CROSS_TENANT_CONTRACT_ID in v.message
+            if v.key is not None and v.key[0] == ib.CATALOG_CROSS_TENANT_CONTRACT_ID
         }
         assert observed == set(ib.CATALOG_CROSS_TENANT_BASELINE)
+
+    def test_catalog_rule_stays_file_granular(self) -> None:
+        """MKT1 reports one violation per file by design — its keys must keep
+        the synthetic ``<file>`` qualname, not an enclosing scope. Only the
+        import-edge contracts got the DRF-1157 split."""
+        assert all(k[2] == ib.FILE_QUALNAME for k in ib.CATALOG_CROSS_TENANT_BASELINE)
 
 
 # ── MKT1: cross-tenant catalog-read rule (#1018) ──────────────────────
@@ -261,7 +343,14 @@ class TestCatalogCrossTenantRule:
     def test_baselined_file_passes(self, tmp_path) -> None:
         _write(tmp_path, "apps/foo/views.py", "CatalogMaster.all_tenants.all()\n")
         baseline = frozenset(
-            {(ib.CATALOG_CROSS_TENANT_CONTRACT_ID, "apps/foo/views.py", ib._CATALOG_ROOT)}
+            {
+                (
+                    ib.CATALOG_CROSS_TENANT_CONTRACT_ID,
+                    "apps/foo/views.py",
+                    ib.FILE_QUALNAME,
+                    ib._CATALOG_ROOT,
+                )
+            }
         )
         assert self._scan_cat(tmp_path, baseline) == []
 
@@ -277,25 +366,20 @@ class TestCatalogCrossTenantRule:
     def test_stale_catalog_baseline_reported(self, tmp_path) -> None:
         _write(tmp_path, "apps/foo/views.py", "CatalogMaster.objects.all()\n")
         baseline = frozenset(
-            {(ib.CATALOG_CROSS_TENANT_CONTRACT_ID, "apps/foo/views.py", ib._CATALOG_ROOT)}
+            {
+                (
+                    ib.CATALOG_CROSS_TENANT_CONTRACT_ID,
+                    "apps/foo/views.py",
+                    ib.FILE_QUALNAME,
+                    ib._CATALOG_ROOT,
+                )
+            }
         )
         v = self._scan_cat(tmp_path, baseline)
         assert len(v) == 1
         assert "STALE BASELINE" in v[0].message
 
 
-def _parse_contract_and_root(message: str) -> tuple[str | None, str | None]:
-    """Pull (contract_id, imported-root) back out of a violation message.
-
-    Message shape: `[<id>] imports '<module>' — ...`. The root is the
-    forbidden module the import fell under, recomputed from the contract.
-    """
-    if not message.startswith("[") or "imports '" not in message:
-        return None, None
-    contract_id = message[1 : message.index("]")]
-    mod_start = message.index("imports '") + len("imports '")
-    module = message[mod_start : message.index("'", mod_start)]
-    contract = next((c for c in ib.CONTRACTS if c.id == contract_id), None)
-    if contract is None:
-        return None, None
-    return contract_id, ib._matched_root(module, contract.forbidden_modules)
+# (`_parse_contract_and_root` used to reconstruct the baseline key by
+# scraping the violation message. DRF-1157 put the key on `Violation.key`
+# instead — the message is prose for humans, the key is data for tests.)

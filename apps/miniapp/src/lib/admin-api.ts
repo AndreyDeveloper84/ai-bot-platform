@@ -121,6 +121,77 @@ export interface MeResponse {
 export const getMe = (): Promise<MeResponse> =>
   request("/api/v1/me", { method: "GET" });
 
+// --- /api/v1/admin/day/ --------------------------------------------------
+
+/**
+ * One visit on the salon's day.
+ *
+ * `client_last_initial` is an initial, not a surname, and there is no
+ * phone field at all — the backend does not resolve one on this path
+ * (DRF-1039).
+ */
+export interface SalonDayVisit {
+  id: string;
+  start_at: string | null;
+  end_at: string | null;
+  duration_min: number;
+  status: string;
+  service_name: string;
+  client_first_name: string;
+  client_last_initial: string;
+  is_in_progress: boolean;
+}
+
+export interface SalonDayMaster {
+  master_id: string;
+  name: string;
+  is_active: boolean;
+  visits: SalonDayVisit[];
+}
+
+export interface SalonDaySummary {
+  total: number;
+  upcoming: number;
+  completed: number;
+  released: number;
+}
+
+export interface SalonDayResponse {
+  date: string;
+  timezone: string;
+  summary: SalonDaySummary;
+  masters: SalonDayMaster[];
+  /**
+   * Visits whose specialist matches no catalog master. Surfaced rather
+   * than dropped — a booking nobody can see is the failure the salon
+   * surface exists to prevent.
+   */
+  orphan_visits: SalonDayVisit[];
+}
+
+/** Statuses that mean the slot was freed — rendered struck through. */
+export const RELEASED_VISIT_STATUSES: ReadonlySet<string> = new Set([
+  "cancelled",
+  "no_show",
+]);
+
+/**
+ * GET /api/v1/admin/day/ — every master's visits for one calendar day.
+ *
+ * `date` is `YYYY-MM-DD` in the tenant's timezone; omit it for the
+ * salon's today (which is not necessarily the server's today).
+ */
+export const getSalonDay = (
+  date?: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<SalonDayResponse> => {
+  const qs = date ? `?date=${encodeURIComponent(date)}` : "";
+  return request<SalonDayResponse>(`/api/v1/admin/day/${qs}`, {
+    method: "GET",
+    signal: init.signal,
+  });
+};
+
 // --- /api/v1/admin/masters/ ----------------------------------------------
 
 export interface MasterListItem {
@@ -201,6 +272,23 @@ export interface DeactivationSummary {
   total_future_bookings: number;
   bookings_with_fallback: number;
   bookings_without_fallback: number;
+  /**
+   * Live future visits the Ayla mirror knows about for this master —
+   * independent of what the cascade can act on (DRF-1139).
+   */
+  mirror_future_bookings?: number;
+  /**
+   * False when the mirror reports more live future visits than
+   * `total_future_bookings`, i.e. this screen cannot see everything it
+   * would archive. The backend refuses `/deactivate/` with 409
+   * `inventory_incomplete` while this is false, and the UI must not
+   * offer the action.
+   *
+   * Optional so an older backend ship (no such field) degrades to the
+   * previous behaviour rather than blocking every deactivation —
+   * absence means «unknown», and only an explicit `false` blocks.
+   */
+  inventory_complete?: boolean;
 }
 
 export interface DeactivationPreview {

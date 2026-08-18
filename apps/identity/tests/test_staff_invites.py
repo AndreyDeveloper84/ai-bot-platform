@@ -172,7 +172,7 @@ class TestRedeemStaffRoles:
 
         role_ctx = resolve_role(person)
         assert role_ctx.is_admin is True
-        assert role_ctx.landing_path == "/admin/dashboard"
+        assert role_ctx.landing_path == "/admin/team"
 
     def test_owner_code_grants_owner(self, tenant, person):
         _, code = issue_staff_invite(tenant=tenant, role=StaffInvite.Role.OWNER)

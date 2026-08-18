@@ -14,6 +14,7 @@ from django.urls import path
 from apps.admin_api import (
     views,
     views_availability,
+    views_day,
     views_invite,
     views_staff_invite,
     views_master_deactivation,
@@ -23,6 +24,10 @@ from apps.admin_api import (
 app_name = "admin_api"
 
 urlpatterns = [
+    # Phase 2 — the salon's day. Declared first because it is the screen
+    # the front desk opens most often; ordering is cosmetic here (no
+    # wildcard can swallow a literal "day" segment at this level).
+    path("day/", views_day.salon_day, name="salon_day"),
     path("masters/", views.masters_list, name="masters_list"),
     # PR 3 / MM2 — must precede masters/<id>/ so the literal "invite"
     # segment is not consumed as a master_id. Django's path resolver is
