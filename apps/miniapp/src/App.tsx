@@ -47,6 +47,7 @@ import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatLi
 import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChatThreadScreen";
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
+import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
@@ -168,6 +169,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
     <>
       {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
       <Route path="/admin/day" element={<AdminSalonDayScreen />} />
+      <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
       <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
       <Route
         path="/admin/team/invite"

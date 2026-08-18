@@ -192,6 +192,57 @@ export const getSalonDay = (
   });
 };
 
+// --- /api/v1/admin/booking-slots/ ----------------------------------------
+
+/** One bookable start, as the canonical schedule returned it. */
+export interface BookingSlot {
+  /** `HH:MM` in the salon's timezone — always present. */
+  time: string;
+  /**
+   * Full ISO timestamp when the schedule sent one, otherwise null.
+   *
+   * Deliberately not reconstructed from `time` on either side: picking a
+   * timezone to fill this in would be the client computing an
+   * authoritative slot, which UX contract §17 rules out.
+   */
+  start_at: string | null;
+  duration_min: number | null;
+}
+
+export interface BookingSlotsResponse {
+  date: string;
+  master_id: string;
+  service_id: string;
+  duration_min: number | null;
+  slots: BookingSlot[];
+}
+
+/**
+ * GET /api/v1/admin/booking-slots/ — bookable starts for one master,
+ * one service, one day.
+ *
+ * All three arguments are required: a slot list that does not know the
+ * service is a list of times that mean nothing (§12).
+ *
+ * The endpoint answers 503 / 502 when the schedule is unreachable rather
+ * than an empty list, so callers must treat a thrown ApiError as «could
+ * not ask» and NEVER as «no free time» (§16).
+ */
+export const getBookingSlots = (
+  params: { masterId: string; serviceId: string; date: string },
+  init: { signal?: AbortSignal } = {},
+): Promise<BookingSlotsResponse> => {
+  const q = new URLSearchParams({
+    master_id: params.masterId,
+    service_id: params.serviceId,
+    date: params.date,
+  });
+  return request<BookingSlotsResponse>(`/api/v1/admin/booking-slots/?${q.toString()}`, {
+    method: "GET",
+    signal: init.signal,
+  });
+};
+
 // --- /api/v1/admin/masters/ ----------------------------------------------
 
 export interface MasterListItem {

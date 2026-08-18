@@ -32,7 +32,7 @@ const COLORING: DraftService = {
 };
 const ANNA = { id: "m-1", name: "Анна" };
 const INNA = { id: "m-2", name: "Инна" };
-const SLOT = { start_at: "2026-08-21T12:00:00Z", end_at: "2026-08-21T13:00:00Z" };
+const SLOT = { time: "15:00", start_at: "2026-08-21T12:00:00Z" };
 const WINDOW = { start_at: "2026-08-21T12:00:00Z", end_at: "2026-08-21T15:00:00Z" };
 
 function draftWithSlot(): BookingDraft {
@@ -212,11 +212,24 @@ describe("window semantics (§12)", () => {
   it("keeps the window separate from the chosen start", () => {
     // «Выбранное окно» is the range the draft started from, not the
     // appointment's duration — a three-hour window with a one-hour
-    // service must not imply a three-hour booking.
+    // service must not imply a three-hour booking. The draft models them
+    // as different shapes so the two can never be confused: a window has
+    // a start AND an end, a slot has a start only.
     const d = draftWithSlot();
     expect(d.window).toEqual(WINDOW);
     expect(d.slot).toEqual(SLOT);
-    expect(d.window?.end_at).not.toEqual(d.slot?.end_at);
+    expect(d.slot).not.toHaveProperty("end_at");
+  });
+
+  it("carries the schedule's own label and does not invent a timestamp", () => {
+    // §17 — filling in a missing `start_at` would mean the client picking
+    // a timezone, which is exactly the local computation the contract
+    // forbids. A slot with no timestamp keeps null and stays usable.
+    const { draft } = applyDraftAction(EMPTY_DRAFT, {
+      type: "slot/set",
+      slot: { time: "16:30", start_at: null },
+    });
+    expect(draft.slot).toEqual({ time: "16:30", start_at: null });
   });
 
   it("resets everything on reset", () => {
