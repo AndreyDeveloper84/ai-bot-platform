@@ -46,6 +46,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 import { MASTER_SESSION_STORAGE_KEY } from "../lib/master-api";
 import {
   hapticNotify,
@@ -144,6 +145,13 @@ export function MasterSettingsScreen() {
       >
         Оплата и выплаты
       </button>
+
+      {/*
+        Above the divider, with the ordinary actions: switching surface
+        is routine for a dual-role person, not a destructive step. It
+        renders nothing at all for someone holding a single role.
+      */}
+      <SurfaceSwitchButton />
 
       <hr
         style={{

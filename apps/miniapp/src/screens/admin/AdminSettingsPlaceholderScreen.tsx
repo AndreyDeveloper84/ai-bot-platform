@@ -5,6 +5,7 @@
  */
 
 import { AdminTabBar } from "../../components/AdminTabBar";
+import { SurfaceSwitchButton } from "../../components/SurfaceSwitch";
 
 export function AdminSettingsPlaceholderScreen() {
   return (
@@ -15,6 +16,12 @@ export function AdminSettingsPlaceholderScreen() {
       <div className="callout" role="status">
         <p style={{ margin: 0 }}>Скоро здесь будут настройки салона.</p>
       </div>
+      {/*
+        The way back out of a surface. Renders itself away for anyone
+        holding a single role, so the ordinary receptionist never sees a
+        control that would only confuse her.
+      */}
+      <SurfaceSwitchButton />
       <AdminTabBar />
     </div>
   );
