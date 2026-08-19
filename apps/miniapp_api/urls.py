@@ -80,6 +80,18 @@ urlpatterns = [
         views.customer_recommendations,
         name="customer_recommendations",
     ),
+    # Goal layer (DRF-1190) — decision-context document + goal selection,
+    # proxied onto Ayla verbatim (Mini App is a dumb renderer).
+    path(
+        "decision-context",
+        views.customer_decision_context,
+        name="customer_decision_context",
+    ),
+    path(
+        "goals/select",
+        views.customer_goal_select,
+        name="customer_goal_select",
+    ),
     # Wellness dashboard — composition of Ayla nutrition reads.
     path(
         "wellness/today",

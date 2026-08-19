@@ -689,6 +689,51 @@ a {
   font-weight: 600;
 }
 
+/* Goal select screen (DRF-1190) — dumb renderer over the decision doc. */
+.goal-select__section-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  margin: var(--s-4) 0 var(--s-2);
+}
+
+.goal-select__current {
+  margin: 0;
+  padding: var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
+
+.goal-select__prompt {
+  margin: 0 0 var(--s-2);
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
+
+.goal-select__textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  resize: vertical;
+}
+
+.goal-select__textarea:disabled {
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+}
+
+.goal-select__actions {
+  margin-top: var(--s-3);
+}
+
 /* Inline action row under each visit card. */
 .visit-row__actions {
   display: flex;

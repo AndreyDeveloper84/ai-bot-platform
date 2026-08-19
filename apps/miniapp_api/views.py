@@ -2531,3 +2531,98 @@ def card_delete(request: HttpRequest, card_id) -> HttpResponse:
     except ClientPaymentsError as exc:
         return _c7_upstream_error(exc)
     return HttpResponse(status=204)
+
+
+# --- /customer/decision-context + /customer/goals/select — goal layer proxy (DRF-1190)
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_decision_context(request: HttpRequest) -> HttpResponse:
+    """Proxy the decision-context read onto Ayla per identity-bridging contract.
+
+    The Mini App is a dumb renderer (owner decision, reply #3): Ayla's
+    document (known / missing / suggestions / intents) is passed through
+    verbatim — a translation layer here would only create a
+    release-lockstep tax.
+
+    Failure mapping: 503 — misconfigured; 502 — Ayla timeout/5xx/malformed.
+    """
+    from apps.integrations.ayla import external_user_id_for
+    from apps.integrations.ayla.goals_client import (
+        GoalsConfigError,
+        GoalsUnavailable,
+        fetch_decision_context,
+    )
+
+    try:
+        ayla_body = fetch_decision_context(
+            external_user_id=external_user_id_for(request.bot_user),  # type: ignore[attr-defined]
+        )
+    except GoalsConfigError as exc:
+        logger.error("customer_decision_context.config_error: %s", exc)
+        return _error("not_configured", "ayla goals not configured", 503)
+    except GoalsUnavailable as exc:
+        logger.warning("customer_decision_context.unavailable: %s", exc)
+        return _error("ayla_unavailable", "ayla decision-context unavailable", 502)
+
+    return JsonResponse(ayla_body)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_goal_select(request: HttpRequest) -> HttpResponse:
+    """Proxy a goal selection onto Ayla; response is the updated document.
+
+    Body: ``{"goal_key": ..., "source_channel": "miniapp"}`` XOR
+    ``{"goal_text": ..., ...}`` XOR ``{"intent": "need_guidance", ...}``.
+    Shape validation lives on Ayla's side (400 forwarded); this hop only
+    checks the body is a JSON object.
+
+    Failure mapping: 400 — malformed body or Ayla 4xx (``ayla_error``
+    forwarded); 502 — Ayla outage; 503 — misconfigured.
+    """
+    import json
+
+    from apps.integrations.ayla import external_user_id_for
+    from apps.integrations.ayla.goals_client import (
+        GoalsBadRequest,
+        GoalsConfigError,
+        GoalsUnavailable,
+        post_goal_select,
+    )
+
+    body: dict = {}
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type == "application/json" and request.body:
+        try:
+            parsed = json.loads(request.body)
+        except ValueError:
+            return _error("malformed", "body is not valid JSON", 400)
+        if not isinstance(parsed, dict):
+            return _error("malformed", "body must be a JSON object", 400)
+        body = parsed
+
+    try:
+        ayla_body = post_goal_select(
+            external_user_id=external_user_id_for(request.bot_user),  # type: ignore[attr-defined]
+            payload=body,
+        )
+    except GoalsConfigError as exc:
+        logger.error("customer_goal_select.config_error: %s", exc)
+        return _error("not_configured", "ayla goals not configured", 503)
+    except GoalsBadRequest as exc:
+        return JsonResponse(
+            {
+                "error": "ayla_bad_request",
+                "detail": f"ayla returned HTTP {exc.status_code}",
+                "ayla_error": exc.body,
+            },
+            status=400,
+        )
+    except GoalsUnavailable as exc:
+        logger.warning("customer_goal_select.unavailable: %s", exc)
+        return _error("ayla_unavailable", "ayla goals unavailable", 502)
+
+    return JsonResponse(ayla_body)
