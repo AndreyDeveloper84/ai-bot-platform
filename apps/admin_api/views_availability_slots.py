@@ -32,6 +32,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_role
+from apps.admin_api.services.salon_day import tenant_tz
 from apps.admin_api.views import _get_master_or_404
 from apps.catalog.models import CatalogService
 
@@ -152,6 +153,10 @@ def booking_slots(request: HttpRequest) -> HttpResponse:
     return JsonResponse(
         {
             "date": day.isoformat(),
+            # The review screen has to state the timezone the appointment
+            # is in (UX contract §18). It comes from the server because
+            # the salon's timezone is the salon's fact, not the device's.
+            "timezone": str(tenant_tz(tenant)),
             "master_id": str(master.id),
             "service_id": str(service.id),
             "duration_min": service.duration_min,

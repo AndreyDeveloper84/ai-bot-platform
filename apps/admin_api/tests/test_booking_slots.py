@@ -95,6 +95,9 @@ class TestSlots:
         assert data["slots"][0]["duration_min"] == 60
         assert data["slots"][1]["start_at"] is None
         assert data["duration_min"] == 60
+        # §18 — the review has to state the timezone, and only the server
+        # knows the salon's.
+        assert data["timezone"] == "Europe/Moscow"
 
     def test_translates_catalog_ids_to_ayla_ids(
         self, client: Client, owner_bot_user, tenant: Tenant, stub_slots

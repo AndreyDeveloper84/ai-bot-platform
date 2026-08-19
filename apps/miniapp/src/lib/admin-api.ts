@@ -192,6 +192,58 @@ export const getSalonDay = (
   });
 };
 
+// --- salon customers (UX contract §13) -----------------------------------
+
+/**
+ * A customer as the salon may see them while booking.
+ *
+ * Name and masked phone, and nothing else. §13: the search «exposes only
+ * fields needed to disambiguate a customer» and «must not surface
+ * unrelated customers, hidden memory, medical inference, or full
+ * history». The raw phone is deliberately absent — on the Ayla side the
+ * lookup takes a phone as input and never returns one.
+ */
+export interface SalonCustomer {
+  id: string;
+  name: string;
+  phone_masked: string;
+}
+
+/**
+ * The search capability is not reachable at all.
+ *
+ * Distinct from «found nothing» on purpose, and the distinction is the
+ * whole point: §13 says «A failed search is not proof that the customer
+ * does not exist». A surface that renders an unreachable search as «нет
+ * такого клиента» invites the receptionist to create a duplicate of
+ * somebody who is already there.
+ */
+export class CustomerSearchUnavailable extends Error {
+  constructor(message = "customer search is not available") {
+    super(message);
+    this.name = "CustomerSearchUnavailable";
+  }
+}
+
+/**
+ * Search the salon's customers by name or phone.
+ *
+ * NOT WIRED YET — the canonical `customers/` contract is still being
+ * settled, and guessing its shape is how a client ends up decoding a
+ * payload nobody promised. Until then this throws
+ * {@link CustomerSearchUnavailable}, which the UI renders as «поиск
+ * недоступен» rather than as an empty result.
+ *
+ * When the contract lands, only this function body changes; every state
+ * the screen can show is already built and tested against it.
+ */
+export const searchSalonCustomers = async (
+  _query: string,
+  _init: { signal?: AbortSignal } = {},
+): Promise<SalonCustomer[]> => {
+  throw new CustomerSearchUnavailable();
+};
+
 // --- /api/v1/admin/booking-slots/ ----------------------------------------
 
 /** One bookable start, as the canonical schedule returned it. */
@@ -211,6 +263,14 @@ export interface BookingSlot {
 
 export interface BookingSlotsResponse {
   date: string;
+  /**
+   * IANA zone the times are in — the salon's, not the device's.
+   *
+   * §18 requires the review to state the timezone, and the server is the
+   * only party that knows it: a receptionist on holiday still books into
+   * the salon's day.
+   */
+  timezone: string;
   master_id: string;
   service_id: string;
   duration_min: number | null;
