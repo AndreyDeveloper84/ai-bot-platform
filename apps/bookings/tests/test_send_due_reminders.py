@@ -474,9 +474,14 @@ class TestSendTimeRecheck:
         assert reminder.status == BookingReminder.Status.PENDING
 
     def test_null_fk_reminder_sends_with_known_gap(self, tenant: Tenant, bot_user: BotUser) -> None:
-        """D4 verdict — NULL booking_request FK = legacy row OR Ayla-path.
-        Phase 0 pilot scope: send без re-check, document gap. Phase 1
-        Ayla event-driven invalidation closes this."""
+        """NULL booking_request FK on a LEGACY YClients row still sends.
+
+        The record id here (``yc-nullfk``) is not an Ayla appointment UUID, so
+        there is no mirror to re-check against and the pre-DRF-1144 behaviour
+        stands. Rows that DO carry an Ayla appointment identity are now
+        classified against ``RemoteBookingProxy`` — see
+        ``test_ayla_mirror_recheck.py``.
+        """
         # _make_reminder (without _linked_) creates NULL FK reminder.
         _make_reminder(
             tenant=tenant,

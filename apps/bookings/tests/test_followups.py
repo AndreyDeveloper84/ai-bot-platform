@@ -882,15 +882,98 @@ class TestB11ConservativeBlockers:
     def test_null_fk_legacy_or_ayla_path_sends_when_other_gates_pass(
         self, tenant: Tenant, bot_user: BotUser
     ) -> None:
-        """NULL booking_request FK (legacy / Ayla-path reminder) — can't
-        check completed_at + booking.status, но opt_out + payment_failures
-        gates still apply. Default opt_out=False, no Conversation =
-        sends. Documented Phase 1 gap для Ayla event integration."""
+        """NULL booking_request FK on a LEGACY YClients reminder.
+
+        ``yc-fu`` is not an Ayla appointment UUID, so there is no mirror to
+        consult and the opt_out + payment_failures gates are the only ones
+        that apply. Behaviour unchanged by DRF-1144.
+        """
         # _make_reminder без _link_reminder_to_booking = NULL FK.
         _make_reminder(
             tenant=tenant,
             bot_user=bot_user,
             visit_at=_msk(2026, 5, 15, 18, 0),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_called_once()
+        assert result["sent"] == 1
+
+    @pytest.mark.parametrize("mirror_status", ["cancelled", "no_show"])
+    def test_ayla_mirror_terminal_status_blocks_followup(
+        self, tenant: Tenant, bot_user: BotUser, mirror_status: str
+    ) -> None:
+        """DRF-1144: blocker #2 was absent on the Ayla path.
+
+        ``BookingRequest.status`` never moves for an Ayla booking, so «как
+        прошёл визит?» went out for visits the mirror already knew were
+        cancelled or a no-show.
+        """
+        import uuid as _uuid
+
+        from apps.booking.models import RemoteBookingProxy
+
+        appointment_id = _uuid.uuid4()
+        visit_at = _msk(2026, 5, 15, 18, 0)
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=appointment_id,
+            tenant=tenant,
+            bot_user=bot_user,
+            start_at=visit_at,
+            end_at=visit_at + timedelta(hours=1),
+            status=mirror_status,
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=visit_at,
+            yc_id=str(appointment_id),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["sent"] == 0
+        assert result["skipped_blocked"] == 1
+
+    def test_ayla_mirror_missing_blocks_followup(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """No mirror row behind an Ayla-path reminder → nothing to ask about."""
+        import uuid as _uuid
+
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=_msk(2026, 5, 15, 18, 0),
+            yc_id=str(_uuid.uuid4()),
+        )
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["sent"] == 0
+        assert result["skipped_blocked"] == 1
+
+    def test_ayla_mirror_confirmed_still_sends(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """Regression guard: the pilot mirror usually stays ``confirmed`` after
+        the visit because Ayla does not reliably emit ``booking.completed``.
+        Requiring ``completed`` here would silence the follow-up entirely."""
+        import uuid as _uuid
+
+        from apps.booking.models import RemoteBookingProxy
+
+        appointment_id = _uuid.uuid4()
+        visit_at = _msk(2026, 5, 15, 18, 0)
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=appointment_id,
+            tenant=tenant,
+            bot_user=bot_user,
+            start_at=visit_at,
+            end_at=visit_at + timedelta(hours=1),
+            status=RemoteBookingProxy.Status.CONFIRMED,
+        )
+        _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            visit_at=visit_at,
+            yc_id=str(appointment_id),
         )
         with patch("apps.bookings.followups.send_message") as mock_send:
             result = send_post_visit_followups()

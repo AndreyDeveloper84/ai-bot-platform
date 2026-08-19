@@ -2646,7 +2646,16 @@ def _show_my_bookings_ayla(
     ``yclients_record_id=<uuid>`` marker; the matching ``RemoteBookingProxy``
     row supplies the live ``start_at`` + status (so cancelled / past bookings
     drop out). Same shape as the flag-OFF path, mirror in place of YClients.
+
+    DRF-1034: a local ``BookingRequest`` is shown only when a mirror row backs
+    it AND that row is in a live status. The previous rule was the inverse —
+    show everything except ``cancelled`` and past — which surfaced a booking
+    whose mirror row said ``completed`` / ``no_show``, and surfaced a booking
+    with no mirror row at all (blank visit time, no way to check anything
+    about it). The local row is not evidence: it is written at confirm time
+    and no event ever moves it, so it stays CONFIRMED forever.
     """
+    from apps.booking.mirror_status import LIVE_STATUSES
     from apps.booking.models import RemoteBookingProxy
 
     rows = list(
@@ -2665,14 +2674,21 @@ def _show_my_bookings_ayla(
     for row in rows:
         appt = _extract_yc_id(row.comment)  # UUID string under flag ON
         proxy = proxies.get(str(appt)) if appt else None
+        if proxy is None:
+            # No mirror row → nothing vouches for this booking. See docstring.
+            logger.info(
+                "booking.show_my_bookings.skip_no_mirror appt=%s bot_user=%s",
+                appt,
+                getattr(bot_user, "id", None),
+            )
+            continue
+        if proxy.status not in LIVE_STATUSES:
+            continue
         visit_iso = ""
-        if proxy is not None:
-            if proxy.status == RemoteBookingProxy.Status.CANCELLED:
+        if proxy.start_at is not None:
+            if proxy.start_at < now:
                 continue
-            if proxy.start_at is not None:
-                if proxy.start_at < now:
-                    continue
-                visit_iso = proxy.start_at.isoformat()
+            visit_iso = proxy.start_at.isoformat()
         bookings.append(
             BookingRow(
                 record_id=str(appt) if appt else "",
