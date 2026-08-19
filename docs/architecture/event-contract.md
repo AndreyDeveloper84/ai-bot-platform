@@ -968,8 +968,16 @@ There are two distinct event systems in this stack. Do not confuse them.
 | **Q-EC2** | Are there cases where an event should bypass dedupe (e.g. periodic state-sync ping)? | bot-platform consumers | 🟡 evaluate after MVP traffic |
 | **Q-EC3** | Per-tenant signing secrets vs single global secret? | security | 🟡 single secret MVP; per-tenant if multi-region |
 | **Q-EC4** | DLQ replay tooling — manual SQL vs admin command? | infra | 🟡 manual MVP; admin command if DLQ frequency >1/wk |
+| **Q-EC5** | **The taxonomy has no deletion event.** An `Appointment` deleted in Ayla (only reachable path today: the Django admin's `delete_selected`) emits nothing, so the mirror keeps a `confirmed` row for a booking that no longer exists. Measured on the pilot 2026-08-16: 23 `RemoteBookingProxy` rows against 7 live appointments — 16 orphans, 4 of them non-terminal. Fork: introduce a deletion event + handler, **or** forbid deletion and require cancellation (which the existing `booking.cancelled` path already handles end to end). | Ayla djangoproject | 🔴 DRF-1034 (Urgent). Mirror-side reconciliation is DRF-1111. |
 
 These are tracked but DO NOT block #441 — they refine v2+ of the contract.
+
+**Consumer-side note on Q-EC5 (DRF-1144).** Reminders and post-visit follow-ups
+no longer trust a scheduled row on its own: both re-check the
+`RemoteBookingProxy` mirror at dispatch time and drop when it says the visit
+will not happen, or when the mirror row is gone. That covers every lifecycle
+transition Ayla *does* publish. It does not, and cannot, cover a silent
+deletion — for that, Q-EC5 has to be resolved on the producer side.
 
 ---
 

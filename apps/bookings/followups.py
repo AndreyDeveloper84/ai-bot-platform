@@ -109,6 +109,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder
+from apps.booking.reminder_lookup import ayla_appointment_id_of
 from apps.channels.max.outbound import MaxAPIError, send_message
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,52 @@ def _b11_blocked_statuses_frozen_at_pr_time() -> tuple[str, ...]:
     )
 
 
+#: Mirror statuses that block B11 on the Ayla path (DRF-1144). The analogue of
+#: ``_b11_blocked_statuses_frozen_at_pr_time`` for bookings whose lifecycle
+#: lands on ``RemoteBookingProxy`` instead of ``BookingRequest``. ``completed``
+#: is NOT here — it is the state B11 exists for.
+_B11_BLOCKED_MIRROR_STATUSES: tuple[str, ...] = ("cancelled", "no_show")
+
+
+def _should_send_b11_ayla(reminder: BookingReminder) -> tuple[bool, str | None]:
+    """B11 blocker #2 for the Ayla path — read the mirror, not the FK.
+
+    ``BookingRequest.status`` is the legacy path's terminal-state signal and no
+    inbound event ever moves it, so on the Ayla path blocker #2 was simply
+    absent: «как прошёл визит?» went out for bookings the mirror already knew
+    were cancelled or a no-show. Same family as DRF-1144 — a lifecycle
+    transition that reached the mirror and stopped there.
+
+    Deliberately narrower than the reminder-dispatch classifier: this blocks
+    only on the terminal-negative states and on a missing mirror row. It does
+    NOT require ``completed`` — the pilot mirror frequently stays ``confirmed``
+    after the visit because Ayla does not always emit ``booking.completed``,
+    and demanding it would silence the follow-up entirely. Widening this to a
+    positive «visit actually happened» proof needs the completion signal to be
+    reliable first.
+    """
+    appointment_id = ayla_appointment_id_of(reminder)
+    if appointment_id is None:
+        # Legacy YClients row — no mirror to consult, behaviour unchanged.
+        return (True, None)
+
+    from apps.booking.models import RemoteBookingProxy
+
+    status = (
+        RemoteBookingProxy.all_tenants.filter(
+            appointment_id=appointment_id,
+            tenant_id=reminder.tenant_id,
+        )
+        .values_list("status", flat=True)
+        .first()
+    )
+    if status is None:
+        return (False, "ayla_mirror_missing")
+    if status in _B11_BLOCKED_MIRROR_STATUSES:
+        return (False, f"ayla_mirror_status_{status}")
+    return (True, None)
+
+
 def _should_send_b11(
     reminder: BookingReminder,
     bot_user: Any,
@@ -189,9 +236,10 @@ def _should_send_b11(
 
     booking_request = reminder.booking_request
     if booking_request is None:
-        # NULL FK — legacy row OR Ayla-path. opt_out + payment_failures
-        # gates already cleared above; send. Phase 1 closes this gap.
-        return (True, None)
+        # NULL FK — legacy YClients row OR Ayla-path. The Ayla path has its own
+        # source of truth; consult it (DRF-1144). Legacy rows keep the old
+        # «gates cleared, send» behaviour because there is nothing to consult.
+        return _should_send_b11_ayla(reminder)
 
     if booking_request.completed_at is None:
         return (False, "completed_at_null")

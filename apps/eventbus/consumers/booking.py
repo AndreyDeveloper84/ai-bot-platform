@@ -69,6 +69,7 @@ from apps.booking.master_notify import (
     schedule_booking_created_notification,
 )
 from apps.booking.models import BookingReminder, RemoteBookingProxy
+from apps.booking.reminder_lookup import reminders_for_appointment
 from apps.conversations.models import Conversation
 from apps.events.services import emit as emit_internal_event
 from apps.eventbus.ingest_dispatcher import register
@@ -326,9 +327,17 @@ def _cancel_reminders(*, appointment_id: UUID) -> None:
     Per §3.2 step 2: «cancelling already-cancelled reminders MUST NOT
     error». ORM update on a filter is naturally idempotent — 0 rows
     matched is not an error.
+
+    DRF-1144: the filter goes through
+    :func:`apps.booking.reminder_lookup.reminders_for_appointment` rather than
+    matching ``ayla_appointment_id`` directly. A booking made in the bot's own
+    dialog schedules its reminders through the R1 factory, which parks the
+    Ayla appointment UUID in ``yclients_record_id`` and leaves
+    ``ayla_appointment_id`` NULL — so the old predicate matched **zero rows**
+    for the product's main booking path, and a cancellation left the reminders
+    PENDING for the beat to send.
     """
-    BookingReminder.all_tenants.filter(
-        ayla_appointment_id=appointment_id,
+    reminders_for_appointment(appointment_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
@@ -338,10 +347,13 @@ def _reschedule_reminders(
     appointment_id: UUID,
     new_start_at: dt.datetime,
 ) -> None:
-    """Re-peg PENDING reminders to a new ``start_at``. Idempotent."""
+    """Re-peg PENDING reminders to a new ``start_at``. Idempotent.
+
+    Same two-column identity problem as :func:`_cancel_reminders` — see its
+    docstring (DRF-1144).
+    """
     for kind, offset in _REMINDER_OFFSETS:
-        BookingReminder.all_tenants.filter(
-            ayla_appointment_id=appointment_id,
+        reminders_for_appointment(appointment_id).filter(
             kind=kind,
             status=BookingReminder.Status.PENDING,
         ).update(

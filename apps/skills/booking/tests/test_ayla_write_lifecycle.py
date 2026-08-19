@@ -419,3 +419,54 @@ class TestShowMyBookingsFlagOn:
         with tenant_scope(tenant):
             result = show_my_bookings(client=_adapter(FakeAyla()), tenant=tenant, bot_user=bot_user)
         assert result.bookings == []
+
+    @pytest.mark.parametrize("terminal_status", ["completed", "no_show"])
+    def test_excludes_other_terminal_mirror_statuses(
+        self, tenant: Tenant, bot_user: BotUser, terminal_status: str
+    ) -> None:
+        """DRF-1034: the rule was «hide cancelled», so a mirror row that said
+        ``completed`` or ``no_show`` still showed up as an upcoming booking.
+
+        Both are Ayla wire values the mirror legitimately holds, and neither is
+        a visit the client is still expecting.
+        """
+        now = dj_timezone.now()
+        _seed_billing_row(tenant, bot_user)
+        _seed_proxy(
+            tenant,
+            bot_user,
+            start_at=now + timedelta(days=1),
+            status=terminal_status,
+        )
+        with tenant_scope(tenant):
+            result = show_my_bookings(client=_adapter(FakeAyla()), tenant=tenant, bot_user=bot_user)
+        assert result.bookings == []
+
+    def test_excludes_booking_with_no_mirror_row(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """DRF-1034: a local billing row with no mirror behind it is not evidence.
+
+        It is written at confirm time and no event ever moves it, so it stays
+        CONFIRMED forever. Previously such a row was listed with a blank visit
+        time — a booking the bot could say nothing true about.
+        """
+        _seed_billing_row(tenant, bot_user)
+        with tenant_scope(tenant):
+            result = show_my_bookings(client=_adapter(FakeAyla()), tenant=tenant, bot_user=bot_user)
+        assert result.bookings == []
+
+    def test_includes_awaiting_payment_mirror_status(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """``awaiting_payment`` is Ayla's wire value and is not in
+        ``RemoteBookingProxy.Status.choices`` — it must stay visible."""
+        now = dj_timezone.now()
+        _seed_billing_row(tenant, bot_user)
+        _seed_proxy(
+            tenant,
+            bot_user,
+            start_at=now + timedelta(days=2),
+            status="awaiting_payment",
+        )
+        with tenant_scope(tenant):
+            result = show_my_bookings(client=_adapter(FakeAyla()), tenant=tenant, bot_user=bot_user)
+        assert len(result.bookings) == 1
