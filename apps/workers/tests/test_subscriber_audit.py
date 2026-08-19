@@ -12,6 +12,10 @@ Acceptance from tech lead 2026-05-22:
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
+
 import pytest
 
 from apps.events.models import Event
@@ -237,3 +241,167 @@ class TestAppConfigReadyIntegration:
         rows = list(Event.objects.filter(event_type="worker.subscriber_audit"))
         assert len(rows) == 1
         assert rows[0].payload["subscriber_count"] == 1
+
+
+class TestAsyncContextDetection:
+    """DRF-1153 — the probe that decides whether the write needs a thread."""
+
+    def test_false_on_a_plain_synchronous_thread(self):
+        """gunicorn config.wsgi / celery / manage.py — no running loop."""
+
+        assert subscriber_audit._running_in_async_context() is False
+
+    def test_true_inside_a_running_event_loop(self):
+        """uvicorn config.asgi — ``ready()`` runs inside the loop."""
+
+        async def _probe():
+            return subscriber_audit._running_in_async_context()
+
+        assert asyncio.run(_probe()) is True
+
+
+@pytest.mark.django_db(transaction=True)
+class TestEmitUnderAsyncBoot:
+    """DRF-1153 — the ASGI boot path.
+
+    ``uvicorn config.asgi:application`` loads Django apps from inside a
+    running event loop, so ``Event.objects.create()`` in
+    ``apps.events.services.emit`` raised ``SynchronousOnlyOperation``.
+    ``emit()`` swallowed it, logged ``events.emit_failed`` at ERROR, and
+    returned — leaving ``emit_subscriber_audit()`` to log «emitted» and
+    set its per-process guard with ZERO rows written.
+
+    ``transaction=True`` because the fixed write path runs on a worker
+    thread: a thread gets its own DB connection and would not see (or
+    be seen by) the wrapping transaction that plain ``django_db`` uses.
+    """
+
+    @staticmethod
+    def _register_one_handler():
+        @register("ingress:max")
+        class _MaxHandler(TenantAwareTask):
+            def handle(self, payload):  # noqa: ANN001
+                pass
+
+        return _MaxHandler
+
+    def test_emit_from_async_context_writes_the_audit_row(self):
+        """The regression: under a running loop the row must land."""
+
+        self._register_one_handler()
+
+        async def _boot():
+            return subscriber_audit.emit_subscriber_audit()
+
+        assert asyncio.run(_boot()) is True
+
+        rows = list(Event.objects.filter(event_type="worker.subscriber_audit"))
+        assert len(rows) == 1, "audit row must exist after an ASGI-style boot"
+        assert rows[0].payload["subscriber_count"] == 1
+        assert rows[0].payload["handlers"][0]["stream"] == "ingress:max"
+
+    def test_emit_from_async_context_logs_no_error(self, caplog):
+        """The noise half of the ticket: zero ERROR records on boot."""
+
+        self._register_one_handler()
+
+        async def _boot():
+            return subscriber_audit.emit_subscriber_audit()
+
+        with caplog.at_level(logging.DEBUG):
+            assert asyncio.run(_boot()) is True
+
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors == [], f"expected a silent boot, got: {[r.getMessage() for r in errors]}"
+        assert not any("emit_failed" in r.getMessage() for r in caplog.records)
+        assert any("workers.subscriber_audit.emitted" in r.getMessage() for r in caplog.records)
+
+    def test_ready_hook_from_async_context_does_not_crash_boot(self):
+        """End-to-end on the real production path: ``WorkersConfig.ready()``
+        invoked from inside a running event loop must neither raise nor
+        lose the audit row."""
+
+        from django.apps import apps as django_apps
+
+        self._register_one_handler()
+        workers_config = django_apps.get_app_config("workers")
+
+        async def _boot():
+            # Must not raise — a failing audit may never break app loading.
+            workers_config.ready()
+
+        asyncio.run(_boot())
+
+        assert Event.objects.filter(event_type="worker.subscriber_audit").count() == 1
+
+    def test_emit_from_async_context_stays_idempotent(self):
+        """The per-process guard survives the threaded path — two boots
+        in one process still write exactly one row."""
+
+        self._register_one_handler()
+
+        async def _boot():
+            return subscriber_audit.emit_subscriber_audit()
+
+        first = asyncio.run(_boot())
+        second = asyncio.run(_boot())
+
+        assert first is True
+        assert second is False
+        assert Event.objects.filter(event_type="worker.subscriber_audit").count() == 1
+
+
+class TestAsyncBootSafetyGuards:
+    """DRF-1153 — the new code paths must keep the «never crash boot»
+    property that the defensive try/except was put there to provide."""
+
+    def test_boot_survives_thread_spawn_failure(self, monkeypatch):
+        """``RuntimeError: can't start new thread`` (tight RLIMIT_NPROC or
+        the systemd unit's MemoryMax) must be swallowed, not propagated
+        into ``AppConfig.ready()``."""
+
+        def _explode(*args, **kwargs):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading, "Thread", _explode)
+
+        async def _boot():
+            return subscriber_audit.emit_subscriber_audit()
+
+        assert asyncio.run(_boot()) is False
+        assert subscriber_audit._AUDIT_EMITTED is False, "a failed attempt must stay retryable"
+
+    def test_boot_survives_exception_inside_the_worker_thread(self, monkeypatch):
+        """A raise on the worker thread is caught there; the caller sees
+        ``False`` and app loading continues."""
+
+        from apps.events import services as events_services
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated audit table missing")
+
+        monkeypatch.setattr(events_services, "emit", _boom)
+
+        async def _boot():
+            return subscriber_audit.emit_subscriber_audit()
+
+        assert asyncio.run(_boot()) is False
+        assert subscriber_audit._AUDIT_EMITTED is False
+
+    def test_swallowed_insert_is_not_reported_as_emitted(self, monkeypatch, caplog):
+        """``emit()`` swallows its own DB errors and returns ``False``.
+        The audit must NOT claim success — that false positive is what
+        made the ASGI inventory silently incomplete."""
+
+        from apps.events import services as events_services
+
+        monkeypatch.setattr(events_services, "emit", lambda *a, **kw: False)
+
+        with caplog.at_level(logging.DEBUG):
+            assert subscriber_audit.emit_subscriber_audit() is False
+
+        assert subscriber_audit._AUDIT_EMITTED is False
+        assert any(
+            "workers.subscriber_audit.not_recorded" in r.getMessage() for r in caplog.records
+        )
+        assert not any("workers.subscriber_audit.emitted" in r.getMessage() for r in caplog.records)

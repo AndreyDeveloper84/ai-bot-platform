@@ -23,6 +23,13 @@ class WorkersConfig(AppConfig):
         in ``config/settings/base.py``, so MaxHandler (the only
         production TenantAwareTask subclass today) is already
         registered by the time we read the registry.
+
+        DRF-1153: under ASGI (``uvicorn config.asgi:application``) this
+        method runs inside a running event loop, where the ORM refuses
+        synchronous queries. ``emit_subscriber_audit()`` detects that
+        and moves its INSERT to a worker thread — this call site stays
+        a plain synchronous call, and a failure here still cannot crash
+        boot.
         """
 
         # Defensive lazy import so import-cycles can't break collection.
