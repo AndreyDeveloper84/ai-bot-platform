@@ -38,6 +38,36 @@ it flags an import whose target matches the contract's
 the `(contract_id, file, qualname, forbidden_root)` quadruple is in
 `BASELINE`.
 
+Alongside the import-edge contracts it runs three rules that are not
+edges at all, each keyed the same way and baselined the same way:
+
+  - **MKT1** (#1018) — cross-tenant catalog read (`CatalogMaster
+    .all_tenants`) outside `apps/marketplace/`.
+  - **DRF-1130** — `select_related()` in the same queryset chain as
+    `select_for_update()`. On Postgres a nullable FK joins LEFT OUTER
+    and the lock is refused outright; the guard cannot see nullability,
+    so the combination is banned and the verified-NOT NULL sites are
+    baselined.
+  - **DRF-1158** — a builtin `hash()` value flowing into a stored sink
+    (keyword argument, attribute assignment, string-keyed dict entry).
+    `hash()` is salt-randomised per process. This is the ONE rule here
+    that also scans test files: its defect lived in a fixture.
+
+# The rule behind all three (and behind this file)
+
+A checkable invariant does not get to live in a comment. `apps/skills/
+booking/tools.py:2364` carried, in as many words, «FOOT-GUN: do NOT add
+``.select_related(...)`` here». It did not protect the line forty rows
+above it in its own file, and it did not protect two sites in other
+modules. DRF-1130 shipped to production and only went red once the full
+suite was switched on. A comment addresses whoever happens to read it;
+a rule addresses everyone who does not.
+
+The same rule applies to what this file itself writes down: see
+"Reading a BASELINE entry" at `BASELINE_STATUSES` below — the verdict
+behind an accepted crossing is a required annotation with a closed
+vocabulary and a test, not a paragraph above a frozenset.
+
 # Why `qualname` is part of the baseline key (DRF-1157)
 
 The key used to be the `(contract_id, file, forbidden_root)` triple —
@@ -107,6 +137,12 @@ the debt down).
 
 Exits 0 when clean. Exits 1 with one line per violation:
 `file:line:col: [contract] message`.
+
+  python tools/lint/import_boundaries.py --baseline-report
+
+Prints every accepted crossing grouped by its verdict — LIVE-DEFECT
+first, UNTRIAGED next, then the sites somebody has proved safe. Ask this
+before filing a bug off a baseline line (DRF-1159).
 """
 
 from __future__ import annotations
@@ -138,6 +174,14 @@ class Contract:
     # "everywhere except X" rather than a positive list of source dirs
     # (e.g. G9: everywhere except the module that owns the model).
     exclude_prefixes: tuple[str, ...] = ()
+    # True when a baseline entry for this contract is a HUMAN VERDICT
+    # rather than a record of visible debt — i.e. the guard bans a
+    # construct it cannot fully judge (G9 cannot see the feature flag;
+    # DRF-1130 cannot see column nullability). Every baseline entry for
+    # such a rule MUST carry a ``BaselineNote`` (enforced by
+    # tests/tools/test_import_boundaries.py). See "Reading a BASELINE
+    # entry" in the module docstring (DRF-1159).
+    triage_note_required: bool = False
 
 
 CONTRACTS: tuple[Contract, ...] = (
@@ -194,13 +238,19 @@ CONTRACTS: tuple[Contract, ...] = (
         source_prefixes=("apps/",),
         exclude_prefixes=("apps/booking/",),
         forbidden_modules=("apps.booking.models.BookingRequest",),
+        triage_note_required=True,
         message=(
             "BookingRequest is owned by apps/booking/ — reading it elsewhere "
             "risks dual-source divergence once BOOKING_VIA_AYLA_REST=ON stops "
-            "writing to it (the flag check itself is invisible to this guard). "
-            "If this is a legitimate flag-gated or historical read, add it to "
-            "BASELINE with a tracking issue; if not, route through apps/booking/ "
-            "or Ayla REST."
+            "writing to it. THIS GUARD SEES ONE FRAME: it reads the function "
+            "the import sits in and nothing else, so a BOOKING_VIA_AYLA_REST "
+            "check in the CALLING function is invisible to it and a flagged "
+            "site may be perfectly safe (DRF-1159). A BASELINE entry here is "
+            "therefore a human verdict, not a bug report — it MUST carry a "
+            "BaselineNote saying which verdict (PROVEN-ELSEWHERE / BY-DESIGN / "
+            "LIVE-DEFECT / UNTRIAGED). If this is a legitimate flag-gated or "
+            "historical read, add it to BASELINE with that note and a tracking "
+            "issue; if not, route through apps/booking/ or Ayla REST."
         ),
     ),
 )
@@ -211,6 +261,13 @@ CONTRACTS: tuple[Contract, ...] = (
 # `qualname` is the dotted class/def nesting the import sits in, or
 # `<module>` for a top-level import. See the module docstring (DRF-1157)
 # for why file granularity was not enough.
+#
+# WHY EACH LINE IS HERE lives in BASELINE_NOTES, not in the prose
+# between these entries (DRF-1159). The comments below are a summary and
+# may drift; the annotation is checked by a test and cannot. For G9 in
+# particular, read the note before treating an entry as a bug — its
+# whole point is that the guard cannot see the frame that makes a site
+# safe. `--baseline-report` prints all of it, grouped by verdict.
 BaselineKey = tuple[str, str, str, str]
 
 # Synthetic qualname for an import at module level.
@@ -484,10 +541,16 @@ BASELINE: frozenset[BaselineKey] = frozenset(
     }
 )
 
-# Directory/file name fragments that are out of scope — the contracts
-# describe the PRODUCTION boundary (the tickets count prod sites
-# separately from test sites).
-_SKIP_DIR_PARTS = frozenset({"tests", "migrations", "__pycache__"})
+# Directory/file name fragments that are out of scope.
+#
+# Two different kinds of "out of scope" live here:
+#   * GENERATED — machine-written or non-source; no rule ever looks.
+#   * TEST      — out of scope for the PRODUCTION-boundary rules (the
+#     G-series tickets count prod sites separately from test sites), but
+#     IN scope for DRF-1158, whose defect lived in a fixture.
+_GENERATED_DIR_PARTS = frozenset({"migrations", "__pycache__"})
+_TEST_DIR_PARTS = frozenset({"tests"})
+_SKIP_DIR_PARTS = _GENERATED_DIR_PARTS | _TEST_DIR_PARTS
 
 
 # ── Cross-tenant catalog-read rule (MKT1, #1018) ─────────────────────
@@ -580,6 +643,592 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
 )
 
 
+# -- Shape rules: banned CODE SHAPES, not import edges -----------------
+#
+# The G-series contracts above ban an *edge* - a fact fully visible in
+# the file being parsed. The two rules below ban a *shape* whose actual
+# defect is NOT visible in the file:
+#
+#   * DRF-1130 - whether a ``select_related()``d FK is nullable lives in
+#     a model that may sit in another app (and, via ``a__b`` spans, in
+#     several).
+#   * DRF-1158 - where a ``hash()`` value ends up (a column, an
+#     idempotency key, a cross-run comparison) is a property of the
+#     other process, not of this expression.
+#
+# So each bans the construct and accepts the known-safe uses through a
+# baseline. That trade is deliberate: a false positive costs one
+# annotated baseline line; a false negative costs an unconditional
+# production failure (DRF-1130) or a test that is green on SQLite and
+# red on Postgres depending on PYTHONHASHSEED (DRF-1158).
+#
+# Corollary - and this is the DRF-1159 lesson: because the guard cannot
+# judge the shape on its own, a baseline entry for a shape rule is a
+# HUMAN VERDICT. It must say which verdict. Hence
+# ``triage_note_required=True`` and BASELINE_NOTES below.
+
+
+@dataclass(frozen=True)
+class ShapeRule:
+    """A banned code shape (ORM/stdlib call), keyed like a contract.
+
+    ``root`` is the synthetic "forbidden root" token that goes into the
+    :data:`BaselineKey` quadruple, so shape rules share the baseline and
+    stale-entry machinery with the import-edge contracts unchanged.
+    """
+
+    id: str
+    issue: str
+    root: str
+    message: str
+    # Shape rules ban a proxy for the defect, never the defect itself -
+    # so every accepted site is somebody's judgement call. Always True
+    # today; kept explicit so a future purely-mechanical shape rule can
+    # opt out honestly rather than by omission.
+    triage_note_required: bool = True
+
+
+# -- DRF-1130: select_related() under select_for_update() --------------
+#
+# ``select_related`` on a NULLABLE FK emits a LEFT OUTER JOIN, and
+# Postgres refuses to lock through it:
+#
+#     FOR UPDATE cannot be applied to the nullable side of an outer join
+#
+# The refusal is unconditional - the query cannot succeed on any data.
+# SQLite (the local default) does not enforce it, so the whole suite
+# stayed green; production never hit it because BOOKING_VIA_AYLA_REST
+# routed around the path. The defect was armed, not firing.
+#
+# WHY THE COMBINATION IS BANNED OUTRIGHT rather than "banned when the FK
+# is nullable": this guard parses ONE file. Nullability is declared on
+# the model - frequently in another app, sometimes on an abstract base,
+# and for ``select_related("a__b")`` on a model two hops away. Resolving
+# it would mean carrying a model registry inside a lint script, i.e.
+# teaching a syntax tool the DB schema, and getting it silently wrong on
+# every dynamic/abstract/swappable case. The asymmetry decides it:
+# ``select_related`` is a query-count optimisation and NEVER a
+# correctness one, so a false positive costs one join plus one annotated
+# baseline line, while a false negative costs a production 500 that no
+# local test run can reproduce. Ban the shape; baseline the
+# verified-NOT NULL uses.
+ROW_LOCK_JOIN_RULE = ShapeRule(
+    id="DRF1130-no-join-under-row-lock",
+    issue="DRF-1130",
+    root="<select_for_update+select_related>",
+    message=(
+        "one queryset both locks rows and joins. A nullable FK joins LEFT "
+        'OUTER and Postgres then refuses the lock outright: "FOR UPDATE '
+        'cannot be applied to the nullable side of an outer join". The '
+        "refusal is unconditional - no data makes it succeed. "
+        "SQLite does not enforce this, so a "
+        "green local suite proves nothing. This guard reads one file and "
+        "cannot know whether the joined field is NOT NULL, so the combination "
+        "is banned outright: drop the `select_related` (it is a query-count "
+        "optimisation, never a correctness one), or - if every joined field is "
+        "verified NOT NULL - add a BASELINE entry with a PROVEN-ELSEWHERE "
+        "note naming the fields and the model file that declares them"
+    ),
+)
+
+# -- DRF-1158: builtin hash() flowing into a stored value --------------
+#
+# ``hash()`` is salt-randomised per process (``PYTHONHASHSEED``): the
+# same input gives a different number in the next run, in another worker
+# and on the other side of a fork. Anything that outlives the process -
+# a column, an idempotency key, a fixture id compared across runs - must
+# use a digest instead.
+#
+# The real instance: ``hash(str(x)) & 0xFFFFFFFF`` written into an
+# ``IntegerField``. ``0xFFFFFFFF`` is 4 294 967 295; Postgres ``integer``
+# tops out at 2 147 483 647, so roughly half of all seeds overflowed.
+# The test failed or passed by coin flip, and never failed at all on
+# SQLite (which does not check integer width).
+#
+# WHAT IS DETECTED - ``hash(...)`` whose value flows, within the
+# expression, into a named sink: a keyword argument
+# (``Model.objects.create(external_id=...)``, and every fixture/factory/
+# payload helper that forwards one), an attribute assignment
+# (``obj.field = ...``), or a string-keyed dict entry (payloads and
+# idempotency keys). Counting every keyword argument is a deliberately
+# wide net: ``hash()`` appears a handful of times in this repo and every
+# one of them was a value on its way somewhere it should not have gone.
+#
+# WHAT IS NOT - a bare ``hash(x)`` bound to a local, ``__hash__`` bodies
+# (the one place the builtin is the correct idiom) and ``hash()`` inside
+# a ``lambda`` (an in-process sort key never leaves the process).
+# Cross-run COMPARISON of two hashes is not AST-visible at all and is
+# not chased.
+#
+# This rule runs on TEST files as well as production ones - unlike every
+# other rule in this file - because the defect it is named after lived
+# in a fixture, and a flaky fixture is exactly the thing nobody bisects.
+HASH_SINK_RULE = ShapeRule(
+    id="DRF1158-no-builtin-hash-into-stored-value",
+    issue="DRF-1158",
+    root="<hash()-into-stored-value>",
+    message=(
+        "receives a builtin `hash()` value. `hash()` is salt-randomised per "
+        "process (PYTHONHASHSEED), so the value changes between runs and "
+        "workers and must never reach a column, an idempotency key, or a "
+        "comparison that spans processes. The 32-bit form also overflows "
+        "Postgres `integer` about half the time - and never on SQLite, which "
+        "is why the test only flickered. Use a digest: "
+        "int.from_bytes(hashlib.sha256(str(v).encode()).digest()[:4], 'big') "
+        "& 0x7FFFFFFF"
+    ),
+)
+
+SHAPE_RULES: tuple[ShapeRule, ...] = (ROW_LOCK_JOIN_RULE, HASH_SINK_RULE)
+
+
+# -- Reading a BASELINE entry: the annotation vocabulary (DRF-1159) ----
+#
+# A baseline line says "the guard fires here and CI stays green". It
+# does NOT say why, and twice in a row that gap got filled by guessing:
+# both an architecture review and the main working window read the
+# `_collect_occupied` G9 entry as a live defect. It is not one - the
+# BOOKING_VIA_AYLA_REST gate sits in its CALLER (`slots`), one frame
+# above anything this guard can see.
+#
+# The fix is not another comment. Prose above a 60-line frozenset is
+# precisely the artefact that already failed here: the same class of
+# failure as the `# FOOT-GUN: do NOT add select_related` comment, which
+# protected neither the next line of its own file nor two sites in other
+# modules. So the verdict becomes DATA next to the key, in a required
+# field with a closed vocabulary, and a test fails the build when a note
+# is missing, carries an unknown status, or is orphaned.
+#
+#   BY-DESIGN       The site is correct and stays. The entry retires
+#                   only when the design changes.
+#   PROVEN-ELSEWHERE
+#                   The site is safe, but the proof lives OUTSIDE the
+#                   frame this key names - a flag check in the CALLER, a
+#                   NOT NULL declared on a model in another app. NOT a
+#                   defect, and the exact line a reader is most likely to
+#                   misread (that is the whole of DRF-1159). The note
+#                   MUST say where the proof lives, by file and name, so
+#                   the claim is checkable in one hop.
+#   LIVE-DEFECT     A real instance of the defect the rule names: wrong
+#                   as written, whether or not it happens to be firing
+#                   today. Accepted only because fixing it was out of
+#                   scope for the change that added the line. The note
+#                   must say how it fails.
+#   UNTRIAGED       Nobody has decided yet. Read it as neither safe nor
+#                   broken. This is the honest status, and the only one
+#                   that stays honest when nobody has looked.
+BASELINE_STATUSES: frozenset[str] = frozenset(
+    {"BY-DESIGN", "PROVEN-ELSEWHERE", "LIVE-DEFECT", "UNTRIAGED"}
+)
+
+
+@dataclass(frozen=True)
+class BaselineNote:
+    """The human verdict behind one baseline entry."""
+
+    status: str
+    text: str
+
+
+def _note_required_ids() -> frozenset[str]:
+    """Contract/rule ids whose baseline entries MUST carry a note.
+
+    Derived from the registries rather than hand-listed, so a new
+    note-required rule cannot forget to join.
+    """
+    return frozenset(
+        [c.id for c in CONTRACTS if c.triage_note_required]
+        + [r.id for r in SHAPE_RULES if r.triage_note_required]
+    )
+
+
+NOTE_REQUIRED_CONTRACT_IDS: frozenset[str] = _note_required_ids()
+
+
+# -- DRF-1130 baseline: verified-safe lock+join sites on origin/dev ----
+#
+# Four sites, all PROVEN-ELSEWHERE: every joined FK is declared without
+# ``null=True``, so the join is INNER and Postgres has nothing to refuse.
+# "Elsewhere" is literal - the declaration sits in an app none of these
+# files import from, which is precisely why the rule does not try to
+# work it out for itself.
+#
+# The two sites this rule was written for are NOT here: they were fixed
+# in 586317b (apps/booking/services/reschedule.py,
+# apps/skills/booking/tools.py) before the rule existed. Their absence
+# is the ratchet working - a fixed site leaves no line behind.
+ROW_LOCK_JOIN_BASELINE: frozenset[BaselineKey] = frozenset(
+    {
+        (
+            "DRF1130-no-join-under-row-lock",
+            "apps/admin_api/services/availability.py",
+            "approve_availability_request",
+            "<select_for_update+select_related>",
+        ),
+        (
+            "DRF1130-no-join-under-row-lock",
+            "apps/admin_api/services/availability.py",
+            "reject_availability_request",
+            "<select_for_update+select_related>",
+        ),
+        (
+            "DRF1130-no-join-under-row-lock",
+            "apps/eventbus/consumers/payment.py",
+            "handle_payment_failed",
+            "<select_for_update+select_related>",
+        ),
+        (
+            "DRF1130-no-join-under-row-lock",
+            "apps/identity/services/staff_invites.py",
+            "redeem_staff_invite",
+            "<select_for_update+select_related>",
+        ),
+    }
+)
+
+
+# -- DRF-1158 baseline: accepted hash()-into-sink sites on origin/dev --
+#
+# Four sites, all LIVE-DEFECT, all in fixtures - which is the point: the
+# rule scans test files because that is where its defect lived, and a
+# per-process-random fixture id is the specific failure mode nobody
+# bisects (it moves between runs, and SQLite never complains). None are
+# fixed here; this window is the sieve, not the cleanup. Each entry says
+# how it fails so the follow-up can be scoped without re-reading the
+# code.
+HASH_SINK_BASELINE: frozenset[BaselineKey] = frozenset(
+    {
+        (
+            "DRF1158-no-builtin-hash-into-stored-value",
+            "apps/catalog/services/tests/test_linking.py",
+            "_legacy_row",
+            "<hash()-into-stored-value>",
+        ),
+        (
+            "DRF1158-no-builtin-hash-into-stored-value",
+            "apps/eventbus/tests/test_reviews_consumer.py",
+            "TestMalformedPayload.test_invalid_rating_no_dedupe_row",
+            "<hash()-into-stored-value>",
+        ),
+        (
+            "DRF1158-no-builtin-hash-into-stored-value",
+            "apps/kb/tests/test_webhooks.py",
+            "TestSchemaTypeMapping.test_schema_type_maps_to_doc_type",
+            "<hash()-into-stored-value>",
+        ),
+        (
+            "DRF1158-no-builtin-hash-into-stored-value",
+            "apps/skills/faq/tests/test_skill.py",
+            "TestMatches.test_imperative_phrasings_match",
+            "<hash()-into-stored-value>",
+        ),
+    }
+)
+
+
+# -- The verdicts behind the entries above (DRF-1159) ------------------
+#
+# Required for every entry of a contract/rule in
+# NOTE_REQUIRED_CONTRACT_IDS; optional (but welcome) elsewhere. Enforced
+# by tests/tools/test_import_boundaries.py::TestBaselineAnnotations:
+# missing note, unknown status and orphaned note all fail the build.
+BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
+    # -- G9: every entry is a triage verdict, never a bug report ------
+    # A G9 hit means 'this file reads apps/booking/'s model'. Whether
+    # that is safe depends on a BOOKING_VIA_AYLA_REST check the guard
+    # cannot see - it may sit in the caller. Hence a status per entry.
+    (
+        "G9-booking-request-outside-owner",
+        "apps/miniapp_api/views.py",
+        "bookings_list",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "BY-DESIGN",
+        "Dual-path read: the BOOKING_VIA_AYLA_REST branch is in this same function, above the read. Retires with the flag.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/miniapp_api/views.py",
+        "_collect_occupied",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "PROVEN-ELSEWHERE",
+        "THE DRF-1159 line. Read twice as a live defect; it is not one. The gate is in the CALLER, apps/miniapp_api/views.py::slots, which since DRF-1062 (0860183) returns Ayla slots on flag-ON and never reaches this helper. This guard sees one frame and cannot see that. Do not file a bug off this line: check slots() first.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/miniapp_api/views.py",
+        "_get_booking_owned",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Helper called from BOTH flag-guarded endpoints (booking_cancel_*/booking_reschedule_* return early on flag-ON) and unguarded ones. Nobody has decided which callers matter. Follow-up ticket.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/miniapp_api/views.py",
+        "customer_recent_activity",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Documented in-file as a read of the local mirror the Ayla booking-event consumer populates (ADR-0009 cached-canonical-state). The documentation has not been verified against the consumer.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/integrations/yclients/webhooks.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "BY-DESIGN",
+        "The YClients webhook is the writer of the local store; the file checks BOOKING_VIA_AYLA_REST at the read. Retires with the flag (#928).",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/skills/booking/tools.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "BY-DESIGN",
+        "Strangler seam: flag-OFF keeps the local write path, flag-ON routes to Ayla REST. The file checks the flag. Retires with #928.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/bookings/tasks.py",
+        "detect_completed_bookings",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "LIVE-DEFECT",
+        "The periodic completion scan reads BookingRequest with NO flag check anywhere in the file - on flag-ON it scans a store that stopped being written. This is the DRF-1108 instance G9 exists to catch. Unfixed here on purpose (IMPL_BRIEF_MECHANIZATION.md S4).",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/admin_api/services/master_deactivation.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/bookings/followups.py",
+        "_b11_blocked_statuses_frozen_at_pr_time",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/bookings/recheck.py",
+        "_recheck_booking_state",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/bookings/reminders_factory.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/eventbus/signals.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/integrations/yclients/tasks.py",
+        "push_booking_to_yclients",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/loyalty/services.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/loyalty/subscribers.py",
+        "LoyaltySubscriber._credit_visit",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/loyalty/subscribers.py",
+        "LoyaltySubscriber._revoke_visit",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/master_api/services/conversation_detail.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/master_api/services/conversations.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/master_api/services/customers.py",
+        "<module>",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    (
+        "G9-booking-request-outside-owner",
+        "apps/master_api/tasks.py",
+        "auto_generate_draft_for_inbound",
+        "apps.booking.models.BookingRequest",
+    ): BaselineNote(
+        "UNTRIAGED",
+        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
+    ),
+    # -- DRF-1130: the joined FK is NOT NULL, declared elsewhere ------
+    (
+        "DRF1130-no-join-under-row-lock",
+        "apps/admin_api/services/availability.py",
+        "approve_availability_request",
+        "<select_for_update+select_related>",
+    ): BaselineNote(
+        "PROVEN-ELSEWHERE",
+        "Joins ScheduleChangeRequest.master and .tenant. Both are declared without null=True in apps/scheduling/models.py (ScheduleChangeRequest, the tenant/master FKs) - INNER JOIN, nothing for FOR UPDATE to refuse. The declaration is in apps/scheduling/, a file this one never opens, which is exactly the knowledge the rule refuses to guess at.",
+    ),
+    (
+        "DRF1130-no-join-under-row-lock",
+        "apps/admin_api/services/availability.py",
+        "reject_availability_request",
+        "<select_for_update+select_related>",
+    ): BaselineNote(
+        "PROVEN-ELSEWHERE",
+        "Same chain and same proof as approve_availability_request: ScheduleChangeRequest.master/.tenant are NOT NULL in apps/scheduling/models.py. Listed separately because the ratchet is per-function - migrating approve must not silently keep reject green.",
+    ),
+    (
+        "DRF1130-no-join-under-row-lock",
+        "apps/eventbus/consumers/payment.py",
+        "handle_payment_failed",
+        "<select_for_update+select_related>",
+    ): BaselineNote(
+        "PROVEN-ELSEWHERE",
+        "Joins Conversation.bot_user, declared without null=True in apps/conversations/models.py (on_delete=PROTECT, Sprint 2.5 H1) - INNER JOIN. The join is load-bearing here: the post-commit payload is built from the locked row and must not re-query.",
+    ),
+    (
+        "DRF1130-no-join-under-row-lock",
+        "apps/identity/services/staff_invites.py",
+        "redeem_staff_invite",
+        "<select_for_update+select_related>",
+    ): BaselineNote(
+        "PROVEN-ELSEWHERE",
+        "Joins StaffInvite.tenant, declared without null=True in apps/tenancy/models.py - INNER JOIN. DRF-1160 already dropped the nullable catalog_master join from this same chain; what is left is the NOT NULL half, and the in-file comment says so.",
+    ),
+    # -- DRF-1158: randomised hash() in a fixture, all still live -----
+    (
+        "DRF1158-no-builtin-hash-into-stored-value",
+        "apps/catalog/services/tests/test_linking.py",
+        "_legacy_row",
+        "<hash()-into-stored-value>",
+    ): BaselineNote(
+        "LIVE-DEFECT",
+        "external_id=abs(hash(slug)) % 10_000_000 into CatalogService.external_id, an IntegerField with unique_together (tenant, external_id). In range, so it does not overflow - but the value is a different number every process, so a collision between two fixtures is a per-seed coin flip. apps/skills/payment_failed/tests/test_skill.py already carries the fix to copy (_stable_external_id, a truncated sha256).",
+    ),
+    (
+        "DRF1158-no-builtin-hash-into-stored-value",
+        "apps/eventbus/tests/test_reviews_consumer.py",
+        "TestMalformedPayload.test_invalid_rating_no_dedupe_row",
+        "<hash()-into-stored-value>",
+    ): BaselineNote(
+        "LIVE-DEFECT",
+        "hash() built into an event_id - i.e. into an IDEMPOTENCY KEY, the one place a value must be identical across processes by definition. Passes today only because each run starts from an empty dedupe table.",
+    ),
+    (
+        "DRF1158-no-builtin-hash-into-stored-value",
+        "apps/kb/tests/test_webhooks.py",
+        "TestSchemaTypeMapping.test_schema_type_maps_to_doc_type",
+        "<hash()-into-stored-value>",
+    ): BaselineNote(
+        "LIVE-DEFECT",
+        "knowledge_doc_id=100 + hash(schema_type) % 1000 into a KbDocument id. Four parametrised schema_types drawn from 1000 slots with a per-process salt: the collision is rare, seed-dependent, and would read as a flake.",
+    ),
+    (
+        "DRF1158-no-builtin-hash-into-stored-value",
+        "apps/skills/faq/tests/test_skill.py",
+        "TestMatches.test_imperative_phrasings_match",
+        "<hash()-into-stored-value>",
+    ): BaselineNote(
+        "LIVE-DEFECT",
+        "channel_user_id=f'imp-{hash(text) & 0xFFFF:x}' - 16 bits of a salt-randomised hash used as an identity. Two phrasings colliding collapses two BotUsers into one on some seeds and not others. Note the irony: apps/skills/faq/tools.py documents this exact hazard for its cache key and its own test fixture ignores it.",
+    ),
+}
+
+
+# Every accepted entry this module ships, for the report + the tests.
+ALL_BASELINES: frozenset[BaselineKey] = frozenset(
+    BASELINE | CATALOG_CROSS_TENANT_BASELINE | ROW_LOCK_JOIN_BASELINE | HASH_SINK_BASELINE
+)
+
+
+def baseline_report() -> list[str]:
+    """Every baseline entry grouped by verdict, most alarming first.
+
+    This is the answer to "which of these lines is a real bug?" — the
+    question that got guessed at twice (DRF-1159). Run:
+
+        python tools/lint/import_boundaries.py --baseline-report
+    """
+    order = ["LIVE-DEFECT", "UNTRIAGED", "PROVEN-ELSEWHERE", "BY-DESIGN", "UNANNOTATED"]
+    buckets: dict[str, list[str]] = {status: [] for status in order}
+    for key in sorted(ALL_BASELINES):
+        contract_id, rel_posix, qualname, root = key
+        note = BASELINE_NOTES.get(key)
+        status = note.status if note else "UNANNOTATED"
+        scope = "" if qualname in (MODULE_QUALNAME, FILE_QUALNAME) else f" ({qualname})"
+        text = f"  {rel_posix}{scope}  [{contract_id} -> {root}]"
+        if note:
+            text += f"\n      {note.text}"
+        buckets.setdefault(status, []).append(text)
+
+    lines: list[str] = []
+    for status in order:
+        entries = buckets.get(status) or []
+        lines.append(f"{status} ({len(entries)})")
+        lines.extend(entries or ["  -"])
+        lines.append("")
+    return lines
+
+
 @dataclass(frozen=True)
 class Violation:
     file: Path
@@ -607,26 +1256,17 @@ class ImportEdge:
     qualname: str = MODULE_QUALNAME
 
 
-class _ImportCollector(ast.NodeVisitor):
-    """Collect every statically-resolvable imported module in a file.
+class _ScopedVisitor(ast.NodeVisitor):
+    """Base visitor that tracks the enclosing ``class``/``def`` nesting.
 
-    ``package_parts`` is the dotted package the file lives in, used to
-    resolve relative imports to absolute module paths.
-
-    Each edge also records the qualname of the enclosing ``class``/``def``
-    scope, so the baseline can pin a single call site instead of a whole
-    file (DRF-1157). Function-local imports are the dominant shape for
-    the G-series crossings in this repo, which is exactly why file
-    granularity hid `_collect_occupied` behind its own module's
-    legitimate flag-gated read.
+    Every rule in this file keys its baseline on the qualname of the
+    scope a hit sits in (DRF-1157), so the scope stack is shared rather
+    than re-implemented per rule.
     """
 
-    def __init__(self, package_parts: tuple[str, ...]) -> None:
-        self.package_parts = package_parts
-        self.edges: list[ImportEdge] = []
+    def __init__(self) -> None:
         self._scope: list[str] = []
 
-    # ── Scope tracking ────────────────────────────────────────────────
     @property
     def qualname(self) -> str:
         return ".".join(self._scope) if self._scope else MODULE_QUALNAME
@@ -646,6 +1286,26 @@ class _ImportCollector(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self._visit_scope(node, node.name)
+
+
+class _ImportCollector(_ScopedVisitor):
+    """Collect every statically-resolvable imported module in a file.
+
+    ``package_parts`` is the dotted package the file lives in, used to
+    resolve relative imports to absolute module paths.
+
+    Each edge also records the qualname of the enclosing ``class``/``def``
+    scope, so the baseline can pin a single call site instead of a whole
+    file (DRF-1157). Function-local imports are the dominant shape for
+    the G-series crossings in this repo, which is exactly why file
+    granularity hid `_collect_occupied` behind its own module's
+    legitimate flag-gated read.
+    """
+
+    def __init__(self, package_parts: tuple[str, ...]) -> None:
+        super().__init__()
+        self.package_parts = package_parts
+        self.edges: list[ImportEdge] = []
 
     # `import a.b.c` / `import a.b.c as x`
     def visit_Import(self, node: ast.Import) -> None:
@@ -734,12 +1394,171 @@ def _matched_root(module: str, forbidden_modules: tuple[str, ...]) -> str | None
     return None
 
 
-def _is_skipped(rel_posix: str) -> bool:
+def _is_generated(rel_posix: str) -> bool:
+    """Never scanned by any rule."""
+    return any(p in _GENERATED_DIR_PARTS for p in rel_posix.split("/"))
+
+
+def _is_test_file(rel_posix: str) -> bool:
     parts = rel_posix.split("/")
-    if any(p in _SKIP_DIR_PARTS for p in parts):
+    if any(p in _TEST_DIR_PARTS for p in parts):
         return True
     name = parts[-1]
     return name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py"
+
+
+def _is_skipped(rel_posix: str) -> bool:
+    """Out of scope for the production-boundary rules (everything but
+    DRF-1158)."""
+    return _is_generated(rel_posix) or _is_test_file(rel_posix)
+
+
+def _chain_method_names(call: ast.Call) -> list[tuple[str, ast.Attribute]]:
+    """Method names in ``call``'s receiver spine, outermost first.
+
+    ``M.objects.select_for_update().select_related("x").get(pk=1)`` ->
+    ``[("get", …), ("select_related", …), ("select_for_update", …)]``.
+    Walks only through chained *calls*; a non-call link (a bare
+    attribute, a subscript, a name) ends the walk — a queryset stashed
+    in a local and re-chained later is a documented blind spot, same
+    pragmatic limit as ``red_zone_guard``.
+    """
+    out: list[tuple[str, ast.Attribute]] = []
+    current: ast.AST = call
+    while isinstance(current, ast.Call):
+        func = current.func
+        if not isinstance(func, ast.Attribute):
+            break
+        out.append((func.attr, func))
+        current = func.value
+    return out
+
+
+def _find_hash_calls(node: ast.AST) -> list[ast.Call]:
+    """Every builtin ``hash(...)`` call in ``node``'s subtree.
+
+    Does not descend into a ``lambda``: an in-process sort key
+    (``sorted(xs, key=lambda v: hash(v))``) never leaves the process and
+    is not what DRF-1158 is about.
+    """
+    found: list[ast.Call] = []
+    stack: list[ast.AST] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ast.Lambda):
+            continue
+        if (
+            isinstance(current, ast.Call)
+            and isinstance(current.func, ast.Name)
+            and current.func.id == "hash"
+        ):
+            found.append(current)
+        stack.extend(ast.iter_child_nodes(current))
+    return found
+
+
+class _RowLockJoinVisitor(_ScopedVisitor):
+    """Record chains that combine ``select_for_update`` + ``select_related``.
+
+    Order-independent (either method may come first) and blind to what
+    sits between them (``.filter()``, ``.only()``, ``.get()``): what
+    matters is that both land in ONE queryset, because that is what makes
+    Postgres put a lock and an outer join in the same statement.
+
+    ``prefetch_related`` is deliberately NOT matched — it issues a second
+    query instead of a join, so it never widens the FOR UPDATE scope.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hits: list[ImportEdge] = []
+        self._seen: set[tuple[int, int]] = set()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        chain = _chain_method_names(node)
+        names = {name for name, _ in chain}
+        if "select_for_update" in names and "select_related" in names:
+            lock = next(attr for name, attr in chain if name == "select_for_update")
+            joined = next(attr for name, attr in chain if name == "select_related")
+            position = (lock.lineno, lock.col_offset)
+            # Every enclosing call in the same chain sees both names;
+            # report the lock site once.
+            if position not in self._seen:
+                self._seen.add(position)
+                self.hits.append(
+                    ImportEdge(
+                        module=f"select_for_update() + select_related() (line {joined.lineno})",
+                        lineno=lock.lineno,
+                        col_offset=lock.col_offset,
+                        qualname=self.qualname,
+                    )
+                )
+        self.generic_visit(node)
+
+
+class _HashSinkVisitor(_ScopedVisitor):
+    """Record builtin ``hash()`` values flowing into a stored/named sink.
+
+    Sinks: a keyword argument, an attribute assignment target, a
+    string-keyed dict entry. See the DRF-1158 block above for why the
+    keyword-argument net is cast this wide and what is deliberately left
+    out.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hits: list[ImportEdge] = []
+        self._seen: set[tuple[int, int]] = set()
+
+    def _record(self, value: ast.AST, sink: str) -> None:
+        for call in _find_hash_calls(value):
+            position = (call.lineno, call.col_offset)
+            if position in self._seen:
+                continue
+            self._seen.add(position)
+            self.hits.append(
+                ImportEdge(
+                    module=sink,
+                    lineno=call.lineno,
+                    col_offset=call.col_offset,
+                    qualname=self.qualname,
+                )
+            )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        # `def __hash__(self): return hash(self._key)` is the ONE place
+        # the builtin is the right answer — the value never outlives the
+        # dict that asked for it.
+        if node.name == "__hash__":
+            return
+        super().visit_FunctionDef(node)
+
+    def visit_keyword(self, node: ast.keyword) -> None:
+        if node.arg is not None:  # `**kwargs` carries no field name
+            self._record(node.value, f"keyword argument `{node.arg}=`")
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if any(isinstance(t, ast.Attribute) for t in node.targets):
+            field = next(t for t in node.targets if isinstance(t, ast.Attribute))
+            self._record(node.value, f"attribute assignment `.{field.attr} =`")
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.target, ast.Attribute) and node.value is not None:
+            self._record(node.value, f"attribute assignment `.{node.target.attr} =`")
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Attribute):
+            self._record(node.value, f"attribute assignment `.{node.target.attr} =`")
+        self.generic_visit(node)
+
+    def visit_Dict(self, node: ast.Dict) -> None:
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                self._record(value, f"dict entry `{key.value}`")
+        self.generic_visit(node)
 
 
 class _CatalogAllTenantsVisitor(ast.NodeVisitor):
@@ -781,35 +1600,49 @@ def evaluate_file(
     catalog_baseline: frozenset[BaselineKey] = CATALOG_CROSS_TENANT_BASELINE,
     catalog_models: frozenset[str] = CATALOG_CROSS_TENANT_MODELS,
     marketplace_prefix: str = MARKETPLACE_PREFIX,
+    row_lock_baseline: frozenset[BaselineKey] = ROW_LOCK_JOIN_BASELINE,
+    hash_baseline: frozenset[BaselineKey] = HASH_SINK_BASELINE,
 ) -> tuple[list[Violation], set[BaselineKey]]:
-    """Evaluate one file against the import-edge contracts AND the
-    cross-tenant catalog-read rule (MKT1).
+    """Evaluate one file against every rule in this module.
+
+    Import-edge contracts (G-series), the cross-tenant catalog read
+    (MKT1) and the row-lock join (DRF-1130) describe the PRODUCTION
+    boundary and skip test files. The hash sink rule (DRF-1158) does
+    not: its defect lived in a fixture.
 
     Returns ``(violations, satisfied_baseline_keys)`` — the second
-    element lets the caller detect stale baseline entries (covering both
-    ``baseline`` and ``catalog_baseline``).
+    element lets the caller detect stale baseline entries across all
+    four baselines.
     """
     try:
         rel_posix = file_path.resolve().relative_to(repo_root.resolve()).as_posix()
     except ValueError:
         return [], set()
 
-    if _is_skipped(rel_posix):
+    if _is_generated(rel_posix):
         return [], set()
+    # Test files are out of scope for the production-boundary rules but
+    # IN scope for DRF-1158 — see _SKIP_DIR_PARTS.
+    production_scope = not _is_test_file(rel_posix)
 
     violations: list[Violation] = []
     satisfied: set[BaselineKey] = set()
 
-    applicable = [
-        c
-        for c in contracts
-        if any(rel_posix.startswith(p) for p in c.source_prefixes)
-        and not any(rel_posix.startswith(e) for e in c.exclude_prefixes)
-    ]
+    applicable = (
+        [
+            c
+            for c in contracts
+            if any(rel_posix.startswith(p) for p in c.source_prefixes)
+            and not any(rel_posix.startswith(e) for e in c.exclude_prefixes)
+        ]
+        if production_scope
+        else []
+    )
     # The catalog rule applies everywhere EXCEPT the sanctioned carve-out.
-    catalog_applies = not rel_posix.startswith(marketplace_prefix)
-    if not applicable and not catalog_applies:
-        return [], set()
+    catalog_applies = production_scope and not rel_posix.startswith(marketplace_prefix)
+    row_lock_applies = production_scope
+    # No early return: DRF-1158 applies to every non-generated file, so
+    # every such file is parsed.
 
     try:
         tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
@@ -889,6 +1722,36 @@ def evaluate_file(
                     )
                 )
 
+    # ── Shape rules (DRF-1130 row-lock join, DRF-1158 hash sink) ──────
+    def _run_shape_rule(
+        rule: ShapeRule,
+        visitor: _ScopedVisitor,
+        rule_baseline: frozenset[BaselineKey],
+    ) -> None:
+        visitor.visit(tree)
+        for hit in visitor.hits:  # type: ignore[attr-defined]
+            key: BaselineKey = (rule.id, rel_posix, hit.qualname, rule.root)
+            if key in rule_baseline:
+                satisfied.add(key)
+                continue
+            where = "at module level" if hit.qualname == MODULE_QUALNAME else f"in {hit.qualname}()"
+            violations.append(
+                Violation(
+                    file=file_path,
+                    lineno=hit.lineno,
+                    col_offset=hit.col_offset,
+                    message=(
+                        f"[{rule.id}] {hit.module} {where} — {rule.message} (tracked {rule.issue})"
+                    ),
+                    key=key,
+                )
+            )
+
+    if row_lock_applies:
+        _run_shape_rule(ROW_LOCK_JOIN_RULE, _RowLockJoinVisitor(), row_lock_baseline)
+    # DRF-1158 runs on production AND test files, deliberately.
+    _run_shape_rule(HASH_SINK_RULE, _HashSinkVisitor(), hash_baseline)
+
     return violations, satisfied
 
 
@@ -899,6 +1762,8 @@ def scan_paths(
     contracts: tuple[Contract, ...] = CONTRACTS,
     baseline: frozenset[BaselineKey] = BASELINE,
     catalog_baseline: frozenset[BaselineKey] = CATALOG_CROSS_TENANT_BASELINE,
+    row_lock_baseline: frozenset[BaselineKey] = ROW_LOCK_JOIN_BASELINE,
+    hash_baseline: frozenset[BaselineKey] = HASH_SINK_BASELINE,
 ) -> list[Violation]:
     """Scan files/directories, returning new-edge / cross-tenant-read
     violations + stale-baseline violations (a baseline entry that no longer
@@ -928,15 +1793,23 @@ def scan_paths(
                 contracts=contracts,
                 baseline=baseline,
                 catalog_baseline=catalog_baseline,
+                row_lock_baseline=row_lock_baseline,
+                hash_baseline=hash_baseline,
             )
             violations.extend(v)
             satisfied |= s
 
-    for key in sorted((baseline | catalog_baseline) - satisfied):
+    all_baselines = baseline | catalog_baseline | row_lock_baseline | hash_baseline
+    for key in sorted(all_baselines - satisfied):
         contract_id, rel_posix, qualname, root = key
         if rel_posix not in scanned_rel:
             continue  # file outside the scanned paths — can't judge staleness
         scope = "" if qualname in (MODULE_QUALNAME, FILE_QUALNAME) else f" ({qualname})"
+        # The verdict travels with the entry: whoever deletes the line
+        # gets told what it claimed, instead of inferring it from prose
+        # sixty lines above the frozenset (DRF-1159).
+        note = BASELINE_NOTES.get(key)
+        verdict = f" It was annotated {note.status}: {note.text}" if note else ""
         violations.append(
             Violation(
                 file=repo_root / rel_posix,
@@ -946,7 +1819,7 @@ def scan_paths(
                     f"[{contract_id}] STALE BASELINE — {rel_posix}{scope} no longer matches "
                     f"{root!r}. The debt was fixed/migrated (or the enclosing function was "
                     "renamed/moved); delete or update this line in the baseline in "
-                    "tools/lint/import_boundaries.py."
+                    f"tools/lint/import_boundaries.py.{verdict}"
                 ),
                 key=key,
             )
@@ -967,8 +1840,17 @@ def _detect_repo_root(start: Path) -> Path:
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        print("usage: import_boundaries.py <path> [<path> ...]", file=sys.stderr)
+        print(
+            "usage: import_boundaries.py <path> [<path> ...]\n"
+            "       import_boundaries.py --baseline-report",
+            file=sys.stderr,
+        )
         return 2
+
+    if argv[1] == "--baseline-report":
+        for line in baseline_report():
+            print(line)
+        return 0
 
     repo_root = _detect_repo_root(Path(argv[1]))
     targets: list[Path] = []
