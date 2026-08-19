@@ -39,6 +39,7 @@ from apps.channels.bot_context import bot_scope
 from apps.channels.max import outbound
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
 from apps.channels.max.staff_menu import (
+    CB_APPROVE_PREFIX,
     CB_DAY,
     CB_OPEN_APP,
     CB_REQUESTS,
@@ -275,7 +276,26 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
                 else "Ваша карточка мастера не найдена."
             )
     elif action == CB_REQUESTS and is_admin_side:
-        body = staff_actions.pending_requests(tenant)
+        _reply(
+            event,
+            staff_actions.pending_requests(tenant),
+            attachments=_requests_attachments(tenant, role_ctx, entry),
+        )
+        return
+    elif action.startswith(CB_APPROVE_PREFIX) and is_admin_side:
+        request_id = action[len(CB_APPROVE_PREFIX) :]
+        outcome = staff_actions.approve_request(
+            tenant=tenant, request_id=request_id, actor=bot_user
+        )
+        # Re-list after deciding: the queue the person is looking at just
+        # changed, and showing the stale one invites a second tap on a
+        # request that is already handled.
+        _reply(
+            event,
+            f"{outcome}\n\n{staff_actions.pending_requests(tenant)}",
+            attachments=_requests_attachments(tenant, role_ctx, entry),
+        )
+        return
     elif action == CB_OPEN_APP:
         # The Mini App opens client-side; nothing to do server-side. MAX
         # still delivers the callback, and answering nothing would look
@@ -308,6 +328,23 @@ def _master_of(bot_user):
         .select_related("tenant")
         .first()
     )
+
+
+def _requests_attachments(tenant, role_ctx, entry):
+    """Menu keyboard plus one approve button per pending request."""
+
+    from apps.channels.max import staff_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment
+    from apps.channels.max.staff_menu import menu_buttons
+
+    buttons = [
+        {"label": label, "callback": f"{CB_APPROVE_PREFIX}{request_id}"}
+        for request_id, label in staff_actions.pending_request_rows(tenant)
+    ]
+    buttons.extend(menu_buttons(role_ctx, entry))
+    if not buttons:
+        return None
+    return [make_inline_keyboard_attachment(buttons, columns=1)]
 
 
 def _send_menu(event: CanonicalEvent, role_ctx, tenant, entry) -> None:
