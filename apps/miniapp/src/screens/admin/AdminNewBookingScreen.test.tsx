@@ -17,20 +17,24 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     getBookingSlots: vi.fn(),
     getCatalogServicesForAdmin: vi.fn(),
     listMasters: vi.fn(),
+    searchSalonCustomers: vi.fn(),
   };
 });
 
 import { ApiError } from "../../lib/api";
 import {
+  CustomerSearchUnavailable,
   getBookingSlots,
   getCatalogServicesForAdmin,
   listMasters,
+  searchSalonCustomers,
 } from "../../lib/admin-api";
 import { AdminNewBookingScreen } from "./AdminNewBookingScreen";
 
 const mockedSlots = vi.mocked(getBookingSlots);
 const mockedServices = vi.mocked(getCatalogServicesForAdmin);
 const mockedMasters = vi.mocked(listMasters);
+const mockedSearch = vi.mocked(searchSalonCustomers);
 
 function renderScreen() {
   render(
@@ -70,8 +74,10 @@ beforeEach(() => {
     next_cursor: null,
     total_count: 1,
   });
+  mockedSearch.mockRejectedValue(new CustomerSearchUnavailable());
   mockedSlots.mockResolvedValue({
     date: "2026-08-21",
+    timezone: "Europe/Moscow",
     master_id: "m-1",
     service_id: "s-1",
     duration_min: 60,
@@ -162,6 +168,7 @@ describe("an unreachable schedule is not «nothing free» (§16)", () => {
   it("distinguishes a genuinely full day from a failure", async () => {
     mockedSlots.mockResolvedValue({
       date: "2026-08-21",
+      timezone: "Europe/Moscow",
       master_id: "m-1",
       service_id: "s-1",
       duration_min: 60,
@@ -175,14 +182,96 @@ describe("an unreachable schedule is not «nothing free» (§16)", () => {
   });
 });
 
-describe("customer selection (§13, §14)", () => {
-  it("does not present an unavailable search as «not found»", async () => {
+describe("review (§18)", () => {
+  it("states the salon's timezone, not the device's", async () => {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Мария", phone_masked: "+• ••67" },
+    ]);
+    renderScreen();
+
+    // customer
+    screen.getByLabelText(/Клиент/).click();
+    fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
+      target: { value: "Мария" },
+    });
+    (await screen.findByText(/Мария · /)).click();
+
+    await chooseServiceAndMaster();
+    screen.getByLabelText(/Дата и время/).click();
+    (await screen.findByRole("button", { name: "15:00" })).click();
+
+    const review = await screen.findByText(/Когда:/);
+    expect(review.textContent).toMatch(/Europe\/Moscow/);
+  });
+
+  it("does not invent a price the catalog never gave", async () => {
+    // §12 step 5 — «do not invent missing domain fields».
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Мария", phone_masked: "+• ••67" },
+    ]);
     renderScreen();
     screen.getByLabelText(/Клиент/).click();
+    fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
+      target: { value: "Мария" },
+    });
+    (await screen.findByText(/Мария · /)).click();
+    await chooseServiceAndMaster();
+    screen.getByLabelText(/Дата и время/).click();
+    (await screen.findByRole("button", { name: "15:00" })).click();
 
-    expect(
-      await screen.findByText(/Это не значит, что клиента нет/),
-    ).toBeInTheDocument();
+    await screen.findByText(/Проверьте запись/);
+    expect(screen.queryByText(/Цена|₽/)).not.toBeInTheDocument();
+  });
+});
+
+describe("customer selection (§13, §14)", () => {
+  async function openSearchAndType(text: string) {
+    screen.getByLabelText(/Клиент/).click();
+    const input = await screen.findByLabelText("Поиск клиента");
+    fireEvent.change(input, { target: { value: text } });
+  }
+
+  it("waits for two characters before searching", async () => {
+    renderScreen();
+    await openSearchAndType("М");
+
+    expect(await screen.findByText(/Введите хотя бы два символа/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(mockedSearch).not.toHaveBeenCalled();
+  });
+
+  it("renders an unreachable search as «недоступен», never as «not found»", async () => {
+    renderScreen();
+    await openSearchAndType("Мария");
+
+    expect(await screen.findByText(/Поиск по клиентам пока недоступен/)).toBeInTheDocument();
+    // The distinction §13 insists on: this is not evidence of absence.
+    expect(screen.queryByText(/Совпадений нет/)).not.toBeInTheDocument();
+  });
+
+  it("distinguishes «found nothing» from «could not look»", async () => {
+    mockedSearch.mockResolvedValue([]);
+    renderScreen();
+    await openSearchAndType("Мария");
+
+    expect(await screen.findByText(/Совпадений нет/)).toBeInTheDocument();
+    expect(screen.queryByText(/недоступен/)).not.toBeInTheDocument();
+  });
+
+  it("shows a match as name plus masked phone and nothing else", async () => {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Мария Иванова", phone_masked: "+• ••• ••• ••67" },
+    ]);
+    renderScreen();
+    await openSearchAndType("Мария");
+
+    const hit = await screen.findByText(/Мария Иванова · \+• ••• ••• ••67/);
+    expect(hit).toBeInTheDocument();
+    hit.click();
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Клиент/).textContent).toMatch(/Мария Иванова/),
+    );
   });
 
   it("accepts a new client from name and phone alone", async () => {

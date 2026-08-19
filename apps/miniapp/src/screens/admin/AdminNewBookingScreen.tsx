@@ -42,12 +42,15 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../../lib/api";
 import {
+  CustomerSearchUnavailable,
   getBookingSlots,
   getCatalogServicesForAdmin,
   listMasters,
+  searchSalonCustomers,
   type BookingSlot,
   type CatalogServiceLite,
   type MasterListItem,
+  type SalonCustomer,
 } from "../../lib/admin-api";
 import {
   applyDraftAction,
@@ -182,6 +185,18 @@ export function AdminNewBookingScreen() {
   const [slotsErr, setSlotsErr] = useState<unknown>(null);
   const [slotsLoading, setSlotsLoading] = useState(false);
 
+  // The salon's timezone, as the schedule reported it. Only the server
+  // knows it, and §18 requires the review to state it.
+  const [timeZone, setTimeZone] = useState<string>("");
+
+  // Customer search (§13). `searchState` is deliberately four-valued —
+  // «found nothing» and «could not look» must never collapse into one.
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SalonCustomer[]>([]);
+  const [searchState, setSearchState] = useState<
+    "idle" | "searching" | "done" | "unavailable" | "error"
+  >("idle");
+
   // Inline «Новый клиент» form (§14 — the minimum is name + phone).
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
@@ -231,6 +246,7 @@ export function AdminNewBookingScreen() {
         );
         if (controller.signal.aborted) return;
         setSlots(res.slots);
+        setTimeZone(res.timezone);
       } catch (e) {
         if ((e as DOMException | undefined)?.name === "AbortError") return;
         setSlotsErr(e);
@@ -240,6 +256,40 @@ export function AdminNewBookingScreen() {
     })();
     return () => controller.abort();
   }, [readyForSlots, sheet, date, draft.master, draft.service]);
+
+  // §13 — debounced search. Runs only from two characters: a one-letter
+  // query would return most of the salon and disambiguate nothing.
+  useEffect(() => {
+    if (sheet !== "customer") return;
+    const q = query.trim();
+    if (q.length < 2) {
+      setSearchState("idle");
+      setResults([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      setSearchState("searching");
+      void (async () => {
+        try {
+          const found = await searchSalonCustomers(q, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          setResults(found);
+          setSearchState("done");
+        } catch (e) {
+          if ((e as DOMException | undefined)?.name === "AbortError") return;
+          setResults([]);
+          // The capability being absent and the request failing are both
+          // «could not look», and neither is «not here» (§13).
+          setSearchState(e instanceof CustomerSearchUnavailable ? "unavailable" : "error");
+        }
+      })();
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query, sheet]);
 
   const customerLabel = useMemo(() => {
     if (draft.customer === null) return null;
@@ -305,11 +355,19 @@ export function AdminNewBookingScreen() {
             <li>Клиент: {customerLabel}</li>
             <li>Услуга: {draft.service?.name}</li>
             <li>Мастер: {draft.master?.name}</li>
-            <li>Когда: {slotLabel}</li>
+            <li>
+              Когда: {slotLabel}
+              {timeZone ? ` (${timeZone})` : ""}
+            </li>
             <li>Длительность: {draft.service?.duration_min} мин</li>
           </ul>
+          {/* §12 step 5 lists a price snapshot «where available» and adds
+              «do not invent missing domain fields». The catalog read this
+              screen uses carries no price, so the line is absent rather
+              than guessed. */}
         </section>
       )}
+
 
       <div style={{ marginTop: "var(--s-5)" }}>
         {!ready && (
@@ -339,13 +397,82 @@ export function AdminNewBookingScreen() {
 
       {sheet === "customer" && (
         <Sheet title="Клиент" onClose={() => setSheet(null)}>
-          {/* §13 — search is a separate capability and is not wired yet.
-              It is rendered as «unavailable», never as «not found»: a
-              failed search is not proof the customer does not exist. */}
-          <div className="callout" role="status">
-            Поиск по клиентам салона пока недоступен. Это не значит, что клиента
-            нет — заведите его как нового.
-          </div>
+          {/* §13 — search shows only what disambiguates a person: a name
+              and a masked phone. Nothing about their history, and never a
+              raw number. */}
+          <label>
+            Найти клиента
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Имя или телефон"
+              aria-label="Поиск клиента"
+            />
+          </label>
+
+          {searchState === "idle" && (
+            <p style={{ color: "var(--c-text-secondary)", margin: 0 }}>
+              Введите хотя бы два символа.
+            </p>
+          )}
+
+          {searchState === "searching" && (
+            <div className="callout" role="status">
+              Ищу…
+            </div>
+          )}
+
+          {searchState === "unavailable" && (
+            // Not «нет такого клиента». §13: «A failed search is not proof
+            // that the customer does not exist» — telling the receptionist
+            // otherwise is how duplicates get created.
+            <div className="callout callout--warning" role="status">
+              Поиск по клиентам пока недоступен. Это не значит, что клиента нет —
+              заведите его как нового.
+            </div>
+          )}
+
+          {searchState === "error" && (
+            <div className="callout callout--warning" role="status">
+              Не удалось выполнить поиск. Это не значит, что клиента нет.
+            </div>
+          )}
+
+          {searchState === "done" && results.length === 0 && (
+            <div className="callout" role="status">
+              Совпадений нет. Возможно, клиент записан под другим именем или
+              телефоном.
+            </div>
+          )}
+
+          {searchState === "done" && results.length > 0 && (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {results.map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    className="sheet__item"
+                    onClick={() => {
+                      dispatch({
+                        type: "customer/set",
+                        customer: {
+                          kind: "existing",
+                          id: c.id,
+                          name: c.name,
+                          phone_masked: c.phone_masked,
+                        },
+                      });
+                      setSheet(null);
+                    }}
+                  >
+                    {c.name} · {c.phone_masked}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
           <h3 className="section__title">Новый клиент</h3>
           <label>
             Имя
