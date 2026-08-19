@@ -636,12 +636,15 @@ class TestS3S5Flow:
         # 4 primary URL + anketa callback + просто посмотреть URL = 6
         assert len(buttons) == 6
         urls = [b.get("url") for b in buttons if "url" in b]
+        # DRF-1167: link fallback points at the same Mini App routes the
+        # slugs resolve to in max-sdk.ts::_ROUTE_MAP (previously /food_scan,
+        # /goal_select etc. — none of which exist as routes).
         assert urls == [
-            "https://miniapp-dev.example/food_scan",
-            "https://miniapp-dev.example/water_add_250",
-            "https://miniapp-dev.example/goal_select",
+            "https://miniapp-dev.example/customer/food-scanner/capture",
+            "https://miniapp-dev.example/customer/wellness",
+            "https://miniapp-dev.example/customer/goal-select",
             "https://miniapp-dev.example/catalog",
-            "https://miniapp-dev.example/home",
+            "https://miniapp-dev.example/customer/main",
         ]
 
 
