@@ -865,8 +865,9 @@ def _flow_already_established(context: SkillContext) -> bool:
     * messages already exchanged with this bot_user — in any other
       conversation, or in the current one beyond the single inbound row
       the channel recorded a moment ago (DRF-1207);
-    * an ACTIVE AdminTask for this bot_user — an open / in-progress
-      handoff means the support flow owns the turn (DRF-1206).
+    * any AdminTask ever created for this bot_user — a handoff, open or
+      long since resolved, proves there WAS a prior interaction, so this
+      turn is not a first contact (see the DRF-1206 note below).
 
     ### DRF-1207 — why the current conversation is no longer skipped wholesale
 
@@ -904,18 +905,27 @@ def _flow_already_established(context: SkillContext) -> bool:
     elif messages.exists():
         return True
 
-    # DRF-1206 — only an ACTIVE handoff owns the turn. The previous
-    # ``.exists()`` carried no status predicate, so a ticket resolved months
-    # ago suppressed the auto-welcome for that user permanently. BOT-001 §10
-    # names this greeting state «User with an Active Task»; a resolved or
-    # cancelled ticket is not active, and the person behind it is a Returning
-    # User (§9) — not somebody whose turn another flow owns.
+    # DRF-1206 — DELIBERATELY unconditioned by status. Do not "fix" this
+    # into ``status__in=(OPEN, IN_PROGRESS)``; that was tried and reverted.
     #
-    # Resume-after-resolve (the regression this arm was added for, b1bfda2)
-    # stays covered by the message check above: since DRF-1207 it counts the
-    # current conversation too, and a conversation that reached a handoff
-    # always holds more than the single inbound row of a first contact.
-    return AdminTask.all_tenants.filter(
-        conversation__bot_user=context.bot_user,
-        status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
-    ).exists()
+    # The audit (AUDIT_DIALOGUE_MODEL.md §2.6 п.10) reads this line as the
+    # detector for the BOT-001 §10 greeting state «User with an Active Task»
+    # and calls it too wide. It is not that detector. That state is resolved
+    # by :func:`_greeting_state` from ``Conversation.skill_state`` (DRF-1202).
+    # This predicate answers a different question — «is this turn genuinely a
+    # first contact?» — and an AdminTask that ever existed is proof that it is
+    # not: the user already talked to us and to an operator. Under §8 a New
+    # User is someone with «no prior recognized interaction», so declining the
+    # auto-welcome here is what the canon asks for, not a deviation from it.
+    #
+    # Narrowing it to active statuses breaks
+    # ``apps/skills/human_handoff/tests/test_skill.py::TestDispatcherGuard
+    # ::test_resume_after_resolve``: the follow-up after a RESOLVED handoff
+    # comes back as a full new-user greeting instead of resuming — the same
+    # «bot forgot we were talking» failure DRF-1207 exists to remove.
+    #
+    # The canon-level complaint behind DRF-1206 — «приветствие не показывается
+    # такому пользователю никогда» — is real but lives elsewhere, and DRF-1202
+    # closes it: such a user is a Returning User (§9) and now has a greeting of
+    # their own.
+    return AdminTask.all_tenants.filter(conversation__bot_user=context.bot_user).exists()

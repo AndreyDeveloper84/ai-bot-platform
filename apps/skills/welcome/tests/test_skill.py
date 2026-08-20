@@ -855,7 +855,7 @@ class TestMidConversationWakeUp:
 
 
 # ───────────────────────────────────────────────────────────────────────
-# DRF-1206 — только АКТИВНАЯ админская задача подавляет приветствие
+# DRF-1206 — любая админская задача снимает автоприветствие (закрепление)
 # ───────────────────────────────────────────────────────────────────────
 
 
@@ -871,17 +871,25 @@ def _admin_task(conversation, status):
     )
 
 
-class TestActiveTaskSuppression:
-    """DRF-1206 / BOT-001 §9–§10.
+class TestAnyAdminTaskBlocksAutoWelcome:
+    """DRF-1206 — постановка не подтвердилась; тест закрепляет ФАКТ.
 
-    «User with an Active Task» — состояние канона; закрытый тикет
-    активным не является, и человек за ним — Returning User, а не
-    пользователь, чей ход принадлежит другому потоку.
+    Проверка `AdminTask…exists()` в `_flow_already_established` — это не
+    детектор состояния «User with an Active Task» (его роль исполняет
+    `_greeting_state` по `Conversation.skill_state`, DRF-1202), а ответ на
+    вопрос «это вообще первый контакт?». Тикет, который когда-либо
+    существовал, доказывает, что нет: BOT-001 §8 определяет New User как
+    человека «with no prior recognized interaction».
+
+    Попытка сузить арму до активных статусов ломает
+    `human_handoff…TestDispatcherGuard::test_resume_after_resolve` —
+    сообщение после закрытого хендофа возвращается полным приветствием
+    новичка вместо продолжения. Тест ниже держит арму на месте.
     """
 
     @pytest.mark.django_db
-    @pytest.mark.parametrize("status", ["open", "in_progress"])
-    def test_active_task_still_suppresses(self, unwelcomed_bot_user, status):
+    @pytest.mark.parametrize("status", ["open", "in_progress", "resolved", "cancelled"])
+    def test_admin_task_of_any_status_blocks_auto_trigger(self, unwelcomed_bot_user, status):
         conversation = _conversation_for(unwelcomed_bot_user)
         _record(conversation, "user", "Привет")
         _admin_task(conversation, status)
@@ -889,29 +897,16 @@ class TestActiveTaskSuppression:
         assert WelcomeSkill().matches(_ctx_in("Привет", unwelcomed_bot_user, conversation)) is False
 
     @pytest.mark.django_db
-    @pytest.mark.parametrize("status", ["resolved", "cancelled"])
-    def test_closed_task_does_not_suppress_forever(self, unwelcomed_bot_user, status):
-        """Закрытый тикет из прошлого больше не глушит приветствие навсегда.
+    def test_explicit_start_still_greets_such_a_user(self, welcomed_bot_user):
+        """И это не «приветствие пропало навсегда»: по явному `/start`
+        человек получает приветствие вернувшегося (DRF-1202, §9.1)."""
+        from apps.skills.welcome.skill import RETURNING_TEXT
 
-        Разговор здесь новый и содержит ровно одно входящее — то есть это
-        настоящий первый контакт, и приветствие обязано сработать.
-        """
-        older = _conversation_for(unwelcomed_bot_user)
-        _record(older, "user", "нужен человек")
-        _admin_task(older, status)
-        older.is_active = False
-        older.save(update_fields=["is_active"])
+        conversation = _conversation_for(welcomed_bot_user)
+        _admin_task(conversation, "resolved")
 
-        # Сообщения прошлого разговора сами по себе тоже блокируют guard —
-        # чтобы проверить именно арму AdminTask, берём разговор без истории.
-        from apps.conversations.models import Message
-
-        Message.all_tenants.filter(conversation=older).delete()
-
-        current = _conversation_for(unwelcomed_bot_user)
-        _record(current, "user", "Привет")
-
-        assert WelcomeSkill().matches(_ctx_in("Привет", unwelcomed_bot_user, current)) is True
+        result = WelcomeSkill().handle(_ctx_in("/start", welcomed_bot_user, conversation))
+        assert result.reply_text == RETURNING_TEXT
 
 
 # ───────────────────────────────────────────────────────────────────────
