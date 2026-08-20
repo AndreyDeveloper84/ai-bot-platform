@@ -1164,6 +1164,24 @@ export function App() {
     navigate("/");
   }, [navigate]);
 
+  // Value handed to leaf screens through SurfaceModeContext. `canSwitch`
+  // is what keeps «Сменить режим» invisible to a single-role person:
+  // a receptionist has one surface and a control offering to leave it
+  // would be noise she cannot act on.
+  const surfaceMode = useMemo<SurfaceModeContextValue>(
+    () => ({
+      canSwitch:
+        boot.status === "ready" &&
+        boot.me != null &&
+        [
+          Boolean(boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist),
+          Boolean(boot.me.is_master),
+        ].filter(Boolean).length > 1,
+      requestChooser,
+    }),
+    [boot.status, boot.me, requestChooser],
+  );
+
   const loadMe = useCallback(async () => {
     setBoot({ status: "loading", me: null, err: null });
     try {

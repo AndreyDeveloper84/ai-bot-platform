@@ -64,6 +64,7 @@ import {
   type ProactivePrefsResponse,
 } from "../lib/customer-profile";
 import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
+import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 
 // ---------------------------------------------------------------------------
 // Stub-backed sections flag (pilot phase 2a, commit 3). R1 identity
@@ -225,6 +226,16 @@ export function CustomerProfileScreen() {
           К управлению приватностью
         </a>
       )}
+
+      {/*
+        Путь назад из клиентской поверхности. Без него владелец,
+        переключившийся «посмотреть глазами клиента», остаётся здесь
+        навсегда — то есть меняет одну ловушку на другую.
+
+        Кнопка сама себя не рисует для человека с одной ролью:
+        обычному клиенту переключать нечего.
+      */}
+      <SurfaceSwitchButton />
 
       <header className="records-screen__header">
         <button
