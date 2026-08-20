@@ -745,3 +745,89 @@ class TestS1MultiTenantVariant:
         )
         assert result.reply_text == WELCOME_TEXT
         assert result.meta["reply_kind"] == "welcome"
+
+
+# ───────────────────────────────────────────────────────────────────────
+# DRF-1207 — приветствие не просыпается посреди разговора
+# ───────────────────────────────────────────────────────────────────────
+
+
+def _conversation_for(bot_user):
+    from apps.conversations.models import Conversation
+
+    return Conversation.all_tenants.create(tenant=bot_user.tenant, bot_user=bot_user)
+
+
+def _record(conversation, role: str, content: str):
+    from apps.conversations.models import Message
+
+    return Message.all_tenants.create(
+        conversation=conversation,
+        tenant=conversation.tenant,
+        role=role,
+        content=content,
+    )
+
+
+def _ctx_in(text: str, bot_user, conversation) -> SkillContext:
+    return SkillContext(
+        conversation=conversation,
+        bot_user=bot_user,
+        message_text=text,
+    )
+
+
+class TestMidConversationWakeUp:
+    """DRF-1207 / BOT-001 P1 + CDP «Amnesia».
+
+    Когда первый ход перехватил другой навык, ``welcomed_at`` остаётся
+    NULL. Раньше guard исключал ВСЕ сообщения текущего разговора, поэтому
+    на втором ходу приветствие всплывало посреди диалога. Теперь
+    считается: ровно одна строка (входящее, записанное каналом до
+    диспетчеризации) — это первый контакт, больше — разговор уже идёт.
+    """
+
+    @pytest.mark.django_db
+    def test_first_contact_still_auto_welcomes(self, unwelcomed_bot_user):
+        conversation = _conversation_for(unwelcomed_bot_user)
+        # Канал записывает входящее ДО dispatch — ровно одна строка.
+        _record(conversation, "user", "Привет")
+
+        assert WelcomeSkill().matches(_ctx_in("Привет", unwelcomed_bot_user, conversation)) is True
+
+    @pytest.mark.django_db
+    def test_does_not_wake_up_after_another_skill_took_the_first_turn(self, unwelcomed_bot_user):
+        conversation = _conversation_for(unwelcomed_bot_user)
+        # Ход 1 достался booking: входящее + ответ бота.
+        _record(conversation, "user", "хочу записаться на маникюр")
+        _record(conversation, "assistant", "На какое время вас записать?")
+        # Ход 2 — новое входящее, записанное каналом до dispatch.
+        _record(conversation, "user", "спасибо")
+
+        assert (
+            WelcomeSkill().matches(_ctx_in("спасибо", unwelcomed_bot_user, conversation)) is False
+        )
+
+    @pytest.mark.django_db
+    def test_messages_in_another_conversation_still_block(self, unwelcomed_bot_user):
+        older = _conversation_for(unwelcomed_bot_user)
+        _record(older, "user", "прошлый разговор")
+        # Активный разговор ровно один (constraint) — прошлый закрыт.
+        older.is_active = False
+        older.save(update_fields=["is_active"])
+        current = _conversation_for(unwelcomed_bot_user)
+        _record(current, "user", "привет снова")
+
+        assert (
+            WelcomeSkill().matches(_ctx_in("привет снова", unwelcomed_bot_user, current)) is False
+        )
+
+    @pytest.mark.django_db
+    def test_explicit_start_is_not_affected(self, unwelcomed_bot_user):
+        """``/start`` — явный жест пользователя, guard его не касается."""
+        conversation = _conversation_for(unwelcomed_bot_user)
+        _record(conversation, "user", "хочу записаться")
+        _record(conversation, "assistant", "На какое время?")
+        _record(conversation, "user", "/start")
+
+        assert WelcomeSkill().matches(_ctx_in("/start", unwelcomed_bot_user, conversation)) is True

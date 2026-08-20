@@ -690,6 +690,13 @@ def _join(base: str, route: str) -> str:
     return f"{base.rstrip('/')}/{route.lstrip('/')}"
 
 
+# DRF-1207 — how many rows the CURRENT conversation may hold and still count
+# as first contact. The channel records the inbound text BEFORE dispatch
+# (apps/channels/max/handler.py::record_message), so a genuine first-contact
+# turn sees exactly one row: the message being dispatched right now.
+_FIRST_CONTACT_MESSAGE_ROWS = 1
+
+
 def _flow_already_established(context: SkillContext) -> bool:
     """True when the user already has a live/established flow the
     auto-welcome must not interrupt.
@@ -697,26 +704,46 @@ def _flow_already_established(context: SkillContext) -> bool:
     Two markers, both checked cross-tenant (the global path runs
     tenant-less):
 
-    * messages in any OTHER conversation of this bot_user (the current
-      conversation's rows are excluded — the channel records the inbound
-      text before dispatch, so a first-contact user legitimately has one
-      message in the current conversation at this point);
+    * messages already exchanged with this bot_user — in any other
+      conversation, or in the current one beyond the single inbound row
+      the channel recorded a moment ago (DRF-1207);
     * any AdminTask ever created for this bot_user — a handoff in
       progress or resolved means the support flow owns the turn.
+
+    ### DRF-1207 — why the current conversation is no longer skipped wholesale
+
+    The previous guard excluded EVERY row of the current conversation, on the
+    reasoning that a first-contact user legitimately owns one message here.
+    That is true of the first turn only. If turn 1 was claimed by another
+    skill (booking matches «хочу записаться» at registry position 12, welcome
+    sits at 14), ``welcomed_at`` is never stamped — and on turn 2 the guard
+    still saw an "empty" conversation, so the full greeting surfaced in the
+    middle of a live dialogue. From the outside that reads as «бот забыл, что
+    мы уже общаемся» — CDP anti-pattern «Amnesia» and a greeting ceremony
+    delaying an intent already in progress (BOT-001 P1).
+
+    Counting instead of excluding keeps the original intent (turn 1 must still
+    auto-welcome) and closes turn 2+: by then the conversation holds the first
+    inbound, the reply that was sent, and the new inbound.
     """
     from apps.conversations.models import Message
     from apps.handoff.models import AdminTask
 
     current_pk = getattr(context.conversation, "pk", None)
-    other_messages = Message.all_tenants.filter(conversation__bot_user=context.bot_user)
-    # Test contexts may carry a MagicMock conversation — exclude only when
-    # the pk is a real key value.
+    messages = Message.all_tenants.filter(conversation__bot_user=context.bot_user)
+    # Test contexts may carry a MagicMock conversation — split current from
+    # other only when the pk is a real key value. int included for test
+    # contexts with a plain-int pk; the ORM accepts it identically to a
+    # UUID/str at the lookup layer.
     import uuid as _uuid
 
     if isinstance(current_pk, (int, _uuid.UUID)):
-        # int included for test contexts with a plain-int pk; the ORM
-        # accepts it identically to a UUID/str at the lookup layer.
-        other_messages = other_messages.exclude(conversation_id=current_pk)  # type: ignore[misc]
-    if other_messages.exists():
+        if messages.exclude(conversation_id=current_pk).exists():  # type: ignore[misc]
+            return True
+        current_rows = messages.filter(conversation_id=current_pk).count()  # type: ignore[misc]
+        if current_rows > _FIRST_CONTACT_MESSAGE_ROWS:
+            return True
+    elif messages.exists():
         return True
+
     return AdminTask.all_tenants.filter(conversation__bot_user=context.bot_user).exists()
