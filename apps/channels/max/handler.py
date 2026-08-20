@@ -722,7 +722,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         )
         assistant_action_type = "booking_lookup"
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
-        bot_user, event.text
+        bot_user, event.text, conversation
     ):
         reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):

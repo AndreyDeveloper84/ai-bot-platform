@@ -164,6 +164,44 @@ class TestNeedsOnboarding:
         assert needs_onboarding(u, "маникюр в Пензе") is False
         assert needs_onboarding(u, "есть окошко на завтра") is False
 
+    def test_first_contact_but_conversation_already_under_way_false(self):
+        """DRF-1207, второй путь. Глобальный путь не проходит через
+        `WelcomeSkill.matches` и его guard — приветствие всплывало посреди
+        разговора, если первый ход забрала другая ветка и `welcomed_at`
+        остался NULL. BOT-001 P1 / CDP анти-паттерн «Amnesia»."""
+        bot_user, conversation = _global_user_and_conv(user_id=91001)
+        from apps.conversations.services import record_global_message
+
+        # Ход 1 достался другой ветке: входящее + ответ бота.
+        record_global_message(conversation, role="user", content="хочу массаж")
+        record_global_message(conversation, role="assistant", content="Вот мастера:")
+        # Ход 2 — новое входящее, записанное до ветвления ответа.
+        record_global_message(conversation, role="user", content="спасибо")
+
+        assert bot_user.welcomed_at is None
+        assert needs_onboarding(bot_user, "спасибо", conversation) is False
+
+    def test_first_contact_single_inbound_row_still_greets(self):
+        """Настоящий первый контакт: канал записал ровно одну строку."""
+        bot_user, conversation = _global_user_and_conv(user_id=91002)
+        from apps.conversations.services import record_global_message
+
+        record_global_message(conversation, role="user", content="привет")
+
+        assert needs_onboarding(bot_user, "привет", conversation) is True
+
+    def test_explicit_start_mid_conversation_still_onboards(self):
+        """`/start` — явный жест, guard его не касается (паритет с
+        основным путём)."""
+        bot_user, conversation = _global_user_and_conv(user_id=91003)
+        from apps.conversations.services import record_global_message
+
+        record_global_message(conversation, role="user", content="хочу массаж")
+        record_global_message(conversation, role="assistant", content="Вот мастера:")
+        record_global_message(conversation, role="user", content="/start")
+
+        assert needs_onboarding(bot_user, "/start", conversation) is True
+
     def test_first_contact_unrecognised_text_still_greets(self):
         """Сигнал намерения намеренно узкий: нераспознанное первое
         сообщение остаётся greeting-driven entry (§6), а не проваливается
@@ -418,3 +456,55 @@ class TestHandlerIntegration:
         # Legacy behaviour — no onboarding, discovery runs.
         spy_discovery.assert_called_once()
         assert mock_send[0]["text"] != GLOBAL_WELCOME_TEXT
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1207 (второй путь) — приветствие посреди разговора на глобальном пути    #
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def spy_visits(monkeypatch):
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    spy = MagicMock(return_value=DiscoveryReply(text="Ваши записи: пока пусто."))
+    monkeypatch.setattr(max_handler, "route_visits", spy)
+    return spy
+
+
+class TestGlobalWelcomeDoesNotWakeUpMidConversation:
+    """Глобальный путь зовёт `WelcomeSkill.handle()` напрямую, минуя
+    `matches()` и его guard `_flow_already_established`. Собственного
+    guard'а здесь не было: признаком первого контакта считался только
+    `welcomed_at IS NULL`.
+
+    Аудит этот второй путь не заметил — он локализовал нарушение одним
+    местом в `welcome/skill.py`.
+    """
+
+    def test_second_turn_is_not_greeted(self, mock_send, fake_redis, spy_visits, spy_discovery):
+        """Ход 1 забирает ветка «покажи мои записи» — она стоит ПЕРЕД
+        onboarding, поэтому `welcomed_at` остаётся NULL. Ход 2 не должен
+        получить полное приветствие посреди идущего разговора.
+
+        BOT-001 P1 «Intent Before Ceremony» + CDP §5 «Amnesia».
+        """
+        max_handler.handle_global_max_event(
+            _msg_payload(text="покажи мои записи", user_id=90501, mid="g-1"),
+            trace_id=str(uuid.uuid4()),
+        )
+        assert len(mock_send) == 1
+        assert mock_send[0]["text"] != GLOBAL_WELCOME_TEXT
+
+        max_handler.handle_global_max_event(
+            _msg_payload(text="спасибо", user_id=90501, mid="g-2"),
+            trace_id=str(uuid.uuid4()),
+        )
+        assert len(mock_send) == 2
+        assert mock_send[1]["text"] != GLOBAL_WELCOME_TEXT
+
+    def test_genuine_first_contact_is_still_greeted(self, mock_send, fake_redis, spy_discovery):
+        """Обратная сторона: настоящий первый контакт приветствие получает."""
+        max_handler.handle_global_max_event(
+            _msg_payload(text="привет", user_id=90502, mid="g-3"),
+            trace_id=str(uuid.uuid4()),
+        )
+        assert mock_send[0]["text"] == GLOBAL_WELCOME_TEXT

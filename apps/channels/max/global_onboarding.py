@@ -115,7 +115,51 @@ _CONSENT_SOURCE = "global_onboarding:welcome_s2"
 CONSENT_DOCUMENT_VERSION = "welcome-s2-v1"
 
 
-def needs_onboarding(bot_user: Any, text: str) -> bool:
+# DRF-1207 (второй путь) — сколько строк может держать ТЕКУЩИЙ разговор и
+# всё ещё считаться первым контактом. `_handle_global_max_event_inner`
+# записывает входящее (`record_global_message`) ДО ветвления ответа, ровно
+# как per-tenant handler делает это до диспетчеризации, поэтому у настоящего
+# первого контакта здесь одна строка. Правило то же, что в
+# `apps/skills/welcome/skill.py::_flow_already_established`; продублировано
+# значением, а не импортом приватного имени через границу пакета.
+_FIRST_CONTACT_MESSAGE_ROWS = 1
+
+
+def _conversation_already_under_way(conversation: Any) -> bool:
+    """True когда разговор содержит больше одного сообщения.
+
+    DRF-1207, второй путь. Глобальный путь не проходит через
+    `WelcomeSkill.matches`, а значит и через его guard
+    `_flow_already_established` — он зовёт `handle()` напрямую
+    (`run_onboarding_turn`). Свой guard тут отсутствовал вовсе: признаком
+    первого контакта считался только `welcomed_at IS NULL`.
+
+    Последствие ровно то же, что на основном пути: если первый ход забрала
+    другая ветка (safety, хендоф, карточки визитов, personal booking lookup
+    — или, после DRF-1205, понятное намерение), `welcomed_at` не
+    проставляется, и следующее не-намеренное сообщение получает полное
+    приветствие посреди идущего разговора.
+
+    Best-effort: сбой чтения не должен рушить ход — деградируем к «разговор
+    не начат», то есть к прежнему поведению.
+    """
+    conversation_id = getattr(conversation, "id", None)
+    if conversation_id is None:
+        return False
+    try:
+        from apps.conversations.models import Message
+
+        rows = Message.all_tenants.filter(conversation_id=conversation_id).count()
+    except Exception:  # noqa: BLE001 — guard must never break the turn
+        logger.exception(
+            "global_onboarding.conversation_probe_failed conversation=%s",
+            conversation_id,
+        )
+        return False
+    return rows > _FIRST_CONTACT_MESSAGE_ROWS
+
+
+def needs_onboarding(bot_user: Any, text: str, conversation: Any = None) -> bool:
     """Decide whether this global turn should run onboarding instead of discovery.
 
     True when any of (per #1046):
@@ -123,8 +167,10 @@ def needs_onboarding(bot_user: Any, text: str) -> bool:
     * ``/start`` or ``/start <deeplink_payload>`` — explicit entry / deep link;
     * a ``cb:welcome:*`` callback tap — the user is mid-consent-flow (S2 prompt,
       consent yes/no, details fold);
-    * first contact — the BotUser has ``welcomed_at IS NULL`` (never greeted)
-      AND the message carries no clear actionable intent (DRF-1205).
+    * first contact — the BotUser has ``welcomed_at IS NULL`` (never greeted),
+      the message carries no clear actionable intent (DRF-1205), and the
+      conversation is not already under way (DRF-1207, see
+      :func:`_conversation_already_under_way`).
 
     False otherwise — an already-welcomed user's plain message (or a
     ``cb:discover:book:*`` handoff tap) flows straight to discovery. This is what
@@ -175,7 +221,12 @@ def needs_onboarding(bot_user: Any, text: str) -> bool:
     # DRF-1205 — намерение обходит церемонию (BOT-001 P1 / CDP-02).
     from apps.skills.menu.matching import looks_like_booking_request
 
-    return not looks_like_booking_request(stripped)
+    if looks_like_booking_request(stripped):
+        return False
+    # DRF-1207 (второй путь) — приветствие не просыпается посреди разговора.
+    if conversation is not None and _conversation_already_under_way(conversation):
+        return False
+    return True
 
 
 def run_onboarding_turn(
