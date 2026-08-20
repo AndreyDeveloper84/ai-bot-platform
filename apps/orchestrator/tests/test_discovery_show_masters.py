@@ -93,15 +93,97 @@ def test_show_masters_resolved_service_rides_the_callback(monkeypatch) -> None:
 
 
 def test_show_masters_no_results_graceful(monkeypatch) -> None:
+    """A real query that matches nothing → honest no-match line.
+
+    DRF-1201 changed the arguments from ``{}`` to a real specialization: an
+    empty-argument call no longer reaches ``discover_masters`` at all (see
+    ``test_show_masters_without_criteria_asks_instead_of_listing_catalogue``),
+    so ``{}`` would no longer exercise what this test is about — the empty
+    RESULT of a genuine query.
+    """
     monkeypatch.setattr(discovery, "discover_masters", lambda **kw: [])
     result = CompletionResult(
-        text="", tool_calls=[ToolCall(id="t1", name="show_masters", arguments={})]
+        text="",
+        tool_calls=[
+            ToolCall(id="t1", name="show_masters", arguments={"specialization": "маникюр"})
+        ],
     )
     monkeypatch.setattr(discovery, "get_router", lambda: _Router(_Provider(result)))
 
     reply = discovery.generate_discovery_reply("маникюр")
     assert "не нашлось" in reply.text
     assert reply.action_data is None
+
+
+def test_show_masters_without_criteria_asks_instead_of_listing_catalogue(monkeypatch) -> None:
+    """DRF-1201 — prohibition #22: no arbitrary catalogue fallback.
+
+    ``show_masters`` declares ``"required": []``, so a criteria-less call is
+    legal and used to run ``discover_masters()`` unfiltered — the whole
+    cross-tenant catalogue, alphabetically, under «Вот мастера, которые могут
+    подойти:». Canon's boundary (BOT-003 §9) is «if additional useful
+    information can realistically enable a responsible recommendation,
+    continue discovery only as needed under Q3», so the turn must be a
+    question. The marketplace read must not happen at all.
+    """
+
+    def _must_not_run(**kw):  # noqa: ANN003
+        raise AssertionError(f"catalogue read reached with no criteria: {kw}")
+
+    monkeypatch.setattr(discovery, "discover_masters", _must_not_run)
+    result = CompletionResult(
+        text="", tool_calls=[ToolCall(id="t1", name="show_masters", arguments={})]
+    )
+    monkeypatch.setattr(discovery, "get_router", lambda: _Router(_Provider(result)))
+
+    reply = discovery.generate_discovery_reply("покажи мастеров")
+
+    assert reply.text == discovery.NO_CRITERIA_QUESTION
+    assert "Вот мастера" not in reply.text
+    # Not the no-match line either: masters DO exist, we just weren't told
+    # what to look for. Saying "не нашлось" here would be false.
+    assert "не нашлось" not in reply.text
+    assert reply.action_data is None
+
+
+def test_show_masters_blank_criteria_are_no_criteria(monkeypatch) -> None:
+    """Whitespace-only arguments are absent arguments.
+
+    ``_bookable_qs`` deliberately treats a blank ``specialization`` as "no
+    filter supplied" — which is exactly the unfiltered read this guard exists
+    to keep out of a conversational turn.
+    """
+
+    def _must_not_run(**kw):  # noqa: ANN003
+        raise AssertionError(f"catalogue read reached with blank criteria: {kw}")
+
+    monkeypatch.setattr(discovery, "discover_masters", _must_not_run)
+    result = CompletionResult(
+        text="",
+        tool_calls=[
+            ToolCall(
+                id="t1",
+                name="show_masters",
+                arguments={"city": "   ", "specialization": ""},
+            )
+        ],
+    )
+    monkeypatch.setattr(discovery, "get_router", lambda: _Router(_Provider(result)))
+
+    reply = discovery.generate_discovery_reply("покажи мастеров")
+    assert reply.text == discovery.NO_CRITERIA_QUESTION
+
+
+def test_city_alone_is_enough_to_search(monkeypatch) -> None:
+    """The guard fires only on NO criteria — one filter still searches."""
+    monkeypatch.setattr(discovery, "discover_masters", lambda **kw: [_card("Анна")])
+    result = CompletionResult(
+        text="", tool_calls=[ToolCall(id="t1", name="show_masters", arguments={"city": "Пенза"})]
+    )
+    monkeypatch.setattr(discovery, "get_router", lambda: _Router(_Provider(result)))
+
+    reply = discovery.generate_discovery_reply("Пенза")
+    assert "Анна" in reply.text
 
 
 def test_plain_turn_no_tool_call(monkeypatch) -> None:

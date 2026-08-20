@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from apps.llm.protocol import CompletionResult, ToolCall
-from apps.orchestrator import concierge
+from apps.orchestrator import concierge, discovery
 from apps.orchestrator.concierge import (
     GlobalConversationStore,
     _dispatch_tool,
@@ -264,6 +264,50 @@ class TestGenerateConciergeReply:
         assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert buttons[0]["callback"] == "cb:discover:book:t1:m1"
+
+    def test_show_masters_without_criteria_asks_instead_of_listing_catalogue(
+        self, monkeypatch
+    ) -> None:
+        """DRF-1201 — prohibition #22 on the LIVE concierge path.
+
+        A criteria-less ``show_masters`` call must become a clarifying turn,
+        not the whole cross-tenant catalogue in alphabetical order. The
+        marketplace read must not happen at all.
+        """
+        tc = ToolCall(id="c1", name="show_masters", arguments={})
+        provider = AsyncMock()
+        provider.complete.return_value = CompletionResult(text="", tool_calls=[tc])
+        monkeypatch.setattr(concierge, "get_router", lambda: _router_returning(provider))
+
+        def _must_not_run(**kwargs):  # noqa: ANN003
+            raise AssertionError(f"catalogue read reached with no criteria: {kwargs}")
+
+        monkeypatch.setattr(concierge, "discover_masters", _must_not_run)
+        bot_user, conversation = self._bot_user_and_conversation()
+
+        reply = generate_concierge_reply(
+            "покажи мастеров", bot_user=bot_user, conversation=conversation
+        )
+
+        assert reply.text == discovery.NO_CRITERIA_QUESTION
+        assert "Вот мастера" not in reply.text
+        assert reply.action_data is None
+        # Still persisted by the concierge store, like every other turn it owns.
+        assert reply.persisted is True
+
+    def test_direct_show_masters_blank_turn_asks_instead_of_listing_catalogue(
+        self, monkeypatch
+    ) -> None:
+        """Same guard on the deterministic pre-LLM path (DRF-1102 branch)."""
+
+        def _must_not_run(**kwargs):  # noqa: ANN003
+            raise AssertionError(f"catalogue read reached with no criteria: {kwargs}")
+
+        monkeypatch.setattr(concierge, "discover_masters", _must_not_run)
+
+        reply = concierge.generate_direct_show_masters_reply("   ")
+
+        assert reply.text == discovery.NO_CRITERIA_QUESTION
 
     def test_llm_error_falls_back_and_not_persisted(self, monkeypatch) -> None:
         provider = AsyncMock()
