@@ -89,7 +89,20 @@ _START_BUTTON: list[dict[str, str]] = [{"label": "▶️ Начать", "callbac
 # reply_kind values (WelcomeSkill.meta["reply_kind"]) whose TEXT we replace with a
 # marketplace surface. Everything else (S2 consent prompt, S2a details, refusal,
 # ask/food/water prompts) passes through verbatim.
-_WELCOME_KINDS = frozenset({"welcome", "welcome_s1_multitenant"})
+# DRF-1202 added two more greeting states to WelcomeSkill (Returning User /
+# User with an Active Task). Their texts are marketplace-neutral, but the
+# marketplace surface — «подобрать мастера по всей стране» + the single
+# «Начать» button that carries the 152-ФЗ consent flow — is owned here, so
+# they are swapped like the other welcome kinds. Behaviour on this path is
+# therefore unchanged by DRF-1202.
+_WELCOME_KINDS = frozenset(
+    {
+        "welcome",
+        "welcome_s1_multitenant",
+        "welcome_returning",
+        "welcome_active_task",
+    }
+)
 _S5_KIND = "welcome_s5_first_action"
 
 # Source slug stamped on the server consent journal row for the global welcome.
@@ -102,7 +115,51 @@ _CONSENT_SOURCE = "global_onboarding:welcome_s2"
 CONSENT_DOCUMENT_VERSION = "welcome-s2-v1"
 
 
-def needs_onboarding(bot_user: Any, text: str) -> bool:
+# DRF-1207 (второй путь) — сколько строк может держать ТЕКУЩИЙ разговор и
+# всё ещё считаться первым контактом. `_handle_global_max_event_inner`
+# записывает входящее (`record_global_message`) ДО ветвления ответа, ровно
+# как per-tenant handler делает это до диспетчеризации, поэтому у настоящего
+# первого контакта здесь одна строка. Правило то же, что в
+# `apps/skills/welcome/skill.py::_flow_already_established`; продублировано
+# значением, а не импортом приватного имени через границу пакета.
+_FIRST_CONTACT_MESSAGE_ROWS = 1
+
+
+def _conversation_already_under_way(conversation: Any) -> bool:
+    """True когда разговор содержит больше одного сообщения.
+
+    DRF-1207, второй путь. Глобальный путь не проходит через
+    `WelcomeSkill.matches`, а значит и через его guard
+    `_flow_already_established` — он зовёт `handle()` напрямую
+    (`run_onboarding_turn`). Свой guard тут отсутствовал вовсе: признаком
+    первого контакта считался только `welcomed_at IS NULL`.
+
+    Последствие ровно то же, что на основном пути: если первый ход забрала
+    другая ветка (safety, хендоф, карточки визитов, personal booking lookup
+    — или, после DRF-1205, понятное намерение), `welcomed_at` не
+    проставляется, и следующее не-намеренное сообщение получает полное
+    приветствие посреди идущего разговора.
+
+    Best-effort: сбой чтения не должен рушить ход — деградируем к «разговор
+    не начат», то есть к прежнему поведению.
+    """
+    conversation_id = getattr(conversation, "id", None)
+    if conversation_id is None:
+        return False
+    try:
+        from apps.conversations.models import Message
+
+        rows = Message.all_tenants.filter(conversation_id=conversation_id).count()
+    except Exception:  # noqa: BLE001 — guard must never break the turn
+        logger.exception(
+            "global_onboarding.conversation_probe_failed conversation=%s",
+            conversation_id,
+        )
+        return False
+    return rows > _FIRST_CONTACT_MESSAGE_ROWS
+
+
+def needs_onboarding(bot_user: Any, text: str, conversation: Any = None) -> bool:
     """Decide whether this global turn should run onboarding instead of discovery.
 
     True when any of (per #1046):
@@ -110,12 +167,40 @@ def needs_onboarding(bot_user: Any, text: str) -> bool:
     * ``/start`` or ``/start <deeplink_payload>`` — explicit entry / deep link;
     * a ``cb:welcome:*`` callback tap — the user is mid-consent-flow (S2 prompt,
       consent yes/no, details fold);
-    * first contact — the BotUser has ``welcomed_at IS NULL`` (never greeted).
+    * first contact — the BotUser has ``welcomed_at IS NULL`` (never greeted),
+      the message carries no clear actionable intent (DRF-1205), and the
+      conversation is not already under way (DRF-1207, see
+      :func:`_conversation_already_under_way`).
 
     False otherwise — an already-welcomed user's plain message (or a
     ``cb:discover:book:*`` handoff tap) flows straight to discovery. This is what
     makes the gate «soft»: after a greeting (or a consent refusal) the user can
     keep searching without re-entering onboarding.
+
+    ### DRF-1205 — Intent Before Ceremony on the global path
+
+    BOT-001 P1: «If the user's first message contains a clear actionable intent,
+    Ayla MUST progress that intent immediately. Greeting or scripted introduction
+    MUST NOT delay useful action.» §17 spells out the same decision as two rows:
+    step 2 (first message contains clear actionable intent → progress it, skip
+    the scripted greeting) vs step 3 (greeting only → contextual greeting).
+    CDP-02 repeats it verbatim for every capability.
+
+    The per-tenant path satisfies this by accident — the registry walks booking
+    before welcome. This path had no such accident: it looked at ``/start``, two
+    callback prefixes and ``welcomed_at``, never at what the user actually said,
+    so «хочу массаж в Пензе» as a first message was swallowed by the greeting.
+
+    The intent signal is the one this path ALREADY uses for exactly this class of
+    turn — ``looks_like_booking_request`` (DRF-1102, handler branch 2.7). Reusing
+    it keeps one definition of «booking-shaped turn» instead of inventing a
+    second. It is deliberately narrow: an unrecognised first message still gets
+    the greeting, which is the canon-correct outcome for a greeting-driven entry.
+
+    Consent is not lost. Variant A is a soft gate by design (module docstring):
+    consent is enforced by the memory writer, not by this greeting, and a user
+    who opens with an intent still meets the greeting + consent offer on their
+    next non-intent turn.
 
     A ``cb:discover:*`` callback (the booking handoff, #1020) is explicitly NOT
     onboarding even when ``welcomed_at IS NULL`` — a booking tap must reach the
@@ -131,7 +216,17 @@ def needs_onboarding(bot_user: Any, text: str) -> bool:
         return True
     if stripped.startswith("cb:welcome:"):
         return True
-    return getattr(bot_user, "welcomed_at", None) is None
+    if getattr(bot_user, "welcomed_at", None) is not None:
+        return False
+    # DRF-1205 — намерение обходит церемонию (BOT-001 P1 / CDP-02).
+    from apps.skills.menu.matching import looks_like_booking_request
+
+    if looks_like_booking_request(stripped):
+        return False
+    # DRF-1207 (второй путь) — приветствие не просыпается посреди разговора.
+    if conversation is not None and _conversation_already_under_way(conversation):
+        return False
+    return True
 
 
 def run_onboarding_turn(

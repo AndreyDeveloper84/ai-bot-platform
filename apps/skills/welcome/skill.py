@@ -1,10 +1,9 @@
 """Welcome skill — bot entry point with inline-keyboard quick actions.
 
 Replaces the bare-text ``/start`` reply that lived in the echo skill.
-Greets the user and surfaces 7 quick-action buttons spanning both the
+Greets the user and surfaces quick-action buttons spanning both the
 salon flow (booking + visits + profile) AND the Ayla wellness flow
-(food diary + water + anketa + FAQ) — parity with the mysite welcome
-that ran in prod since 2026-04.
+(food diary + water + FAQ).
 
 Salon buttons (3):
   * 📅 Записаться  — bot-native booking entry (``cb:menu:book``, DRF-963;
@@ -13,15 +12,22 @@ Salon buttons (3):
                      DRF-963; was a Mini App visits route)
   * 👤 Профиль     — Mini App profile screen (config-gated)
 
-Ayla wellness buttons (3):
+Ayla wellness buttons (2):
   * 🍽 Дневник еды — prompts the user to send a food photo / description.
                      The food_scanner / food_clarify skill then takes the
                      next turn.
   * 💧 Вода         — prompts for a drink amount; water skill picks up
                      ("стакан", "250 мл") on the next turn.
-  * 📊 Анкета       — payload is ``cb:anketa:start`` so the
-                     nutrition_anketa skill matches directly and starts
-                     the FSM without an intermediate welcome turn.
+
+### DRF-1199 — no «Анкета» button on First Contact
+
+BOT-001 forbids a standalone questionnaire entry point in four independent
+places: §13.3 «a standalone "Анкета" object or button», non-goal #2, AC-5.1,
+and the CDP anti-pattern «Questionnaire as entry price». The button is gone
+from BOTH welcome surfaces (the S1 keyboard and the S5 first-action grid).
+The anketa itself is untouched — ``NutritionAnketaSkill`` still owns
+``/anketa`` and ``cb:anketa:start``; what is removed is its promotion to an
+entry price.
 
 FAQ button (1):
   * ❓ Задать вопрос — pure-text callback prompting the user to ask. The
@@ -80,10 +86,11 @@ privacy consent prompt (Tau's customer-onboarding-flow.md §5):
 ### S3 positioning + S5 first-action grid — task #85 part 3, 2026-05-26
 
 After consent, customer lands на S5 (Tau §8 Variant A: Grid 2×2 +
-anketa pair) — KEY MOMENT, выбор первого experience с Ayla. Six
-buttons: 4 Mini-App primary actions + anketa (bot skill) + «Просто
-посмотреть» exit valve. Combined-bubble S3+S5 preserves «no user
-action between bubbles» intent without multi-message infrastructure.
+exit valve) — KEY MOMENT, выбор первого experience с Ayla. Five
+buttons: 4 Mini-App primary actions + «Просто посмотреть» exit valve
+(DRF-1199 removed the sixth, «Начать анкету»). Combined-bubble S3+S5
+preserves «no user action between bubbles» intent without
+multi-message infrastructure.
 
 ### S1 multi-tenant variant — task #85 part 4, 2026-05-26
 
@@ -118,12 +125,35 @@ from apps.tenancy.context import current_tenant
 logger = logging.getLogger(__name__)
 
 
+# S1 greeting for a New User.
+#
+# DRF-1203 — копия состояние-первая, а не сервис-первая. Было: сначала
+# идентификация бизнеса («Это бот массажного салона …»), потом перечень
+# услуг, состояние человека — третьим предложением после «А ещё», и
+# закрывающее «Выберите раздел:».
+#
+# Канон:
+# * CDP-01 «Goal Before Mechanism» — разговор «never requires the user to
+#   understand Ayla's services, categories, screens or internal structure
+#   in order to make progress»; «Ayla is not a service catalogue with a
+#   chat wrapper».
+# * BOT-001 §8.1 — «The greeting SHOULD introduce Ayla's role briefly»,
+#   «MUST NOT deliver a long feature explanation or guided tour».
+# * BOT-001 §6.1 п.3 — «The greeting SHOULD offer help or invite the user
+#   to state their goal in free text».
+# * CDP §5 анти-паттерн #1 «Navigation before intent» — «Выберите
+#   раздел:» превращало приветствие в меню.
+#
+# Канон задаёт смысл, но не дословный текст (§8.2: «Quick Action copy
+# MUST NOT be canonicalized in this specification»), поэтому формулировка
+# написана по смыслу. Салон назван — но как контекст в конце, а не как
+# заголовок: на пилоте бот действительно принадлежит одному салону, и
+# скрывать это было бы нечестно.
 WELCOME_TEXT = (
     "Здравствуйте! 👋\n\n"
-    "Это бот массажного салона «Формула тела» в Пензе.\n"
-    "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n"
-    "А ещё умею вести дневник еды и воды.\n\n"
-    "Выберите раздел:"
+    "Я Ayla. Скажите своими словами, что сейчас нужно вам — отдохнуть, "
+    "разобраться с самочувствием или записаться к мастеру. Я пойму и помогу.\n\n"
+    "Рядом со мной — массажный салон «Формула тела» в Пензе."
 )
 
 # S1 multi-tenant variant (Tau §4) — rendered when bot_started arrives
@@ -181,14 +211,55 @@ S3_POSITIONING_TEXT = (
     "ближайшая запись, самочувствие. Без оценок."
 )
 
-# S5 prompt (Tau §8 verbatim). KEY MOMENT — customer выбирает первый
-# experience с Ayla. Anketa de-duplicated per Brand Guardian fix
-# (5 шагов framing replaces «Или сначала анкета» double-surfacing).
-S5_PROMPT_TEXT = "С чего хочешь начать? Можно прямо сейчас:"
+# S5 prompt (Tau §8). KEY MOMENT — customer выбирает первый experience
+# с Ayla.
+#
+# DRF-1199: раньше здесь была пара строк — приглашение выбрать кнопку плюс
+# отдельная рамка «Или расскажи о себе — 5 шагов» под кнопку анкеты. Анкета
+# как входная точка запрещена (BOT-001 §13.3, non-goal #2, AC-5.1), рамка
+# ушла вместе с кнопкой. Вместо неё — приглашение сказать своими словами:
+# BOT-001 §6.1 «The greeting SHOULD offer help or invite the user to state
+# their goal in free text», §11 «Free-text input MUST be the primary
+# interaction mode». Текст читается и без клавиатуры — в zero-config
+# конфигурации кнопок на этом экране не остаётся вовсе, и это допустимо:
+# AC-4.1 «Quick Actions are optional».
+S5_PROMPT_TEXT = "С чего хочешь начать? Напиши своими словами, что сейчас нужно, — я пойму."
 
-# S5 follow-up framing for anketa + exit valve (Tau §8). Separator
-# между 4 primary actions и anketa-or-skip choice.
-S5_FOLLOWUP_TEXT = "Или расскажи о себе — 5 шагов, буду точнее советовать:"
+# ── DRF-1202 — ровно три состояния приветствия ─────────────────────────
+#
+# BOT-001 P8: «MVP First Contact MUST use exactly three greeting states:
+# New User, Returning User, User with an Active Task.» AC-3.1 требует,
+# чтобы эти три состояния были проверяемы, AC-3.2 запрещает сегментацию
+# сверх них («No behavioral cohort, RFM, VIP, favorite-service or churn
+# segmentation appears in First Contact»).
+#
+# Нарушение было односторонним: варианта для вернувшегося пользователя
+# не существовало вовсе. `/start` от уже поздоровавшегося человека
+# отдавал ту же копию для новичка, а любой другой его текст навык просто
+# не брал. Реализованным было одно состояние из трёх.
+#
+# Ниже — три состояния как явная, читаемая величина; резолвер один,
+# и добавить четвёртое незаметно уже нельзя.
+GREETING_STATE_NEW = "new_user"
+GREETING_STATE_RETURNING = "returning_user"
+GREETING_STATE_ACTIVE_TASK = "active_task"
+
+# Returning User (BOT-001 §9.1): «The greeting SHOULD acknowledge the
+# return»; «MUST NOT assume or create a new Task automatically». §9.3:
+# «A Returning User MUST be able to start a new intent at any time via
+# free text. The system MUST NOT force continuation of a previous topic
+# that is no longer active.» — поэтому здесь ни намёка на прошлую тему.
+RETURNING_TEXT = "С возвращением! 👋\n\nС чем помочь сегодня? Скажите своими словами — я пойму."
+
+# User with an Active Task (BOT-001 §10.1): «Ayla MAY offer to continue
+# the Active Task»; «MUST NOT force continuation»; «MUST allow the user
+# to start a new intent via free text at any time». Формулировка по
+# смыслу — §18.4 даёт пример поведения, но не канонический текст.
+ACTIVE_TASK_TEXT = (
+    "С возвращением! 👋\n\n"
+    "Мы кое-что не закончили — продолжим? "
+    "Или скажите своими словами, если сейчас нужно другое."
+)
 
 ASK_PROMPT = (
     "Спросите о чём угодно — про услуги, цены, противопоказания, "
@@ -223,11 +294,26 @@ class WelcomeSkill:
             return True
         if text.startswith("cb:welcome:"):
             return True
-        # S1 auto-trigger (task #85). Any text from an unwelcomed BotUser
-        # routes here BEFORE other skills — first impression wins. After
-        # ``handle()`` marks ``welcomed_at``, subsequent matches() calls
-        # return False (this branch), and the normal dispatcher walks
-        # other skills for the user's actual intent.
+        # S1 auto-trigger (task #85). Text from an unwelcomed BotUser
+        # routes here — but NOT before other skills.
+        #
+        # DRF-1205 — фактическая правка комментария. Раньше здесь стояло
+        # «Any text from an unwelcomed BotUser routes here BEFORE other
+        # skills — first impression wins». Это неверно и всегда было
+        # неверно: ``registry.dispatch`` идёт по реестру сверху вниз и
+        # берёт ПЕРВЫЙ сматчившийся навык, а welcome зарегистрирован
+        # четырнадцатым — booking (12) и остальные опрашиваются раньше
+        # (apps/skills/apps.py). Поэтому «хочу записаться на маникюр»
+        # уходит в booking, и welcome об этом ходе даже не спрашивают.
+        #
+        # Это и есть BOT-001 P1 «Intent Before Ceremony» — но соблюдается
+        # он здесь ПОБОЧНО, порядком регистрации, а не выраженным
+        # правилом. Комментарий описывал ровно нарушающее поведение как
+        # действующее; исполнитель, который «починит» код под такой
+        # комментарий, соответствие уничтожит.
+        #
+        # После того как ``handle()`` проставит ``welcomed_at``,
+        # последующие matches() возвращают False (ветка ниже).
         if getattr(context.bot_user, "welcomed_at", None) is None:
             # Regression guard (#85): never hijack a user who is ALREADY
             # inside a flow — a resolved/in-progress human handoff or any
@@ -315,6 +401,10 @@ class WelcomeSkill:
         # don't need to respond to with a message. Re-show the menu so
         # they have a way back if the Mini App rejected the deeplink.
         #
+        # DRF-1202 — состояние приветствия определяется ДО того, как
+        # ``welcomed_at`` будет проставлен: сразу после штампа тот же
+        # пользователь выглядит вернувшимся.
+        greeting_state = _greeting_state(context)
         # S1 idempotency: stamp welcomed_at so subsequent inbound
         # messages bypass the auto-trigger branch in matches().
         bot_user = context.bot_user
@@ -332,11 +422,47 @@ class WelcomeSkill:
                     getattr(bot_user, "id", None),
                     exc,
                 )
+        # DRF-1202 — Returning User (§9) и User with an Active Task (§10).
+        # Оба доступны только через явный жест: `/start` или колбэк
+        # welcome-клавиатуры. Автотриггер по произвольному тексту
+        # по-прежнему только для New User (``welcomed_at IS NULL``) —
+        # расширять его на вернувшихся значило бы ставить церемонию перед
+        # намерением (P1) на каждом ходу.
+        if greeting_state == GREETING_STATE_ACTIVE_TASK:
+            return SkillResult(
+                reply_text=ACTIVE_TASK_TEXT,
+                action_type="welcome_menu",
+                action_data={
+                    "buttons": _welcome_buttons(),
+                    "button_columns": 1,
+                },
+                meta={"reply_kind": "welcome_active_task"},
+            )
+        if greeting_state == GREETING_STATE_RETURNING:
+            return SkillResult(
+                reply_text=RETURNING_TEXT,
+                action_type="welcome_menu",
+                action_data={
+                    "buttons": _welcome_buttons(),
+                    "button_columns": 1,
+                },
+                meta={"reply_kind": "welcome_returning"},
+            )
         # S1 multi-tenant variant detection (Tau §4). Folded deeplink
         # payload sits в text suffix after «/start ». Recognised prefixes
         # = ref_ / qr_ / ig_post_. На match → render multi-tenant text
         # с salon name из current tenant. Unparseable / empty → standard
         # WELCOME_TEXT, no behavior change.
+        #
+        # Это НЕ четвёртое состояние: канон прямо велит учитывать
+        # entry context внутри состояния. P3 — «Greeting behavior MUST
+        # adapt to entry context: user state, channel and available
+        # context»; §5 перечисляет «a deep link or trigger that carries
+        # context» как способ начать First Contact; §17 шаг 1 —
+        # «Determine entry context: channel, user state, trigger/deep
+        # link». Сегментация, запрещённая AC-3.2, — поведенческая
+        # (cohort / RFM / VIP / favorite-service / churn), а не источник
+        # перехода.
         start_param = _extract_start_param(text)
         if start_param and start_param.startswith(_S1_MULTITENANT_PREFIXES):
             salon_name = _resolve_salon_name(bot_user)
@@ -400,14 +526,13 @@ class WelcomeSkill:
         if show_s3:
             body_parts.append(S3_POSITIONING_TEXT)
         body_parts.append(S5_PROMPT_TEXT)
-        body_parts.append(S5_FOLLOWUP_TEXT)
         return SkillResult(
             reply_text="\n\n".join(body_parts),
             action_type="welcome_s5_first_action",
             action_data={
                 "buttons": _s5_first_action_buttons(),
                 # Grid 2×2 per Tau §8 Variant A — primary 4 buttons +
-                # anketa-or-skip pair, всё в 2-col layout.
+                # «Просто посмотреть», всё в 2-col layout.
                 "button_columns": 2,
             },
             meta={
@@ -541,15 +666,18 @@ def _legacy_salon_buttons(web_app: str, miniapp_url: str) -> list[dict[str, str]
 def _wellness_buttons(*, include_help: bool) -> list[dict[str, str]]:
     """Wellness + FAQ row — always callback-typed.
 
-    These trigger a follow-up bot turn rather than a Mini App route. Anketa
-    jumps straight into the nutrition_anketa FSM via its own callback
-    prefix. «❓ Помощь» (DRF-963) lists what the bot can do; «❓ Задать
-    вопрос» stays the FAQ entry — complementary, not duplicates.
+    These trigger a follow-up bot turn rather than a Mini App route.
+    «❓ Помощь» (DRF-963) lists what the bot can do; «❓ Задать вопрос» stays
+    the FAQ entry — complementary, not duplicates.
+
+    DRF-1199: «📊 Анкета» used to sit here and jump straight into the
+    nutrition_anketa FSM. BOT-001 §13.3 forbids a standalone «Анкета» button
+    on First Contact, so it was removed; ``/anketa`` still starts the same
+    flow when the user asks for it.
     """
     buttons = [
         {"label": "🍽 Дневник еды", "callback": "cb:welcome:food"},
         {"label": "💧 Вода", "callback": "cb:welcome:water"},
-        {"label": "📊 Анкета", "callback": "cb:anketa:start"},
         {"label": "❓ Задать вопрос", "callback": "cb:welcome:ask"},
     ]
     if include_help:
@@ -602,25 +730,27 @@ def _s2a_details_buttons() -> list[dict[str, str]]:
 
 
 def _s5_first_action_buttons() -> list[dict[str, str]]:
-    """S5 first-action grid (Tau §8 Variant A — Grid 2×2 + anketa pair).
+    """S5 first-action grid (Tau §8 Variant A — Grid 2×2 + exit valve).
 
-    Six buttons total. Most route к Mini App start_params; anketa
-    triggers `nutrition_anketa` skill в bot DM (S6).
+    Five buttons total, all routed к Mini App start_params. DRF-1199 removed
+    the sixth («📝 Начать анкету») — BOT-001 §13.3 forbids a standalone
+    «Анкета» button on First Contact.
 
     Mini App ladder (mirrors ``_welcome_buttons()``):
       * ``MAX_BOT_WEB_APP`` set → ``open_app`` buttons with flat-slug
         callback payloads (no `=`, `&` — MAX HTTP 400 on those).
       * ``MAX_MINIAPP_URL`` only → ``link`` buttons.
-      * Neither → drop Mini-App-dependent buttons. Anketa still ships
-        (bot skill); «Просто посмотреть» drops too (Dashboard exists
-        only as Mini App). Zero-config mode = 1 button: anketa.
+      * Neither → drop Mini-App-dependent buttons; «Просто посмотреть»
+        drops too (Dashboard exists only as Mini App). Zero-config mode =
+        no buttons at all, only the free-text invitation in
+        :data:`S5_PROMPT_TEXT` — allowed by AC-4.1 («Quick Actions are
+        optional») now that the copy no longer promises a keyboard.
 
     Routing per Tau §8 (resolved Mini App side — DRF-1167 fix):
       * ``open_food_scan`` → /customer/food-scanner/capture
       * ``open_water_add_250`` → /customer/wellness
       * ``open_goal_select`` → /customer/goal-select
       * ``open_catalog`` → /catalog
-      * ``cb:anketa:start`` → S6 bot-DM anketa FSM
       * ``open_home`` → /customer/main
 
     Source of truth for slug→path resolution is the consumer-side
@@ -669,15 +799,15 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
         just_browse = [
             {"label": "Просто посмотреть", "url": _join(miniapp_url, "customer/main")},
         ]
-    # Else: zero-config — only anketa ships (bot skill, no Mini App required).
+    # Else: zero-config — no Mini-App buttons at all.
     # NOTE: Pilot deployment assumes MAX_BOT_WEB_APP IS configured (production-
     # validated MAX stack). Zero-config branch = degraded dev / test mode;
-    # S5 surface shows ~3 paragraphs + single anketa button. Acceptable for
-    # pilot, but если zero-config попадёт в prod это значит config drift —
-    # alert на operator side, не silent UX regression.
+    # S5 surface shows the positioning text plus the free-text invitation and
+    # no keyboard. Acceptable for pilot, но если zero-config попадёт в prod
+    # это значит config drift — alert на operator side, не silent UX
+    # regression.
 
-    anketa = [{"label": "📝 Начать анкету", "callback": "cb:anketa:start"}]
-    return primary_actions + anketa + just_browse
+    return primary_actions + just_browse
 
 
 def _join(base: str, route: str) -> str:
@@ -690,6 +820,41 @@ def _join(base: str, route: str) -> str:
     return f"{base.rstrip('/')}/{route.lstrip('/')}"
 
 
+def _greeting_state(context: SkillContext) -> str:
+    """Which of the three canonical greeting states this turn is in.
+
+    BOT-001 P8 / AC-3.1 — ровно три: New User, Returning User, User with
+    an Active Task. Порядок проверок повторяет §17 (шаги 4–6): сначала
+    «есть ли прошлое взаимодействие», потом «есть ли незавершённая
+    работа».
+
+    * **New User** — §8: «no prior recognized interaction with Ayla in the
+      current pilot context». В коде это ``welcomed_at IS NULL``.
+    * **User with an Active Task** — §10: «an ongoing Task from a previous
+      interaction». §10.3 намеренно оставляет обнаружение рантайму («This
+      specification does not define: Task storage; Task retrieval
+      logic…»), поэтому берём собственную запись рантайма о незавершённой
+      работе — ``Conversation.skill_state``, куда многошаговые навыки
+      (booking-continuation, nutrition_anketa) кладут свой FSM. Это НЕ
+      ``AdminTask``: тот — тикет оператору, вещь другого рода.
+    * **Returning User** — §9: прошлое взаимодействие есть, активной
+      задачи нет.
+    """
+    if getattr(context.bot_user, "welcomed_at", None) is None:
+        return GREETING_STATE_NEW
+    skill_state = getattr(context.conversation, "skill_state", None)
+    if isinstance(skill_state, dict) and any(v for v in skill_state.values()):
+        return GREETING_STATE_ACTIVE_TASK
+    return GREETING_STATE_RETURNING
+
+
+# DRF-1207 — how many rows the CURRENT conversation may hold and still count
+# as first contact. The channel records the inbound text BEFORE dispatch
+# (apps/channels/max/handler.py::record_message), so a genuine first-contact
+# turn sees exactly one row: the message being dispatched right now.
+_FIRST_CONTACT_MESSAGE_ROWS = 1
+
+
 def _flow_already_established(context: SkillContext) -> bool:
     """True when the user already has a live/established flow the
     auto-welcome must not interrupt.
@@ -697,26 +862,70 @@ def _flow_already_established(context: SkillContext) -> bool:
     Two markers, both checked cross-tenant (the global path runs
     tenant-less):
 
-    * messages in any OTHER conversation of this bot_user (the current
-      conversation's rows are excluded — the channel records the inbound
-      text before dispatch, so a first-contact user legitimately has one
-      message in the current conversation at this point);
-    * any AdminTask ever created for this bot_user — a handoff in
-      progress or resolved means the support flow owns the turn.
+    * messages already exchanged with this bot_user — in any other
+      conversation, or in the current one beyond the single inbound row
+      the channel recorded a moment ago (DRF-1207);
+    * any AdminTask ever created for this bot_user — a handoff, open or
+      long since resolved, proves there WAS a prior interaction, so this
+      turn is not a first contact (see the DRF-1206 note below).
+
+    ### DRF-1207 — why the current conversation is no longer skipped wholesale
+
+    The previous guard excluded EVERY row of the current conversation, on the
+    reasoning that a first-contact user legitimately owns one message here.
+    That is true of the first turn only. If turn 1 was claimed by another
+    skill (booking matches «хочу записаться» at registry position 12, welcome
+    sits at 14), ``welcomed_at`` is never stamped — and on turn 2 the guard
+    still saw an "empty" conversation, so the full greeting surfaced in the
+    middle of a live dialogue. From the outside that reads as «бот забыл, что
+    мы уже общаемся» — CDP anti-pattern «Amnesia» and a greeting ceremony
+    delaying an intent already in progress (BOT-001 P1).
+
+    Counting instead of excluding keeps the original intent (turn 1 must still
+    auto-welcome) and closes turn 2+: by then the conversation holds the first
+    inbound, the reply that was sent, and the new inbound.
     """
     from apps.conversations.models import Message
     from apps.handoff.models import AdminTask
 
     current_pk = getattr(context.conversation, "pk", None)
-    other_messages = Message.all_tenants.filter(conversation__bot_user=context.bot_user)
-    # Test contexts may carry a MagicMock conversation — exclude only when
-    # the pk is a real key value.
+    messages = Message.all_tenants.filter(conversation__bot_user=context.bot_user)
+    # Test contexts may carry a MagicMock conversation — split current from
+    # other only when the pk is a real key value. int included for test
+    # contexts with a plain-int pk; the ORM accepts it identically to a
+    # UUID/str at the lookup layer.
     import uuid as _uuid
 
     if isinstance(current_pk, (int, _uuid.UUID)):
-        # int included for test contexts with a plain-int pk; the ORM
-        # accepts it identically to a UUID/str at the lookup layer.
-        other_messages = other_messages.exclude(conversation_id=current_pk)  # type: ignore[misc]
-    if other_messages.exists():
+        if messages.exclude(conversation_id=current_pk).exists():  # type: ignore[misc]
+            return True
+        current_rows = messages.filter(conversation_id=current_pk).count()  # type: ignore[misc]
+        if current_rows > _FIRST_CONTACT_MESSAGE_ROWS:
+            return True
+    elif messages.exists():
         return True
+
+    # DRF-1206 — DELIBERATELY unconditioned by status. Do not "fix" this
+    # into ``status__in=(OPEN, IN_PROGRESS)``; that was tried and reverted.
+    #
+    # The audit (AUDIT_DIALOGUE_MODEL.md §2.6 п.10) reads this line as the
+    # detector for the BOT-001 §10 greeting state «User with an Active Task»
+    # and calls it too wide. It is not that detector. That state is resolved
+    # by :func:`_greeting_state` from ``Conversation.skill_state`` (DRF-1202).
+    # This predicate answers a different question — «is this turn genuinely a
+    # first contact?» — and an AdminTask that ever existed is proof that it is
+    # not: the user already talked to us and to an operator. Under §8 a New
+    # User is someone with «no prior recognized interaction», so declining the
+    # auto-welcome here is what the canon asks for, not a deviation from it.
+    #
+    # Narrowing it to active statuses breaks
+    # ``apps/skills/human_handoff/tests/test_skill.py::TestDispatcherGuard
+    # ::test_resume_after_resolve``: the follow-up after a RESOLVED handoff
+    # comes back as a full new-user greeting instead of resuming — the same
+    # «bot forgot we were talking» failure DRF-1207 exists to remove.
+    #
+    # The canon-level complaint behind DRF-1206 — «приветствие не показывается
+    # такому пользователю никогда» — is real but lives elsewhere, and DRF-1202
+    # closes it: such a user is a Returning User (§9) and now has a greeting of
+    # their own.
     return AdminTask.all_tenants.filter(conversation__bot_user=context.bot_user).exists()

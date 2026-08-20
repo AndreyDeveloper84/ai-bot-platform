@@ -142,7 +142,10 @@ class TestWelcomeBranch:
 
         sent = mock_send[0]["text"]
         assert "Формула тела" in sent
-        assert "Помогу записаться" in sent
+        # DRF-1203 — копия состояние-первая: приглашение сказать своими
+        # словами вместо перечня услуг и «Выберите раздел:».
+        assert "своими словами" in sent
+        assert "Выберите раздел" not in sent
         # Assistant message body matches what we sent.
         assistant_msg = Message.all_tenants.get(role="assistant")
         assert assistant_msg.content == sent
@@ -439,10 +442,11 @@ class TestKeyboardPassThrough:
         att = attachments[0]
         assert att["type"] == "inline_keyboard"
         buttons = att["payload"]["buttons"]
-        # 9 rows (default columns=1): 2 bot-native salon callbacks (DRF-963)
-        # + 1 Mini App profile link + 5 wellness/FAQ/help callbacks
-        # + 1 «▶️ Начать» S1→S2 ack button (task #85).
-        assert len(buttons) == 9
+        # 8 rows (default columns=1): 2 bot-native salon callbacks (DRF-963)
+        # + 1 Mini App profile link + 4 wellness/FAQ/help callbacks
+        # + 1 «▶️ Начать» S1→S2 ack button (task #85). DRF-1199 убрал
+        # «📊 Анкета» — анкета как входная точка запрещена BOT-001 §13.3.
+        assert len(buttons) == 8
         # DRF-963: booking entry is a bot callback, not a Mini App link.
         assert buttons[0][0]["type"] == "callback"
         assert buttons[0][0]["payload"] == "cb:menu:book"

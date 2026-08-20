@@ -143,9 +143,71 @@ class TestNeedsOnboarding:
         u = SimpleNamespace(welcomed_at=object())
         assert needs_onboarding(u, "cb:welcome:consent_yes") is True
 
-    def test_first_contact_welcomed_at_none_true(self):
+    def test_first_contact_greeting_only_true(self):
+        """BOT-001 §17 шаг 3 — «First message is a greeting only» →
+        контекстное приветствие. Это по-прежнему onboarding."""
         u = SimpleNamespace(welcomed_at=None)
-        assert needs_onboarding(u, "хочу массаж") is True
+        assert needs_onboarding(u, "привет") is True
+
+    def test_first_contact_with_actionable_intent_false(self):
+        """DRF-1205 / BOT-001 P1 «Intent Before Ceremony»: «If the user's
+        first message contains a clear actionable intent, Ayla MUST
+        progress that intent immediately. Greeting or scripted
+        introduction MUST NOT delay useful action.»
+
+        §17 шаг 2 говорит то же: «Progress intent immediately … Skip
+        scripted greeting.» До правки этот путь смотрел только на
+        ``/start``, два префикса колбэков и ``welcomed_at`` — содержимое
+        сообщения не исследовалось вовсе."""
+        u = SimpleNamespace(welcomed_at=None)
+        assert needs_onboarding(u, "хочу массаж") is False
+        assert needs_onboarding(u, "маникюр в Пензе") is False
+        assert needs_onboarding(u, "есть окошко на завтра") is False
+
+    def test_first_contact_but_conversation_already_under_way_false(self):
+        """DRF-1207, второй путь. Глобальный путь не проходит через
+        `WelcomeSkill.matches` и его guard — приветствие всплывало посреди
+        разговора, если первый ход забрала другая ветка и `welcomed_at`
+        остался NULL. BOT-001 P1 / CDP анти-паттерн «Amnesia»."""
+        bot_user, conversation = _global_user_and_conv(user_id=91001)
+        from apps.conversations.services import record_global_message
+
+        # Ход 1 достался другой ветке: входящее + ответ бота.
+        record_global_message(conversation, role="user", content="хочу массаж")
+        record_global_message(conversation, role="assistant", content="Вот мастера:")
+        # Ход 2 — новое входящее, записанное до ветвления ответа.
+        record_global_message(conversation, role="user", content="спасибо")
+
+        assert bot_user.welcomed_at is None
+        assert needs_onboarding(bot_user, "спасибо", conversation) is False
+
+    def test_first_contact_single_inbound_row_still_greets(self):
+        """Настоящий первый контакт: канал записал ровно одну строку."""
+        bot_user, conversation = _global_user_and_conv(user_id=91002)
+        from apps.conversations.services import record_global_message
+
+        record_global_message(conversation, role="user", content="привет")
+
+        assert needs_onboarding(bot_user, "привет", conversation) is True
+
+    def test_explicit_start_mid_conversation_still_onboards(self):
+        """`/start` — явный жест, guard его не касается (паритет с
+        основным путём)."""
+        bot_user, conversation = _global_user_and_conv(user_id=91003)
+        from apps.conversations.services import record_global_message
+
+        record_global_message(conversation, role="user", content="хочу массаж")
+        record_global_message(conversation, role="assistant", content="Вот мастера:")
+        record_global_message(conversation, role="user", content="/start")
+
+        assert needs_onboarding(bot_user, "/start", conversation) is True
+
+    def test_first_contact_unrecognised_text_still_greets(self):
+        """Сигнал намерения намеренно узкий: нераспознанное первое
+        сообщение остаётся greeting-driven entry (§6), а не проваливается
+        в discovery."""
+        u = SimpleNamespace(welcomed_at=None)
+        assert needs_onboarding(u, "ыаывпаып") is True
 
     def test_welcomed_plain_message_false(self):
         u = SimpleNamespace(welcomed_at=object())
@@ -276,13 +338,26 @@ class TestHandlerIntegration:
         self, mock_send, fake_redis, spy_discovery
     ):
         max_handler.handle_global_max_event(
-            _msg_payload(text="хочу массаж", mid="m-1"), trace_id=str(uuid.uuid4())
+            _msg_payload(text="привет", mid="m-1"), trace_id=str(uuid.uuid4())
         )
 
         spy_discovery.assert_not_called()
         assert len(mock_send) == 1
         assert mock_send[0]["text"] == GLOBAL_WELCOME_TEXT
         assert current_tenant() is None
+
+    def test_first_message_with_intent_is_progressed_not_greeted(
+        self, mock_send, fake_redis, spy_discovery, spy_direct_show_masters
+    ):
+        """DRF-1205 — церемония не перехватывает первое сообщение с
+        понятным намерением (BOT-001 P1, §17 шаг 2; CDP-02)."""
+        max_handler.handle_global_max_event(
+            _msg_payload(text="хочу массаж", mid="m-1"), trace_id=str(uuid.uuid4())
+        )
+
+        assert len(mock_send) == 1
+        assert mock_send[0]["text"] != GLOBAL_WELCOME_TEXT
+        spy_direct_show_masters.assert_called_once()
 
     def test_full_consent_flow_then_discovery(
         self, mock_send, fake_redis, spy_discovery, spy_direct_show_masters
@@ -381,3 +456,55 @@ class TestHandlerIntegration:
         # Legacy behaviour — no onboarding, discovery runs.
         spy_discovery.assert_called_once()
         assert mock_send[0]["text"] != GLOBAL_WELCOME_TEXT
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1207 (второй путь) — приветствие посреди разговора на глобальном пути    #
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def spy_visits(monkeypatch):
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    spy = MagicMock(return_value=DiscoveryReply(text="Ваши записи: пока пусто."))
+    monkeypatch.setattr(max_handler, "route_visits", spy)
+    return spy
+
+
+class TestGlobalWelcomeDoesNotWakeUpMidConversation:
+    """Глобальный путь зовёт `WelcomeSkill.handle()` напрямую, минуя
+    `matches()` и его guard `_flow_already_established`. Собственного
+    guard'а здесь не было: признаком первого контакта считался только
+    `welcomed_at IS NULL`.
+
+    Аудит этот второй путь не заметил — он локализовал нарушение одним
+    местом в `welcome/skill.py`.
+    """
+
+    def test_second_turn_is_not_greeted(self, mock_send, fake_redis, spy_visits, spy_discovery):
+        """Ход 1 забирает ветка «покажи мои записи» — она стоит ПЕРЕД
+        onboarding, поэтому `welcomed_at` остаётся NULL. Ход 2 не должен
+        получить полное приветствие посреди идущего разговора.
+
+        BOT-001 P1 «Intent Before Ceremony» + CDP §5 «Amnesia».
+        """
+        max_handler.handle_global_max_event(
+            _msg_payload(text="покажи мои записи", user_id=90501, mid="g-1"),
+            trace_id=str(uuid.uuid4()),
+        )
+        assert len(mock_send) == 1
+        assert mock_send[0]["text"] != GLOBAL_WELCOME_TEXT
+
+        max_handler.handle_global_max_event(
+            _msg_payload(text="спасибо", user_id=90501, mid="g-2"),
+            trace_id=str(uuid.uuid4()),
+        )
+        assert len(mock_send) == 2
+        assert mock_send[1]["text"] != GLOBAL_WELCOME_TEXT
+
+    def test_genuine_first_contact_is_still_greeted(self, mock_send, fake_redis, spy_discovery):
+        """Обратная сторона: настоящий первый контакт приветствие получает."""
+        max_handler.handle_global_max_event(
+            _msg_payload(text="привет", user_id=90502, mid="g-3"),
+            trace_id=str(uuid.uuid4()),
+        )
+        assert mock_send[0]["text"] == GLOBAL_WELCOME_TEXT
