@@ -1,10 +1,9 @@
 """Welcome skill — bot entry point with inline-keyboard quick actions.
 
 Replaces the bare-text ``/start`` reply that lived in the echo skill.
-Greets the user and surfaces 7 quick-action buttons spanning both the
+Greets the user and surfaces quick-action buttons spanning both the
 salon flow (booking + visits + profile) AND the Ayla wellness flow
-(food diary + water + anketa + FAQ) — parity with the mysite welcome
-that ran in prod since 2026-04.
+(food diary + water + FAQ).
 
 Salon buttons (3):
   * 📅 Записаться  — bot-native booking entry (``cb:menu:book``, DRF-963;
@@ -13,15 +12,22 @@ Salon buttons (3):
                      DRF-963; was a Mini App visits route)
   * 👤 Профиль     — Mini App profile screen (config-gated)
 
-Ayla wellness buttons (3):
+Ayla wellness buttons (2):
   * 🍽 Дневник еды — prompts the user to send a food photo / description.
                      The food_scanner / food_clarify skill then takes the
                      next turn.
   * 💧 Вода         — prompts for a drink amount; water skill picks up
                      ("стакан", "250 мл") on the next turn.
-  * 📊 Анкета       — payload is ``cb:anketa:start`` so the
-                     nutrition_anketa skill matches directly and starts
-                     the FSM without an intermediate welcome turn.
+
+### DRF-1199 — no «Анкета» button on First Contact
+
+BOT-001 forbids a standalone questionnaire entry point in four independent
+places: §13.3 «a standalone "Анкета" object or button», non-goal #2, AC-5.1,
+and the CDP anti-pattern «Questionnaire as entry price». The button is gone
+from BOTH welcome surfaces (the S1 keyboard and the S5 first-action grid).
+The anketa itself is untouched — ``NutritionAnketaSkill`` still owns
+``/anketa`` and ``cb:anketa:start``; what is removed is its promotion to an
+entry price.
 
 FAQ button (1):
   * ❓ Задать вопрос — pure-text callback prompting the user to ask. The
@@ -80,10 +86,11 @@ privacy consent prompt (Tau's customer-onboarding-flow.md §5):
 ### S3 positioning + S5 first-action grid — task #85 part 3, 2026-05-26
 
 After consent, customer lands на S5 (Tau §8 Variant A: Grid 2×2 +
-anketa pair) — KEY MOMENT, выбор первого experience с Ayla. Six
-buttons: 4 Mini-App primary actions + anketa (bot skill) + «Просто
-посмотреть» exit valve. Combined-bubble S3+S5 preserves «no user
-action between bubbles» intent without multi-message infrastructure.
+exit valve) — KEY MOMENT, выбор первого experience с Ayla. Five
+buttons: 4 Mini-App primary actions + «Просто посмотреть» exit valve
+(DRF-1199 removed the sixth, «Начать анкету»). Combined-bubble S3+S5
+preserves «no user action between bubbles» intent without
+multi-message infrastructure.
 
 ### S1 multi-tenant variant — task #85 part 4, 2026-05-26
 
@@ -181,14 +188,19 @@ S3_POSITIONING_TEXT = (
     "ближайшая запись, самочувствие. Без оценок."
 )
 
-# S5 prompt (Tau §8 verbatim). KEY MOMENT — customer выбирает первый
-# experience с Ayla. Anketa de-duplicated per Brand Guardian fix
-# (5 шагов framing replaces «Или сначала анкета» double-surfacing).
-S5_PROMPT_TEXT = "С чего хочешь начать? Можно прямо сейчас:"
-
-# S5 follow-up framing for anketa + exit valve (Tau §8). Separator
-# между 4 primary actions и anketa-or-skip choice.
-S5_FOLLOWUP_TEXT = "Или расскажи о себе — 5 шагов, буду точнее советовать:"
+# S5 prompt (Tau §8). KEY MOMENT — customer выбирает первый experience
+# с Ayla.
+#
+# DRF-1199: раньше здесь была пара строк — приглашение выбрать кнопку плюс
+# отдельная рамка «Или расскажи о себе — 5 шагов» под кнопку анкеты. Анкета
+# как входная точка запрещена (BOT-001 §13.3, non-goal #2, AC-5.1), рамка
+# ушла вместе с кнопкой. Вместо неё — приглашение сказать своими словами:
+# BOT-001 §6.1 «The greeting SHOULD offer help or invite the user to state
+# their goal in free text», §11 «Free-text input MUST be the primary
+# interaction mode». Текст читается и без клавиатуры — в zero-config
+# конфигурации кнопок на этом экране не остаётся вовсе, и это допустимо:
+# AC-4.1 «Quick Actions are optional».
+S5_PROMPT_TEXT = "С чего хочешь начать? Напиши своими словами, что сейчас нужно, — я пойму."
 
 ASK_PROMPT = (
     "Спросите о чём угодно — про услуги, цены, противопоказания, "
@@ -400,14 +412,13 @@ class WelcomeSkill:
         if show_s3:
             body_parts.append(S3_POSITIONING_TEXT)
         body_parts.append(S5_PROMPT_TEXT)
-        body_parts.append(S5_FOLLOWUP_TEXT)
         return SkillResult(
             reply_text="\n\n".join(body_parts),
             action_type="welcome_s5_first_action",
             action_data={
                 "buttons": _s5_first_action_buttons(),
                 # Grid 2×2 per Tau §8 Variant A — primary 4 buttons +
-                # anketa-or-skip pair, всё в 2-col layout.
+                # «Просто посмотреть», всё в 2-col layout.
                 "button_columns": 2,
             },
             meta={
@@ -541,15 +552,18 @@ def _legacy_salon_buttons(web_app: str, miniapp_url: str) -> list[dict[str, str]
 def _wellness_buttons(*, include_help: bool) -> list[dict[str, str]]:
     """Wellness + FAQ row — always callback-typed.
 
-    These trigger a follow-up bot turn rather than a Mini App route. Anketa
-    jumps straight into the nutrition_anketa FSM via its own callback
-    prefix. «❓ Помощь» (DRF-963) lists what the bot can do; «❓ Задать
-    вопрос» stays the FAQ entry — complementary, not duplicates.
+    These trigger a follow-up bot turn rather than a Mini App route.
+    «❓ Помощь» (DRF-963) lists what the bot can do; «❓ Задать вопрос» stays
+    the FAQ entry — complementary, not duplicates.
+
+    DRF-1199: «📊 Анкета» used to sit here and jump straight into the
+    nutrition_anketa FSM. BOT-001 §13.3 forbids a standalone «Анкета» button
+    on First Contact, so it was removed; ``/anketa`` still starts the same
+    flow when the user asks for it.
     """
     buttons = [
         {"label": "🍽 Дневник еды", "callback": "cb:welcome:food"},
         {"label": "💧 Вода", "callback": "cb:welcome:water"},
-        {"label": "📊 Анкета", "callback": "cb:anketa:start"},
         {"label": "❓ Задать вопрос", "callback": "cb:welcome:ask"},
     ]
     if include_help:
@@ -602,25 +616,27 @@ def _s2a_details_buttons() -> list[dict[str, str]]:
 
 
 def _s5_first_action_buttons() -> list[dict[str, str]]:
-    """S5 first-action grid (Tau §8 Variant A — Grid 2×2 + anketa pair).
+    """S5 first-action grid (Tau §8 Variant A — Grid 2×2 + exit valve).
 
-    Six buttons total. Most route к Mini App start_params; anketa
-    triggers `nutrition_anketa` skill в bot DM (S6).
+    Five buttons total, all routed к Mini App start_params. DRF-1199 removed
+    the sixth («📝 Начать анкету») — BOT-001 §13.3 forbids a standalone
+    «Анкета» button on First Contact.
 
     Mini App ladder (mirrors ``_welcome_buttons()``):
       * ``MAX_BOT_WEB_APP`` set → ``open_app`` buttons with flat-slug
         callback payloads (no `=`, `&` — MAX HTTP 400 on those).
       * ``MAX_MINIAPP_URL`` only → ``link`` buttons.
-      * Neither → drop Mini-App-dependent buttons. Anketa still ships
-        (bot skill); «Просто посмотреть» drops too (Dashboard exists
-        only as Mini App). Zero-config mode = 1 button: anketa.
+      * Neither → drop Mini-App-dependent buttons; «Просто посмотреть»
+        drops too (Dashboard exists only as Mini App). Zero-config mode =
+        no buttons at all, only the free-text invitation in
+        :data:`S5_PROMPT_TEXT` — allowed by AC-4.1 («Quick Actions are
+        optional») now that the copy no longer promises a keyboard.
 
     Routing per Tau §8 (resolved Mini App side — DRF-1167 fix):
       * ``open_food_scan`` → /customer/food-scanner/capture
       * ``open_water_add_250`` → /customer/wellness
       * ``open_goal_select`` → /customer/goal-select
       * ``open_catalog`` → /catalog
-      * ``cb:anketa:start`` → S6 bot-DM anketa FSM
       * ``open_home`` → /customer/main
 
     Source of truth for slug→path resolution is the consumer-side
@@ -669,15 +685,15 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
         just_browse = [
             {"label": "Просто посмотреть", "url": _join(miniapp_url, "customer/main")},
         ]
-    # Else: zero-config — only anketa ships (bot skill, no Mini App required).
+    # Else: zero-config — no Mini-App buttons at all.
     # NOTE: Pilot deployment assumes MAX_BOT_WEB_APP IS configured (production-
     # validated MAX stack). Zero-config branch = degraded dev / test mode;
-    # S5 surface shows ~3 paragraphs + single anketa button. Acceptable for
-    # pilot, but если zero-config попадёт в prod это значит config drift —
-    # alert на operator side, не silent UX regression.
+    # S5 surface shows the positioning text plus the free-text invitation and
+    # no keyboard. Acceptable for pilot, но если zero-config попадёт в prod
+    # это значит config drift — alert на operator side, не silent UX
+    # regression.
 
-    anketa = [{"label": "📝 Начать анкету", "callback": "cb:anketa:start"}]
-    return primary_actions + anketa + just_browse
+    return primary_actions + just_browse
 
 
 def _join(base: str, route: str) -> str:

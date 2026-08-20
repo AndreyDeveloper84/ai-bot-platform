@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 
 from apps.skills.base import SkillContext
 from apps.skills.welcome.skill import (
@@ -68,15 +70,15 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 2 bot-native salon + 5 wellness/FAQ/help + 1 S1 «Начать» = 8.
-        assert len(buttons) == 8
+        # 2 bot-native salon + 4 wellness/FAQ/help + 1 S1 «Начать» = 7.
+        # DRF-1199: «Анкета» больше не выставляется входной точкой.
+        assert len(buttons) == 7
         callbacks = [b["callback"] for b in buttons]
         assert callbacks == [
             "cb:menu:book",
             "cb:menu:my_bookings",
             "cb:welcome:food",
             "cb:welcome:water",
-            "cb:anketa:start",
             "cb:welcome:ask",
             "cb:menu:help",
             "cb:welcome:start_s2",
@@ -89,9 +91,9 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 2 bot-native salon + 1 Mini App profile + 5 wellness/FAQ/help
-        # + 1 S1 «Начать» = 9 total.
-        assert len(buttons) == 9
+        # 2 bot-native salon + 1 Mini App profile + 4 wellness/FAQ/help
+        # + 1 S1 «Начать» = 8 total (DRF-1199 убрал «Анкету»).
+        assert len(buttons) == 8
         # DRF-963: booking actions route into the bot, not the Mini App.
         assert buttons[0]["callback"] == "cb:menu:book"
         assert buttons[1]["callback"] == "cb:menu:my_bookings"
@@ -116,7 +118,7 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 9
+        assert len(buttons) == 8
         assert buttons[2]["url"] == "https://miniapp-dev.example/profile"
 
     def test_web_app_takes_precedence_over_miniapp_url(self, settings):
@@ -139,15 +141,23 @@ class TestHandleStart:
             callbacks = {b.get("callback") for b in buttons}
             assert {"cb:menu:book", "cb:menu:my_bookings", "cb:menu:help"} <= callbacks
 
-    def test_anketa_button_routes_directly_to_anketa_skill(self, settings):
-        """The 📊 Анкета button payload is ``cb:anketa:start`` — that lets
-        the nutrition_anketa skill match it directly and kick off the
-        FSM without an intermediate welcome turn."""
-        settings.MAX_BOT_WEB_APP = ""
-        settings.MAX_MINIAPP_URL = ""
+    @pytest.mark.parametrize(
+        ("web_app", "miniapp_url"),
+        [("", ""), ("id583_bot", ""), ("", "https://m.example/")],
+    )
+    def test_no_anketa_entry_point_on_first_screen(self, settings, web_app, miniapp_url):
+        """DRF-1199 — BOT-001 §13.3: «The following MUST NOT appear in
+        First Contact: a standalone "Анкета" object or button». Тот же
+        запрет в non-goal #2 («No standalone questionnaire»), в AC-5.1
+        и в анти-паттерне CDP «Questionnaire as entry price».
+
+        Проверяем при всех трёх конфигурациях клавиатуры — запрет не
+        зависит от того, настроен ли Mini App."""
+        settings.MAX_BOT_WEB_APP = web_app
+        settings.MAX_MINIAPP_URL = miniapp_url
         buttons = WelcomeSkill().handle(_ctx("/start")).action_data["buttons"]
-        anketa = next(b for b in buttons if b["label"].startswith("📊"))
-        assert anketa["callback"] == "cb:anketa:start"
+        assert all(b.get("callback") != "cb:anketa:start" for b in buttons)
+        assert all("нкет" not in b["label"] for b in buttons)
 
     def test_button_columns_one(self, settings):
         settings.MAX_BOT_WEB_APP = "id583_bot"
@@ -192,15 +202,12 @@ class TestHandleCallback:
 # ───────────────────────────────────────────────────────────────────────
 
 
-import pytest  # noqa: E402
-
 from apps.skills.welcome.skill import (  # noqa: E402
     S1_MULTITENANT_TEXT_TEMPLATE,
     S2_CONSENT_TEXT,
     S2_REFUSED_TEXT,
     S2A_DETAILS_TEXT,
     S3_POSITIONING_TEXT,
-    S5_FOLLOWUP_TEXT,
     S5_PROMPT_TEXT,
 )
 
@@ -502,7 +509,7 @@ class TestS2ConsentFlow:
 
 
 class TestS3S5Flow:
-    """S3 conditional positioning + S5 6-button grid (Tau §6 + §8)."""
+    """S3 conditional positioning + S5 5-button grid (Tau §6 + §8)."""
 
     @pytest.mark.django_db
     def test_direct_consent_path_shows_s3(self, unwelcomed_bot_user):
@@ -515,7 +522,6 @@ class TestS3S5Flow:
         assert result.meta["s3_shown"] is True
         assert result.reply_text.startswith(S3_POSITIONING_TEXT)
         assert S5_PROMPT_TEXT in result.reply_text
-        assert S5_FOLLOWUP_TEXT in result.reply_text
 
     @pytest.mark.django_db
     def test_s2a_path_skips_s3(self, unwelcomed_bot_user):
@@ -529,7 +535,6 @@ class TestS3S5Flow:
         assert result.meta["s3_shown"] is False
         assert S3_POSITIONING_TEXT not in result.reply_text
         assert result.reply_text.startswith(S5_PROMPT_TEXT)
-        assert S5_FOLLOWUP_TEXT in result.reply_text
 
     @pytest.mark.django_db
     def test_s2a_path_also_stamps_consent_at(self, unwelcomed_bot_user):
@@ -567,26 +572,31 @@ class TestS3S5Flow:
         assert unwelcomed_bot_user.consent_at == original_consent_at
 
     @pytest.mark.django_db
-    def test_s5_grid_zero_config_ships_anketa_only(self, unwelcomed_bot_user, settings):
-        """Zero-config (no Mini App): только anketa ship'ится — это
-        единственная кнопка которая работает без Mini App config.
-        «Просто посмотреть» drops (Dashboard = Mini App only)."""
+    def test_s5_grid_zero_config_ships_no_buttons_but_invites_free_text(
+        self, unwelcomed_bot_user, settings
+    ):
+        """DRF-1199 — zero-config: анкета была ЕДИНСТВЕННОЙ кнопкой этого
+        экрана, и она запрещена каноном. Пустого экрана не остаётся:
+        клавиатура опциональна (BOT-001 AC-4.1 «Quick Actions are
+        optional»), а копия приглашает сказать своими словами — §6.1
+        «The greeting SHOULD offer help or invite the user to state their
+        goal in free text»."""
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = ""
         skill = WelcomeSkill()
         result = skill.handle(
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
-        buttons = result.action_data["buttons"]
-        callbacks = [b.get("callback") for b in buttons]
-        assert callbacks == ["cb:anketa:start"]
+        assert result.action_data["buttons"] == []
+        assert "своими словами" in result.reply_text
+        assert S3_POSITIONING_TEXT in result.reply_text
 
     @pytest.mark.django_db
-    def test_s5_grid_web_app_emits_6_open_app_buttons(self, unwelcomed_bot_user, settings):
-        """Mini App configured: 6 кнопок — 4 primary actions
+    def test_s5_grid_web_app_emits_5_open_app_buttons(self, unwelcomed_bot_user, settings):
+        """Mini App configured: 5 кнопок — 4 primary actions
         (open_food_scan / open_water_add_250 / open_goal_select /
-        open_catalog) + anketa (bot skill) + open_home («Просто
-        посмотреть»). Tau §8 routing table."""
+        open_catalog) + open_home («Просто посмотреть»). Tau §8 routing
+        table минус анкета (DRF-1199)."""
         settings.MAX_BOT_WEB_APP = "id583_bot"
         settings.MAX_MINIAPP_URL = ""
         skill = WelcomeSkill()
@@ -594,26 +604,21 @@ class TestS3S5Flow:
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 6
+        assert len(buttons) == 5
         callbacks = [b["callback"] for b in buttons]
         assert callbacks == [
             "open_food_scan",
             "open_water_add_250",
             "open_goal_select",
             "open_catalog",
-            "cb:anketa:start",
             "open_home",
         ]
-        # Mini App buttons carry web_app payload; anketa stays bot-only.
         for btn in buttons:
-            if btn["callback"].startswith("open_"):
-                assert btn["web_app"] == "id583_bot"
-            else:
-                assert "web_app" not in btn
+            assert btn["web_app"] == "id583_bot"
 
     @pytest.mark.django_db
     def test_s5_grid_uses_2_column_layout(self, unwelcomed_bot_user, settings):
-        """Tau §8 Variant A = Grid 2×2 + anketa pair → button_columns=2."""
+        """Tau §8 Variant A = Grid 2×2 + exit valve → button_columns=2."""
         settings.MAX_BOT_WEB_APP = "id583_bot"
         skill = WelcomeSkill()
         result = skill.handle(
@@ -624,8 +629,7 @@ class TestS3S5Flow:
     @pytest.mark.django_db
     def test_s5_grid_miniapp_url_fallback_emits_link_buttons(self, unwelcomed_bot_user, settings):
         """No MAX_BOT_WEB_APP but MAX_MINIAPP_URL set → link buttons
-        for the 4 primary actions + «Просто посмотреть» exit. Anketa
-        callback unaffected."""
+        for the 4 primary actions + «Просто посмотреть» exit."""
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         skill = WelcomeSkill()
@@ -633,8 +637,8 @@ class TestS3S5Flow:
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
         buttons = result.action_data["buttons"]
-        # 4 primary URL + anketa callback + просто посмотреть URL = 6
-        assert len(buttons) == 6
+        # 4 primary URL + просто посмотреть URL = 5 (DRF-1199 убрал анкету)
+        assert len(buttons) == 5
         urls = [b.get("url") for b in buttons if "url" in b]
         # DRF-1167: link fallback points at the same Mini App routes the
         # slugs resolve to in max-sdk.ts::_ROUTE_MAP (previously /food_scan,
