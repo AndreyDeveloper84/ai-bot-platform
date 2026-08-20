@@ -81,22 +81,23 @@ class TestHandleStart:
     def test_zero_config_still_ships_the_booking_entry(self, settings):
         """DRF-963: «Записаться» / «Мои записи» are bot-native, so a
         deployment with no Mini App config is no longer left without any
-        booking entry point. Only «Профиль» (Mini-App-only) drops out."""
+        booking entry point. Only «Профиль» (Mini-App-only) drops out.
+
+        Pinned as a composition, not as a count — the count is the canon
+        BOUNDARY and lives in :class:`TestCanonQuickActionCeilingAC42`.
+        Asserting a bare ``len(buttons) == N`` here is what let the
+        violation survive two rounds of «сократили и поправили число»."""
 
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 2 bot-native salon + 4 wellness/FAQ/help + 1 S1 «Начать» = 7.
-        # DRF-1199: «Анкета» больше не выставляется входной точкой.
-        assert len(buttons) == 7
         callbacks = [b["callback"] for b in buttons]
+        # DRF-1200: дневник еды / вода / «Задать вопрос» ушли с первого
+        # экрана — обычным текстом они по-прежнему доступны.
         assert callbacks == [
             "cb:menu:book",
             "cb:menu:my_bookings",
-            "cb:welcome:food",
-            "cb:welcome:water",
-            "cb:welcome:ask",
             "cb:menu:help",
             "cb:welcome:start_s2",
         ]
@@ -108,20 +109,22 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 2 bot-native salon + 1 Mini App profile + 4 wellness/FAQ/help
-        # + 1 S1 «Начать» = 8 total (DRF-1199 убрал «Анкету»).
-        assert len(buttons) == 8
+        # Composition, not a count — the ceiling is guarded separately in
+        # :class:`TestCanonQuickActionCeilingAC42`.
+        assert [b["callback"] for b in buttons] == [
+            "cb:menu:book",
+            "cb:menu:my_bookings",
+            "open_profile",
+            "cb:menu:help",
+            "cb:welcome:start_s2",
+        ]
         # DRF-963: booking actions route into the bot, not the Mini App.
-        assert buttons[0]["callback"] == "cb:menu:book"
-        assert buttons[1]["callback"] == "cb:menu:my_bookings"
         assert "web_app" not in buttons[0] and "web_app" not in buttons[1]
         # Flat slug payload — MAX rejects open_app payloads with `=`
         # (HTTP 400 proto.payload). Mini App's parseStartRoute resolves
         # these by direct lookup.
-        profile = buttons[2]
-        assert profile["web_app"] == "id583_bot"
-        assert profile["callback"] == "open_profile"
-        # Wellness + FAQ + help + S1 row: never carries web_app.
+        assert buttons[2]["web_app"] == "id583_bot"
+        # Help + S1 rows: never carry web_app.
         for btn in buttons[3:]:
             assert "web_app" not in btn
             assert btn["callback"].startswith("cb:")
@@ -135,7 +138,13 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 8
+        assert [b["label"] for b in buttons] == [
+            "📅 Записаться",
+            "📋 Мои записи",
+            "👤 Профиль",
+            "❓ Помощь",
+            "▶️ Начать",
+        ]
         assert buttons[2]["url"] == "https://miniapp-dev.example/profile"
 
     def test_web_app_takes_precedence_over_miniapp_url(self, settings):
@@ -621,7 +630,8 @@ class TestS3S5Flow:
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 5
+        # Composition, not a bare count — the «not more than five» boundary
+        # is guarded once, in TestCanonQuickActionCeilingAC42 (AC-4.2).
         callbacks = [b["callback"] for b in buttons]
         assert callbacks == [
             "open_food_scan",
@@ -654,9 +664,11 @@ class TestS3S5Flow:
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
         buttons = result.action_data["buttons"]
-        # 4 primary URL + просто посмотреть URL = 5 (DRF-1199 убрал анкету)
-        assert len(buttons) == 5
+        # 4 primary URL + «просто посмотреть» URL (DRF-1199 убрал анкету).
+        # Пинуется составом, не числом — потолок AC-4.2 сторожит
+        # TestCanonQuickActionCeilingAC42.
         urls = [b.get("url") for b in buttons if "url" in b]
+        assert len(urls) == len(buttons)
         # DRF-1167: link fallback points at the same Mini App routes the
         # slugs resolve to in max-sdk.ts::_ROUTE_MAP (previously /food_scan,
         # /goal_select etc. — none of which exist as routes).

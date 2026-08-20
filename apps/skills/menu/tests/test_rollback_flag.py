@@ -64,6 +64,34 @@ class TestWelcomeKeyboardReverts:
         assert callbacks[:3] == ["open_catalog", "open_visits", "open_profile"]
         assert not any(str(c).startswith("cb:menu:") for c in callbacks)
 
+    def test_off_keyboard_is_frozen_at_its_pre_drf963_shape(self, flag_off, settings):
+        """Известное и осознанное исключение из потолка AC-4.2 (DRF-1200).
+
+        DRF-1200 сократил живой первый экран до пяти кнопок, и
+        ``TestCanonQuickActionCeilingAC42`` сторожит эту границу. Ветка
+        отката её НЕ соблюдает: она отдаёт семь кнопок, потому что её
+        работа — вернуть до-DRF-963 клавиатуру буквально, а не «канон
+        минус DRF-963». Откат, который отдаёт третью, свою собственную
+        клавиатуру — не откат.
+
+        Отсюда следует: ``PILOT_CONVERSATIONAL_UX=False`` в проде
+        возвращает и нарушение AC-4.2 тоже. Это аварийный рычаг, а не
+        режим работы; здесь состав заморожен поимённо, чтобы ветка не
+        могла тихо разрастись сверх того, что она обязана восстановить.
+        """
+        settings.MAX_BOT_WEB_APP = "id583_bot"
+        settings.MAX_MINIAPP_URL = ""
+        buttons = WelcomeSkill().handle(_ctx("/start")).action_data["buttons"]
+        assert [b["label"] for b in buttons] == [
+            "📅 Записаться",
+            "📋 Мои визиты",
+            "👤 Профиль",
+            "🍽 Дневник еды",
+            "💧 Вода",
+            "❓ Задать вопрос",
+            "▶️ Начать",
+        ]
+
     def test_off_never_ships_a_dead_menu_button(self, flag_off, settings):
         """With MenuSkill standing down, a cb:menu:* button would do
         nothing — worse than the bug being rolled back."""
