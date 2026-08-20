@@ -110,12 +110,38 @@ def needs_onboarding(bot_user: Any, text: str) -> bool:
     * ``/start`` or ``/start <deeplink_payload>`` — explicit entry / deep link;
     * a ``cb:welcome:*`` callback tap — the user is mid-consent-flow (S2 prompt,
       consent yes/no, details fold);
-    * first contact — the BotUser has ``welcomed_at IS NULL`` (never greeted).
+    * first contact — the BotUser has ``welcomed_at IS NULL`` (never greeted)
+      AND the message carries no clear actionable intent (DRF-1205).
 
     False otherwise — an already-welcomed user's plain message (or a
     ``cb:discover:book:*`` handoff tap) flows straight to discovery. This is what
     makes the gate «soft»: after a greeting (or a consent refusal) the user can
     keep searching without re-entering onboarding.
+
+    ### DRF-1205 — Intent Before Ceremony on the global path
+
+    BOT-001 P1: «If the user's first message contains a clear actionable intent,
+    Ayla MUST progress that intent immediately. Greeting or scripted introduction
+    MUST NOT delay useful action.» §17 spells out the same decision as two rows:
+    step 2 (first message contains clear actionable intent → progress it, skip
+    the scripted greeting) vs step 3 (greeting only → contextual greeting).
+    CDP-02 repeats it verbatim for every capability.
+
+    The per-tenant path satisfies this by accident — the registry walks booking
+    before welcome. This path had no such accident: it looked at ``/start``, two
+    callback prefixes and ``welcomed_at``, never at what the user actually said,
+    so «хочу массаж в Пензе» as a first message was swallowed by the greeting.
+
+    The intent signal is the one this path ALREADY uses for exactly this class of
+    turn — ``looks_like_booking_request`` (DRF-1102, handler branch 2.7). Reusing
+    it keeps one definition of «booking-shaped turn» instead of inventing a
+    second. It is deliberately narrow: an unrecognised first message still gets
+    the greeting, which is the canon-correct outcome for a greeting-driven entry.
+
+    Consent is not lost. Variant A is a soft gate by design (module docstring):
+    consent is enforced by the memory writer, not by this greeting, and a user
+    who opens with an intent still meets the greeting + consent offer on their
+    next non-intent turn.
 
     A ``cb:discover:*`` callback (the booking handoff, #1020) is explicitly NOT
     onboarding even when ``welcomed_at IS NULL`` — a booking tap must reach the
@@ -131,7 +157,12 @@ def needs_onboarding(bot_user: Any, text: str) -> bool:
         return True
     if stripped.startswith("cb:welcome:"):
         return True
-    return getattr(bot_user, "welcomed_at", None) is None
+    if getattr(bot_user, "welcomed_at", None) is not None:
+        return False
+    # DRF-1205 — намерение обходит церемонию (BOT-001 P1 / CDP-02).
+    from apps.skills.menu.matching import looks_like_booking_request
+
+    return not looks_like_booking_request(stripped)
 
 
 def run_onboarding_turn(

@@ -258,11 +258,26 @@ class WelcomeSkill:
             return True
         if text.startswith("cb:welcome:"):
             return True
-        # S1 auto-trigger (task #85). Any text from an unwelcomed BotUser
-        # routes here BEFORE other skills — first impression wins. After
-        # ``handle()`` marks ``welcomed_at``, subsequent matches() calls
-        # return False (this branch), and the normal dispatcher walks
-        # other skills for the user's actual intent.
+        # S1 auto-trigger (task #85). Text from an unwelcomed BotUser
+        # routes here — but NOT before other skills.
+        #
+        # DRF-1205 — фактическая правка комментария. Раньше здесь стояло
+        # «Any text from an unwelcomed BotUser routes here BEFORE other
+        # skills — first impression wins». Это неверно и всегда было
+        # неверно: ``registry.dispatch`` идёт по реестру сверху вниз и
+        # берёт ПЕРВЫЙ сматчившийся навык, а welcome зарегистрирован
+        # четырнадцатым — booking (12) и остальные опрашиваются раньше
+        # (apps/skills/apps.py). Поэтому «хочу записаться на маникюр»
+        # уходит в booking, и welcome об этом ходе даже не спрашивают.
+        #
+        # Это и есть BOT-001 P1 «Intent Before Ceremony» — но соблюдается
+        # он здесь ПОБОЧНО, порядком регистрации, а не выраженным
+        # правилом. Комментарий описывал ровно нарушающее поведение как
+        # действующее; исполнитель, который «починит» код под такой
+        # комментарий, соответствие уничтожит.
+        #
+        # После того как ``handle()`` проставит ``welcomed_at``,
+        # последующие matches() возвращают False (ветка ниже).
         if getattr(context.bot_user, "welcomed_at", None) is None:
             # Regression guard (#85): never hijack a user who is ALREADY
             # inside a flow — a resolved/in-progress human handoff or any

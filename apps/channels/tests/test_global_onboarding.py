@@ -143,9 +143,33 @@ class TestNeedsOnboarding:
         u = SimpleNamespace(welcomed_at=object())
         assert needs_onboarding(u, "cb:welcome:consent_yes") is True
 
-    def test_first_contact_welcomed_at_none_true(self):
+    def test_first_contact_greeting_only_true(self):
+        """BOT-001 §17 шаг 3 — «First message is a greeting only» →
+        контекстное приветствие. Это по-прежнему onboarding."""
         u = SimpleNamespace(welcomed_at=None)
-        assert needs_onboarding(u, "хочу массаж") is True
+        assert needs_onboarding(u, "привет") is True
+
+    def test_first_contact_with_actionable_intent_false(self):
+        """DRF-1205 / BOT-001 P1 «Intent Before Ceremony»: «If the user's
+        first message contains a clear actionable intent, Ayla MUST
+        progress that intent immediately. Greeting or scripted
+        introduction MUST NOT delay useful action.»
+
+        §17 шаг 2 говорит то же: «Progress intent immediately … Skip
+        scripted greeting.» До правки этот путь смотрел только на
+        ``/start``, два префикса колбэков и ``welcomed_at`` — содержимое
+        сообщения не исследовалось вовсе."""
+        u = SimpleNamespace(welcomed_at=None)
+        assert needs_onboarding(u, "хочу массаж") is False
+        assert needs_onboarding(u, "маникюр в Пензе") is False
+        assert needs_onboarding(u, "есть окошко на завтра") is False
+
+    def test_first_contact_unrecognised_text_still_greets(self):
+        """Сигнал намерения намеренно узкий: нераспознанное первое
+        сообщение остаётся greeting-driven entry (§6), а не проваливается
+        в discovery."""
+        u = SimpleNamespace(welcomed_at=None)
+        assert needs_onboarding(u, "ыаывпаып") is True
 
     def test_welcomed_plain_message_false(self):
         u = SimpleNamespace(welcomed_at=object())
@@ -276,13 +300,26 @@ class TestHandlerIntegration:
         self, mock_send, fake_redis, spy_discovery
     ):
         max_handler.handle_global_max_event(
-            _msg_payload(text="хочу массаж", mid="m-1"), trace_id=str(uuid.uuid4())
+            _msg_payload(text="привет", mid="m-1"), trace_id=str(uuid.uuid4())
         )
 
         spy_discovery.assert_not_called()
         assert len(mock_send) == 1
         assert mock_send[0]["text"] == GLOBAL_WELCOME_TEXT
         assert current_tenant() is None
+
+    def test_first_message_with_intent_is_progressed_not_greeted(
+        self, mock_send, fake_redis, spy_discovery, spy_direct_show_masters
+    ):
+        """DRF-1205 — церемония не перехватывает первое сообщение с
+        понятным намерением (BOT-001 P1, §17 шаг 2; CDP-02)."""
+        max_handler.handle_global_max_event(
+            _msg_payload(text="хочу массаж", mid="m-1"), trace_id=str(uuid.uuid4())
+        )
+
+        assert len(mock_send) == 1
+        assert mock_send[0]["text"] != GLOBAL_WELCOME_TEXT
+        spy_direct_show_masters.assert_called_once()
 
     def test_full_consent_flow_then_discovery(
         self, mock_send, fake_redis, spy_discovery, spy_direct_show_masters
