@@ -107,6 +107,15 @@ const _ROUTE_MAP: Record<string, string> = {
   open_catalog: "/catalog",
   open_visits: "/my-visits",
   open_profile: "/me",
+  // S5 first-action grid (welcome skill) — DRF-1167 fix. Each slug mirrors
+  // the payload emitted by apps/skills/welcome/skill.py::_s5_first_action_buttons.
+  open_food_scan: "/customer/food-scanner/capture",
+  open_water_add_250: "/customer/wellness",
+  open_goal_select: "/customer/goal-select",
+  // Home = «Мои записи» (pilot phase 3.2 orchestrator decision, App.tsx
+  // comment at the /customer/main route) — newer than the onboarding spec's
+  // "Dashboard empty state".
+  open_home: "/customer/main",
   // Legacy querystring inner-values — kept for cold-start back-compat.
   catalog: "/catalog",
   visits: "/my-visits",

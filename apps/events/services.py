@@ -58,7 +58,7 @@ def emit(
     distinct_id: str = "",
     dialog_id: uuid.UUID | None = None,
     properties: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
     """Insert an Event row for the current tenant + trace_id.
 
     Args:
@@ -83,6 +83,16 @@ def emit(
       - Logs a warning if ``event_name`` is not in CANONICAL_EVENTS,
         but still inserts the row — telemetry never drops.
       - Swallows all exceptions; logs for Sentry visibility.
+
+    Returns:
+      ``True`` when the Event row was inserted, ``False`` when the
+      insert failed and was swallowed. DRF-1153: callers that need to
+      know whether their telemetry actually landed (e.g. the boot-time
+      subscriber audit, which claims «one event per process») cannot
+      tell from an exception, because there isn't one. The return value
+      is purely additive — every existing call site ignores it and the
+      "never raises" contract above is unchanged. Fanout is attempted
+      either way: destinations may be independently reachable.
     """
 
     tenant = current_tenant()
@@ -111,6 +121,7 @@ def emit(
             trace_id,
         )
 
+    inserted = False
     try:
         Event.objects.create(
             tenant=tenant,
@@ -124,6 +135,7 @@ def emit(
             dialog_id=dialog_id,
             trace_id=trace_id,
         )
+        inserted = True
     except Exception:  # noqa: BLE001 — telemetry must never break the request
         logger.exception(
             "events.emit_failed event=%s tenant=%s trace=%s",
@@ -147,3 +159,5 @@ def emit(
             trace_id=trace_id,
         )
     )
+
+    return inserted

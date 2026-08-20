@@ -615,13 +615,19 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
         (bot skill); «Просто посмотреть» drops too (Dashboard exists
         only as Mini App). Zero-config mode = 1 button: anketa.
 
-    Routing per Tau §8:
-      * ``open_food_scan`` → Food Scanner F1 Capture
-      * ``open_water_add_250`` → Dashboard with +250ml auto-logged
-      * ``open_goal_select`` → Goal selector
-      * ``open_catalog`` → Услуги tab
+    Routing per Tau §8 (resolved Mini App side — DRF-1167 fix):
+      * ``open_food_scan`` → /customer/food-scanner/capture
+      * ``open_water_add_250`` → /customer/wellness
+      * ``open_goal_select`` → /customer/goal-select
+      * ``open_catalog`` → /catalog
       * ``cb:anketa:start`` → S6 bot-DM anketa FSM
-      * ``open_home`` → Dashboard empty state
+      * ``open_home`` → /customer/main
+
+    Source of truth for slug→path resolution is the consumer-side
+    ``_ROUTE_MAP`` in ``apps/miniapp/src/lib/max-sdk.ts`` (CONTRACT MIRROR):
+    adding a button here requires adding the matching route there in the
+    same PR, otherwise the menu ships a dead deeplink. The ``link``
+    fallback below points at the same paths as the resolved slugs.
     """
     web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
     miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
@@ -647,14 +653,21 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
             {"label": "Просто посмотреть", "callback": "open_home", "web_app": web_app},
         ]
     elif miniapp_url:
+        # Link fallback — same targets as the slugs resolved in
+        # apps/miniapp/src/lib/max-sdk.ts::_ROUTE_MAP (DRF-1167 fix:
+        # previously pointed at /food_scan, /goal_select etc., none of
+        # which exist as Mini App routes).
         primary_actions = [
-            {"label": "📸 Сфотографировать еду", "url": _join(miniapp_url, "food_scan")},
-            {"label": "💧 + стакан воды", "url": _join(miniapp_url, "water_add_250")},
-            {"label": "🎯 Выбрать цель", "url": _join(miniapp_url, "goal_select")},
+            {
+                "label": "📸 Сфотографировать еду",
+                "url": _join(miniapp_url, "customer/food-scanner/capture"),
+            },
+            {"label": "💧 + стакан воды", "url": _join(miniapp_url, "customer/wellness")},
+            {"label": "🎯 Выбрать цель", "url": _join(miniapp_url, "customer/goal-select")},
             {"label": "📅 Найти услугу", "url": _join(miniapp_url, "catalog")},
         ]
         just_browse = [
-            {"label": "Просто посмотреть", "url": _join(miniapp_url, "home")},
+            {"label": "Просто посмотреть", "url": _join(miniapp_url, "customer/main")},
         ]
     # Else: zero-config — only anketa ships (bot skill, no Mini App required).
     # NOTE: Pilot deployment assumes MAX_BOT_WEB_APP IS configured (production-

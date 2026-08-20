@@ -14,8 +14,10 @@ from django.urls import path
 from apps.admin_api import (
     views,
     views_availability,
+    views_availability_slots,
     views_day,
     views_invite,
+    views_staff_invite,
     views_master_deactivation,
     views_services_mapping,
 )
@@ -27,6 +29,14 @@ urlpatterns = [
     # the front desk opens most often; ordering is cosmetic here (no
     # wildcard can swallow a literal "day" segment at this level).
     path("day/", views_day.salon_day, name="salon_day"),
+    # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
+    # canonical slots read; see the module docstring for why it refuses
+    # rather than returning an empty list on upstream failure.
+    path(
+        "booking-slots/",
+        views_availability_slots.booking_slots,
+        name="booking_slots",
+    ),
     path("masters/", views.masters_list, name="masters_list"),
     # PR 3 / MM2 — must precede masters/<id>/ so the literal "invite"
     # segment is not consumed as a master_id. Django's path resolver is
@@ -35,6 +45,14 @@ urlpatterns = [
         "masters/invite/",
         views_invite.master_invite_create,
         name="master_invite_create",
+    ),
+    # DRF-1061 block 2.4 — staff access codes (owner/admin/receptionist,
+    # plus linking an EXISTING master). Separate from masters/invite/,
+    # which creates a catalog master rather than granting access.
+    path(
+        "staff/invite/",
+        views_staff_invite.staff_invite_create,
+        name="staff_invite_create",
     ),
     path(
         "masters/<str:master_id>/",

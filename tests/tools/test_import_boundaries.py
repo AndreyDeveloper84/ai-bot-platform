@@ -383,3 +383,533 @@ class TestCatalogCrossTenantRule:
 # (`_parse_contract_and_root` used to reconstruct the baseline key by
 # scraping the violation message. DRF-1157 put the key on `Violation.key`
 # instead — the message is prose for humans, the key is data for tests.)
+
+
+# ── DRF-1130: select_related() under select_for_update() ──────────────
+#
+# The defect this rule replaces was a COMMENT. `apps/skills/booking/
+# tools.py` said, in as many words, "FOOT-GUN: do NOT add
+# .select_related(...) here" — and forty lines above it, in the same
+# file, somebody did. So the tests below are about the two properties a
+# comment does not have: it fires on a site nobody was reading, and it
+# fires on a site somebody moved.
+
+
+def _scan_row_lock(root: Path, baseline: frozenset = _EMPTY) -> list[ib.Violation]:
+    """Scan with ONLY the DRF-1130 rule live."""
+    return ib.scan_paths(
+        [root / "apps"],
+        root,
+        contracts=(),
+        catalog_baseline=_EMPTY,
+        row_lock_baseline=baseline,
+        hash_baseline=_EMPTY,
+    )
+
+
+class TestRowLockJoinRule:
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # the canonical shape, and the shape of both fixed defects
+            'M.all_tenants.select_for_update().select_related("m").get(pk=1)',
+            # order reversed — the SQL is identical, so the rule must be too
+            'M.all_tenants.select_related("m").select_for_update().get(pk=1)',
+            # filters/slicers between the two halves
+            'M.all_tenants.select_for_update().filter(a=1).select_related("m").first()',
+            'M.all_tenants.select_for_update().only("id").select_related("m", "t").get(pk=1)',
+            # select_for_update carrying arguments
+            'M.all_tenants.select_for_update(of=("self",)).select_related("m").get(pk=1)',
+            'M.all_tenants.select_for_update(skip_locked=True).select_related("m").first()',
+            # multi-hop join spec — the case a nullability resolver would
+            # have to chase across two models
+            'M.all_tenants.select_for_update().select_related("m__tenant").get(pk=1)',
+        ],
+    )
+    def test_lock_plus_join_is_flagged(self, tmp_path, expr: str) -> None:
+        _write(tmp_path, "apps/svc/mod.py", f"x = {expr}\n")
+        v = _scan_row_lock(tmp_path)
+        assert len(v) == 1, f"{expr!r} not caught"
+        assert "DRF1130-no-join-under-row-lock" in v[0].message
+
+    def test_multiline_chain_is_flagged(self, tmp_path) -> None:
+        # The real sites are all wrapped like this; the rule must not
+        # depend on the two calls sharing a line.
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            """
+            def approve():
+                req = (
+                    ScheduleChangeRequest.all_tenants.select_for_update()
+                    .select_related("master", "tenant")
+                    .get(id=1)
+                )
+                return req
+            """,
+        )
+        v = _scan_row_lock(tmp_path)
+        assert len(v) == 1
+        assert v[0].key == (
+            "DRF1130-no-join-under-row-lock",
+            "apps/svc/mod.py",
+            "approve",
+            "<select_for_update+select_related>",
+        )
+
+    def test_reported_once_per_chain(self, tmp_path) -> None:
+        # Every enclosing call in the chain sees both method names; the
+        # lock site must still be reported exactly once.
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            'x = M.all_tenants.select_for_update().select_related("m").filter(a=1).first()\n',
+        )
+        assert len(_scan_row_lock(tmp_path)) == 1
+
+    def test_two_chains_in_one_function_report_separately(self, tmp_path) -> None:
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            """
+            def f():
+                a = M.all_tenants.select_for_update().select_related("m").get(pk=1)
+                b = N.all_tenants.select_for_update().select_related("t").get(pk=2)
+                return a, b
+            """,
+        )
+        assert len(_scan_row_lock(tmp_path)) == 2
+
+
+class TestRowLockJoinFalsePositives:
+    """A rule that cries wolf gets baselined into silence. These are the
+    shapes it must stay quiet about."""
+
+    @pytest.mark.parametrize(
+        "src_code",
+        [
+            # lock alone — the whole point of the DRF-1130 fix
+            "x = M.all_tenants.select_for_update().get(pk=1)\n",
+            'x = M.all_tenants.select_for_update(of=("self",)).get(pk=1)\n',
+            # join alone, no lock in sight
+            'x = M.all_tenants.select_related("m").filter(a=1)\n',
+            # prefetch_related issues a SECOND query — no join, so it can
+            # never widen the FOR UPDATE scope
+            'x = M.all_tenants.select_for_update().prefetch_related("items").get(pk=1)\n',
+            # only/defer/annotate near a lock are fine
+            'x = M.all_tenants.select_for_update().only("id").get(pk=1)\n',
+            # two INDEPENDENT chains, one locking, one joining
+            "a = M.all_tenants.select_for_update().get(pk=1)\n"
+            'b = M.all_tenants.select_related("m").all()\n',
+            # a lock and a join on different querysets in one expression
+            "x = (M.all_tenants.select_for_update().get(pk=1), "
+            'N.all_tenants.select_related("m").first())\n',
+        ],
+    )
+    def test_safe_shapes_are_silent(self, tmp_path, src_code: str) -> None:
+        _write(tmp_path, "apps/svc/mod.py", src_code)
+        assert _scan_row_lock(tmp_path) == []
+
+    def test_test_files_are_out_of_scope(self, tmp_path) -> None:
+        # DRF-1130 describes the PRODUCTION boundary: a test that builds
+        # the shape on purpose (to assert Postgres rejects it, say) is not
+        # the target. DRF-1158 is the one rule that crosses into tests.
+        _write(
+            tmp_path,
+            "apps/svc/tests/test_mod.py",
+            'x = M.all_tenants.select_for_update().select_related("m").get(pk=1)\n',
+        )
+        assert _scan_row_lock(tmp_path) == []
+
+    def test_queryset_split_across_statements_is_a_known_blind_spot(self, tmp_path) -> None:
+        # Documented limitation, pinned so a future reader knows it is a
+        # decision and not an oversight: the rule walks ONE call chain.
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            """
+            def f():
+                qs = M.all_tenants.select_for_update()
+                return qs.select_related("m").get(pk=1)
+            """,
+        )
+        assert _scan_row_lock(tmp_path) == []
+
+
+class TestRowLockJoinBaseline:
+    _TWO_SITES = """
+        def approve():
+            return M.all_tenants.select_for_update().select_related("m").get(pk=1)
+
+        def reject():
+            return M.all_tenants.select_for_update().select_related("m").get(pk=2)
+        """
+
+    def _key(self, qualname: str) -> ib.BaselineKey:
+        return (
+            "DRF1130-no-join-under-row-lock",
+            "apps/svc/mod.py",
+            qualname,
+            "<select_for_update+select_related>",
+        )
+
+    def test_baselined_site_passes(self, tmp_path) -> None:
+        _write(tmp_path, "apps/svc/mod.py", self._TWO_SITES)
+        both = frozenset({self._key("approve"), self._key("reject")})
+        assert _scan_row_lock(tmp_path, both) == []
+
+    def test_baselining_one_site_leaves_its_neighbour_red(self, tmp_path) -> None:
+        # Same granularity guarantee as DRF-1157: the two availability.py
+        # sites are separate lines precisely so migrating `approve` cannot
+        # silently keep `reject` green.
+        _write(tmp_path, "apps/svc/mod.py", self._TWO_SITES)
+        v = _scan_row_lock(tmp_path, frozenset({self._key("approve")}))
+        assert len(v) == 1
+        assert v[0].key == self._key("reject")
+
+    def test_stale_entry_reported_when_the_join_is_dropped(self, tmp_path) -> None:
+        # The ratchet: DRF-1130 was fixed by DELETING the select_related,
+        # and the baseline line then has to go too.
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            "def approve():\n    return M.all_tenants.select_for_update().get(pk=1)\n",
+        )
+        v = _scan_row_lock(tmp_path, frozenset({self._key("approve")}))
+        assert len(v) == 1
+        assert "STALE BASELINE" in v[0].message
+
+
+# ── DRF-1158: builtin hash() into a stored value ──────────────────────
+
+
+def _scan_hash(root: Path, baseline: frozenset = _EMPTY) -> list[ib.Violation]:
+    """Scan with ONLY the DRF-1158 rule live."""
+    return ib.scan_paths(
+        [root / "apps"],
+        root,
+        contracts=(),
+        catalog_baseline=_EMPTY,
+        row_lock_baseline=_EMPTY,
+        hash_baseline=baseline,
+    )
+
+
+class TestHashSinkRule:
+    @pytest.mark.parametrize(
+        "src_code",
+        [
+            # the literal DRF-1158 shape: 32-bit mask into an IntegerField
+            "M.all_tenants.create(external_id=hash(str(slug)) & 0xFFFFFFFF)\n",
+            # arithmetic around it changes nothing
+            "M.objects.create(external_id=abs(hash(slug)) % 10_000_000)\n",
+            "M.objects.create(external_id=100 + hash(k) % 1000)\n",
+            # laundered through an f-string
+            'M.objects.create(channel_user_id=f"imp-{hash(text) & 0xFFFF:x}")\n',
+            # an idempotency key — the sink the brief calls out by name
+            'consume(event_id=f"01J9{hash(payload) % 10**12:012d}ZZ")\n',
+            # attribute assignment onto a model instance
+            "obj.external_id = hash(slug) & 0xFFFFFFFF\n",
+            "obj.external_id: int = hash(slug)\n",
+            "obj.counter += hash(slug)\n",
+            # a string-keyed dict entry: payloads and idempotency keys
+            'payload = {"event_id": hash(x)}\n',
+            # nested one level down in a fixture helper's kwargs
+            "row = _legacy_row(tenant, external_id=abs(hash(slug)) % 1000)\n",
+        ],
+    )
+    def test_hash_into_sink_is_flagged(self, tmp_path, src_code: str) -> None:
+        _write(tmp_path, "apps/svc/mod.py", src_code)
+        v = _scan_hash(tmp_path)
+        assert len(v) == 1, f"{src_code!r} not caught"
+        assert "DRF1158-no-builtin-hash-into-stored-value" in v[0].message
+
+    def test_names_the_sink_in_the_message(self, tmp_path) -> None:
+        _write(tmp_path, "apps/svc/mod.py", "M.objects.create(external_id=hash(x))\n")
+        assert "`external_id=`" in _scan_hash(tmp_path)[0].message
+
+    def test_fires_inside_test_files(self, tmp_path) -> None:
+        """THE regression for DRF-1158: the defect lived in a fixture.
+
+        Every other rule in this module stops at the production boundary.
+        If this one did too, the flaky-on-Postgres, green-on-SQLite test
+        that started the ticket would never have been caught."""
+        _write(
+            tmp_path,
+            "apps/svc/tests/test_mod.py",
+            "def _row():\n    return M.objects.create(external_id=hash('x') & 0xFFFFFFFF)\n",
+        )
+        v = _scan_hash(tmp_path)
+        assert len(v) == 1
+        assert v[0].key == (
+            "DRF1158-no-builtin-hash-into-stored-value",
+            "apps/svc/tests/test_mod.py",
+            "_row",
+            "<hash()-into-stored-value>",
+        )
+
+    def test_conftest_is_scanned_too(self, tmp_path) -> None:
+        _write(tmp_path, "apps/svc/conftest.py", "M.objects.create(external_id=hash('x'))\n")
+        assert len(_scan_hash(tmp_path)) == 1
+
+    def test_reported_once_per_hash_call(self, tmp_path) -> None:
+        # The call sits inside a dict inside a keyword argument: three
+        # nested sinks, one defect.
+        _write(tmp_path, "apps/svc/mod.py", 'M.objects.create(raw={"k": hash(x)})\n')
+        assert len(_scan_hash(tmp_path)) == 1
+
+    def test_two_hash_calls_in_one_sink_are_both_reported(self, tmp_path) -> None:
+        _write(tmp_path, "apps/svc/mod.py", "M.objects.create(a=hash(x), b=hash(y))\n")
+        assert len(_scan_hash(tmp_path)) == 2
+
+
+class TestHashSinkFalsePositives:
+    @pytest.mark.parametrize(
+        "src_code",
+        [
+            # a bare local that never reaches a sink — out of scope by
+            # design, not by accident (documented limitation)
+            "v = hash(x)\n",
+            "if hash(a) == hash(b):\n    pass\n",
+            # a digest is the prescribed fix — it must not trip the rule
+            "M.objects.create(external_id=int.from_bytes("
+            'hashlib.sha256(s.encode()).digest()[:4], "big"))\n',
+            # a method or module-level function that happens to be named
+            # `hash` is not the builtin
+            "M.objects.create(external_id=self.hash(x))\n",
+            "M.objects.create(external_id=hashlib.md5(x).hexdigest())\n",
+            # **kwargs spread carries no field name
+            "M.objects.create(**extra)\n",
+            # a non-string dict key is not a payload field
+            "payload = {0: hash(x)}\n",
+        ],
+    )
+    def test_safe_shapes_are_silent(self, tmp_path, src_code: str) -> None:
+        _write(tmp_path, "apps/svc/mod.py", src_code)
+        assert _scan_hash(tmp_path) == []
+
+    def test_dunder_hash_body_is_allowed(self, tmp_path) -> None:
+        # `def __hash__` is the one place the builtin is the right answer:
+        # the value never outlives the dict that asked for it.
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            """
+            class Key:
+                def __hash__(self):
+                    return hash(self._parts)
+            """,
+        )
+        assert _scan_hash(tmp_path) == []
+
+    def test_dunder_hash_delegating_through_a_call_is_allowed(self, tmp_path) -> None:
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            """
+            class Key:
+                def __hash__(self):
+                    return combine(left=hash(self.a), right=hash(self.b))
+            """,
+        )
+        assert _scan_hash(tmp_path) == []
+
+    def test_lambda_sort_key_is_allowed(self, tmp_path) -> None:
+        # An in-process sort key never leaves the process, so per-process
+        # randomisation is harmless — and `key=` is a keyword argument,
+        # so this is the false positive the lambda carve-out exists for.
+        _write(tmp_path, "apps/svc/mod.py", "rows = sorted(xs, key=lambda v: hash(v))\n")
+        assert _scan_hash(tmp_path) == []
+
+    def test_migrations_are_never_scanned(self, tmp_path) -> None:
+        _write(
+            tmp_path,
+            "apps/svc/migrations/0001_init.py",
+            "M.objects.create(external_id=hash('x'))\n",
+        )
+        assert _scan_hash(tmp_path) == []
+
+
+class TestHashSinkBaseline:
+    _TWO_SITES = """
+        def accepted():
+            return M.objects.create(external_id=hash("a"))
+
+        def fresh():
+            return M.objects.create(external_id=hash("b"))
+        """
+
+    def _key(self, qualname: str) -> ib.BaselineKey:
+        return (
+            "DRF1158-no-builtin-hash-into-stored-value",
+            "apps/svc/mod.py",
+            qualname,
+            "<hash()-into-stored-value>",
+        )
+
+    def test_baselined_site_passes(self, tmp_path) -> None:
+        _write(tmp_path, "apps/svc/mod.py", self._TWO_SITES)
+        both = frozenset({self._key("accepted"), self._key("fresh")})
+        assert _scan_hash(tmp_path, both) == []
+
+    def test_baselining_one_site_leaves_its_neighbour_red(self, tmp_path) -> None:
+        _write(tmp_path, "apps/svc/mod.py", self._TWO_SITES)
+        v = _scan_hash(tmp_path, frozenset({self._key("accepted")}))
+        assert len(v) == 1
+        assert v[0].key == self._key("fresh")
+
+    def test_stale_entry_reported_when_the_hash_is_replaced(self, tmp_path) -> None:
+        _write(
+            tmp_path,
+            "apps/svc/mod.py",
+            "def accepted():\n    return M.objects.create(external_id=_stable_id('a'))\n",
+        )
+        v = _scan_hash(tmp_path, frozenset({self._key("accepted")}))
+        assert len(v) == 1
+        assert "STALE BASELINE" in v[0].message
+
+
+# ── DRF-1159: the baseline has to say what it means ───────────────────
+#
+# `apps/miniapp_api/views.py::_collect_occupied` is baselined under G9
+# and is NOT a defect — the BOOKING_VIA_AYLA_REST gate lives in its
+# caller, one frame above anything an AST guard reading a single
+# function can see. Both an architecture review and the main working
+# window read that line as a live bug. Twice is a pattern, and the
+# pattern was: the entry carried a key and no verdict, with the
+# explanation in prose above a sixty-line frozenset.
+#
+# So the verdict is now a required, closed-vocabulary annotation next to
+# the key — and these are the tests that keep it required.
+
+
+class TestBaselineAnnotations:
+    def test_every_verdict_rule_is_note_required(self) -> None:
+        # Derived from the registries, not hand-listed: a rule that bans
+        # a construct it cannot fully judge must opt IN to annotation.
+        assert ib.NOTE_REQUIRED_CONTRACT_IDS == {
+            "G9-booking-request-outside-owner",
+            "DRF1130-no-join-under-row-lock",
+            "DRF1158-no-builtin-hash-into-stored-value",
+        }
+
+    def test_every_required_entry_carries_a_note(self) -> None:
+        need = {k for k in ib.ALL_BASELINES if k[0] in ib.NOTE_REQUIRED_CONTRACT_IDS}
+        missing = need - set(ib.BASELINE_NOTES)
+        assert not missing, (
+            "baseline entries with no verdict — add a BaselineNote (see "
+            "'Reading a BASELINE entry' in tools/lint/import_boundaries.py):\n"
+            + "\n".join(str(k) for k in sorted(missing))
+        )
+
+    def test_no_orphan_notes(self) -> None:
+        # A note whose entry is gone is the same lie as a stale baseline
+        # line: it describes code that no longer exists.
+        orphans = set(ib.BASELINE_NOTES) - set(ib.ALL_BASELINES)
+        assert not orphans, "\n".join(str(k) for k in sorted(orphans))
+
+    def test_statuses_come_from_the_closed_vocabulary(self) -> None:
+        bad = {
+            k: n.status
+            for k, n in ib.BASELINE_NOTES.items()
+            if n.status not in ib.BASELINE_STATUSES
+        }
+        assert not bad, bad
+
+    def test_notes_actually_say_something(self) -> None:
+        thin = {k for k, n in ib.BASELINE_NOTES.items() if len(n.text) < 40}
+        assert not thin, f"a verdict of fewer than 40 chars explains nothing: {thin}"
+
+    def test_the_collect_occupied_entry_is_not_readable_as_a_defect(self) -> None:
+        """THE regression for DRF-1159.
+
+        Whoever reads this entry next must be told, at the entry, that
+        the gate is in the caller and where to look."""
+        key = (
+            "G9-booking-request-outside-owner",
+            "apps/miniapp_api/views.py",
+            "_collect_occupied",
+            "apps.booking.models.BookingRequest",
+        )
+        note = ib.BASELINE_NOTES[key]
+        assert note.status == "PROVEN-ELSEWHERE"
+        assert "slots" in note.text, "the note must name the frame that holds the gate"
+        assert "CALLER" in note.text.upper()
+
+    def test_the_known_live_defect_is_labelled_as_one(self) -> None:
+        key = (
+            "G9-booking-request-outside-owner",
+            "apps/bookings/tasks.py",
+            "detect_completed_bookings",
+            "apps.booking.models.BookingRequest",
+        )
+        assert ib.BASELINE_NOTES[key].status == "LIVE-DEFECT"
+
+    def test_g9_contract_message_states_the_one_frame_limit(self) -> None:
+        # The limitation belongs in the contract too, not only in the
+        # entries: a NEW crossing gets the contract message, never the
+        # notes of somebody else's entry.
+        g9 = next(c for c in ib.CONTRACTS if c.id == "G9-booking-request-outside-owner")
+        assert g9.triage_note_required is True
+        assert "ONE FRAME" in g9.message.upper()
+        assert "CALLING" in g9.message.upper()
+
+    def test_stale_message_carries_the_verdict(self, tmp_path) -> None:
+        # When the ratchet demands a line be deleted, the person deleting
+        # it is told what the line claimed.
+        _write(tmp_path, "apps/svc/mod.py", "x = 1\n")
+        key = ("DRF1130-no-join-under-row-lock", "apps/svc/mod.py", "f", "<x>")
+        notes_backup = dict(ib.BASELINE_NOTES)
+        ib.BASELINE_NOTES[key] = ib.BaselineNote("PROVEN-ELSEWHERE", "the FK is NOT NULL")
+        try:
+            v = _scan_row_lock(tmp_path, frozenset({key}))
+        finally:
+            ib.BASELINE_NOTES.clear()
+            ib.BASELINE_NOTES.update(notes_backup)
+        assert len(v) == 1
+        assert "STALE BASELINE" in v[0].message
+        assert "PROVEN-ELSEWHERE" in v[0].message
+        assert "the FK is NOT NULL" in v[0].message
+
+    def test_baseline_report_leads_with_the_live_defects(self) -> None:
+        report = ib.baseline_report()
+        assert report[0].startswith("LIVE-DEFECT")
+        statuses = [line.split(" (")[0] for line in report if line and not line.startswith(" ")]
+        assert statuses[:2] == ["LIVE-DEFECT", "UNTRIAGED"]
+        joined = "\n".join(report)
+        assert "apps/bookings/tasks.py" in joined
+
+
+# ── Integration: the two new rules against the real repo ──────────────
+
+
+class TestNewRulesAgainstRealRepo:
+    def test_row_lock_baseline_matches_reality(self) -> None:
+        found = ib.scan_paths(
+            [_PROJECT_ROOT / "apps"], _PROJECT_ROOT, row_lock_baseline=frozenset()
+        )
+        observed = {
+            v.key for v in found if v.key is not None and v.key[0] == ib.ROW_LOCK_JOIN_RULE.id
+        }
+        assert observed == set(ib.ROW_LOCK_JOIN_BASELINE)
+
+    def test_hash_baseline_matches_reality(self) -> None:
+        found = ib.scan_paths([_PROJECT_ROOT / "apps"], _PROJECT_ROOT, hash_baseline=frozenset())
+        observed = {v.key for v in found if v.key is not None and v.key[0] == ib.HASH_SINK_RULE.id}
+        assert observed == set(ib.HASH_SINK_BASELINE)
+
+    def test_the_two_fixed_drf1130_sites_left_no_baseline_line(self) -> None:
+        """586317b fixed reschedule.py and tools.py by deleting the join.
+
+        A fixed site leaves nothing behind — that is the difference
+        between this rule and the comment it replaces."""
+        files = {k[1] for k in ib.ROW_LOCK_JOIN_BASELINE}
+        assert "apps/booking/services/reschedule.py" not in files
+        assert "apps/skills/booking/tools.py" not in files
+
+    def test_hash_rule_reaches_test_files_in_the_real_tree(self) -> None:
+        # Not a tautology over the baseline: it pins the SCOPE decision.
+        # Every accepted hash site is a fixture, which is the whole reason
+        # this rule crosses the production boundary.
+        assert ib.HASH_SINK_BASELINE
+        assert all(ib._is_test_file(k[1]) for k in ib.HASH_SINK_BASELINE)

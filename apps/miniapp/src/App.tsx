@@ -60,6 +60,7 @@ import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatLi
 import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChatThreadScreen";
 import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
+import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
@@ -79,6 +80,7 @@ import { CustomerCardsScreen } from "./screens/CustomerCardsScreen";
 import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
 import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
+import { GoalSelectScreen } from "./screens/GoalSelectScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { FoodScannerCaptureScreen } from "./screens/FoodScannerCaptureScreen";
 import { FoodScannerDiaryScreen } from "./screens/FoodScannerDiaryScreen";
@@ -181,6 +183,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
     <>
       {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
       <Route path="/admin/day" element={<AdminSalonDayScreen />} />
+      <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
       <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
       <Route
         path="/admin/team/invite"
@@ -1012,6 +1015,17 @@ function CustomerRoutes() {
           (stub surface, gated) moves to /customer/wellness until
           S4/post-pilot. */}
       <Route path="/customer/main" element={<CustomerRecordsScreen />} />
+      {/*
+        DRF-1190 — the goal surface. Registered by the main window at the
+        conversation window's request: the screen is theirs, App.tsx is
+        not, and shipping the screen without a route would land an
+        unreachable surface — "looks done, does nothing".
+
+        The welcome skill's `open_goal_select` slug resolves here
+        (_ROUTE_MAP in lib/max-sdk.ts), so this path is a contract with
+        the bot, not just an internal link.
+      */}
+      <Route path="/customer/goal-select" element={<GoalSelectScreen />} />
       <Route
         path="/customer/wellness"
         element={<CustomerWellnessDashboardScreen />}

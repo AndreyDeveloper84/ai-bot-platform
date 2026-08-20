@@ -192,6 +192,117 @@ export const getSalonDay = (
   });
 };
 
+// --- salon customers (UX contract §13) -----------------------------------
+
+/**
+ * A customer as the salon may see them while booking.
+ *
+ * Name and masked phone, and nothing else. §13: the search «exposes only
+ * fields needed to disambiguate a customer» and «must not surface
+ * unrelated customers, hidden memory, medical inference, or full
+ * history». The raw phone is deliberately absent — on the Ayla side the
+ * lookup takes a phone as input and never returns one.
+ */
+export interface SalonCustomer {
+  id: string;
+  name: string;
+  phone_masked: string;
+}
+
+/**
+ * The search capability is not reachable at all.
+ *
+ * Distinct from «found nothing» on purpose, and the distinction is the
+ * whole point: §13 says «A failed search is not proof that the customer
+ * does not exist». A surface that renders an unreachable search as «нет
+ * такого клиента» invites the receptionist to create a duplicate of
+ * somebody who is already there.
+ */
+export class CustomerSearchUnavailable extends Error {
+  constructor(message = "customer search is not available") {
+    super(message);
+    this.name = "CustomerSearchUnavailable";
+  }
+}
+
+/**
+ * Search the salon's customers by name or phone.
+ *
+ * NOT WIRED YET — the canonical `customers/` contract is still being
+ * settled, and guessing its shape is how a client ends up decoding a
+ * payload nobody promised. Until then this throws
+ * {@link CustomerSearchUnavailable}, which the UI renders as «поиск
+ * недоступен» rather than as an empty result.
+ *
+ * When the contract lands, only this function body changes; every state
+ * the screen can show is already built and tested against it.
+ */
+export const searchSalonCustomers = async (
+  _query: string,
+  _init: { signal?: AbortSignal } = {},
+): Promise<SalonCustomer[]> => {
+  throw new CustomerSearchUnavailable();
+};
+
+// --- /api/v1/admin/booking-slots/ ----------------------------------------
+
+/** One bookable start, as the canonical schedule returned it. */
+export interface BookingSlot {
+  /** `HH:MM` in the salon's timezone — always present. */
+  time: string;
+  /**
+   * Full ISO timestamp when the schedule sent one, otherwise null.
+   *
+   * Deliberately not reconstructed from `time` on either side: picking a
+   * timezone to fill this in would be the client computing an
+   * authoritative slot, which UX contract §17 rules out.
+   */
+  start_at: string | null;
+  duration_min: number | null;
+}
+
+export interface BookingSlotsResponse {
+  date: string;
+  /**
+   * IANA zone the times are in — the salon's, not the device's.
+   *
+   * §18 requires the review to state the timezone, and the server is the
+   * only party that knows it: a receptionist on holiday still books into
+   * the salon's day.
+   */
+  timezone: string;
+  master_id: string;
+  service_id: string;
+  duration_min: number | null;
+  slots: BookingSlot[];
+}
+
+/**
+ * GET /api/v1/admin/booking-slots/ — bookable starts for one master,
+ * one service, one day.
+ *
+ * All three arguments are required: a slot list that does not know the
+ * service is a list of times that mean nothing (§12).
+ *
+ * The endpoint answers 503 / 502 when the schedule is unreachable rather
+ * than an empty list, so callers must treat a thrown ApiError as «could
+ * not ask» and NEVER as «no free time» (§16).
+ */
+export const getBookingSlots = (
+  params: { masterId: string; serviceId: string; date: string },
+  init: { signal?: AbortSignal } = {},
+): Promise<BookingSlotsResponse> => {
+  const q = new URLSearchParams({
+    master_id: params.masterId,
+    service_id: params.serviceId,
+    date: params.date,
+  });
+  return request<BookingSlotsResponse>(`/api/v1/admin/booking-slots/?${q.toString()}`, {
+    method: "GET",
+    signal: init.signal,
+  });
+};
+
 // --- /api/v1/admin/masters/ ----------------------------------------------
 
 export interface MasterListItem {

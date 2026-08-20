@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { AdminTabBar } from "../../components/AdminTabBar";
 import { StateError } from "../../components/StateError";
@@ -110,6 +111,7 @@ function VisitRow({ visit, timeZone }: { visit: SalonDayVisit; timeZone: string 
 }
 
 export function AdminSalonDayScreen() {
+  const navigate = useNavigate();
   const today = useMemo(() => toIsoDate(new Date()), []);
   const [date, setDate] = useState<string>(today);
   const [day, setDay] = useState<SalonDayResponse | null>(null);
@@ -150,8 +152,21 @@ export function AdminSalonDayScreen() {
 
   return (
     <div className="screen admin-flow-screen">
-      <header className="screen__header">
+      <header
+        className="screen__header"
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
+      >
         <h1 className="screen__title">День салона</h1>
+        {/* UX contract §12 — manual booking opens «from Schedule or an
+            allowed free interval». The day carries the date forward so
+            the picker starts where the receptionist was looking. */}
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => navigate(`/admin/booking/new?date=${date}`)}
+        >
+          Записать
+        </button>
       </header>
 
       <div

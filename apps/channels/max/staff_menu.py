@@ -54,6 +54,11 @@ CB_DAY = "cb:staff:day"
 CB_REQUESTS = "cb:staff:requests"
 CB_OPEN_APP = "cb:staff:open_app"
 
+#: Approving one request. The request id rides in the 4th segment;
+#: `parse_callback` splits on the first three colons only, so a UUID
+#: survives intact.
+CB_APPROVE_PREFIX = "cb:staff:req_ok:"
+
 #: Flat slug for the open_app payload. MAX rejects `=`, `&` and `?` there
 #: (HTTP 400 proto.payload); colons are legal and already used elsewhere.
 OPEN_APP_PAYLOAD = "cb:staff:open_app"

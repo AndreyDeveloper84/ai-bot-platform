@@ -628,13 +628,53 @@ class TestStateRecheckBeforeSend:
         tenant: Tenant,
         bot_user: BotUser,
     ) -> None:
-        # NULL FK = legacy row OR Ayla-path (no BookingRequest mirror
-        # yet). The helper returns SEND with reason
-        # "null_fk_legacy_or_ayla_path" — documented Phase 0 gap.
-        # Behaviour pinned so a future tightening of this branch is
-        # an intentional change, not a regression.
+        # NULL FK on a legacy YClients row: the record id is not an Ayla
+        # appointment UUID, so there is no mirror to re-check against and the
+        # classifier returns SEND ("null_fk_legacy_yclients_path"). Rows that
+        # DO carry an Ayla appointment identity are classified against
+        # RemoteBookingProxy since DRF-1144 — pinned just below.
         _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=None)
         with patch("apps.bookings.escalation.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert mock_send.call_count == 1
         assert result["escalated"] == 1
+
+    def test_cancelled_ayla_mirror_is_not_escalated(
+        self,
+        tenant: Tenant,
+        bot_user: BotUser,
+    ) -> None:
+        """DRF-1144: escalation shares the send-time classifier.
+
+        Phoning the manager about a booking the mirror says was cancelled is
+        the same trust break as reminding the client about it.
+        """
+        import uuid as _uuid
+
+        from apps.booking.models import RemoteBookingProxy
+
+        appointment_id = _uuid.uuid4()
+        start_at = timezone.now() + timedelta(hours=6)
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=appointment_id,
+            tenant=tenant,
+            bot_user=bot_user,
+            start_at=start_at,
+            end_at=start_at + timedelta(hours=1),
+            status=RemoteBookingProxy.Status.CANCELLED,
+        )
+        reminder = _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            booking_request=None,
+            yc_id=str(appointment_id),
+        )
+        with patch("apps.bookings.escalation.send_message") as mock_send:
+            result = escalate_stale_reminders()
+        assert mock_send.call_count == 0
+        assert result["escalated"] == 0
+        assert result["skipped"] == 1
+        reminder.refresh_from_db()
+        # The escalation beat marks a dropped row ESCALATED (terminal) rather
+        # than STALE_DROPPED — see the drop branch in ``escalate_stale_reminders``.
+        assert reminder.status == BookingReminder.Status.ESCALATED

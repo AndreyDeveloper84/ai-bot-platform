@@ -589,8 +589,33 @@ def _make_booking(tenant, bot_user, *, ayla_marker_id=None) -> BookingRequest:
 
 
 class TestPaymentMirrorReadModel:
+    @staticmethod
+    def _mirror_row(tenant, bot_user) -> RemoteBookingProxy:
+        """The proxy `booking.confirmed` now requires before it will run.
+
+        The handler grew this precondition and raises
+        ``BookingConfirmedPendingProxyError`` without it — a deliberate
+        «the mirror has not caught up yet, retry» signal, not a failure.
+        These two tests predate it and were asserting against a handler
+        that no longer exists. The assertions themselves are still the
+        right ones; only the setup was stale.
+        """
+
+        from django.utils import timezone as tz
+
+        return RemoteBookingProxy.all_tenants.create(
+            appointment_id=APPT_ID,
+            tenant=tenant,
+            bot_user=bot_user,
+            start_at=tz.now() + timedelta(days=7),
+            end_at=tz.now() + timedelta(days=7, hours=1),
+            status="confirmed",
+        )
+
     def test_booking_confirmed_with_payment_id_stamps_hold(self, tenant, bot_user) -> None:
         import datetime as dt
+
+        self._mirror_row(tenant, bot_user)
 
         env = IngestEnvelope(
             event_id="9f8e7d6c-5b4a-3c2d-1e0f-a9b8c7d6e5f4",
@@ -616,6 +641,8 @@ class TestPaymentMirrorReadModel:
 
     def test_booking_confirmed_without_payment_id_no_mirror(self, tenant, bot_user) -> None:
         import datetime as dt
+
+        self._mirror_row(tenant, bot_user)
 
         env = IngestEnvelope(
             event_id="8e7d6c5b-4a3b-2c1d-0e9f-b8a7c6d5e4f3",
