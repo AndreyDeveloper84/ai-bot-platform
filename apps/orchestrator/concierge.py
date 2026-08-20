@@ -60,6 +60,8 @@ from apps.orchestrator.discovery import (
     _discovery_voice_fields,
     _render_ask_clarification,
     _render_master_cards,
+    has_discovery_criteria,
+    render_no_criteria_clarification,
 )
 from apps.orchestrator.llm.templates import get_fallback
 
@@ -376,9 +378,21 @@ def generate_concierge_reply(
     if dto.action_type == ActionType.SHOW_MASTERS:
         args = (dto.action_data or {}).get("arguments", {})
         limit = args.get("limit")
+        city = args.get("city") or None
+        specialization = args.get("specialization") or None
+        if not has_discovery_criteria(city, specialization):
+            # Criteria-less call → continue discovery, never the catalogue
+            # (BOT-003 §9 / prohibition #22 — see has_discovery_criteria).
+            logger.info("orchestrator.concierge.show_masters.no_criteria trace=%s", trace_id)
+            rendered = render_no_criteria_clarification()
+            return DiscoveryReply(
+                text=rendered.text,
+                action_data=rendered.action_data,
+                persisted=True,
+            )
         cards = discover_masters(
-            city=args.get("city") or None,
-            specialization=args.get("specialization") or None,
+            city=city,
+            specialization=specialization,
             limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
             resolve_service=True,
         )
@@ -442,6 +456,11 @@ def generate_direct_show_masters_reply(
     echo) because the global path has no salon-scoped booking skill to hand
     off to yet; showing masters IS the equivalent next step here.
     """
+    if not has_discovery_criteria(None, message_text):
+        # Same guard as the LLM path: a blank turn carries no criteria, and the
+        # unfiltered read behind it is the catalogue fallback canon forbids.
+        logger.info("orchestrator.concierge.direct_show_masters.no_criteria trace=%s", trace_id)
+        return render_no_criteria_clarification()
     cards = discover_masters(
         specialization=message_text,
         limit=_MAX_MASTER_CARDS,

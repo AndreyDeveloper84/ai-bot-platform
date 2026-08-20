@@ -67,7 +67,8 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Show bookable beauty masters across all salons matching the user's "
         "request. Call this when the user wants to find, browse, or pick a "
-        "master (optionally by city or specialization)."
+        "master. Requires at least a city or a specialization: with neither, "
+        "there is nothing to match on — use ask_clarification instead."
     ),
     "parameters": {
         "type": "object",
@@ -282,6 +283,42 @@ def _render_ask_clarification(question: str, options: list[str]) -> DiscoveryRep
     return DiscoveryReply(text=text, action_data=action_data)
 
 
+# BOT-003 §9 / prohibition #22 (docs/AUDIT_DIALOGUE_MODEL.md §2.3): «It does not
+# use an arbitrary catalogue fallback». ``show_masters`` declares ``"required":
+# []``, so a call with neither city nor specialization is legal — and it used to
+# reach ``discover_masters()`` unfiltered, i.e. every bookable master in every
+# tenant, ordered ``("name", "id")``, rendered under «Вот мастера, которые могут
+# подойти:». That is the whole nationwide catalogue, alphabetically, offered as
+# an answer — enumeration standing in for a recommendation, and it fired exactly
+# when the model was least sure what the user wanted.
+#
+# What canon prescribes instead is not «say nothing found» — masters DO exist,
+# so the no-match line would be a lie — but the §9 boundary: «if additional
+# useful information can realistically enable a responsible recommendation,
+# continue discovery only as needed under Q3». With zero criteria, a service or
+# a city is exactly such information, so this is the definitional material
+# blocking gap (§6), not the «unnecessary questioning» the same paragraph bans:
+# we are not asking to avoid admitting no-match, we are asking because nothing
+# has been asked for yet.
+NO_CRITERIA_QUESTION = "Чтобы подобрать мастера, подскажите: какая услуга нужна и в каком городе?"
+
+
+def has_discovery_criteria(city: str | None, specialization: str | None) -> bool:
+    """True when a ``show_masters`` call carries at least one real filter.
+
+    Whitespace-only counts as absent — ``_bookable_qs`` treats a blank
+    ``specialization`` as "no filter supplied" (it says so at
+    ``apps/marketplace/discovery.py``), which is precisely the unfiltered
+    catalogue read this guard exists to keep out of a conversational turn.
+    """
+    return bool((city or "").strip() or (specialization or "").strip())
+
+
+def render_no_criteria_clarification() -> DiscoveryReply:
+    """The canon-prescribed reply to a criteria-less ``show_masters`` call."""
+    return _render_ask_clarification(NO_CRITERIA_QUESTION, [])
+
+
 def generate_discovery_reply(
     message_text: str,
     *,
@@ -318,9 +355,14 @@ def generate_discovery_reply(
         if call.name == SHOW_MASTERS_TOOL_SPEC["name"]:
             args = call.arguments if isinstance(call.arguments, dict) else {}
             limit = args.get("limit")
+            city = args.get("city") or None
+            specialization = args.get("specialization") or None
+            if not has_discovery_criteria(city, specialization):
+                logger.info("orchestrator.discovery.show_masters.no_criteria trace=%s", trace_id)
+                return render_no_criteria_clarification()
             cards = discover_masters(
-                city=args.get("city") or None,
-                specialization=args.get("specialization") or None,
+                city=city,
+                specialization=specialization,
                 limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
                 resolve_service=True,
             )
