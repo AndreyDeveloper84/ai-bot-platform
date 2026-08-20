@@ -426,11 +426,16 @@ MENU_CALLBACK_TEXT: dict[str, str] = {
 
 
 def main_menu_buttons() -> list[dict[str, str]]:
-    """The pilot's main menu — one definition, three surfaces.
+    """The pilot's main menu — one definition, two surfaces.
 
-    Used by the honest fallback (U-5), the «Помощь» reply and the welcome
-    keyboard. Channel-agnostic ``{label, callback}`` shape; the channel
-    adapter converts it to the native wire format.
+    Used by the honest fallback (U-5) and the «Помощь» reply. NOT by the
+    welcome keyboard: :func:`apps.skills.welcome.skill._welcome_buttons`
+    builds its own five (BOT-001 AC-4.2 caps First Contact at five, and
+    the two sets overlap only partially). Editing this list does not
+    change the first screen.
+
+    Channel-agnostic ``{label, callback}`` shape; the channel adapter
+    converts it to the native wire format.
     """
     return [
         {"label": "📅 Записаться", "callback": CALLBACK_MENU_BOOK},
