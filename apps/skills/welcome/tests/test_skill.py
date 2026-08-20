@@ -995,3 +995,71 @@ class TestThreeGreetingStates:
 
         result = WelcomeSkill().handle(ctx)
         assert result.meta["reply_kind"] == "welcome_s1_multitenant"
+
+
+# ───────────────────────────────────────────────────────────────────────
+# BOT-001 AC-4.2 — постоянный страж границы канона (DRF-1200)
+# ───────────────────────────────────────────────────────────────────────
+
+#: BOT-001 AC-4.2: «Quick Actions, when present, MUST NOT exceed 5».
+#: Это потолок канона, а не «текущее число кнопок». Если экран сократили
+#: ещё — тесты ниже остаются зелёными; если кто-то добавил шестую —
+#: падают. Менять эту константу можно только вместе с каноном.
+CANON_MAX_QUICK_ACTIONS = 5
+
+#: Все конфигурации Mini App, которые меняют состав клавиатуры:
+#: пилотная (``MAX_BOT_WEB_APP`` задан → open_app), внешняя ссылка
+#: (``MAX_MINIAPP_URL`` → link) и пустая (zero-config).
+_MINIAPP_CONFIGS = [
+    pytest.param("", "", id="zero-config"),
+    pytest.param("id583_bot", "", id="pilot-web-app"),
+    pytest.param("", "https://m.example/", id="miniapp-url"),
+]
+
+
+class TestCanonQuickActionCeilingAC42:
+    """AC-4.2: набор быстрых действий первого экрана не больше пяти.
+
+    Страж, а не снимок. Предыдущая правка (DRF-1200, первая попытка)
+    сократила девять кнопок до восьми и переписала утверждение
+    ``== 9`` на ``== 8`` — нарушение канона осталось зацементировано
+    зелёным тестом, просто на другом числе. Здесь закреплена ГРАНИЦА:
+    ``<= 5``. Добавление шестой кнопки роняет тест при любой
+    конфигурации Mini App; дальнейшее сокращение — нет.
+
+    Канон намеренно не фиксирует ни текст, ни состав кнопок
+    (BOT-001 §8.2: «Quick Action copy MUST NOT be canonicalized… examples
+    only»), поэтому проверяется ровно количество.
+    """
+
+    @pytest.mark.parametrize(("web_app", "miniapp_url"), _MINIAPP_CONFIGS)
+    def test_s1_welcome_keyboard_within_canon_ceiling(self, settings, web_app, miniapp_url):
+        """S1 (первый экран, ``/start``) — не больше пяти быстрых действий."""
+        settings.PILOT_CONVERSATIONAL_UX = True
+        settings.MAX_BOT_WEB_APP = web_app
+        settings.MAX_MINIAPP_URL = miniapp_url
+        buttons = WelcomeSkill().handle(_ctx("/start")).action_data["buttons"]
+        assert len(buttons) <= CANON_MAX_QUICK_ACTIONS, (
+            f"AC-4.2 нарушен: {len(buttons)} кнопок на S1 "
+            f"(web_app={web_app!r}, miniapp_url={miniapp_url!r}): "
+            f"{[b['label'] for b in buttons]}"
+        )
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(("web_app", "miniapp_url"), _MINIAPP_CONFIGS)
+    def test_s5_first_action_grid_within_canon_ceiling(
+        self, unwelcomed_bot_user, settings, web_app, miniapp_url
+    ):
+        """S5 (сетка первого действия после согласия) — тот же потолок."""
+        settings.PILOT_CONVERSATIONAL_UX = True
+        settings.MAX_BOT_WEB_APP = web_app
+        settings.MAX_MINIAPP_URL = miniapp_url
+        result = WelcomeSkill().handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        buttons = result.action_data["buttons"]
+        assert len(buttons) <= CANON_MAX_QUICK_ACTIONS, (
+            f"AC-4.2 нарушен: {len(buttons)} кнопок на S5 "
+            f"(web_app={web_app!r}, miniapp_url={miniapp_url!r}): "
+            f"{[b['label'] for b in buttons]}"
+        )
