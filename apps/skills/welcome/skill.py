@@ -225,6 +225,42 @@ S3_POSITIONING_TEXT = (
 # AC-4.1 «Quick Actions are optional».
 S5_PROMPT_TEXT = "С чего хочешь начать? Напиши своими словами, что сейчас нужно, — я пойму."
 
+# ── DRF-1202 — ровно три состояния приветствия ─────────────────────────
+#
+# BOT-001 P8: «MVP First Contact MUST use exactly three greeting states:
+# New User, Returning User, User with an Active Task.» AC-3.1 требует,
+# чтобы эти три состояния были проверяемы, AC-3.2 запрещает сегментацию
+# сверх них («No behavioral cohort, RFM, VIP, favorite-service or churn
+# segmentation appears in First Contact»).
+#
+# Нарушение было односторонним: варианта для вернувшегося пользователя
+# не существовало вовсе. `/start` от уже поздоровавшегося человека
+# отдавал ту же копию для новичка, а любой другой его текст навык просто
+# не брал. Реализованным было одно состояние из трёх.
+#
+# Ниже — три состояния как явная, читаемая величина; резолвер один,
+# и добавить четвёртое незаметно уже нельзя.
+GREETING_STATE_NEW = "new_user"
+GREETING_STATE_RETURNING = "returning_user"
+GREETING_STATE_ACTIVE_TASK = "active_task"
+
+# Returning User (BOT-001 §9.1): «The greeting SHOULD acknowledge the
+# return»; «MUST NOT assume or create a new Task automatically». §9.3:
+# «A Returning User MUST be able to start a new intent at any time via
+# free text. The system MUST NOT force continuation of a previous topic
+# that is no longer active.» — поэтому здесь ни намёка на прошлую тему.
+RETURNING_TEXT = "С возвращением! 👋\n\nС чем помочь сегодня? Скажите своими словами — я пойму."
+
+# User with an Active Task (BOT-001 §10.1): «Ayla MAY offer to continue
+# the Active Task»; «MUST NOT force continuation»; «MUST allow the user
+# to start a new intent via free text at any time». Формулировка по
+# смыслу — §18.4 даёт пример поведения, но не канонический текст.
+ACTIVE_TASK_TEXT = (
+    "С возвращением! 👋\n\n"
+    "Мы кое-что не закончили — продолжим? "
+    "Или скажите своими словами, если сейчас нужно другое."
+)
+
 ASK_PROMPT = (
     "Спросите о чём угодно — про услуги, цены, противопоказания, "
     "адрес или режим работы. Я постараюсь ответить."
@@ -365,6 +401,10 @@ class WelcomeSkill:
         # don't need to respond to with a message. Re-show the menu so
         # they have a way back if the Mini App rejected the deeplink.
         #
+        # DRF-1202 — состояние приветствия определяется ДО того, как
+        # ``welcomed_at`` будет проставлен: сразу после штампа тот же
+        # пользователь выглядит вернувшимся.
+        greeting_state = _greeting_state(context)
         # S1 idempotency: stamp welcomed_at so subsequent inbound
         # messages bypass the auto-trigger branch in matches().
         bot_user = context.bot_user
@@ -382,11 +422,47 @@ class WelcomeSkill:
                     getattr(bot_user, "id", None),
                     exc,
                 )
+        # DRF-1202 — Returning User (§9) и User with an Active Task (§10).
+        # Оба доступны только через явный жест: `/start` или колбэк
+        # welcome-клавиатуры. Автотриггер по произвольному тексту
+        # по-прежнему только для New User (``welcomed_at IS NULL``) —
+        # расширять его на вернувшихся значило бы ставить церемонию перед
+        # намерением (P1) на каждом ходу.
+        if greeting_state == GREETING_STATE_ACTIVE_TASK:
+            return SkillResult(
+                reply_text=ACTIVE_TASK_TEXT,
+                action_type="welcome_menu",
+                action_data={
+                    "buttons": _welcome_buttons(),
+                    "button_columns": 1,
+                },
+                meta={"reply_kind": "welcome_active_task"},
+            )
+        if greeting_state == GREETING_STATE_RETURNING:
+            return SkillResult(
+                reply_text=RETURNING_TEXT,
+                action_type="welcome_menu",
+                action_data={
+                    "buttons": _welcome_buttons(),
+                    "button_columns": 1,
+                },
+                meta={"reply_kind": "welcome_returning"},
+            )
         # S1 multi-tenant variant detection (Tau §4). Folded deeplink
         # payload sits в text suffix after «/start ». Recognised prefixes
         # = ref_ / qr_ / ig_post_. На match → render multi-tenant text
         # с salon name из current tenant. Unparseable / empty → standard
         # WELCOME_TEXT, no behavior change.
+        #
+        # Это НЕ четвёртое состояние: канон прямо велит учитывать
+        # entry context внутри состояния. P3 — «Greeting behavior MUST
+        # adapt to entry context: user state, channel and available
+        # context»; §5 перечисляет «a deep link or trigger that carries
+        # context» как способ начать First Contact; §17 шаг 1 —
+        # «Determine entry context: channel, user state, trigger/deep
+        # link». Сегментация, запрещённая AC-3.2, — поведенческая
+        # (cohort / RFM / VIP / favorite-service / churn), а не источник
+        # перехода.
         start_param = _extract_start_param(text)
         if start_param and start_param.startswith(_S1_MULTITENANT_PREFIXES):
             salon_name = _resolve_salon_name(bot_user)
@@ -742,6 +818,34 @@ def _join(base: str, route: str) -> str:
     have to think about it.
     """
     return f"{base.rstrip('/')}/{route.lstrip('/')}"
+
+
+def _greeting_state(context: SkillContext) -> str:
+    """Which of the three canonical greeting states this turn is in.
+
+    BOT-001 P8 / AC-3.1 — ровно три: New User, Returning User, User with
+    an Active Task. Порядок проверок повторяет §17 (шаги 4–6): сначала
+    «есть ли прошлое взаимодействие», потом «есть ли незавершённая
+    работа».
+
+    * **New User** — §8: «no prior recognized interaction with Ayla in the
+      current pilot context». В коде это ``welcomed_at IS NULL``.
+    * **User with an Active Task** — §10: «an ongoing Task from a previous
+      interaction». §10.3 намеренно оставляет обнаружение рантайму («This
+      specification does not define: Task storage; Task retrieval
+      logic…»), поэтому берём собственную запись рантайма о незавершённой
+      работе — ``Conversation.skill_state``, куда многошаговые навыки
+      (booking-continuation, nutrition_anketa) кладут свой FSM. Это НЕ
+      ``AdminTask``: тот — тикет оператору, вещь другого рода.
+    * **Returning User** — §9: прошлое взаимодействие есть, активной
+      задачи нет.
+    """
+    if getattr(context.bot_user, "welcomed_at", None) is None:
+        return GREETING_STATE_NEW
+    skill_state = getattr(context.conversation, "skill_state", None)
+    if isinstance(skill_state, dict) and any(v for v in skill_state.values()):
+        return GREETING_STATE_ACTIVE_TASK
+    return GREETING_STATE_RETURNING
 
 
 # DRF-1207 — how many rows the CURRENT conversation may hold and still count

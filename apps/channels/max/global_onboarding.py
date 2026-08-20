@@ -89,7 +89,20 @@ _START_BUTTON: list[dict[str, str]] = [{"label": "▶️ Начать", "callbac
 # reply_kind values (WelcomeSkill.meta["reply_kind"]) whose TEXT we replace with a
 # marketplace surface. Everything else (S2 consent prompt, S2a details, refusal,
 # ask/food/water prompts) passes through verbatim.
-_WELCOME_KINDS = frozenset({"welcome", "welcome_s1_multitenant"})
+# DRF-1202 added two more greeting states to WelcomeSkill (Returning User /
+# User with an Active Task). Their texts are marketplace-neutral, but the
+# marketplace surface — «подобрать мастера по всей стране» + the single
+# «Начать» button that carries the 152-ФЗ consent flow — is owned here, so
+# they are swapped like the other welcome kinds. Behaviour on this path is
+# therefore unchanged by DRF-1202.
+_WELCOME_KINDS = frozenset(
+    {
+        "welcome",
+        "welcome_s1_multitenant",
+        "welcome_returning",
+        "welcome_active_task",
+    }
+)
 _S5_KIND = "welcome_s5_first_action"
 
 # Source slug stamped on the server consent journal row for the global welcome.

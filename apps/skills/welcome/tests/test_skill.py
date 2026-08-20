@@ -24,11 +24,28 @@ from apps.tenancy.context import tenant_scope
 
 
 def _ctx(text: str) -> SkillContext:
-    """Build a SkillContext stub. Welcome skill ignores conversation +
-    bot_user — only ``message_text`` drives matches/handle."""
+    """Build a SkillContext stub with a MagicMock bot_user.
+
+    ``welcomed_at`` on a MagicMock is a truthy attribute, so this context
+    reads as a **Returning User** for the DRF-1202 state resolver — which
+    is what the keyboard-contract tests want (they assert the button
+    ladder, and the ladder is the same in every greeting state)."""
     return SkillContext(
         conversation=MagicMock(),
         bot_user=MagicMock(),
+        message_text=text,
+    )
+
+
+def _ctx_new_user(text: str) -> SkillContext:
+    """Same stub, but the user has never been greeted → New User state."""
+    bot_user = MagicMock()
+    bot_user.welcomed_at = None
+    conversation = MagicMock()
+    conversation.skill_state = {}
+    return SkillContext(
+        conversation=conversation,
+        bot_user=bot_user,
         message_text=text,
     )
 
@@ -56,7 +73,7 @@ class TestMatches:
 
 class TestHandleStart:
     def test_greeting_text(self):
-        result = WelcomeSkill().handle(_ctx("/start"))
+        result = WelcomeSkill().handle(_ctx_new_user("/start"))
         assert result.reply_text == WELCOME_TEXT
         assert result.action_type == "welcome_menu"
         assert result.meta["reply_kind"] == "welcome"
@@ -192,7 +209,7 @@ class TestHandleCallback:
         button payload that came back as a callback for some reason)
         falls back to re-showing the menu rather than 500-ing."""
 
-        result = WelcomeSkill().handle(_ctx("cb:welcome:book"))
+        result = WelcomeSkill().handle(_ctx_new_user("cb:welcome:book"))
         assert result.reply_text == WELCOME_TEXT
         assert result.action_type == "welcome_menu"
 
@@ -895,3 +912,91 @@ class TestActiveTaskSuppression:
         _record(current, "user", "Привет")
 
         assert WelcomeSkill().matches(_ctx_in("Привет", unwelcomed_bot_user, current)) is True
+
+
+# ───────────────────────────────────────────────────────────────────────
+# DRF-1202 — ровно три состояния приветствия (BOT-001 P8 / AC-3.1)
+# ───────────────────────────────────────────────────────────────────────
+
+
+from apps.skills.welcome.skill import (  # noqa: E402
+    ACTIVE_TASK_TEXT,
+    GREETING_STATE_ACTIVE_TASK,
+    GREETING_STATE_NEW,
+    GREETING_STATE_RETURNING,
+    RETURNING_TEXT,
+    _greeting_state,
+)
+
+
+class TestThreeGreetingStates:
+    """BOT-001 P8: «MVP First Contact MUST use exactly three greeting
+    states: New User, Returning User, User with an Active Task.»
+    AC-3.1 требует, чтобы эти три состояния были проверяемы.
+
+    До правки реализовано было одно: `/start` от вернувшегося отдавал
+    копию для новичка, а любой другой его текст навык не брал вовсе.
+    """
+
+    @pytest.mark.django_db
+    def test_new_user_state(self, unwelcomed_bot_user):
+        conversation = _conversation_for(unwelcomed_bot_user)
+        ctx = _ctx_in("/start", unwelcomed_bot_user, conversation)
+        assert _greeting_state(ctx) == GREETING_STATE_NEW
+        assert WelcomeSkill().handle(ctx).reply_text == WELCOME_TEXT
+
+    @pytest.mark.django_db
+    def test_returning_user_state(self, welcomed_bot_user):
+        """§9.1 «The greeting SHOULD acknowledge the return»; §9.3 — новое
+        намерение свободным текстом доступно всегда, продолжение прошлой
+        темы не навязывается."""
+        conversation = _conversation_for(welcomed_bot_user)
+        ctx = _ctx_in("/start", welcomed_bot_user, conversation)
+        assert _greeting_state(ctx) == GREETING_STATE_RETURNING
+
+        result = WelcomeSkill().handle(ctx)
+        assert result.reply_text == RETURNING_TEXT
+        assert result.meta["reply_kind"] == "welcome_returning"
+        assert result.reply_text != WELCOME_TEXT
+
+    @pytest.mark.django_db
+    def test_active_task_state(self, welcomed_bot_user):
+        """§10.1 «Ayla MAY offer to continue the Active Task … MUST NOT
+        force continuation». Обнаружение — рантайм-вопрос (§10.3), берём
+        собственную запись рантайма о незавершённой работе."""
+        conversation = _conversation_for(welcomed_bot_user)
+        conversation.skill_state = {"booking_flow": {"stage": "awaiting_selection"}}
+        conversation.save(update_fields=["skill_state"])
+        ctx = _ctx_in("/start", welcomed_bot_user, conversation)
+        assert _greeting_state(ctx) == GREETING_STATE_ACTIVE_TASK
+
+        result = WelcomeSkill().handle(ctx)
+        assert result.reply_text == ACTIVE_TASK_TEXT
+        assert result.meta["reply_kind"] == "welcome_active_task"
+        # Продолжение предлагается, но не навязывается — свободный текст
+        # назван прямо.
+        assert "своими словами" in result.reply_text
+
+    @pytest.mark.django_db
+    def test_empty_skill_state_is_not_an_active_task(self, welcomed_bot_user):
+        """Очищенный FSM (``write_skill_state(conv, key, None)`` кладёт
+        None, а не удаляет ключ) не должен считаться активной задачей."""
+        conversation = _conversation_for(welcomed_bot_user)
+        conversation.skill_state = {"nutrition_anketa": None}
+        conversation.save(update_fields=["skill_state"])
+        ctx = _ctx_in("/start", welcomed_bot_user, conversation)
+        assert _greeting_state(ctx) == GREETING_STATE_RETURNING
+
+    @pytest.mark.django_db
+    def test_deeplink_variant_is_not_a_fourth_state(self, unwelcomed_bot_user):
+        """Вариант по deeplink — entry context внутри состояния New User,
+        а не четвёртое состояние. Канон велит его учитывать: P3
+        «Greeting behavior MUST adapt to entry context: user state,
+        channel and available context», §17 шаг 1 «Determine entry
+        context: channel, user state, trigger/deep link»."""
+        conversation = _conversation_for(unwelcomed_bot_user)
+        ctx = _ctx_in("/start ref_42", unwelcomed_bot_user, conversation)
+        assert _greeting_state(ctx) == GREETING_STATE_NEW
+
+        result = WelcomeSkill().handle(ctx)
+        assert result.meta["reply_kind"] == "welcome_s1_multitenant"
