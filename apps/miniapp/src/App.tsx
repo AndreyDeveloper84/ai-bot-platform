@@ -41,6 +41,19 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import {
+  SurfaceModeContext,
+  type SurfaceModeContextValue,
+} from "./components/SurfaceSwitch";
+import {
+  clearLastSurface,
+  readLastSurface,
+  requestSurfaceChooser,
+  useLastSurface,
+  useSurfaceChooserRequested,
+  writeLastSurface,
+  type UnifiedSurface,
+} from "./state/surface";
 import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatListScreen";
@@ -320,58 +333,85 @@ function MasterRoutes() {
 }
 
 /**
- * Storage key + helpers for remembering which top-level surface the
- * solo / dual-role user last picked (or last navigated into). We use
- * plain ``localStorage`` with the ``max:`` prefix the rest of the app
- * uses for the DeviceStorage fallback (see ``setDeviceStorage`` in
- * lib/max-sdk.ts). Synchronous access is required because we read it
- * during the initial render to pick a landing route. The real MAX
- * DeviceStorage bridge is async (callback-based), so we deliberately
- * stick to localStorage — best-effort, gracefully ignored when
- * unavailable (private mode / SSR).
- */
-const UNIFIED_LAST_SURFACE_KEY = "max:unified_last_surface";
-type UnifiedSurface = "admin" | "master";
-
-function readLastSurface(): UnifiedSurface | null {
-  if (typeof window === "undefined" || !window.localStorage) return null;
-  try {
-    const v = window.localStorage.getItem(UNIFIED_LAST_SURFACE_KEY);
-    return v === "admin" || v === "master" ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeLastSurface(s: UnifiedSurface): void {
-  if (typeof window === "undefined" || !window.localStorage) return;
-  try {
-    window.localStorage.setItem(UNIFIED_LAST_SURFACE_KEY, s);
-  } catch {
-    /* private mode / quota — best effort */
-  }
-}
-
-/**
- * Surface chooser for users with BOTH admin and master roles (solo
- * provider OR dual-role team member). Surfaces two big buttons that
- * jump into the respective surface and persist the choice so re-opens
- * land where the user last was.
+ * Surface chooser for users who hold more than one role (solo provider
+ * OR dual-role team member). Big buttons that jump into the respective
+ * surface and persist the choice so re-opens land where the user last
+ * was.
+ *
+ * Storage helpers now live in `state/surface.ts` — see the header there
+ * for why they had to move out of this module.
  *
  * Memory ref: project_solo_provider_universal_ui — universal UI with
  * smart defaults; tabbed surface keeps cognitive separation between
  * «сейчас я как админ» and «сейчас я как мастер».
+ *
+ * The third option — «Клиент» — is the fix for the surface the owner
+ * could never reach. She is owner+master, so the cascade below always
+ * matched an earlier branch and `CustomerRoutes` was effectively
+ * dead code for anyone with a role. The chooser is the entry; the
+ * «Сменить режим» action (SurfaceSwitch.tsx) is the way back.
+ *
+ * Solo providers see a single «Моя работа» card instead of the
+ * Салон/Мастер split: their surface is already unified (Tau §5.1), so
+ * splitting it in the chooser would be a distinction without a
+ * difference. They still get «Клиент».
  */
+function SurfaceCard({
+  icon,
+  title,
+  subtitle,
+  ariaLabel,
+  onClick,
+}: {
+  icon: string;
+  title: string;
+  subtitle: string;
+  ariaLabel: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        gap: "var(--s-1)",
+        padding: "var(--s-4)",
+        minHeight: 88,
+        background: "var(--c-surface-1)",
+        border: "1px solid var(--c-divider)",
+        borderRadius: "var(--r-md)",
+        textAlign: "left",
+      }}
+      aria-label={ariaLabel}
+    >
+      <span style={{ fontSize: "var(--font-size-300)", fontWeight: 600 }}>
+        {icon} {title}
+      </span>
+      <span
+        style={{
+          fontSize: "var(--font-size-200)",
+          color: "var(--c-text-secondary)",
+        }}
+      >
+        {subtitle}
+      </span>
+    </button>
+  );
+}
+
 function UnifiedLanding({ me }: { me: MeResponse }) {
   const navigate = useNavigate();
-  const goAdmin = useCallback(() => {
-    writeLastSurface("admin");
-    navigate("/admin/team");
-  }, [navigate]);
-  const goMaster = useCallback(() => {
-    writeLastSurface("master");
-    navigate("/master/dashboard");
-  }, [navigate]);
+  const isSolo = me.is_solo_provider === true;
+  const pick = useCallback(
+    (surface: UnifiedSurface, path: string) => {
+      writeLastSurface(surface);
+      navigate(path);
+    },
+    [navigate],
+  );
 
   const userName = me.user.name || "мастер";
 
@@ -379,7 +419,7 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
     <div className="screen">
       <h1 className="screen__title">Здравствуйте, {userName}!</h1>
       <p style={{ color: "var(--c-text-secondary)", marginTop: 0 }}>
-        У вас два режима в этом салоне — выберите, с чего начать.
+        У вас несколько режимов — выберите, с чего начать.
       </p>
       <div
         style={{
@@ -389,64 +429,39 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
           marginTop: "var(--s-4)",
         }}
       >
-        <button
-          type="button"
-          onClick={goAdmin}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-start",
-            gap: "var(--s-1)",
-            padding: "var(--s-4)",
-            minHeight: 88,
-            background: "var(--c-surface-1)",
-            border: "1px solid var(--c-divider)",
-            borderRadius: "var(--r-md)",
-            textAlign: "left",
-          }}
-          aria-label="Перейти в Салон"
-        >
-          <span style={{ fontSize: "var(--font-size-300)", fontWeight: 600 }}>
-            🏢 Салон
-          </span>
-          <span
-            style={{
-              fontSize: "var(--font-size-200)",
-              color: "var(--c-text-secondary)",
-            }}
-          >
-            Команда, услуги, запросы графика
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={goMaster}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-start",
-            gap: "var(--s-1)",
-            padding: "var(--s-4)",
-            minHeight: 88,
-            background: "var(--c-surface-1)",
-            border: "1px solid var(--c-divider)",
-            borderRadius: "var(--r-md)",
-            textAlign: "left",
-          }}
-          aria-label="Открыть профиль мастера"
-        >
-          <span style={{ fontSize: "var(--font-size-300)", fontWeight: 600 }}>
-            👤 Мой профиль мастера
-          </span>
-          <span
-            style={{
-              fontSize: "var(--font-size-200)",
-              color: "var(--c-text-secondary)",
-            }}
-          >
-            Моё расписание, диалоги, черновики
-          </span>
-        </button>
+        {isSolo ? (
+          <SurfaceCard
+            icon="💼"
+            title="Моя работа"
+            subtitle="День, записи, клиенты, услуги"
+            ariaLabel="Перейти к своей работе"
+            onClick={() => pick("master", "/solo/my-day")}
+          />
+        ) : (
+          <>
+            <SurfaceCard
+              icon="🏢"
+              title="Салон"
+              subtitle="Команда, услуги, запросы графика"
+              ariaLabel="Перейти в Салон"
+              onClick={() => pick("admin", "/admin/team")}
+            />
+            <SurfaceCard
+              icon="👤"
+              title="Мой профиль мастера"
+              subtitle="Моё расписание, диалоги, черновики"
+              ariaLabel="Открыть профиль мастера"
+              onClick={() => pick("master", "/master/dashboard")}
+            />
+          </>
+        )}
+        <SurfaceCard
+          icon="👤"
+          title="Клиент"
+          subtitle="Мои записи, услуги, запись к мастеру"
+          ariaLabel="Открыть клиентскую часть"
+          onClick={() => pick("customer", "/customer/main")}
+        />
       </div>
     </div>
   );
@@ -479,6 +494,10 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
 function UnifiedLandingOrRedirect({ me }: { me: MeResponse }) {
   // If we have a persisted last-surface, jump directly into it. Otherwise
   // show the chooser. We do this with a <Navigate> on mount.
+  //
+  // `"customer"` never reaches this point: the cascade in `App` swaps the
+  // whole tree for `CustomerRoutes` before this component is mounted, so
+  // the fall-through below (→ chooser) is defensive only.
   const last = readLastSurface();
   if (last === "admin") {
     return <Navigate to="/admin/team" replace />;
@@ -495,6 +514,13 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
   // previous per-route mount which re-wrote on every back/forward).
   // The landing `/` route deliberately does NOT write — the user
   // hasn't picked a surface yet at that point.
+  //
+  // Customer paths cannot be tracked here and must not be: this
+  // component is only mounted while the caller is in the admin/master
+  // tree. Choosing «Клиент» flips the cascade in `App`, which unmounts
+  // this whole subtree before any `/customer/*` navigation happens, so
+  // the stored `"customer"` can never be overwritten with `"admin"` by
+  // the prefix check below.
   const location = useLocation();
   useEffect(() => {
     if (location.pathname.startsWith("/admin/")) {
@@ -1121,6 +1147,40 @@ function CustomerFallbackWithBanner({
 
 export function App() {
   const [boot, setBoot] = useState<BootState>(INITIAL);
+  // Surface choice drives the cascade below, so it has to be reactive —
+  // a bare localStorage read wouldn't re-render when the user picks
+  // «Клиент» or taps «Сменить режим». See state/surface.ts.
+  const surfacePref = useLastSurface();
+  const chooserRequested = useSurfaceChooserRequested();
+  const navigate = useNavigate();
+
+  const requestChooser = useCallback(() => {
+    clearLastSurface();
+    requestSurfaceChooser();
+    // Keep the URL honest — the chooser is rendered above every route
+    // tree, and leaving a stale `/customer/profile` in the address bar
+    // would send the user back into the surface they just left if they
+    // reloaded mid-choice.
+    navigate("/");
+  }, [navigate]);
+
+  // Value handed to leaf screens through SurfaceModeContext. `canSwitch`
+  // is what keeps «Сменить режим» invisible to a single-role person:
+  // a receptionist has one surface and a control offering to leave it
+  // would be noise she cannot act on.
+  const surfaceMode = useMemo<SurfaceModeContextValue>(
+    () => ({
+      canSwitch:
+        boot.status === "ready" &&
+        boot.me != null &&
+        [
+          Boolean(boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist),
+          Boolean(boot.me.is_master),
+        ].filter(Boolean).length > 1,
+      requestChooser,
+    }),
+    [boot.status, boot.me, requestChooser],
+  );
 
   const loadMe = useCallback(async () => {
     setBoot({ status: "loading", me: null, err: null });
@@ -1145,33 +1205,33 @@ export function App() {
     void loadMe();
   }, [loadMe]);
 
-  // Round-1 FOLLOW_UP cleanup (#79): when the resolved role pattern is
-  // single (admin-only OR master-only OR customer-only) OR solo (Tau §5
-  // unified surface — chooser bypassed), drop any stale
+  // Round-1 FOLLOW_UP cleanup (#79): when the resolved role pattern
+  // leaves nothing to choose between, drop any stale
   // unified-last-surface key. Prevents a dead key from lingering after
   // a role revocation (e.g. owner who was demoted to master-only and
-  // had previously chosen the admin surface) OR a team → solo
-  // transition (Tau §9.4 — tenant shrinks to 1 person, chooser no
-  // longer renders). Without this, a team-mode visit that wrote
-  // `master:unified_last_surface=admin` would leak through to a
-  // post-shrink solo session as an orphan key.
+  // had previously chosen the admin surface). Without this, a
+  // team-mode visit that wrote `max:unified_last_surface=admin` would
+  // leak through to a later single-role session as an orphan key.
+  //
+  // Amended for the customer surface: `"customer"` is meaningful for
+  // ANY multi-role caller, solo providers included — they reach it
+  // through «Сменить режим» rather than through the auto-shown chooser.
+  // Wiping it here would have bounced the owner straight back into the
+  // admin surface on her next open, which is the exact bug this branch
+  // is fixing. `"admin"` / `"master"` stay solo-dead-weight as before:
+  // the solo surface never reads them.
   useEffect(() => {
     if (boot.status !== "ready" || !boot.me) return;
     const hasAdmin =
       boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist;
     const hasMaster = boot.me.is_master;
     const isSolo = boot.me.is_solo_provider === true;
-    // The chooser is rendered only when `hasAdmin && hasMaster && !isSolo`.
-    // Any other resolved shape => the persisted key is dead weight.
-    const choosing = hasAdmin && hasMaster && !isSolo;
-    if (!choosing) {
-      if (typeof window === "undefined" || !window.localStorage) return;
-      try {
-        window.localStorage.removeItem(UNIFIED_LAST_SURFACE_KEY);
-      } catch {
-        /* SSR / private mode / quota — best effort */
-      }
-    }
+    const multiRole = hasAdmin && hasMaster;
+    const stored = readLastSurface();
+    if (stored === null) return;
+    const meaningful =
+      multiRole && (stored === "customer" || !isSolo);
+    if (!meaningful) clearLastSurface();
   }, [boot.status, boot.me]);
 
   if (boot.status === "loading") return <SplashScreen />;
@@ -1180,49 +1240,98 @@ export function App() {
   }
 
   if (boot.status === "ready" && boot.me) {
-    const me = boot.me;
-    const hasAdmin = me.is_owner || me.is_admin || me.is_receptionist;
-    const hasMaster = me.is_master;
-    // Solo provider hint from W4 (`is_solo_provider(tenant)`) per Tau
-    // §3.1 — true only when the tenant has exactly one distinct active
-    // person. Missing field → false (graceful fallback for older
-    // backends that haven't shipped #760 yet).
-    const isSolo = me.is_solo_provider === true;
-    // Routing cascade — Tau §5 + memory project_solo_provider_universal_ui.
-    //
-    //   1. Solo provider WITH master link → 8-tab unified solo surface.
-    //      Skips the chooser entirely; Olga lands on /solo/my-day.
-    //      Covers her full triple-role (owner+admin+master) — the solo
-    //      surface reuses master-flavored screens (My day / Bookings /
-    //      Schedule / AI all read /master/* endpoints), so a master
-    //      link is required for the surface to be functional.
-    //
-    //      Round-1 amendment (adversarial Code Reviewer): edge case —
-    //      a newly bootstrapped solo tenant where the owner created
-    //      themselves but hasn't been added as a master yet (solo=true,
-    //      admin=true, master=false). Mounting `UnifiedSoloSurface` for
-    //      that user would paint a 8-tab nav whose master-screen tabs
-    //      can't load any data. We narrow the guard to require
-    //      `hasMaster` so that case falls through to the existing
-    //      `hasAdmin → AdminRoutes` branch — they get the admin team
-    //      screen and can add themselves as a master to bootstrap.
-    //
-    //   2. Team dual-role (NOT solo, has both admin AND master) →
-    //      existing chooser surface from PR #753. Татьяна owner+master
-    //      with junior masters under her keeps the «Салон»/«Мой
-    //      профиль мастера» split.
-    //   3-5. Single-role cascade unchanged.
-    if (isSolo && hasMaster) {
-      return <UnifiedSoloSurface me={me} />;
-    }
-    if (hasAdmin && hasMaster) {
-      return <UnifiedAdminMasterRoutes me={me} />;
-    }
-    if (hasAdmin) return <AdminRoutes me={me} />;
-    if (hasMaster) return <MasterRoutes />;
-    return <CustomerRoutes />;
+    return (
+      <SurfaceModeContext.Provider value={surfaceMode}>
+        <RoleSurface
+          me={boot.me}
+          surfacePref={surfacePref}
+          chooserRequested={chooserRequested}
+        />
+      </SurfaceModeContext.Provider>
+    );
   }
 
   // Network / 5xx — customer fallback with a retry banner.
   return <CustomerFallbackWithBanner onRetry={() => void loadMe()} />;
+}
+
+/**
+ * The routing cascade for a booted user. Split out of `App` so the
+ * surface-mode provider can wrap it once instead of at every early
+ * return.
+ */
+function RoleSurface({
+  me,
+  surfacePref,
+  chooserRequested,
+}: {
+  me: MeResponse;
+  surfacePref: UnifiedSurface | null;
+  chooserRequested: boolean;
+}) {
+  const hasAdmin = me.is_owner || me.is_admin || me.is_receptionist;
+  const hasMaster = me.is_master;
+  // Solo provider hint from W4 (`is_solo_provider(tenant)`) per Tau
+  // §3.1 — true only when the tenant has exactly one distinct active
+  // person. Missing field → false (graceful fallback for older
+  // backends that haven't shipped #760 yet).
+  const isSolo = me.is_solo_provider === true;
+  // Routing cascade — Tau §5 + memory project_solo_provider_universal_ui.
+  //
+  //   1. Solo provider WITH master link → 8-tab unified solo surface.
+  //      Skips the chooser entirely; Olga lands on /solo/my-day.
+  //      Covers her full triple-role (owner+admin+master) — the solo
+  //      surface reuses master-flavored screens (My day / Bookings /
+  //      Schedule / AI all read /master/* endpoints), so a master
+  //      link is required for the surface to be functional.
+  //
+  //      Round-1 amendment (adversarial Code Reviewer): edge case —
+  //      a newly bootstrapped solo tenant where the owner created
+  //      themselves but hasn't been added as a master yet (solo=true,
+  //      admin=true, master=false). Mounting `UnifiedSoloSurface` for
+  //      that user would paint a 8-tab nav whose master-screen tabs
+  //      can't load any data. We narrow the guard to require
+  //      `hasMaster` so that case falls through to the existing
+  //      `hasAdmin → AdminRoutes` branch — they get the admin team
+  //      screen and can add themselves as a master to bootstrap.
+  //
+  //   2. Team dual-role (NOT solo, has both admin AND master) →
+  //      existing chooser surface from PR #753. Татьяна owner+master
+  //      with junior masters under her keeps the «Салон»/«Мой
+  //      профиль мастера» split.
+  //   3-5. Single-role cascade unchanged.
+  //
+  // Amendment (surface switch): the four branches below are all
+  // role-derived, which is why the customer surface used to be
+  // unreachable for anyone holding a role — an owner who is also a
+  // master matched branch 1 or 2 and never fell through to
+  // `CustomerRoutes`. The two explicit-intent checks are therefore
+  // placed ABOVE the whole cascade rather than inside any branch:
+  //
+  //   - an explicit choice must beat a role-derived default, and
+  //   - putting them first leaves branches 1-5 byte-for-byte as they
+  //     were, so the solo / dual-role / single-role behaviour of a
+  //     user who never touched the chooser is unchanged.
+  //
+  // Both are gated on `multiRole`: a plain customer has nothing to
+  // switch between, and a stale key from a revoked role must never
+  // divert a single-role user (the cleanup effect above also wipes
+  // it, but the gate makes that a safety net rather than a
+  // load-bearing invariant).
+  const multiRole = hasAdmin && hasMaster;
+  if (multiRole && chooserRequested) {
+    return <UnifiedLanding me={me} />;
+  }
+  if (multiRole && surfacePref === "customer") {
+    return <CustomerRoutes />;
+  }
+  if (isSolo && hasMaster) {
+    return <UnifiedSoloSurface me={me} />;
+  }
+  if (hasAdmin && hasMaster) {
+    return <UnifiedAdminMasterRoutes me={me} />;
+  }
+  if (hasAdmin) return <AdminRoutes me={me} />;
+  if (hasMaster) return <MasterRoutes />;
+  return <CustomerRoutes />;
 }
