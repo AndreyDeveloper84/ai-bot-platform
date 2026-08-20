@@ -1,23 +1,35 @@
 """Welcome skill — bot entry point with inline-keyboard quick actions.
 
 Replaces the bare-text ``/start`` reply that lived in the echo skill.
-Greets the user and surfaces quick-action buttons spanning both the
-salon flow (booking + visits + profile) AND the Ayla wellness flow
-(food diary + water + FAQ).
+Greets the user and surfaces the quick actions for the salon flow.
 
-Salon buttons (3):
+### DRF-1200 — five quick actions, and no more (BOT-001 AC-4.2)
+
+AC-4.2 caps Quick Actions at five. The first screen shipped eight; the
+owner picked which five survive:
+
   * 📅 Записаться  — bot-native booking entry (``cb:menu:book``, DRF-963;
                      was a Mini App catalog route)
   * 📋 Мои записи  — bot-native booking lookup (``cb:menu:my_bookings``,
                      DRF-963; was a Mini App visits route)
   * 👤 Профиль     — Mini App profile screen (config-gated)
+  * ❓ Помощь      — capability list (``cb:menu:help``, DRF-963)
+  * ▶️ Начать      — S1 → S2 152-ФЗ consent ack (``cb:welcome:start_s2``)
 
-Ayla wellness buttons (2):
-  * 🍽 Дневник еды — prompts the user to send a food photo / description.
-                     The food_scanner / food_clarify skill then takes the
-                     next turn.
-  * 💧 Вода         — prompts for a drink amount; water skill picks up
-                     ("стакан", "250 мл") on the next turn.
+Removed from the first screen — NOT from the bot:
+
+  * 🍽 Дневник еды — a photo still reaches ``FoodScannerSkill`` (it
+                     claims attachment-only turns), food-shaped free
+                     text still reaches ``FoodClarifySkill``
+                     (``looks_like_food_drink``), and the S5 grid still
+                     opens the Mini App scanner.
+  * 💧 Вода        — free text («стакан», «250 мл») still reaches the
+                     water skill; S5 still offers «+ стакан воды».
+  * ❓ Задать вопрос — the FAQ skill claims question-shaped free text on
+                     its own; «❓ Помощь» names free text explicitly.
+
+All three ``cb:welcome:*`` callbacks remain handled, so a keyboard
+already sitting in a customer's chat history does not go dead.
 
 ### DRF-1199 — no «Анкета» button on First Contact
 
@@ -29,24 +41,20 @@ The anketa itself is untouched — ``NutritionAnketaSkill`` still owns
 ``/anketa`` and ``cb:anketa:start``; what is removed is its promotion to an
 entry price.
 
-FAQ button (1):
-  * ❓ Задать вопрос — pure-text callback prompting the user to ask. The
-                       FAQ skill picks up the actual question on the next turn.
-
 ### Button-type ladder
 
-The salon buttons need a Mini App route. Behaviour follows config:
+Only «👤 Профиль» needs a Mini App route. Behaviour follows config:
 
 * ``settings.MAX_BOT_WEB_APP`` set → ``open_app`` (Mini App opens INSIDE
   the MAX client; the route comes from the ``callback`` field which MAX
   forwards into the Mini App's ``initData``).
 * ``settings.MAX_BOT_WEB_APP`` empty + ``settings.MAX_MINIAPP_URL`` set
   → ``link`` button (opens in the external browser).
-* Both empty → only the wellness + FAQ callback buttons ship — zero-config
-  fallback for tests + early dev.
+* Both empty → «👤 Профиль» drops and the screen ships four bot-native
+  callbacks — zero-config fallback for tests + early dev.
 
-The wellness + FAQ buttons are always ``callback`` type — they don't
-need a Mini App route, just a follow-up bot turn.
+The other four are always ``callback`` type — they don't need a Mini App
+route, just a follow-up bot turn.
 
 ### Why a dedicated skill and not an echo branch
 
@@ -592,6 +600,42 @@ def _welcome_buttons() -> list[dict[str, str]]:
     Order matters — emoji-prefixed labels keep the visual rhythm aligned
     with the legacy maxbot welcome (parity with prod since 2026-04).
 
+    ### DRF-1200 — five actions, hard-capped by BOT-001 AC-4.2
+
+    AC-4.2 caps Quick Actions at five; this screen shipped eight. The
+    surviving five, and why each one is here:
+
+      1. «📅 Записаться»  — DRF-963 brief minimum (bot-native booking).
+      2. «📋 Мои записи»  — DRF-963 brief minimum.
+      3. «👤 Профиль»     — owner's call: the Mini App must stay reachable
+                           from the first screen. Config-gated, so a
+                           zero-config deployment ships four, not five.
+      4. «❓ Помощь»      — DRF-963 brief minimum; §8.2 cites it as an
+                           example Quick Action.
+      5. «▶️ Начать»      — the ONLY entry into the S2 152-ФЗ consent
+                           screen on the per-tenant path. Removing it
+                           would strand consent.
+
+    Dropped: «🍽 Дневник еды», «💧 Вода», «❓ Задать вопрос». The owner
+    chose this set knowing the price — wellness and FAQ move off the
+    first screen into free text. Nothing is unreachable: photos reach
+    ``FoodScannerSkill``, food-shaped text reaches ``FoodClarifySkill``,
+    «стакан» / «250 мл» reaches ``WaterSkill``, question-shaped text
+    reaches ``FaqSkill`` — all four claim those turns on their own. The
+    S5 first-action grid still opens food scan and water in the Mini
+    App, and the three ``cb:welcome:*`` callbacks stay handled so old
+    keyboards in chat history keep working. The removed buttons only
+    ever printed a prompt telling the user to do exactly that.
+
+    The button count is guarded, not asserted: see
+    ``TestCanonQuickActionCeilingAC42`` — it pins ``<= 5``, so adding a
+    sixth fails under every Mini App configuration.
+
+    NOT closed by DRF-1200: §12.1 / AC-4.3 «The exact number and labels
+    MUST be determined by context, not fixed globally». This function
+    takes no arguments and reads only settings — the set is still global.
+    Making it contextual is separate design work.
+
     ### DRF-963 (Wave 1, variant A) — booking actions are bot-native
 
     «📅 Записаться» and «📋 Мои записи» used to be Mini App routes, so on
@@ -617,7 +661,7 @@ def _welcome_buttons() -> list[dict[str, str]]:
         # buttons, which is worse than the bug we were fixing.
         return (
             _legacy_salon_buttons(web_app, miniapp_url)
-            + _wellness_buttons(include_help=False)
+            + _legacy_wellness_buttons()
             + _start_buttons()
         )
 
@@ -643,7 +687,7 @@ def _welcome_buttons() -> list[dict[str, str]]:
         salon_buttons.append({"label": "👤 Профиль", "url": _join(miniapp_url, "profile")})
     # Else: zero-config — no Mini App button; the bot-native pair still ships.
 
-    return salon_buttons + _wellness_buttons(include_help=True) + _start_buttons()
+    return salon_buttons + _help_button() + _start_buttons()
 
 
 def _legacy_salon_buttons(web_app: str, miniapp_url: str) -> list[dict[str, str]]:
@@ -663,26 +707,41 @@ def _legacy_salon_buttons(web_app: str, miniapp_url: str) -> list[dict[str, str]
     return []
 
 
-def _wellness_buttons(*, include_help: bool) -> list[dict[str, str]]:
-    """Wellness + FAQ row — always callback-typed.
+def _legacy_wellness_buttons() -> list[dict[str, str]]:
+    """Pre-DRF-963 wellness + FAQ row — used ONLY by the rollback branch.
 
     These trigger a follow-up bot turn rather than a Mini App route.
-    «❓ Помощь» (DRF-963) lists what the bot can do; «❓ Задать вопрос» stays
-    the FAQ entry — complementary, not duplicates.
+
+    DRF-1200 removed all three from the live first screen: BOT-001 AC-4.2
+    caps Quick Actions at five, and the owner chose which five survive
+    (see :func:`_welcome_buttons`). They stay here because
+    ``PILOT_CONVERSATIONAL_UX=False`` must restore the pre-DRF-963
+    keyboard *exactly* — a rollback that silently ships a different
+    keyboard is not a rollback.
+
+    The callbacks themselves (``cb:welcome:food`` / ``water`` / ``ask``)
+    are still handled in :meth:`WelcomeSkill.handle`, so an old keyboard
+    still sitting in a customer's chat history keeps working.
 
     DRF-1199: «📊 Анкета» used to sit here and jump straight into the
     nutrition_anketa FSM. BOT-001 §13.3 forbids a standalone «Анкета» button
     on First Contact, so it was removed; ``/anketa`` still starts the same
     flow when the user asks for it.
     """
-    buttons = [
+    return [
         {"label": "🍽 Дневник еды", "callback": "cb:welcome:food"},
         {"label": "💧 Вода", "callback": "cb:welcome:water"},
         {"label": "❓ Задать вопрос", "callback": "cb:welcome:ask"},
     ]
-    if include_help:
-        buttons.append({"label": "❓ Помощь", "callback": CALLBACK_MENU_HELP})
-    return buttons
+
+
+def _help_button() -> list[dict[str, str]]:
+    """«❓ Помощь» — the capability list (DRF-963 brief minimum).
+
+    Handled by :class:`apps.skills.menu.help_skill.HelpSkill`; BOT-001
+    §8.2 cites «Помощь» as a Quick Action example.
+    """
+    return [{"label": "❓ Помощь", "callback": CALLBACK_MENU_HELP}]
 
 
 def _start_buttons() -> list[dict[str, str]]:

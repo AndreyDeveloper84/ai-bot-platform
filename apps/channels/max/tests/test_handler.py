@@ -442,11 +442,22 @@ class TestKeyboardPassThrough:
         att = attachments[0]
         assert att["type"] == "inline_keyboard"
         buttons = att["payload"]["buttons"]
-        # 8 rows (default columns=1): 2 bot-native salon callbacks (DRF-963)
-        # + 1 Mini App profile link + 4 wellness/FAQ/help callbacks
-        # + 1 «▶️ Начать» S1→S2 ack button (task #85). DRF-1199 убрал
-        # «📊 Анкета» — анкета как входная точка запрещена BOT-001 §13.3.
-        assert len(buttons) == 8
+        # One row per button (default columns=1). Pinned as a composition,
+        # not as a count: the «сколько кнопок» boundary is guarded once, in
+        # apps/skills/welcome/tests/test_skill.py::
+        # TestCanonQuickActionCeilingAC42 (BOT-001 AC-4.2, <= 5). This test
+        # owns the MAX-side rendering — that each button reaches the wire
+        # with the right native type.
+        #
+        # DRF-1200 cut «🍽 Дневник еды» / «💧 Вода» / «❓ Задать вопрос»
+        # from the first screen; DRF-1199 had already cut «📊 Анкета».
+        assert [row[0]["text"] for row in buttons] == [
+            "📅 Записаться",
+            "📋 Мои записи",
+            "👤 Профиль",
+            "❓ Помощь",
+            "▶️ Начать",
+        ]
         # DRF-963: booking entry is a bot callback, not a Mini App link.
         assert buttons[0][0]["type"] == "callback"
         assert buttons[0][0]["payload"] == "cb:menu:book"
@@ -454,7 +465,7 @@ class TestKeyboardPassThrough:
         assert buttons[2][0]["type"] == "link"
         assert buttons[2][0]["url"] == "https://miniapp-dev.example/profile"
         # The «❓ Помощь» callback — second-to-last (the #85 «Начать»
-        # ack button is appended after the wellness/FAQ block).
+        # ack button is appended last).
         assert buttons[-2][0]["type"] == "callback"
         assert buttons[-2][0]["payload"] == "cb:menu:help"
         # Last button is the S1→S2 ack «▶️ Начать» (task #85).

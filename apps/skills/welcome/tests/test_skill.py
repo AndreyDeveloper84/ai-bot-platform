@@ -81,22 +81,23 @@ class TestHandleStart:
     def test_zero_config_still_ships_the_booking_entry(self, settings):
         """DRF-963: «Записаться» / «Мои записи» are bot-native, so a
         deployment with no Mini App config is no longer left without any
-        booking entry point. Only «Профиль» (Mini-App-only) drops out."""
+        booking entry point. Only «Профиль» (Mini-App-only) drops out.
+
+        Pinned as a composition, not as a count — the count is the canon
+        BOUNDARY and lives in :class:`TestCanonQuickActionCeilingAC42`.
+        Asserting a bare ``len(buttons) == N`` here is what let the
+        violation survive two rounds of «сократили и поправили число»."""
 
         settings.MAX_BOT_WEB_APP = ""
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 2 bot-native salon + 4 wellness/FAQ/help + 1 S1 «Начать» = 7.
-        # DRF-1199: «Анкета» больше не выставляется входной точкой.
-        assert len(buttons) == 7
         callbacks = [b["callback"] for b in buttons]
+        # DRF-1200: дневник еды / вода / «Задать вопрос» ушли с первого
+        # экрана — обычным текстом они по-прежнему доступны.
         assert callbacks == [
             "cb:menu:book",
             "cb:menu:my_bookings",
-            "cb:welcome:food",
-            "cb:welcome:water",
-            "cb:welcome:ask",
             "cb:menu:help",
             "cb:welcome:start_s2",
         ]
@@ -108,20 +109,22 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = ""
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        # 2 bot-native salon + 1 Mini App profile + 4 wellness/FAQ/help
-        # + 1 S1 «Начать» = 8 total (DRF-1199 убрал «Анкету»).
-        assert len(buttons) == 8
+        # Composition, not a count — the ceiling is guarded separately in
+        # :class:`TestCanonQuickActionCeilingAC42`.
+        assert [b["callback"] for b in buttons] == [
+            "cb:menu:book",
+            "cb:menu:my_bookings",
+            "open_profile",
+            "cb:menu:help",
+            "cb:welcome:start_s2",
+        ]
         # DRF-963: booking actions route into the bot, not the Mini App.
-        assert buttons[0]["callback"] == "cb:menu:book"
-        assert buttons[1]["callback"] == "cb:menu:my_bookings"
         assert "web_app" not in buttons[0] and "web_app" not in buttons[1]
         # Flat slug payload — MAX rejects open_app payloads with `=`
         # (HTTP 400 proto.payload). Mini App's parseStartRoute resolves
         # these by direct lookup.
-        profile = buttons[2]
-        assert profile["web_app"] == "id583_bot"
-        assert profile["callback"] == "open_profile"
-        # Wellness + FAQ + help + S1 row: never carries web_app.
+        assert buttons[2]["web_app"] == "id583_bot"
+        # Help + S1 rows: never carry web_app.
         for btn in buttons[3:]:
             assert "web_app" not in btn
             assert btn["callback"].startswith("cb:")
@@ -135,7 +138,13 @@ class TestHandleStart:
         settings.MAX_MINIAPP_URL = "https://miniapp-dev.example/"
         result = WelcomeSkill().handle(_ctx("/start"))
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 8
+        assert [b["label"] for b in buttons] == [
+            "📅 Записаться",
+            "📋 Мои записи",
+            "👤 Профиль",
+            "❓ Помощь",
+            "▶️ Начать",
+        ]
         assert buttons[2]["url"] == "https://miniapp-dev.example/profile"
 
     def test_web_app_takes_precedence_over_miniapp_url(self, settings):
@@ -621,7 +630,8 @@ class TestS3S5Flow:
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
         buttons = result.action_data["buttons"]
-        assert len(buttons) == 5
+        # Composition, not a bare count — the «not more than five» boundary
+        # is guarded once, in TestCanonQuickActionCeilingAC42 (AC-4.2).
         callbacks = [b["callback"] for b in buttons]
         assert callbacks == [
             "open_food_scan",
@@ -654,9 +664,11 @@ class TestS3S5Flow:
             _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
         )
         buttons = result.action_data["buttons"]
-        # 4 primary URL + просто посмотреть URL = 5 (DRF-1199 убрал анкету)
-        assert len(buttons) == 5
+        # 4 primary URL + «просто посмотреть» URL (DRF-1199 убрал анкету).
+        # Пинуется составом, не числом — потолок AC-4.2 сторожит
+        # TestCanonQuickActionCeilingAC42.
         urls = [b.get("url") for b in buttons if "url" in b]
+        assert len(urls) == len(buttons)
         # DRF-1167: link fallback points at the same Mini App routes the
         # slugs resolve to in max-sdk.ts::_ROUTE_MAP (previously /food_scan,
         # /goal_select etc. — none of which exist as routes).
@@ -995,3 +1007,71 @@ class TestThreeGreetingStates:
 
         result = WelcomeSkill().handle(ctx)
         assert result.meta["reply_kind"] == "welcome_s1_multitenant"
+
+
+# ───────────────────────────────────────────────────────────────────────
+# BOT-001 AC-4.2 — постоянный страж границы канона (DRF-1200)
+# ───────────────────────────────────────────────────────────────────────
+
+#: BOT-001 AC-4.2: «Quick Actions, when present, MUST NOT exceed 5».
+#: Это потолок канона, а не «текущее число кнопок». Если экран сократили
+#: ещё — тесты ниже остаются зелёными; если кто-то добавил шестую —
+#: падают. Менять эту константу можно только вместе с каноном.
+CANON_MAX_QUICK_ACTIONS = 5
+
+#: Все конфигурации Mini App, которые меняют состав клавиатуры:
+#: пилотная (``MAX_BOT_WEB_APP`` задан → open_app), внешняя ссылка
+#: (``MAX_MINIAPP_URL`` → link) и пустая (zero-config).
+_MINIAPP_CONFIGS = [
+    pytest.param("", "", id="zero-config"),
+    pytest.param("id583_bot", "", id="pilot-web-app"),
+    pytest.param("", "https://m.example/", id="miniapp-url"),
+]
+
+
+class TestCanonQuickActionCeilingAC42:
+    """AC-4.2: набор быстрых действий первого экрана не больше пяти.
+
+    Страж, а не снимок. Предыдущая правка (DRF-1200, первая попытка)
+    сократила девять кнопок до восьми и переписала утверждение
+    ``== 9`` на ``== 8`` — нарушение канона осталось зацементировано
+    зелёным тестом, просто на другом числе. Здесь закреплена ГРАНИЦА:
+    ``<= 5``. Добавление шестой кнопки роняет тест при любой
+    конфигурации Mini App; дальнейшее сокращение — нет.
+
+    Канон намеренно не фиксирует ни текст, ни состав кнопок
+    (BOT-001 §8.2: «Quick Action copy MUST NOT be canonicalized… examples
+    only»), поэтому проверяется ровно количество.
+    """
+
+    @pytest.mark.parametrize(("web_app", "miniapp_url"), _MINIAPP_CONFIGS)
+    def test_s1_welcome_keyboard_within_canon_ceiling(self, settings, web_app, miniapp_url):
+        """S1 (первый экран, ``/start``) — не больше пяти быстрых действий."""
+        settings.PILOT_CONVERSATIONAL_UX = True
+        settings.MAX_BOT_WEB_APP = web_app
+        settings.MAX_MINIAPP_URL = miniapp_url
+        buttons = WelcomeSkill().handle(_ctx("/start")).action_data["buttons"]
+        assert len(buttons) <= CANON_MAX_QUICK_ACTIONS, (
+            f"AC-4.2 нарушен: {len(buttons)} кнопок на S1 "
+            f"(web_app={web_app!r}, miniapp_url={miniapp_url!r}): "
+            f"{[b['label'] for b in buttons]}"
+        )
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(("web_app", "miniapp_url"), _MINIAPP_CONFIGS)
+    def test_s5_first_action_grid_within_canon_ceiling(
+        self, unwelcomed_bot_user, settings, web_app, miniapp_url
+    ):
+        """S5 (сетка первого действия после согласия) — тот же потолок."""
+        settings.PILOT_CONVERSATIONAL_UX = True
+        settings.MAX_BOT_WEB_APP = web_app
+        settings.MAX_MINIAPP_URL = miniapp_url
+        result = WelcomeSkill().handle(
+            _ctx_with_botuser("cb:welcome:consent_yes", unwelcomed_bot_user),
+        )
+        buttons = result.action_data["buttons"]
+        assert len(buttons) <= CANON_MAX_QUICK_ACTIONS, (
+            f"AC-4.2 нарушен: {len(buttons)} кнопок на S5 "
+            f"(web_app={web_app!r}, miniapp_url={miniapp_url!r}): "
+            f"{[b['label'] for b in buttons]}"
+        )
