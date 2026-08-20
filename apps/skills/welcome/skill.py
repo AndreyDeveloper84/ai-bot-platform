@@ -18,8 +18,11 @@ owner picked which five survive:
 
 Removed from the first screen — NOT from the bot:
 
-  * 🍽 Дневник еды — free text / photo still reaches food_scanner, and
-                     the S5 grid still opens the Mini App scanner.
+  * 🍽 Дневник еды — a photo still reaches ``FoodScannerSkill`` (it
+                     claims attachment-only turns), food-shaped free
+                     text still reaches ``FoodClarifySkill``
+                     (``looks_like_food_drink``), and the S5 grid still
+                     opens the Mini App scanner.
   * 💧 Вода        — free text («стакан», «250 мл») still reaches the
                      water skill; S5 still offers «+ стакан воды».
   * ❓ Задать вопрос — the FAQ skill claims question-shaped free text on
@@ -615,12 +618,14 @@ def _welcome_buttons() -> list[dict[str, str]]:
 
     Dropped: «🍽 Дневник еды», «💧 Вода», «❓ Задать вопрос». The owner
     chose this set knowing the price — wellness and FAQ move off the
-    first screen into free text. Nothing is unreachable: the food /
-    water / FAQ skills all claim free text on their own
-    (``food_scanner``, ``water``, ``faq``), the S5 first-action grid
-    still opens food scan and water in the Mini App, and the three
-    ``cb:welcome:*`` callbacks stay handled so old keyboards in chat
-    history keep working.
+    first screen into free text. Nothing is unreachable: photos reach
+    ``FoodScannerSkill``, food-shaped text reaches ``FoodClarifySkill``,
+    «стакан» / «250 мл» reaches ``WaterSkill``, question-shaped text
+    reaches ``FaqSkill`` — all four claim those turns on their own. The
+    S5 first-action grid still opens food scan and water in the Mini
+    App, and the three ``cb:welcome:*`` callbacks stay handled so old
+    keyboards in chat history keep working. The removed buttons only
+    ever printed a prompt telling the user to do exactly that.
 
     The button count is guarded, not asserted: see
     ``TestCanonQuickActionCeilingAC42`` — it pins ``<= 5``, so adding a
