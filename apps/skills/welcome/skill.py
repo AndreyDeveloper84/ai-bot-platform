@@ -707,8 +707,8 @@ def _flow_already_established(context: SkillContext) -> bool:
     * messages already exchanged with this bot_user — in any other
       conversation, or in the current one beyond the single inbound row
       the channel recorded a moment ago (DRF-1207);
-    * any AdminTask ever created for this bot_user — a handoff in
-      progress or resolved means the support flow owns the turn.
+    * an ACTIVE AdminTask for this bot_user — an open / in-progress
+      handoff means the support flow owns the turn (DRF-1206).
 
     ### DRF-1207 — why the current conversation is no longer skipped wholesale
 
@@ -746,4 +746,18 @@ def _flow_already_established(context: SkillContext) -> bool:
     elif messages.exists():
         return True
 
-    return AdminTask.all_tenants.filter(conversation__bot_user=context.bot_user).exists()
+    # DRF-1206 — only an ACTIVE handoff owns the turn. The previous
+    # ``.exists()`` carried no status predicate, so a ticket resolved months
+    # ago suppressed the auto-welcome for that user permanently. BOT-001 §10
+    # names this greeting state «User with an Active Task»; a resolved or
+    # cancelled ticket is not active, and the person behind it is a Returning
+    # User (§9) — not somebody whose turn another flow owns.
+    #
+    # Resume-after-resolve (the regression this arm was added for, b1bfda2)
+    # stays covered by the message check above: since DRF-1207 it counts the
+    # current conversation too, and a conversation that reached a handoff
+    # always holds more than the single inbound row of a first contact.
+    return AdminTask.all_tenants.filter(
+        conversation__bot_user=context.bot_user,
+        status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
+    ).exists()

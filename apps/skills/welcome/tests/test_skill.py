@@ -831,3 +831,63 @@ class TestMidConversationWakeUp:
         _record(conversation, "user", "/start")
 
         assert WelcomeSkill().matches(_ctx_in("/start", unwelcomed_bot_user, conversation)) is True
+
+
+# ───────────────────────────────────────────────────────────────────────
+# DRF-1206 — только АКТИВНАЯ админская задача подавляет приветствие
+# ───────────────────────────────────────────────────────────────────────
+
+
+def _admin_task(conversation, status):
+    from apps.handoff.models import AdminTask
+
+    return AdminTask.all_tenants.create(
+        tenant=conversation.tenant,
+        bot_user=conversation.bot_user,
+        conversation=conversation,
+        task_type=AdminTask.TaskType.HANDOFF,
+        status=status,
+    )
+
+
+class TestActiveTaskSuppression:
+    """DRF-1206 / BOT-001 §9–§10.
+
+    «User with an Active Task» — состояние канона; закрытый тикет
+    активным не является, и человек за ним — Returning User, а не
+    пользователь, чей ход принадлежит другому потоку.
+    """
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("status", ["open", "in_progress"])
+    def test_active_task_still_suppresses(self, unwelcomed_bot_user, status):
+        conversation = _conversation_for(unwelcomed_bot_user)
+        _record(conversation, "user", "Привет")
+        _admin_task(conversation, status)
+
+        assert WelcomeSkill().matches(_ctx_in("Привет", unwelcomed_bot_user, conversation)) is False
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("status", ["resolved", "cancelled"])
+    def test_closed_task_does_not_suppress_forever(self, unwelcomed_bot_user, status):
+        """Закрытый тикет из прошлого больше не глушит приветствие навсегда.
+
+        Разговор здесь новый и содержит ровно одно входящее — то есть это
+        настоящий первый контакт, и приветствие обязано сработать.
+        """
+        older = _conversation_for(unwelcomed_bot_user)
+        _record(older, "user", "нужен человек")
+        _admin_task(older, status)
+        older.is_active = False
+        older.save(update_fields=["is_active"])
+
+        # Сообщения прошлого разговора сами по себе тоже блокируют guard —
+        # чтобы проверить именно арму AdminTask, берём разговор без истории.
+        from apps.conversations.models import Message
+
+        Message.all_tenants.filter(conversation=older).delete()
+
+        current = _conversation_for(unwelcomed_bot_user)
+        _record(current, "user", "Привет")
+
+        assert WelcomeSkill().matches(_ctx_in("Привет", unwelcomed_bot_user, current)) is True
