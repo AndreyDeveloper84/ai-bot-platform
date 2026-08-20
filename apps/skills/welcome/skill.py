@@ -125,12 +125,35 @@ from apps.tenancy.context import current_tenant
 logger = logging.getLogger(__name__)
 
 
+# S1 greeting for a New User.
+#
+# DRF-1203 — копия состояние-первая, а не сервис-первая. Было: сначала
+# идентификация бизнеса («Это бот массажного салона …»), потом перечень
+# услуг, состояние человека — третьим предложением после «А ещё», и
+# закрывающее «Выберите раздел:».
+#
+# Канон:
+# * CDP-01 «Goal Before Mechanism» — разговор «never requires the user to
+#   understand Ayla's services, categories, screens or internal structure
+#   in order to make progress»; «Ayla is not a service catalogue with a
+#   chat wrapper».
+# * BOT-001 §8.1 — «The greeting SHOULD introduce Ayla's role briefly»,
+#   «MUST NOT deliver a long feature explanation or guided tour».
+# * BOT-001 §6.1 п.3 — «The greeting SHOULD offer help or invite the user
+#   to state their goal in free text».
+# * CDP §5 анти-паттерн #1 «Navigation before intent» — «Выберите
+#   раздел:» превращало приветствие в меню.
+#
+# Канон задаёт смысл, но не дословный текст (§8.2: «Quick Action copy
+# MUST NOT be canonicalized in this specification»), поэтому формулировка
+# написана по смыслу. Салон назван — но как контекст в конце, а не как
+# заголовок: на пилоте бот действительно принадлежит одному салону, и
+# скрывать это было бы нечестно.
 WELCOME_TEXT = (
     "Здравствуйте! 👋\n\n"
-    "Это бот массажного салона «Формула тела» в Пензе.\n"
-    "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n"
-    "А ещё умею вести дневник еды и воды.\n\n"
-    "Выберите раздел:"
+    "Я Ayla. Скажите своими словами, что сейчас нужно вам — отдохнуть, "
+    "разобраться с самочувствием или записаться к мастеру. Я пойму и помогу.\n\n"
+    "Рядом со мной — массажный салон «Формула тела» в Пензе."
 )
 
 # S1 multi-tenant variant (Tau §4) — rendered when bot_started arrives
