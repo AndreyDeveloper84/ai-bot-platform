@@ -15,6 +15,7 @@ from apps.admin_api import (
     views,
     views_availability,
     views_availability_slots,
+    views_booking_cancel,
     views_booking_create,
     views_customers,
     views_day,
@@ -37,6 +38,13 @@ urlpatterns = [
     # Phase 2 — the commit boundary of manual booking. Ayla owns the
     # booking; this is a shell that names the acting administrator.
     path("bookings/", views_booking_create.create_booking, name="create_booking"),
+    # Phase 2 — cancellation. No expected_version: the end state is the
+    # same however many times you ask, so Ayla does not gate it on one.
+    path(
+        "bookings/<uuid:appointment_id>/cancel/",
+        views_booking_cancel.cancel_booking,
+        name="cancel_booking",
+    ),
     # Phase 2 — customer search, the first step of the booking flow (§13).
     # Refuses rather than returning an empty list when it cannot ask, for
     # the same reason as booking-slots: «nothing found» and «could not

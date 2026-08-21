@@ -96,6 +96,28 @@ class SalonSlotTaken(SalonAPIError):
     """409 — the interval went while the draft was open."""
 
 
+class SalonStaleVersion(SalonAPIError):
+    """409 ``STALE_VERSION`` — somebody else moved this booking first.
+
+    Shares a status code with :class:`SalonSlotTaken` and means something
+    entirely different. «The time was taken» sends the receptionist to
+    pick another slot; «the booking changed under you» sends them to
+    refresh the day, because the booking they are looking at is not the
+    booking that exists. Telling them the first when it is the second
+    invites a second move on top of somebody else's — which is exactly
+    what ``expected_version`` is there to prevent.
+    """
+
+
+class SalonNotAllowed(SalonAPIError):
+    """422 — the booking's own state forbids this, whoever is asking.
+
+    A finished visit cannot be cancelled and a cancelled one cannot be
+    moved. Not a rights problem (403) and not a race (409): no retry and
+    no other actor changes the answer.
+    """
+
+
 class SalonUnavailable(SalonAPIError):
     """Network, timeout or 5xx.
 
@@ -205,6 +227,7 @@ class AylaSalonClient:
         """
 
         detail = _detail(resp)
+        code = _error_code(resp)
         if resp.status_code == 400:
             raise SalonValidationError(detail)
         if resp.status_code == 401:
@@ -214,7 +237,17 @@ class AylaSalonClient:
         if resp.status_code == 404:
             raise SalonNotFound(detail)
         if resp.status_code == 409:
+            # One status, three meanings on this surface — the code is the
+            # only thing that separates them, so it is read rather than
+            # collapsed. Unknown 409s stay «slot taken»: it is the common
+            # case and the safe instruction (look again), whereas guessing
+            # «stale» would tell the user to refresh a booking that did
+            # not change.
+            if code == "STALE_VERSION":
+                raise SalonStaleVersion(detail)
             raise SalonSlotTaken(detail)
+        if resp.status_code == 422:
+            raise SalonNotAllowed(detail)
         if resp.status_code >= 500:
             raise SalonUnavailable(f"upstream {resp.status_code}: {detail}")
         raise SalonAPIError(f"unexpected {resp.status_code}: {detail}")
@@ -309,6 +342,114 @@ class AylaSalonClient:
             json_body=body,
         )
 
+    #: What a salon may legitimately assert about its own cancellation.
+    #: Ayla's closed allowlist (``SALON_CANCELLATION_REASON_CODES``): the
+    #: ``user_*`` codes are the customer's business and
+    #: ``payment_hold_expired`` is the payment system's fact, so letting
+    #: the salon claim either would let one party author another's
+    #: attribution. Mirrored here to refuse locally rather than learn it
+    #: from a 400.
+    CANCELLATION_REASON_CODES = frozenset({"master_unavailable", "tenant_closed_slot", "other"})
+
+    def cancel_appointment(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        appointment_id: str,
+        reason: str = "",
+        reason_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel a booking of this salon, attributed to the acting admin.
+
+        No ``expected_version``: cancellation is idempotent in intent —
+        the end state is the same however many times you ask — so Ayla
+        does not gate it on a version, and neither does this.
+
+        ``reason`` is free text for the record; ``reason_code`` is the
+        structured claim. Omitted, Ayla defaults it to ``other``, which is
+        the honest value when the salon has not said why.
+        """
+
+        if not tenant_slug:
+            raise SalonValidationError("tenant_slug is required")
+        if not appointment_id:
+            raise SalonValidationError("appointment_id is required")
+        if reason_code is not None and reason_code not in self.CANCELLATION_REASON_CODES:
+            raise SalonValidationError(
+                f"reason_code must be one of {sorted(self.CANCELLATION_REASON_CODES)}"
+            )
+
+        body: dict[str, Any] = {"reason": reason or ""}
+        if reason_code is not None:
+            body["reason_code"] = reason_code
+
+        return self._post(
+            f"appointments/{appointment_id}/cancel/",
+            actor_external_id=actor_external_id,
+            # Cancel takes no idempotency key upstream (`command_key` is an
+            # audit trace there, never queried), but the header is what
+            # switches _post into write mode; the value is the audit trail.
+            idempotency_key=f"cancel:{appointment_id}",
+            tenant_slug=tenant_slug,
+            json_body=body,
+        )
+
+    def reschedule_appointment(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        appointment_id: str,
+        new_start_datetime: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """Move a booking. ``expected_version`` is required, not optional.
+
+        Upstream makes it required on this surface specifically (it is
+        optional on the mobile path only because old app builds exist),
+        and the reason is the whole concurrency story: the version says
+        «the booking I am moving is the booking I was shown». Without it
+        two people moving the same booking both succeed and the second
+        silently wins.
+
+        **Not wired to a screen yet, and deliberately so.** The version
+        has to be the canonical one, and as of 2026-08-21 the bot has no
+        canonical read that carries it: the day journal here is built
+        from ``RemoteBookingProxy``, whose
+        ``last_applied_appointment_version`` is NULL unless a canonical
+        ``appointment.rescheduled`` event happened to have been applied.
+        Measured on the pilot the same day: 2 of 23 mirrored bookings
+        carry a version, and the single future confirmed booking — the
+        only one anybody could actually move — carries none. Sending that
+        NULL, or inventing a 1, would make every move fail as STALE or,
+        worse, succeed against the wrong revision.
+
+        So this method is complete and tested, and the caller is missing
+        on purpose. See the report §31 for the two ways to supply the
+        version; both are Ayla-side and neither is guesswork here.
+        """
+
+        if not tenant_slug:
+            raise SalonValidationError("tenant_slug is required")
+        if not appointment_id:
+            raise SalonValidationError("appointment_id is required")
+        if not isinstance(expected_version, int) or expected_version < 1:
+            # A caller with no version must not reach the network: the
+            # request would be answered, and answered wrongly.
+            raise SalonValidationError("expected_version must be a positive integer")
+
+        return self._post(
+            f"appointments/{appointment_id}/reschedule/",
+            actor_external_id=actor_external_id,
+            idempotency_key=f"reschedule:{appointment_id}:{expected_version}",
+            tenant_slug=tenant_slug,
+            json_body={
+                "new_start_datetime": new_start_datetime,
+                "expected_version": expected_version,
+            },
+        )
+
     MIN_QUERY = 2
 
     def search_customers(
@@ -356,6 +497,25 @@ class AylaSalonClient:
             # returning [].
             raise SalonUnavailable("upstream returned an unrecognised search payload")
         return [row for row in results if isinstance(row, dict)]
+
+
+def _error_code(resp: httpx.Response) -> str:
+    """Ayla's machine-readable error code, or "" when there isn't one.
+
+    Separate from :func:`_detail` because the two are read by different
+    audiences: the message is shown to a human, the code decides which
+    branch runs. Collapsing them would mean branching on prose.
+    """
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        return ""
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            return str(err.get("code") or "")
+    return ""
 
 
 def _detail(resp: httpx.Response) -> str:

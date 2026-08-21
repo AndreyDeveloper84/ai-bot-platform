@@ -24,8 +24,11 @@ import { useNavigate } from "react-router-dom";
 import { AdminTabBar } from "../../components/AdminTabBar";
 import { StateError } from "../../components/StateError";
 import {
+  CANCEL_REASONS,
+  cancelSalonBooking,
   getSalonDay,
   RELEASED_VISIT_STATUSES,
+  type CancelReasonCode,
   type SalonDayResponse,
   type SalonDayVisit,
 } from "../../lib/admin-api";
@@ -77,8 +80,20 @@ function clientLabel(v: SalonDayVisit): string {
   return `${v.client_first_name}${initial}`.trim() || "Гость";
 }
 
-function VisitRow({ visit, timeZone }: { visit: SalonDayVisit; timeZone: string }) {
+function VisitRow({
+  visit,
+  timeZone,
+  onCancel,
+}: {
+  visit: SalonDayVisit;
+  timeZone: string;
+  onCancel: (visit: SalonDayVisit) => void;
+}) {
   const released = RELEASED_VISIT_STATUSES.has(visit.status);
+  // Offered only where it can succeed. A cancelled or finished visit is
+  // settled — Ayla answers 422 whoever asks — and a button that always
+  // fails teaches the front desk to distrust the screen.
+  const cancellable = !released && !visit.is_in_progress;
   return (
     <li
       className="salon-day__visit"
@@ -106,7 +121,85 @@ function VisitRow({ visit, timeZone }: { visit: SalonDayVisit; timeZone: string 
           </span>
         )}
       </span>
+      {cancellable && (
+        <button
+          type="button"
+          className="btn btn--ghost"
+          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          onClick={() => onCancel(visit)}
+          aria-label={`Отменить визит: ${clientLabel(visit)}, ${formatTime(
+            visit.start_at,
+            timeZone,
+          )}`}
+        >
+          Отменить
+        </button>
+      )}
     </li>
+  );
+}
+
+/**
+ * Confirmation before a cancellation.
+ *
+ * Deliberately two steps, not one. The customer is told their
+ * appointment is off, so a mis-tap is not recoverable by pressing again
+ * — and the reason is asked for here because Ayla records it as the
+ * salon's own claim about why.
+ */
+function CancelDialog({
+  visit,
+  timeZone,
+  busy,
+  onConfirm,
+  onDismiss,
+}: {
+  visit: SalonDayVisit;
+  timeZone: string;
+  busy: boolean;
+  onConfirm: (code: CancelReasonCode) => void;
+  onDismiss: () => void;
+}) {
+  const [code, setCode] = useState<CancelReasonCode>("master_unavailable");
+  return (
+    <div className="sheet" role="dialog" aria-modal="true" aria-label="Отмена визита">
+      <h3 className="section__title">Отменить визит?</h3>
+      <p>
+        {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
+        {visit.service_name ? ` · ${visit.service_name}` : ""}
+      </p>
+      <p className="muted">Клиент получит уведомление об отмене.</p>
+
+      <fieldset style={{ border: 0, padding: 0, margin: "var(--s-3) 0" }}>
+        <legend className="muted">Причина</legend>
+        {CANCEL_REASONS.map((r) => (
+          <label key={r.code} style={{ display: "block", padding: "var(--s-1) 0" }}>
+            <input
+              type="radio"
+              name="cancel-reason"
+              value={r.code}
+              checked={code === r.code}
+              onChange={() => setCode(r.code)}
+            />{" "}
+            {r.label}
+          </label>
+        ))}
+      </fieldset>
+
+      <div style={{ display: "flex", gap: "var(--s-2)" }}>
+        <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
+          Не отменять
+        </button>
+        <button
+          type="button"
+          className="btn btn--danger"
+          onClick={() => onConfirm(code)}
+          disabled={busy}
+        >
+          {busy ? "Отменяем…" : "Отменить визит"}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -117,6 +210,9 @@ export function AdminSalonDayScreen() {
   const [day, setDay] = useState<SalonDayResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<unknown>(null);
+  const [cancelling, setCancelling] = useState<SalonDayVisit | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     setBackButton(false);
@@ -145,6 +241,46 @@ export function AdminSalonDayScreen() {
     void load(date, controller.signal);
     return () => controller.abort();
   }, [date, load]);
+
+  const confirmCancel = useCallback(
+    async (code: CancelReasonCode) => {
+      const visit = cancelling;
+      if (!visit || cancelBusy) return;
+      setCancelBusy(true);
+      try {
+        const res = await cancelSalonBooking(visit.id, { reason_code: code });
+        setCancelling(null);
+
+        // Every outcome except «blocked» ends with a reload, because in
+        // each of them the day on screen may no longer be the day that
+        // exists — including `pending`, where the cancellation may well
+        // have landed. Refreshing is how the receptionist finds out,
+        // and it is safer than any message we could invent.
+        switch (res.outcome) {
+          case "committed":
+            setNotice("Визит отменён. Клиент получит уведомление.");
+            break;
+          case "conflict":
+            setNotice("Запись успели изменить — день обновлён.");
+            break;
+          case "pending":
+            setNotice(
+              "Расписание не ответило. Возможно, отмена прошла — проверьте день, прежде чем повторять.",
+            );
+            break;
+          case "blocked":
+            setNotice(res.detail || "Этот визит нельзя отменить.");
+            break;
+          default:
+            setNotice(res.detail || "Не удалось отменить.");
+        }
+        if (res.outcome !== "blocked") await load(date);
+      } finally {
+        setCancelBusy(false);
+      }
+    },
+    [cancelling, cancelBusy, date, load],
+  );
 
   const tz = day?.timezone ?? "Europe/Moscow";
   const busyMasters = day?.masters.filter((m) => m.visits.length > 0) ?? [];
@@ -247,7 +383,7 @@ export function AdminSalonDayScreen() {
               </p>
               <ul style={{ listStyle: "none", padding: 0, margin: "var(--s-2) 0 0" }}>
                 {day.orphan_visits.map((v) => (
-                  <VisitRow key={v.id} visit={v} timeZone={tz} />
+                  <VisitRow key={v.id} visit={v} timeZone={tz} onCancel={setCancelling} />
                 ))}
               </ul>
             </div>
@@ -260,7 +396,7 @@ export function AdminSalonDayScreen() {
               </h2>
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {m.visits.map((v) => (
-                  <VisitRow key={v.id} visit={v} timeZone={tz} />
+                  <VisitRow key={v.id} visit={v} timeZone={tz} onCancel={setCancelling} />
                 ))}
               </ul>
             </section>
@@ -277,6 +413,25 @@ export function AdminSalonDayScreen() {
             </section>
           )}
         </>
+      )}
+
+      {notice && (
+        <p
+          role="status"
+          style={{ marginTop: "var(--s-3)", color: "var(--c-text-secondary)" }}
+        >
+          {notice}
+        </p>
+      )}
+
+      {cancelling && (
+        <CancelDialog
+          visit={cancelling}
+          timeZone={tz}
+          busy={cancelBusy}
+          onConfirm={(code) => void confirmCancel(code)}
+          onDismiss={() => setCancelling(null)}
+        />
       )}
 
       <AdminTabBar />

@@ -377,3 +377,182 @@ class TestCustomerSearch:
                 tenant_slug="formula-tela",
                 query="Мар",
             )
+
+
+class TestOneStatusThreeMeanings:
+    """409 on this surface means three different things.
+
+    SLOT_NOT_AVAILABLE sends the receptionist to pick another time.
+    STALE_VERSION sends them to refresh — the booking they are looking at
+    is not the booking that exists. Collapsing the second into the first
+    tells them to re-pick a time for a booking somebody else already
+    moved, which is precisely what expected_version exists to prevent.
+    """
+
+    def _409(self, code: str):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(409, json={"error": {"code": code, "message": "conflict"}})
+
+        return handler
+
+    def test_stale_version_is_its_own_exception(self) -> None:
+        from apps.integrations.ayla.salon_client import SalonStaleVersion
+
+        with pytest.raises(SalonStaleVersion):
+            _client(self._409("STALE_VERSION")).cancel_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+            )
+
+    def test_a_taken_slot_stays_a_taken_slot(self) -> None:
+        with pytest.raises(SalonSlotTaken):
+            _client(self._409("SLOT_NOT_AVAILABLE")).cancel_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+            )
+
+    def test_an_unknown_409_falls_back_to_the_safe_instruction(self) -> None:
+        """«Look again» is safe for an unrecognised conflict; «somebody
+        moved it» would be a claim we cannot support."""
+        with pytest.raises(SalonSlotTaken):
+            _client(self._409("SOMETHING_NEW")).cancel_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+            )
+
+    def test_422_is_the_bookings_own_state_not_a_race(self) -> None:
+        from apps.integrations.ayla.salon_client import SalonNotAllowed
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422,
+                json={"error": {"code": "CANCELLATION_NOT_ALLOWED", "message": "done"}},
+            )
+
+        with pytest.raises(SalonNotAllowed):
+            _client(handler).cancel_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+            )
+
+
+class TestCancel:
+    def test_posts_to_the_cancel_endpoint_of_that_booking(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"data": {"id": "a-1"}})
+
+        _client(handler).cancel_appointment(
+            actor_external_id=ACTOR,
+            tenant_slug="formula-tela",
+            appointment_id="a-1",
+            reason="мастер заболел",
+            reason_code="master_unavailable",
+        )
+
+        assert seen["url"] == ("https://ayla.example/api/v1/tenants/me/appointments/a-1/cancel/")
+        assert seen["body"] == {
+            "reason": "мастер заболел",
+            "reason_code": "master_unavailable",
+        }
+
+    def test_an_omitted_reason_code_is_not_invented(self) -> None:
+        """Upstream defaults it to «other». Sending a guess would put a
+        claim in the permanent record that nobody actually made."""
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"data": {}})
+
+        _client(handler).cancel_appointment(
+            actor_external_id=ACTOR,
+            tenant_slug="formula-tela",
+            appointment_id="a-1",
+        )
+
+        assert "reason_code" not in seen["body"]
+
+    def test_a_reason_code_outside_the_salon_allowlist_is_refused(self) -> None:
+        """`user_*` codes are the customer's business and
+        `payment_hold_expired` is the payment system's fact. Letting the
+        salon assert either would let one party author another's
+        attribution — refused here rather than learned from a 400.
+        """
+        client = _client(_ok)
+        with pytest.raises(SalonValidationError, match="reason_code"):
+            client.cancel_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+                reason_code="user_changed_mind",
+            )
+
+    def test_refuses_without_a_tenant(self) -> None:
+        client = _client(_ok)
+        with pytest.raises(SalonValidationError, match="tenant_slug"):
+            client.cancel_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="",
+                appointment_id="a-1",
+            )
+
+
+class TestReschedule:
+    """Complete and tested; no caller yet, and that is deliberate.
+
+    The bot has no canonical read that carries a booking's `version`.
+    Measured on the pilot 2026-08-21: 2 of 23 mirrored bookings have one,
+    and the single future confirmed booking has none. See report §31.
+    """
+
+    def test_sends_the_new_start_and_the_expected_version(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"data": {"id": "a-1", "version": 4}})
+
+        _client(handler).reschedule_appointment(
+            actor_external_id=ACTOR,
+            tenant_slug="formula-tela",
+            appointment_id="a-1",
+            new_start_datetime="2026-08-22T15:00:00+03:00",
+            expected_version=3,
+        )
+
+        assert seen["url"].endswith("/appointments/a-1/reschedule/")
+        assert seen["body"] == {
+            "new_start_datetime": "2026-08-22T15:00:00+03:00",
+            "expected_version": 3,
+        }
+
+    @pytest.mark.parametrize("version", [None, 0, -1, "3"])
+    def test_a_missing_or_bogus_version_never_reaches_the_network(self, version) -> None:
+        """A move without a trustworthy version would be answered — and
+        answered wrongly, against whatever revision happens to exist."""
+        called = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal called
+            called = True
+            return httpx.Response(200, json={"data": {}})
+
+        with pytest.raises(SalonValidationError, match="expected_version"):
+            _client(handler).reschedule_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+                new_start_datetime="2026-08-22T15:00:00+03:00",
+                expected_version=version,  # type: ignore[arg-type]
+            )
+
+        assert called is False

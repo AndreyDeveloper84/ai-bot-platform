@@ -270,6 +270,61 @@ export const createSalonBooking = async (
   }
 };
 
+// --- POST /api/v1/admin/bookings/<id>/cancel/ (UX contract §19) ----------
+
+/** The salon's closed allowlist of cancellation reasons. */
+export const CANCEL_REASONS = [
+  { code: "master_unavailable", label: "Мастер не сможет" },
+  { code: "tenant_closed_slot", label: "Салон закрыт" },
+  { code: "other", label: "Другое" },
+] as const;
+
+export type CancelReasonCode = (typeof CANCEL_REASONS)[number]["code"];
+
+export interface CancelBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+}
+
+/**
+ * Cancel a booking.
+ *
+ * Same five outcomes as creation and, as there, never throws on a
+ * business answer. `pending` carries more weight here than anywhere
+ * else: a cancellation reported as failed invites a second press, and a
+ * second press on an already-cancelled booking is how a customer gets
+ * told twice that their appointment is off.
+ */
+export const cancelSalonBooking = async (
+  appointmentId: string,
+  body: { reason_code?: CancelReasonCode; reason?: string } = {},
+): Promise<CancelBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/cancel/`,
+      { method: "POST", headers, body: JSON.stringify(body) },
+    );
+  } catch {
+    return { outcome: "pending", detail: "нет ответа от сети" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CancelBookingResult>;
+    if (data.outcome) return data as CancelBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    // Unreadable body on a write is not evidence that nothing happened.
+    return { outcome: "pending", detail: "ответ не прочитан" };
+  }
+};
+
 // --- salon customers (UX contract §13) -----------------------------------
 
 /**
