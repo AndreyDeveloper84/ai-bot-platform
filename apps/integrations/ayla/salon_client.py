@@ -67,6 +67,23 @@ class SalonValidationError(SalonAPIError):
     """400 — Ayla rejected the payload (e.g. booking window)."""
 
 
+class SalonUnauthorized(SalonAPIError):
+    """401 — Ayla rejected our credentials before permissions ran.
+
+    Not a booking problem and not this administrator's fault: the salon
+    endpoints did not accept the service credential at all. Distinguished
+    from :class:`SalonForbidden` because the remedy is entirely different —
+    403 means «this person may not», 401 means «we may not», and only the
+    second is an operator's page.
+
+    Measured against live Ayla on 2026-08-21: the salon endpoints answer
+    401 ``token_not_valid`` to a service Bearer, because their JWT
+    authenticator rejects it before ``permission_classes`` are consulted
+    (DRF-1231). When that is fixed this stops happening, and the contract
+    test that pins it should go red and say so.
+    """
+
+
 class SalonForbidden(SalonAPIError):
     """403 — this actor is not an administrator of this salon."""
 
@@ -153,6 +170,8 @@ class AylaSalonClient:
         detail = _detail(resp)
         if resp.status_code == 400:
             raise SalonValidationError(detail)
+        if resp.status_code == 401:
+            raise SalonUnauthorized(detail)
         if resp.status_code == 403:
             raise SalonForbidden(detail)
         if resp.status_code == 404:
@@ -247,6 +266,7 @@ __all__ = [
     "SalonNotConfigured",
     "SalonNotFound",
     "SalonSlotTaken",
+    "SalonUnauthorized",
     "SalonUnavailable",
     "SalonValidationError",
     "get_salon_client",

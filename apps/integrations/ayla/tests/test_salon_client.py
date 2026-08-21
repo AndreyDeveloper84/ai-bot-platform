@@ -23,6 +23,7 @@ from apps.integrations.ayla.salon_client import (
     SalonNotConfigured,
     SalonNotFound,
     SalonSlotTaken,
+    SalonUnauthorized,
     SalonUnavailable,
     SalonValidationError,
 )
@@ -112,6 +113,7 @@ class TestStatusMapping:
         "status,exc",
         [
             (400, SalonValidationError),
+            (401, SalonUnauthorized),
             (403, SalonForbidden),
             (404, SalonNotFound),
             (409, SalonSlotTaken),
@@ -181,3 +183,47 @@ class TestRefusals:
     def test_empty_base_url_fails_closed(self) -> None:
         with pytest.raises(SalonNotConfigured):
             AylaSalonClient(base_url="", service_token=TOKEN)
+
+
+class TestUpstreamContractAsMeasured:
+    """Today's reality on the receiving side, pinned so its repair is visible.
+
+    Measured on live Ayla 2026-08-21: the salon endpoints answer 401
+    ``token_not_valid`` to a service Bearer, because their JWT authenticator
+    runs before ``permission_classes`` and rejects a non-JWT credential.
+    DRF-1231 fixes that.
+
+    The point of writing today's broken behaviour down is that when it stops
+    being true, this test goes red and tells us — which is cheaper than
+    learning it from a salon administrator, and cheaper than never noticing
+    that the fix landed.
+    """
+
+    def test_a_service_bearer_is_refused_at_authentication_today(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Verbatim shape of the live response.
+            return httpx.Response(
+                401,
+                json={
+                    "error": {
+                        "code": "token_not_valid",
+                        "message": "Given token not valid for any token type",
+                    }
+                },
+            )
+
+        with pytest.raises(SalonUnauthorized) as caught:
+            _create(_client(handler))
+
+        assert "not valid" in str(caught.value)
+
+    def test_unauthorized_is_not_confused_with_forbidden(self) -> None:
+        """401 and 403 mean different things and have different remedies.
+
+        403 is «this person may not» — the administrator's rights are wrong.
+        401 is «we may not» — our credential is wrong, and no action by the
+        administrator can help. Collapsing them would send an operator
+        problem to the wrong person.
+        """
+        assert not issubclass(SalonUnauthorized, SalonForbidden)
+        assert not issubclass(SalonForbidden, SalonUnauthorized)

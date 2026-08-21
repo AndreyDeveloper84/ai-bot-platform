@@ -26,6 +26,7 @@ from apps.integrations.ayla.salon_client import (
     SalonForbidden,
     SalonNotConfigured,
     SalonSlotTaken,
+    SalonUnauthorized,
     SalonUnavailable,
     SalonValidationError,
 )
@@ -189,6 +190,27 @@ class TestOutcomes:
         assert data["outcome"] not in ("committed", "failed")
         # The key comes back so a retry can be the same write, not a new one.
         assert data["idempotency_key"]
+
+    def test_upstream_401_is_blocked_and_not_failed(
+        self, client: Client, tenant: Tenant, owner_bot_user, stub_salon
+    ) -> None:
+        """Our credential being refused is not the booking failing.
+
+        As of 2026-08-21 this is what live Ayla does to a service Bearer on
+        the salon endpoints (DRF-1231). Reported as blocked so the screen
+        does not offer a retry that cannot possibly succeed.
+        """
+        master = make_master(tenant, name="Анна", external_id=1)
+        service = _service(tenant)
+        stub_salon(_StubSalon(exc=SalonUnauthorized("token_not_valid")))
+
+        resp = _post(client, tenant, master, service)
+        assert resp.status_code == 503
+        data = resp.json()
+        assert data["outcome"] == "blocked"
+        assert data["outcome"] != "failed"
+        # Nothing the administrator can act on — so no upstream text leaks.
+        assert "token" not in data["detail"]
 
     def test_validation_error_is_blocked_not_conflict(
         self, client: Client, tenant: Tenant, owner_bot_user, stub_salon

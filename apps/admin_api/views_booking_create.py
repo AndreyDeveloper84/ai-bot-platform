@@ -146,6 +146,7 @@ def create_booking(request: HttpRequest) -> HttpResponse:
         SalonNotConfigured,
         SalonNotFound,
         SalonSlotTaken,
+        SalonUnauthorized,
         SalonUnavailable,
         SalonValidationError,
         get_salon_client,
@@ -169,6 +170,20 @@ def create_booking(request: HttpRequest) -> HttpResponse:
         return _outcome(
             "blocked",
             "booking is not configured on this deployment",
+            503,
+        )
+    except SalonUnauthorized as exc:
+        # Our credential, not this person's rights. Loud in the log because
+        # only an operator can fix it, and neutral on screen because the
+        # administrator did nothing wrong and can do nothing about it.
+        logger.error(
+            "admin_api.create_booking.upstream_unauthorized tenant=%s err=%s",
+            tenant.id,
+            exc,
+        )
+        return _outcome(
+            "blocked",
+            "запись сейчас недоступна — обратитесь к поддержке",
             503,
         )
     except SalonSlotTaken as exc:
