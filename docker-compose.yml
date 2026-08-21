@@ -100,6 +100,11 @@ services:
       S3_ACCESS_KEY: minioadmin
       S3_SECRET_KEY: minioadmin
       S3_REPLAY_BUCKET: ai-bot-replay
+      ORCHESTRATOR_SHADOW_ENABLED: ${ORCHESTRATOR_SHADOW_ENABLED:-false}
+      ORCHESTRATOR_SHADOW_SAMPLE_RATE: ${ORCHESTRATOR_SHADOW_SAMPLE_RATE:-0.0}
+      ORCHESTRATOR_SHADOW_SURFACES: ${ORCHESTRATOR_SHADOW_SURFACES:-global}
+      ORCHESTRATOR_SHADOW_MAX_BACKLOG: ${ORCHESTRATOR_SHADOW_MAX_BACKLOG:-500}
+      ORCHESTRATOR_SHADOW_TIMEOUT_MS: ${ORCHESTRATOR_SHADOW_TIMEOUT_MS:-2500}
     ports:
       - "8000:8000"
     volumes:
@@ -144,6 +149,50 @@ services:
       S3_ACCESS_KEY: minioadmin
       S3_SECRET_KEY: minioadmin
       S3_REPLAY_BUCKET: ai-bot-replay
+      ORCHESTRATOR_SHADOW_ENABLED: ${ORCHESTRATOR_SHADOW_ENABLED:-false}
+      ORCHESTRATOR_SHADOW_SAMPLE_RATE: ${ORCHESTRATOR_SHADOW_SAMPLE_RATE:-0.0}
+      ORCHESTRATOR_SHADOW_SURFACES: ${ORCHESTRATOR_SHADOW_SURFACES:-global}
+      ORCHESTRATOR_SHADOW_MAX_BACKLOG: ${ORCHESTRATOR_SHADOW_MAX_BACKLOG:-500}
+      ORCHESTRATOR_SHADOW_TIMEOUT_MS: ${ORCHESTRATOR_SHADOW_TIMEOUT_MS:-2500}
+    volumes:
+      - ./:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Shadow worker (Live Shadow Stage 1): drains the dedicated `shadow`
+  # Celery queue for the observe-only orchestrator.shadow_turn task.
+  # Isolated from the production Celery worker and the MAX DM stream
+  # consumer by design — it must never share their bounded pools.
+  shadow-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A config worker --loglevel=INFO -Q shadow --concurrency=2 --prefetch-multiplier=1
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_DEBUG: "True"
+      DJANGO_ALLOWED_HOSTS: "*"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_bot_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_HTTP_HOST: chromadb
+      CHROMA_HTTP_PORT: "8000"
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_REPLAY_BUCKET: ai-bot-replay
+      ORCHESTRATOR_SHADOW_ENABLED: ${ORCHESTRATOR_SHADOW_ENABLED:-false}
+      ORCHESTRATOR_SHADOW_SAMPLE_RATE: ${ORCHESTRATOR_SHADOW_SAMPLE_RATE:-0.0}
+      ORCHESTRATOR_SHADOW_SURFACES: ${ORCHESTRATOR_SHADOW_SURFACES:-global}
+      ORCHESTRATOR_SHADOW_MAX_BACKLOG: ${ORCHESTRATOR_SHADOW_MAX_BACKLOG:-500}
+      ORCHESTRATOR_SHADOW_TIMEOUT_MS: ${ORCHESTRATOR_SHADOW_TIMEOUT_MS:-2500}
     volumes:
       - ./:/app
     depends_on:

@@ -74,8 +74,7 @@ def mock_discovery(monkeypatch):
     from apps.orchestrator.discovery import DiscoveryReply
 
     monkeypatch.setattr(
-        max_handler,
-        "generate_concierge_reply",
+        "apps.orchestrator.concierge.generate_concierge_reply",
         lambda *a, **k: DiscoveryReply(text="Привет! Какая услуга интересует?"),
     )
 
@@ -143,7 +142,7 @@ def test_booking_callback_routes_to_booking_pipeline_not_concierge(
         return DiscoveryReply(text="concierge")
 
     monkeypatch.setattr(max_handler, "route_booking_callback", fake_route)
-    monkeypatch.setattr(max_handler, "generate_concierge_reply", fake_concierge)
+    monkeypatch.setattr("apps.orchestrator.concierge.generate_concierge_reply", fake_concierge)
 
     GlobalMaxHandler()(
         _raw_entry(
@@ -182,7 +181,7 @@ def test_foreign_callback_still_goes_to_concierge(
         seen["concierge"] = True
         return DiscoveryReply(text="concierge reply")
 
-    monkeypatch.setattr(max_handler, "generate_concierge_reply", fake_concierge)
+    monkeypatch.setattr("apps.orchestrator.concierge.generate_concierge_reply", fake_concierge)
     monkeypatch.setattr(
         max_handler,
         "route_booking_callback",

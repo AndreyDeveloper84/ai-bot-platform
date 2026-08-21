@@ -1,0 +1,42 @@
+# ai-bot-platform — Celery SHADOW worker systemd unit (TEMPLATE).
+#
+# Dedicated worker for the observe-only orchestrator.shadow_turn task
+# (queue `shadow`, routed via CELERY_TASK_ROUTES). Isolation contract:
+# shadow LLM jobs never occupy slots of the production worker
+# (ai-bot-platform-{ENV}-worker.service, queue `celery`, concurrency=2),
+# and stopping/starting THIS unit never affects production workers.
+#
+# Placeholders: see ai-bot-platform-web.service.template.
+# Install at: /etc/systemd/system/ai-bot-platform-{ENV}-shadow-worker.service
+
+[Unit]
+Description=ai-bot-platform Celery shadow worker — {ENV}
+After=network.target redis-server.service postgresql.service
+Wants=network.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=taximeter
+Group=taximeter
+WorkingDirectory={DEPLOY_PATH}
+EnvironmentFile={ENV_FILE}
+Environment="DJANGO_SETTINGS_MODULE=config.settings.production"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart={DEPLOY_PATH}/.venv/bin/celery -A config worker \
+    -Q shadow \
+    --loglevel=INFO \
+    --concurrency=2 \
+    --prefetch-multiplier=1
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
+
+# RAM cap per worker. 2 concurrency × ~120MB Django process ≈ 350MB
+# steady-state. Cap at 512MB to absorb temporary spikes.
+MemoryMax=512M
+MemoryHigh=400M
+
+[Install]
+WantedBy=multi-user.target

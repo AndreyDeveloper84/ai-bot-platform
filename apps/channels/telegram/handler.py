@@ -79,6 +79,12 @@ from apps.conversations.services import record_message, resolve_active_conversat
 from apps.events.services import emit
 from apps.identity.services import resolve_or_create_bot_user
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.turn_seam import (
+    SURFACE_PER_TENANT,
+    TurnContext,
+    orchestrate_turn,
+    turn_reply_to_skill_result,
+)
 
 if TYPE_CHECKING:
     from apps.tenancy.models import Tenant
@@ -170,19 +176,22 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     )
     short_term.append(conversation.id, role="user", content=event.text)
 
-    # Lazy import — skill registry depends on ChannelSender registration
-    # which we don't do for Telegram in this PR (the registry is for the
-    # orchestrator's async pipeline; Telegram inbound is sync-direct).
-    from apps.skills.base import SkillContext
-    from apps.skills.registry import dispatch as skill_dispatch
-
-    skill_result = skill_dispatch(
-        SkillContext(
-            conversation=conversation,
-            bot_user=bot_user,
-            message_text=event.text,
-            trace_id="",
-            has_attachments=bool(event.attachments),
+    # Routed via the normalized orchestration seam
+    # (apps.orchestrator.turn_seam) — the same per-tenant skill-registry
+    # brain as MAX; the SkillResult is rebuilt 1:1 so every branch below
+    # is byte-identical to the pre-seam direct dispatch. The seam keeps
+    # the skills.registry import lazy internally.
+    skill_result = turn_reply_to_skill_result(
+        orchestrate_turn(
+            TurnContext(
+                surface=SURFACE_PER_TENANT,
+                conversation=conversation,
+                bot_user=bot_user,
+                text=event.text,
+                channel="telegram",
+                trace_id="",
+                has_attachments=bool(event.attachments),
+            )
         )
     )
 

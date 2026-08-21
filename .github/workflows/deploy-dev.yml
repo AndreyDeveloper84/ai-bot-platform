@@ -89,7 +89,15 @@ jobs:
             git checkout dev
             git pull --ff-only origin dev
             sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
-              -p ai-bot-platform-dev up -d --build --force-recreate --no-deps web worker
+              -p ai-bot-platform-dev build web worker shadow-worker
+            # Migrations MUST land between build and up: the new code may
+            # query columns the old schema lacks (additive MemoryEntry
+            # migrations 0015-0018). run --rm web uses the freshly built
+            # image, so schema and code never drift apart in production.
+            sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
+              -p ai-bot-platform-dev run --rm web python manage.py migrate --noinput
+            sudo docker compose --env-file /etc/ai-bot-platform-dev/.env \
+              -p ai-bot-platform-dev up -d --force-recreate --no-deps web worker shadow-worker
             sudo docker compose -p ai-bot-platform-dev ps
           "
 

@@ -77,7 +77,7 @@ def mock_discovery(monkeypatch):
         except StopIteration:
             return DiscoveryReply(text="…")
 
-    monkeypatch.setattr(max_handler, "generate_concierge_reply", fake_reply)
+    monkeypatch.setattr("apps.orchestrator.concierge.generate_concierge_reply", fake_reply)
 
 
 def test_discovery_turn_persists_under_sentinel_and_rereads(
@@ -172,7 +172,7 @@ def test_general_booking_request_shows_masters_without_reaching_the_llm(
     def _must_not_run(*_args, **_kwargs):
         raise AssertionError("generate_concierge_reply must not run for a general booking request")
 
-    monkeypatch.setattr(max_handler, "generate_concierge_reply", _must_not_run)
+    monkeypatch.setattr("apps.orchestrator.concierge.generate_concierge_reply", _must_not_run)
 
     GlobalMaxHandler()(
         _raw_entry(
