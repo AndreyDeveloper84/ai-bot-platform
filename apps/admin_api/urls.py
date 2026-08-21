@@ -16,6 +16,7 @@ from apps.admin_api import (
     views_availability,
     views_availability_slots,
     views_booking_cancel,
+    views_booking_complete,
     views_booking_create,
     views_customers,
     views_day,
@@ -44,6 +45,20 @@ urlpatterns = [
         "bookings/<uuid:appointment_id>/cancel/",
         views_booking_cancel.cancel_booking,
         name="cancel_booking",
+    ),
+    # Phase 2 — closing the visit. Two endpoints on purpose: the canonical
+    # version is read first and travels back through the operator, because
+    # a read folded into the write would make the guard match every time
+    # and protect nothing (the DRF-1232 defect, one repo over).
+    path(
+        "bookings/<uuid:appointment_id>/",
+        views_booking_complete.booking_version,
+        name="booking_version",
+    ),
+    path(
+        "bookings/<uuid:appointment_id>/complete/",
+        views_booking_complete.complete_booking,
+        name="complete_booking",
     ),
     # Phase 2 — customer search, the first step of the booking flow (§13).
     # Refuses rather than returning an empty list when it cannot ask, for

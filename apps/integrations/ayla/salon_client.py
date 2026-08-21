@@ -450,6 +450,45 @@ class AylaSalonClient:
             },
         )
 
+    def complete_appointment(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        appointment_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """Close a visit. ``expected_version`` is required, not optional.
+
+        Everything downstream of closure — commission, payment capture,
+        the review request, RFM — starts from Ayla's ``booking.completed``,
+        which is why this is the write that matters most on the surface.
+
+        The version must be the one the operator was shown, not one this
+        process fetched a millisecond ago: a read folded into the write
+        would make the guard match every time and protect nothing. Closure
+        does not bump the counter (it counts reschedules), so this guards
+        against closing a booking that MOVED, not against closing twice —
+        that one Ayla refuses on the state machine.
+        """
+
+        if not tenant_slug:
+            raise SalonValidationError("tenant_slug is required")
+        if not appointment_id:
+            raise SalonValidationError("appointment_id is required")
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int):
+            raise SalonValidationError("expected_version must be a positive integer")
+        if expected_version < 1:
+            raise SalonValidationError("expected_version must be a positive integer")
+
+        return self._post(
+            f"appointments/{appointment_id}/complete/",
+            actor_external_id=actor_external_id,
+            idempotency_key=f"complete:{appointment_id}:{expected_version}",
+            tenant_slug=tenant_slug,
+            json_body={"expected_version": expected_version},
+        )
+
     MIN_QUERY = 2
 
     def search_customers(

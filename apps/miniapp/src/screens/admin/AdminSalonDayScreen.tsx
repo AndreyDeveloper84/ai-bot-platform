@@ -26,6 +26,8 @@ import { StateError } from "../../components/StateError";
 import {
   CANCEL_REASONS,
   cancelSalonBooking,
+  completeSalonBooking,
+  getBookingVersion,
   getSalonDay,
   RELEASED_VISIT_STATUSES,
   type CancelReasonCode,
@@ -84,16 +86,23 @@ function VisitRow({
   visit,
   timeZone,
   onCancel,
+  onComplete,
 }: {
   visit: SalonDayVisit;
   timeZone: string;
   onCancel: (visit: SalonDayVisit) => void;
+  onComplete: (visit: SalonDayVisit) => void;
 }) {
   const released = RELEASED_VISIT_STATUSES.has(visit.status);
   // Offered only where it can succeed. A cancelled or finished visit is
   // settled — Ayla answers 422 whoever asks — and a button that always
   // fails teaches the front desk to distrust the screen.
   const cancellable = !released && !visit.is_in_progress;
+  // Closing is what everything downstream hangs on — commission, payment
+  // capture, the review request, RFM — and until this button existed none
+  // of it had ever run. Offered on anything still open, including a visit
+  // in progress: the front desk closes it as the customer leaves.
+  const closable = !released && visit.status !== "completed";
   return (
     <li
       className="salon-day__visit"
@@ -121,6 +130,20 @@ function VisitRow({
           </span>
         )}
       </span>
+      {closable && (
+        <button
+          type="button"
+          className="btn btn--ghost"
+          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          onClick={() => onComplete(visit)}
+          aria-label={`Визит состоялся: ${clientLabel(visit)}, ${formatTime(
+            visit.start_at,
+            timeZone,
+          )}`}
+        >
+          Состоялся
+        </button>
+      )}
       {cancellable && (
         <button
           type="button"
@@ -203,6 +226,67 @@ function CancelDialog({
   );
 }
 
+/**
+ * Confirmation before closing a visit.
+ *
+ * The version shown here is the one that will be sent. That is the whole
+ * design: `expected_version` guards against acting on a booking that
+ * changed since the operator looked, and a version fetched by the write
+ * itself would always match and guard nothing. The pause between reading
+ * and confirming is the window it covers.
+ */
+function CompleteDialog({
+  visit,
+  timeZone,
+  version,
+  busy,
+  onConfirm,
+  onDismiss,
+}: {
+  visit: SalonDayVisit;
+  timeZone: string;
+  version: { version: number; status: string } | null;
+  busy: boolean;
+  onConfirm: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="sheet" role="dialog" aria-modal="true" aria-label="Закрытие визита">
+      <h3 className="section__title">Визит состоялся?</h3>
+      <p>
+        {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
+        {visit.service_name ? ` · ${visit.service_name}` : ""}
+      </p>
+
+      {version === null ? (
+        <p className="muted">Читаем запись в расписании…</p>
+      ) : (
+        <p className="muted">
+          {version.status === "confirmed"
+            ? "После закрытия визит уйдёт в историю, а клиенту придёт запрос отзыва."
+            : `Расписание считает эту запись «${version.status}». Проверьте, прежде чем закрывать.`}
+        </p>
+      )}
+
+      <div style={{ display: "flex", gap: "var(--s-2)" }}>
+        <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
+          Не сейчас
+        </button>
+        <button
+          type="button"
+          className="btn btn--primary"
+          onClick={onConfirm}
+          // Nothing to send until the canonical version has arrived —
+          // and it is never invented locally.
+          disabled={busy || version === null}
+        >
+          {busy ? "Закрываем…" : "Да, состоялся"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function AdminSalonDayScreen() {
   const navigate = useNavigate();
   const today = useMemo(() => toIsoDate(new Date()), []);
@@ -212,6 +296,11 @@ export function AdminSalonDayScreen() {
   const [err, setErr] = useState<unknown>(null);
   const [cancelling, setCancelling] = useState<SalonDayVisit | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
+  const [closing, setClosing] = useState<SalonDayVisit | null>(null);
+  const [closingVersion, setClosingVersion] = useState<
+    { version: number; status: string } | null
+  >(null);
+  const [closeBusy, setCloseBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -241,6 +330,57 @@ export function AdminSalonDayScreen() {
     void load(date, controller.signal);
     return () => controller.abort();
   }, [date, load]);
+
+  const beginComplete = useCallback((visit: SalonDayVisit) => {
+    // Open the dialog first, then read: the operator sees the visit they
+    // tapped immediately, and the canonical version arrives into it.
+    setClosing(visit);
+    setClosingVersion(null);
+    setNotice(null);
+    void (async () => {
+      try {
+        const v = await getBookingVersion(visit.id);
+        setClosingVersion({ version: v.version, status: v.status });
+      } catch {
+        // No version means no action. Closing the dialog rather than
+        // offering a button we would have to aim blind.
+        setClosing(null);
+        setNotice("Не удалось прочитать запись в расписании. Попробуйте ещё раз.");
+      }
+    })();
+  }, []);
+
+  const confirmComplete = useCallback(async () => {
+    const visit = closing;
+    const version = closingVersion;
+    if (!visit || version === null || closeBusy) return;
+    setCloseBusy(true);
+    try {
+      const res = await completeSalonBooking(visit.id, version.version);
+      setClosing(null);
+      switch (res.outcome) {
+        case "committed":
+          setNotice("Визит закрыт.");
+          break;
+        case "conflict":
+          setNotice("Запись изменилась — день обновлён, посмотрите ещё раз.");
+          break;
+        case "pending":
+          setNotice(
+            "Расписание не ответило. Возможно, визит закрыт — проверьте день, прежде чем повторять.",
+          );
+          break;
+        case "blocked":
+          setNotice(res.detail || "Этот визит нельзя закрыть.");
+          break;
+        default:
+          setNotice(res.detail || "Не удалось закрыть визит.");
+      }
+      if (res.outcome !== "blocked") await load(date);
+    } finally {
+      setCloseBusy(false);
+    }
+  }, [closing, closingVersion, closeBusy, date, load]);
 
   const confirmCancel = useCallback(
     async (code: CancelReasonCode) => {
@@ -383,7 +523,13 @@ export function AdminSalonDayScreen() {
               </p>
               <ul style={{ listStyle: "none", padding: 0, margin: "var(--s-2) 0 0" }}>
                 {day.orphan_visits.map((v) => (
-                  <VisitRow key={v.id} visit={v} timeZone={tz} onCancel={setCancelling} />
+                  <VisitRow
+                    key={v.id}
+                    visit={v}
+                    timeZone={tz}
+                    onCancel={setCancelling}
+                    onComplete={beginComplete}
+                  />
                 ))}
               </ul>
             </div>
@@ -396,7 +542,13 @@ export function AdminSalonDayScreen() {
               </h2>
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {m.visits.map((v) => (
-                  <VisitRow key={v.id} visit={v} timeZone={tz} onCancel={setCancelling} />
+                  <VisitRow
+                    key={v.id}
+                    visit={v}
+                    timeZone={tz}
+                    onCancel={setCancelling}
+                    onComplete={beginComplete}
+                  />
                 ))}
               </ul>
             </section>
@@ -422,6 +574,17 @@ export function AdminSalonDayScreen() {
         >
           {notice}
         </p>
+      )}
+
+      {closing && (
+        <CompleteDialog
+          visit={closing}
+          timeZone={tz}
+          version={closingVersion}
+          busy={closeBusy}
+          onConfirm={() => void confirmComplete()}
+          onDismiss={() => setClosing(null)}
+        />
       )}
 
       {cancelling && (

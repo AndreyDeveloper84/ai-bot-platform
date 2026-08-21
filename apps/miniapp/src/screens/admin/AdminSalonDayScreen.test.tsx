@@ -13,11 +13,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../lib/admin-api", async (importOriginal) => {
   const original =
     await importOriginal<typeof import("../../lib/admin-api")>();
-  return { ...original, getSalonDay: vi.fn(), cancelSalonBooking: vi.fn() };
+  return {
+    ...original,
+    getSalonDay: vi.fn(),
+    cancelSalonBooking: vi.fn(),
+    getBookingVersion: vi.fn(),
+    completeSalonBooking: vi.fn(),
+  };
 });
 
 import {
   cancelSalonBooking,
+  completeSalonBooking,
+  getBookingVersion,
   getSalonDay,
   type SalonDayResponse,
 } from "../../lib/admin-api";
@@ -25,6 +33,8 @@ import { AdminSalonDayScreen } from "./AdminSalonDayScreen";
 
 const mockedDay = vi.mocked(getSalonDay);
 const mockedCancel = vi.mocked(cancelSalonBooking);
+const mockedVersion = vi.mocked(getBookingVersion);
+const mockedComplete = vi.mocked(completeSalonBooking);
 
 function visit(over: Partial<SalonDayResponse["masters"][0]["visits"][0]> = {}) {
   return {
@@ -264,5 +274,119 @@ describe("cancelling a visit", () => {
     expect(await screen.findByText("Визит уже завершён.")).toBeInTheDocument();
     // Settled, not contended: nothing changed, so nothing to reload.
     await waitFor(() => expect(mockedDay).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("closing a visit", () => {
+  function dayWithOneVisit(over = {}) {
+    return dayResponse({
+      summary: { total: 1, upcoming: 1, completed: 0, released: 0 },
+      masters: [
+        {
+          master_id: "m-1",
+          name: "Анна Петрова",
+          is_active: true,
+          visits: [visit(over)],
+        },
+      ],
+    });
+  }
+
+  const version = (over = {}) => ({
+    id: "v-1",
+    version: 3,
+    status: "confirmed",
+    start_datetime: "2026-08-20T07:00:00+00:00",
+    ...over,
+  });
+
+  it("sends the version the operator was shown, not one fetched by the write", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    mockedVersion.mockResolvedValue(version({ version: 7 }));
+    mockedComplete.mockResolvedValue({ outcome: "committed", detail: "ok" });
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+    await screen.findByRole("dialog", { name: "Закрытие визита" });
+    await user.click(screen.getByRole("button", { name: "Да, состоялся" }));
+
+    await waitFor(() => expect(mockedComplete).toHaveBeenCalledWith("v-1", 7));
+  });
+
+  it("cannot confirm before the canonical version has arrived", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    // Never resolves — the read is still in flight.
+    mockedVersion.mockImplementation(() => new Promise(() => {}));
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+
+    // Disabled rather than sending a locally invented version.
+    expect(screen.getByRole("button", { name: "Да, состоялся" })).toBeDisabled();
+    expect(mockedComplete).not.toHaveBeenCalled();
+  });
+
+  it("gives up rather than guessing when the version cannot be read", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    mockedVersion.mockRejectedValue(new Error("503"));
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+
+    expect(await screen.findByText(/Не удалось прочитать запись/)).toBeInTheDocument();
+    expect(mockedComplete).not.toHaveBeenCalled();
+  });
+
+  it("warns when the schedule disagrees about the status", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    mockedVersion.mockResolvedValue(version({ status: "cancelled" }));
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+
+    expect(await screen.findByText(/считает эту запись/)).toBeInTheDocument();
+  });
+
+  it("does not call it a failure when the schedule did not answer", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    mockedVersion.mockResolvedValue(version());
+    mockedComplete.mockResolvedValue({ outcome: "pending", detail: "no answer" });
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Визит состоялся: Мария/ }));
+    await screen.findByRole("dialog", { name: "Закрытие визита" });
+    await user.click(screen.getByRole("button", { name: "Да, состоялся" }));
+
+    expect(await screen.findByText(/Возможно, визит закрыт/)).toBeInTheDocument();
+    await waitFor(() => expect(mockedDay).toHaveBeenCalledTimes(2));
+  });
+
+  it("offers nothing to close on a released visit", async () => {
+    mockedDay.mockResolvedValue(dayWithOneVisit({ status: "cancelled" }));
+    renderScreen();
+
+    await screen.findByText("Мария И.");
+    expect(
+      screen.queryByRole("button", { name: /Визит состоялся: Мария/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still offers to close a visit that is in progress", async () => {
+    mockedDay.mockResolvedValue(dayWithOneVisit({ is_in_progress: true }));
+    renderScreen();
+
+    // The front desk closes it as the customer walks out — unlike
+    // cancelling, which is gone by then.
+    expect(
+      await screen.findByRole("button", { name: /Визит состоялся: Мария/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Отменить визит: Мария/ }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -325,6 +325,79 @@ export const cancelSalonBooking = async (
   }
 };
 
+// --- closing a visit (UX contract §19) -----------------------------------
+
+/** The canonical facts, read straight from the schedule. */
+export interface BookingVersion {
+  id: string;
+  version: number;
+  status: string;
+  start_datetime: string;
+}
+
+/**
+ * GET /api/v1/admin/bookings/<id>/ — the canonical version.
+ *
+ * Read before the confirmation, never inside the write. `expected_version`
+ * protects against acting on a booking that changed since the operator
+ * looked at it; a version fetched by the write itself would always match
+ * and protect nothing. The human pause between this call and the confirm
+ * IS the window the guard covers.
+ */
+export const getBookingVersion = (
+  appointmentId: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<BookingVersion> =>
+  request<BookingVersion>(
+    `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/`,
+    { signal: init.signal },
+  );
+
+export interface CompleteBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+}
+
+/**
+ * POST /api/v1/admin/bookings/<id>/complete/ — close the visit.
+ *
+ * `expectedVersion` must be the value the operator was shown. Same five
+ * outcomes as the other writes, and the same rule: never throws on a
+ * business answer, and `pending` is «unknown», not «failed».
+ */
+export const completeSalonBooking = async (
+  appointmentId: string,
+  expectedVersion: number,
+): Promise<CompleteBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/complete/`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ expected_version: expectedVersion }),
+      },
+    );
+  } catch {
+    return { outcome: "pending", detail: "нет ответа от сети" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CompleteBookingResult>;
+    if (data.outcome) return data as CompleteBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    return { outcome: "pending", detail: "ответ не прочитан" };
+  }
+};
+
 // --- salon customers (UX contract §13) -----------------------------------
 
 /**

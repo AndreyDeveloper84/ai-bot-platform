@@ -556,3 +556,76 @@ class TestReschedule:
             )
 
         assert called is False
+
+
+class TestComplete:
+    def test_posts_to_the_complete_endpoint_with_the_version(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"data": {"id": "a-1"}})
+
+        _client(handler).complete_appointment(
+            actor_external_id=ACTOR,
+            tenant_slug="formula-tela",
+            appointment_id="a-1",
+            expected_version=4,
+        )
+
+        assert seen["url"].endswith("/appointments/a-1/complete/")
+        assert seen["body"] == {"expected_version": 4}
+
+    @pytest.mark.parametrize("version", [None, 0, -1, "4", True])
+    def test_a_version_that_is_not_a_positive_int_never_travels(self, version) -> None:
+        """Includes ``True``: `isinstance(True, int)` is True in Python,
+        and a boolean reaching a concurrency guard would send `1`."""
+        called = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal called
+            called = True
+            return httpx.Response(200, json={"data": {}})
+
+        with pytest.raises(SalonValidationError, match="expected_version"):
+            _client(handler).complete_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+                expected_version=version,  # type: ignore[arg-type]
+            )
+
+        assert called is False
+
+    def test_a_stale_version_is_its_own_exception(self) -> None:
+        from apps.integrations.ayla.salon_client import SalonStaleVersion
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409, json={"error": {"code": "STALE_VERSION", "message": "moved"}}
+            )
+
+        with pytest.raises(SalonStaleVersion):
+            _client(handler).complete_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+                expected_version=4,
+            )
+
+    def test_an_already_closed_visit_is_not_allowed(self) -> None:
+        from apps.integrations.ayla.salon_client import SalonNotAllowed
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                422, json={"error": {"code": "INVALID_STATUS", "message": "done"}}
+            )
+
+        with pytest.raises(SalonNotAllowed):
+            _client(handler).complete_appointment(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                appointment_id="a-1",
+                expected_version=4,
+            )
