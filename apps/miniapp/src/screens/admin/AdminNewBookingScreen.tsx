@@ -341,9 +341,12 @@ export function AdminNewBookingScreen() {
 
   const customerLabel = useMemo(() => {
     if (draft.customer === null) return null;
-    return draft.customer.kind === "existing"
+    if (draft.customer.kind === "new") return `${draft.customer.name} (новый)`;
+    // The masked phone is absent today — the lookup does not return one.
+    // Rendering «Мария · undefined» would be worse than the name alone.
+    return draft.customer.phone_masked
       ? `${draft.customer.name} · ${draft.customer.phone_masked}`
-      : `${draft.customer.name} (новый)`;
+      : draft.customer.name;
   }, [draft.customer]);
 
   const slotLabel = draft.slot ? `${formatDayTitle(date)} · ${draft.slot.time}` : null;
@@ -556,7 +559,7 @@ export function AdminNewBookingScreen() {
                       setSheet(null);
                     }}
                   >
-                    {c.name} · {c.phone_masked}
+                    {c.phone_masked ? `${c.name} · ${c.phone_masked}` : c.name}
                   </button>
                 </li>
               ))}

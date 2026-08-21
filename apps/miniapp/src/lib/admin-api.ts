@@ -283,8 +283,23 @@ export const createSalonBooking = async (
  */
 export interface SalonCustomer {
   id: string;
+  /** Never blank: an unnamed customer arrives as «Без имени». */
   name: string;
-  phone_masked: string;
+  /**
+   * False when `name` is the placeholder rather than a real name.
+   *
+   * Upstream may hold no name at all — deliberately, since inventing
+   * «Клиент №4» would make the record look more certain than it is.
+   */
+  named: boolean;
+  /**
+   * Absent today: the canonical lookup returns no phone at all
+   * (DRF-1039 — the number is an input, never an output). Decision B-6
+   * says the administrator should see a masked one, which this contract
+   * cannot currently satisfy; reported, and optional here so that
+   * nothing changes on this side when it can.
+   */
+  phone_masked?: string;
 }
 
 /**
@@ -303,23 +318,48 @@ export class CustomerSearchUnavailable extends Error {
   }
 }
 
+/** Minimum the canonical lookup accepts; a shorter query is refused. */
+export const CUSTOMER_SEARCH_MIN_QUERY = 2;
+
 /**
- * Search the salon's customers by name or phone.
+ * GET /api/v1/admin/customers/?q=… — search this salon's customers.
  *
- * NOT WIRED YET — the canonical `customers/` contract is still being
- * settled, and guessing its shape is how a client ends up decoding a
- * payload nobody promised. Until then this throws
- * {@link CustomerSearchUnavailable}, which the UI renders as «поиск
- * недоступен» rather than as an empty result.
+ * Matches a name from the start, or a phone **exactly** — a prefix match
+ * on digits would turn this into a way to sweep the customer list a few
+ * keystrokes at a time, so the canonical lookup does not offer one.
  *
- * When the contract lands, only this function body changes; every state
- * the screen can show is already built and tested against it.
+ * Every failure becomes {@link CustomerSearchUnavailable}, never an empty
+ * array. §13: «A failed search is not proof that the customer does not
+ * exist» — the two look identical on screen and mean opposite things, and
+ * getting it wrong creates a duplicate of somebody already in the book.
  */
 export const searchSalonCustomers = async (
-  _query: string,
-  _init: { signal?: AbortSignal } = {},
+  query: string,
+  init: { signal?: AbortSignal } = {},
 ): Promise<SalonCustomer[]> => {
-  throw new CustomerSearchUnavailable();
+  const q = query.trim();
+  if (q.length < CUSTOMER_SEARCH_MIN_QUERY) return [];
+
+  let payload: { results?: unknown };
+  try {
+    payload = await request<{ results?: unknown }>(
+      `/api/v1/admin/customers/?q=${encodeURIComponent(q)}`,
+      { signal: init.signal },
+    );
+  } catch (err) {
+    // An aborted keystroke is not a failed search — let the caller's
+    // abort handling see it unchanged.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new CustomerSearchUnavailable(
+      err instanceof Error ? err.message : undefined,
+    );
+  }
+
+  if (!Array.isArray(payload.results)) {
+    // A success shape we do not recognise is not «nobody matched».
+    throw new CustomerSearchUnavailable("unrecognised search payload");
+  }
+  return payload.results as SalonCustomer[];
 };
 
 // --- /api/v1/admin/booking-slots/ ----------------------------------------

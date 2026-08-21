@@ -126,7 +126,11 @@ class AylaSalonClient:
         self._transport = transport
 
     def _headers(
-        self, *, actor_external_id: str, idempotency_key: str, tenant_slug: str
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, str]:
         """Service proves the request; the headers name the human and the salon.
 
@@ -143,14 +147,18 @@ class AylaSalonClient:
         admin-of-A-acts-on-B.
         """
 
-        return {
+        headers = {
             "Authorization": f"Bearer {self._token}",
             "X-External-User-ID": actor_external_id,
             "X-Tenant": tenant_slug,
-            "X-Idempotency-Key": idempotency_key,
             "Accept": "application/json",
-            "Content-Type": "application/json",
         }
+        # Reads carry no idempotency key: there is nothing to de-duplicate,
+        # and sending one would suggest to the reader that there is.
+        if idempotency_key:
+            headers["X-Idempotency-Key"] = idempotency_key
+            headers["Content-Type"] = "application/json"
+        return headers
 
     def _post(
         self,
@@ -185,6 +193,17 @@ class AylaSalonClient:
             except ValueError as exc:
                 raise SalonUnavailable("upstream returned non-JSON on success") from exc
 
+        self._raise_for_status(resp)
+        raise SalonAPIError("unreachable")  # pragma: no cover — _raise_for_status always raises
+
+    @staticmethod
+    def _raise_for_status(resp: httpx.Response) -> None:
+        """Turn a non-2xx into the exception that says what to do about it.
+
+        Shared by reads and writes so the two can never drift into
+        disagreeing about what a 403 means.
+        """
+
         detail = _detail(resp)
         if resp.status_code == 400:
             raise SalonValidationError(detail)
@@ -199,6 +218,38 @@ class AylaSalonClient:
         if resp.status_code >= 500:
             raise SalonUnavailable(f"upstream {resp.status_code}: {detail}")
         raise SalonAPIError(f"unexpected {resp.status_code}: {detail}")
+
+    def _get(
+        self,
+        endpoint: str,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        url = self._urls.build(f"tenants/me/{endpoint.lstrip('/')}")
+        try:
+            with httpx.Client(timeout=self._timeout_s, transport=self._transport) as http:
+                resp = http.get(
+                    url,
+                    headers=self._headers(
+                        actor_external_id=actor_external_id,
+                        tenant_slug=tenant_slug,
+                    ),
+                    params=params,
+                )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            logger.warning("salon_client.%s.network err=%s", endpoint, type(exc).__name__)
+            raise SalonUnavailable(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise SalonUnavailable("upstream returned non-JSON on success") from exc
+
+        self._raise_for_status(resp)
+        raise SalonAPIError("unreachable")  # pragma: no cover — _raise_for_status always raises
 
     def create_appointment(
         self,
@@ -257,6 +308,54 @@ class AylaSalonClient:
             tenant_slug=tenant_slug,
             json_body=body,
         )
+
+    MIN_QUERY = 2
+
+    def search_customers(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        query: str,
+    ) -> list[dict[str, Any]]:
+        """Find a returning customer of this salon. §13 of the UX contract.
+
+        Upstream contract as read in ``SalonCustomerLookupView`` (Ayla,
+        2026-08-21), not as guessed:
+
+        * ``q`` — at least two characters, else 400;
+        * matches a first/last name from the start, or a phone **exactly**
+          (a prefix match on digits would make this a way to sweep the
+          customer list a few keystrokes at a time);
+        * answers ``{"data": {"results": [{"id", "name"}]}}``, at most 20;
+        * **never returns a phone.** The number is an input you already
+          have, never an output — DRF-1039.
+
+        The two-character floor is enforced here as well so a one-letter
+        keystroke costs nothing instead of a round-trip and a 400.
+        """
+
+        if not tenant_slug:
+            raise SalonValidationError("tenant_slug is required")
+        query = (query or "").strip()
+        if len(query) < self.MIN_QUERY:
+            raise SalonValidationError(f"query must be at least {self.MIN_QUERY} characters")
+
+        payload = self._get(
+            "customers/",
+            actor_external_id=actor_external_id,
+            tenant_slug=tenant_slug,
+            params={"q": query},
+        )
+        data = payload.get("data") if isinstance(payload, dict) else None
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            # A success shape we do not recognise is not «no customers».
+            # §13: a failed search must never be rendered as proof that the
+            # person is not there, so this fails loudly instead of quietly
+            # returning [].
+            raise SalonUnavailable("upstream returned an unrecognised search payload")
+        return [row for row in results if isinstance(row, dict)]
 
 
 def _detail(resp: httpx.Response) -> str:

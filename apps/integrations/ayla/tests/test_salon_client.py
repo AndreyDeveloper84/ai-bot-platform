@@ -250,3 +250,130 @@ class TestTenantHeader:
                 start_datetime="2026-08-21T15:00:00+03:00",
                 client_id="c-1",
             )
+
+
+class TestCustomerSearch:
+    """§13 — the read half of the booking flow.
+
+    Contract read out of Ayla's ``SalonCustomerLookupView`` on 2026-08-21
+    rather than guessed; the shape assertions below are what «read it»
+    means in practice.
+    """
+
+    def test_asks_the_canonical_lookup_with_the_query(self) -> None:
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["headers"] = dict(request.headers)
+            return httpx.Response(200, json={"data": {"results": []}})
+
+        _client(handler).search_customers(
+            actor_external_id=ACTOR,
+            tenant_slug="formula-tela",
+            query="Мар",
+        )
+
+        assert seen["url"].startswith("https://ayla.example/api/v1/tenants/me/customers/")
+        assert "q=" in seen["url"]
+        assert seen["headers"]["x-tenant"] == "formula-tela"
+        assert seen["headers"]["authorization"] == f"Bearer {TOKEN}"
+
+    def test_a_read_carries_no_idempotency_key(self) -> None:
+        """There is nothing to de-duplicate, and pretending otherwise
+        would tell the next reader that there is."""
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.update(dict(request.headers))
+            return httpx.Response(200, json={"data": {"results": []}})
+
+        _client(handler).search_customers(
+            actor_external_id=ACTOR,
+            tenant_slug="formula-tela",
+            query="Мар",
+        )
+
+        assert "x-idempotency-key" not in seen
+
+    def test_unwraps_the_data_envelope(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"data": {"results": [{"id": "c-1", "name": "Мария"}]}},
+            )
+
+        rows = _client(handler).search_customers(
+            actor_external_id=ACTOR,
+            tenant_slug="formula-tela",
+            query="Мар",
+        )
+
+        assert rows == [{"id": "c-1", "name": "Мария"}]
+
+    def test_a_short_query_costs_no_round_trip(self) -> None:
+        """One keystroke must not become an HTTP request and a 400."""
+        called = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal called
+            called = True
+            return httpx.Response(200, json={"data": {"results": []}})
+
+        with pytest.raises(SalonValidationError, match="at least"):
+            _client(handler).search_customers(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                query="М",
+            )
+
+        assert called is False
+
+    def test_refuses_without_a_tenant(self) -> None:
+        client = _client(_ok)
+        with pytest.raises(SalonValidationError, match="tenant_slug"):
+            client.search_customers(
+                actor_external_id=ACTOR,
+                tenant_slug="",
+                query="Мар",
+            )
+
+    def test_an_unrecognised_success_shape_is_not_an_empty_result(self) -> None:
+        """The §13 rule, enforced at the lowest level that can see it.
+
+        Returning ``[]`` for a payload we failed to understand would hand
+        the front desk «no such customer» on the strength of a parsing
+        failure.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": {"customers": []}})
+
+        with pytest.raises(SalonUnavailable):
+            _client(handler).search_customers(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                query="Мар",
+            )
+
+    @pytest.mark.parametrize(
+        "status,exc",
+        [
+            (401, SalonUnauthorized),
+            (403, SalonForbidden),
+            (500, SalonUnavailable),
+        ],
+    )
+    def test_reads_map_status_like_writes_do(self, status: int, exc: type) -> None:
+        """One mapping for both verbs, so a 403 cannot come to mean two
+        different things depending on which method you called."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(status, json={"error": {"message": "nope"}})
+
+        with pytest.raises(exc):
+            _client(handler).search_customers(
+                actor_external_id=ACTOR,
+                tenant_slug="formula-tela",
+                query="Мар",
+            )

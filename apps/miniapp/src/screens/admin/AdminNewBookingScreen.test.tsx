@@ -190,7 +190,7 @@ describe("an unreachable schedule is not «nothing free» (§16)", () => {
 describe("commit (§18)", () => {
   async function fillWholeDraft() {
     mockedSearch.mockResolvedValue([
-      { id: "c-1", name: "Мария", phone_masked: "+• ••67" },
+      { id: "c-1", name: "Мария", named: true, phone_masked: "+• ••67" },
     ]);
     screen.getByLabelText(/Клиент/).click();
     fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
@@ -274,7 +274,7 @@ describe("commit (§18)", () => {
 describe("review (§18)", () => {
   it("states the salon's timezone, not the device's", async () => {
     mockedSearch.mockResolvedValue([
-      { id: "c-1", name: "Мария", phone_masked: "+• ••67" },
+      { id: "c-1", name: "Мария", named: true, phone_masked: "+• ••67" },
     ]);
     renderScreen();
 
@@ -296,7 +296,7 @@ describe("review (§18)", () => {
   it("does not invent a price the catalog never gave", async () => {
     // §12 step 5 — «do not invent missing domain fields».
     mockedSearch.mockResolvedValue([
-      { id: "c-1", name: "Мария", phone_masked: "+• ••67" },
+      { id: "c-1", name: "Мария", named: true, phone_masked: "+• ••67" },
     ]);
     renderScreen();
     screen.getByLabelText(/Клиент/).click();
@@ -349,7 +349,7 @@ describe("customer selection (§13, §14)", () => {
 
   it("shows a match as name plus masked phone and nothing else", async () => {
     mockedSearch.mockResolvedValue([
-      { id: "c-1", name: "Мария Иванова", phone_masked: "+• ••• ••• ••67" },
+      { id: "c-1", name: "Мария Иванова", named: true, phone_masked: "+• ••• ••• ••67" },
     ]);
     renderScreen();
     await openSearchAndType("Мария");
