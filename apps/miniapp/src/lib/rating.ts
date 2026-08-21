@@ -10,11 +10,6 @@
  * The naive guard `master.rating ? …` does not catch it: "0.00" is a
  * non-empty STRING, i.e. truthy. Hence the explicit domain check here.
  */
-// DRF-1229 PROOF-OF-GATE — DELIBERATE TYPE ERROR, REVERTED IN THE NEXT COMMIT.
-// The vitest step is already proven red. This proves the OTHER step: that
-// `npm run typecheck` actually propagates tsc's non-zero exit to the job.
-export const PROOF_OF_GATE: number = "0.00";
-
 export function publicRating(raw: string | number | null | undefined): number | null {
   if (raw === null || raw === undefined || raw === "") return null;
   const value = Number(raw);
