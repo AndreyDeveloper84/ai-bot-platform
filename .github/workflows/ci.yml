@@ -346,26 +346,41 @@ jobs:
           echo "run_fe=$run_fe" >> "$GITHUB_OUTPUT"
           echo "::notice::miniapp gate: run_fe=$run_fe ($reason)"
 
-      # Node 20 — but NOT any Node 20. The binding constraint is
-      # `^20.19.0 || >=22.12.0`, and it does not come from Vite 5
-      # (vite@5.4.21 accepts `^18.0.0 || >=20.0.0`). It comes from what
-      # vitest 4 actually drags in:
-      #   - vitest@4.1.10          engines: ^20.0.0 || ^22.0.0 || >=24.0.0
-      #   - jsdom@29.1.1           engines: ^20.19.0 || ^22.13.0 || >=24.0.0
-      #   - vite@8.1.5 (rolldown)  engines: ^20.19.0 || >=22.12.0
-      # vitest 4's peer range is vite `^6 || ^7 || ^8`, which the project's
-      # own vite@5 does not satisfy, so npm nests vite@8 under vitest and
-      # the tests actually execute on that. Verified in the run log:
-      # "`optimizeDeps.esbuildOptions` ... use `optimizeDeps.rolldownOptions`".
-      # Hence "20.19" (latest 20.19.x), not a bare "20" that could resolve
-      # to 20.18.x and fail on three separate engine checks.
-      - name: Set up Node 20.19
+      # Node version lives in apps/miniapp/.nvmrc so CI and local dev cannot
+      # drift apart. It is 22 (current LTS), and the reason is NOT the one in
+      # the ticket: Vite 5 is not the binding constraint — vite@5.4.21 accepts
+      # `^18.0.0 || >=20.0.0` and would run happily on Node 18. The real floor
+      # is `^20.19.0 || >=22.12.0`, and it comes from what vitest 4 drags in:
+      #   vitest@4.1.10          engines: ^20.0.0 || ^22.0.0 || >=24.0.0
+      #   jsdom@29.1.1           engines: ^20.19.0 || ^22.13.0 || >=24.0.0
+      #   vite@8.1.5 (rolldown)  engines: ^20.19.0 || >=22.12.0
+      # vitest 4's peer range is vite `^6 || ^7 || ^8`; the project's own
+      # vite@5 does not satisfy it, so npm nests vite@8 under vitest and the
+      # tests actually execute on that (confirmed in the run log:
+      # "`optimizeDeps.esbuildOptions` ... use `optimizeDeps.rolldownOptions`").
+      #
+      # Node 20 does satisfy all three (measured: setup-node resolved
+      # 20.19.6 and every engine check passed). 22 is chosen because Node 20
+      # left LTS maintenance in April 2026 and the runner already warns about
+      # Node 20 deprecation — putting a brand-new gate on an EOL runtime is a
+      # dated-on-arrival decision, not a safe one. A bare "20"/"22" is fine
+      # here only because setup-node resolves the LATEST matching line, which
+      # is above both floors; do not downgrade this to a specific old patch.
+      #
+      # npm version matters as much as Node here — see the lockfile commit.
+      # Node 22 ships npm 10.x, which is what package-lock.json is generated
+      # with. Regenerating it under npm 11 produces a lockfile npm 10 rejects.
+      - name: Set up Node (from apps/miniapp/.nvmrc)
         if: steps.detect.outputs.run_fe == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: "20.19"
+          node-version-file: apps/miniapp/.nvmrc
           cache: npm
           cache-dependency-path: apps/miniapp/package-lock.json
+
+      - name: Show resolved node + npm
+        if: steps.detect.outputs.run_fe == 'true'
+        run: node --version && npm --version
 
       - name: npm ci
         if: steps.detect.outputs.run_fe == 'true'
