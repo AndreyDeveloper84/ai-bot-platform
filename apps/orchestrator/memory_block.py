@@ -32,6 +32,7 @@ from typing import Any, cast
 
 from ayla_ai_core import build_memory_block
 
+from apps.identity.services.memory_key_policy import CARDINALITY_MULTI, key_cardinality
 from apps.identity.services.personal_context import GateStatus, get_declared_prefs
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,9 @@ def _merge_inferred(bot_user: Any, facts: dict, confidences: dict) -> None:
     """Merge bot-side inferred green MemoryEntry facts (own consent basis).
 
     Declared values win on key conflicts (user-stated beats inferred).
+    Live rows are pre-resolved by the key policy (single-value keys
+    surface ONE current value — an explicit correction beats a fresher
+    inferred row), so a superseded fact never reaches the block.
     Any failure degrades to declared-only — never raises.
     """
     try:
@@ -113,9 +117,9 @@ def _merge_inferred(bot_user: Any, facts: dict, confidences: dict) -> None:
         ayla_user_id = getattr(bot_user, "ayla_user_id", None)
         if not ayla_user_id:
             return
-        from apps.identity.services.memory_reader import read_personal_context
+        from apps.identity.services.memory_key_policy import read_current_view
 
-        view = read_personal_context(ayla_user_id)
+        view = read_current_view(ayla_user_id)
     except Exception:  # noqa: BLE001
         logger.exception("orchestrator.memory_block.inferred_failed")
         return
@@ -125,6 +129,16 @@ def _merge_inferred(bot_user: Any, facts: dict, confidences: dict) -> None:
         raw_key = cast(str, content.get("key"))
         key = _INFERRED_KEY_MAP.get(raw_key, raw_key)
         value = content.get("value")
-        if isinstance(key, str) and key not in facts and value not in (None, "", []):
+        if not (isinstance(key, str) and value not in (None, "", [])):
+            continue
+        if key_cardinality(raw_key) == CARDINALITY_MULTI:
+            # Multi-value keys accrete into a list — but never onto a
+            # declared value (declared wins on key conflicts).
+            if key not in facts:
+                facts[key] = [value]
+                confidences[key] = _INFERRED_CONFIDENCE
+            elif confidences.get(key) == _INFERRED_CONFIDENCE and isinstance(facts[key], list):
+                facts[key].append(value)
+        elif key not in facts:
             facts[key] = value
             confidences[key] = _INFERRED_CONFIDENCE

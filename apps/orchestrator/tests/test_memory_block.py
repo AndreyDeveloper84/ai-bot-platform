@@ -128,7 +128,7 @@ class TestInferredMerge:
             green_facts=[GreenFact(kind="lifestyle", content={"key": "diet", "value": "vegan"})],
         )
         monkeypatch.setattr(
-            "apps.identity.services.memory_reader.read_personal_context",
+            "apps.identity.services.memory_key_policy.read_current_view",
             lambda user_id: view,
         )
         block = build_concierge_memory_block(SimpleNamespace(ayla_user_id=uuid4()))
@@ -155,7 +155,7 @@ class TestInferredMerge:
             green_facts=[GreenFact(kind="lifestyle", content={"key": "diet", "value": "vegan"})],
         )
         monkeypatch.setattr(
-            "apps.identity.services.memory_reader.read_personal_context",
+            "apps.identity.services.memory_key_policy.read_current_view",
             lambda user_id: view,
         )
         block = build_concierge_memory_block(SimpleNamespace(ayla_user_id=uuid4()))
@@ -186,7 +186,7 @@ class TestInferredKeyTypeSafety:
             ],
         )
         monkeypatch.setattr(
-            "apps.identity.services.memory_reader.read_personal_context",
+            "apps.identity.services.memory_key_policy.read_current_view",
             lambda user_id: view,
         )
         with pytest.raises(TypeError):
