@@ -439,7 +439,6 @@ class TenantStaff(models.Model):
     class Meta:
         verbose_name = "Tenant staff"
         verbose_name_plural = "Tenant staff"
-        unique_together = (("tenant", "bot_user", "role"),)
         constraints = [
             # ADR-0008 decision 5: each tenant has exactly one active
             # Owner. Partial unique index lets handover work as
@@ -450,6 +449,21 @@ class TenantStaff(models.Model):
                 fields=["tenant"],
                 condition=models.Q(role="owner", deactivated_at__isnull=True),
                 name="unique_active_owner_per_tenant",
+            ),
+            # DRF-1227: one ACTIVE row per (tenant, person, role) — the
+            # same partial shape as the Owner rule above, for the same
+            # reason. This replaces a plain unique_together, which
+            # contradicted the field it sat next to: `deactivated_at`
+            # promises that "soft deactivation preserves the historical
+            # assignment for audit", but under a total unique index the
+            # history could hold exactly one entry, so re-hiring somebody
+            # you had revoked failed with an IntegrityError instead of
+            # granting the role back. Found by the revoke tests before it
+            # reached anyone.
+            models.UniqueConstraint(
+                fields=["tenant", "bot_user", "role"],
+                condition=models.Q(deactivated_at__isnull=True),
+                name="unique_active_staff_role",
             ),
         ]
         indexes = [
