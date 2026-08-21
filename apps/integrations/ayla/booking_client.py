@@ -453,14 +453,13 @@ class AylaBookingClient(Protocol):
         external_user_id: str,
     ) -> list[AylaUserRecord]: ...
 
-    # DRF-1233 — the canonical version, required by every reschedule and
-    # closure and readable nowhere else on this side.
-    def get_appointment_version(
-        self,
-        *,
-        external_user_id: str,
-        booking_id: str,
-    ) -> AylaAppointmentVersion: ...
+    # NOTE: ``get_appointment_version`` (DRF-1233) is deliberately NOT a
+    # member of this Protocol. This seam exists for the booking skill's
+    # provider-selector, and the canonical version read belongs to the
+    # salon console, which holds a concrete client. Declaring it here
+    # would oblige every fake of the booking skill to implement a method
+    # that skill never calls — which is exactly what happened when it was
+    # first written this way, and what mypy caught.
 
 
 # ─── wire → DTO mappers ───────────────────────────────────────────────────────
