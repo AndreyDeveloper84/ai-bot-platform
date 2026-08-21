@@ -687,6 +687,48 @@ class MemoryEntry(models.Model):
         (DELETION_REASON_UNKNOWN_LEGACY, "Pre-spec-era soft-delete (backfill only)"),
     ]
 
+    # Ayla Memory Domain Contract v1.0 §3.1 — lifecycle status. Schema-only
+    # (Migration Plan Step 2): no runtime reader/writer consults it yet;
+    # semantic backfill of legacy rows is Step 3.
+    STATUS_ACTIVE = "active"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_EXPIRED = "expired"
+    STATUS_DELETION_PENDING = "deletion_pending"
+    STATUS_DELETED = "deleted"
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_SUPERSEDED, "Superseded by a newer entry"),
+        (STATUS_EXPIRED, "Expired"),
+        (STATUS_DELETION_PENDING, "Deletion requested, tombstone pending"),
+        (STATUS_DELETED, "Deleted (soft)"),
+    ]
+
+    # §3.1 — why an entry was superseded. Supersession is NOT deletion, so
+    # these deliberately live OUTSIDE DELETION_REASON_CHOICES.
+    SUPERSESSION_CORRECTED = "corrected"
+    SUPERSESSION_CHANGED = "changed"
+    SUPERSESSION_CONSOLIDATED = "consolidated"
+    SUPERSESSION_POLICY_MIGRATION = "policy_migration"
+    SUPERSESSION_REASON_CHOICES = [
+        (SUPERSESSION_CORRECTED, "Corrected — the old value was wrong"),
+        (SUPERSESSION_CHANGED, "Changed — the fact legitimately changed"),
+        (SUPERSESSION_CONSOLIDATED, "Consolidated into another entry"),
+        (SUPERSESSION_POLICY_MIGRATION, "Policy-driven migration"),
+    ]
+
+    # §3.1 — canonical provenance (AYLA-DEC-0024). Added as Step 2.5 schema
+    # correction: the legacy `source` field stays legacy runtime metadata
+    # and is NOT re-purposed as canonical provenance (owner/architect
+    # ruling). `user_confirmed_inference` may ONLY appear after explicit
+    # user confirmation through the proposal flow — inferred/signal legacy
+    # rows are never silently promoted (backfill: Step 3B, migration 0018).
+    PROVENANCE_USER_STATED = "user_stated"
+    PROVENANCE_USER_CONFIRMED_INFERENCE = "user_confirmed_inference"
+    PROVENANCE_CHOICES = [
+        (PROVENANCE_USER_STATED, "User stated directly"),
+        (PROVENANCE_USER_CONFIRMED_INFERENCE, "Inference explicitly confirmed by the user"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user_id = models.UUIDField(
         db_index=True,
@@ -794,6 +836,114 @@ class MemoryEntry(models.Model):
         help_text="Distinguishes WHY a row is being deleted. CHECK 3 "
         "enforces nullness invariant: live rows MUST have NULL; deleted "
         "rows MUST have non-NULL. unknown_legacy reserved for backfill.",
+    )
+
+    # ------------------------------------------------------------------
+    # Ayla Memory Domain Contract v1.0 §3.1 — schema-compatible additions
+    # (Memory and Context Migration Plan, Step 2). ALL fields below are
+    # nullable/default-capable, additive-only, and NOT consulted by any
+    # read/write path yet. Semantic backfill of legacy rows (status from
+    # soft_deleted_at/delete_requested_at, updated_at/effective_from from
+    # created_at, expires_at from created_at+ttl_days) is Step 3 — the
+    # migration deliberately performs NO backfill.
+    # ------------------------------------------------------------------
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        null=True,
+        blank=True,
+        default=None,
+        help_text="Lifecycle status per §3.1. NULL on legacy rows until "
+        "the Step-3 backfill; runtime logic does not read it yet.",
+    )
+    updated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Last state-transition moment (§3.1). NOT auto_now — "
+        "existing save paths must not start touching it implicitly. "
+        "NULL on legacy rows until the Step-3 backfill (= created_at). "
+        "Distinct from last_used_at (usage tracking).",
+    )
+    effective_from = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the fact starts being effective (§3.1). NULL on "
+        "legacy rows until the Step-3 backfill (= created_at).",
+    )
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Absolute expiry moment (§3.1). ttl_days stays the "
+        "relative policy input; expires_at = created_at + ttl_days is "
+        "computed by the Step-3 backfill, not here.",
+    )
+    superseded_by = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supersedes",
+        help_text="The entry this one was superseded by (§3.1, §6 "
+        "immutable supersession). SET_NULL: purging the replacement "
+        "never cascades onto the superseded row.",
+    )
+    supersession_reason = models.CharField(
+        max_length=20,
+        choices=SUPERSESSION_REASON_CHOICES,
+        null=True,
+        blank=True,
+        help_text="Why the entry was superseded (§3.1). Required when "
+        "status=superseded (app-level, Step 3+); supersession is NOT a "
+        "deletion_reason.",
+    )
+    source_event_id = models.UUIDField(
+        null=True,
+        blank=True,
+        unique=True,
+        help_text="Idempotency key — the originating event (§3.1). "
+        "Unique where NOT NULL; Postgres unique allows multiple NULLs.",
+    )
+    evidence_refs = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="References to observations (messages/events) the fact "
+        "was confirmed from (§3.1). Callable default — never a shared "
+        "mutable [].",
+    )
+    derivation_method = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        help_text="How the fact was derived (§3.1; for confirmed "
+        "inference). NULL for user_stated facts.",
+    )
+    consent_scope = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        help_text="CSR scope that AUTHORIZED the write of this entry "
+        "(§3.1; MVP: preference_memory). Attribute of the write — never "
+        "rewritten on read/use. Nullable for the transition period; "
+        "backfill per migration plan.",
+    )
+    purpose_tags = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Allowed usage purposes restricting retrieval (§3.1). "
+        "[] = inherit from category policy. Resolver enforcement is a "
+        "later step — not implemented here.",
+    )
+    provenance = models.CharField(
+        max_length=30,
+        choices=PROVENANCE_CHOICES,
+        null=True,
+        blank=True,
+        default=None,
+        help_text="Canonical provenance per §3.1 (Step 2.5 schema "
+        "correction). The legacy `source` field is NOT re-purposed: "
+        "explicit→user_stated backfill is Step 3B (migration 0018); "
+        "inferred/signal rows stay NULL — user_confirmed_inference "
+        "requires explicit confirmation via the proposal flow.",
     )
 
     # NOT TenantScopedManager — MemoryEntry is cross-tenant by design.

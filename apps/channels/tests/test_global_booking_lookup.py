@@ -141,7 +141,7 @@ def spy_concierge(monkeypatch):
     from apps.orchestrator.discovery import DiscoveryReply
 
     spy = MagicMock(return_value=DiscoveryReply(text="Какая услуга интересует?"))
-    monkeypatch.setattr(max_handler, "generate_concierge_reply", spy)
+    monkeypatch.setattr("apps.orchestrator.concierge.generate_concierge_reply", spy)
     return spy
 
 

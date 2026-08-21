@@ -12,6 +12,9 @@ unchanged.
 
 from __future__ import annotations
 
+import uuid
+
+from apps.identity.services.memory_key_policy import read_current_view
 from apps.identity.services.memory_reader import GreenFact, PersonalContextView
 
 # Known green (key, value) → natural Russian phrase. The pilot writes `diet`
@@ -79,3 +82,16 @@ def render_personal_context(view: PersonalContextView) -> str | None:
         "уместно — например «помню, что ты…»; НЕ перечисляй списком и НЕ "
         f"придумывай ничего сверх этого): {body}."
     )
+
+
+def render_current_personal_context(user_id: uuid.UUID) -> str | None:
+    """Read live green memory, resolve key conflicts, render the prompt paragraph.
+
+    Conflict-aware counterpart to ``read_personal_context`` +
+    :func:`render_personal_context`: live rows are collapsed by the key
+    policy first (a single-value key surfaces ONE current value — an
+    explicit correction beats a fresher inferred row), so the model never
+    sees mutually exclusive facts (vegan + keto) in one block.
+    """
+
+    return render_personal_context(read_current_view(user_id))

@@ -134,7 +134,8 @@ class TestRoutingThroughHelper:
         from apps.orchestrator.discovery import DiscoveryReply
 
         monkeypatch.setattr(
-            max_handler, "generate_concierge_reply", lambda *a, **k: DiscoveryReply(text="привет")
+            "apps.orchestrator.concierge.generate_concierge_reply",
+            lambda *a, **k: DiscoveryReply(text="привет"),
         )
         GlobalMaxHandler()(self._payload("хочу маникюр", mid="nr1"))
         assert helper_calls == []  # normal turn does NOT use the crisis helper

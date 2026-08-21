@@ -1,5 +1,13 @@
 """Inferred green-memory persistence (S3-B, pilot 2026-08-15).
 
+.. deprecated:: Migration Plan Step 3.5 audit (2026-08-20)
+   This writer has ZERO production callers (only tests exercise it) and is
+   kept dormant: per the canonical contract (MDC §3.1/§3.2, AYLA-DEC-0024)
+   inference may become persistent memory ONLY through the proposal flow
+   (MemoryProposal, Step 4+). Its semantics are intentionally NOT changed
+   here — in particular, rows it writes keep provenance=NULL, since
+   user_confirmed_inference requires explicit user confirmation.
+
 The sanctioned write path for **inferred** 🟢 green facts — facts the
 platform derives (behavioral / conversational signals) rather than the
 user stating them verbatim. Complements the explicit path

@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import socket
 import uuid
+from datetime import timedelta
 from typing import Any, Optional
 
 from django.db import transaction
@@ -172,6 +173,27 @@ def write_entry(
             _audit_write_rejected(user_id, request_id, purpose)
             return None
 
+    # Canonical §3.1 fields at write time (Migration Plan Step 3.5): stop
+    # NEW schema drift after the Step-3 backfill. EXPLICIT persistent
+    # writes are canonical user_stated facts — stamped here, in the single
+    # sanctioned write path, so every explicit caller is covered. ONE
+    # timestamp per write operation (no auto_now semantics): effective_from
+    # == updated_at == the expiry base. inferred/signal rows are NOT
+    # stamped — provenance=user_confirmed_inference may only come from the
+    # proposal flow (Step 4+), never silently from the writer. consent_scope
+    # / source_event_id / evidence_refs / derivation_method are never
+    # fabricated here; purpose_tags stays [] (no category policy yet).
+    canonical: dict[str, Any] = {}
+    if source == MemoryEntry.SOURCE_EXPLICIT:
+        write_ts = timezone.now()
+        canonical = {
+            "status": MemoryEntry.STATUS_ACTIVE,
+            "provenance": MemoryEntry.PROVENANCE_USER_STATED,
+            "effective_from": write_ts,
+            "updated_at": write_ts,
+            "expires_at": (write_ts + timedelta(days=ttl_days) if ttl_days is not None else None),
+        }
+
     return MemoryEntry.objects.create(
         user_id=user_id,
         personal_context=personal_context,
@@ -183,6 +205,7 @@ def write_entry(
         source_tenant_id=source_tenant_id,
         last_inferred_at=last_inferred_at,
         ttl_days=ttl_days,
+        **canonical,
     )
 
 

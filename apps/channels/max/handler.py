@@ -124,13 +124,9 @@ from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
 )
-from apps.identity.services.memory_reader import read_personal_context
 from apps.persona.memory_commands import handle_memory_command
-from apps.persona.memory_surface import render_personal_context
-from apps.orchestrator.concierge import (
-    generate_concierge_reply,
-    generate_direct_show_masters_reply,
-)
+from apps.persona.memory_surface import render_current_personal_context
+from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
@@ -154,6 +150,13 @@ from apps.orchestrator.memory.personal_context import record_explicit_green_fact
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.safety.gate import evaluate_inbound
+from apps.orchestrator.turn_seam import (
+    SURFACE_GLOBAL,
+    SURFACE_PER_TENANT,
+    TurnContext,
+    orchestrate_turn,
+    turn_reply_to_skill_result,
+)
 from apps.skills.booking.lookup import is_personal_booking_lookup
 from apps.skills.menu.matching import looks_like_booking_request
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
@@ -800,15 +803,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 # is sent, so a transient error must degrade to «no memory», never abort
                 # the turn (the idempotency key is already claimed — a raise would lose
                 # the reply on retry).
-                personal_context = None
+                personal_context_block = ""
                 try:
                     if ayla_user_id is not None:
-                        personal_context = read_personal_context(ayla_user_id)
+                        personal_context_block = render_current_personal_context(ayla_user_id) or ""
                 except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
                     logger.exception(
                         "channels.max.global.memory_surface_failed bot_user=%s", bot_user.id
                     )
-                    personal_context = None
+                    personal_context_block = ""
                 # W5 task 2: consent-gated ai-core memory block (declared prefs +
                 # inferred green). "" when the memory_green gate is closed —
                 # not a single fact reaches the prompt then. Fail-closed.
@@ -823,19 +826,29 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 # W5 task 1: the concierge DM runs on ayla-ai-core AIConcierge
                 # (apps.orchestrator.concierge) — history from the Message table,
                 # assistant turn persisted by its store (reply.persisted=True).
-                reply = generate_concierge_reply(
-                    event.text,
-                    bot_user=bot_user,
-                    conversation=conversation,
-                    # Booking callbacks never reach this branch (2.5 above), so
-                    # the skipped user-turn persistence can't leak a None here.
-                    user_message_id=user_msg.id if user_msg is not None else None,
-                    memory_block=memory_block,
-                    extra_system=(
-                        render_personal_context(personal_context) if personal_context else ""
+                # Routed via the normalized orchestration seam
+                # (apps.orchestrator.turn_seam): tenant=None is the designed
+                # global-pilot input (OR-BOT-3), the concierge brain is unchanged.
+                turn_reply = orchestrate_turn(
+                    TurnContext(
+                        surface=SURFACE_GLOBAL,
+                        conversation=conversation,
+                        bot_user=bot_user,
+                        text=event.text,
+                        channel=event.channel,
+                        trace_id=str(trace_id) if trace_id else "",
+                        tenant=None,
+                        # Booking callbacks never reach this branch (2.5 above), so
+                        # the skipped user-turn persistence can't leak a None here.
+                        user_message_id=user_msg.id if user_msg is not None else None,
+                        memory_block=memory_block,
+                        extra_system=personal_context_block or "",
                     )
-                    or "",
-                    trace_id=str(trace_id) if trace_id else None,
+                )
+                reply = DiscoveryReply(
+                    text=turn_reply.reply_text,
+                    action_data=turn_reply.action_data,
+                    persisted=turn_reply.assistant_persisted,
                 )
                 # W5 (S3.5): organically weave ONE memory question when the Ayla
                 # anti-spam engine allows asking. Best-effort.
@@ -1051,23 +1064,26 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
                 )
                 conversation.last_photo_bytes = None  # type: ignore[attr-defined]
 
-    # Sprint 3 / D1 — dispatch through the skill registry. Lazy import
-    # of skills.registry breaks the echo-skill ↔ handler.py module-load
-    # cycle (echo skill needs the legacy welcome/fallback strings that
-    # live up here). The EchoSkill is the final catch-all in registration
-    # order so dispatch() always returns a SkillResult under normal load;
-    # the `_echo_text` fallback below stays only for the defensive
+    # Sprint 3 / D1 — dispatch through the skill registry, routed via the
+    # normalized orchestration seam (apps.orchestrator.turn_seam). The seam
+    # keeps the skills.registry import lazy internally (the echo-skill ↔
+    # handler.py module-load cycle), and the SkillResult is rebuilt 1:1 so
+    # every branch below is byte-identical to the pre-seam direct dispatch.
+    # The EchoSkill is the final catch-all in registration order so
+    # dispatch() always returns a SkillResult under normal load; the
+    # `_echo_text` fallback below stays only for the defensive
     # "registry empty" edge case (e.g. tests that reset the registry).
-    from apps.skills.base import SkillContext
-    from apps.skills.registry import dispatch as skill_dispatch
-
-    skill_result = skill_dispatch(
-        SkillContext(
-            conversation=conversation,
-            bot_user=bot_user,
-            message_text=event.text,
-            trace_id=str(trace_id) if trace_id else "",
-            has_attachments=bool(event.attachments),
+    skill_result = turn_reply_to_skill_result(
+        orchestrate_turn(
+            TurnContext(
+                surface=SURFACE_PER_TENANT,
+                conversation=conversation,
+                bot_user=bot_user,
+                text=event.text,
+                channel=event.channel,
+                trace_id=str(trace_id) if trace_id else "",
+                has_attachments=bool(event.attachments),
+            )
         )
     )
 

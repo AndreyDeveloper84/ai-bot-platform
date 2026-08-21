@@ -1029,6 +1029,18 @@ CELERY_IMPORTS = (
     "apps.llm.tasks",
 )
 
+# Live Shadow Activation (Stage 1 pre-flight) — dedicated queue for the
+# observe-only shadow task. Shadow LLM jobs (up to the soft 2.5s budget /
+# 30s hard ceiling) must never occupy worker slots of latency-sensitive
+# production tasks (booking reminders/followups, eventbus dispatch) that
+# share the default `celery` queue on a concurrency=2 pool. Routing is
+# registered for THIS task only — every other task keeps the default queue.
+# The shadow queue is drained by a dedicated worker
+# (`infra/systemd/ai-bot-platform-shadow-worker.service.template`).
+CELERY_TASK_ROUTES = {
+    "orchestrator.shadow_turn": {"queue": "shadow"},
+}
+
 # Beat schedule — keep retention tasks on separate cadences per the
 # 6A-split rule (AuditLog 90d daily sweep vs IdempotencyKey 7d hourly
 # sweep). Cron times in UTC; the Django Celery beat runs in
@@ -1714,3 +1726,32 @@ LOGGING = {
         "handlers": ["console"],
     },
 }
+
+# OR-SHADOW (Bot Runtime Shadow Integration) — side-effect-free shadow
+# execution of the new-brain compute subset next to the orchestration
+# seam. Default OFF: when disabled the seam performs zero shadow work
+# (no enqueue, no latency, no log spam). The legacy brain stays
+# authoritative either way; the shadow runs async on the
+# ingress:shadow_turn stream and can never change the user-visible reply.
+ORCHESTRATOR_SHADOW_ENABLED = (
+    os.environ.get("ORCHESTRATOR_SHADOW_ENABLED", "false").lower() == "true"
+)
+# Soft per-turn budget for the shadow compute (intent classify dominates).
+# Exceeding it marks the shadow result TIMEOUT; the legacy turn is never
+# affected.
+ORCHESTRATOR_SHADOW_TIMEOUT_MS = int(os.environ.get("ORCHESTRATOR_SHADOW_TIMEOUT_MS", "2500"))
+
+# Live Shadow Activation Gate controls (§5-§8).
+# SAMPLE_RATE: deterministic fraction of eligible turns dispatched to
+# shadow (0.0-1.0). Default 0.0 — enabling the flag alone never floods
+# the broker; activation requires an explicit rate (rollout ladder
+# 0.01 -> 0.10 -> 0.25 -> 0.50 -> 1.00).
+ORCHESTRATOR_SHADOW_SAMPLE_RATE = float(os.environ.get("ORCHESTRATOR_SHADOW_SAMPLE_RATE", "0.0"))
+# SURFACES: rollout targeting — seam surfaces allowed to dispatch.
+# Default "global" (tenant-less pilot ONLY). per-tenant MAX / Telegram
+# stay excluded unless ops explicitly widens the list.
+ORCHESTRATOR_SHADOW_SURFACES = os.environ.get("ORCHESTRATOR_SHADOW_SURFACES", "global")
+# MAX_BACKLOG: broker admission limit — when the celery queue depth is at
+# or above this, new shadow jobs are dropped (logged) and legacy turns
+# continue untouched.
+ORCHESTRATOR_SHADOW_MAX_BACKLOG = int(os.environ.get("ORCHESTRATOR_SHADOW_MAX_BACKLOG", "500"))
