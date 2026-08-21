@@ -37,11 +37,12 @@
  *   length** (§12) — including the wording of the label.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../../lib/api";
 import {
+  createSalonBooking,
   CustomerSearchUnavailable,
   getBookingSlots,
   getCatalogServicesForAdmin,
@@ -58,9 +59,12 @@ import {
   canReview,
   EMPTY_DRAFT,
   missingSteps,
+  outcomeKeepsDraft,
+  SUBMIT_OUTCOME_COPY,
   type BookingDraft,
   type DraftAction,
   type SlotInvalidationReason,
+  type SubmitOutcome,
 } from "../../lib/booking-draft";
 import { setBackButton } from "../../lib/max-sdk";
 
@@ -201,6 +205,18 @@ export function AdminNewBookingScreen() {
   const [newName, setNewName] = useState("");
   const [newPhone, setNewPhone] = useState("");
 
+  // §18 — the outcome of a submit. `null` means «not submitted», which is a
+  // different thing from every value it can hold.
+  const [outcome, setOutcome] = useState<SubmitOutcome | null>(null);
+  const [outcomeDetail, setOutcomeDetail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // One key per booking attempt, kept across retries on purpose. Ayla
+  // invents a key when the header is absent, so retrying with a fresh one
+  // books the customer twice — which is exactly what the «pending» outcome
+  // tempts a worried receptionist into doing.
+  const idempotencyKey = useRef<string>(crypto.randomUUID());
+
   useEffect(() => {
     setBackButton(true);
   }, []);
@@ -291,6 +307,38 @@ export function AdminNewBookingScreen() {
     };
   }, [query, sheet]);
 
+  const submit = useCallback(async () => {
+    if (!canReview(draft) || submitting) return;
+    setSubmitting(true);
+    setOutcome(null);
+    try {
+      const res = await createSalonBooking({
+        master_id: draft.master!.id,
+        service_id: draft.service!.id,
+        // The schedule's own timestamp. When it sent none we cannot invent
+        // one (§17), so the slot is unusable for a commit and the button
+        // stays out of reach — see `canSubmit` below.
+        start_at: draft.slot!.start_at ?? "",
+        idempotency_key: idempotencyKey.current,
+        ...(draft.customer!.kind === "existing"
+          ? { client_id: draft.customer!.id }
+          : {
+              client_name: draft.customer!.name,
+              client_phone: draft.customer!.phone,
+            }),
+      });
+      setOutcome(res.outcome);
+      setOutcomeDetail(res.detail);
+      if (res.outcome === "committed") {
+        // A fresh key for whatever is booked next; this one is spent.
+        idempotencyKey.current = crypto.randomUUID();
+        dispatch({ type: "reset" });
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }, [draft, submitting, dispatch]);
+
   const customerLabel = useMemo(() => {
     if (draft.customer === null) return null;
     return draft.customer.kind === "existing"
@@ -302,6 +350,10 @@ export function AdminNewBookingScreen() {
 
   const missing = missingSteps(draft);
   const ready = canReview(draft);
+  // A slot the schedule labelled but did not timestamp cannot be committed:
+  // building the instant here would mean the client picking a timezone,
+  // which §17 forbids. Rare, and better refused than guessed.
+  const commitable = ready && !!draft.slot?.start_at;
 
   return (
     <div className="screen admin-flow-screen">
@@ -379,21 +431,59 @@ export function AdminNewBookingScreen() {
           type="button"
           className="cta-bar__button"
           style={{ width: "100%" }}
-          disabled={!ready}
-          aria-disabled={!ready}
+          disabled={!commitable || submitting}
+          aria-disabled={!commitable || submitting}
+          onClick={() => void submit()}
         >
-          Создать запись
+          {submitting ? "Создаю…" : "Создать запись"}
         </button>
-        <p
-          style={{
-            color: "var(--c-text-secondary)",
-            fontSize: "var(--font-size-100)",
-            marginTop: "var(--s-2)",
-          }}
-        >
-          Создание записи подключается вместе с доступом к расписанию салона.
-        </p>
+        {ready && !commitable && (
+          <p style={{ color: "var(--c-text-secondary)", margin: "var(--s-2) 0 0" }}>
+            У этого времени нет точной метки от расписания — выберите другое.
+          </p>
+        )}
       </div>
+
+      {outcome !== null && (
+        // §18 — four distinguishable outcomes. `pending` in particular must
+        // not read as success: «Do not claim creation». It also must not
+        // read as failure, or the receptionist presses again and the client
+        // is booked twice.
+        <section
+          className={outcome === "committed" ? "callout" : "callout callout--warning"}
+          role="status"
+          aria-live="polite"
+          style={{ marginTop: "var(--s-3)" }}
+        >
+          <p style={{ margin: 0 }}>{SUBMIT_OUTCOME_COPY[outcome]}</p>
+          {outcomeDetail && (
+            <p
+              style={{
+                margin: "var(--s-1) 0 0",
+                color: "var(--c-text-secondary)",
+                fontSize: "var(--font-size-100)",
+              }}
+            >
+              {outcomeDetail}
+            </p>
+          )}
+          {outcomeKeepsDraft(outcome) && (
+            <p style={{ margin: "var(--s-1) 0 0", color: "var(--c-text-secondary)" }}>
+              Введённые данные сохранены.
+            </p>
+          )}
+          {outcome === "pending" && (
+            <button
+              type="button"
+              className="btn-secondary"
+              style={{ marginTop: "var(--s-2)" }}
+              onClick={() => navigate("/admin/day")}
+            >
+              Открыть день салона
+            </button>
+          )}
+        </section>
+      )}
 
       {sheet === "customer" && (
         <Sheet title="Клиент" onClose={() => setSheet(null)}>

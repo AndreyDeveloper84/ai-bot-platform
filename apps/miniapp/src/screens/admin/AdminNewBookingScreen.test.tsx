@@ -18,11 +18,13 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     getCatalogServicesForAdmin: vi.fn(),
     listMasters: vi.fn(),
     searchSalonCustomers: vi.fn(),
+    createSalonBooking: vi.fn(),
   };
 });
 
 import { ApiError } from "../../lib/api";
 import {
+  createSalonBooking,
   CustomerSearchUnavailable,
   getBookingSlots,
   getCatalogServicesForAdmin,
@@ -35,6 +37,7 @@ const mockedSlots = vi.mocked(getBookingSlots);
 const mockedServices = vi.mocked(getCatalogServicesForAdmin);
 const mockedMasters = vi.mocked(listMasters);
 const mockedSearch = vi.mocked(searchSalonCustomers);
+const mockedCreate = vi.mocked(createSalonBooking);
 
 function renderScreen() {
   render(
@@ -75,6 +78,7 @@ beforeEach(() => {
     total_count: 1,
   });
   mockedSearch.mockRejectedValue(new CustomerSearchUnavailable());
+  mockedCreate.mockResolvedValue({ outcome: "committed", detail: "ok", appointment_id: "a-1" });
   mockedSlots.mockResolvedValue({
     date: "2026-08-21",
     timezone: "Europe/Moscow",
@@ -179,6 +183,91 @@ describe("an unreachable schedule is not «nothing free» (§16)", () => {
     screen.getByLabelText(/Дата и время/).click();
 
     expect(await screen.findByText(/свободного времени нет/)).toBeInTheDocument();
+  });
+});
+
+
+describe("commit (§18)", () => {
+  async function fillWholeDraft() {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Мария", phone_masked: "+• ••67" },
+    ]);
+    screen.getByLabelText(/Клиент/).click();
+    fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
+      target: { value: "Мария" },
+    });
+    (await screen.findByText(/Мария · /)).click();
+    await chooseServiceAndMaster();
+    screen.getByLabelText(/Дата и время/).click();
+    (await screen.findByRole("button", { name: "15:00" })).click();
+    await screen.findByText(/Проверьте запись/);
+  }
+
+  it("sends exactly one identification path for an existing customer", async () => {
+    renderScreen();
+    await fillWholeDraft();
+    screen.getByRole("button", { name: "Создать запись" }).click();
+
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const body = mockedCreate.mock.calls[0]?.[0];
+    expect(body?.client_id).toBe("c-1");
+    expect(body?.client_name).toBeUndefined();
+    expect(body?.idempotency_key).toBeTruthy();
+  });
+
+  it("reuses the same idempotency key when a pending submit is retried", async () => {
+    // Ayla invents a key when the header is absent, so a retry with a fresh
+    // one books the customer twice — the exact trap «pending» sets.
+    mockedCreate.mockResolvedValue({
+      outcome: "pending",
+      detail: "нет ответа",
+      idempotency_key: "k-1",
+    });
+    renderScreen();
+    await fillWholeDraft();
+
+    const btn = screen.getByRole("button", { name: "Создать запись" });
+    btn.click();
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1));
+    await screen.findByText(/могла быть создана/);
+
+    btn.click();
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(2));
+    expect(mockedCreate.mock.calls[1]?.[0].idempotency_key).toBe(
+      mockedCreate.mock.calls[0]?.[0].idempotency_key,
+    );
+  });
+
+  it("never renders pending as created", async () => {
+    mockedCreate.mockResolvedValue({ outcome: "pending", detail: "" });
+    renderScreen();
+    await fillWholeDraft();
+    screen.getByRole("button", { name: "Создать запись" }).click();
+
+    expect(await screen.findByText(/могла быть создана/)).toBeInTheDocument();
+    expect(screen.queryByText("Запись создана.")).not.toBeInTheDocument();
+    expect(screen.getByText(/Введённые данные сохранены/)).toBeInTheDocument();
+  });
+
+  it("keeps the draft on conflict so the user can pick another time", async () => {
+    mockedCreate.mockResolvedValue({ outcome: "conflict", detail: "занято" });
+    renderScreen();
+    await fillWholeDraft();
+    screen.getByRole("button", { name: "Создать запись" }).click();
+
+    await screen.findByText(/это время уже занято/i);
+    expect(screen.getByLabelText(/Клиент/).textContent).toMatch(/Мария/);
+  });
+
+  it("clears the draft only when the booking is actually committed", async () => {
+    renderScreen();
+    await fillWholeDraft();
+    screen.getByRole("button", { name: "Создать запись" }).click();
+
+    expect(await screen.findByText("Запись создана.")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText(/Клиент/).textContent).toMatch(/выбрать/),
+    );
   });
 });
 

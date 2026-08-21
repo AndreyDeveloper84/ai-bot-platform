@@ -192,6 +192,84 @@ export const getSalonDay = (
   });
 };
 
+// --- POST /api/v1/admin/bookings/ (UX contract §18) -----------------------
+
+/**
+ * What happened to a submitted booking.
+ *
+ * Mirrors `SubmitOutcome` in `booking-draft.ts` and the backend's
+ * `outcome` field. The backend sends it explicitly rather than letting
+ * the client infer it from a status code, because a code is lossy: 409
+ * could be «slot taken» or «already exists», and the screen must react
+ * differently.
+ */
+export interface CreateBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+  /** Returned on `pending` so a retry can be the same write, not a new one. */
+  idempotency_key?: string;
+}
+
+export interface CreateBookingBody {
+  master_id: string;
+  service_id: string;
+  /** ISO start, as the schedule gave it. */
+  start_at: string;
+  /** Stable across retries of the same draft — see the screen. */
+  idempotency_key: string;
+  /** Exactly one of these two paths (§14). */
+  client_id?: string;
+  client_name?: string;
+  client_phone?: string;
+}
+
+/**
+ * Create the appointment.
+ *
+ * Never throws on a business outcome — every one of the five is a normal
+ * answer the screen renders differently. Only a transport failure throws,
+ * and that is itself reported as `pending`: a write that did not answer
+ * may still have landed, and «Do not claim creation» cuts both ways.
+ */
+export const createSalonBooking = async (
+  body: CreateBookingBody,
+): Promise<CreateBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch("/api/v1/admin/bookings/", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return {
+      outcome: "pending",
+      detail: "нет ответа от сети",
+      idempotency_key: body.idempotency_key,
+    };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CreateBookingResult>;
+    if (data.outcome) return data as CreateBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    // A body we cannot read on a write is not evidence that nothing
+    // happened. Treat it as unknown rather than as failure.
+    return {
+      outcome: "pending",
+      detail: "ответ не прочитан",
+      idempotency_key: body.idempotency_key,
+    };
+  }
+};
+
 // --- salon customers (UX contract §13) -----------------------------------
 
 /**

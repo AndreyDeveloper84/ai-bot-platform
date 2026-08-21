@@ -15,6 +15,7 @@ from apps.admin_api import (
     views,
     views_availability,
     views_availability_slots,
+    views_booking_create,
     views_day,
     views_invite,
     views_staff_invite,
@@ -32,6 +33,9 @@ urlpatterns = [
     # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
     # canonical slots read; see the module docstring for why it refuses
     # rather than returning an empty list on upstream failure.
+    # Phase 2 — the commit boundary of manual booking. Ayla owns the
+    # booking; this is a shell that names the acting administrator.
+    path("bookings/", views_booking_create.create_booking, name="create_booking"),
     path(
         "booking-slots/",
         views_availability_slots.booking_slots,
