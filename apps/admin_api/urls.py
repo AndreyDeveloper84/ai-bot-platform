@@ -17,6 +17,7 @@ from apps.admin_api import (
     views_day,
     views_invite,
     views_staff_invite,
+    views_staff_revoke,
     views_master_deactivation,
     views_services_mapping,
 )
@@ -44,6 +45,13 @@ urlpatterns = [
         "staff/invite/",
         views_staff_invite.staff_invite_create,
         name="staff_invite_create",
+    ),
+    # DRF-1227 — the other half of the invite: taking access back. Also
+    # before masters/<id>/ so "staff" is never read as a master id.
+    path(
+        "staff/revoke/",
+        views_staff_revoke.staff_revoke,
+        name="staff_revoke",
     ),
     path(
         "masters/<str:master_id>/",

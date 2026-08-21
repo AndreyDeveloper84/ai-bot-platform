@@ -372,25 +372,42 @@ def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
         )
 
     try:
-        TenantStaff.all_tenants.create(
-            tenant_id=invite.tenant_id,
-            bot_user=bot_user,
-            role=invite.role,
-            created_by=invite.created_by,
-        )
+        # Savepoint: an IntegrityError poisons the enclosing transaction,
+        # and the non-owner branch below wants to carry on afterwards.
+        with transaction.atomic():
+            TenantStaff.all_tenants.create(
+                tenant_id=invite.tenant_id,
+                bot_user=bot_user,
+                role=invite.role,
+                created_by=invite.created_by,
+            )
     except IntegrityError as exc:
-        # The only constraint that can fire here is the partial unique
-        # index guaranteeing one active owner per tenant. Surfacing it as a
-        # 500 would be wrong: the operator issued a second owner code, and
-        # that is an answerable situation, not a crash.
+        # Two partial unique indexes can fire here (DRF-1227 added the
+        # second): one active owner per tenant, and one active row per
+        # (tenant, person, role).
         if invite.role == StaffInvite.Role.OWNER:
+            # Surfacing this as a 500 would be wrong: the operator issued a
+            # second owner code, and that is an answerable situation.
             logger.warning(
                 "identity.staff_invite.owner_conflict tenant=%s invite=%s",
                 invite.tenant_id,
                 invite.id,
             )
             raise OwnerAlreadyExists("tenant already has an active owner") from exc
-        raise
+        # Otherwise we lost a race with a concurrent redemption granting the
+        # same role to the same person. The grant the caller wanted now
+        # exists, so this is the "already had it" answer, not a failure.
+        logger.info(
+            "identity.staff_invite.grant_race tenant=%s invite=%s role=%s",
+            invite.tenant_id,
+            invite.id,
+            invite.role,
+        )
+        return RedeemResult(
+            role=invite.role,
+            tenant_id=str(invite.tenant_id),
+            already_had_role=True,
+        )
 
     return RedeemResult(
         role=invite.role,

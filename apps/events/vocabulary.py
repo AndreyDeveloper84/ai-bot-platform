@@ -119,6 +119,14 @@ MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 # belong in one.
 STAFF_INVITE_ISSUED = "staff.invite_issued"
 
+# --- Staff access revoked (DRF-1227) -------------------------------------
+# Emitted from apps.identity.services.staff_revoke when a person loses every
+# salon-side capability they held in one tenant. Payload:
+# {roles_revoked[], master_unlinked, master_id?, actor_id?, reason}.
+# Written inside the same transaction as the revoke itself — an audit row
+# describing a rollback would be a lie.
+STAFF_ACCESS_REVOKED = "staff.access_revoked"
+
 # --- Admin services ↔ masters mapping (master-management MM4 / PR 4) -----
 # Emitted from apps.admin_api when an owner/admin toggles the M2M between
 # CatalogMaster and CatalogService. One event PER affected master with a
@@ -332,6 +340,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_INVITED,
         MASTER_INVITE_DISPATCHED,
         STAFF_INVITE_ISSUED,
+        STAFF_ACCESS_REVOKED,
         MASTER_SERVICES_CHANGED,
         INTERNAL_CHAT_THREAD_CREATED,
         INTERNAL_CHAT_MESSAGE_SENT,

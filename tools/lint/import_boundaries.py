@@ -554,6 +554,12 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # because redemption also runs from a management command and from
         # the stream consumer, where no tenant ContextVar is set.
         "apps/identity/services/staff_invites.py",
+        # DRF-1227 — the mirror of redemption: clears the link on the one
+        # master row this person is attached to, filtered on the tenant the
+        # caller named. Same posture as staff_invites.py above, and `.objects`
+        # is unavailable for the same reason — revocation must also work from
+        # a command, where no tenant ContextVar is set.
+        "apps/identity/services/staff_revoke.py",
         # DRF-1061 — operator command listing and picking a master to invite.
         # Every query is filtered on the --tenant the operator named, and it
         # runs at a terminal with no request and therefore no tenant
