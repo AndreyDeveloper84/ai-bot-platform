@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 import uuid
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -29,7 +30,7 @@ from apps.skills.base import SkillResult
 
 
 def _ctx(**overrides) -> TurnContext:
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         surface=SURFACE_PER_TENANT,
         conversation=SimpleNamespace(id=uuid.uuid4()),
         bot_user=SimpleNamespace(id=1),
@@ -42,7 +43,7 @@ def _ctx(**overrides) -> TurnContext:
 
 
 def _skill_result(**overrides) -> SkillResult:
-    kwargs = dict(reply_text="ответ")
+    kwargs: dict[str, Any] = dict(reply_text="ответ")
     kwargs.update(overrides)
     return SkillResult(**kwargs)
 

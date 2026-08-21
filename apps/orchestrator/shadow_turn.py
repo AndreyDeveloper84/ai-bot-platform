@@ -49,7 +49,7 @@ import asyncio
 import logging
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from apps.orchestrator.turn_seam import TurnReply
 
@@ -319,7 +319,9 @@ def _celery_queue_len() -> int:
 
     from apps.ingress.streams import _client
 
-    return int(_client().llen(SHADOW_QUEUE))
+    # The sync redis client returns int at runtime; its stub union includes
+    # the async variant (Awaitable[int]) — narrow explicitly, semantics unchanged.
+    return int(cast(int, _client().llen(SHADOW_QUEUE)))
 
 
 def dispatch_shadow_turn(context: Any, legacy_reply: TurnReply) -> None:

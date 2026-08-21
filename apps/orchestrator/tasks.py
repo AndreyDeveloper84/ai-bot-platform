@@ -55,7 +55,10 @@ def run_shadow_from_payload(payload: dict[str, Any]) -> None:
     trace_id = str(payload.get("trace_id", ""))
     surface = str(payload.get("surface", ""))
 
-    conversation = Conversation.all_tenants.filter(id=payload.get("conversation_id")).first()
+    conversation_id = payload.get("conversation_id")
+    conversation = (
+        Conversation.all_tenants.filter(id=conversation_id).first() if conversation_id else None
+    )
     if conversation is None:
         shadow = ShadowTurnResult(
             execution_status=EXEC_NOT_EVALUABLE,

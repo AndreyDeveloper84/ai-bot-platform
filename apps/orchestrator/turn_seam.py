@@ -203,5 +203,7 @@ def turn_reply_to_skill_result(reply: TurnReply) -> Any:
         new_state=reply.new_state,
         should_handoff=reply.should_handoff,
         handoff_reason=reply.handoff_reason,
-        meta=reply.meta,
+        # SkillResult.meta is a required dict on dev (default_factory=dict);
+        # TurnReply keeps None as "no meta" — normalise at the boundary.
+        meta=reply.meta or {},
     )
