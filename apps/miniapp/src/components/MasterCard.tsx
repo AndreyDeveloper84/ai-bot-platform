@@ -1,4 +1,5 @@
 import type { Master } from "../lib/api";
+import { publicRating } from "../lib/rating";
 
 interface Props {
   master: Master;
@@ -16,7 +17,8 @@ function initials(name: string): string {
 }
 
 export function MasterCard({ master, selected, onSelect }: Props) {
-  const rating = master.rating ? Number(master.rating) : null;
+  // DRF-1224 — «0.00» is a truthy string and not a rating; see publicRating.
+  const rating = publicRating(master.rating);
   return (
     <button
       type="button"

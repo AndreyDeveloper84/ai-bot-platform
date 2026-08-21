@@ -27,6 +27,7 @@ import {
   getCustomerMaster,
   type CustomerMaster,
 } from "../lib/customer-booking";
+import { publicRating } from "../lib/rating";
 import { setMaster, setService, useBookingDraft } from "../state/booking";
 
 type State =
@@ -96,7 +97,9 @@ export function CustomerMasterDetailScreen() {
   }
 
   const m = state.master;
-  const rating = m.rating ? Number(m.rating).toFixed(1) : null;
+  // DRF-1224 — same 1..5 domain rule as the catalog card.
+  const ratingValue = publicRating(m.rating);
+  const rating = ratingValue === null ? null : ratingValue.toFixed(1);
 
   return (
     <ScreenLayout

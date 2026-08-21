@@ -94,6 +94,25 @@ class TestMasterToBody:
         assert "Массажист" in body
         assert "4.8" in body
 
+    def test_zero_rating_not_projected(self, tenant: Tenant) -> None:
+        """DRF-1224 — «Рейтинг: 0.00» must not enter the KB body.
+
+        The KB body is retrieval text the model quotes back to the user, so
+        a projected 0.00 is the same leak as the discovery card, one hop
+        later. Domain is 1..5; 0.00 means «no reviews», not «rated zero».
+        """
+        m = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11,
+            external_updated_at=_ts(),
+            name="Денис",
+            specialization="Массажист",
+            rating=Decimal("0.00"),
+        )
+        body = master_to_body(m)
+        assert "Рейтинг" not in body
+        assert "0.00" not in body
+
 
 class TestFaqAndHelpBody:
     def test_faq_qa_format(self, tenant: Tenant) -> None:

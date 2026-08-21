@@ -193,3 +193,114 @@ def test_plain_turn_no_tool_call(monkeypatch) -> None:
     reply = discovery.generate_discovery_reply("привет")
     assert reply.text == "Привет! Чем помочь?"
     assert reply.action_data is None
+
+
+class TestEmptyRatingIsNotShown:
+    """DRF-1224 — «★ 0.00» must never reach a user.
+
+    Observed on the pilot: «массаж в Пензе» answered with four cards, every
+    one of them «★ 0.00». The rating domain is 1..5 (``booking_rating_in_
+    range_or_null``, ``apps/eventbus/consumers/reviews.py`` rejects anything
+    outside it), so a stored ``0.00`` cannot mean «rated zero» — it can only
+    mean «nothing behind it». Reviews are blocked upstream on the pilot, so
+    that is EVERY card, and the ``is not None`` guard let all of them
+    through.
+
+    Same class as the em-dash bug documented in ``_render_master_cards``:
+    a guard written for the value that never arrives, while the value that
+    does arrive walks straight past it.
+    """
+
+    def _line(self, **overrides) -> str:
+        card = MasterCard(
+            tenant_id=uuid4(),
+            master_id=uuid4(),
+            name="Архипкин Денис",
+            specialization=overrides.pop("specialization", ""),
+            rating=overrides.pop("rating", Decimal("0.00")),
+            photo_url="",
+            city=overrides.pop("city", "Пенза"),
+            service_id=overrides.pop("service_id", None),
+            service_name=overrides.pop("service_name", ""),
+        )
+        assert not overrides, overrides
+        return discovery._render_master_cards([card]).text.splitlines()[1]
+
+    def test_zero_rating_renders_no_star(self) -> None:
+        assert "★" not in self._line(rating=Decimal("0.00"))
+
+    def test_none_rating_still_renders_no_star(self) -> None:
+        assert "★" not in self._line(rating=None)
+
+    def test_real_rating_still_shown(self) -> None:
+        assert "★ 4.80" in self._line(rating=Decimal("4.80"))
+
+    def test_zero_rating_leaves_no_dangling_separator(self) -> None:
+        """The em-dash lesson: an omitted part must not leave its glue.
+
+        Every optional part carries its own « · » / « — » PREFIX, so an
+        empty one should vanish whole. Pin it — this is exactly the shape
+        that regressed before.
+        """
+        line = self._line(rating=Decimal("0.00"), specialization="", service_id=None, city="")
+        assert line == "• Архипкин Денис"
+
+    def test_no_double_separator_in_any_combination(self) -> None:
+        """All 16 on/off combinations of spec × service × rating × city."""
+        sid = uuid4()
+        for spec in ("", "Массажист"):
+            for service in ((None, ""), (sid, "Спортивный массаж")):
+                for rating in (None, Decimal("0.00"), Decimal("4.80")):
+                    for city in ("", "Пенза"):
+                        line = self._line(
+                            specialization=spec,
+                            service_id=service[0],
+                            service_name=service[1],
+                            rating=rating,
+                            city=city,
+                        )
+                        assert "  " not in line, line
+                        assert " ·  " not in line, line
+                        assert " —  " not in line, line
+                        assert not line.endswith(("·", "—", " ")), line
+
+    def test_named_service_missing_does_not_leave_bare_separator(self) -> None:
+        """``service_name`` is normalised to ``""`` next to a real
+        ``service_id`` (apps/marketplace/discovery.py:240 — ``service_name
+        or ""``), so the id-only guard can render a bare « · ». Not observed
+        on the pilot; same bug shape, one character away."""
+        line = self._line(service_id=uuid4(), service_name="", city="Пенза")
+        assert " ·  " not in line
+        assert line == "• Архипкин Денис · Пенза"
+
+    def test_pilot_reproduction_all_four_cards(self, monkeypatch) -> None:
+        """End-to-end through the tool path, exactly as the pilot answered."""
+        cards = [
+            MasterCard(
+                tenant_id=uuid4(),
+                master_id=uuid4(),
+                name=name,
+                specialization="",
+                rating=Decimal("0.00"),
+                photo_url="",
+                city="Пенза",
+            )
+            for name in ("Архипкин Денис", "Сазонова Инна", "Тихонова Ольга")
+        ]
+        monkeypatch.setattr(discovery, "discover_masters", lambda **kw: cards)
+        result = CompletionResult(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    name="show_masters",
+                    arguments={"city": "Пенза", "specialization": "массаж"},
+                )
+            ],
+        )
+        monkeypatch.setattr(discovery, "get_router", lambda: _Router(_Provider(result)))
+
+        reply = discovery.generate_discovery_reply("массаж в Пензе")
+        assert "★" not in reply.text
+        assert "0.00" not in reply.text
+        assert "Архипкин Денис" in reply.text

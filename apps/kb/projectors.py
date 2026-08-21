@@ -104,7 +104,11 @@ def master_to_body(row: "CatalogMaster") -> str:
         parts.append(row.bio)
     if row.experience:
         parts.append(f"Опыт: {row.experience}")
-    if row.rating is not None:
+    # Domain is 1..5 — a stored 0.00 means «no reviews behind it», not
+    # «rated zero» (DRF-1224). This body is retrieval text the model quotes
+    # back to the user, so projecting it is the discovery-card leak one hop
+    # later.
+    if row.rating is not None and row.rating >= 1:
         parts.append(f"Рейтинг: {row.rating}")
     return "\n".join(parts)
 
