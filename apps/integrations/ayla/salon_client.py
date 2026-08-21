@@ -13,20 +13,22 @@ in the tenant. The point is attribution: a journal that says «the owner
 cancelled» when an administrator pressed the button is worse than no journal,
 because people believe it.
 
-The shared secret lives in its own setting, ``AYLA_SALON_SERVICE_TOKEN``, and
-deliberately does NOT fall back to ``NUTRITION_SERVICE_TOKEN``. Reusing one
-secret across two surfaces is precisely the conflation #1050 unpicked, and the
-settings module says so at length. An unset token fails closed.
+Concretely: ``Authorization: Bearer AYLA_INTERNAL_API_TOKEN`` plus
+``X-External-User-ID``, which Ayla checks with
+``IsBotServiceWithVerifiedClient``.
 
-.. note::
+That permission does more than authenticate. It resolves the header into a
+real Ayla ``User`` and puts it on ``request.user``, so the ownership filters
+already written across the salon views keep working unchanged. For the
+attribution path Б was chosen for, that is not a convenience — it is the
+mechanism.
 
-   Which auth shape the salon endpoints will finally take is still open on the
-   Ayla side — see the report's escalation. Two mechanisms exist there today:
-   ``IsServiceAccount`` (``X-Service-Token`` vs ``NUTRITION_SERVICE_TOKEN``,
-   scoped to nutrition) and ``IsBotServiceWithVerifiedClient``
-   (``Authorization: Bearer`` vs ``AYLA_INTERNAL_API_TOKEN``, already used by
-   payments). This client implements the first per the main window's answer;
-   if the second wins, :meth:`_headers` is the only method that changes.
+No separate salon secret exists on purpose. The surface is distinguished by
+the resolved actor, not by a second shared key, so adding one would buy an
+ops step and no isolation. ``IsServiceAccount`` — the ``X-Service-Token``
+half — is scoped to nutrition by its own docstring and keyed to
+``NUTRITION_SERVICE_TOKEN``; reusing it here would rebuild the conflation
+#1050 unpicked.
 
 ### Idempotency is not optional here
 
@@ -100,7 +102,7 @@ class AylaSalonClient:
         if not base_url:
             raise SalonNotConfigured("AYLA_BASE_URL is empty")
         if not service_token:
-            raise SalonNotConfigured("AYLA_SALON_SERVICE_TOKEN is empty")
+            raise SalonNotConfigured("AYLA_INTERNAL_API_TOKEN is empty")
         self._urls = AylaUrlBuilder(base_url)
         self._token = service_token
         self._timeout_s = timeout_s
@@ -110,7 +112,7 @@ class AylaSalonClient:
         """Service proves the request; the header names the human behind it."""
 
         return {
-            "X-Service-Token": self._token,
+            "Authorization": f"Bearer {self._token}",
             "X-External-User-ID": actor_external_id,
             "X-Idempotency-Key": idempotency_key,
             "Accept": "application/json",
@@ -234,7 +236,7 @@ def get_salon_client() -> AylaSalonClient:
 
     return AylaSalonClient(
         base_url=getattr(settings, "AYLA_BASE_URL", ""),
-        service_token=getattr(settings, "AYLA_SALON_SERVICE_TOKEN", ""),
+        service_token=getattr(settings, "AYLA_INTERNAL_API_TOKEN", ""),
     )
 
 

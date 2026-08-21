@@ -629,20 +629,6 @@ NUTRITION_SERVICE_TOKEN = (
     else os.environ.get("AYLA_SERVICE_TOKEN", "")
 )
 
-# 3. ``AYLA_SALON_SERVICE_TOKEN`` — the salon-surface (``/tenants/me/…``)
-#    shared secret. Its OWN name on purpose, with no fallback to either
-#    secret above: the salon endpoints are a third surface with a third
-#    audience, and #1050 exists because one secret serving two roles is how
-#    a rotation on one surface silently breaks another. Unset fails closed
-#    in the client rather than falling back to something that happens to
-#    work today.
-#
-#    Path Б (owner decision OD-B5-1): the service authenticates the request,
-#    ``X-External-User-ID`` names the acting human, and Ayla checks that
-#    human's rights in the tenant. Attribution is the reason the path was
-#    chosen, so the actor header is not optional.
-AYLA_SALON_SERVICE_TOKEN = os.environ.get("AYLA_SALON_SERVICE_TOKEN", "")
-
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
 # instead of direct YClients calls. DEFAULT OFF — the flip (#1041) is gated on
 # the ayla_service_id coverage report (#1016/#1034, command:
