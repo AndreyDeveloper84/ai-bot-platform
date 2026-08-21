@@ -253,3 +253,138 @@ jobs:
       # `# type: ignore[<code>]` rather than slip through.
       - name: mypy
         run: uv run mypy apps config tests
+
+  # ---------------------------------------------------------------------
+  # DRF-1229 — Mini App front-end gate.
+  #
+  # Why this job exists: apps/miniapp ships 259 vitest tests in 35 files
+  # and NOT ONE of them ran in CI. They only ever executed when somebody
+  # remembered to run them locally. The Mini App is the surface a human
+  # actually looks at; the backend has a full apps/ run on every PR and
+  # the front-end had nothing.
+  #
+  # Concrete cost, DRF-1224: the empty-rating guard in the Mini App was
+  # broken *differently and worse* than in the bot — the API returns
+  # "0.00", a non-empty STRING, so it is truthy and even a correct
+  # `!== null` guard would not catch it. Users saw `★ 0.0` with
+  # aria-label="Рейтинг 0.0". A test for that could have existed and
+  # stayed silent, because nothing ran it.
+  #
+  # Runs as its own job (parallel with "pytest + ruff + mypy"), so it
+  # does NOT extend the ~25-32 min Python critical path. It gates
+  # deploy-dev too: deploy-dev keys off `workflow_run` of the whole `ci`
+  # workflow with conclusion == 'success', so a red front-end now blocks
+  # the dev deploy — which is the intent.
+  # ---------------------------------------------------------------------
+  miniapp:
+    name: miniapp (typecheck + vitest)
+    runs-on: ubuntu-latest
+    # Measured: npm ci ~15s + tsc ~10s + 259 vitest tests ~40s on a warm
+    # cache. 15 min is a generous ceiling that still fails fast on a hang.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the change-detection step below diffs against
+          # the PR base, which a depth-1 checkout cannot reach.
+          fetch-depth: 0
+
+      # Per-job `paths:` filters do not exist in GitHub Actions — only
+      # per-workflow. Rather than split this into a sister workflow (and
+      # inherit the required-check-never-reports trap that ci-docs-skip.yml
+      # exists to work around), detect the change set inside the job, the
+      # same way ci-docs-skip.yml does. The job therefore ALWAYS reports a
+      # verdict and is safe to mark as a required check, while the
+      # expensive steps only run when apps/miniapp/** actually changed.
+      #
+      # Bias is deliberately toward RUNNING: if the change set cannot be
+      # determined (new branch, force-push, workflow_dispatch, shallow
+      # history), we run the checks. A needless 2-minute run is cheap; a
+      # silent skip that lets a broken Mini App through is not.
+      - name: Detect apps/miniapp changes
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -uo pipefail
+          run_fe=true
+          reason="could not determine change set — running checks (fail-safe)"
+
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "${BASE_REF:-}" ]; then
+            if git fetch origin "$BASE_REF" --depth=1 >/dev/null 2>&1 \
+               && BASE_SHA="$(git rev-parse "origin/$BASE_REF" 2>/dev/null)"; then
+              CHANGED="$(git diff --name-only "$BASE_SHA"...HEAD)"
+              if [ -n "$CHANGED" ]; then
+                if echo "$CHANGED" | grep -qE '^apps/miniapp/'; then
+                  run_fe=true
+                  reason="PR touches apps/miniapp/**"
+                else
+                  run_fe=false
+                  reason="PR does not touch apps/miniapp/** — front-end checks not needed"
+                fi
+              fi
+            fi
+          elif [ "$EVENT_NAME" = "push" ] \
+               && [ -n "${BEFORE_SHA:-}" ] \
+               && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            CHANGED="$(git diff --name-only "$BEFORE_SHA" HEAD)"
+            if [ -n "$CHANGED" ]; then
+              if echo "$CHANGED" | grep -qE '^apps/miniapp/'; then
+                run_fe=true
+                reason="push touches apps/miniapp/**"
+              else
+                run_fe=false
+                reason="push does not touch apps/miniapp/** — front-end checks not needed"
+              fi
+            fi
+          fi
+
+          echo "run_fe=$run_fe" >> "$GITHUB_OUTPUT"
+          echo "::notice::miniapp gate: run_fe=$run_fe ($reason)"
+
+      # Node 20 — but NOT any Node 20. The binding constraint is
+      # `^20.19.0 || >=22.12.0`, and it does not come from Vite 5
+      # (vite@5.4.21 accepts `^18.0.0 || >=20.0.0`). It comes from what
+      # vitest 4 actually drags in:
+      #   - vitest@4.1.10          engines: ^20.0.0 || ^22.0.0 || >=24.0.0
+      #   - jsdom@29.1.1           engines: ^20.19.0 || ^22.13.0 || >=24.0.0
+      #   - vite@8.1.5 (rolldown)  engines: ^20.19.0 || >=22.12.0
+      # vitest 4's peer range is vite `^6 || ^7 || ^8`, which the project's
+      # own vite@5 does not satisfy, so npm nests vite@8 under vitest and
+      # the tests actually execute on that. Verified in the run log:
+      # "`optimizeDeps.esbuildOptions` ... use `optimizeDeps.rolldownOptions`".
+      # Hence "20.19" (latest 20.19.x), not a bare "20" that could resolve
+      # to 20.18.x and fail on three separate engine checks.
+      - name: Set up Node 20.19
+        if: steps.detect.outputs.run_fe == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: npm
+          cache-dependency-path: apps/miniapp/package-lock.json
+
+      - name: npm ci
+        if: steps.detect.outputs.run_fe == 'true'
+        working-directory: apps/miniapp
+        run: npm ci
+
+      - name: tsc --noEmit (typecheck)
+        if: steps.detect.outputs.run_fe == 'true'
+        working-directory: apps/miniapp
+        run: npm run typecheck
+
+      # `npx vitest run` (not `npm test`) on purpose: package.json's
+      # "test" script is bare `vitest`, which starts WATCH mode and would
+      # hang the runner until the 15-minute timeout.
+      - name: vitest run
+        if: steps.detect.outputs.run_fe == 'true'
+        working-directory: apps/miniapp
+        run: npx vitest run
+
+      - name: Skipped — apps/miniapp untouched
+        if: steps.detect.outputs.run_fe != 'true'
+        run: echo "✓ No apps/miniapp/** changes in this ref. Front-end checks not needed; reporting success so branch protection is satisfied."

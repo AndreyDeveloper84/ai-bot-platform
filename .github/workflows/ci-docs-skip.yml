@@ -95,3 +95,21 @@ jobs:
           # so we never silently report success on a mixed PR.
           echo "::error::gh run cancel did not stop the job after 60s. Failing to avoid masking real CI."
           exit 1
+
+  # DRF-1229 — mirror for the second required check added to ci.yml.
+  # Same reason as `test` above: ci.yml has paths-ignore for docs/**, so on
+  # a docs-only PR the "miniapp (typecheck + vitest)" check would never
+  # report and would block the PR forever once it is marked required.
+  #
+  # `needs: test` is what makes this safe on a MIXED PR: the `test` job
+  # above self-cancels the whole workflow run when it detects non-docs
+  # files, so this job never starts and never false-positively reports
+  # green. On a genuine docs-only PR `test` succeeds and this reports.
+  miniapp:
+    name: miniapp (typecheck + vitest)
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 2
+    steps:
+      - name: Confirm docs-only success
+        run: echo "✓ Docs-only PR — apps/miniapp/** untouched by definition. Reporting success to satisfy required-check branch protection."
