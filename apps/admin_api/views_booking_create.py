@@ -158,6 +158,7 @@ def create_booking(request: HttpRequest) -> HttpResponse:
         created = get_salon_client().create_appointment(
             actor_external_id=actor,
             idempotency_key=idempotency_key,
+            tenant_slug=tenant.slug,
             specialist_id=str(master.id),
             service_id=str(service.ayla_service_id),
             start_datetime=start_at,

@@ -125,12 +125,28 @@ class AylaSalonClient:
         self._timeout_s = timeout_s
         self._transport = transport
 
-    def _headers(self, *, actor_external_id: str, idempotency_key: str) -> dict[str, str]:
-        """Service proves the request; the header names the human behind it."""
+    def _headers(
+        self, *, actor_external_id: str, idempotency_key: str, tenant_slug: str
+    ) -> dict[str, str]:
+        """Service proves the request; the headers name the human and the salon.
+
+        ``X-Tenant`` is not decoration. Ayla's ``TenantContextMiddleware``
+        resolves it into ``request.tenant``, and ``IsTenantAdmin`` — the
+        permission that keeps an administrator of salon A out of salon B —
+        refuses outright when it is None. Omitting it would not fail open;
+        it would fail with a 403 that looks like a rights problem and is
+        actually a missing header.
+
+        The header states which salon we are acting **in**, which is a
+        different claim from which salon the actor belongs to. Ayla compares
+        the two; that comparison is the second factor against
+        admin-of-A-acts-on-B.
+        """
 
         return {
             "Authorization": f"Bearer {self._token}",
             "X-External-User-ID": actor_external_id,
+            "X-Tenant": tenant_slug,
             "X-Idempotency-Key": idempotency_key,
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -142,6 +158,7 @@ class AylaSalonClient:
         *,
         actor_external_id: str,
         idempotency_key: str,
+        tenant_slug: str,
         json_body: dict[str, Any],
     ) -> dict[str, Any]:
         url = self._urls.build(f"tenants/me/{endpoint.lstrip('/')}")
@@ -152,6 +169,7 @@ class AylaSalonClient:
                     headers=self._headers(
                         actor_external_id=actor_external_id,
                         idempotency_key=idempotency_key,
+                        tenant_slug=tenant_slug,
                     ),
                     json=json_body,
                 )
@@ -187,6 +205,7 @@ class AylaSalonClient:
         *,
         actor_external_id: str,
         idempotency_key: str,
+        tenant_slug: str,
         specialist_id: str,
         service_id: str,
         start_datetime: str,
@@ -211,6 +230,10 @@ class AylaSalonClient:
             raise SalonValidationError("provide exactly one of client_id or client_name")
         if has_name and not client_phone:
             raise SalonValidationError("a new guest needs a name and a phone")
+        if not tenant_slug:
+            # See _headers: a missing tenant becomes a 403 that reads like a
+            # rights failure. Refuse locally where the message is honest.
+            raise SalonValidationError("tenant_slug is required")
         if not idempotency_key:
             # Upstream would invent one per request, which silently turns a
             # retry into a second booking. Refuse rather than book twice.
@@ -231,6 +254,7 @@ class AylaSalonClient:
             "appointments/",
             actor_external_id=actor_external_id,
             idempotency_key=idempotency_key,
+            tenant_slug=tenant_slug,
             json_body=body,
         )
 

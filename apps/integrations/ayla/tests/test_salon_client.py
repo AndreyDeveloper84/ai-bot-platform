@@ -48,6 +48,7 @@ def _create(client: AylaSalonClient):
     return client.create_appointment(
         actor_external_id=ACTOR,
         idempotency_key="key-1",
+        tenant_slug="formula-tela",
         specialist_id="m-1",
         service_id="s-1",
         start_datetime="2026-08-21T15:00:00+03:00",
@@ -83,6 +84,9 @@ class TestWireShape:
 
         assert seen["x-external-user-id"] == ACTOR
         assert seen["x-idempotency-key"] == "key-1"
+        # Without this, IsTenantAdmin refuses with a 403 that reads like a
+        # rights problem and is really a missing header.
+        assert seen["x-tenant"] == "formula-tela"
 
     def test_posts_to_the_salon_surface(self) -> None:
         seen: dict = {}
@@ -146,6 +150,7 @@ class TestRefusals:
             client.create_appointment(
                 actor_external_id=ACTOR,
                 idempotency_key="",
+                tenant_slug="formula-tela",
                 specialist_id="m-1",
                 service_id="s-1",
                 start_datetime="2026-08-21T15:00:00+03:00",
@@ -158,6 +163,7 @@ class TestRefusals:
             client.create_appointment(
                 actor_external_id=ACTOR,
                 idempotency_key="k",
+                tenant_slug="formula-tela",
                 specialist_id="m-1",
                 service_id="s-1",
                 start_datetime="2026-08-21T15:00:00+03:00",
@@ -171,6 +177,7 @@ class TestRefusals:
             client.create_appointment(
                 actor_external_id=ACTOR,
                 idempotency_key="k",
+                tenant_slug="formula-tela",
                 specialist_id="m-1",
                 service_id="s-1",
                 start_datetime="2026-08-21T15:00:00+03:00",
@@ -227,3 +234,19 @@ class TestUpstreamContractAsMeasured:
         """
         assert not issubclass(SalonUnauthorized, SalonForbidden)
         assert not issubclass(SalonForbidden, SalonUnauthorized)
+
+
+class TestTenantHeader:
+    def test_refuses_without_a_tenant(self) -> None:
+        """A 403 that is really a missing header is worse than a local refusal."""
+        client = _client(_ok)
+        with pytest.raises(SalonValidationError, match="tenant_slug"):
+            client.create_appointment(
+                actor_external_id=ACTOR,
+                idempotency_key="k",
+                tenant_slug="",
+                specialist_id="m-1",
+                service_id="s-1",
+                start_datetime="2026-08-21T15:00:00+03:00",
+                client_id="c-1",
+            )
