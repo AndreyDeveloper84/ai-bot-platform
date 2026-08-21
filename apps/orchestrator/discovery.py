@@ -234,7 +234,15 @@ def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
     lines = ["Вот мастера, которые могут подойти:"]
     buttons: list[dict[str, str]] = []
     for card in cards:
-        rating = f" · ★ {card.rating}" if card.rating is not None else ""
+        # The rating domain is 1..5, so a stored 0.00 is not a rating at all
+        # — it is the absence of one. Ratings are derived from reviews, the
+        # pilot has none and cannot have any yet, so EVERY card carries 0.00
+        # and the None-guard — written for a value that never arrives — let
+        # all of them through as «★ 0.00», which reads as «bad master»
+        # (DRF-1224). Same shape as the em-dash below: guard the value that
+        # actually shows up, not the one the schema allows.
+        has_rating = card.rating is not None and card.rating >= 1
+        rating = f" · ★ {card.rating}" if has_rating else ""
         city = f" · {card.city}" if card.city else ""
         # The em-dash belongs to the specialization, not to the line. Ayla's
         # specialists feed carries no specialization, so since DRF-945 made
@@ -244,7 +252,11 @@ def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
         spec = f" — {card.specialization}" if card.specialization else ""
         # Surface the resolved service on the card line: the button will carry
         # it into booking, so the user must SEE what they are tapping into.
-        service = f" · {card.service_name}" if card.service_id is not None else ""
+        # Gate on the NAME, not the id: apps/marketplace/discovery.py:240
+        # normalises a NULL service name to "" while keeping the id, and an
+        # id-only card would render a bare « ·  » — the em-dash bug again.
+        # The id still rides the callback below regardless of the name.
+        service = f" · {card.service_name}" if card.service_name else ""
         lines.append(f"• {card.name}{spec}{service}{rating}{city}")
         service_suffix = f":{card.service_id}" if card.service_id is not None else ""
         buttons.append(
