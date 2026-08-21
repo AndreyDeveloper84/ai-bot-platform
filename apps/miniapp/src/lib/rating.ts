@@ -11,7 +11,10 @@
  * non-empty STRING, i.e. truthy. Hence the explicit domain check here.
  */
 export function publicRating(raw: string | number | null | undefined): number | null {
-  if (raw === null || raw === undefined || raw === "") return null;
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 1 ? value : null;
+  // DRF-1229 PROOF-OF-GATE — DELIBERATE REGRESSION, REVERTED IN THE NEXT COMMIT.
+  // This is verbatim the naive truthy guard that shipped «★ 0.0» to the pilot
+  // in DRF-1224. "0.00" is a non-empty STRING, therefore truthy, therefore it
+  // sails straight through and comes back as 0.
+  if (!raw) return null;
+  return Number(raw);
 }
