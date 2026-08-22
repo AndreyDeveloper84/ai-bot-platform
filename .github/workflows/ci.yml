@@ -33,13 +33,11 @@ jobs:
     # Flagged for tech-lead confirmation in REPORT_MECHANIZATION.md —
     # this is a real CI-feedback-latency tradeoff, not a free win.
     #
-    # DRF-1253 bumped 45 -> 50: the new "pytest tests/ (cross-cutting
-    # suite)" step measured ~2.5 min against Postgres, leaving only ~7
-    # min of headroom over the apps/ suite's ~30 min. deploy-dev keys
-    # off this workflow's conclusion, so a timeout-kill would block the
-    # dev deploy exactly as hard as a real failure — five minutes of
-    # slack is cheaper than that.
-    timeout-minutes: 50
+    # DRF-1253 left this at 45. The new "pytest tests/ (cross-cutting
+    # suite)" step costs 58s on the runner (it takes ~2.5 min locally on
+    # Windows — the runner is the faster of the two), and the whole job
+    # measured 26m05s with it in. The headroom is real; do not spend it.
+    timeout-minutes: 45
 
     services:
       postgres:
@@ -173,8 +171,9 @@ jobs:
       #
       # Measured against Postgres 16 (NOT SQLite — see cause (a) below
       # for why that distinction is the whole story): 440 passed, 9
-      # skipped, 38 deselected in ~2.5 min, run twice with identical
-      # results. 21 of the 26 files are green as-is.
+      # skipped, 38 deselected. Four runs before merge — three locally
+      # on Windows (~2.5 min each) and one on this runner (57.77s) —
+      # all with identical counts. 21 of the 26 files are green as-is.
       #
       # The 9 skips are by design, not gaps:
       #   - tests/e2e/test_ayla_integration.py (8) self-skips without
