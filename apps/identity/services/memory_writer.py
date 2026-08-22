@@ -225,11 +225,21 @@ def promote_zone(
     Demotion (yellow→green, red→yellow, red→green) is always allowed
     without a token — moving toward less sensitivity is a privacy
     improvement.
+
+    Either way ``updated_at`` moves to the transition moment (DRF-1263).
+    A REJECTED promotion is not a transition and moves nothing.
     """
     promoting_up = entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN and new_zone in (
         MemoryEntry.SENSITIVITY_YELLOW,
         MemoryEntry.SENSITIVITY_RED,
     )
+
+    # DRF-1263 — a zone change IS a state transition, so `updated_at` moves
+    # with it (MDC §3.1: «time of the last state transition»). This is the one
+    # update-in-place the contract tolerates (ADR-0011 §11.2), which makes
+    # `updated_at` the ONLY trace the transition ever leaves; leaving it behind
+    # made the row claim it had not changed since it was written.
+    now = timezone.now()
 
     if promoting_up:
         if not consent_token:
@@ -241,10 +251,12 @@ def promote_zone(
         # Same UPDATE — satisfies CHECK 2 (yellow/red require
         # consent_at NOT NULL).
         entry.sensitivity_zone = new_zone
-        entry.consent_at = timezone.now()
-        entry.save(update_fields=["sensitivity_zone", "consent_at"])
+        entry.consent_at = now
+        entry.updated_at = now
+        entry.save(update_fields=["sensitivity_zone", "consent_at", "updated_at"])
     else:
         entry.sensitivity_zone = new_zone
-        entry.save(update_fields=["sensitivity_zone"])
+        entry.updated_at = now
+        entry.save(update_fields=["sensitivity_zone", "updated_at"])
 
     return entry

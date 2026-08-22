@@ -23,6 +23,7 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 _MIG_0015 = ("identity", "0015_memoryentry_consent_scope_and_more")
 _MIG_0016 = ("identity", "0016_memoryentry_step3_backfill")
+_MIG_HEAD = ("identity", "0019_memoryentry_lifecycle_constraints")
 
 _TS = datetime(2026, 1, 10, 12, 0, 0, tzinfo=tz.utc)
 
@@ -39,10 +40,13 @@ def _apps_at(target):
 @pytest.fixture
 def at_0015():
     """Migrate down to 0015; ALWAYS return to the chain head afterwards
-    (0017 adds the `provenance` column the runtime model writes)."""
+    (0017 adds the `provenance` column the runtime model writes; 0019 the
+    lifecycle CHECK constraints). The target MUST be the real head — the
+    session shares one database, so returning to an earlier node leaves every
+    later test running against a schema with the constraints stripped."""
     _executor().migrate([_MIG_0015])
     yield _apps_at(_MIG_0015)
-    _executor().migrate([("identity", "0018_memoryentry_provenance_backfill")])
+    _executor().migrate([_MIG_HEAD])
 
 
 def _row(apps, upc, *, created_at=_TS, source="explicit", **fields) -> uuid.UUID:
@@ -194,3 +198,103 @@ class TestBackfillRollback:
         apps15 = _apps_at(_MIG_0015)
         for field_name in ("status", "effective_from", "updated_at", "expires_at"):
             assert _field(apps15, pk, field_name) is None, field_name
+
+
+class TestRollbackTouchesOnlyWhatForwardWrote:
+    """DRF-1264 — the reverse function must not erase state it never created.
+
+    `revert_step2_fields` was a filter-less
+    ``update(status=None, effective_from=None, updated_at=None, expires_at=None)``
+    over the WHOLE table. One rollback therefore wiped the lifecycle of every
+    row, including rows written long after the migration ran — a supersession,
+    a deletion, a zone transition, a TTL. Today the table is empty and the
+    reverse costs nothing; after the pilot fills it, it costs the state of
+    living people's memory.
+    """
+
+    def _post_migration_row(self, apps, upc):
+        """A row whose lifecycle values the forward rule could never produce."""
+        MemoryEntry = apps.get_model("identity", "MemoryEntry")
+        pk = _row(apps, upc)
+        MemoryEntry.objects.filter(pk=pk).update(
+            status="superseded",  # forward would derive 'active' from the stamps
+            effective_from=_TS + timedelta(days=3),  # forward: == created_at
+            updated_at=_TS + timedelta(days=4),  # forward: == created_at
+            expires_at=_TS + timedelta(days=7),  # forward: NULL (no ttl_days)
+        )
+        return pk
+
+    def test_rollback_preserves_a_row_the_backfill_never_wrote(self, at_0015):
+        apps = at_0015
+        UPC = apps.get_model("identity", "UserPersonalContext")
+        upc = UPC.objects.create(user_id=uuid.uuid4())
+
+        _executor().migrate([_MIG_0016])
+        apps16 = _apps_at(_MIG_0016)
+        upc16 = apps16.get_model("identity", "UserPersonalContext").objects.get(pk=upc.pk)
+        pk = self._post_migration_row(apps16, upc16)
+
+        _executor().migrate([_MIG_0015])  # rollback
+        apps15 = _apps_at(_MIG_0015)
+
+        assert _field(apps15, pk, "status") == "superseded", (
+            "The rollback erased a supersession that happened AFTER the "
+            "backfill — the row now claims a lifecycle it never had."
+        )
+        assert _field(apps15, pk, "effective_from") == _TS + timedelta(days=3)
+        assert _field(apps15, pk, "updated_at") == _TS + timedelta(days=4)
+        assert _field(apps15, pk, "expires_at") == _TS + timedelta(days=7)
+
+    def test_rollback_preserves_a_ttl_that_is_not_the_backfilled_one(self, at_0015):
+        """`expires_at` reverts only when it still equals created_at + ttl_days."""
+        apps = at_0015
+        UPC = apps.get_model("identity", "UserPersonalContext")
+        upc = UPC.objects.create(user_id=uuid.uuid4())
+
+        _executor().migrate([_MIG_0016])
+        apps16 = _apps_at(_MIG_0016)
+        upc16 = apps16.get_model("identity", "UserPersonalContext").objects.get(pk=upc.pk)
+        MemoryEntry16 = apps16.get_model("identity", "MemoryEntry")
+
+        backfilled = _row(apps16, upc16, ttl_days=90)
+        MemoryEntry16.objects.filter(pk=backfilled).update(
+            expires_at=_TS + timedelta(days=90)  # exactly the backfill's value
+        )
+        retimed = _row(apps16, upc16, ttl_days=90)
+        MemoryEntry16.objects.filter(pk=retimed).update(
+            expires_at=_TS + timedelta(days=400)  # extended after the backfill
+        )
+
+        _executor().migrate([_MIG_0015])
+        apps15 = _apps_at(_MIG_0015)
+
+        assert _field(apps15, backfilled, "expires_at") is None
+        assert _field(apps15, retimed, "expires_at") == _TS + timedelta(days=400)
+
+    def test_rollback_still_reverts_a_deletion_pending_row(self, at_0015):
+        """The backfill's own three status mappings all still revert."""
+        apps = at_0015
+        UPC = apps.get_model("identity", "UserPersonalContext")
+        upc = UPC.objects.create(user_id=uuid.uuid4())
+        pending = _row(
+            apps,
+            upc,
+            delete_requested_at=_TS + timedelta(days=1),
+            deletion_reason="user_delete",
+        )
+        deleted = _row(
+            apps,
+            upc,
+            soft_deleted_at=_TS + timedelta(days=2),
+            deletion_reason="user_delete",
+        )
+
+        _executor().migrate([_MIG_0016])
+        apps16 = _apps_at(_MIG_0016)
+        assert _field(apps16, pending, "status") == "deletion_pending"
+        assert _field(apps16, deleted, "status") == "deleted"
+
+        _executor().migrate([_MIG_0015])
+        apps15 = _apps_at(_MIG_0015)
+        assert _field(apps15, pending, "status") is None
+        assert _field(apps15, deleted, "status") is None

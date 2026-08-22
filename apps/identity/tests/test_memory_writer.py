@@ -22,6 +22,7 @@ observed behaviour.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from django.utils import timezone
@@ -223,6 +224,7 @@ class TestZonePromotionGuard:
             personal_context=upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
             source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
             kind="preference",
             content={"likes": "x"},
         )
@@ -240,6 +242,7 @@ class TestZonePromotionGuard:
             personal_context=upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
             source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
             kind="preference",
             content={"likes": "x"},
         )
@@ -253,6 +256,7 @@ class TestZonePromotionGuard:
             personal_context=upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
             source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
             kind="preference",
             content={"likes": "x"},
         )
@@ -275,6 +279,7 @@ class TestZonePromotionGuard:
             personal_context=upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_YELLOW,
             source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
             kind="preference",
             content={"likes": "x"},
             consent_at=timezone.now(),
@@ -290,6 +295,7 @@ class TestZonePromotionGuard:
             personal_context=upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
             source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
             kind="contraindication",
             content={"x": "y"},
             consent_at=timezone.now(),
@@ -458,3 +464,65 @@ class TestFailClosedAuditDurability:
             )
         assert entry is not None
         assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN
+
+
+# ───────────────────────────────────────────────────────────────────────
+# DRF-1263 — promote_zone must move `updated_at`
+# ───────────────────────────────────────────────────────────────────────
+
+
+class TestPromoteZoneMovesUpdatedAt:
+    """MDC §3.1: `updated_at` = «time of the last state transition».
+
+    `promote_zone` is a state transition (it is the ONE update-in-place the
+    contract tolerates, ADR-0011 §11.2). Leaving `updated_at` where it was
+    makes the transition unreconstructable — there is no other record of it.
+    """
+
+    def _green(self, upc):
+        return MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+            source=MemoryEntry.SOURCE_EXPLICIT,
+            kind="preference",
+            content={"likes": "x"},
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,
+            status=MemoryEntry.STATUS_ACTIVE,
+            effective_from=timezone.now() - timedelta(days=10),
+            updated_at=timezone.now() - timedelta(days=10),
+        )
+
+    def test_promotion_moves_updated_at(self, upc) -> None:
+        entry = self._green(upc)
+        before = entry.updated_at
+        promote_zone(
+            entry=entry,
+            new_zone=MemoryEntry.SENSITIVITY_YELLOW,
+            consent_token="user-affirmed",
+        )
+        entry.refresh_from_db()
+        assert entry.updated_at > before, (
+            "promote_zone changed the zone but left updated_at behind — the "
+            "transition cannot be reconstructed from the row."
+        )
+
+    def test_demotion_moves_updated_at(self, upc) -> None:
+        entry = self._green(upc)
+        MemoryEntry.objects.filter(pk=entry.pk).update(
+            sensitivity_zone=MemoryEntry.SENSITIVITY_YELLOW, consent_at=timezone.now()
+        )
+        entry.refresh_from_db()
+        before = entry.updated_at
+        promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_GREEN)
+        entry.refresh_from_db()
+        assert entry.updated_at > before
+
+    def test_rejected_promotion_does_not_move_updated_at(self, upc) -> None:
+        """A refused promotion is not a state transition."""
+        entry = self._green(upc)
+        before = entry.updated_at
+        with pytest.raises(ZonePromotionRequiresConsent):
+            promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_YELLOW)
+        entry.refresh_from_db()
+        assert entry.updated_at == before

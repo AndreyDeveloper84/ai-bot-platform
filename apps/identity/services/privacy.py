@@ -76,6 +76,7 @@ from apps.identity.services.memory_deleter import (
     request_forget_all,
     soft_delete_green_entries,
 )
+from apps.identity.services.memory_key_policy import select_current_facts
 from apps.identity.services.memory_reader import read_green_entries
 from apps.integrations.ayla.personal_context_client import (
     PersonalContextError,
@@ -366,6 +367,28 @@ def export_personal_data(
 
     memory_section: list[dict[str, Any]] = []
     if ayla_user_id is not None:
+        # DRF-1262 — the export stays COMPLETE and becomes UNAMBIGUOUS.
+        #
+        # The write path keeps history: a changed fact («веган» → «кето»)
+        # lands as a new live row and the old one stays live, so two
+        # mutually exclusive facts sit in this list at once. The other read
+        # surfaces resolve that with `read_current_view` and show one value.
+        # This one deliberately does NOT filter, and here is why:
+        #
+        # 152-ФЗ ст. 14 gives the subject (and the regulator) the composition
+        # of the data actually PROCESSED. A superseded row is still stored,
+        # still inside the retention window and still in scope for erasure —
+        # dropping it would under-report what we hold, which is the worse
+        # failure for a legal document. But handing over two contradicting
+        # facts with nothing to tell them apart answers the regulator wrongly
+        # in the other direction: it hides that the system itself uses only
+        # one of them.
+        #
+        # So: every live row is exported, each carrying `is_current` (does
+        # this row survive the key policy the prompt reads through) and its
+        # lifecycle `status`. Complete, and self-explaining.
+        entries = read_green_entries(ayla_user_id)
+        current_ids = {entry.id for entry in select_current_facts(entries)}
         memory_section = [
             {
                 "id": str(entry.id),
@@ -376,8 +399,10 @@ def export_personal_data(
                 if entry.last_inferred_at
                 else None,
                 "created_at": entry.created_at.isoformat(),
+                "status": entry.status,
+                "is_current": entry.id in current_ids,
             }
-            for entry in read_green_entries(ayla_user_id)
+            for entry in entries
         ]
 
     shell_ids = _person_shell_ids(bot_user, link)

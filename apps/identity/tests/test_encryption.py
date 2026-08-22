@@ -29,6 +29,7 @@ class TestMemoryEntryContentEncryption:
             personal_context=upc,
             sensitivity_zone="green",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             content=original,
         )
         entry.refresh_from_db()
@@ -56,6 +57,7 @@ class TestMemoryEntryContentEncryption:
             personal_context=upc,
             sensitivity_zone="green",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             content=original,
         )
 
@@ -91,6 +93,7 @@ class TestMemoryEntryContentEncryption:
             personal_context=upc,
             sensitivity_zone="green",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             # Don't pass content — should default to {}
         )
         entry.refresh_from_db()
