@@ -13,10 +13,23 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
+    # Deliberately the *creating* migrations of the referenced models, not
+    # the leaf `makemigrations` picks by default. A leaf pin puts this
+    # migration inside the blast radius of every backwards `migrate` in
+    # those apps: `apps/identity/tests/test_memory_entry_step*` roll
+    # `identity` down to 0014/0015/0017 through `MigrationExecutor`, and
+    # `backwards_plan` unapplies *everything that depends on* the target —
+    # which, with a leaf pin, meant DROPping both tables below mid-suite.
+    # The fixtures then migrate `identity` forward again, but a dependent
+    # is not an ancestor, so nothing re-applied us: every later test that
+    # touched the delete cascade hit `relation ... does not exist`.
+    # `0001_initial` is what actually creates `identity.BotUser` and
+    # `tenancy.Tenant`, is never rolled back, and is the same pin
+    # `conversations/0001_initial` already uses.
     dependencies = [
         ("conversations", "0014_widen_event_id_to_36"),
-        ("identity", "0018_memoryentry_provenance_backfill"),
-        ("tenancy", "0012_alter_tenantstaff_unique_together_and_more"),
+        ("identity", "0001_initial"),
+        ("tenancy", "0001_initial"),
     ]
 
     operations = [
