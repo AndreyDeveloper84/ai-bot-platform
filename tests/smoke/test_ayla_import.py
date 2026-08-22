@@ -72,23 +72,35 @@ class TestAylaAllowList:
 
     def test_ayla_marketplace_voice_importable(self) -> None:
         """#1026 — the tenant-less discovery reply consumes the frozen
-        marketplace voice (apps/orchestrator/discovery.py). Sibling of the
-        already-consumed FORMULA_TELA_VOICE (apps/promptreg/voice_examples.py).
+        marketplace voice (apps/persona/voice.py since DRF-1061; it was
+        apps/orchestrator/discovery.py when this test was written). Sibling
+        of the already-consumed FORMULA_TELA_VOICE
+        (apps/promptreg/voice_examples.py).
         """
         from ayla_ai_core import AYLA_MARKETPLACE_VOICE
 
         assert AYLA_MARKETPLACE_VOICE.assistant_name == "Ayla"
 
-    def test_discovery_fallback_voice_matches_frozen_constant(self) -> None:
-        """The local fallback mirror in apps/orchestrator/discovery.py must not
-        drift from the frozen AYLA_MARKETPLACE_VOICE it copies (CR NIT, #1026).
+    def test_offline_voice_mirror_matches_frozen_constant(self) -> None:
+        """The offline mirror of the marketplace voice must not drift from the
+        frozen AYLA_MARKETPLACE_VOICE it copies (CR NIT, #1026).
+
+        DRF-1061 moved that mirror out of apps/orchestrator/discovery.py into
+        apps/persona/voice.py, where all three surfaces now take their name
+        from one table; the guard follows the thing it guards.
+        apps/persona/tests/test_voice.py holds the same invariant next to the
+        code. This copy stays deliberately: `pytest tests/smoke/` fails in
+        seconds, ahead of the ~30-minute `pytest apps/` step, and a library
+        bump that silently diverges from the mirror is worth failing fast on
+        (same reasoning as the eventbus fast-fail step in ci.yml).
+
         Runs only when the extra is installed (this class is skipif-gated).
         """
         from ayla_ai_core import AYLA_MARKETPLACE_VOICE
 
-        from apps.orchestrator.discovery import _FALLBACK_VOICE_FIELDS
+        from apps.persona.voice import _FROZEN_MIRROR
 
-        assert _FALLBACK_VOICE_FIELDS == {
+        assert _FROZEN_MIRROR == {
             "assistant_name": AYLA_MARKETPLACE_VOICE.assistant_name,
             "business_name": AYLA_MARKETPLACE_VOICE.business_name,
             "domain": AYLA_MARKETPLACE_VOICE.domain,

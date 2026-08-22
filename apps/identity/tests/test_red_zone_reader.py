@@ -49,6 +49,7 @@ def red_entry(upc):
         personal_context=upc,
         sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
         source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
         consent_at=timezone.now(),
         content={"marker": "PII_CANARY"},
         source_tenant_id=uuid.uuid4(),
@@ -423,6 +424,7 @@ class TestGucResetAfterAccessor:
             personal_context=other_upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
             source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
             consent_at=timezone.now(),
             content={"marker": "OTHER_USER_PII"},
             source_tenant_id=uuid.uuid4(),

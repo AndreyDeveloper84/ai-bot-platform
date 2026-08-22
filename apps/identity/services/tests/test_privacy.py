@@ -443,6 +443,51 @@ class TestDelete:
             user_id=ayla_user_id, soft_deleted_at__isnull=True
         ).exists()
 
+    def test_staff_assistant_thread_survives_the_cascade(self, bot_user) -> None:
+        """DRF-1061 — known gap, pinned so it cannot stay quiet.
+
+        This asserts what the cascade does TODAY, not what it should do.
+
+        The customer-facing 152-ФЗ path erases ``BotUser`` identifiers in
+        place, withdraws consents, forgets memory and drops preferences.
+        It knows nothing about ``StaffAssistantThread`` /
+        ``StaffAssistantMessage``, so free text an employee typed to the
+        salon assistant survives «удалите мои данные» verbatim — including
+        anything personal they happened to type into it. Staff are
+        ``BotUser`` rows like anyone else, and a former employee can
+        exercise the same right (DRF-1227 revokes access, it does not
+        erase what was said).
+
+        The step-0 PR introduced these tables; closing them into the
+        cascade is a deletion-behaviour change and belongs to its own
+        ticket. Until then this test is the record that the gap is known:
+        whoever closes it must consciously come here and invert the
+        assertions, instead of the cascade quietly staying incomplete
+        behind a green suite.
+        """
+        from apps.conversations.models import StaffAssistantMessage, StaffAssistantThread
+        from apps.conversations.staff_assistant import (
+            record_staff_message,
+            resolve_active_staff_thread,
+        )
+        from apps.tenancy.context import tenant_scope
+
+        secret = "мой номер +79990001122, звоните после шести"
+        with tenant_scope(bot_user.tenant):
+            thread = resolve_active_staff_thread(bot_user, role_at_open="master")
+            assert thread is not None
+            record_staff_message(thread, role="user", content=secret)
+
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        assert result.all_ok  # the cascade reports success...
+
+        # ...while the employee's own words are untouched by it.
+        surviving = StaffAssistantThread.all_tenants.filter(bot_user=bot_user)
+        assert surviving.count() == 1
+        assert surviving.get().deleted_at is None
+        messages = StaffAssistantMessage.all_tenants.filter(thread=thread)
+        assert [m.content for m in messages] == [secret]
+
     def test_audit_has_no_values(self, bot_user, ayla_user_id) -> None:
         from apps.audit.models import AuditLog
 
@@ -1375,3 +1420,67 @@ class TestConflictingSiblingAylaIdsFailClosed:
         assert "identity_conflict" in blob
         assert str(id_a) not in blob and str(id_b) not in blob
         assert _PII["phone"] not in blob
+
+
+class TestExportMarksCurrency:
+    """DRF-1262 — the 152-ФЗ export labels every fact as current or superseded.
+
+    Two contradicting live rows for one key («веган», затем «кето») used to
+    leave the export silently mixed: the regulator, and the subject, read two
+    mutually exclusive facts with nothing to tell them apart, while Ayla acted
+    on exactly one of them.
+
+    The decision here is deliberately NOT «filter to the current view». 152-ФЗ
+    ст. 14 gives the subject the composition of the data actually PROCESSED —
+    a superseded row is still stored, still in scope for erasure, and hiding
+    it would under-report. So the export keeps every live row and adds
+    ``is_current``: complete AND unambiguous.
+    """
+
+    def _two_conflicting_facts(self, ayla_user_id) -> None:
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from apps.identity.services.memory_reader import get_or_create_personal_context
+
+        upc = get_or_create_personal_context(ayla_user_id)
+        for value in ("vegan", "keto"):
+            MemoryEntry.objects.filter(user_id=ayla_user_id).update(
+                created_at=timezone.now() - timedelta(days=1)
+            )
+            MemoryEntry.objects.create(
+                user_id=ayla_user_id,
+                personal_context=upc,
+                sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+                source=MemoryEntry.SOURCE_EXPLICIT,
+                provenance=MemoryEntry.PROVENANCE_USER_STATED,
+                kind="lifestyle",
+                content={"key": "diet", "value": value},
+            )
+
+    def test_export_keeps_both_rows(self, bot_user, ayla_user_id) -> None:
+        self._two_conflicting_facts(ayla_user_id)
+        payload = export_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        assert sorted(m["content"]["value"] for m in payload["memory"]) == ["keto", "vegan"]
+
+    def test_export_labels_which_one_is_current(self, bot_user, ayla_user_id) -> None:
+        self._two_conflicting_facts(ayla_user_id)
+        payload = export_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        by_value = {m["content"]["value"]: m for m in payload["memory"]}
+        assert by_value["keto"]["is_current"] is True
+        assert by_value["vegan"]["is_current"] is False, (
+            "The 152-ФЗ export hands the regulator two contradicting facts "
+            "with no indication of which one the system actually uses."
+        )
+
+    def test_lone_fact_is_current(self, bot_user, ayla_user_id) -> None:
+        _seed_memory(bot_user, ayla_user_id)
+        payload = export_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        assert [m["is_current"] for m in payload["memory"]] == [True]
+
+    def test_export_reports_lifecycle_status(self, bot_user, ayla_user_id) -> None:
+        """`status` travels with the row — «is this fact live» is subject data."""
+        self._two_conflicting_facts(ayla_user_id)
+        payload = export_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        assert all("status" in m for m in payload["memory"])
