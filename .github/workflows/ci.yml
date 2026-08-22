@@ -32,6 +32,11 @@ jobs:
     # step alone measured ~30 min against Postgres locally (7246 tests).
     # Flagged for tech-lead confirmation in REPORT_MECHANIZATION.md —
     # this is a real CI-feedback-latency tradeoff, not a free win.
+    #
+    # DRF-1253 left this at 45. The new "pytest tests/ (cross-cutting
+    # suite)" step costs 58s on the runner (it takes ~2.5 min locally on
+    # Windows — the runner is the faster of the two), and the whole job
+    # measured 26m05s with it in. The headroom is real; do not spend it.
     timeout-minutes: 45
 
     services:
@@ -153,6 +158,135 @@ jobs:
 
       - name: pytest tests/smoke/
         run: uv run pytest tests/smoke/ -v
+
+      # ---------------------------------------------------------------
+      # DRF-1253 — the rest of `tests/`.
+      #
+      # `pyproject.toml` declares `testpaths = ["tests", "apps"]`, but CI
+      # only ever ran `tests/smoke/` (6 files). The other 26 test files
+      # under `tests/` — 487 tests — never executed anywhere except on
+      # whoever remembered to run them locally. `mypy apps config tests`
+      # below type-checked them, which is exactly the trap: they looked
+      # covered and defended nothing.
+      #
+      # Measured against Postgres 16 (NOT SQLite — see cause (a) below
+      # for why that distinction is the whole story): 440 passed, 9
+      # skipped, 38 deselected. Four runs before merge — three locally
+      # on Windows (~2.5 min each) and one on this runner (57.77s) —
+      # all with identical counts. 21 of the 26 files are green as-is.
+      #
+      # The 9 skips are by design, not gaps:
+      #   - tests/e2e/test_ayla_integration.py (8) self-skips without
+      #     AYLA_BASE_URL + a credential; its own docstring says
+      #     "CI default = skip".
+      #   - tests/e2e/test_replay_diff_vs_mysite.py (1) skips until the
+      #     mysite ground-truth fixture is present.
+      # Both print a skip reason, so a regression into "skipped" shows
+      # in the log rather than passing as green.
+      #
+      # `--ignore=tests/smoke` leaves the fast smoke gate above as its
+      # own step instead of running those 6 files twice.
+      #
+      # No `-q` here on purpose. `addopts` in pyproject.toml is already
+      # `-q -m "not smoke"`; a second `-q` makes it `-qq`, which
+      # suppresses the final `N passed` line — a failure then reads like
+      # a success. (The `pytest apps/ -q` step below has exactly that
+      # problem today. Out of scope for this ticket, worth its own.)
+      #
+      # ─── Deselected: 38 tests, 4 root causes, none introduced here ──
+      # Every one reproduced on Postgres and filed separately. Deselects
+      # are node-ID-scoped, not file-scoped, so the 206 passing tests
+      # that live *inside* those five files still run — above all the
+      # 186 green cases of the cross-tenant leakage scanner, which
+      # guards a security invariant and is worth keeping in CI.
+      #
+      # (a) 34 x tests/integration/test_cross_tenant_leakage.py — the
+      #     generic `_create_row` factory (`_MODEL_REQUIRED_FIELDS`) is
+      #     wrong on Postgres and only on Postgres:
+      #       31 x StringDataRightTruncation — the factory appends
+      #            "-{Model}-{n}" to a base value and overflows
+      #            varchar(16) columns (TenantStaff.role receives
+      #            "admin-TenantStaff-1", 19 chars).
+      #        3 x NotNullViolation — StaffInvite.expires_at is NOT NULL
+      #            with no default and the factory never supplies it.
+      #     SQLite enforces neither, which is why this file read as
+      #     green for as long as it sat outside CI. Test-side fix.
+      # (b) 2 x tests/e2e/ (test_max_echo, test_handoff_skill) — both
+      #     assert the bot echoes the user's text back verbatim; DRF-963
+      #     replaced verbatim echo with the "Я пока не понял" fallback.
+      #     This is DRF-1217. For whoever picks that up: it is 2 tests
+      #     in 2 files, not the 4 the ticket assumes, and in
+      #     test_handoff_skill.py only the last line (197) fails — the
+      #     handoff flow it is named for passes.
+      # (c) 1 x tests/e2e/test_privacy_skill.py — asserts that a chat
+      #     "удали мои данные" hard-deletes the BotUser. DRF-956 / T-05
+      #     deliberately turned that into a redirect to the Mini App
+      #     confirmed flow ("Сейчас я ничего не удалила"), because chat
+      #     cannot express a confirmation step and Pilot was not the
+      #     place to invent one. The test asserts the behaviour that
+      #     ticket removed on purpose. Test-side fix.
+      # (d) 1 x tests/contracts/test_event_idempotency.py — its autouse
+      #     fixture sets EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN but never
+      #     EVENT_INGEST_ALLOWED_TENANTS / _ALLOWED_EVENTS, so
+      #     booking.created is denied with
+      #     `reason=relationship_unavailable` and the two reminders are
+      #     never written. Every sibling suite under apps/ that
+      #     dispatches envelopes does set the allowlist in its fixture
+      #     (apps/eventbus/tests/test_booking_consumer.py:137 and five
+      #     others). One-line fixture fix.
+      #
+      # The node IDs are single-quoted, unlike the apps/ deselects
+      # below: parametrized IDs end in `[ModelName]`, and an unquoted
+      # `[...]` is a bash glob character class. It happens to survive
+      # today only because nothing matches and nullglob/failglob are
+      # off — which is a property of the shell, not of this file.
+      #
+      # Do NOT add deselects here to silence a new failure — a new red
+      # test means something you touched broke. The list is pinned to
+      # specific node IDs, so renaming any of these tests must also
+      # touch this file.
+      # ---------------------------------------------------------------
+      - name: pytest tests/ (cross-cutting suite, minus smoke)
+        run: |
+          uv run pytest tests/ --ignore=tests/smoke \
+            --deselect 'tests/contracts/test_event_idempotency.py::TestBookingIdempotency::test_booking_created_idempotent' \
+            --deselect 'tests/e2e/test_handoff_skill.py::test_handoff_flow_creates_task_silences_followup_resumes_on_resolve' \
+            --deselect 'tests/e2e/test_max_echo.py::test_max_webhook_to_echo_happy_path' \
+            --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[TenantStaff]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[StaffInvite]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[DisclaimerLibrary]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[AIRequestMetric]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[BookingReminder]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PendingBookingAction]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[RemoteBookingProxy]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PaymentMirror]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[ScheduleException]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[LoyaltyEvent]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[TenantStaff]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[StaffInvite]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[Message]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ConsentRecord]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[DisclaimerLibrary]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[AIRequestMetric]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[BookingReminder]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PendingBookingAction]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[RemoteBookingProxy]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PaymentMirror]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ScheduleException]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[LoyaltyEvent]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[TenantStaff]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[StaffInvite]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[Message]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ConsentRecord]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[DisclaimerLibrary]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[AIRequestMetric]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[BookingReminder]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PendingBookingAction]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[RemoteBookingProxy]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PaymentMirror]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ScheduleException]' \
+            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[LoyaltyEvent]'
 
       # Static Ayla client↔route-table contract (S0-C / G-Contract). Pure,
       # network-free: exercises every bot Ayla client through its real code and
