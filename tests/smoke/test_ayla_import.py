@@ -72,8 +72,10 @@ class TestAylaAllowList:
 
     def test_ayla_marketplace_voice_importable(self) -> None:
         """#1026 — the tenant-less discovery reply consumes the frozen
-        marketplace voice (apps/orchestrator/discovery.py). Sibling of the
-        already-consumed FORMULA_TELA_VOICE (apps/promptreg/voice_examples.py).
+        marketplace voice (apps/persona/voice.py since DRF-1061; it was
+        apps/orchestrator/discovery.py when this test was written). Sibling
+        of the already-consumed FORMULA_TELA_VOICE
+        (apps/promptreg/voice_examples.py).
         """
         from ayla_ai_core import AYLA_MARKETPLACE_VOICE
 
