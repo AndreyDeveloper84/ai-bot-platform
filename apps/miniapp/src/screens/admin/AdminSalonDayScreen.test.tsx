@@ -19,14 +19,18 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     cancelSalonBooking: vi.fn(),
     getBookingVersion: vi.fn(),
     completeSalonBooking: vi.fn(),
+    getBookingSlots: vi.fn(),
+    rescheduleSalonBooking: vi.fn(),
   };
 });
 
 import {
   cancelSalonBooking,
   completeSalonBooking,
+  getBookingSlots,
   getBookingVersion,
   getSalonDay,
+  rescheduleSalonBooking,
   type SalonDayResponse,
 } from "../../lib/admin-api";
 import { AdminSalonDayScreen } from "./AdminSalonDayScreen";
@@ -35,10 +39,13 @@ const mockedDay = vi.mocked(getSalonDay);
 const mockedCancel = vi.mocked(cancelSalonBooking);
 const mockedVersion = vi.mocked(getBookingVersion);
 const mockedComplete = vi.mocked(completeSalonBooking);
+const mockedSlots = vi.mocked(getBookingSlots);
+const mockedMove = vi.mocked(rescheduleSalonBooking);
 
 function visit(over: Partial<SalonDayResponse["masters"][0]["visits"][0]> = {}) {
   return {
     id: "v-1",
+    service_id: "svc-1",
     start_at: "2026-08-20T07:00:00+00:00",
     end_at: "2026-08-20T08:00:00+00:00",
     duration_min: 60,
@@ -451,5 +458,152 @@ describe("a closed visit reads as closed, not as cancelled", () => {
     await screen.findByText("Мария И.");
     expect(screen.getByLabelText("Визит закрыт")).toBeInTheDocument();
     expect(screen.queryByLabelText("Визит идёт сейчас")).not.toBeInTheDocument();
+  });
+});
+
+describe("moving a visit", () => {
+  function dayWith(over = {}) {
+    return dayResponse({
+      summary: { total: 1, upcoming: 1, completed: 0, released: 0 },
+      masters: [
+        {
+          master_id: "m-1",
+          name: "Анна Петрова",
+          is_active: true,
+          visits: [visit(over)],
+        },
+      ],
+    });
+  }
+
+  const okVersion = {
+    id: "v-1",
+    version: 4,
+    status: "confirmed",
+    start_datetime: "2026-08-20T07:00:00+00:00",
+  };
+
+  const slotsPayload = (slots: unknown[]) => ({
+    date: "2026-08-20",
+    timezone: "Europe/Moscow",
+    master_id: "m-1",
+    service_id: "svc-1",
+    duration_min: 60,
+    slots,
+  });
+
+  it("asks the schedule for that master and service, then sends its ISO start", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWith());
+    mockedVersion.mockResolvedValue(okVersion);
+    mockedSlots.mockResolvedValue(
+      slotsPayload([
+        { time: "14:00", start_at: "2026-08-20T11:00:00+00:00", duration_min: 60 },
+      ]) as never,
+    );
+    mockedMove.mockResolvedValue({ outcome: "committed", detail: "ok" });
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+    // The date is the day the screen is SHOWING, which starts at the
+    // device's today — not the date baked into the fixture payload.
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${`${today.getMonth() + 1}`.padStart(2, "0")}-${`${today.getDate()}`.padStart(2, "0")}`;
+    await waitFor(() =>
+      expect(mockedSlots).toHaveBeenCalledWith({
+        masterId: "m-1",
+        serviceId: "svc-1",
+        date: iso,
+      }),
+    );
+
+    await user.click(await screen.findByRole("button", { name: "14:00" }));
+
+    // The schedule's own ISO instant, not one rebuilt from «14:00».
+    await waitFor(() =>
+      expect(mockedMove).toHaveBeenCalledWith("v-1", 4, "2026-08-20T11:00:00+00:00"),
+    );
+  });
+
+  it("never renders an unreachable slot list as «no free time»", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWith());
+    mockedVersion.mockResolvedValue(okVersion);
+    mockedSlots.mockRejectedValue(new Error("503"));
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+
+    expect(await screen.findByText(/Не смогли спросить расписание/)).toBeInTheDocument();
+    expect(screen.queryByText(/нет свободного времени/)).not.toBeInTheDocument();
+  });
+
+  it("says plainly when the master really has nothing free", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWith());
+    mockedVersion.mockResolvedValue(okVersion);
+    mockedSlots.mockResolvedValue(slotsPayload([]) as never);
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+
+    expect(await screen.findByText(/нет свободного времени/)).toBeInTheDocument();
+  });
+
+  it("refuses a slot the schedule could not put an instant on", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWith());
+    mockedVersion.mockResolvedValue(okVersion);
+    mockedSlots.mockResolvedValue(
+      slotsPayload([{ time: "14:00", start_at: null, duration_min: 60 }]) as never,
+    );
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+    await user.click(await screen.findByRole("button", { name: "14:00" }));
+
+    // Rebuilding the instant from «14:00» would mean picking a timezone
+    // here — the client computing an authoritative start (§17).
+    expect(mockedMove).not.toHaveBeenCalled();
+    expect(await screen.findByText(/не назвало точное время/)).toBeInTheDocument();
+  });
+
+  it("gives up rather than guessing when the version cannot be read", async () => {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWith());
+    mockedVersion.mockRejectedValue(new Error("503"));
+    renderScreen();
+
+    await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+
+    expect(await screen.findByText(/Не удалось прочитать запись/)).toBeInTheDocument();
+    expect(mockedSlots).not.toHaveBeenCalled();
+  });
+
+  it("offers no move when the booking has no local service", async () => {
+    mockedDay.mockResolvedValue(dayWith({ service_id: "" }));
+    renderScreen();
+
+    await screen.findByText("Мария И.");
+    // No service means no way to ask what is bookable, and offering
+    // arbitrary times would be inventing availability.
+    expect(
+      screen.queryByRole("button", { name: /Перенести визит: Мария/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers no move on an orphan visit — there is no master to ask", async () => {
+    mockedDay.mockResolvedValue(
+      dayResponse({
+        summary: { total: 1, upcoming: 1, completed: 0, released: 0 },
+        orphan_visits: [visit()],
+      }),
+    );
+    renderScreen();
+
+    await screen.findByText("Мария И.");
+    expect(
+      screen.queryByRole("button", { name: /Перенести визит: Мария/ }),
+    ).not.toBeInTheDocument();
   });
 });

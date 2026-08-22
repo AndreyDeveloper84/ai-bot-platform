@@ -32,6 +32,7 @@ from apps.integrations.ayla.salon_client import (
     SalonForbidden,
     SalonNotAllowed,
     SalonNotFound,
+    SalonSlotTaken,
     SalonStaleVersion,
     SalonUnauthorized,
     SalonUnavailable,
@@ -364,3 +365,145 @@ class TestScope:
         )
 
         assert salon.calls[0]["actor_external_id"] == (f"bot:max:{admin_bot_user.channel_user_id}")
+
+
+class _StubReschedule(_StubSalon):
+    def reschedule_appointment(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.exc:
+            raise self.exc
+        return {"id": kwargs["appointment_id"]}
+
+
+def _move(client: Client, proxy, *, uid="5001", **body):
+    return client.post(
+        reverse("admin_api:reschedule_booking", args=[str(proxy.appointment_id)]),
+        data=json.dumps(body),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=init_data_header(uid),
+    )
+
+
+class TestReschedule:
+    def test_sends_the_new_start_and_the_operators_version(
+        self, client: Client, tenant: Tenant, owner_bot_user, stubs
+    ) -> None:
+        proxy = _proxy(tenant)
+        booking, salon = stubs(salon=_StubReschedule())
+
+        resp = _move(
+            client,
+            proxy,
+            expected_version=5,
+            new_start_at="2026-08-23T15:00:00+03:00",
+        )
+
+        assert resp.status_code == 200
+        call = salon.calls[0]
+        assert call["expected_version"] == 5
+        assert call["new_start_datetime"] == "2026-08-23T15:00:00+03:00"
+        # Same rule as closure: the write never fetches its own version.
+        assert booking.calls == []
+
+    def test_two_kinds_of_409_are_two_different_instructions(
+        self, client: Client, tenant: Tenant, owner_bot_user, stubs
+    ) -> None:
+        """«The booking moved» and «the time went» are opposite advice.
+
+        One says look again at the booking; the other says the booking is
+        as you left it, pick another slot. One message for both would send
+        half the operators to the wrong place.
+        """
+        proxy = _proxy(tenant)
+
+        stubs(salon=_StubReschedule(exc=SalonStaleVersion("moved")))
+        stale = _move(
+            client,
+            proxy,
+            expected_version=5,
+            new_start_at="2026-08-23T15:00:00+03:00",
+        ).json()
+
+        stubs(salon=_StubReschedule(exc=SalonSlotTaken("taken")))
+        taken = _move(
+            client,
+            proxy,
+            expected_version=5,
+            new_start_at="2026-08-23T15:00:00+03:00",
+        ).json()
+
+        assert stale["outcome"] == taken["outcome"] == "conflict"
+        assert stale["detail"] != taken["detail"]
+        assert "перенесли" in stale["detail"]
+        assert "время" in taken["detail"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"new_start_at": "2026-08-23T15:00:00+03:00"},
+            {"expected_version": 5},
+            {"expected_version": 5, "new_start_at": "   "},
+            {"expected_version": True, "new_start_at": "2026-08-23T15:00:00+03:00"},
+            {"expected_version": 0, "new_start_at": "2026-08-23T15:00:00+03:00"},
+        ],
+    )
+    def test_an_incomplete_request_never_reaches_ayla(
+        self, client: Client, tenant: Tenant, owner_bot_user, stubs, body
+    ) -> None:
+        proxy = _proxy(tenant)
+        _, salon = stubs(salon=_StubReschedule())
+
+        resp = _move(client, proxy, **body)
+
+        assert resp.status_code == 400
+        assert salon.calls == []
+
+    def test_timeout_is_pending_and_never_failed(
+        self, client: Client, tenant: Tenant, owner_bot_user, stubs
+    ) -> None:
+        """A blind retry could move the booking twice."""
+        proxy = _proxy(tenant)
+        stubs(salon=_StubReschedule(exc=SalonUnavailable("network: ReadTimeout")))
+
+        data = _move(
+            client,
+            proxy,
+            expected_version=5,
+            new_start_at="2026-08-23T15:00:00+03:00",
+        ).json()
+
+        assert data["outcome"] == "pending"
+        assert data["outcome"] != "failed"
+
+    def test_a_booking_of_another_salon_is_not_moved(
+        self, client: Client, tenant: Tenant, other_tenant: Tenant, owner_bot_user, stubs
+    ) -> None:
+        stranger = _proxy(other_tenant)
+        _, salon = stubs(salon=_StubReschedule())
+
+        resp = _move(
+            client,
+            stranger,
+            expected_version=5,
+            new_start_at="2026-08-23T15:00:00+03:00",
+        )
+
+        assert resp.status_code == 404
+        assert salon.calls == []
+
+    def test_a_master_only_caller_is_forbidden(
+        self, client: Client, tenant: Tenant, master_only_bot_user, stubs
+    ) -> None:
+        proxy = _proxy(tenant)
+        _, salon = stubs(salon=_StubReschedule())
+
+        resp = _move(
+            client,
+            proxy,
+            uid="5004",
+            expected_version=5,
+            new_start_at="2026-08-23T15:00:00+03:00",
+        )
+
+        assert resp.status_code == 403
+        assert salon.calls == []

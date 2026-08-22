@@ -60,6 +60,11 @@ urlpatterns = [
         views_booking_complete.complete_booking,
         name="complete_booking",
     ),
+    path(
+        "bookings/<uuid:appointment_id>/reschedule/",
+        views_booking_complete.reschedule_booking,
+        name="reschedule_booking",
+    ),
     # Phase 2 — customer search, the first step of the booking flow (§13).
     # Refuses rather than returning an empty list when it cannot ask, for
     # the same reason as booking-slots: «nothing found» and «could not

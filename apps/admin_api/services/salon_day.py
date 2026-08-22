@@ -109,8 +109,15 @@ def _last_initial(full_name: str) -> str:
     return f"{parts[1][:1]}."
 
 
-def _resolve_service_names(service_ids: Iterable[UUID | None], tenant_id) -> dict[UUID, str]:
-    """Batch ``ayla_service_id`` → catalog name. Missing → empty string.
+def _resolve_service_names(
+    service_ids: Iterable[UUID | None], tenant_id
+) -> dict[UUID, tuple[str, str]]:
+    """Batch ``ayla_service_id`` → ``(catalog id, name)``. Missing → absent.
+
+    The id rides along because a reschedule cannot ask for bookable
+    starts without it: the slots endpoint takes the CATALOG service id,
+    while the mirror stores Ayla's. Resolving both in the one query that
+    was already running keeps the day journal's flat query budget.
 
     Uses the tenant-scoped default manager, not ``all_tenants``: cross-
     tenant catalog reads belong to marketplace discovery alone (MKT1 /
@@ -122,9 +129,9 @@ def _resolve_service_names(service_ids: Iterable[UUID | None], tenant_id) -> dic
     if not ids:
         return {}
     rows = CatalogService.objects.filter(tenant_id=tenant_id, ayla_service_id__in=ids).values_list(
-        "ayla_service_id", "name"
+        "ayla_service_id", "id", "name"
     )
-    return {sid: name for sid, name in rows if sid is not None}
+    return {sid: (str(cid), name) for sid, cid, name in rows if sid is not None}
 
 
 def _resolve_client_names(bot_user_ids: Iterable[UUID | None], tenant_id) -> dict[UUID, str]:
@@ -150,6 +157,10 @@ class DayVisit:
     end_at: datetime | None
     duration_min: int
     status: str
+    #: Catalog service id — what the slots endpoint takes. Empty when the
+    #: mirror's Ayla service id maps to nothing local, in which case the
+    #: screen must not offer a reschedule it cannot price a slot for.
+    service_id: str
     service_name: str
     client_first_name: str
     client_last_initial: str
@@ -191,6 +202,16 @@ class SalonDay:
     orphan_visits: list[DayVisit] = field(default_factory=list)
 
 
+def _service_ref(
+    service_names: dict[UUID, tuple[str, str]], ayla_service_id: UUID | None
+) -> tuple[str, str]:
+    """``(catalog id, name)`` for a mirrored booking, or two empty strings."""
+
+    if not ayla_service_id:
+        return "", ""
+    return service_names.get(ayla_service_id, ("", ""))
+
+
 def _build_visit(proxy: RemoteBookingProxy, *, service_names, client_names, now) -> DayVisit:
     duration = 0
     if proxy.start_at and proxy.end_at:
@@ -205,13 +226,15 @@ def _build_visit(proxy: RemoteBookingProxy, *, service_names, client_names, now)
         and proxy.end_at is not None
         and proxy.start_at <= now < proxy.end_at
     )
+    service_id, service_name = _service_ref(service_names, proxy.service_id)
     return DayVisit(
         id=str(proxy.appointment_id),
         start_at=proxy.start_at,
         end_at=proxy.end_at,
         duration_min=duration,
         status=proxy.status,
-        service_name=service_names.get(proxy.service_id, "") if proxy.service_id else "",
+        service_id=service_id,
+        service_name=service_name,
         client_first_name=_first_name(client_name),
         client_last_initial=_last_initial(client_name),
         is_in_progress=in_progress,

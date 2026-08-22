@@ -27,9 +27,12 @@ import {
   CANCEL_REASONS,
   cancelSalonBooking,
   completeSalonBooking,
+  getBookingSlots,
   getBookingVersion,
   getSalonDay,
+  rescheduleSalonBooking,
   RELEASED_VISIT_STATUSES,
+  type BookingSlot,
   type CancelReasonCode,
   type SalonDayResponse,
   type SalonDayVisit,
@@ -87,11 +90,16 @@ function VisitRow({
   timeZone,
   onCancel,
   onComplete,
+  onMove,
+  masterId,
 }: {
   visit: SalonDayVisit;
   timeZone: string;
   onCancel: (visit: SalonDayVisit) => void;
   onComplete: (visit: SalonDayVisit) => void;
+  onMove: (visit: SalonDayVisit, masterId: string) => void;
+  /** Absent for orphan visits — see `movable`. */
+  masterId?: string;
 }) {
   const released = RELEASED_VISIT_STATUSES.has(visit.status);
   // Offered only where it can succeed. A cancelled or finished visit is
@@ -108,6 +116,12 @@ function VisitRow({
   // «отменён» is precisely the confusion the screen exists to prevent, and
   // it only became visible once there was a button to close one.
   const closed = visit.status === "completed";
+  // Moving needs a service to ask the schedule about. Without it there is
+  // no way to know which starts are bookable, and offering arbitrary
+  // times would be the client inventing availability (§17).
+  // Also needs a master: an orphan visit is one whose specialist matches
+  // no master here, and there is nobody to ask for free time.
+  const movable = cancellable && Boolean(visit.service_id) && Boolean(masterId);
   return (
     <li
       className="salon-day__visit"
@@ -159,6 +173,20 @@ function VisitRow({
           )}`}
         >
           Состоялся
+        </button>
+      )}
+      {movable && (
+        <button
+          type="button"
+          className="btn btn--ghost"
+          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          onClick={() => onMove(visit, masterId as string)}
+          aria-label={`Перенести визит: ${clientLabel(visit)}, ${formatTime(
+            visit.start_at,
+            timeZone,
+          )}`}
+        >
+          Перенести
         </button>
       )}
       {cancellable && (
@@ -304,6 +332,83 @@ function CompleteDialog({
   );
 }
 
+/**
+ * Choosing a new time for an existing booking.
+ *
+ * The times come from the schedule, never from the client: §17 forbids
+ * offering a start nobody said was bookable, and Ayla re-checks at commit
+ * regardless. An unreachable slot list is shown as «не смогли спросить» —
+ * an empty list would read as «мастер занят весь день», which is the
+ * opposite claim.
+ */
+function MoveDialog({
+  visit,
+  timeZone,
+  date,
+  version,
+  slots,
+  slotsState,
+  busy,
+  onPick,
+  onDismiss,
+}: {
+  visit: SalonDayVisit;
+  timeZone: string;
+  date: string;
+  version: { version: number; status: string } | null;
+  slots: BookingSlot[];
+  slotsState: "loading" | "ready" | "unavailable";
+  busy: boolean;
+  onPick: (slot: BookingSlot) => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="sheet" role="dialog" aria-modal="true" aria-label="Перенос визита">
+      <h3 className="section__title">Перенести визит</h3>
+      <p>
+        {clientLabel(visit)} · сейчас {formatTime(visit.start_at, timeZone)}
+        {visit.service_name ? ` · ${visit.service_name}` : ""}
+      </p>
+      <p className="muted">{formatDayTitle(date)} — свободное время того же мастера</p>
+
+      {slotsState === "loading" && <p className="muted">Спрашиваем расписание…</p>}
+
+      {slotsState === "unavailable" && (
+        <p className="muted">
+          Не смогли спросить расписание. Это не значит, что времени нет —
+          попробуйте ещё раз.
+        </p>
+      )}
+
+      {slotsState === "ready" && slots.length === 0 && (
+        <p className="muted">В этот день у мастера нет свободного времени.</p>
+      )}
+
+      {slotsState === "ready" && slots.length > 0 && (
+        <ul style={{ listStyle: "none", padding: 0, margin: "var(--s-2) 0" }}>
+          {slots.map((slot) => (
+            <li key={slot.time}>
+              <button
+                type="button"
+                className="sheet__item"
+                // Nothing to send until the canonical version arrives.
+                disabled={busy || version === null}
+                onClick={() => onPick(slot)}
+              >
+                {slot.time}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
+        Не переносить
+      </button>
+    </div>
+  );
+}
+
 export function AdminSalonDayScreen() {
   const navigate = useNavigate();
   const today = useMemo(() => toIsoDate(new Date()), []);
@@ -318,6 +423,15 @@ export function AdminSalonDayScreen() {
     { version: number; status: string } | null
   >(null);
   const [closeBusy, setCloseBusy] = useState(false);
+  const [moving, setMoving] = useState<SalonDayVisit | null>(null);
+  const [moveVersion, setMoveVersion] = useState<
+    { version: number; status: string } | null
+  >(null);
+  const [moveSlots, setMoveSlots] = useState<BookingSlot[]>([]);
+  const [moveSlotsState, setMoveSlotsState] = useState<
+    "loading" | "ready" | "unavailable"
+  >("loading");
+  const [moveBusy, setMoveBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -398,6 +512,88 @@ export function AdminSalonDayScreen() {
       setCloseBusy(false);
     }
   }, [closing, closingVersion, closeBusy, date, load]);
+
+  const beginMove = useCallback(
+    (visit: SalonDayVisit, masterId: string) => {
+      setMoving(visit);
+      setMoveVersion(null);
+      setMoveSlots([]);
+      setMoveSlotsState("loading");
+      setNotice(null);
+      // Two independent asks: the canonical version (what we will send
+      // back) and the bookable starts (what we may offer). Neither is
+      // guessed if the other fails.
+      void (async () => {
+        try {
+          const v = await getBookingVersion(visit.id);
+          setMoveVersion({ version: v.version, status: v.status });
+        } catch {
+          setMoving(null);
+          setNotice("Не удалось прочитать запись в расписании. Попробуйте ещё раз.");
+          return;
+        }
+        try {
+          const res = await getBookingSlots({
+            masterId,
+            serviceId: visit.service_id,
+            date,
+          });
+          setMoveSlots(res.slots);
+          setMoveSlotsState("ready");
+        } catch {
+          // «Could not ask» — never rendered as «no free time» (§16).
+          setMoveSlotsState("unavailable");
+        }
+      })();
+    },
+    [date],
+  );
+
+  const pickNewSlot = useCallback(
+    async (slot: BookingSlot) => {
+      const visit = moving;
+      const version = moveVersion;
+      if (!visit || version === null || moveBusy) return;
+      // The schedule's own ISO start, never one rebuilt from «HH:MM»:
+      // choosing a timezone here would be the client computing an
+      // authoritative moment (§17).
+      if (!slot.start_at) {
+        setNotice("Расписание не назвало точное время этого слота — обновите день.");
+        return;
+      }
+      setMoveBusy(true);
+      try {
+        const res = await rescheduleSalonBooking(
+          visit.id,
+          version.version,
+          slot.start_at,
+        );
+        setMoving(null);
+        switch (res.outcome) {
+          case "committed":
+            setNotice(`Визит перенесён на ${slot.time}.`);
+            break;
+          case "conflict":
+            setNotice(res.detail);
+            break;
+          case "pending":
+            setNotice(
+              "Расписание не ответило. Возможно, перенос прошёл — проверьте день, прежде чем повторять.",
+            );
+            break;
+          case "blocked":
+            setNotice(res.detail || "Этот визит нельзя перенести.");
+            break;
+          default:
+            setNotice(res.detail || "Не удалось перенести визит.");
+        }
+        if (res.outcome !== "blocked") await load(date);
+      } finally {
+        setMoveBusy(false);
+      }
+    },
+    [moving, moveVersion, moveBusy, date, load],
+  );
 
   const confirmCancel = useCallback(
     async (code: CancelReasonCode) => {
@@ -546,6 +742,7 @@ export function AdminSalonDayScreen() {
                     timeZone={tz}
                     onCancel={setCancelling}
                     onComplete={beginComplete}
+                    onMove={beginMove}
                   />
                 ))}
               </ul>
@@ -563,8 +760,10 @@ export function AdminSalonDayScreen() {
                     key={v.id}
                     visit={v}
                     timeZone={tz}
+                    masterId={m.master_id}
                     onCancel={setCancelling}
                     onComplete={beginComplete}
+                    onMove={beginMove}
                   />
                 ))}
               </ul>
@@ -591,6 +790,20 @@ export function AdminSalonDayScreen() {
         >
           {notice}
         </p>
+      )}
+
+      {moving && (
+        <MoveDialog
+          visit={moving}
+          timeZone={tz}
+          date={date}
+          version={moveVersion}
+          slots={moveSlots}
+          slotsState={moveSlotsState}
+          busy={moveBusy}
+          onPick={(slot) => void pickNewSlot(slot)}
+          onDismiss={() => setMoving(null)}
+        />
       )}
 
       {closing && (

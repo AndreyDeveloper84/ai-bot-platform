@@ -2,6 +2,7 @@
 
 ``GET  /api/v1/admin/bookings/<appointment_id>/``
 ``POST /api/v1/admin/bookings/<appointment_id>/complete/``
+``POST /api/v1/admin/bookings/<appointment_id>/reschedule/``
 
 ### Why these are two endpoints and not one
 
@@ -231,4 +232,131 @@ def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     return _outcome("committed", "visit closed", 200, appointment_id=str(appointment_id))
 
 
-__all__ = ["booking_version", "complete_booking"]
+__all__ = ["booking_version", "complete_booking", "reschedule_booking"]
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_admin_role
+def reschedule_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
+    """Move a booking to a new start, on behalf of the acting administrator.
+
+    Shares the version rule with closure above, and needs it more: two
+    people moving the same booking is the concrete accident
+    ``expected_version`` was added for. The new start must be one the
+    schedule offered — the screen picks it from the slots endpoint, and
+    Ayla re-checks availability at commit regardless (UX contract §17:
+    never silently shift a start).
+    """
+
+    tenant = request.tenant  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("bad_request", "invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("bad_request", "body must be a JSON object", 400)
+
+    raw_version = body.get("expected_version")
+    if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+        return _error("bad_request", "expected_version is required", 400)
+    if raw_version < 1:
+        return _error("bad_request", "expected_version must be positive", 400)
+
+    new_start = str(body.get("new_start_at") or "").strip()
+    if not new_start:
+        return _error("bad_request", "new_start_at is required", 400)
+
+    if _own_booking(tenant.id, appointment_id) is None:
+        return _error("not_found", "booking not found", 404)
+
+    from apps.integrations.ayla.salon_client import (
+        SalonAPIError,
+        SalonForbidden,
+        SalonNotAllowed,
+        SalonNotConfigured,
+        SalonNotFound,
+        SalonSlotTaken,
+        SalonStaleVersion,
+        SalonUnauthorized,
+        SalonUnavailable,
+        SalonValidationError,
+        get_salon_client,
+    )
+
+    actor = external_user_id_for(bot_user)
+
+    try:
+        get_salon_client().reschedule_appointment(
+            actor_external_id=actor,
+            tenant_slug=tenant.slug,
+            appointment_id=str(appointment_id),
+            new_start_datetime=new_start,
+            expected_version=raw_version,
+        )
+    except SalonValidationError as exc:
+        return _outcome("blocked", str(exc), 400)
+    except SalonNotConfigured as exc:
+        logger.error("admin_api.reschedule_booking.not_configured err=%s", exc)
+        return _outcome("blocked", "перенос не настроен", 503)
+    except SalonUnauthorized as exc:
+        logger.error(
+            "admin_api.reschedule_booking.upstream_unauthorized tenant=%s err=%s",
+            tenant.id,
+            exc,
+        )
+        return _outcome("blocked", "перенос сейчас недоступен — обратитесь к поддержке", 503)
+    except SalonForbidden as exc:
+        logger.warning(
+            "admin_api.reschedule_booking.forbidden actor=%s tenant=%s err=%s",
+            actor,
+            tenant.id,
+            exc,
+        )
+        return _outcome("blocked", str(exc), 403)
+    except SalonStaleVersion:
+        # Somebody moved it first. The operator is looking at a booking
+        # that no longer exists in that shape — send them back to read.
+        return _outcome(
+            "conflict",
+            "запись уже перенесли — обновите день и посмотрите заново",
+            409,
+        )
+    except SalonSlotTaken:
+        # Different fact, different instruction: the booking is as they
+        # left it, the TIME went.
+        return _outcome(
+            "conflict",
+            "это время успели занять — выберите другое",
+            409,
+        )
+    except SalonNotAllowed as exc:
+        return _outcome("blocked", str(exc), 409)
+    except SalonNotFound as exc:
+        logger.warning(
+            "admin_api.reschedule_booking.mirror_divergence appointment=%s err=%s",
+            appointment_id,
+            exc,
+        )
+        return _outcome("conflict", "запись не найдена в расписании — обновите день", 409)
+    except SalonUnavailable as exc:
+        # May have been applied. A blind retry could move it twice.
+        logger.warning("admin_api.reschedule_booking.unknown actor=%s err=%s", actor, exc)
+        return _outcome(
+            "pending",
+            "расписание не ответило — обновите день, прежде чем повторять",
+            504,
+        )
+    except SalonAPIError as exc:
+        logger.warning("admin_api.reschedule_booking.error actor=%s err=%s", actor, exc)
+        return _outcome("failed", str(exc), 502)
+
+    logger.info(
+        "admin_api.reschedule_booking.committed appointment=%s actor=%s tenant=%s",
+        appointment_id,
+        actor,
+        tenant.id,
+    )
+    return _outcome("committed", "booking moved", 200, appointment_id=str(appointment_id))

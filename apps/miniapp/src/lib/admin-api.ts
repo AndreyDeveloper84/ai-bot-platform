@@ -132,6 +132,15 @@ export const getMe = (): Promise<MeResponse> =>
  */
 export interface SalonDayVisit {
   id: string;
+  /**
+   * Catalog service id — what the slots endpoint takes.
+   *
+   * Empty when the mirrored booking's Ayla service maps to nothing local.
+   * A reschedule cannot be offered then: there is no way to ask which
+   * starts are bookable, and offering arbitrary times would be the
+   * client inventing availability (§17).
+   */
+  service_id: string;
   start_at: string | null;
   end_at: string | null;
   duration_min: number;
@@ -383,6 +392,49 @@ export const completeSalonBooking = async (
         method: "POST",
         headers,
         body: JSON.stringify({ expected_version: expectedVersion }),
+      },
+    );
+  } catch {
+    return { outcome: "pending", detail: "нет ответа от сети" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CompleteBookingResult>;
+    if (data.outcome) return data as CompleteBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    return { outcome: "pending", detail: "ответ не прочитан" };
+  }
+};
+
+/**
+ * POST /api/v1/admin/bookings/<id>/reschedule/ — move it.
+ *
+ * `expectedVersion` is the value the operator was shown, exactly as for
+ * closure. `newStartAt` must be a start the schedule offered — the screen
+ * picks it from the slots endpoint, and Ayla re-checks at commit anyway.
+ */
+export const rescheduleSalonBooking = async (
+  appointmentId: string,
+  expectedVersion: number,
+  newStartAt: string,
+): Promise<CompleteBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/reschedule/`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expected_version: expectedVersion,
+          new_start_at: newStartAt,
+        }),
       },
     );
   } catch {
