@@ -45,6 +45,7 @@ from typing import Any
 
 from ayla_ai_core import ActionType, AIConcierge, ToolResult
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.utils import timezone
 
 from apps.conversations.services import (
@@ -440,6 +441,63 @@ def build_concierge_system_prompt(
     return "\n\n".join(parts)
 
 
+def _max_llm_passes() -> int:
+    """Pass cap for the multi-pass concierge (DRF-1266).
+
+    ``settings.CONCIERGE_MAX_LLM_PASSES``, default 2 (primary call + one
+    tool-data pass), clamped to >= 1 so a misconfigured env can never mean
+    «call the model zero times» or loop unbounded on live traffic.
+    """
+    try:
+        return max(1, int(getattr(settings, "CONCIERGE_MAX_LLM_PASSES", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _build_tool_result_message(user_text: str, cards: list[Any], args: dict[str, Any]) -> str:
+    """Second-pass input: the executed ``show_masters`` result as plain text.
+
+    Deliberately a plain user-role message, NOT the OpenAI/Anthropic
+    tool-result protocol: the Anthropic adapter in ayla-ai-core
+    (``providers/anthropic.py``) does not assemble ``role="tool"`` blocks,
+    so a classic tool loop would work on OpenAI only and silently break
+    when an operator flips ``SKILL_LLM_PROVIDER`` — a decision of the
+    operator, not the developer. A plain message rides the same path on
+    every provider.
+
+    The original user question is embedded because the ai-core store
+    excludes the handler-persisted user turn from LLM history on every
+    pass (it expects the turn's text to arrive as ``message_text``).
+    """
+    lines = [
+        f"Клиент спросил: «{user_text}».",
+        f"Инструмент show_masters (город: {args.get('city') or '—'}, "
+        f"услуга: {args.get('specialization') or '—'}) вернул мастеров: {len(cards)}.",
+    ]
+    for card in cards[:_MAX_MASTER_CARDS]:
+        parts = [str(card.name)]
+        if getattr(card, "specialization", ""):
+            parts.append(str(card.specialization))
+        if getattr(card, "service_name", ""):
+            parts.append(str(card.service_name))
+        rating = getattr(card, "rating", None)
+        if rating is not None and rating >= 1:
+            parts.append(f"★ {rating}")
+        if getattr(card, "city", ""):
+            parts.append(str(card.city))
+        lines.append("- " + ", ".join(parts))
+    if not cards:
+        lines.append("(по этому запросу никого не нашлось)")
+    lines.append(
+        "Ответь клиенту словами, опираясь ТОЛЬКО на эти данные: коротко "
+        "перечисли подходящих мастеров и предложи записаться. Если список "
+        "пуст — честно скажи, что никого не нашлось, и предложи уточнить "
+        "город или услугу. Ничего не выдумывай. Инструмент show_masters "
+        "повторно не вызывай — данных достаточно."
+    )
+    return "\n".join(lines)
+
+
 def generate_concierge_reply(
     message_text: str,
     *,
@@ -451,6 +509,13 @@ def generate_concierge_reply(
     trace_id: str | None = None,
 ) -> DiscoveryReply:
     """One concierge turn through ayla-ai-core AIConcierge (W5 / DRF-241).
+
+    Multi-pass (DRF-1266): when the model calls ``show_masters`` and the
+    pass budget allows, the executed tool's result is fed back as a plain
+    user message (see :func:`_build_tool_result_message` for why not the
+    tool protocol) and the model gets one more pass to phrase the answer
+    in words. Budget exhausted with the model still calling the tool →
+    the deterministic card render, i.e. exactly the pre-DRF-1266 reply.
 
     Persists the assistant turn via the store (``persisted=True`` on the
     returned reply so the handler does NOT double-record). On any LLM
@@ -477,41 +542,68 @@ def generate_concierge_reply(
             extra_system=extra_system,
         )
 
-    started = time.monotonic()
-    try:
-        dto = asyncio.run(
-            concierge.send_message(
-                user_key=bot_user,
-                message_text=message_text,
-                prompt_renderer=_renderer,
+    max_passes = _max_llm_passes()
+    pass_index = 0
+    current_text = message_text
+    # Cards of the most recent show_masters execution — kept so a failing or
+    # budget-exhausted follow-up pass can still render real data instead of
+    # the generic fallback line.
+    pending_cards: list[Any] | None = None
+    dto: Any = None
+    while pass_index < max_passes:
+        pass_index += 1
+        started = time.monotonic()
+        try:
+            dto = asyncio.run(
+                concierge.send_message(
+                    user_key=bot_user,
+                    message_text=current_text,
+                    prompt_renderer=_renderer,
+                )
             )
-        )
-    except Exception as exc:  # noqa: BLE001 — degrade to safe fallback
-        logger.warning("orchestrator.concierge.llm_error trace=%s err=%s", trace_id, exc)
+        except Exception as exc:  # noqa: BLE001 — degrade to safe fallback
+            logger.warning(
+                "orchestrator.concierge.llm_error trace=%s pass=%d err=%s",
+                trace_id,
+                pass_index,
+                exc,
+            )
+            _record_concierge_metric(
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                message_text=message_text,
+                pass_index=pass_index,
+                outcome=AIRequestMetric.OUTCOME_ERROR,
+                latency_total_ms=int((time.monotonic() - started) * 1000),
+                llm_client=llm_client,
+            )
+            if pending_cards is not None:
+                # A follow-up pass failed AFTER the tool already returned
+                # data — render the cards deterministically rather than the
+                # generic fallback: the user asked for masters, we have them.
+                rendered = _render_master_cards(pending_cards[:_MAX_MASTER_CARDS])
+                return DiscoveryReply(
+                    text=rendered.text,
+                    action_data=rendered.action_data,
+                    persisted=True,
+                )
+            return DiscoveryReply(text=get_fallback("ru"))
         _record_concierge_metric(
             bot_user=bot_user,
             conversation=conversation,
             trace_id=trace_id,
             message_text=message_text,
-            pass_index=1,
-            outcome=AIRequestMetric.OUTCOME_ERROR,
+            pass_index=pass_index,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
             latency_total_ms=int((time.monotonic() - started) * 1000),
+            dto=dto,
             llm_client=llm_client,
         )
-        return DiscoveryReply(text=get_fallback("ru"))
-    _record_concierge_metric(
-        bot_user=bot_user,
-        conversation=conversation,
-        trace_id=trace_id,
-        message_text=message_text,
-        pass_index=1,
-        outcome=AIRequestMetric.OUTCOME_SUCCESS,
-        latency_total_ms=int((time.monotonic() - started) * 1000),
-        dto=dto,
-        llm_client=llm_client,
-    )
 
-    if dto.action_type == ActionType.SHOW_MASTERS:
+        if dto.action_type != ActionType.SHOW_MASTERS:
+            break
+
         args = (dto.action_data or {}).get("arguments", {})
         limit = args.get("limit")
         city = args.get("city") or None
@@ -533,16 +625,29 @@ def generate_concierge_reply(
             resolve_service=True,
         )
         logger.info(
-            "orchestrator.concierge.show_masters count=%d trace=%s",
+            "orchestrator.concierge.show_masters count=%d trace=%s pass=%d",
             len(cards),
             trace_id,
+            pass_index,
         )
-        rendered = _render_master_cards(cards[:_MAX_MASTER_CARDS])
-        return DiscoveryReply(
-            text=rendered.text,
-            action_data=rendered.action_data,
-            persisted=True,
-        )
+        if pass_index >= max_passes:
+            # Pass budget exhausted with the model still asking for the tool:
+            # the deterministic card render — byte-identical to the
+            # pre-DRF-1266 reply. The user sees real data, never silence
+            # or a raw tool dump.
+            logger.info(
+                "orchestrator.concierge.multipass_budget_exhausted trace=%s passes=%d",
+                trace_id,
+                pass_index,
+            )
+            rendered = _render_master_cards(cards[:_MAX_MASTER_CARDS])
+            return DiscoveryReply(
+                text=rendered.text,
+                action_data=rendered.action_data,
+                persisted=True,
+            )
+        pending_cards = cards
+        current_text = _build_tool_result_message(message_text, cards, args)
 
     if dto.action_type == ActionType.ASK_CLARIFICATION:
         data = dto.action_data or {}
