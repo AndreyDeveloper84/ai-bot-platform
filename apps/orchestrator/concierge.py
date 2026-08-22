@@ -296,7 +296,9 @@ def _record_concierge_metric(
         if dto is not None:
             tokens_in = dto.tokens_in or None
             tokens_out = dto.tokens_out or None
-            latency_llm_ms = dto.latency_ms or None
+            # Explicit None check — a sub-millisecond call legitimately
+            # measures 0, and 0 must not become NULL («no LLM call»).
+            latency_llm_ms = dto.latency_ms if dto.latency_ms is not None else None
         if llm_client is not None:
             llm_provider = llm_client.last_provider
             llm_model = llm_client.last_model
