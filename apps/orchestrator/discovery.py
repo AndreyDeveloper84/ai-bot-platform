@@ -145,35 +145,19 @@ class DiscoveryReply:
     persisted: bool = False
 
 
-# Local mirror of ayla-ai-core's AYLA_MARKETPLACE_VOICE (v0.8.1) for envs where
-# the ``[ai-core]`` extra isn't installed (CI installs it → the real frozen
-# voice is consumed there). Field values copied verbatim from the frozen
-# constant; guarded import below prefers the real thing.
-_FALLBACK_VOICE_FIELDS: dict[str, str] = {
-    "assistant_name": "Ayla",
-    "business_name": "Ayla — AI Self-Care",
-    "domain": "beauty-услуги",
-    "off_topic_redirect": "Я помогаю с записями к beauty-мастерам, чем помочь?",
-}
-
-
 def _discovery_voice_fields() -> dict[str, str]:
-    """Read the marketplace voice from frozen ayla-ai-core, or fall back.
+    """The marketplace voice, from the one place that owns it.
 
-    Consumes (never modifies) the frozen ``AYLA_MARKETPLACE_VOICE`` constant.
-    Guarded like the other ayla-ai-core imports in this app — the library is an
-    optional extra in some environments.
+    The fallback mirror that used to live here has moved to
+    :mod:`apps.persona.voice` alongside the other two surfaces. It was a
+    hand-copied duplicate of the frozen constant with nothing comparing the
+    two — a divergence would have surfaced as «CI says one thing, prod says
+    another». A test there now pins them equal.
     """
-    try:
-        from ayla_ai_core import AYLA_MARKETPLACE_VOICE as voice
-    except Exception:  # pragma: no cover - lib not installed in this env
-        return dict(_FALLBACK_VOICE_FIELDS)
-    return {
-        "assistant_name": voice.assistant_name,
-        "business_name": voice.business_name,
-        "domain": voice.domain,
-        "off_topic_redirect": voice.off_topic_redirect,
-    }
+
+    from apps.persona.voice import frozen_voice_fields
+
+    return frozen_voice_fields()
 
 
 def build_discovery_prompt(

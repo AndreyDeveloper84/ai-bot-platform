@@ -357,15 +357,25 @@ def _build_prompt_messages(
       * the recent history mapped role-for-role (USER → ``user``,
         ASSISTANT → ``assistant``, TOOL → ``tool``)
 
-    Brand-voice / tenant tone is a Phase 1+ enhancement once the
-    BrandVoiceConfig contract lands; for now the system prompt is
-    fixed Russian-language matching §M6's «Помощник» voice.
+    The assistant's NAME now comes from :mod:`apps.persona.voice`
+    (``SURFACE_SALON``) rather than a literal in this function. Same word
+    as before — the point is that the concierge and this path can no
+    longer drift apart silently, which they had. Per-tenant tone remains a
+    later enhancement.
     """
+
+    from apps.persona.voice import SURFACE_SALON, assistant_identity
 
     specialization = (master.specialization or "").strip()
     role_hint = f" Мастер специализируется на: {specialization}." if specialization else ""
+    # The name comes from apps.persona.voice, not a literal here. It used to
+    # be hardcoded, and the customer concierge hardcoded a different one —
+    # a person who got a reply from a draft met a different assistant than
+    # the one they had been talking to. Same name as before on this surface;
+    # what changed is that it is now one decision in one file.
+    identity = assistant_identity(SURFACE_SALON)
     system_prompt = (
-        "Ты — «Помощник», единый голос ассистента салона. "
+        f"Ты — «{identity.name}», единый голос ассистента салона. "
         "Отвечай клиенту коротко (1-3 предложения), вежливо и по делу. "
         "Никогда не подписывайся именем мастера или администратора. "
         "Если не уверен в ответе — мягко предложи уточнить у мастера." + role_hint
