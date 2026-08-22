@@ -285,6 +285,29 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "topic": "general",
         "sla_due_at": lambda tenant, suffix: _future_datetime(),
     },
+    # DRF-1061 step 0: the employee's own assistant thread. `bot_user` is
+    # the only NOT-NULL no-default column. It must be a FRESH BotUser per
+    # row — `staff_assistant_thread_one_active` is a partial unique on
+    # (tenant, bot_user) WHERE is_active AND deleted_at IS NULL, and the
+    # scanner writes several rows per tenant.
+    "StaffAssistantThread": {
+        "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(
+            tenant, f"sat-{suffix or 'x'}"
+        ),
+    },
+    # DRF-1061 step 0: one turn inside that thread. `seq` has no default —
+    # the service assigns it under a row lock, which the scanner does not
+    # go through. A fresh thread per row keeps seq=0 clear of
+    # `staff_assistant_message_seq_unique` on (thread, seq).
+    "StaffAssistantMessage": {
+        "thread": lambda tenant, suffix: _make_staff_assistant_thread_for_scanner(
+            tenant, f"sam-{suffix or 'x'}"
+        ),
+        "seq": 0,
+        # Callable: a plain string would get `-{suffix}` appended and
+        # overflow `role`'s max_length=16.
+        "role": lambda tenant, suffix: "user",
+    },
     # M7: OneToOne master — fresh CatalogMaster per row. All toggles have
     # defaults; urgent defaults True which the CheckConstraint demands.
     "MasterNotificationPrefs": {
@@ -384,6 +407,19 @@ def _make_conversation_for_scanner(tenant, suffix: str):
 
     bot_user = _make_bot_user_for_scanner(tenant, suffix)
     return Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
+
+
+def _make_staff_assistant_thread_for_scanner(tenant, suffix: str):
+    """Inline StaffAssistantThread factory for the StaffAssistantMessage row.
+
+    Bypasses ``resolve_active_staff_thread`` on purpose: that helper needs a
+    tenant in scope, and the scanner builds its fixtures outside one.
+    """
+
+    from apps.conversations.models import StaffAssistantThread
+
+    bot_user = _make_bot_user_for_scanner(tenant, suffix)
+    return StaffAssistantThread.all_tenants.create(tenant=tenant, bot_user=bot_user)
 
 
 # Cache per (model __name__, tenant.id, suffix) → (bot_user, conversation).
