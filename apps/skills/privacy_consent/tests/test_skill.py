@@ -177,6 +177,47 @@ class TestDataDelete:
         with tenant_scope(tenant), pytest.raises(ProtectedError):
             data_delete(bot_user)
 
+    def test_raises_protected_error_on_staff_assistant_thread(self, tenant, bot_user):
+        """DRF-1061 — the staff assistant thread joined the PROTECT wall.
+
+        ``StaffAssistantThread.bot_user`` is PROTECT, deliberately
+        mirroring ``Conversation.bot_user``. Only half the mirror was
+        built: ``delete_bot_user_data`` clears the Conversations before
+        ``bot_user.delete()``, nothing clears the threads. So an employee
+        who ever wrote to the assistant cannot be wiped by this helper at
+        all — the whole cascade aborts, and the rows above it roll back
+        with it.
+
+        Pinned rather than fixed: completing the mirror changes deletion
+        behaviour, which is out of scope for step 0. Its live counterpart
+        — the customer-facing cascade, which does not abort but simply
+        never reaches these rows — is pinned in
+        ``apps/identity/services/tests/test_privacy.py``
+        (``test_staff_assistant_thread_survives_the_cascade``).
+
+        Without this test the class above goes green while saying nothing
+        about the new tables: none of its fixtures ever open a thread, so
+        "the cascade is complete" would be an assertion about absence.
+        """
+        from django.db.models import ProtectedError
+
+        from apps.conversations.models import StaffAssistantThread
+        from apps.conversations.staff_assistant import (
+            record_staff_message,
+            resolve_active_staff_thread,
+        )
+
+        with tenant_scope(tenant):
+            thread = resolve_active_staff_thread(bot_user, role_at_open="master")
+            assert thread is not None
+            record_staff_message(thread, role="user", content="во сколько я завтра")
+
+        with tenant_scope(tenant), pytest.raises(ProtectedError):
+            data_delete(bot_user)
+
+        # And the thread is still there — the abort is not a partial wipe.
+        assert StaffAssistantThread.all_tenants.filter(bot_user=bot_user).exists()
+
 
 class TestSkillHandle:
     """DRF-956 / T-05 — the chat delete intent is a redirect, not a delete."""

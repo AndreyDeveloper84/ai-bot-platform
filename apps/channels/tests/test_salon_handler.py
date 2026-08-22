@@ -227,3 +227,127 @@ class TestWrongBotGuard:
         _handle("привет", tenant)
 
         sent.assert_not_called()
+
+
+class TestTheThread:
+    """The salon bot now keeps a record of what staff typed (step 0).
+
+    Not a dialogue yet — the reply is still the menu. What matters is that
+    the exchange is written down, because the assistant in step 1 has
+    nothing to stand on otherwise.
+    """
+
+    def _make_admin(self, tenant) -> BotUser:
+        person = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=CHANNEL_USER_ID,
+            chat_id=CHAT_ID,
+        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=person, role="admin")
+        return person
+
+    def test_a_typed_line_and_the_reply_are_both_recorded(self, tenant, sent):
+        from apps.conversations.models import StaffAssistantMessage
+
+        self._make_admin(tenant)
+
+        _handle("что у меня сегодня", tenant)
+
+        rows = list(StaffAssistantMessage.all_tenants.order_by("seq"))
+        assert [r.role for r in rows] == ["user", "assistant"]
+        assert rows[0].content == "что у меня сегодня"
+        # The assistant turn is what the person actually saw.
+        assert rows[1].content == sent.call_args.kwargs["text"]
+
+    def test_the_thread_remembers_the_role_they_held(self, tenant, sent):
+        from apps.conversations.models import StaffAssistantThread
+
+        self._make_admin(tenant)
+
+        _handle("привет", tenant)
+
+        assert StaffAssistantThread.all_tenants.get().role_at_open == "admin"
+
+    def test_one_thread_across_several_messages(self, tenant, sent):
+        from apps.conversations.models import StaffAssistantMessage, StaffAssistantThread
+
+        self._make_admin(tenant)
+
+        _handle("первое", tenant, update_id=1)
+        _handle("второе", tenant, update_id=2)
+
+        assert StaffAssistantThread.all_tenants.count() == 1
+        assert StaffAssistantMessage.all_tenants.count() == 4
+
+    def test_a_button_tap_is_not_recorded(self, tenant, sent):
+        """Taps are not speech.
+
+        The customer path already paid for the opposite: raw `cb:*`
+        payloads sitting in history provoked hallucinated replies (DRF-988).
+        """
+
+        from apps.conversations.models import StaffAssistantMessage
+
+        self._make_admin(tenant)
+
+        with tenant_scope(tenant):
+            handle_salon_max_event(
+                {
+                    "update_type": "message_callback",
+                    "timestamp": 1_700_000_000_000,
+                    "callback": {
+                        "callback_id": "cb-1",
+                        "payload": "cb:staff:day",
+                        "timestamp": 1_700_000_000_000,
+                        "user": {"user_id": int(CHANNEL_USER_ID), "name": "Владелец"},
+                    },
+                    "message": {
+                        "body": {"mid": "m1", "seq": 1, "text": ""},
+                        "sender": {"user_id": 999, "name": "bot", "is_bot": True},
+                        "recipient": {
+                            "chat_id": int(CHAT_ID),
+                            "user_id": 999,
+                            "chat_type": "dialog",
+                        },
+                    },
+                }
+            )
+
+        assert sent.called
+        assert not StaffAssistantMessage.all_tenants.exists()
+
+    def test_someone_without_a_role_gets_no_thread(self, tenant, sent):
+        # Typing an invite code is not a conversation.
+        from apps.conversations.models import StaffAssistantThread
+
+        _handle("привет", tenant)
+
+        assert not StaffAssistantThread.all_tenants.exists()
+
+    def test_the_customer_conversation_is_left_alone(self, tenant, sent):
+        from apps.conversations.models import Conversation, Message
+
+        self._make_admin(tenant)
+
+        _handle("что у меня сегодня", tenant)
+
+        assert Conversation.all_tenants.count() == 0
+        assert Message.all_tenants.count() == 0
+
+    def test_a_failing_thread_write_never_costs_the_reply(self, tenant, sent):
+        """History is a place to write, not a precondition for answering.
+
+        A staff member mid-shift must get their menu even if the write
+        fails.
+        """
+
+        self._make_admin(tenant)
+
+        with patch(
+            "apps.conversations.staff_assistant.resolve_active_staff_thread",
+            side_effect=RuntimeError("db is having a moment"),
+        ):
+            _handle("что у меня сегодня", tenant)
+
+        assert sent.called
