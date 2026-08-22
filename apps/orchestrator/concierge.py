@@ -36,6 +36,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import date
 from types import SimpleNamespace
@@ -49,8 +51,12 @@ from apps.conversations.services import (
     record_global_message,
     resolve_active_global_conversation,
 )
+from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
 from apps.marketplace.discovery import discover_masters
+from apps.observability.ai_metrics import record_ai_request
+from apps.observability.models import AIRequestMetric
 from apps.orchestrator.discovery import (
     _MAX_MASTER_CARDS,
     _MAX_REPLY_CHARS,
@@ -133,6 +139,13 @@ class _RouterCompletions:
 
     def __init__(self, *, skill: str) -> None:
         self._skill = skill
+        # Telemetry of the most recent complete() call (DRF-1211). The
+        # router's CompletionResult carries the RESOLVED provider/model;
+        # the ai-core DTO does not surface them truthfully (dto.model is
+        # ai-core's configured default, dto.provider the passthrough
+        # adapter's constant) — so the metric reader picks them up here.
+        self.last_provider = ""
+        self.last_model = ""
 
     async def create(
         self,
@@ -147,6 +160,8 @@ class _RouterCompletions:
 
         provider = await sync_to_async(_resolve, thread_sensitive=False)()
         result = await provider.complete(messages, model=model, tools=tools)
+        self.last_provider = result.provider or ""
+        self.last_model = result.model or ""
         return _to_openai_shape(result)
 
 
@@ -155,6 +170,16 @@ class RouterLLMClient:
 
     def __init__(self, *, skill: str) -> None:
         self.chat = SimpleNamespace(completions=_RouterCompletions(skill=skill))
+
+    @property
+    def last_provider(self) -> str:
+        """Provider slug of the most recent completion (DRF-1211 telemetry)."""
+        return self.chat.completions.last_provider
+
+    @property
+    def last_model(self) -> str:
+        """Vendor-resolved model id of the most recent completion."""
+        return self.chat.completions.last_model
 
 
 class GlobalConversationStore:
@@ -219,6 +244,94 @@ class GlobalConversationStore:
 
 
 _KNOWN_TOOLS = frozenset({SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]})
+
+
+def _record_concierge_metric(
+    *,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str | None,
+    message_text: str,
+    pass_index: int,
+    outcome: str,
+    latency_total_ms: int,
+    dto: Any = None,
+    llm_client: "RouterLLMClient | None" = None,
+) -> None:
+    """DRF-1211 — emit one ``AIRequestMetric`` row per concierge LLM pass.
+
+    The live global-pilot path (``generate_concierge_reply``) never wrote
+    ``AIRequestMetric`` at all — the only writers were the dead tenant
+    pipeline and the shadow turn. Multi-pass (DRF-1266) doubles-triples
+    model calls per turn; without this row its cost would surface in the
+    invoice, not in data. ``llm_pass_index`` separates the first call from
+    follow-up passes so the cost of multi-pass is distinguishable from
+    general traffic growth.
+
+    The metric row parks under the ``global_bot`` sentinel tenant — the
+    same tenant that owns the global BotUser / Conversation rows — at
+    ``current_tenant()=None``, exactly like the ``*_global_*`` services.
+
+    Best-effort, mirroring ``pipeline._emit_ai_metric``: observability
+    must never crash the turn — failures log WARN with trace_id.
+    """
+    try:
+        try:
+            request_uuid = uuid.UUID(str(trace_id))
+        except (ValueError, TypeError, AttributeError):
+            # Same deterministic fallback as pipeline._emit_ai_metric: keeps
+            # log grep (raw trace_id string) and the metric row correlated
+            # even for non-UUID trace ids.
+            request_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, str(trace_id) if trace_id else "concierge-no-trace"
+            )
+
+        llm_provider = ""
+        llm_model = ""
+        tokens_in: int | None = None
+        tokens_out: int | None = None
+        latency_llm_ms: int | None = None
+        cost_usd = None
+        if dto is not None:
+            tokens_in = dto.tokens_in or None
+            tokens_out = dto.tokens_out or None
+            latency_llm_ms = dto.latency_ms or None
+        if llm_client is not None:
+            llm_provider = llm_client.last_provider
+            llm_model = llm_client.last_model
+        if llm_model and tokens_in is not None:
+            try:
+                cost_usd = compute_cost(
+                    llm_model, input_tokens=tokens_in, output_tokens=tokens_out or 0
+                )
+            except UnknownModelError:
+                # Unpriced model — tokens + latency still recorded, cost NULL.
+                cost_usd = None
+
+        record_ai_request(
+            tenant=get_global_bot_tenant(),
+            bot_user=bot_user,
+            conversation=conversation,
+            request_id=request_uuid,
+            message_text_length=len(message_text),
+            skill_selected="concierge",
+            latency_total_ms=latency_total_ms,
+            latency_llm_ms=latency_llm_ms,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_tokens_input=tokens_in,
+            llm_tokens_output=tokens_out,
+            llm_cost_usd=cost_usd,
+            llm_pass_index=pass_index,
+            outcome=outcome,
+        )
+    except Exception as emit_exc:  # noqa: BLE001 — observability never crashes the turn
+        logger.warning(
+            "orchestrator.concierge.ai_metric_emit_failed trace=%s outcome=%s err=%s",
+            trace_id,
+            outcome,
+            emit_exc,
+        )
 
 
 def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
@@ -344,8 +457,9 @@ def generate_concierge_reply(
     failure degrades to the same safe fallback line as the legacy
     discovery path — the concierge must never 500.
     """
+    llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
     concierge = AIConcierge(
-        openai_client=RouterLLMClient(skill=CONCIERGE_SKILL),
+        openai_client=llm_client,
         store=GlobalConversationStore(user_message_id=user_message_id),
         context_builder=lambda: ConciergeContext(
             candidates=[],
@@ -363,6 +477,7 @@ def generate_concierge_reply(
             extra_system=extra_system,
         )
 
+    started = time.monotonic()
     try:
         dto = asyncio.run(
             concierge.send_message(
@@ -373,7 +488,28 @@ def generate_concierge_reply(
         )
     except Exception as exc:  # noqa: BLE001 — degrade to safe fallback
         logger.warning("orchestrator.concierge.llm_error trace=%s err=%s", trace_id, exc)
+        _record_concierge_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            pass_index=1,
+            outcome=AIRequestMetric.OUTCOME_ERROR,
+            latency_total_ms=int((time.monotonic() - started) * 1000),
+            llm_client=llm_client,
+        )
         return DiscoveryReply(text=get_fallback("ru"))
+    _record_concierge_metric(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        message_text=message_text,
+        pass_index=1,
+        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        latency_total_ms=int((time.monotonic() - started) * 1000),
+        dto=dto,
+        llm_client=llm_client,
+    )
 
     if dto.action_type == ActionType.SHOW_MASTERS:
         args = (dto.action_data or {}).get("arguments", {})
