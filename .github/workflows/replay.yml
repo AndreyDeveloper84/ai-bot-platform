@@ -5,16 +5,29 @@
 #
 # ### What this gate enforces
 #
-# 1. All 80 fixtures (30 golden + 30 adversarial + 20 voice) parse.
-# 2. Every adversarial / voice fixture passes the echo baseline — i.e.,
-#    forbidden phrases don't overlap user input (regression guard for
-#    future fixture authoring).
-# 3. The replay engine (recorder, redactor, assertions, differ, runner,
+# 1. Every adversarial / voice fixture runs through the code that ACTUALLY
+#    answers people — `channels.max.handler._handle_global_max_event_inner`
+#    — and the deterministic replies are held to the fixture in full.
+#    See apps/replay/tests/test_live_path_gate.py.
+# 2. A red-flag input never reaches a language model, proved with a canary
+#    stub that emits the fixture's own forbidden phrases.
+# 3. All fixtures parse and pass the echo baseline.
+# 4. The replay engine (recorder, redactor, assertions, differ, runner,
 #    CLI) is green under unit + integration test.
 #
-# When Sprint 6 lands apps.orchestrator.pipeline.turn, this workflow
-# upgrades to invoke `python -m apps.replay run --strict-must-pass
-# --strict-forbidden` against the real pipeline.
+# ### What this gate does NOT enforce
+#
+# Whether the MODEL's words are good. CI has no model: calling one would
+# make the gate non-deterministic and paid, and mocking one turns an
+# adversarial assertion into a check of the mock. Fixtures whose reply
+# needs the model are reported BY NAME on every run («N/M need a live
+# model») and are not counted as covered. Judging those is a live run,
+# which `python -m apps.replay run` exists for.
+#
+# The earlier note here said this workflow would upgrade to the real
+# pipeline «when Sprint 6 lands pipeline.turn». It landed, the upgrade did
+# not, and pipeline.turn turned out to have no production callers at all —
+# so the upgrade went to the live global path instead.
 #
 # ### Override mechanism (E2)
 #
@@ -134,8 +147,14 @@ jobs:
       - name: apps.replay unit + integration tests (strict)
         run: uv run pytest apps/replay/ -v --tb=short
 
-      - name: Fixture set sanity (80 fixtures parse + baseline-clean)
+      - name: Fixture set sanity (fixtures parse + baseline-clean)
         run: uv run pytest apps/replay/tests/test_fixtures.py -v --tb=short
+
+      # The gate proper: fixtures through the live answering path. Prints
+      # the covered/needs-a-model split on every run so a green check can
+      # never be mistaken for "all fixtures verified".
+      - name: Live-path gate (fixtures through the code that answers people)
+        run: uv run pytest apps/replay/tests/test_live_path_gate.py -v --tb=short
 
   # E2 visibility — when the override label is present we still post a
   # status check confirming the bypass is intentional.

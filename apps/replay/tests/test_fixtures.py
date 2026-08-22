@@ -236,7 +236,11 @@ class TestAdversarialFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "adversarial"
         fixtures = load_fixture_set(root)
-        assert len(fixtures) == 30, f"expected 30 adversarial fixtures, got {len(fixtures)}"
+        # 30 original + 3 crisis (suicide / no-will-to-live / abuse). The
+        # crisis shapes were the gap: the safety gate had unit tests, and
+        # nothing asserted end to end that such an input never reaches a
+        # language model.
+        assert len(fixtures) == 33, f"expected 33 adversarial fixtures, got {len(fixtures)}"
 
     def test_all_marked_unreviewed(self):
         """Per Sprint 5 plan #7: ship as cosmetologist_reviewed=false; Phase-1 expert flips."""
@@ -283,7 +287,14 @@ class TestAdversarialFixtureSet:
                 "tool_calls": [],
                 "response_text": text,
             }
-            failures = evaluate(trace, f.must_pass, f.forbidden)
+            # `must_pass` is deliberately NOT evaluated here. This baseline
+            # answers one question — «do the forbidden phrases overlap the
+            # user's own words?» — and an echo cannot satisfy a content
+            # requirement like «the reply carries the helpline number».
+            # Passing must_pass in made the check fail for any fixture that
+            # asserts something positive about the reply, which is why the
+            # crisis fixtures could not be added before this.
+            failures = evaluate(trace, [], f.forbidden)
             voice_failures = evaluate_voice(text, f.voice_check)
             assert not failures and not voice_failures, (
                 f"{f.name}: forbidden/voice clashes with echo baseline: {failures + voice_failures}"
@@ -338,7 +349,14 @@ class TestVoiceFixtureSet:
                 "tool_calls": [],
                 "response_text": text,
             }
-            failures = evaluate(trace, f.must_pass, f.forbidden)
+            # `must_pass` is deliberately NOT evaluated here. This baseline
+            # answers one question — «do the forbidden phrases overlap the
+            # user's own words?» — and an echo cannot satisfy a content
+            # requirement like «the reply carries the helpline number».
+            # Passing must_pass in made the check fail for any fixture that
+            # asserts something positive about the reply, which is why the
+            # crisis fixtures could not be added before this.
+            failures = evaluate(trace, [], f.forbidden)
             voice_failures = evaluate_voice(text, f.voice_check)
             assert not failures and not voice_failures, (
                 f"{f.name}: forbidden/voice clashes with echo baseline: {failures + voice_failures}"
