@@ -3,8 +3,11 @@
 > **Auditor:** W3 (Zeta, security backstop)
 > **Date:** 2026-06-02
 > **Scope:** pre-flip pass (subset). A separate post-flip delta-pass will follow within 24-48h after `STRICT_TENANT_REFUSE=True` is rolled to production.
-> **Methodology:** static analysis against `origin/dev` HEAD, cross-referenced with `.importlinter.baseline`, `docs/runbooks/strict-tenant-refuse-flip.md`, ADR-0009, and currently-open security follow-ups.
+> **Methodology:** static analysis against `origin/dev` HEAD, cross-referenced with the ADR-0009 G1–G10 import-edge contracts, `docs/runbooks/strict-tenant-refuse-flip.md`, ADR-0009, and currently-open security follow-ups.
 > **Audit branch:** `phase2/w3/pre-flip-security-audit`
+
+> ### ⚠️ Correction (S5, 2026-06-03) — read before §3
+> This audit's original text treated `.importlinter.baseline` as an existing, enforcing artifact. **It is not. No `.importlinter*` file exists or has ever existed in the repo** (verified across full git history of all three repos). The G1–G10 "contracts" are real ADR-0009 invariants drawn from the Codex integration audit + roadmap item A11 — but A11 (which proposed import-linter) **never shipped**, so nothing auto-enforces these edges today. The original methodology line citing `.importlinter.baseline` was a *planned-as-done* error; see the S5 provenance trace on #968. The §3 finding below (7 uncovered write-path sites) **remains valid** — it is a real ADR-0009 §5 breadth gap; only its attribution to a "baseline contract file" is corrected. Enforcement is moving to the `tools/lint/` AST-linter (Option B per orchestrator 2026-06-03), where these edges become CI-blocking.
 
 ## Executive summary
 
@@ -12,13 +15,13 @@
 |---|------|---------|--------|
 | 1 | `requires_tenant=False` exemption sweep (silent-bypass post-flip) | 🟢 GREEN | None — zero production handlers declare `False`. Defence-in-depth verified. |
 | 2 | `STRICT_TENANT_REFUSE` read-site coverage (stale-cache risk) | 🟢 GREEN | None — single runtime read-site, worker-restart contract documented and load-bearing. |
-| 3 | Canonical-state mutator imports from upstream surfaces (G5.1 breadth check) | 🟡 YELLOW | Adversarial pass refuted initial GREEN — baseline contract scope was too narrow. 7 additional write-path sites in `transitions` + `feedback` not covered. New tracker #968 filed. |
+| 3 | Canonical-state mutator imports from upstream surfaces (G5.1 breadth check) | 🟡 YELLOW | Adversarial pass refuted initial GREEN — the triaged G5.1 edge scope was too narrow (see correction; not an enforced linter contract). 7 additional write-path sites in `transitions` + `feedback` not covered. New tracker #968 filed. |
 | 4 | Audit log durability under flip (`worker.tenant_required_missing` emission contract) | 🟢 GREEN | None — dual-path emit (log line always fires, DB emit conditionally), operator has fallback. |
 | 5 | PEL reaper readiness for post-flip drainage | 🟢 GREEN (runbook already enforces) | Verified — `docs/runbooks/strict-tenant-refuse-flip.md` lines 147/157/167 enforce `PEL_REAPER_ENABLED=true` as pre-flip blocker. |
 
 **Overall pre-flip security posture: 🟡 GREEN-with-one-YELLOW.**
 
-Four of five audit dimensions pass. §3 was downgraded from 🟢 GREEN to 🟡 YELLOW by the in-house adversarial pass on this audit doc: the `.importlinter.baseline` G5.1 contract scope was found to be narrower than the underlying ADR-0009 §5 invariant, and the auditor's first §3 grep mirrored that narrow scope and missed 7 production write-path imports of `apps.booking.services.transitions` + `apps.booking.services.feedback` from `miniapp_api` + `admin_api`. New tracker #968 filed; flip-day risk remains bounded (sync HTTP paths, JWT-resolved, not stream consumers under STRICT_TENANT_REFUSE).
+Four of five audit dimensions pass. §3 was downgraded from 🟢 GREEN to 🟡 YELLOW by the in-house adversarial pass on this audit doc: the triaged G5.1 edge scope (see correction — it is a documented invariant, not an enforced linter contract) was found to be narrower than the underlying ADR-0009 §5 invariant, and the auditor's first §3 grep mirrored that narrow scope and missed 7 production write-path imports of `apps.booking.services.transitions` + `apps.booking.services.feedback` from `miniapp_api` + `admin_api`. New tracker #968 filed; flip-day risk remains bounded (sync HTTP paths, JWT-resolved, not stream consumers under STRICT_TENANT_REFUSE).
 
 The §5 procedural dependency (PEL reaper enablement) is already enforced by the flip runbook as a pre-flip blocker checkbox (verified at lines 147/157/167 of `strict-tenant-refuse-flip.md`).
 
@@ -122,7 +125,7 @@ None. Re-emphasize the worker-restart step in operator briefing on flip day.
 
 ADR-0009 rule 5 forbids bot-platform from DB-writing booking, payment, or catalog state. Surfaces authenticated by client-equivalent credentials (`miniapp_api`, `master_api`, `channels`, `skills`) writing canonical state = potential cross-tenant leak vector.
 
-The `.importlinter.baseline` tracks **one** such violation (`G5-projection-writes-via-consumers` → `apps/miniapp_api/views.py:668`). Pre-flip audit: confirm this is the FULL scope, not just one tracked site.
+The W3 Block A triage notes describe **one** such violation under the `G5-projection-writes-via-consumers` edge (→ `apps/miniapp_api/views.py:668`) — but as a documented invariant, not an enforced linter contract (see correction above). Pre-flip audit: confirm this is the FULL scope, not just one tracked site.
 
 ### Evidence — initial pass (incomplete)
 
@@ -144,7 +147,7 @@ The initial verdict marked this 🟢 GREEN with «zero undiscovered breaches». 
 
 ### Adversarial refutation
 
-The `.importlinter.baseline` G5.1 contract's `forbidden_modules` list only enumerates `apps.booking.services.create` + `apps.booking.services.reschedule`. The auditor's initial §3 grep mirrored that narrow scope, missing the actual production cancel/confirm/feedback mutator modules:
+The G5.1 edge as written in the W3 Block A triage notes only enumerates `apps.booking.services.create` + `apps.booking.services.reschedule` as forbidden modules. The auditor's initial §3 grep mirrored that narrow scope, missing the actual production cancel/confirm/feedback mutator modules:
 
 - `apps/booking/services/transitions.py` — direct `row.status = ...` writes at lines 201, 241, 282, 332, 363; `BookingRequest.objects.create(...)` at line 477. Exposes `commit_cancel`, `request_cancel`, `commit_reschedule`.
 - `apps/booking/services/feedback.py` — `submit_feedback` mutates booking.
@@ -161,13 +164,13 @@ apps/miniapp_api/views.py:1177  from apps.booking.services.feedback import (...)
 apps/admin_api/services/master_deactivation.py:67  from apps.booking.services.transitions import (... commit_cancel, request_cancel)
 ```
 
-Seven additional write-path import sites NOT tracked by the baseline contract, NOT tracked by #925 (which targets only `views.py:668`).
+Seven additional write-path import sites NOT covered by the triaged G5.1 edge, NOT tracked by #925 (which targets only `views.py:668`).
 
 (Note: `apps/miniapp_api/views.py:727` imports the `UNDO_WINDOW_SECONDS` constant from `transitions` — read-only, harmless, excluded from this count.)
 
 ### Verdict
 
-🟡 **YELLOW.** The G5.1 contract scope is narrower than the underlying ADR-0009 §5 invariant. Production cancel/confirm/feedback canonical writes from `miniapp_api` (client-equivalent surface) and `admin_api` (admin surface) bypass Ayla's canonical gate on 7 sites that the import-linter does not block.
+🟡 **YELLOW.** The triaged G5.1 edge scope is narrower than the underlying ADR-0009 §5 invariant. Production cancel/confirm/feedback canonical writes from `miniapp_api` (client-equivalent surface) and `admin_api` (admin surface) bypass Ayla's canonical gate on 7 sites that **no linter blocks today** (the planned import-linter never shipped; Option B AST-linter will cover them — see correction).
 
 **Flip-day risk:** **Bounded.** These are sync HTTP paths protected by JWT at the view boundary, not stream consumers subject to `STRICT_TENANT_REFUSE`. The flip is safe today. The risk is pre-pilot architectural debt: same SoR violation as #925, larger surface.
 
@@ -181,7 +184,7 @@ Seven additional write-path import sites NOT tracked by the baseline contract, N
 
 ### Recommended actions
 
-1. **Expand `.importlinter.baseline` G5.1 `forbidden_modules`** to include `transitions` + `feedback` modules. Pins the 7 sites in the baseline (no CI break) while preventing further growth.
+1. **Encode the G5.1 edge in the `tools/lint/` AST-linter (Option B)** to cover `transitions` + `feedback` in addition to `create` + `reschedule`. New violations hard-fail CI; the existing 7 sites are ticket-tracked (#968), not pinned in a baseline file (no `.importlinter*` exists — see correction).
 2. **Phase 2.2 scope expansion** in `unified-maintainability-roadmap.md` — `execute_reschedule` Ayla REST migration grows to also cover the cancel/confirm/feedback paths from `miniapp_api` + `admin_api/master_deactivation`.
 
 Both actions tracked under #968.
@@ -309,7 +312,7 @@ W3 will deliver a separate **post-flip delta-pass** within 24–48h after the fl
 
 This pre-flip pass surfaced **one new tracker** via the adversarial pass on §3:
 
-- **#968** — G5.1 baseline contract too narrow; 7 additional write-path imports of `transitions` + `feedback` from `miniapp_api` + `admin_api` not covered by current contract. **Severity:** MUST_FIX_PRE_PILOT (not flip-day blocker).
+- **#968** — G5.1 edge too narrow; 7 additional write-path imports of `transitions` + `feedback` from `miniapp_api` + `admin_api` not covered. To be enforced via the `tools/lint/` AST-linter (Option B). **Severity:** MUST_FIX_PRE_PILOT (not flip-day blocker).
 
 §§1, 2, 4, 5 verified against `origin/dev` with no new findings. §5 procedural dependency already enforced by the flip runbook.
 

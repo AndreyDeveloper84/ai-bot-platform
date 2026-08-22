@@ -57,7 +57,7 @@ Lower the per-PR cost of change. Stabilize Ayla ↔ bot-platform integration con
 | A8 | Payment `confirmation_url` parsing (NOT `checkout_url`) + trailing slash + `X-Idempotency-Key` decision | Alpha + W4 joint | ~2-3h |
 | **A9** | **ayla-ai-core SHA/version alignment (both consumers same SHA) + startup version smoke** | **Alpha + W2 joint** | **~3-4h** |
 | A10 | Minimal shared contract fixtures: `booking.created.v1.json` + `payment.captured.v1.json` + `payment.failed.v1.json` + `recommendations.request.json` | Gamma | ~3-4h |
-| A11 | `lint-imports` in CI (`.importlinter.passing` blocking) | W4 | ~2h |
+| A11 | Enforce G1–G10 ADR-0009 import-edges via the existing AST-linter (`tools/lint/`, already CI-blocking) — **Option B**, NOT import-linter (rejected pre-pilot, see #968) | W4 | ~3-4h |
 
 **Block A total:** ~20-25h across 4 streams parallel. ~3-5 working days with parallelism.
 
@@ -67,7 +67,7 @@ Lower the per-PR cost of change. Stabilize Ayla ↔ bot-platform integration con
 - [ ] `AylaUrlBuilder` used by all bot-platform Ayla clients.
 - [ ] Both consumer repos pin the same `ayla-ai-core` SHA/tag.
 - [ ] 4 contract fixtures live in `contracts/` directory.
-- [ ] `lint-imports.passing` is CI-blocking; 9 contracts kept.
+- [ ] AST-linter (`tools/lint/`) blocks new G1–G10 ADR-0009 import-edge violations in CI; contracts not cheaply expressible in AST are gated by a mandatory Code Reviewer checklist item (Option C fallback).
 
 ## Block B — Payment Stabilization
 
@@ -111,7 +111,7 @@ This is the heaviest block. Critical path = `execute_reschedule` rewrite (joint 
 
 | ID | Task | Owner |
 |---|---|---|
-| D1 | Freeze new `BookingRequest` writes (lint-imports + CI gate) | W4 |
+| D1 | Freeze new `BookingRequest` writes (AST-linter G5 import-edge + CI gate) | W4 |
 | D2 | `AylaBookingClient` (create/cancel/reschedule/list/detail) | Alpha + W2 joint |
 | D3 | Booking skill confirm/cancel/reschedule → call Ayla via D2 client | W2 (joint with Alpha) |
 | D4 | Disable direct YClients writes for Ayla-owned tenants | W2 |
@@ -172,7 +172,7 @@ Per-item decision matrix:
 | Block A (A8) | Phase 2.2, 2.3 small payment fixes | Joint |
 | Block A (A9) | Phase 6.1, 6.2 ayla-ai-core alignment | **Pulled forward per founder** |
 | Block A (A10) | Phase 7.5 contract test CI | **Pulled forward per founder** — minimal fixtures NOW |
-| Block A (A11) | Maintainability Phase 0 floor | Lint-imports protects everything else |
+| Block A (A11) | Maintainability Phase 0 floor | AST-linter (Option B) protects ADR-0009 import-edges |
 | Block B | Phase 2 payment contract | Same scope |
 | Block C | Phase 3 event delivery | Same scope |
 | Block D | Phase 4 booking ownership | Same scope (joint PRs) |
@@ -230,8 +230,8 @@ Per founder ref.txt: success measured by **6 cross-service smoke checks**, not o
 
 ### Gate E — Maintainability Floor Set
 
-- [ ] `.importlinter.passing` blocking CI (9 contracts, 0 broken).
-- [ ] `.importlinter.baseline` count not growing (4 contracts ratchet).
+- [ ] AST-linter (`tools/lint/`) blocks new G1–G10 ADR-0009 import-edge violations in CI (Option B).
+- [ ] Known existing violations (#925/#927/#928/#968) ticket-tracked and not growing; remediation per Phase 2.2 (NOT a baseline file — no `.importlinter*` exists; see #968 provenance).
 - [ ] **Legacy migration coverage = 100% (E0) before any legacy delete.**
 
 ## 6 Honest End-to-End Pilot Readiness Checks
@@ -268,7 +268,7 @@ No legacy delete in first sprint. No big refactor. Foundation first.
 1. Should bot-platform be allowed to create payments, or only retry/display? (B1)
 2. Should certificate payment be in MVP, and if yes which Ayla domain owns it? (B2)
 3. What is the existing Ayla `OutboxEvent` table for — local, cross-service, or both? (C1)
-4. Should `lint-imports.baseline` be a hard count gate from week 1, or warning-only?
+4. ~~Should `lint-imports.baseline` be a hard count gate from week 1, or warning-only?~~ **RESOLVED (orchestrator 2026-06-03):** enforcement is the `tools/lint/` AST-linter (Option B), not import-linter. New G1–G10 violations hard-fail CI; existing violations are ticket-tracked (#925/#927/#928/#968), not held in a baseline file.
 5. ayla-ai-core re-audit cadence — quarterly or only on major version bumps?
 
 ## Largest Risk
@@ -282,6 +282,6 @@ No legacy delete in first sprint. No big refactor. Foundation first.
 - `docs/architecture/unified-system-stabilization-roadmap.md` — codex integration roadmap
 - `CLAUDE.md` — ADR-0009 hard rules
 - `docs/adr/ADR-0009-ayla-split-domain-architecture.md` — full ADR
-- `.importlinter.passing` — 9 ADR-0009 contracts CI-blocking
-- `.importlinter.baseline` — 4 contracts ratchet (broken, count must not grow)
+- `tools/lint/` AST-linter — enforces G1–G10 ADR-0009 import-edges in CI (Option B; already runs as `red_zone_guard.py`, A11 extends it). import-linter rejected pre-pilot per #968.
+- ⚠️ **No `.importlinter*` file exists or has ever existed in this repo.** Earlier references to `.importlinter.passing` / `.importlinter.baseline` (incl. in this doc) were a *planned-as-done* error — A11 never shipped. See the S5 provenance trace on #968. The real legacy_* import ban is ruff TID251 `flake8-tidy-imports.banned-api` in `pyproject.toml`.
 - Founder review: `handoffs/ref.txt` (2026-05-30)
