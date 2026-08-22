@@ -95,11 +95,17 @@ jobs:
       #
       # WHY FIRST IN THE JOB: the same argument that keeps the "eventbus
       # booking lifecycle tests" step below as its own fast-fail gate — a
-      # check that fails in seconds must not sit behind "pytest apps/
-      # (full suite)" (~30 min). Placing it above `uv sync` also means
-      # the guard still runs when the private-dep fetch (GH_DEPLOY_TOKEN)
-      # is broken, which is precisely a moment when credentials are being
-      # moved around.
+      # cheap gate must not sit behind "pytest apps/ (full suite)"
+      # (~30 min). Measured on ubuntu-latest: the three steps below add
+      # ~2 min to a green run (the scan itself is ~1m45s over ~1800
+      # tracked files), and turn a leaked-credential run red at ~2 min
+      # instead of ~25. That ~2 min is a real, recurring cost on every
+      # push — recorded here rather than buried, same as the
+      # CI-feedback-latency note on `timeout-minutes` above.
+      #
+      # Placing it above `uv sync` also means the guard still runs when
+      # the private-dep fetch (GH_DEPLOY_TOKEN) is broken, which is
+      # precisely a moment when credentials are being moved around.
       - name: Set up Python 3.12 (secret guard)
         uses: actions/setup-python@v5
         with:
