@@ -443,29 +443,18 @@ class TestDelete:
             user_id=ayla_user_id, soft_deleted_at__isnull=True
         ).exists()
 
-    def test_staff_assistant_thread_survives_the_cascade(self, bot_user) -> None:
-        """DRF-1061 — known gap, pinned so it cannot stay quiet.
+    def test_staff_assistant_thread_erased_by_the_cascade(self, bot_user) -> None:
+        """DRF-1276 — the gap this test pinned as DRF-1061's known debt is closed.
 
-        This asserts what the cascade does TODAY, not what it should do.
-
-        The customer-facing 152-ФЗ path erases ``BotUser`` identifiers in
-        place, withdraws consents, forgets memory and drops preferences.
-        It knows nothing about ``StaffAssistantThread`` /
-        ``StaffAssistantMessage``, so free text an employee typed to the
-        salon assistant survives «удалите мои данные» verbatim — including
-        anything personal they happened to type into it. Staff are
-        ``BotUser`` rows like anyone else, and a former employee can
-        exercise the same right (DRF-1227 revokes access, it does not
-        erase what was said).
-
-        The step-0 PR introduced these tables; closing them into the
-        cascade is a deletion-behaviour change and belongs to its own
-        ticket. Until then this test is the record that the gap is known:
-        whoever closes it must consciously come here and invert the
-        assertions, instead of the cascade quietly staying incomplete
-        behind a green suite.
+        Free text an employee typed to the salon assistant is personal
+        data like anyone else's: staff are ``BotUser`` rows, and a former
+        employee (access revoked via DRF-1227) keeps the same 152-ФЗ
+        right. The cascade blanks ``StaffAssistantMessage.content`` in
+        place — the rows stay for finance reconciliation, the words do
+        not — and soft-deletes the thread, so a returning person starts
+        fresh instead of resuming a ghost.
         """
-        from apps.conversations.models import StaffAssistantMessage, StaffAssistantThread
+        from apps.conversations.models import StaffAssistantMessage
         from apps.conversations.staff_assistant import (
             record_staff_message,
             resolve_active_staff_thread,
@@ -479,14 +468,34 @@ class TestDelete:
             record_staff_message(thread, role="user", content=secret)
 
         result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
-        assert result.all_ok  # the cascade reports success...
+        assert result.all_ok
 
-        # ...while the employee's own words are untouched by it.
-        surviving = StaffAssistantThread.all_tenants.filter(bot_user=bot_user)
-        assert surviving.count() == 1
-        assert surviving.get().deleted_at is None
+        thread.refresh_from_db()
+        assert thread.deleted_at is not None
+        assert thread.is_active is False
         messages = StaffAssistantMessage.all_tenants.filter(thread=thread)
-        assert [m.content for m in messages] == [secret]
+        assert [m.content for m in messages] == [""]
+        assert secret not in "".join(m.content for m in messages)
+
+    def test_staff_assistant_erase_is_idempotent(self, bot_user) -> None:
+        """A repeated confirmed DELETE must report the same success (ruling §2)."""
+        from apps.conversations.staff_assistant import (
+            record_staff_message,
+            resolve_active_staff_thread,
+        )
+        from apps.tenancy.context import tenant_scope
+
+        with tenant_scope(bot_user.tenant):
+            thread = resolve_active_staff_thread(bot_user, role_at_open="master")
+            assert thread is not None
+            record_staff_message(thread, role="user", content="во сколько я завтра")
+
+        first = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        second = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert first.all_ok and second.all_ok
+        step = next(s for s in second.steps if s.step == "staff_assistant_erase")
+        assert step.ok
 
     def test_audit_has_no_values(self, bot_user, ayla_user_id) -> None:
         from apps.audit.models import AuditLog
@@ -502,6 +511,7 @@ class TestDelete:
             "memory_delete",
             "consent_withdraw",
             "profile_pii_erase",
+            "staff_assistant_erase",
         }
 
 
