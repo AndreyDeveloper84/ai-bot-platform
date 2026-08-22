@@ -15,6 +15,10 @@ from apps.admin_api import (
     views,
     views_availability,
     views_availability_slots,
+    views_booking_cancel,
+    views_booking_complete,
+    views_booking_create,
+    views_customers,
     views_day,
     views_invite,
     views_staff_invite,
@@ -33,6 +37,40 @@ urlpatterns = [
     # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
     # canonical slots read; see the module docstring for why it refuses
     # rather than returning an empty list on upstream failure.
+    # Phase 2 — the commit boundary of manual booking. Ayla owns the
+    # booking; this is a shell that names the acting administrator.
+    path("bookings/", views_booking_create.create_booking, name="create_booking"),
+    # Phase 2 — cancellation. No expected_version: the end state is the
+    # same however many times you ask, so Ayla does not gate it on one.
+    path(
+        "bookings/<uuid:appointment_id>/cancel/",
+        views_booking_cancel.cancel_booking,
+        name="cancel_booking",
+    ),
+    # Phase 2 — closing the visit. Two endpoints on purpose: the canonical
+    # version is read first and travels back through the operator, because
+    # a read folded into the write would make the guard match every time
+    # and protect nothing (the DRF-1232 defect, one repo over).
+    path(
+        "bookings/<uuid:appointment_id>/",
+        views_booking_complete.booking_version,
+        name="booking_version",
+    ),
+    path(
+        "bookings/<uuid:appointment_id>/complete/",
+        views_booking_complete.complete_booking,
+        name="complete_booking",
+    ),
+    path(
+        "bookings/<uuid:appointment_id>/reschedule/",
+        views_booking_complete.reschedule_booking,
+        name="reschedule_booking",
+    ),
+    # Phase 2 — customer search, the first step of the booking flow (§13).
+    # Refuses rather than returning an empty list when it cannot ask, for
+    # the same reason as booking-slots: «nothing found» and «could not
+    # look» are opposite instructions to the front desk.
+    path("customers/", views_customers.search_customers, name="search_customers"),
     path(
         "booking-slots/",
         views_availability_slots.booking_slots,

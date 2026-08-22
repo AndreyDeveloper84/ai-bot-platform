@@ -40,8 +40,16 @@ export interface DraftExistingCustomer {
   kind: "existing";
   id: string;
   name: string;
-  /** Masked for display — the draft never holds a raw phone. */
-  phone_masked: string;
+  /**
+   * Masked for display — the draft never holds a raw phone.
+   *
+   * Optional because the canonical `customers/` lookup does not return
+   * one (DRF-1039: the number is an input, never an output), so today it
+   * is always absent and the picker disambiguates by name alone. Kept in
+   * the shape because decision B-6 says the administrator *should* see a
+   * masked number; when Ayla adds it, nothing here changes.
+   */
+  phone_masked?: string;
 }
 
 /**

@@ -45,6 +45,7 @@ def _visit_payload(v: DayVisit) -> dict[str, Any]:
         "end_at": v.end_at.isoformat() if v.end_at else None,
         "duration_min": v.duration_min,
         "status": v.status,
+        "service_id": v.service_id,
         "service_name": v.service_name,
         # First name + last initial only. The administrator needs to
         # recognise the client, not to hold their identity documents, and
