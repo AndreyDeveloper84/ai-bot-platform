@@ -116,3 +116,90 @@ class TestForgetAll:
         res = handle_memory_command(user_id=upc.user_id, text="забудь все")
         assert res is not None
         assert res.action_type == "memory_forget_all_prompt"
+
+
+def _add_green(upc, value):
+    """Append one more live green diet row (the write path never supersedes).
+
+    Every existing row is backdated by a day first, so «which one is newer» is
+    deterministic rather than a microsecond race between two inserts.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    MemoryEntry.objects.filter(user_id=upc.user_id).update(
+        created_at=timezone.now() - timedelta(days=1)
+    )
+    return MemoryEntry.objects.create(
+        user_id=upc.user_id,
+        personal_context=upc,
+        sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+        source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,
+        kind="lifestyle",
+        content={"key": "diet", "value": value},
+    )
+
+
+class TestShowDoesNotContradictItself:
+    """DRF-1262 — «покажи, что знаешь обо мне» must show the CURRENT fact set.
+
+    A changed fact lands as a new live row and the old row stays live
+    (memory_key_policy module docstring). The prompt is already collapsed by
+    `read_current_view`; this surface was not, so the человек was shown «ты
+    веган; ты на кето» while Ayla herself acted on «кето» alone. The system
+    was showing the person something other than what it uses.
+    """
+
+    def test_show_renders_only_the_current_value_of_a_single_valued_key(self):
+        upc = _upc_with_green("vegan")
+        _add_green(upc, "vegetarian")
+
+        res = handle_memory_command(user_id=upc.user_id, text="что ты обо мне знаешь")
+
+        assert res is not None
+        assert "вегетарианского питания" in res.text
+        assert "веганского питания" not in res.text, (
+            "SHOW surfaced both values of one single-valued key — the person "
+            "is shown a contradiction the prompt never sees."
+        )
+
+    def test_show_still_renders_a_lone_fact(self):
+        upc = _upc_with_green("vegan")
+        res = handle_memory_command(user_id=upc.user_id, text="что ты обо мне знаешь")
+        assert res is not None
+        assert "веганского питания" in res.text
+
+    def test_clarify_summary_is_also_conflict_resolved(self):
+        """The «не поняла, что забыть» fallback renders the same view."""
+        upc = _upc_with_green("vegan")
+        _add_green(upc, "vegetarian")
+
+        res = handle_memory_command(user_id=upc.user_id, text="забудь мою диету")
+
+        assert res is not None
+        assert "Не совсем поняла" in res.text
+        assert "веганского питания" not in res.text
+
+    def test_forget_still_reaches_a_superseded_row(self):
+        """Deletion is NOT narrowed to the current view.
+
+        152-ФЗ erasure targets what is STORED, not what is surfaced: «забудь,
+        что я веган» must still erase the stale vegan row. Narrowing the
+        matcher to the current view would also resurrect it — deleting the
+        winning keto row would put vegan back in front of the person.
+        """
+        upc = _upc_with_green("vegan")
+        current = _add_green(upc, "vegetarian")
+
+        res = handle_memory_command(user_id=upc.user_id, text="забудь что я веган")
+
+        assert res is not None
+        assert "Готово" in res.text
+        assert (
+            MemoryEntry.objects.filter(user_id=upc.user_id, soft_deleted_at__isnull=True)
+            .values_list("id", flat=True)
+            .first()
+            == current.id
+        )

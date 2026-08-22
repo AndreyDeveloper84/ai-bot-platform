@@ -34,6 +34,7 @@ from apps.identity.services.memory_deleter import (
     request_forget_all,
     soft_delete_green_entries,
 )
+from apps.identity.services.memory_key_policy import read_current_view, select_current_facts
 from apps.identity.services.memory_reader import read_green_entries
 from apps.persona.memory_surface import describe_green_content
 
@@ -119,8 +120,21 @@ def _entry_keywords(content: dict) -> tuple[str, ...]:
     return kws
 
 
-def _summary_line(entries: list) -> str:
-    phrases = [p for e in entries if (p := describe_green_content(e.content))]
+def _summary_line(facts: list) -> str:
+    """Render «помню, что ты …» from an ALREADY conflict-resolved fact list.
+
+    DRF-1262: callers must pass the CURRENT view (`read_current_view` /
+    `select_current_facts`), never raw live rows. The write path keeps history
+    — a changed fact lands as a new live row and the old one stays live — so
+    raw rows render «ты веган; ты на кето» while the prompt, which does go
+    through the key policy, sees exactly one of them. Showing the person
+    something other than what the system uses is the defect.
+
+    Accepts anything with a ``.content`` dict: `MemoryEntry` rows or
+    `GreenFact` view items.
+    """
+
+    phrases = [p for f in facts if (p := describe_green_content(f.content))]
     if not phrases:
         return "Я пока ничего о тебе не запомнила."
     return "Помню, что ты " + "; ".join(phrases) + "."
@@ -166,6 +180,12 @@ def handle_memory_command(
         # handle them instead of hijacking the turn with a clarify prompt.
         if not target or target in _NON_FIELD_TARGETS or target.startswith("меня"):
             return None
+        # Matching runs over ALL live rows, NOT the current view: 152-ФЗ
+        # erasure targets what is STORED, not what is surfaced, so «забудь,
+        # что я веган» must still reach a row that a newer fact has already
+        # displaced. Narrowing the matcher would also RESURRECT it — deleting
+        # the winning row would put the superseded one back in front of the
+        # person. Only what is SHOWN goes through the key policy.
         entries = read_green_entries(user_id)
         if not entries:
             return MemoryCommandResult(text="Мне пока нечего о тебе забывать.")
@@ -174,13 +194,17 @@ def handle_memory_command(
             label = describe_green_content(matched[0].content) or "это"
             soft_delete_green_entries(user_id, [matched[0].id])
             return MemoryCommandResult(text=f"Готово — забыла: {label}.")
-        # 0 or >1 matches → clarify by showing what's remembered.
+        # 0 or >1 matches → clarify by showing what's remembered (DRF-1262:
+        # the current view, so the clarification itself is not a contradiction).
         return MemoryCommandResult(
-            text="Не совсем поняла, что именно забыть. " + _summary_line(entries)
+            text="Не совсем поняла, что именно забыть. "
+            + _summary_line(select_current_facts(entries))
         )
 
-    # 4. «покажи что знаешь обо мне» → green-only summary.
+    # 4. «покажи что знаешь обо мне» → green-only summary, through the SAME
+    #    conflict-resolving read the prompt uses (DRF-1262). Before this the
+    #    person was shown every live row while Ayla acted on one.
     if any(trigger in norm for trigger in _SHOW_TRIGGERS):
-        return MemoryCommandResult(text=_summary_line(read_green_entries(user_id)))
+        return MemoryCommandResult(text=_summary_line(read_current_view(user_id).green_facts))
 
     return None
