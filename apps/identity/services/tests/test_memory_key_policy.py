@@ -48,6 +48,8 @@ def _green(upc, *, source=MemoryEntry.SOURCE_EXPLICIT, created_at=None, **overri
     )
     if source in (MemoryEntry.SOURCE_INFERRED, MemoryEntry.SOURCE_SIGNAL):
         kwargs.setdefault("last_inferred_at", timezone.now())  # CHECK 1
+    else:  # CHECK 5 (DRF-1263) — explicit rows carry canonical provenance
+        kwargs.setdefault("provenance", MemoryEntry.PROVENANCE_USER_STATED)
     kwargs.update(overrides)
     entry = MemoryEntry.objects.create(**kwargs)
     if created_at is not None:  # auto_now_add — override post-create

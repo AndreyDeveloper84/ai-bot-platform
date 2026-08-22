@@ -66,6 +66,7 @@ class TestCheck1InferredNullness:
                 personal_context=upc,
                 sensitivity_zone="green",
                 source="explicit",
+                provenance="user_stated",  # CHECK 5 (DRF-1263)
                 last_inferred_at=_now(),  # forbidden for explicit
                 content={"k": "v"},
             )
@@ -101,6 +102,7 @@ class TestCheck1InferredNullness:
             personal_context=upc,
             sensitivity_zone="green",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             last_inferred_at=None,
             content={"k": "v"},
         )
@@ -136,6 +138,7 @@ class TestCheck2YellowRedRequiresConsent:
                 personal_context=upc,
                 sensitivity_zone="yellow",
                 source="explicit",
+                provenance="user_stated",  # CHECK 5 (DRF-1263)
                 consent_at=None,
                 soft_deleted_at=None,
                 content={"k": "v"},
@@ -149,6 +152,7 @@ class TestCheck2YellowRedRequiresConsent:
                 personal_context=upc,
                 sensitivity_zone="red",
                 source="explicit",
+                provenance="user_stated",  # CHECK 5 (DRF-1263)
                 consent_at=None,
                 soft_deleted_at=None,
                 content={"k": "v"},
@@ -161,6 +165,7 @@ class TestCheck2YellowRedRequiresConsent:
             personal_context=upc,
             sensitivity_zone="yellow",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             consent_at=_now(),
             content={"k": "v"},
         )
@@ -178,6 +183,7 @@ class TestCheck2YellowRedRequiresConsent:
             personal_context=upc,
             sensitivity_zone="yellow",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             consent_at=None,  # cleared during withdrawal
             soft_deleted_at=now,
             delete_requested_at=now,
@@ -193,6 +199,7 @@ class TestCheck2YellowRedRequiresConsent:
             personal_context=upc,
             sensitivity_zone="green",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             consent_at=None,
             content={"k": "v"},
         )
@@ -214,6 +221,7 @@ class TestCheck3DeletionReasonNullness:
                 personal_context=upc,
                 sensitivity_zone="green",
                 source="explicit",
+                provenance="user_stated",  # CHECK 5 (DRF-1263)
                 # No delete timestamps set:
                 delete_requested_at=None,
                 soft_deleted_at=None,
@@ -230,6 +238,7 @@ class TestCheck3DeletionReasonNullness:
                 personal_context=upc,
                 sensitivity_zone="green",
                 source="explicit",
+                provenance="user_stated",  # CHECK 5 (DRF-1263)
                 soft_deleted_at=_now(),  # tombstone present
                 delete_requested_at=_now(),
                 deletion_reason=None,  # but reason missing — forbidden
@@ -243,6 +252,7 @@ class TestCheck3DeletionReasonNullness:
             personal_context=upc,
             sensitivity_zone="green",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             delete_requested_at=None,
             soft_deleted_at=None,
             deletion_reason=None,
@@ -259,9 +269,145 @@ class TestCheck3DeletionReasonNullness:
             personal_context=upc,
             sensitivity_zone="green",
             source="explicit",
+            provenance="user_stated",  # CHECK 5 (DRF-1263)
             delete_requested_at=now,
             soft_deleted_at=now,
             deletion_reason="user_delete",
+            content={"k": "v"},
+        )
+        assert entry.pk is not None
+
+
+class TestCheck4DeletedStatusMatchesTombstone:
+    """DRF-1263 / CHECK 4 — `status='deleted'` ⇔ `soft_deleted_at IS NOT NULL`.
+
+    Deliberately narrowed: `status IS NULL` is exempt. `status` is nullable
+    until the Step-4 writer stamps every row (inferred/signal rows are
+    unstamped by design, MDC §3.1), and migration 0016 exists precisely to
+    fill NULLs — a constraint forbidding NULL here would make the state that
+    0016 migrates FROM unrepresentable.
+    """
+
+    def test_active_status_with_tombstone_raises(self, upc):
+        """The exact row every deletion minted before DRF-1263."""
+        with transaction.atomic(), pytest.raises(IntegrityError):
+            MemoryEntry.objects.create(
+                user_id=upc.user_id,
+                personal_context=upc,
+                sensitivity_zone="green",
+                source="explicit",
+                provenance="user_stated",
+                status="active",
+                soft_deleted_at=_now(),
+                delete_requested_at=_now(),
+                deletion_reason="user_delete",
+                content={"k": "v"},
+            )
+
+    def test_deleted_status_without_tombstone_raises(self, upc):
+        """The mirror lie — «deleted» with nothing actually deleted."""
+        with transaction.atomic(), pytest.raises(IntegrityError):
+            MemoryEntry.objects.create(
+                user_id=upc.user_id,
+                personal_context=upc,
+                sensitivity_zone="green",
+                source="explicit",
+                provenance="user_stated",
+                status="deleted",
+                content={"k": "v"},
+            )
+
+    def test_deleted_status_with_tombstone_allowed(self, upc):
+        now = _now()
+        entry = MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone="green",
+            source="explicit",
+            provenance="user_stated",
+            status="deleted",
+            soft_deleted_at=now,
+            delete_requested_at=now,
+            deletion_reason="user_delete",
+            content={"k": "v"},
+        )
+        assert entry.pk is not None
+
+    def test_deletion_pending_without_tombstone_allowed(self, upc):
+        """Delete requested, sweep not yet run — legal interim state."""
+        entry = MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone="green",
+            source="explicit",
+            provenance="user_stated",
+            status="deletion_pending",
+            delete_requested_at=_now(),
+            deletion_reason="user_delete",
+            content={"k": "v"},
+        )
+        assert entry.pk is not None
+
+    def test_null_status_is_exempt(self, upc):
+        """Unstamped legacy row — pre-0016 shape must stay representable."""
+        now = _now()
+        entry = MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone="green",
+            source="inferred",
+            last_inferred_at=now,
+            status=None,
+            soft_deleted_at=now,
+            delete_requested_at=now,
+            deletion_reason="user_delete",
+            content={"k": "v"},
+        )
+        assert entry.pk is not None
+
+
+class TestCheck5ExplicitRequiresProvenance:
+    """DRF-1263 / CHECK 5 — `source='explicit'` → `provenance IS NOT NULL`.
+
+    MDC §3.1 allows exactly two provenance values. Today the invariant lives
+    in ONE `if` in memory_writer, so any other writer (admin, shell, a future
+    importer) can mint `source='explicit', provenance=NULL` — making NULL a
+    de-facto third value the contract does not know.
+
+    inferred/signal rows keep `provenance=NULL` on purpose: promotion to
+    `user_confirmed_inference` requires the proposal flow (OR-MEM-3).
+    """
+
+    def test_explicit_without_provenance_raises(self, upc):
+        with transaction.atomic(), pytest.raises(IntegrityError):
+            MemoryEntry.objects.create(
+                user_id=upc.user_id,
+                personal_context=upc,
+                sensitivity_zone="green",
+                source="explicit",
+                provenance=None,
+                content={"k": "v"},
+            )
+
+    def test_explicit_with_provenance_allowed(self, upc):
+        entry = MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone="green",
+            source="explicit",
+            provenance="user_stated",
+            content={"k": "v"},
+        )
+        assert entry.pk is not None
+
+    def test_inferred_without_provenance_allowed(self, upc):
+        entry = MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone="green",
+            source="inferred",
+            last_inferred_at=_now(),
+            provenance=None,
             content={"k": "v"},
         )
         assert entry.pk is not None

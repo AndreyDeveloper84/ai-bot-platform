@@ -19,6 +19,7 @@ from apps.identity.models import MemoryEntry
 
 _MIG_0017 = ("identity", "0017_memoryentry_provenance")
 _MIG_0018 = ("identity", "0018_memoryentry_provenance_backfill")
+_MIG_HEAD = ("identity", "0019_memoryentry_lifecycle_constraints")
 
 _TS = datetime(2026, 1, 10, 12, 0, 0, tzinfo=tz.utc)
 
@@ -34,10 +35,16 @@ def _apps_at(target):
 
 @pytest.fixture
 def at_0017():
-    """Migrate down to 0017; ALWAYS return to 0018 afterwards."""
+    """Migrate down to 0017; ALWAYS return to the chain HEAD afterwards.
+
+    Head, not 0018: migrating «to 0018» unapplies everything after it, and
+    since pytest-django reuses one database for the whole session that would
+    silently strip migration 0019's CHECK constraints from every test that
+    runs later (DRF-1263).
+    """
     _executor().migrate([_MIG_0017])
     yield _apps_at(_MIG_0017)
-    _executor().migrate([_MIG_0018])
+    _executor().migrate([_MIG_HEAD])
 
 
 def _row(apps, upc, *, source="explicit", **fields) -> uuid.UUID:
@@ -62,8 +69,16 @@ def _field(apps, pk, name):
 
 @pytest.mark.django_db
 class TestProvenanceSchema:
-    def test_provenance_nullable(self, db):
-        """1. The field is optional — a row without it is valid and NULL."""
+    def test_provenance_nullable_for_inferred(self, db):
+        """1. The field is optional — an inferred row is valid with NULL.
+
+        Narrowed by DRF-1263: the column stays nullable, but CHECK 5
+        (migration 0019) forbids NULL on `source='explicit'`. NULL is now
+        exactly what it was supposed to mean — «not yet confirmed through the
+        proposal flow» — instead of a de-facto third provenance value.
+        """
+        from django.utils import timezone
+
         from apps.identity.models import UserPersonalContext
 
         upc = UserPersonalContext.objects.create(user_id=uuid.uuid4())
@@ -71,12 +86,14 @@ class TestProvenanceSchema:
             user_id=upc.user_id,
             personal_context=upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
-            source=MemoryEntry.SOURCE_EXPLICIT,
+            source=MemoryEntry.SOURCE_INFERRED,
+            last_inferred_at=timezone.now(),  # CHECK 1
             kind="lifestyle",
             content={"key": "diet", "value": "vegan"},
         )
         entry.refresh_from_db()
         assert entry.provenance is None
+        assert MemoryEntry._meta.get_field("provenance").null is True
 
     def test_choices_are_canonical_only(self):
         """2. Exactly the §3.1 vocabulary — nothing else, no confidence."""

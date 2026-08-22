@@ -130,6 +130,7 @@ def test_delete_requested_entries_stay_hidden_after_restore(tmp_path: Path) -> N
         personal_context=upc,
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
         kind="preference",
         content={"preference": "live"},
     )
@@ -138,6 +139,7 @@ def test_delete_requested_entries_stay_hidden_after_restore(tmp_path: Path) -> N
         personal_context=upc,
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
         kind="preference",
         content={"preference": "user_asked_to_forget"},
         delete_requested_at=timezone.now(),
