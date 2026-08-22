@@ -9,8 +9,9 @@ Two operations, both append the 152-ФЗ audit trail:
 
 - :func:`soft_delete_green_entries` — per-entry erasure. Sets
   ``delete_requested_at`` + ``soft_deleted_at`` + ``deletion_reason='user_delete'``
-  in one UPDATE (ADR-0011 §11.3 soft-delete tombstone; the async purge job
-  hard-deletes after retention). The read-gate hides the row immediately.
+  + ``status='deleted'`` + ``updated_at`` in one UPDATE (ADR-0011 §11.3
+  soft-delete tombstone; the async purge job hard-deletes after retention).
+  The read-gate hides the row immediately.
 - :func:`request_forget_all` — mass erasure INTENT. Sets
   ``UPC.forget_all_requested_at``; the async sweep then soft-deletes every
   entry. The read-gate already treats ``forget_all_requested_at`` as «forgotten»
@@ -58,6 +59,16 @@ def soft_delete_green_entries(
             delete_requested_at=now,
             soft_deleted_at=now,
             deletion_reason=MemoryEntry.DELETION_REASON_USER_DELETE,
+            # DRF-1263 — `status` moves in the SAME UPDATE as the tombstone.
+            # Without it every deletion after migration 0016 minted
+            # `status='active' AND soft_deleted_at IS NOT NULL`: a state the
+            # contract forbids, and one that puts the forgotten fact back in
+            # front of the person the moment a read path filters by `status`
+            # (Migration Plan step 5). `updated_at` moves too — deletion is a
+            # state transition (MDC §3.1), and it is the only record of when
+            # it happened. CHECK 4 (migration 0019) now enforces the pair.
+            status=MemoryEntry.STATUS_DELETED,
+            updated_at=now,
         )
 
     if deleted:

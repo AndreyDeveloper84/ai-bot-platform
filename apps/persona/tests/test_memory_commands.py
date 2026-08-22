@@ -19,6 +19,7 @@ def _upc_with_green(value="vegan"):
         personal_context=upc,
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
         kind="lifestyle",
         content={"key": "diet", "value": value},
     )

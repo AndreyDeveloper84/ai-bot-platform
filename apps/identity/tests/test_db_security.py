@@ -68,6 +68,7 @@ def red_entry(upc):
         personal_context=upc,
         sensitivity_zone="red",
         source="explicit",
+        provenance="user_stated",  # CHECK 5 (DRF-1263)
         consent_at=timezone.now(),
         content={"marker": "PII_CANARY"},
     )
@@ -81,6 +82,7 @@ def green_entry(upc):
         personal_context=upc,
         sensitivity_zone="green",
         source="explicit",
+        provenance="user_stated",  # CHECK 5 (DRF-1263)
         content={"diet": "vegetarian"},
     )
 

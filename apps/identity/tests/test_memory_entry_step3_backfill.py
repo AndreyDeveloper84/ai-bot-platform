@@ -23,6 +23,7 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 _MIG_0015 = ("identity", "0015_memoryentry_consent_scope_and_more")
 _MIG_0016 = ("identity", "0016_memoryentry_step3_backfill")
+_MIG_HEAD = ("identity", "0019_memoryentry_lifecycle_constraints")
 
 _TS = datetime(2026, 1, 10, 12, 0, 0, tzinfo=tz.utc)
 
@@ -39,10 +40,13 @@ def _apps_at(target):
 @pytest.fixture
 def at_0015():
     """Migrate down to 0015; ALWAYS return to the chain head afterwards
-    (0017 adds the `provenance` column the runtime model writes)."""
+    (0017 adds the `provenance` column the runtime model writes; 0019 the
+    lifecycle CHECK constraints). The target MUST be the real head — the
+    session shares one database, so returning to an earlier node leaves every
+    later test running against a schema with the constraints stripped."""
     _executor().migrate([_MIG_0015])
     yield _apps_at(_MIG_0015)
-    _executor().migrate([("identity", "0018_memoryentry_provenance_backfill")])
+    _executor().migrate([_MIG_HEAD])
 
 
 def _row(apps, upc, *, created_at=_TS, source="explicit", **fields) -> uuid.UUID:

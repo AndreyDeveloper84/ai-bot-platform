@@ -26,6 +26,7 @@ def _green(upc, **overrides):
         personal_context=upc,
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
         kind="lifestyle",
         content={"key": "diet", "value": "vegan"},
     )
@@ -99,3 +100,55 @@ class TestRequestForgetAll:
         uid = uuid.uuid4()
         assert request_forget_all(uid) is True
         assert UserPersonalContext.objects.get(user_id=uid).forget_all_requested_at is not None
+
+
+class TestDeletionStampsStatus:
+    """DRF-1263 — a soft-deleted entry must not stay ``status='active'``.
+
+    Migration 0016 backfilled `status`; the deleter never wrote it, so every
+    deletion after 0016 minted a row in a state the contract forbids
+    (`status='active' AND soft_deleted_at IS NOT NULL`). The cost surfaces the
+    moment any read path filters by `status` — Migration Plan step 5.
+    """
+
+    def test_deleted_entry_is_not_returned_by_a_status_active_filter(self):
+        """THE regression: the row must disappear from a status-based read.
+
+        This is the query Step 5 will ship. Written against the read, not
+        against the field, because «status is set» is not the promise —
+        «the человек asked to forget it and it stays forgotten» is.
+        """
+        upc = _upc()
+        e = _green(upc, status=MemoryEntry.STATUS_ACTIVE)
+
+        soft_delete_green_entries(upc.user_id, [e.id])
+
+        live = MemoryEntry.objects.filter(user_id=upc.user_id, status=MemoryEntry.STATUS_ACTIVE)
+        assert list(live) == [], (
+            "A soft-deleted entry is still returned by a status='active' "
+            "filter — the deleted fact comes back into the выдача."
+        )
+
+    def test_soft_delete_sets_status_deleted(self):
+        upc = _upc()
+        e = _green(upc, status=MemoryEntry.STATUS_ACTIVE)
+        soft_delete_green_entries(upc.user_id, [e.id])
+        e.refresh_from_db()
+        assert e.status == MemoryEntry.STATUS_DELETED
+
+    def test_status_is_stamped_in_the_same_update_as_the_timestamps(self):
+        """No window in which soft_deleted_at is set and status is not."""
+        upc = _upc()
+        e = _green(upc, status=MemoryEntry.STATUS_ACTIVE)
+        soft_delete_green_entries(upc.user_id, [e.id])
+        e.refresh_from_db()
+        assert (e.status == MemoryEntry.STATUS_DELETED) == (e.soft_deleted_at is not None)
+
+    def test_unstamped_legacy_row_also_gets_status(self):
+        """A row written before the step-3.5 stamp (status NULL) still lands
+        in a contract-legal state after deletion."""
+        upc = _upc()
+        e = _green(upc, status=None)
+        soft_delete_green_entries(upc.user_id, [e.id])
+        e.refresh_from_db()
+        assert e.status == MemoryEntry.STATUS_DELETED

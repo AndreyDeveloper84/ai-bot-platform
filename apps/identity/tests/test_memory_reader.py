@@ -24,6 +24,7 @@ def _green(upc, **overrides):
         personal_context=upc,
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
         kind="lifestyle",
         content={"key": "diet", "value": "vegan"},
     )
@@ -77,6 +78,7 @@ class TestReadPersonalContext:
             personal_context=upc,
             sensitivity_zone=MemoryEntry.SENSITIVITY_YELLOW,
             source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,  # CHECK 5 (DRF-1263)
             consent_at=timezone.now(),
             content={"key": "yellow_fact"},
         )
