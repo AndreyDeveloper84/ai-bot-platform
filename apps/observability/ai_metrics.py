@@ -91,6 +91,8 @@ def record_ai_request(
     llm_tokens_input: Optional[int] = None,
     llm_tokens_output: Optional[int] = None,
     llm_cost_usd: Optional[Decimal] = None,
+    llm_model: str = "",
+    llm_pass_index: Optional[int] = None,
 ) -> AIRequestMetric:
     """Record one `AIRequestMetric` row for the just-completed AI request.
 
@@ -118,6 +120,10 @@ def record_ai_request(
         llm_tokens_input: Input tokens billed. NULL when no LLM.
         llm_tokens_output: Output tokens billed. NULL when no LLM.
         llm_cost_usd: USD cost for the LLM call (6 dp precision). NULL when no LLM.
+        llm_model: Vendor-resolved model id (e.g. `"gpt-4o-mini"`). Empty when
+            no LLM call. DRF-1211.
+        llm_pass_index: 1-based index of the LLM call within one user turn
+            (multi-pass concierge, DRF-1266). NULL for single-pass writers.
 
     Returns:
         The persisted `AIRequestMetric` row.
@@ -151,6 +157,8 @@ def record_ai_request(
         llm_tokens_input=llm_tokens_input,
         llm_tokens_output=llm_tokens_output,
         llm_cost_usd=llm_cost_usd,
+        llm_model=llm_model,
+        llm_pass_index=llm_pass_index,
         outcome=outcome,
     )
 

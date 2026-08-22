@@ -286,6 +286,24 @@ class AIRequestMetric(models.Model):
         help_text="USD cost for this single LLM call (6 dp = 0.000001 = a fraction of "
         "a cent). Drives the Cost per Request < $0.01 threshold. NULL when no LLM call.",
     )
+    llm_model = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Vendor-resolved model id for this LLM call (e.g. 'gpt-4o-mini', "
+        "'claude-haiku-4-5'). Empty when no LLM call or the writer predates "
+        "DRF-1211 (pipeline / shadow paths). Needed to attribute cost to a "
+        "model when SKILL_LLM_PROVIDER reroutes a skill.",
+    )
+    llm_pass_index = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="1-based index of the LLM call within one user turn "
+        "(multi-pass concierge, DRF-1266: 1 = first call, 2+ = follow-up "
+        "passes fed with the tool result). NULL for single-pass writers "
+        "(pipeline, shadow) — separates the cost of multi-pass from "
+        "general traffic growth.",
+    )
 
     # ─── Outcome ─────────────────────────────────────────────────────────
     outcome = models.CharField(
