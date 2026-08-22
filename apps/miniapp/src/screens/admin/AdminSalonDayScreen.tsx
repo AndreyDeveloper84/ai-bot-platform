@@ -103,6 +103,11 @@ function VisitRow({
   // of it had ever run. Offered on anything still open, including a visit
   // in progress: the front desk closes it as the customer leaves.
   const closable = !released && visit.status !== "completed";
+  // A closed visit HAPPENED — it must not be struck through, which on this
+  // board means «the slot was freed». Same pixels for «состоялся» and
+  // «отменён» is precisely the confusion the screen exists to prevent, and
+  // it only became visible once there was a button to close one.
+  const closed = visit.status === "completed";
   return (
     <li
       className="salon-day__visit"
@@ -110,7 +115,7 @@ function VisitRow({
         display: "flex",
         gap: "var(--s-2)",
         padding: "var(--s-2) 0",
-        opacity: released ? 0.55 : 1,
+        opacity: released || closed ? 0.55 : 1,
         textDecoration: released ? "line-through" : "none",
       }}
     >
@@ -120,13 +125,25 @@ function VisitRow({
       <span style={{ flex: 1 }}>
         <span style={{ fontWeight: 600 }}>{clientLabel(visit)}</span>
         {visit.service_name ? ` · ${visit.service_name}` : ""}
-        {visit.is_in_progress && (
+        {visit.is_in_progress && !closed && (
           <span
             className="badge"
             style={{ marginInlineStart: "var(--s-2)" }}
             aria-label="Визит идёт сейчас"
           >
             идёт
+          </span>
+        )}
+        {closed && (
+          <span
+            className="badge"
+            style={{
+              marginInlineStart: "var(--s-2)",
+              color: "var(--c-text-secondary)",
+            }}
+            aria-label="Визит закрыт"
+          >
+            закрыт
           </span>
         )}
       </span>

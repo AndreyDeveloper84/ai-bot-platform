@@ -390,3 +390,66 @@ describe("closing a visit", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("a closed visit reads as closed, not as cancelled", () => {
+  function dayWith(over = {}) {
+    return dayResponse({
+      summary: { total: 1, upcoming: 0, completed: 1, released: 0 },
+      masters: [
+        {
+          master_id: "m-1",
+          name: "Анна Петрова",
+          is_active: true,
+          visits: [visit(over)],
+        },
+      ],
+    });
+  }
+
+  it("marks it «закрыт»", async () => {
+    mockedDay.mockResolvedValue(dayWith({ status: "completed" }));
+    renderScreen();
+
+    expect(await screen.findByLabelText("Визит закрыт")).toBeInTheDocument();
+  });
+
+  it("does not strike it through — the visit happened", async () => {
+    mockedDay.mockResolvedValue(dayWith({ status: "completed" }));
+    renderScreen();
+
+    const row = (await screen.findByText("Мария И.")).closest("li");
+    // Struck through on this board means «the slot was freed». A closed
+    // visit is the opposite claim: the customer came and was served.
+    expect(row).toHaveStyle({ textDecoration: "none" });
+  });
+
+  it("still strikes a cancelled one through", async () => {
+    mockedDay.mockResolvedValue(dayWith({ status: "cancelled" }));
+    renderScreen();
+
+    const row = (await screen.findByText("Мария И.")).closest("li");
+    expect(row).toHaveStyle({ textDecoration: "line-through" });
+    expect(screen.queryByLabelText("Визит закрыт")).not.toBeInTheDocument();
+  });
+
+  it("offers no closing button on an already closed visit", async () => {
+    mockedDay.mockResolvedValue(dayWith({ status: "completed" }));
+    renderScreen();
+
+    await screen.findByText("Мария И.");
+    expect(
+      screen.queryByRole("button", { name: /Визит состоялся: Мария/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("prefers «закрыт» over «идёт» when both could apply", async () => {
+    mockedDay.mockResolvedValue(
+      dayWith({ status: "completed", is_in_progress: true }),
+    );
+    renderScreen();
+
+    await screen.findByText("Мария И.");
+    expect(screen.getByLabelText("Визит закрыт")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Визит идёт сейчас")).not.toBeInTheDocument();
+  });
+});
