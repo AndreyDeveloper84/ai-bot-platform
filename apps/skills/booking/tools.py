@@ -3430,18 +3430,29 @@ def _upsert_remote_booking_proxy(
         # a cross-tenant appointment_id collision surfaces as an IntegrityError
         # (caught by the best-effort guard below) instead of silently
         # overwriting another tenant's mirror row.
+        defaults: dict[str, Any] = {
+            "bot_user": bot_user,
+            "start_at": start_at,
+            "end_at": end_at,
+            "status": RemoteBookingProxy.Status.CONFIRMED,
+            "source": RemoteBookingProxy.Source.AUTOMATION,
+        }
+        # Only write what we actually know. Ayla's appointment payload does
+        # not expose the salon service at all, so a reschedule whose
+        # response omits it used to overwrite a good service_id with NULL —
+        # silently turning a named visit on the day board into a nameless
+        # one. Absent means «no news», never «it is gone».
+        service_uuid = _as_uuid(raw.get("service_id"))
+        if service_uuid is not None:
+            defaults["service_id"] = service_uuid
+        specialist_uuid = _as_uuid(raw.get("specialist_id"))
+        if specialist_uuid is not None:
+            defaults["specialist_id"] = specialist_uuid
+
         RemoteBookingProxy.all_tenants.update_or_create(
             appointment_id=_as_uuid(appt),
             tenant=tenant,
-            defaults={
-                "bot_user": bot_user,
-                "start_at": start_at,
-                "end_at": end_at,
-                "status": RemoteBookingProxy.Status.CONFIRMED,
-                "source": RemoteBookingProxy.Source.AUTOMATION,
-                "service_id": _as_uuid(raw.get("service_id")),
-                "specialist_id": _as_uuid(raw.get("specialist_id")),
-            },
+            defaults=defaults,
         )
     except Exception:  # noqa: BLE001 — mirror write is best-effort (see docstring)
         logger.exception("booking.proxy.upsert_failed appt=%s", appt)
