@@ -132,8 +132,25 @@ class PIITokenizingProvider:
         temperature: float = 0.0,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> CompletionResult:
         """Tokenize messages → wrapped.complete() → detokenize response."""
+        # DRF-1286 — `tool_choice` is forwarded ONLY when the caller asked
+        # for it. Two reasons, both about not breaking what we wrap:
+        #
+        # 1. Forced tool use is a once-per-turn exception (the concierge's
+        #    promise-without-tool retry). Putting the parameter into every
+        #    call would change the call shape of every skill on the
+        #    platform for a feature none of them use.
+        # 2. The wrapped object is duck-typed. Not every implementation
+        #    accepts every parameter — the Anthropic adapter in ai-core
+        #    was already found poorer than expected once (no `role="tool"`)
+        #    — and an unconditional kwarg turns "does not support forcing"
+        #    into a TypeError on an ordinary, unrelated call.
+        optional: dict[str, Any] = {}
+        if tool_choice is not None:
+            optional["tool_choice"] = tool_choice
+
         # Settings gate — allows tests / smoke flows to disable PII
         # tokenization without monkey-patching the decorator. Defaults
         # to True (152-ФЗ §6 compliance MUST be on by default;
@@ -147,6 +164,7 @@ class PIITokenizingProvider:
                 temperature=temperature,
                 tools=tools,
                 max_tokens=max_tokens,
+                **optional,
             )
 
         conversation_id = pii_tokenizer.current_conversation_id()
@@ -167,6 +185,7 @@ class PIITokenizingProvider:
                 temperature=temperature,
                 tools=tools,
                 max_tokens=max_tokens,
+                **optional,
             )
 
         tokenized_messages = [
@@ -179,6 +198,7 @@ class PIITokenizingProvider:
             temperature=temperature,
             tools=tools,
             max_tokens=max_tokens,
+            **optional,
         )
         # Audit row — 152-ФЗ transit pseudonymisation evidence. Payload
         # carries ONLY tokenized-counts + structured metadata; raw user

@@ -38,6 +38,15 @@ OpenAI); we collect them into the same provider-agnostic
 :class:`apps.llm.protocol.ToolCall` list so call sites stay
 vendor-blind.
 
+Forced tool use (DRF-1286) is likewise renamed, not missing:
+OpenAI's ``tool_choice="required"`` is Anthropic's
+``tool_choice={"type": "any"}`` — «use one of the supplied tools,
+your choice which». :data:`_TOOL_CHOICE_MAP` holds the translation
+so a caller passing the canonical protocol string gets forced tool
+use on BOTH providers. This matters because the provider is an
+operator switch (``SKILL_LLM_PROVIDER``): a feature that silently
+no-ops after a flip is the defect class this mapping prevents.
+
 ### Messages API mapping
 
 ChatML ``messages=[{role: system, ...}]`` is split: Anthropic puts
@@ -88,6 +97,18 @@ logger = logging.getLogger(__name__)
 # Decision 18 — pinned default models. Override per-call via ``model=`` kwarg.
 _DEFAULT_INTENT_MODEL = "claude-haiku-4-5"
 _DEFAULT_REPLY_MODEL = "claude-sonnet-4-6"
+
+
+# DRF-1286 — canonical protocol ``tool_choice`` string → Anthropic's
+# object form. ``"required"`` → ``{"type": "any"}`` is the forced-tool-use
+# equivalent: the model must emit a tool_use block, but picks which tool.
+# (``{"type": "tool", "name": ...}`` would pin a specific tool — not what
+# the canonical string means, so it is deliberately unmapped.)
+_TOOL_CHOICE_MAP: dict[str, dict[str, str]] = {
+    "auto": {"type": "auto"},
+    "required": {"type": "any"},
+    "none": {"type": "none"},
+}
 
 
 # Sprint 7 / L7 (DRF-585) — Redis key + TTL for daily token counter.
@@ -164,8 +185,15 @@ class AnthropicProvider:
         temperature: float = 0.0,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> CompletionResult:
         """Anthropic Messages API call with L7 daily-token cap.
+
+        ``tool_choice`` (DRF-1286) takes the canonical protocol string and
+        is translated through :data:`_TOOL_CHOICE_MAP`. An unknown value is
+        dropped with a WARNING rather than forwarded — Anthropic rejects a
+        bare string with 400, and a hard failure here would turn a caller
+        typo into a customer-visible LLM error.
 
         Returns :class:`CompletionResult`; raises
         :class:`apps.llm.protocol.LLMProviderQuotaExceeded` when our
@@ -212,6 +240,18 @@ class AnthropicProvider:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = [_to_anthropic_tool(spec) for spec in tools]
+            # DRF-1286 — forced tool use. Only meaningful alongside
+            # `tools`; Anthropic 400s on `tool_choice` without them.
+            if tool_choice:
+                mapped = _TOOL_CHOICE_MAP.get(tool_choice)
+                if mapped is None:
+                    logger.warning(
+                        "anthropic.complete: unsupported tool_choice=%r — ignored (supported: %s)",
+                        tool_choice,
+                        sorted(_TOOL_CHOICE_MAP),
+                    )
+                else:
+                    kwargs["tool_choice"] = mapped
 
         # Phase 1 / PI7 (DRF-858) — wrap the SDK call in exponential-
         # backoff retry. Symmetric with OpenAIProvider — same policy,

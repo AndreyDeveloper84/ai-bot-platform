@@ -131,6 +131,148 @@ def _to_openai_shape(result: Any) -> Any:
     )
 
 
+# -- DRF-1286 - "promised and never called the tool" -------------------
+#
+# The concierge advertises exactly two tools (show_masters,
+# ask_clarification) and its prompt pushes warm conversational prose. That
+# combination produces a specific silent failure: the model writes
+# "сейчас подберу вам мастеров" / "секундочку" and emits NO tool_call. The
+# turn looks successful - text was produced, tokens were billed, latency
+# was normal - but nothing happened, and the client waits for an action
+# that will never come.
+#
+# This is the failure the DRF-1102 audit named as the reason for the
+# regex short-circuit (:func:`generate_direct_show_masters_reply`: the
+# model "would loop re-asking instead of ever calling it"). The bypass
+# hides the symptom; this detector plus one forced-tool pass removes the
+# cause.
+#
+# Detection is stem-based on the reply text, ported from the legacy bot
+# (``legacy_maxbot/ai_concierge.py:163-196``), because Russian verbs
+# inflect and no LLM-side signal distinguishes the case: ``finish_reason``
+# is a plain "stop", the text is well-formed, and ``tool_calls`` is simply
+# absent. The only evidence is the promise itself.
+#
+# NOTE on evidence: this stem list is inherited, NOT measured — there is
+# no recorded concierge transcript in this repo to tune it against (the
+# `replay` recorder writes ReplayTrace rows only on the live path, and the
+# DRF-1102 audit these comments cite is not a committed document). Treat
+# the list as a first cut and re-tune it from the
+# `orchestrator.concierge.promise_without_tool` WARN + the
+# `fallback_triggered` metric rows once the pilot has produced some.
+#
+# Deliberately NARROWER than the legacy list. Legacy matched bare stems
+# ("подбер", "посмотр", "рассмотр"), which also fire on imperatives
+# aimed at the CLIENT ("подберите удобное время", "посмотрите
+# профиль") - and a false positive is not free: it forces a tool
+# call onto a turn the model answered correctly in words. We therefore
+# match first-person commitments and the wait-markers, both of which only
+# make sense when the assistant is about to act itself.
+_PROMISE_STEMS: tuple[str, ...] = (
+    # first-person commitment to act
+    "подберу",
+    "подберем",
+    "подберём",
+    "подбираю",
+    "подбираем",
+    "посмотрю",
+    "посмотрим",
+    "гляну",
+    "глянем",
+    "уточню",
+    "уточним",
+    "найду",
+    "поищу",
+    "покажу",
+    "покажем",
+    "проверю",
+    "проверим",
+    "помогу подобрать",
+    "помогу выбрать",
+    # explicit wait - an assistant that asks the client to wait without
+    # emitting a tool call is ALWAYS a bug: nothing is running.
+    "секундочк",
+    "минуточк",
+    "минутку",
+    "одну минут",
+    "одну секунд",
+    "подождит",
+    "подожди",
+    # "вот варианты" / "вот кто подойдёт" - announces a result
+    # that, without a tool call, does not exist.
+    "вот вариант",
+    "вот кто",
+    "вот подходящ",
+    # joint-action framing of the same promise
+    "давайте подбер",
+    "давай подбер",
+    "давайте уточн",
+    "давай уточн",
+    # DRF-1268 — the gate itself is tool-agnostic (it fires on "the model
+    # called NO tool", not on a list of action types), but this LEXICON was
+    # tuned on master-search vocabulary and missed "записываю 200 мл воды"
+    # entirely. Recording verbs are the promise form the nutrition tools
+    # (log_water, clarify_food_entry, start_nutrition_anketa,
+    # health_screening) attract, so they belong here too.
+    "запишу",
+    "запишем",
+    "записываю",
+    "сохраню",
+    "сохраним",
+    "сохраняю",
+    "зафиксирую",
+    "зафиксируем",
+    "оформлю",
+    "оформим",
+    "заполню",
+    "заполним",
+    "заведу",
+    # Deliberately NOT here: "добавлю" / "отмечу". Both are ordinary Russian
+    # discourse markers ("Добавлю, что цены могут отличаться") and would fire
+    # on turns the model answered correctly in words — the same false-positive
+    # cost that made this list narrower than the legacy one.
+)
+
+
+def _looks_like_promise_without_tool(content: str | None) -> bool:
+    """True when assistant prose promises an action it never triggered.
+
+    Substring match on lowercased text - stems, not whole words, so
+    "подберу"/"подберём" and "секундочку"/"секундочка" all hit
+    without a morphology dependency. Called ONLY when ``tool_calls`` is
+    empty, so a reply that both promises AND calls the tool never reaches
+    it.
+    """
+    if not content:
+        return False
+    text = content.lower()
+    return any(stem in text for stem in _PROMISE_STEMS)
+
+
+@dataclass(frozen=True)
+class ForcedToolRetry:
+    """Usage of the EXTRA, discarded LLM call in a forced retry (DRF-1286).
+
+    A forced retry always makes two calls and uses one of them. Whichever
+    answer loses, its tokens were still billed — so they get their own
+    ``AIRequestMetric`` row instead of being folded into the winner's,
+    which would make the feature read as free.
+
+    Which call is the discarded one depends on the outcome, so this
+    deliberately does NOT hard-code "the first attempt":
+
+    * the forced pass produced a tool call → we use it, the promise
+      attempt is discarded;
+    * the forced pass produced no tool call (provider ignored the
+      constraint) → we keep the promise attempt, the forced pass is the
+      discarded one.
+    """
+
+    prompt_tokens: int
+    completion_tokens: int
+    latency_ms: int
+
+
 class _RouterCompletions:
     """``chat.completions`` facade routed through ``apps.llm.router``.
 
@@ -148,6 +290,22 @@ class _RouterCompletions:
         # adapter's constant) — so the metric reader picks them up here.
         self.last_provider = ""
         self.last_model = ""
+        # DRF-1286 - promise-without-tool retry. Armed per pass by
+        # `generate_concierge_reply`: forcing a tool call is only correct
+        # while a tool call is still a legitimate outcome. On the
+        # DRF-1266 follow-up pass the prompt explicitly says "инструмент
+        # повторно не вызывай", so arming there would fight it.
+        self.force_tool_retry_armed = False
+        self._forced_retry: ForcedToolRetry | None = None
+
+    def take_forced_retry(self) -> "ForcedToolRetry | None":
+        """Pop the last pass's forced-retry telemetry (read-and-clear).
+
+        Read-and-clear so a retry on pass 1 can never be re-counted
+        against pass 2's metric row.
+        """
+        info, self._forced_retry = self._forced_retry, None
+        return info
 
     async def create(
         self,
@@ -161,7 +319,63 @@ class _RouterCompletions:
             return get_router().get_provider(None, skill=self._skill, op="complete")
 
         provider = await sync_to_async(_resolve, thread_sensitive=False)()
+        started = time.monotonic()
         result = await provider.complete(messages, model=model, tools=tools)
+
+        # DRF-1286 - one forced-tool pass, never a loop. The retry calls
+        # `provider.complete` DIRECTLY rather than re-entering `create`,
+        # so a second promise-without-tool answer structurally cannot
+        # trigger a third call: a model that ignored `tool_choice` twice
+        # will ignore it again, and the tokens would triple.
+        if (
+            self.force_tool_retry_armed
+            and tools
+            and not result.tool_calls
+            and _looks_like_promise_without_tool(result.text)
+        ):
+            first_latency_ms = int((time.monotonic() - started) * 1000)
+            logger.warning(
+                "orchestrator.concierge.promise_without_tool provider=%s "
+                "model=%s content=%r — retrying with tool_choice=required",
+                result.provider,
+                result.model,
+                (result.text or "")[:120],
+            )
+            retry_started = time.monotonic()
+            try:
+                forced = await provider.complete(
+                    messages, model=model, tools=tools, tool_choice="required"
+                )
+            except Exception as exc:  # noqa: BLE001 — keep the first answer
+                # The retry is an optimisation, not the turn. A failure
+                # here must not cost the client the reply we already have.
+                # No metric row either: nothing was billed.
+                logger.warning("orchestrator.concierge.forced_tool_retry_failed err=%s", exc)
+            else:
+                retry_latency_ms = int((time.monotonic() - retry_started) * 1000)
+                if forced.tool_calls:
+                    discarded, discarded_latency_ms = result, first_latency_ms
+                    result = forced
+                else:
+                    # Provider honoured the call but not the constraint (or
+                    # has no forced mode at all). Keeping the first answer
+                    # is strictly better than shipping a second tool-less
+                    # reply — the FORCED pass is what gets discarded here,
+                    # and it is its tokens that must be accounted for.
+                    logger.warning(
+                        "orchestrator.concierge.forced_tool_retry_no_tool_call "
+                        "provider=%s model=%s — provider ignored "
+                        "tool_choice=required",
+                        forced.provider,
+                        forced.model,
+                    )
+                    discarded, discarded_latency_ms = forced, retry_latency_ms
+                self._forced_retry = ForcedToolRetry(
+                    prompt_tokens=discarded.prompt_tokens or 0,
+                    completion_tokens=discarded.completion_tokens or 0,
+                    latency_ms=discarded_latency_ms,
+                )
+
         self.last_provider = result.provider or ""
         self.last_model = result.model or ""
         return _to_openai_shape(result)
@@ -182,6 +396,19 @@ class RouterLLMClient:
     def last_model(self) -> str:
         """Vendor-resolved model id of the most recent completion."""
         return self.chat.completions.last_model
+
+    def arm_forced_tool_retry(self, armed: bool) -> None:
+        """Enable/disable the DRF-1286 promise-without-tool retry.
+
+        Per-pass, not per-client: see
+        :meth:`_RouterCompletions.create` for why forcing a tool call is
+        only correct while a tool call is still a legitimate outcome.
+        """
+        self.chat.completions.force_tool_retry_armed = armed
+
+    def take_forced_retry(self) -> "ForcedToolRetry | None":
+        """Pop telemetry of a forced retry made during the last pass."""
+        return self.chat.completions.take_forced_retry()
 
 
 class GlobalConversationStore:
@@ -271,6 +498,25 @@ def _record_concierge_metric(
     invoice, not in data. ``llm_pass_index`` separates the first call from
     follow-up passes so the cost of multi-pass is distinguishable from
     general traffic growth.
+
+    DRF-1286 keeps that meaning intact rather than redefining it: the
+    field counts LLM CALLS within the turn (its documented contract), and
+    a forced-tool retry is one more such call, so it takes the next index
+    and pushes any later multi-pass call along. What tells the two apart
+    is ``fallback_triggered=True``, set on the DISCARDED
+    promise-without-tool attempt. Among ``skill_selected='concierge'``
+    rows that flag has exactly one meaning — the model promised an action
+    and never called the tool. (DRF-1283's deterministic branch also sets
+    it, but under ``skill_selected='concierge_direct'`` with a NULL
+    ``llm_pass_index``, so the two never mix in one filter.) So::
+
+        -- how often the model promises and never calls the tool
+        WHERE skill_selected='concierge' AND fallback_triggered
+
+        -- what those turns cost (discarded attempt + its forced retry)
+        ... plus the row at llm_pass_index+1 of the same request_id
+
+    «дорого» and «часто ошибается» read off separate columns.
 
     The metric row parks under the ``global_bot`` sentinel tenant — the
     same tenant that owns the global BotUser / Conversation rows — at
@@ -579,6 +825,15 @@ def generate_concierge_reply(
     in words. Budget exhausted with the model still calling the tool →
     the deterministic card render, i.e. exactly the pre-DRF-1266 reply.
 
+    Forced-tool retry (DRF-1286): on the FIRST pass only — the one where
+    a tool call is still a legitimate outcome — the client is armed to
+    detect «the model promised an action and emitted no tool_call» and
+    repeat that single call with ``tool_choice="required"``. Armed per
+    pass rather than globally because the DRF-1266 follow-up pass tells
+    the model NOT to call the tool again; forcing there would fight the
+    prompt. At most one extra call per turn, and it gets its own metric
+    row (see :func:`_record_concierge_metric`).
+
     Persists the assistant turn via the store (``persisted=True`` on the
     returned reply so the handler does NOT double-record). On any LLM
     failure degrades to the same safe fallback line as the legacy
@@ -607,6 +862,13 @@ def generate_concierge_reply(
 
     max_passes = _max_llm_passes()
     pass_index = 0
+    # DRF-1286 — index written to `llm_pass_index`. Tracked separately
+    # from `pass_index` because a forced-tool retry is an extra LLM CALL
+    # but NOT an extra multi-pass pass: it must not eat the DRF-1266
+    # budget (that budget counts tool round-trips, not model calls).
+    # Without a retry the two counters stay identical, so existing rows
+    # are unchanged.
+    llm_call_index = 0
     current_text = message_text
     # Cards of the most recent show_masters execution — kept so a failing or
     # budget-exhausted follow-up pass can still render real data instead of
@@ -618,6 +880,9 @@ def generate_concierge_reply(
     dto: Any = None
     while pass_index < max_passes:
         pass_index += 1
+        llm_call_index += 1
+        # DRF-1286 — arm only while a tool call is still the right answer.
+        llm_client.arm_forced_tool_retry(pass_index == 1)
         started = time.monotonic()
         try:
             dto = asyncio.run(
@@ -639,7 +904,7 @@ def generate_concierge_reply(
                 conversation=conversation,
                 trace_id=trace_id,
                 message_text=message_text,
-                pass_index=pass_index,
+                pass_index=llm_call_index,
                 outcome=AIRequestMetric.OUTCOME_ERROR,
                 latency_total_ms=int((time.monotonic() - started) * 1000),
                 llm_client=llm_client,
@@ -659,14 +924,41 @@ def generate_concierge_reply(
                     persisted=True,
                 )
             return DiscoveryReply(text=get_fallback("ru"))
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        # DRF-1286 — a forced-tool retry happened inside this pass: two
+        # LLM calls were billed and one answer was thrown away. Give the
+        # discarded call its own row, then hand the next index to the
+        # answer we actually used.
+        forced_retry = llm_client.take_forced_retry()
+        if forced_retry is not None:
+            _record_concierge_metric(
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                message_text=message_text,
+                pass_index=llm_call_index,
+                outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                fallback_triggered=True,
+                latency_total_ms=forced_retry.latency_ms,
+                dto=SimpleNamespace(
+                    tokens_in=forced_retry.prompt_tokens,
+                    tokens_out=forced_retry.completion_tokens,
+                    latency_ms=forced_retry.latency_ms,
+                ),
+                llm_client=llm_client,
+            )
+            llm_call_index += 1
+            # Never negative: both readings come from the same monotonic
+            # clock, but clamp anyway rather than write a bogus p95 input.
+            elapsed_ms = max(0, elapsed_ms - forced_retry.latency_ms)
         _record_concierge_metric(
             bot_user=bot_user,
             conversation=conversation,
             trace_id=trace_id,
             message_text=message_text,
-            pass_index=pass_index,
+            pass_index=llm_call_index,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
-            latency_total_ms=int((time.monotonic() - started) * 1000),
+            latency_total_ms=elapsed_ms,
             dto=dto,
             llm_client=llm_client,
         )
