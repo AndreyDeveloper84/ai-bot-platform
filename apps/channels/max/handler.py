@@ -766,6 +766,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     user_id=ayla_user_id,
                     text=event.text,
                     last_assistant_text=_last_assistant_content(history),
+                    # DRF-1261: the Ayla-side half of the loop (declared-prefs
+                    # merge into «покажи», field clearing on «забудь»).
+                    bot_user=bot_user,
                 )
                 if cmd is not None:
                     mem_reply = DiscoveryReply(text=cmd.text)
