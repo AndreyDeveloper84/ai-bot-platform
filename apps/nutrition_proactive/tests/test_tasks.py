@@ -17,9 +17,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
 from apps.integrations.ayla import SummaryResponse, WaterTodayResponse
-from apps.nutrition_proactive import prefs, tasks
+from apps.nutrition_proactive import prefs, selection, tasks
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
@@ -40,6 +41,17 @@ def tenant(db) -> Tenant:
     return Tenant.objects.create(slug="np-salon", name="Salon", timezone="Europe/Moscow")
 
 
+def grant_consent(bot_user: BotUser) -> ConsentRecord:
+    """Give ``bot_user`` the active 152-ФЗ record the gate asks for."""
+    return ConsentRecord.all_tenants.create(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        granted=True,
+        source="test:fixture",
+    )
+
+
 def make_user(
     tenant: Tenant,
     *,
@@ -51,11 +63,20 @@ def make_user(
     chat_id: str | None = None,
     extra_prefs: dict | None = None,
 ) -> BotUser:
-    """A recipient that clears every gate unless a flag says otherwise."""
+    """A recipient that clears every gate unless a flag says otherwise.
+
+    ``consented`` builds **both** halves of consent: the ``consent_at``
+    stamp and the ``ConsentRecord`` that proves it. Before DRF-1314 the
+    stamp alone was enough to pass this module's gate, which is the bug —
+    a fixture that still set only the column would be describing a person
+    the pilot has four of: stamped, and withdrawn. That the gate bites is
+    proven in ``TestConsentGate`` against users built without a record,
+    not by leaving this fixture half-built.
+    """
     now = datetime(2026, 5, 1, tzinfo=dt_timezone.utc)
     user_prefs = {"water_reminders": water, "daily_report_time": report}
     user_prefs.update(extra_prefs or {})
-    return BotUser.all_tenants.create(
+    user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
         channel_user_id=f"np-{suffix}",
@@ -65,6 +86,9 @@ def make_user(
         food_scanner_consent_at=now if consented else None,
         context={prefs.CONTEXT_KEY: user_prefs},
     )
+    if consented:
+        grant_consent(user)
+    return user
 
 
 def water_reader(total_ml: int, norm_ml: int = 2000):
@@ -199,7 +223,6 @@ class TestOptOutIsAbsolute:
 
     def test_excluded_by_the_queryset_not_merely_by_a_late_check(self, tenant: Tenant) -> None:
         user = make_user(tenant, opt_out=True)
-        from apps.nutrition_proactive import selection
 
         assert user.pk not in {u.pk for u in selection.base_queryset()}
 
@@ -230,6 +253,7 @@ class TestDefaultsAreOff:
             food_scanner_consent_at=datetime(2026, 5, 1, tzinfo=dt_timezone.utc),
             context={},
         )
+        grant_consent(user)
         water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
         report = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
         assert only(water, user).reason == "water_off"
