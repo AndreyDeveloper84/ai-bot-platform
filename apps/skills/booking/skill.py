@@ -1987,7 +1987,7 @@ def _render_part_picker(
         )
         return _build_skill_result(
             text=_PART_UNAVAILABLE_PROMPT.format(
-                day=day_label(date, today).lower(),
+                day=day_label(date, today),
                 part=PART_PHRASES[wanted_part],
             ),
             tool_calls_made=[],

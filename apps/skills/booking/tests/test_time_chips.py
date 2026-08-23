@@ -375,7 +375,7 @@ class TestStatedPreferenceIsHonoured:
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(_tap(context, "cb:book:pick_master:11:22"))
-        assert result.reply_text == ("завтра вечером у мастера свободного времени нет. Есть так:")
+        assert result.reply_text == "Завтра вечером у мастера свободного времени нет. Есть так:"
         assert _labels(result) == ["Утро (до 12:00)", "День (12:00–17:00)", "Точное время"]
 
     def test_a_stale_preference_does_not_hijack_a_later_booking(
