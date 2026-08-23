@@ -80,6 +80,7 @@ from apps.events.vocabulary import (
     MASTER_REACTIVATED,
 )
 from apps.identity.models import BotUser
+from apps.notifications.proactive import consent_blocker
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,12 @@ class FutureBookingPreview:
     client_last_initial: str
     duration_min: int | None
     fallback_masters: list[FallbackCandidate]
+    #: Why the bot may not message this client about the change, or ``""``
+    #: when it may (DRF-1307). Read on the preview screen so the operator
+    #: learns who they will have to phone **before** pressing a button
+    #: that cannot be undone — a message the cascade silently declines to
+    #: send is the harm this ticket's gate would otherwise introduce.
+    notify_blocked: str = ""
 
 
 @dataclass(frozen=True)
@@ -192,6 +199,10 @@ class DeactivationPreview:
     #: False when the mirror knows about more live future visits than the
     #: actionable set contains. Deactivation is refused while False.
     inventory_complete: bool = True
+    #: How many of ``future_bookings`` belong to a client the bot may not
+    #: message (DRF-1307). Non-zero means that many people will have to be
+    #: told by a human.
+    bookings_client_unreachable: int = 0
 
 
 @dataclass(frozen=True)
@@ -214,6 +225,12 @@ class DeactivationResult:
     cancelled_count: int
     customer_notifications_dispatched: int
     master_notifications_dispatched: int
+    #: Clients whose booking was moved or cancelled but who were NOT
+    #: written to, because the consent gate or the outbound safety check
+    #: refused (DRF-1307). Non-zero means somebody's visit changed and
+    #: only a human can tell them — the per-booking audit rows carry the
+    #: reason and the booking id.
+    customer_notifications_blocked: int = 0
 
 
 @dataclass(frozen=True)
@@ -226,13 +243,23 @@ class ReactivationResult:
 
 @dataclass
 class _PendingNotification:
-    """One customer DM to fire on commit (rendered text + hash + target)."""
+    """One customer DM to fire on commit (rendered text + hash + target).
+
+    ``blocked_reason`` is decided at PLAN time, inside the same
+    transaction that reassigns or cancels the booking, and lands in the
+    per-booking audit row (DRF-1307). Deciding it here rather than in
+    the ``on_commit`` dispatcher is what makes the decision auditable: a
+    client whose visit was moved or cancelled and who was *not* told
+    still needs telling, by a human, and the audit row is where an
+    operator finds out who that is and why.
+    """
 
     chat_id: str | None
     text: str
     hash_: str
     booking_id: str
     branch: str  # "reassign" or "cancel"
+    blocked_reason: str | None = None
 
 
 @dataclass
@@ -240,6 +267,7 @@ class _PendingMasterNotification:
     chat_id: str
     text: str
     master_id: str
+    blocked_reason: str | None = None
 
 
 # --- helpers --------------------------------------------------------------
@@ -312,6 +340,140 @@ def _render_customer_notification(
         else:
             rendered = _keep_branch(rendered, keep="CANCEL")
     return rendered.strip()
+
+
+def _customer_notification_blocker(bot_user) -> str | None:
+    """Why this client must not be written to, or ``None`` when they may be.
+
+    DRF-1307. Four conditions live in
+    :mod:`apps.notifications.proactive` — the person's global "do not
+    write to me first", a GDPR erasure, the 152-ФЗ welcome consent, and
+    an *active* ``ConsentRecord`` rather than the denormalised
+    ``consent_at`` column that a withdrawal never clears. Two more are
+    local to this cascade and are checked first because they are cheaper
+    and because "we have no address for them" is a different operator
+    problem from "they said no".
+
+    Measured on the pilot on 2026-08-23, against the twelve reachable
+    ``BotUser`` rows: **one** clears this gate. Four are blocked by a
+    withdrawn ``ConsentRecord`` while ``consent_at`` is set — the shape
+    that a single-column check waves through — six have never consented,
+    and one is an erased row that still has a ``chat_id``.
+
+    Whether a message about somebody's *own confirmed booking* should be
+    gated this hard is a live question, not a settled one, and it is
+    raised in ``docs/REPORT_DRF1307.md``: the docstring of
+    ``BotUser.proactive_messages_opt_out`` already carves reminders out
+    of the opt-out as «contract-required dispatch ahead of confirmed
+    bookings», and «вашу запись отменили» has at least as good a claim to
+    that carve-out as a T-24h reminder does. This implements the strict
+    reading, and pairs it with :attr:`FutureBookingPreview.notify_blocked`
+    so the operator sees who the bot may not reach *before* pressing an
+    irreversible button, and can pick up the phone.
+    """
+
+    if bot_user is None:
+        return "no_bot_user"
+    if not (getattr(bot_user, "chat_id", "") or "").strip():
+        return "no_chat_id"
+    return consent_blocker(bot_user)
+
+
+def _vet_catalogue_values(values: list[str]) -> None:
+    """Refuse the cascade when staff-edited catalogue text is unsafe to echo.
+
+    The outbound safety check is applied HERE, to the interpolated
+    values, and deliberately **not** to the administrator's own prose.
+
+    The brief for DRF-1307 listed :func:`~apps.orchestrator.safety.
+    outbound.evaluate_outbound` as the fourth missing defence for this
+    message. Run against the administrator's text it is the wrong tool,
+    and not marginally so. That filter was written for an LLM reply,
+    where a promise is illegitimate because the assistant has no
+    authority to make one. A salon administrator does have that
+    authority, and the ``promise`` category — ``гарантиру``, ``вернём
+    деньги``, ``сделаем скидку`` — is a list of the exact words somebody
+    uses to compensate a client whose appointment they just cancelled.
+    The ``contact`` category is the same trap in reverse: a salon phone
+    number is noise in an assistant's answer and is the single most
+    useful thing a cancellation notice can carry. Checked against five
+    realistic administrator messages, four were blocked; the one that
+    passed was the one that offered the client nothing.
+
+    What survives the argument is the part that is not the
+    administrator's: ``master.name`` and ``service_name`` are catalogue
+    text mirrored from Ayla and edited by salon staff, and a master name
+    carrying a phone number or an email is the untrusted-name path
+    DRF-1039 exists for. ``client_name`` is excluded too — echoing
+    somebody's own name back to them leaks nothing, and refusing an
+    entire deactivation because one client typed something odd into a
+    booking form would be a worse failure than the one it prevents.
+
+    Raises rather than dropping the message, and does so before the
+    cascade commits. That is the difference between this and the
+    recipient gate above: a withdrawn consent cannot be fixed and the
+    visit still has to be dealt with, so that case proceeds and reports.
+    A master name with a phone number in it **can** be fixed — in the
+    catalogue, in a minute — and the retry costs nothing because nothing
+    happened. Same stance the ``inventory_incomplete`` guard takes a few
+    dozen lines up: when the operator can still act, refuse rather than
+    report.
+    """
+
+    from apps.orchestrator.safety.outbound import evaluate_outbound
+
+    for value in values:
+        if not (value or "").strip():
+            continue
+        verdict = evaluate_outbound(value)
+        if verdict.blocked:
+            raise DeactivationError(
+                "notification_text_unsafe",
+                (
+                    "Catalogue text that would be quoted to clients trips the "
+                    f"outbound safety check ({', '.join(verdict.categories)}). "
+                    "Fix the master or service name in the catalogue and retry — "
+                    "nothing has been changed."
+                ),
+            )
+
+
+def _master_notification_blocker(bot_user) -> str | None:
+    """Why a staff DM must not go out, or ``None`` when it may.
+
+    Deliberately **not** the customer gate (DRF-1307). Two of the four
+    customer conditions do not transfer:
+
+    * ``consent_at`` / ``ConsentRecord`` — the 152-ФЗ welcome consent is
+      the basis for talking to a *client*. A master being told that N of
+      somebody else's bookings just landed on their calendar is an
+      operational notice under a working relationship, and gating it on
+      a consent nobody collects from staff would silently stop masters
+      finding out about work they are now responsible for. That failure
+      is worse than the one it prevents.
+    * ``proactive_messages_opt_out`` — same argument, and it is a
+      customer-facing switch set from a customer-facing skill.
+
+    Both are raised as open questions in ``docs/REPORT_DRF1307.md``
+    rather than decided here: whether staff DMs need a consent basis of
+    their own is an owner call, not something to settle inside a bug fix.
+
+    What does transfer:
+
+    * ``deleted_at`` — an erasure request is unambiguous whoever made it,
+      and ``soft_delete_user()`` leaves ``chat_id`` in place, so without
+      this an erased row stays a recipient.
+    The staff DM interpolates ``master.name``, which is catalogue text
+    and therefore untrusted — but that is vetted once, up front, by
+    :func:`_vet_catalogue_values`, which refuses the whole cascade
+    rather than dropping one DM. Nothing is left to check per-recipient.
+    """
+
+    if bot_user is None:
+        return "no_bot_user"
+    if getattr(bot_user, "deleted_at", None) is not None:
+        return "deleted"
+    return None
 
 
 def _keep_branch(text: str, *, keep: str) -> str:
@@ -503,6 +665,7 @@ def _build_booking_preview(
         fallback_masters=_find_fallback_masters(
             booking, deactivating_master_id=deactivating_master_id
         ),
+        notify_blocked=_customer_notification_blocker(booking.bot_user) or "",
     )
 
 
@@ -575,6 +738,7 @@ def preview_deactivation(
         bookings_without_fallback=without_fb,
         mirror_future_bookings=mirror_count,
         inventory_complete=inventory_complete,
+        bookings_client_unreachable=sum(1 for p in previews if p.notify_blocked),
     )
 
 
@@ -761,6 +925,16 @@ def execute_deactivation(
                     f"target master {target.id} does not perform service {booking.service_id}",
                 )
 
+        # DRF-1307 — vet every catalogue string this cascade is about to
+        # quote to a client, once, before anything is mutated. A hit here
+        # is fixable in the catalogue and the retry is free; a hit found
+        # halfway through would not be.
+        _vet_catalogue_values(
+            [master.name]
+            + [t.name for t in reassign_targets.values()]
+            + [by_id[a.booking_id].service_name or "" for a in plan]
+        )
+
         reassigned_count = 0
         cancelled_count = 0
 
@@ -786,6 +960,9 @@ def execute_deactivation(
                     master_name=target.name,
                 )
 
+                bu = booking.bot_user
+                notify_blocked = _customer_notification_blocker(bu)
+
                 payload = {
                     "master_id": str(master.id),
                     "actor_id": str(actor.pk),
@@ -796,6 +973,7 @@ def execute_deactivation(
                     "to_master_id": str(target.id),
                     "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
                     "customer_notification_message_hash": msg_hash,
+                    "customer_notification_blocked": notify_blocked or "",
                 }
                 write_audit(
                     MASTER_BOOKINGS_REASSIGNED,
@@ -806,7 +984,6 @@ def execute_deactivation(
                 )
                 emit(MASTER_BOOKINGS_REASSIGNED, properties=payload)
 
-                bu = booking.bot_user
                 pending_customer_notifications.append(
                     _PendingNotification(
                         chat_id=bu.chat_id if bu else None,
@@ -814,6 +991,7 @@ def execute_deactivation(
                         hash_=msg_hash,
                         booking_id=str(booking.id),
                         branch="reassign",
+                        blocked_reason=notify_blocked,
                     )
                 )
                 reassigned_count += 1
@@ -856,6 +1034,9 @@ def execute_deactivation(
                             status=409,
                         ) from exc
 
+                bu = booking.bot_user
+                notify_blocked = _customer_notification_blocker(bu)
+
                 payload = {
                     "master_id": str(master.id),
                     "actor_id": str(actor.pk),
@@ -864,6 +1045,7 @@ def execute_deactivation(
                     "booking_id": str(booking.id),
                     "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
                     "customer_notification_message_hash": msg_hash,
+                    "customer_notification_blocked": notify_blocked or "",
                 }
                 write_audit(
                     MASTER_BOOKINGS_CANCELLED,
@@ -874,7 +1056,6 @@ def execute_deactivation(
                 )
                 emit(MASTER_BOOKINGS_CANCELLED, properties=payload)
 
-                bu = booking.bot_user
                 pending_customer_notifications.append(
                     _PendingNotification(
                         chat_id=bu.chat_id if bu else None,
@@ -882,6 +1063,7 @@ def execute_deactivation(
                         hash_=msg_hash,
                         booking_id=str(booking.id),
                         branch="cancel",
+                        blocked_reason=notify_blocked,
                     )
                 )
                 cancelled_count += 1
@@ -937,16 +1119,28 @@ def execute_deactivation(
                         chat_id=bu.chat_id,
                         text=text,
                         master_id=target_id,
+                        blocked_reason=_master_notification_blocker(bu),
                     )
                 )
 
     # Dispatch on commit — failures non-fatal.
     customer_dispatched = 0
     master_dispatched = 0
+    customer_blocked = sum(1 for pn in pending_customer_notifications if pn.blocked_reason)
 
     def _dispatch_customer_notifications() -> None:
         nonlocal customer_dispatched
         for pn in pending_customer_notifications:
+            if pn.blocked_reason:
+                # Decided at plan time and already in the audit row; logged
+                # again here so the reason is visible in the same stream as
+                # the sends it sits between.
+                logger.info(
+                    "mm5.notify.skip booking=%s reason=%s",
+                    pn.booking_id,
+                    pn.blocked_reason,
+                )
+                continue
             if not pn.chat_id:
                 logger.info("mm5.notify.skip booking=%s reason=no_chat_id", pn.booking_id)
                 continue
@@ -963,6 +1157,13 @@ def execute_deactivation(
     def _dispatch_master_notifications() -> None:
         nonlocal master_dispatched
         for pn in pending_master_notifications:
+            if pn.blocked_reason:
+                logger.info(
+                    "mm5.notify.master_skip master=%s reason=%s",
+                    pn.master_id,
+                    pn.blocked_reason,
+                )
+                continue
             try:
                 send_message(chat_id=pn.chat_id, text=pn.text)
                 master_dispatched += 1
@@ -991,6 +1192,7 @@ def execute_deactivation(
         cancelled_count=cancelled_count,
         customer_notifications_dispatched=customer_dispatched,
         master_notifications_dispatched=master_dispatched,
+        customer_notifications_blocked=customer_blocked,
     )
 
 
@@ -1036,12 +1238,15 @@ def reactivate_master(
         if notify_master and master.linked_bot_user_id is not None:
             bu = BotUser.all_tenants.filter(pk=master.linked_bot_user_id).first()
             if bu is not None and bu.chat_id:
+                blocked = _master_notification_blocker(bu)
                 pending_master_dm = _PendingMasterNotification(
                     chat_id=bu.chat_id,
                     text=REACTIVATION_NOTIFICATION_TEXT,
                     master_id=str(master.id),
+                    blocked_reason=blocked,
                 )
-                payload["notified_master"] = True
+                payload["notified_master"] = blocked is None
+                payload["master_notification_blocked"] = blocked or ""
 
         write_audit(
             MASTER_REACTIVATED,
@@ -1057,6 +1262,13 @@ def reactivate_master(
     def _dispatch() -> None:
         nonlocal notified
         if pending_master_dm is None:
+            return
+        if pending_master_dm.blocked_reason:
+            logger.info(
+                "mm5.reactivate.notify_skip master=%s reason=%s",
+                pending_master_dm.master_id,
+                pending_master_dm.blocked_reason,
+            )
             return
         try:
             send_message(chat_id=pending_master_dm.chat_id, text=pending_master_dm.text)

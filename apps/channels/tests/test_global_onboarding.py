@@ -127,6 +127,15 @@ def _global_user_and_conv(user_id: int = 7777):
     return bot_user, conversation
 
 
+def _granted_types(bot_user) -> set[str]:
+    """Active granted consent types for this user (sentinel tenant)."""
+    return set(
+        ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, granted=True, withdrawn_at__isnull=True
+        ).values_list("consent_type", flat=True)
+    )
+
+
 # --------------------------------------------------------------------------- #
 # needs_onboarding — truth table                                              #
 # --------------------------------------------------------------------------- #
@@ -282,6 +291,64 @@ class TestRunOnboardingTurn:
         # 152-ФЗ informed consent — the row must prove WHICH disclosure was shown.
         assert row.document_version == CONSENT_DOCUMENT_VERSION
 
+    # --- DRF-1311: the tap grants memory_green too --------------------- #
+
+    def test_consent_yes_journals_memory_green_too(self):
+        """The S2 disclosure IS the memory disclosure — record it as one.
+
+        «Я буду помнить о тебе только то, что поможет рекомендовать точнее»
+        (+ S2a «Запоминаю: твои сообщения мне, выбранные цели, питание и
+        вода…»). Writing only ``personal_data`` left
+        :func:`has_memory_consent` False forever (DRF-1311).
+        """
+        bot_user, conv = _global_user_and_conv()
+        run_onboarding_turn(conv, bot_user, "/start")
+
+        run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
+
+        assert _granted_types(bot_user) == {
+            ConsentRecord.ConsentType.PERSONAL_DATA.value,
+            ConsentRecord.ConsentType.MEMORY_GREEN.value,
+        }
+
+    def test_memory_green_row_carries_the_same_disclosure_version(self):
+        """Both types must cite the SAME text — the user saw one screen."""
+        from apps.channels.max.global_onboarding import CONSENT_DOCUMENT_VERSION
+
+        bot_user, conv = _global_user_and_conv()
+        run_onboarding_turn(conv, bot_user, "/start")
+        run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
+
+        row = ConsentRecord.all_tenants.get(
+            bot_user=bot_user,
+            consent_type=ConsentRecord.ConsentType.MEMORY_GREEN,
+            granted=True,
+        )
+        assert row.document_version == CONSENT_DOCUMENT_VERSION
+        assert row.tenant == bot_user.tenant  # sentinel
+
+    def test_onboarded_user_can_read_memory_the_gate_actually_opens(self):
+        """The regression DRF-1311 needed: onboarding OPENS the read gate.
+
+        Every unit around this passed on 23.08 while the pilot's first stored
+        fact was unreadable: the write gate (``can_store_green_memory`` →
+        PERSONAL_DATA) said yes and the read gate
+        (``has_memory_consent`` → memory_green) said no, because nothing ever
+        granted memory_green. Asserting the two gates AGREE after onboarding
+        is the only assertion that spans that seam.
+        """
+        from apps.consent.memory import can_store_green_memory
+        from apps.consent.services import has_memory_consent
+
+        bot_user, conv = _global_user_and_conv()
+        bot_user.ayla_user_id = uuid.uuid4()
+        bot_user.save(update_fields=["ayla_user_id"])
+        run_onboarding_turn(conv, bot_user, "/start")
+        run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
+
+        assert can_store_green_memory(bot_user) is True  # write side
+        assert has_memory_consent(bot_user.ayla_user_id, "green") is True  # read side
+
     def test_consent_yes_via_s2a_also_journals(self):
         # The S2a-fold path (cb:welcome:consent_yes_via_s2a) also stamps consent
         # + renders S5, so it too must write the server journal.
@@ -291,18 +358,22 @@ class TestRunOnboardingTurn:
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes_via_s2a")
 
         assert reply.text == GLOBAL_S5_TEXT
-        assert ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True).count() == 1
+        assert _granted_types(bot_user) == {
+            ConsentRecord.ConsentType.PERSONAL_DATA.value,
+            ConsentRecord.ConsentType.MEMORY_GREEN.value,
+        }
 
     def test_repeat_consent_yes_is_idempotent_no_duplicate_journal(self):
         bot_user, conv = _global_user_and_conv()
         run_onboarding_turn(conv, bot_user, "/start")
         run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
         # Second tap re-renders S5 → journal is attempted again, but get_or_create
-        # keeps it to a single active-grant row.
+        # keeps it to a single active-grant row PER TYPE.
         run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
 
         rows = ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True)
-        assert rows.count() == 1
+        assert rows.count() == 2  # personal_data + memory_green, one each
+        assert len(_granted_types(bot_user)) == 2
 
     def test_consent_refuse_passes_through_and_leaves_consent_null(self):
         bot_user, conv = _global_user_and_conv()

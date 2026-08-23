@@ -41,3 +41,56 @@ class MasterCard:
     city: str
     service_id: UUID | None = None
     service_name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SalonCard:
+    """A single public salon card (DRF-1304).
+
+    A "salon" on the marketplace is a tenant that has at least one bookable
+    master — the same predicate discovery applies to masters, one level up.
+    Public fields only: name, city, address, and a count + sample of what is
+    done there. ``tenant_id`` rides along so a caller can deep-link, same as
+    ``MasterCard``.
+
+    ``address`` is the only field whose source is per-master (the Ayla
+    specialists feed carries it in the specialist payload, mirrored into
+    ``CatalogMaster.raw``; ``Tenant`` has no address column). It is the first
+    non-empty address among the salon's bookable masters, and may legitimately
+    be "" — the pilot salon's masters carry no address at all.
+    """
+
+    tenant_id: UUID
+    name: str
+    city: str
+    address: str
+    master_count: int
+    service_count: int
+    sample_services: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceCard:
+    """A single public service card (DRF-1304).
+
+    Name plus the two commercial facts the concierge may quote — ``price_from``
+    and ``duration_min`` — and the salon they belong to. Both may be ``None``:
+    the mirror is only as complete as the upstream feed (the pilot salon's
+    canonical-template coverage is 0 of 58 rows), and a missing value must
+    render as "not told", never as an invented number. A ``price_from`` of 0
+    is kept as stored; renderers decide how (not) to show it.
+
+    ``has_bookable_master`` answers «is there anyone to book with for this
+    service» — false is a NORMAL state (a salon may list a service none of its
+    masters is mapped to). It gates the tap chip, not the line: the service is
+    still real and still shown, it just leads nowhere yet.
+    """
+
+    tenant_id: UUID
+    service_id: UUID
+    name: str
+    price_from: Decimal | None
+    duration_min: int | None
+    salon_name: str
+    city: str
+    has_bookable_master: bool = False

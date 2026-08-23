@@ -60,7 +60,11 @@ logger = logging.getLogger(__name__)
 # predates this feature has ``welcomed_at IS NULL`` (the global path never stamped
 # it), so without this guard the first post-flag-flip booking tap of an existing
 # user would be swallowed by the welcome greeting.
-_DISCOVER_CALLBACK_PREFIX = "cb:discover:"
+#
+# DRF-1304 adds ``cb:catalog:*`` (the salon / service chips) for exactly the same
+# reason: those chips lead INTO the booking chain, and the greeting must not
+# swallow a tap on a card the bot itself just drew.
+_PASSTHROUGH_CALLBACK_PREFIXES = ("cb:discover:", "cb:catalog:")
 
 
 # Marketplace-framed welcome. WelcomeSkill.WELCOME_TEXT names the «Формула тела»
@@ -202,15 +206,16 @@ def needs_onboarding(bot_user: Any, text: str, conversation: Any = None) -> bool
     who opens with an intent still meets the greeting + consent offer on their
     next non-intent turn.
 
-    A ``cb:discover:*`` callback (the booking handoff, #1020) is explicitly NOT
-    onboarding even when ``welcomed_at IS NULL`` — a booking tap must reach the
-    booking flow, never the welcome greeting. This matters at flag flip: every
+    A ``cb:discover:*`` callback (the booking handoff, #1020) or a ``cb:catalog:*``
+    one (the salon / service chips, DRF-1304) is explicitly NOT onboarding even
+    when ``welcomed_at IS NULL`` — a tap on a card the bot itself drew must reach
+    what the card promised, never the welcome greeting. This matters at flag flip: every
     pre-existing global BotUser has ``welcomed_at IS NULL``, so without this guard
     their first booking tap after enabling the flag would be swallowed.
     """
     stripped = (text or "").strip()
-    # Booking handoff wins over onboarding, unconditionally.
-    if stripped.startswith(_DISCOVER_CALLBACK_PREFIX):
+    # A tap on a card the bot drew wins over onboarding, unconditionally.
+    if stripped.startswith(_PASSTHROUGH_CALLBACK_PREFIXES):
         return False
     if stripped == "/start" or stripped.startswith("/start "):
         return True
@@ -322,17 +327,47 @@ def _record_consent_journal(bot_user: Any) -> None:
     because a failure means NO consent was captured this turn (the S5 CTA still
     renders, but the user isn't marked consented — safe: nothing is persisted for
     them). Idempotent, so a subsequent consent tap re-attempts cleanly.
-    """
-    try:
-        from apps.consent.services import record_global_consent
 
-        record_global_consent(
-            bot_user,
-            source=_CONSENT_SOURCE,
-            document_version=CONSENT_DOCUMENT_VERSION,
-        )
-    except Exception:  # noqa: BLE001 — journal failure must not break the reply
-        logger.exception(
-            "global_onboarding.consent_journal_failed bot_user_id=%s",
-            getattr(bot_user, "id", None),
-        )
+    ### Two types, ONE tap (DRF-1311)
+
+    The S2 text the user accepts is, verbatim, a memory disclosure —
+    «Я буду помнить о тебе только то, что поможет рекомендовать точнее.
+    Хранится безопасно. Удалить можно в любой момент.», expanded by S2a
+    («Запоминаю: твои сообщения мне, выбранные цели, питание и вода…»).
+    MEMORY_FOUNDATION_DESIGN §8 q.2 decided accordingly: *«в пилоте
+    активируем personal_data + memory_green»*. Only ``personal_data`` was
+    ever written, so :func:`apps.consent.services.has_memory_consent`
+    returned False for EVERY user and the read side
+    (:mod:`apps.identity.services.personal_context`) was permanently
+    ``BLOCKED_CONSENT`` — writes landed, nothing could be read back, and the
+    Ayla declared-prefs PATCH bridge was blocked with them (live pilot,
+    2026-08-23: ``memory_bridge.patch_blocked`` + five ``personal_context.
+    gate_closed``). Both types are recorded here, under the SAME
+    ``document_version`` — this records the scope the user was actually
+    shown, it does not widen it.
+
+    The two calls are deliberately NOT one transaction: ``memory_green``
+    failing must not roll back the ``personal_data`` proof-of-consent. The
+    withdraw side already treats them as a set (``withdraw_personal_data``
+    cascades personal_data → memory_*, §8.4); this is the missing grant half.
+    """
+    from apps.consent.models import ConsentRecord
+    from apps.consent.services import record_global_consent
+
+    for consent_type in (
+        ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        ConsentRecord.ConsentType.MEMORY_GREEN.value,
+    ):
+        try:
+            record_global_consent(
+                bot_user,
+                consent_type=consent_type,
+                source=_CONSENT_SOURCE,
+                document_version=CONSENT_DOCUMENT_VERSION,
+            )
+        except Exception:  # noqa: BLE001 — journal failure must not break the reply
+            logger.exception(
+                "global_onboarding.consent_journal_failed bot_user_id=%s type=%s",
+                getattr(bot_user, "id", None),
+                consent_type,
+            )
