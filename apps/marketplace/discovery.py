@@ -21,6 +21,7 @@ from uuid import UUID
 
 from django.core.paginator import Paginator
 from django.db.models import Case, F, IntegerField, Max, Q, QuerySet, Value, When
+from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Coalesce
 
 from apps.catalog.models import CatalogMaster
@@ -364,7 +365,9 @@ def _match_score(stems: list[str]) -> Coalesce:
     real service match. Zero says what NULL meant.
     """
     row = _service_row_q()
-    total = None
+    # Annotated because the accumulator changes shape on the second term: one
+    # stem is a bare Case, two or more is a CombinedExpression of them.
+    total: Case | CombinedExpression | None = None
     for stem in stems:
         term = Case(
             When(row & Q(services_offered__service__name__icontains=stem), then=Value(1)),
