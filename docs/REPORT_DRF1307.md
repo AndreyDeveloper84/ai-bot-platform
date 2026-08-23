@@ -246,6 +246,13 @@ nutrition_proactive,consent}` целиком зелёные. `ruff check .`,
 `ruff format --check .`, `mypy`, `red_zone_guard`, `import_boundaries`,
 `makemigrations --check` — чисто.
 
+**CI на PR #1243 — зелёный.** `pytest + ruff + mypy` SUCCESS (29m17s),
+`replay fixtures` SUCCESS, `miniapp` SUCCESS. Осторожно: `gh pr checks`
+показывает рядом три строки «fail» — это **отменённые** дубли прогонов
+(concurrency group убивает предыдущий при новом пуше). Проверено через
+`gh run view <id> --json conclusion`: CANCELLED, не FAILURE. Ровно ловушка
+из §7 брифа.
+
 ---
 
 ## Открытые вопросы владельцу
