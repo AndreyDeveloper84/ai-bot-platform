@@ -81,6 +81,11 @@ from apps.orchestrator.nutrition_global import (
     NUTRITION_TOOL_SPECS,
     execute_nutrition_tool,
 )
+from apps.orchestrator.personal_surface import (
+    PERSONAL_TOOL_ACTIONS,
+    SHOW_MY_RECORDS_TOOL_SPEC,
+    execute_personal_tool,
+)
 from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
 
 logger = logging.getLogger(__name__)
@@ -486,6 +491,7 @@ _KNOWN_TOOLS = frozenset(
     {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]}
     | NUTRITION_TOOL_ACTIONS
     | CATALOG_TOOL_ACTIONS
+    | PERSONAL_TOOL_ACTIONS
 )
 
 
@@ -669,6 +675,11 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         # DRF-1304 — same selection-only shape: the marketplace read and the
         # deterministic render run in the wrapper's sync scope.
         return ToolResult(action_type=name, action_data={"arguments": args})
+    if name in PERSONAL_TOOL_ACTIONS:
+        # DRF-1302/1305 — selection only again: the Ayla GETs and the memory
+        # read are I/O and belong in the wrapper's sync scope, not in a
+        # dispatcher the ai-core contract requires to be side-effect-free.
+        return ToolResult(action_type=name, action_data={"arguments": args})
     return ToolResult(
         action_type=ActionType.SHOW_MASTERS,
         action_data={"arguments": args},
@@ -753,7 +764,16 @@ def build_concierge_system_prompt(
         "никогда не clarify_food_entry.\n"
         "- Короткий текст про еду («борщ 300г») — clarify_food_entry.\n"
         "- Просьба заполнить или продолжить анкету питания — "
-        "start_nutrition_anketa.",
+        "start_nutrition_anketa.\n"
+        # DRF-1302/1305 — the READ tool. Named apart from the four writing
+        # tools above because the failure it prevents is the model ANSWERING
+        # «что я ел сегодня» from its own head: without a tool call there is
+        # no data, and a warm invented answer about the person's food is the
+        # exact thing the boundary below forbids.
+        "- Вопрос про СВОИ записи или про то, что ты о нём помнишь («что я "
+        "ел сегодня», «мой дневник», «что ты про меня помнишь») — "
+        "show_my_records. Никогда не отвечай на такой вопрос по памяти "
+        "разговора: числа и факты берутся только из ответа инструмента.",
         f"Если вопрос не про запись к мастеру — мягко верни в тему: "
         f"«{voice['off_topic_redirect']}»",
         # Boundaries (W5 task 4) — Constitution Art. X (helpful restraint),
@@ -903,6 +923,7 @@ def generate_concierge_reply(
             SHOW_SERVICES_TOOL_SPEC,
             ASK_CLARIFICATION_TOOL_SPEC,
             *NUTRITION_TOOL_SPECS,
+            SHOW_MY_RECORDS_TOOL_SPEC,
         ],
         tool_dispatcher=_dispatch_tool,
     )
@@ -1090,6 +1111,26 @@ def generate_concierge_reply(
         # Parser refused the phrase the model passed (or the skill
         # declined): fall back to whatever text the model produced
         # alongside the call, else the safe line.
+        text = (dto.content or "").strip()
+        if text:
+            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+
+    if dto.action_type in PERSONAL_TOOL_ACTIONS:
+        # DRF-1302/1305 — the person's own diary + memory. Deterministic
+        # render, no second model pass: these are the person's own numbers,
+        # and a rephrasing pass is a chance for a model to round one.
+        args = (dto.action_data or {}).get("arguments", {})
+        personal_reply = execute_personal_tool(
+            dto.action_type, args if isinstance(args, dict) else {}, bot_user=bot_user
+        )
+        if personal_reply is not None:
+            return DiscoveryReply(
+                text=personal_reply.text,
+                action_data=personal_reply.action_data,
+                persisted=True,
+            )
+        # Unreachable (_KNOWN_TOOLS gates dispatch); degrade like its siblings.
         text = (dto.content or "").strip()
         if text:
             return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)

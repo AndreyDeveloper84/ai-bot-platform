@@ -214,6 +214,16 @@ class NutritionAnketaSkill:
                 "carbs_g": profile.carbs_g,
                 "water_ml": profile.water_ml,
                 "goal_overridden_by": profile.goal_overridden_by,
+                # DRF-1302 — the anketa used to compute the norms and go
+                # silent, leaving the person holding five numbers and no next
+                # move. These two are the only next moves that exist as
+                # working code today, and each callback is claimed by a
+                # deterministic matcher (WaterSkill's beverage parser;
+                # ``looks_like_diary_request``), so a tap runs rather than
+                # asks a model to guess. A photo cannot be a chip -- the
+                # person has to send one -- so the closing line invites it in
+                # words instead of a button that could not deliver.
+                "buttons": _post_anketa_chips(),
             },
             meta={"reply_kind": "anketa_complete"},
         )
@@ -335,6 +345,26 @@ def _is_real_orm_conversation(conversation: object) -> bool:
 
 
 # ─── summary rendering ────────────────────────────────────────────────────
+
+
+def _post_anketa_chips() -> list[dict[str, str]]:
+    """The two next steps that really execute after the norms land.
+
+    Kept next to the summary it ships with, and built from the
+    ``personal_surface`` constants so the labels and callbacks cannot drift
+    apart from the matchers that claim them.
+    """
+
+    from apps.orchestrator.personal_surface import CHIP_DIARY, CHIP_WATER, diary_is_reachable
+
+    chips = [dict(CHIP_WATER)]
+    if diary_is_reachable():
+        # Only the global path claims «что я ел сегодня» deterministically.
+        # On a salon bot the same tap would fall through the skill ladder to a
+        # generic reply -- a button that answers «я вас не понял», which is
+        # worse than no button.
+        chips.append(dict(CHIP_DIARY))
+    return chips
 
 
 def _format_summary(profile) -> str:

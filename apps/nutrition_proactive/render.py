@@ -89,8 +89,18 @@ def render_daily_report(
     summary: SummaryResponse,
     water: WaterTodayResponse | None,
     profile: ProfileResponse | None = None,
+    *,
+    include_opt_out: bool = True,
 ) -> str:
     """Compose the daily report.
+
+    ``include_opt_out`` (DRF-1302): the off-switch footer belongs to the
+    PUSH. When the person asks for the diary themselves
+    (:func:`apps.orchestrator.personal_surface.render_diary`), offering to
+    stop sending a message nobody sent reads as a non-sequitur -- and worse,
+    as the bot mistaking an answer for an intrusion. The numbers, the
+    boundary and the remark rules stay byte-identical either way; a second
+    renderer for the pull would have been a second boundary to keep in sync.
 
     Structure: what was logged against what the profile expects, then at
     most **one** remark, then Ayla's own comment if it sent one, then the
@@ -105,7 +115,8 @@ def render_daily_report(
         # scoreboard of a day the person chose not to log, and the bot has
         # no business scoring that.
         lines.append("Сегодня записей не было — считать нечего.")
-        lines.append(OPT_OUT_HINT)
+        if include_opt_out:
+            lines.append(OPT_OUT_HINT)
         return "\n".join(lines)
 
     lines.append("")
@@ -128,8 +139,9 @@ def render_daily_report(
         lines.append("")
         lines.append(summary.ai_comment)
 
-    lines.append("")
-    lines.append(OPT_OUT_HINT)
+    if include_opt_out:
+        lines.append("")
+        lines.append(OPT_OUT_HINT)
     return "\n".join(lines)
 
 
