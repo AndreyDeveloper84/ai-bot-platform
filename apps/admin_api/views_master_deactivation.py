@@ -86,6 +86,10 @@ def _preview_to_payload(preview: DeactivationPreview) -> dict[str, Any]:
                 }
                 for fb in p.fallback_masters
             ],
+            # DRF-1307 — "" means the bot may write to this client about
+            # the change; anything else is the reason it may not, and the
+            # operator has to reach them another way.
+            "notify_blocked": p.notify_blocked,
         }
 
     return {
@@ -105,6 +109,9 @@ def _preview_to_payload(preview: DeactivationPreview) -> dict[str, Any]:
             # avoid presenting an empty list as «nothing to worry about».
             "mirror_future_bookings": preview.mirror_future_bookings,
             "inventory_complete": preview.inventory_complete,
+            # DRF-1307 — how many of these people the bot is not allowed
+            # to tell. Shown before the irreversible button, not after.
+            "bookings_client_unreachable": preview.bookings_client_unreachable,
         },
     }
 

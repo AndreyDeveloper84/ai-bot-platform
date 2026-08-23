@@ -80,7 +80,7 @@ from apps.events.vocabulary import (
     MASTER_REACTIVATED,
 )
 from apps.identity.models import BotUser
-from apps.notifications.proactive import consent_blocker, vet_outbound
+from apps.notifications.proactive import consent_blocker
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +166,12 @@ class FutureBookingPreview:
     client_last_initial: str
     duration_min: int | None
     fallback_masters: list[FallbackCandidate]
+    #: Why the bot may not message this client about the change, or ``""``
+    #: when it may (DRF-1307). Read on the preview screen so the operator
+    #: learns who they will have to phone **before** pressing a button
+    #: that cannot be undone — a message the cascade silently declines to
+    #: send is the harm this ticket's gate would otherwise introduce.
+    notify_blocked: str = ""
 
 
 @dataclass(frozen=True)
@@ -193,6 +199,10 @@ class DeactivationPreview:
     #: False when the mirror knows about more live future visits than the
     #: actionable set contains. Deactivation is refused while False.
     inventory_complete: bool = True
+    #: How many of ``future_bookings`` belong to a client the bot may not
+    #: message (DRF-1307). Non-zero means that many people will have to be
+    #: told by a human.
+    bookings_client_unreachable: int = 0
 
 
 @dataclass(frozen=True)
@@ -332,7 +342,7 @@ def _render_customer_notification(
     return rendered.strip()
 
 
-def _customer_notification_blocker(bot_user, rendered: str) -> str | None:
+def _customer_notification_blocker(bot_user) -> str | None:
     """Why this client must not be written to, or ``None`` when they may be.
 
     DRF-1307. Four conditions live in
@@ -344,33 +354,91 @@ def _customer_notification_blocker(bot_user, rendered: str) -> str | None:
     and because "we have no address for them" is a different operator
     problem from "they said no".
 
-    The text is vetted last, once the recipient has cleared. The order
-    matters for the audit trail: a row that reads ``opt_out`` says the
-    client refused, a row that reads ``outbound_safety_contact`` says
-    the administrator's own text was the problem — and only one of those
-    is fixable by rewriting the message.
+    Measured on the pilot on 2026-08-23, against the twelve reachable
+    ``BotUser`` rows: **one** clears this gate. Four are blocked by a
+    withdrawn ``ConsentRecord`` while ``consent_at`` is set — the shape
+    that a single-column check waves through — six have never consented,
+    and one is an erased row that still has a ``chat_id``.
 
-    That last one is not hypothetical here. The message body is written
-    by an administrator, free-form, up to 4000 characters, and is sent
-    verbatim to every affected client. It is the only bot-initiated text
-    in the platform that no engineer has read. It also interpolates
-    ``master.name`` from the catalogue, which is staff-edited mirror
-    text — the same untrusted-name path DRF-1301 found in the follow-up
-    beat.
+    Whether a message about somebody's *own confirmed booking* should be
+    gated this hard is a live question, not a settled one, and it is
+    raised in ``docs/REPORT_DRF1307.md``: the docstring of
+    ``BotUser.proactive_messages_opt_out`` already carves reminders out
+    of the opt-out as «contract-required dispatch ahead of confirmed
+    bookings», and «вашу запись отменили» has at least as good a claim to
+    that carve-out as a T-24h reminder does. This implements the strict
+    reading, and pairs it with :attr:`FutureBookingPreview.notify_blocked`
+    so the operator sees who the bot may not reach *before* pressing an
+    irreversible button, and can pick up the phone.
     """
 
     if bot_user is None:
         return "no_bot_user"
     if not (getattr(bot_user, "chat_id", "") or "").strip():
         return "no_chat_id"
-    blocked = consent_blocker(bot_user)
-    if blocked:
-        return blocked
-    _, text_blocked = vet_outbound(rendered)
-    return text_blocked
+    return consent_blocker(bot_user)
 
 
-def _master_notification_blocker(bot_user, text: str) -> str | None:
+def _vet_catalogue_values(values: list[str]) -> None:
+    """Refuse the cascade when staff-edited catalogue text is unsafe to echo.
+
+    The outbound safety check is applied HERE, to the interpolated
+    values, and deliberately **not** to the administrator's own prose.
+
+    The brief for DRF-1307 listed :func:`~apps.orchestrator.safety.
+    outbound.evaluate_outbound` as the fourth missing defence for this
+    message. Run against the administrator's text it is the wrong tool,
+    and not marginally so. That filter was written for an LLM reply,
+    where a promise is illegitimate because the assistant has no
+    authority to make one. A salon administrator does have that
+    authority, and the ``promise`` category — ``гарантиру``, ``вернём
+    деньги``, ``сделаем скидку`` — is a list of the exact words somebody
+    uses to compensate a client whose appointment they just cancelled.
+    The ``contact`` category is the same trap in reverse: a salon phone
+    number is noise in an assistant's answer and is the single most
+    useful thing a cancellation notice can carry. Checked against five
+    realistic administrator messages, four were blocked; the one that
+    passed was the one that offered the client nothing.
+
+    What survives the argument is the part that is not the
+    administrator's: ``master.name`` and ``service_name`` are catalogue
+    text mirrored from Ayla and edited by salon staff, and a master name
+    carrying a phone number or an email is the untrusted-name path
+    DRF-1039 exists for. ``client_name`` is excluded too — echoing
+    somebody's own name back to them leaks nothing, and refusing an
+    entire deactivation because one client typed something odd into a
+    booking form would be a worse failure than the one it prevents.
+
+    Raises rather than dropping the message, and does so before the
+    cascade commits. That is the difference between this and the
+    recipient gate above: a withdrawn consent cannot be fixed and the
+    visit still has to be dealt with, so that case proceeds and reports.
+    A master name with a phone number in it **can** be fixed — in the
+    catalogue, in a minute — and the retry costs nothing because nothing
+    happened. Same stance the ``inventory_incomplete`` guard takes a few
+    dozen lines up: when the operator can still act, refuse rather than
+    report.
+    """
+
+    from apps.orchestrator.safety.outbound import evaluate_outbound
+
+    for value in values:
+        if not (value or "").strip():
+            continue
+        verdict = evaluate_outbound(value)
+        if verdict.blocked:
+            raise DeactivationError(
+                "notification_text_unsafe",
+                (
+                    "Catalogue text that would be quoted to clients trips the "
+                    f"outbound safety check ({', '.join(verdict.categories)}). "
+                    "Fix the master or service name in the catalogue and retry — "
+                    "nothing has been changed."
+                ),
+            )
+
+
+def _master_notification_blocker(bot_user) -> str | None:
     """Why a staff DM must not go out, or ``None`` when it may.
 
     Deliberately **not** the customer gate (DRF-1307). Two of the four
@@ -395,19 +463,17 @@ def _master_notification_blocker(bot_user, text: str) -> str | None:
     * ``deleted_at`` — an erasure request is unambiguous whoever made it,
       and ``soft_delete_user()`` leaves ``chat_id`` in place, so without
       this an erased row stays a recipient.
-    * the outbound safety check — this text interpolates
-      ``master.name`` from the catalogue, which is staff-edited mirror
-      text. A master name carrying a phone number trips the ``contact``
-      shape, which is the check doing its job rather than a false
-      positive (DRF-1039).
+    The staff DM interpolates ``master.name``, which is catalogue text
+    and therefore untrusted — but that is vetted once, up front, by
+    :func:`_vet_catalogue_values`, which refuses the whole cascade
+    rather than dropping one DM. Nothing is left to check per-recipient.
     """
 
     if bot_user is None:
         return "no_bot_user"
     if getattr(bot_user, "deleted_at", None) is not None:
         return "deleted"
-    _, text_blocked = vet_outbound(text)
-    return text_blocked
+    return None
 
 
 def _keep_branch(text: str, *, keep: str) -> str:
@@ -599,6 +665,7 @@ def _build_booking_preview(
         fallback_masters=_find_fallback_masters(
             booking, deactivating_master_id=deactivating_master_id
         ),
+        notify_blocked=_customer_notification_blocker(booking.bot_user) or "",
     )
 
 
@@ -671,6 +738,7 @@ def preview_deactivation(
         bookings_without_fallback=without_fb,
         mirror_future_bookings=mirror_count,
         inventory_complete=inventory_complete,
+        bookings_client_unreachable=sum(1 for p in previews if p.notify_blocked),
     )
 
 
@@ -857,6 +925,16 @@ def execute_deactivation(
                     f"target master {target.id} does not perform service {booking.service_id}",
                 )
 
+        # DRF-1307 — vet every catalogue string this cascade is about to
+        # quote to a client, once, before anything is mutated. A hit here
+        # is fixable in the catalogue and the retry is free; a hit found
+        # halfway through would not be.
+        _vet_catalogue_values(
+            [master.name]
+            + [t.name for t in reassign_targets.values()]
+            + [by_id[a.booking_id].service_name or "" for a in plan]
+        )
+
         reassigned_count = 0
         cancelled_count = 0
 
@@ -883,7 +961,7 @@ def execute_deactivation(
                 )
 
                 bu = booking.bot_user
-                notify_blocked = _customer_notification_blocker(bu, rendered)
+                notify_blocked = _customer_notification_blocker(bu)
 
                 payload = {
                     "master_id": str(master.id),
@@ -957,7 +1035,7 @@ def execute_deactivation(
                         ) from exc
 
                 bu = booking.bot_user
-                notify_blocked = _customer_notification_blocker(bu, rendered)
+                notify_blocked = _customer_notification_blocker(bu)
 
                 payload = {
                     "master_id": str(master.id),
@@ -1041,7 +1119,7 @@ def execute_deactivation(
                         chat_id=bu.chat_id,
                         text=text,
                         master_id=target_id,
-                        blocked_reason=_master_notification_blocker(bu, text),
+                        blocked_reason=_master_notification_blocker(bu),
                     )
                 )
 
@@ -1160,7 +1238,7 @@ def reactivate_master(
         if notify_master and master.linked_bot_user_id is not None:
             bu = BotUser.all_tenants.filter(pk=master.linked_bot_user_id).first()
             if bu is not None and bu.chat_id:
-                blocked = _master_notification_blocker(bu, REACTIVATION_NOTIFICATION_TEXT)
+                blocked = _master_notification_blocker(bu)
                 pending_master_dm = _PendingMasterNotification(
                     chat_id=bu.chat_id,
                     text=REACTIVATION_NOTIFICATION_TEXT,

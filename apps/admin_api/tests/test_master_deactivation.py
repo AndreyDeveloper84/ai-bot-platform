@@ -1319,3 +1319,319 @@ class TestServiceLayerUnits:
                 actor_role="owner",
             )
         assert exc_info.value.slug == "already_active"
+
+
+# =========================================================================
+# DRF-1307 — the consent gate on the customer broadcast
+# =========================================================================
+
+
+def _plan_all(bookings, *, to_master=None) -> list[BookingAction]:
+    return [
+        BookingAction(
+            booking_id=str(b.id),
+            action="reassign" if to_master else "cancel",
+            to_master_id=str(to_master.id) if to_master else None,
+        )
+        for b in bookings
+    ]
+
+
+def _audit_blocked_reasons() -> dict[str, str]:
+    """``{booking_id: reason}`` from the per-booking cascade audit rows."""
+    out: dict[str, str] = {}
+    for row in AuditLog.all_tenants.filter(
+        action__in=("master.bookings_reassigned", "master.bookings_cancelled")
+    ):
+        payload = row.payload or {}
+        out[payload["booking_id"]] = payload.get("customer_notification_blocked", "")
+    return out
+
+
+class TestCustomerConsentGate:
+    """Who the cascade may write to, and — just as loudly — who it may.
+
+    A test that only proves nobody was written to proves nothing: an
+    empty send list is equally consistent with «the gate works» and
+    «the dispatch is dead». Every test below that asserts a block runs
+    against a suite where :meth:`test_consenting_client_still_receives`
+    asserts the opposite half on the same code path, and the mixed test
+    asserts both halves in one call.
+    """
+
+    @pytest.fixture
+    def one_booking(self, tenant: Tenant, master: CatalogMaster):
+        service = _make_service(tenant)
+        _link_master_service(tenant, master, service)
+        return service
+
+    def _run(self, tenant, master, service, bot_user, owner_bot_user):
+        booking = _make_booking(
+            tenant=tenant, master=master, service=service, bot_user=bot_user
+        )
+        sent: list[tuple[str, str]] = []
+
+        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
+            sent.append((chat_id, text))
+            return {"ok": True}
+
+        with patch(
+            "apps.admin_api.services.master_deactivation.send_message", side_effect=_capture
+        ):
+            result = execute_deactivation(
+                master,
+                plan=_plan_all([booking]),
+                reason="уволилась",
+                notify_reassigned_masters=False,
+                custom_template=None,
+                actor=owner_bot_user,
+                actor_role="owner",
+            )
+        return booking, sent, result
+
+    def test_consenting_client_still_receives(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        """The half that makes every block below mean something."""
+        bu = _make_customer_bot_user(tenant, 30)
+        booking, sent, result = self._run(tenant, master, one_booking, bu, owner_bot_user)
+
+        assert [c for c, _ in sent] == ["chat-6030"]
+        assert result.customer_notifications_dispatched == 1
+        assert result.customer_notifications_blocked == 0
+        assert _audit_blocked_reasons()[str(booking.id)] == ""
+
+    def test_opted_out_client_is_not_written_to(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        bu = _make_customer_bot_user(tenant, 31, opted_out=True)
+        booking, sent, result = self._run(tenant, master, one_booking, bu, owner_bot_user)
+
+        assert sent == []
+        assert result.customer_notifications_blocked == 1
+        assert _audit_blocked_reasons()[str(booking.id)] == "opt_out"
+        # …and the cascade itself still ran. The person's booking is
+        # cancelled whether or not we were allowed to say so.
+        assert result.cancelled_count == 1
+        master.refresh_from_db()
+        assert master.is_active is False
+
+    def test_client_who_never_consented_is_not_written_to(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        bu = _make_customer_bot_user(tenant, 32, consented=False)
+        booking, sent, result = self._run(tenant, master, one_booking, bu, owner_bot_user)
+
+        assert sent == []
+        assert _audit_blocked_reasons()[str(booking.id)] == "no_consent"
+
+    def test_withdrawn_consent_is_not_written_to(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        """The mine: ``withdraw()`` never clears ``consent_at``.
+
+        Four of the pilot's twelve reachable users are in exactly this
+        state on 2026-08-23 — column set, record withdrawn. A gate that
+        reads the column alone writes to all four.
+        """
+        bu = _make_customer_bot_user(tenant, 33, withdrawn=True)
+        assert bu.consent_at is not None  # the column still says yes
+        booking, sent, result = self._run(tenant, master, one_booking, bu, owner_bot_user)
+
+        assert sent == []
+        assert _audit_blocked_reasons()[str(booking.id)] == "consent_withdrawn"
+
+    def test_erased_client_with_surviving_chat_id_is_not_written_to(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        """The second mine: ``soft_delete_user()`` leaves ``chat_id`` set.
+
+        One pilot row is erased and still reachable.
+        """
+        bu = _make_customer_bot_user(tenant, 34, deleted=True)
+        assert bu.chat_id  # erasure scrubbed the PII, not the address
+        booking, sent, result = self._run(tenant, master, one_booking, bu, owner_bot_user)
+
+        assert sent == []
+        assert _audit_blocked_reasons()[str(booking.id)] == "deleted"
+
+    def test_mixed_cascade_writes_to_exactly_the_one_who_may_be_written_to(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        """Both halves in one call — the pilot's shape, scaled down.
+
+        Four recipients, one allowed. On the pilot the ratio is twelve
+        reachable to one allowed.
+        """
+        service = one_booking
+        ok = _make_customer_bot_user(tenant, 40)
+        opted_out = _make_customer_bot_user(tenant, 41, opted_out=True)
+        withdrawn = _make_customer_bot_user(tenant, 42, withdrawn=True)
+        erased = _make_customer_bot_user(tenant, 43, deleted=True)
+
+        bookings = [
+            _make_booking(
+                tenant=tenant,
+                master=master,
+                service=service,
+                bot_user=bu,
+                visit_at=datetime.now(tz=timezone.utc) + timedelta(days=n + 2),
+            )
+            for n, bu in enumerate((ok, opted_out, withdrawn, erased))
+        ]
+
+        sent: list[str] = []
+
+        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
+            sent.append(chat_id)
+            return {"ok": True}
+
+        with patch(
+            "apps.admin_api.services.master_deactivation.send_message", side_effect=_capture
+        ):
+            result = execute_deactivation(
+                master,
+                plan=_plan_all(bookings),
+                reason="уволилась",
+                notify_reassigned_masters=False,
+                custom_template=None,
+                actor=owner_bot_user,
+                actor_role="owner",
+            )
+
+        assert sent == ["chat-6040"]
+        assert result.cancelled_count == 4
+        assert result.customer_notifications_dispatched == 1
+        assert result.customer_notifications_blocked == 3
+
+        reasons = _audit_blocked_reasons()
+        assert reasons[str(bookings[0].id)] == ""
+        assert reasons[str(bookings[1].id)] == "opt_out"
+        assert reasons[str(bookings[2].id)] == "consent_withdrawn"
+        assert reasons[str(bookings[3].id)] == "deleted"
+
+    def test_preview_reports_unreachable_clients_before_the_button(
+        self,
+        client: Client,
+        tenant: Tenant,
+        master: CatalogMaster,
+        one_booking,
+        owner_bot_user: BotUser,
+    ) -> None:
+        """The operator learns who they must phone while it is still free to.
+
+        Blocking a message about somebody's own cancelled visit is only
+        defensible if a human is told to make the call instead. If this
+        assertion ever goes away, the gate stops being a protection and
+        becomes a way to lose people quietly.
+        """
+        _make_booking(
+            tenant=tenant,
+            master=master,
+            service=one_booking,
+            bot_user=_make_customer_bot_user(tenant, 50),
+        )
+        _make_booking(
+            tenant=tenant,
+            master=master,
+            service=one_booking,
+            bot_user=_make_customer_bot_user(tenant, 51, withdrawn=True),
+            visit_at=datetime.now(tz=timezone.utc) + timedelta(days=5),
+        )
+
+        resp = client.post(_preview_url(master.id), HTTP_AUTHORIZATION=init_data_header("5001"))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["summary"]["bookings_client_unreachable"] == 1
+        blocked = sorted(b["notify_blocked"] for b in data["future_bookings"])
+        assert blocked == ["", "consent_withdrawn"]
+
+
+class TestOutboundSafetyScope:
+    """What the safety filter is pointed at here, and what it is not.
+
+    The DRF-1307 brief asked for ``evaluate_outbound`` on this message.
+    Run against the administrator's own words it blocks the messages a
+    salon most needs to send — see :func:`_vet_catalogue_values`. These
+    two tests pin both halves of that decision so a later reader cannot
+    "restore" the missing check without first deleting a test that says
+    why it is missing.
+    """
+
+    @pytest.fixture
+    def one_booking(self, tenant: Tenant, master: CatalogMaster):
+        service = _make_service(tenant)
+        _link_master_service(tenant, master, service)
+        return service
+
+    def test_administrator_may_promise_a_refund_and_give_a_phone_number(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        """A salon administrator has the authority an LLM does not.
+
+        «вернём деньги» trips the ``promise`` shape and the number trips
+        ``contact``. Both are exactly right in a message about an
+        appointment the salon just cancelled.
+        """
+        bu = _make_customer_bot_user(tenant, 60)
+        booking = _make_booking(tenant=tenant, master=master, service=one_booking, bot_user=bu)
+        custom = (
+            "Здравствуйте, {client_first_name}! Запись отменяем — вернём деньги "
+            "за предоплату. Звоните: +7 999 123 45 67."
+        )
+        sent: list[str] = []
+
+        def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
+            sent.append(text)
+            return {"ok": True}
+
+        with patch(
+            "apps.admin_api.services.master_deactivation.send_message", side_effect=_capture
+        ):
+            result = execute_deactivation(
+                master,
+                plan=_plan_all([booking]),
+                reason="уволилась",
+                notify_reassigned_masters=False,
+                custom_template=custom,
+                actor=owner_bot_user,
+                actor_role="owner",
+            )
+
+        assert result.customer_notifications_dispatched == 1
+        assert "вернём деньги" in sent[0]
+        assert "+7 999 123 45 67" in sent[0]
+
+    def test_master_name_carrying_a_phone_number_refuses_the_whole_cascade(
+        self, tenant, master, one_booking, owner_bot_user
+    ) -> None:
+        """Catalogue text is not the administrator's, and it IS checked.
+
+        Refuses instead of dropping the DM: this is fixable in the
+        catalogue and the retry costs nothing, so nothing is mutated.
+        """
+        master.name = "Ольга +7 999 123 45 67"
+        master.save(update_fields=["name"])
+        bu = _make_customer_bot_user(tenant, 61)
+        booking = _make_booking(tenant=tenant, master=master, service=one_booking, bot_user=bu)
+
+        with patch("apps.admin_api.services.master_deactivation.send_message") as send_mock:
+            with pytest.raises(DeactivationError) as exc_info:
+                execute_deactivation(
+                    master,
+                    plan=_plan_all([booking]),
+                    reason="уволилась",
+                    notify_reassigned_masters=False,
+                    custom_template=None,
+                    actor=owner_bot_user,
+                    actor_role="owner",
+                )
+
+        assert exc_info.value.slug == "notification_text_unsafe"
+        send_mock.assert_not_called()
+        # Nothing happened: the master is still active and the booking stands.
+        master.refresh_from_db()
+        booking.refresh_from_db()
+        assert master.is_active is True
+        assert master.archived_at is None
+        assert booking.status == BookingRequest.Status.CONFIRMED
