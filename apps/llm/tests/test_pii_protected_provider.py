@@ -53,6 +53,7 @@ class _FakeProvider:
         self.last_text: str | None = None
         self.complete_calls = 0
         self.embedding_calls = 0
+        self.last_tool_choice: str | None = None
 
     async def complete(
         self,
@@ -62,7 +63,11 @@ class _FakeProvider:
         temperature: float = 0.0,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        # DRF-1286 — the Protocol grew a forced-tool-use parameter;
+        # doubles that spell the signature out have to carry it.
+        tool_choice: str | None = None,
     ) -> CompletionResult:
+        self.last_tool_choice = tool_choice
         self.last_messages = [dict(m) for m in messages]
         self.complete_calls += 1
         return CompletionResult(
@@ -132,6 +137,60 @@ class TestNoActiveScope:
 
 
 class TestActiveScope:
+    @pytest.mark.asyncio
+    async def test_tool_choice_forwarded_when_asked_for(self, fake_provider, fake_redis, conv_id):
+        """DRF-1286 — the PII wrapper must not swallow forced tool use.
+
+        The concierge's forced retry reaches the vendor THROUGH this
+        wrapper. If it dropped `tool_choice`, the retry would silently
+        become an ordinary second call — the same silent-degradation
+        failure the retry exists to fix.
+        """
+        wrapped = PIITokenizingProvider(fake_provider)
+        with pii_tokenizer.pii_context(conv_id):
+            await wrapped.complete(
+                [{"role": "user", "content": "покажи мастеров"}],
+                model="gpt-4",
+                tools=[{"name": "t", "description": "d", "parameters": {}}],
+                tool_choice="required",
+            )
+        assert fake_provider.last_tool_choice == "required"
+
+    @pytest.mark.asyncio
+    async def test_provider_that_predates_tool_choice_still_works(self, fake_redis, conv_id):
+        """DRF-1286 — an ordinary call must not carry the new parameter.
+
+        The wrapped object is duck-typed, and not every implementation
+        accepts every parameter (the ai-core Anthropic adapter was already
+        found poorer than expected once — no ``role="tool"``). This double
+        deliberately has the PRE-DRF-1286 signature: if the wrapper ever
+        goes back to forwarding `tool_choice` unconditionally, an ordinary
+        call to such a provider raises TypeError, and this test says so
+        instead of a skill breaking in production.
+        """
+
+        class _PreToolChoiceProvider:
+            name = "legacy"
+
+            async def complete(
+                self,
+                messages: list[dict[str, Any]],
+                *,
+                model: str | None = None,
+                temperature: float = 0.0,
+                tools: list[dict[str, Any]] | None = None,
+                max_tokens: int | None = None,
+            ) -> CompletionResult:
+                return CompletionResult(text="ok", model=model or "m", provider=self.name)
+
+            async def embedding(self, text: str, *, model: str) -> list[float]:
+                return [0.1]
+
+        wrapped = PIITokenizingProvider(_PreToolChoiceProvider())
+        with pii_tokenizer.pii_context(conv_id):
+            result = await wrapped.complete([{"role": "user", "content": "привет"}], model="gpt-4")
+        assert result.text == "ok"
+
     @pytest.mark.asyncio
     async def test_complete_tokenizes_user_message(self, fake_provider, fake_redis, conv_id):
         wrapped = PIITokenizingProvider(fake_provider)
