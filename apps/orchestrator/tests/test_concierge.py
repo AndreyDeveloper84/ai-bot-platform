@@ -21,6 +21,23 @@ from apps.orchestrator.concierge import (
 )
 
 
+def _card(name: str):
+    """A minimal public card — enough for the renderer, no catalog needed."""
+    from uuid import uuid4
+
+    from apps.marketplace.dto import MasterCard
+
+    return MasterCard(
+        tenant_id=uuid4(),
+        master_id=uuid4(),
+        name=name,
+        specialization="",
+        rating=None,
+        photo_url="",
+        city="Пенза",
+    )
+
+
 def _router_returning(provider: AsyncMock) -> Mock:
     router = Mock()
     router.get_provider.return_value = provider
@@ -307,6 +324,11 @@ class TestGenerateConciergeReply:
 
         reply = concierge.generate_direct_show_masters_reply("   ")
 
+        # NOT None (DRF-1283): «no criteria» and «found nobody» are different
+        # answers. A criteria-less turn is the branch's own business — asking
+        # is the canon-prescribed reply (BOT-003 §9), and handing it to the
+        # model instead would spend an LLM turn re-deriving the same question.
+        assert reply is not None
         assert reply.text == discovery.NO_CRITERIA_QUESTION
 
     def test_llm_error_falls_back_and_not_persisted(self, monkeypatch) -> None:
@@ -319,3 +341,108 @@ class TestGenerateConciergeReply:
 
         assert reply.text.strip()
         assert reply.persisted is False
+
+
+@pytest.mark.django_db(transaction=True)
+class TestDirectShowMastersDeclinesOnZero:
+    """DRF-1283 — zero results are a handoff signal, not a reply.
+
+    ``generate_direct_show_masters_reply`` returns ``None`` when the search
+    matched nobody. The handler reads that as «this layer could not resolve
+    the turn» and runs the concierge instead of sending a no-match line
+    (routing pinned in ``apps/channels/tests/test_global_zero_result_llm_fallback.py``).
+    """
+
+    def _bot_user_and_conversation(self):
+        from apps.conversations.services import resolve_active_global_conversation
+        from apps.identity.services import resolve_or_create_global_bot_user
+
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max",
+            channel_user_id="drf1283-uid",
+            chat_id="drf1283-chat",
+        )
+        return bot_user, resolve_active_global_conversation(bot_user)
+
+    def test_zero_cards_returns_none(self, monkeypatch) -> None:
+        monkeypatch.setattr(concierge, "discover_masters", lambda **kw: [])
+
+        assert concierge.generate_direct_show_masters_reply("хочу массаж") is None
+
+    def test_cards_are_rendered_as_before(self, monkeypatch) -> None:
+        card = _card("Массажист")
+        monkeypatch.setattr(concierge, "discover_masters", lambda **kw: [card])
+
+        reply = concierge.generate_direct_show_masters_reply("хочу массаж")
+
+        assert reply is not None
+        assert "Массажист" in reply.text
+        assert reply.action_data is not None
+
+
+@pytest.mark.django_db(transaction=True)
+class TestDirectBranchIsCounted:
+    """DRF-1283 — the deterministic branch writes an ``AIRequestMetric`` row.
+
+    It answers the most common booking turn without a model and used to write
+    nothing, so the busiest path in the funnel was absent from the table the
+    pilot thresholds are computed from. That is a DENOMINATOR gap, not a cost
+    gap: every per-request threshold (Cost per Request, Latency p95, Fallback
+    Rate) was computed over a sample that systematically excluded the
+    cheapest, fastest turns, and «what share of turns needs the model at all»
+    could not be answered.
+    """
+
+    def _bot_user_and_conversation(self):
+        from apps.conversations.services import resolve_active_global_conversation
+        from apps.identity.services import resolve_or_create_global_bot_user
+
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max",
+            channel_user_id="drf1283-metric-uid",
+            chat_id="drf1283-metric-chat",
+        )
+        return bot_user, resolve_active_global_conversation(bot_user)
+
+    def _rows(self):
+        from apps.observability.models import AIRequestMetric
+
+        return list(AIRequestMetric.all_tenants.all())
+
+    def test_answered_turn_writes_one_row_with_no_llm_columns(self, monkeypatch) -> None:
+        monkeypatch.setattr(concierge, "discover_masters", lambda **kw: [_card("Массажист")])
+        bot_user, conversation = self._bot_user_and_conversation()
+
+        concierge.generate_direct_show_masters_reply(
+            "хочу массаж", bot_user=bot_user, conversation=conversation
+        )
+
+        rows = self._rows()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.skill_selected == "concierge_direct"
+        assert row.outcome == "success"
+        # NULL, not 0 — the schema's own encoding for «no LLM call». Zeros
+        # would drag AVG(cost)/AVG(tokens) toward zero and replace an
+        # under-count with a distortion.
+        assert row.llm_model == ""
+        assert row.llm_provider == ""
+        assert row.llm_tokens_input is None
+        assert row.llm_tokens_output is None
+        assert row.llm_cost_usd is None
+        # No model call happened, so there is no pass to index — 0 would read
+        # as «a zeroth call».
+        assert row.llm_pass_index is None
+
+    def test_declined_turn_writes_nothing(self, monkeypatch) -> None:
+        """No double-counting: the concierge writes the row for this turn."""
+        monkeypatch.setattr(concierge, "discover_masters", lambda **kw: [])
+        bot_user, conversation = self._bot_user_and_conversation()
+
+        assert (
+            concierge.generate_direct_show_masters_reply(
+                "хочу массаж", bot_user=bot_user, conversation=conversation
+            )
+            is None
+        )
+        assert self._rows() == []

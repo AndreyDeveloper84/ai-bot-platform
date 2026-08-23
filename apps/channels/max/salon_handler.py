@@ -372,12 +372,30 @@ def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> No
     """
 
     thread = _open_thread(bot_user, role_ctx)
-    _remember(thread, role="user", content=event.text)
+    inbound = _remember(thread, role="user", content=event.text)
 
-    body = menu_header(role_ctx, tenant)
-    _reply(event, body, attachments=menu_attachments(role_ctx, entry))
+    answer = _ask_assistant(bot_user, thread, event.text, exclude_id=inbound)
+    if answer is None:
+        # No assistant for this person (not a master yet, or the surface is
+        # off). The menu is still a real answer — and it is the one this
+        # handler gave for its whole life before now.
+        body = menu_header(role_ctx, tenant)
+        _reply(event, body, attachments=menu_attachments(role_ctx, entry))
+        _remember(thread, role="assistant", content=body)
+        return
 
-    _remember(thread, role="assistant", content=body)
+    _reply(event, answer.text, attachments=menu_attachments(role_ctx, entry))
+    _remember(
+        thread,
+        role="assistant",
+        content=answer.text,
+        tool_name=answer.tool_name,
+        tokens_in=answer.tokens_in,
+        tokens_out=answer.tokens_out,
+        llm_provider=answer.llm_provider,
+        llm_model=answer.llm_model,
+        llm_cost_usd=answer.llm_cost_usd,
+    )
 
 
 def _open_thread(bot_user, role_ctx):
@@ -397,20 +415,51 @@ def _open_thread(bot_user, role_ctx):
         return None
 
 
-def _remember(thread, *, role: str, content: str) -> None:
-    """Append one turn, swallowing failure for the same reason as above."""
+def _remember(thread, *, role: str, content: str, **telemetry):
+    """Append one turn and return its id, swallowing failure as above."""
 
     if thread is None:
-        return
+        return None
 
     from apps.conversations.staff_assistant import record_staff_message
 
     try:
-        record_staff_message(thread, role=role, content=content)
+        return record_staff_message(thread, role=role, content=content, **telemetry).id
     except Exception:  # noqa: BLE001
         logger.exception(
             "channels.max.salon.thread_write_failed thread=%s role=%s", thread.id, role
         )
+        return None
+
+
+def _ask_assistant(bot_user, thread, text: str, *, exclude_id=None):
+    """The master's assistant, or None when there is nobody to answer as.
+
+    Only masters have one in step 1: every tool reads one master's own
+    schedule, and the admin-side equivalent needs a different set entirely.
+    An admin typing a sentence keeps getting the menu, which is what they
+    got yesterday — no promise is broken.
+
+    Never raises. The assistant already degrades every failure to a
+    sentence; this catch is for the paths it cannot know about, and its
+    fallback is the menu.
+    """
+
+    from apps.conversations.staff_assistant import recent_staff_history
+    from apps.master_api.services.assistant import answer_master_question
+
+    master = _master_of(bot_user)
+    if master is None:
+        return None
+
+    try:
+        # The inbound line is already in the thread — exclude it, or the
+        # model is handed the same question twice.
+        history = recent_staff_history(thread, exclude_id=exclude_id) if thread is not None else []
+        return answer_master_question(master=master, text=text, history=history)
+    except Exception:  # noqa: BLE001
+        logger.exception("channels.max.salon.assistant_failed bot_user=%s", bot_user.id)
+        return None
 
 
 def _send_menu(event: CanonicalEvent, role_ctx, tenant, entry) -> None:

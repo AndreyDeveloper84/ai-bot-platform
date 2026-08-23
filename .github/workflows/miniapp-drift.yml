@@ -1,0 +1,134 @@
+# miniapp-drift — go red when the Mini App people receive is not the Mini App in `dev`.
+#
+# DRF-1257. The Mini App is static files on the pilot host, not a container.
+# The bot deploy rebuilds four Python services and never touches
+# `apps/miniapp/`, so merging a front-end change publishes nothing. On
+# 2026-08-20 the built `dist` on the pilot turned out to be dated 8 August:
+# twelve days in which the owner reviewed screenshots of an August interface
+# sitting on top of a backend rebuilt that morning, and nobody could tell,
+# because nothing anywhere was comparing the two.
+#
+# This workflow is the thing that tells. It makes "silently drifted" into
+# "loudly failed".
+#
+# ### Why it is a separate workflow and not a step in `ci`
+# `ci` answers "is this commit good?". This answers "is the pilot serving this
+# commit?" — a question about the world, not about the diff, whose answer can
+# change with no commit at all (someone rebuilds the host from a stale
+# checkout). It also must NOT gate pull requests: a PR's Mini App changes are
+# by definition not published yet, so a per-PR run would be red by
+# construction and instantly ignored.
+#
+# ### Why not a timestamp comparison
+# Because mtimes lie. Rebuilding a two-week-old checkout refreshes every
+# timestamp and looks perfectly current. The guard downloads the bundle a
+# browser downloads, reads the sources embedded in its sourcemap, and diffs
+# those against this commit. It reports the divergence people actually
+# experience.
+#
+# ### Expected behaviour after a Mini App change merges
+# This goes RED and stays red until someone publishes
+# (`infra/deploy/miniapp-release.sh`). That is the intended design, not noise:
+# a merged front-end change that has not been published IS a defect, and this
+# is the only place it is visible.
+
+name: miniapp-drift
+
+# ### Which of these triggers actually fires — read before trusting one
+#
+# `push` is evaluated against the workflow file **on the branch being pushed**,
+# so this one works the moment it lands on `dev`. It is the trigger that
+# carries the guarantee, and it covers the case that caused this ticket: a Mini
+# App change merged to `dev` and never published.
+#
+# `schedule` and `workflow_dispatch` are read **only from the default branch**.
+# The default branch here is `main`, 885 commits behind, so until this file
+# reaches it BOTH are inert — the cron will not fire and the workflow will not
+# appear in the Actions dispatch list. This is stated rather than quietly
+# accepted because it is exactly how `deploy-dev.yml` died: commit ab2d164
+# moved it to a `workflow_run` trigger that only the default branch is read
+# for, and it has not auto-run since 2026-06-10. They are kept here so they
+# start working by themselves when `main` catches up; do not read a silent
+# `miniapp-drift` as a clean pilot until `gh run list --workflow=miniapp-drift.yml`
+# shows scheduled runs.
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "apps/miniapp/**"
+  # Catches the drift no commit causes: a host rebuilt from a stale checkout,
+  # a release rolled back and never rolled forward, a directory restored from
+  # a backup. Nothing in the repository moves in those cases, so only a
+  # wall-clock trigger can notice. Inert until this file is on `main` — see above.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Origin to check"
+        required: false
+        default: "https://miniapp-dev.gobeauty.site"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: miniapp-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: served bundle matches sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # `dev` is the branch the pilot deploys from, so that is what the live
+      # site must be compared against. A scheduled run would otherwise check
+      # out the default branch — `main`, 885 commits behind — and diff the
+      # pilot against ancient sources.
+      #
+      # Resolving this with a `git checkout dev` step instead was tried and is
+      # wrong: it replaces the whole working tree, including
+      # tools/ci/miniapp_bundle_drift.py, which on a pull_request run does not
+      # exist on `dev` yet. The checkout action's `ref` selects the commit
+      # without ever discarding the code being run.
+      - uses: actions/checkout@v4
+        with:
+          ref: >-
+            ${{ (github.event_name == 'push' || github.event_name == 'pull_request')
+                && github.ref || 'dev' }}
+
+      - name: Show what is being compared
+        run: echo "::notice::comparing the pilot against $(git rev-parse --short HEAD)"
+
+      # Node is needed only for the stylesheet half of the check: the JS
+      # sourcemap carries its own sources, but extracted CSS has no sourcemap,
+      # so the only way to compare it is to build one and diff the bytes.
+      # This is safe from false alarms because CSS output is deterministic
+      # given the lockfile — `npm ci` pins the esbuild that minifies it, and a
+      # Node 24 build and the pilot's Node 20 build were verified to emit a
+      # byte-identical index-foET4UYR.css.
+      - name: Set up Node (from apps/miniapp/.nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: apps/miniapp/.nvmrc
+          cache: npm
+          cache-dependency-path: apps/miniapp/package-lock.json
+
+      - name: npm ci
+        working-directory: apps/miniapp
+        run: npm ci
+
+      - name: vite build (reference bundle for the stylesheet comparison)
+        working-directory: apps/miniapp
+        run: npx vite build
+
+      - name: Compare the served bundle against these sources
+        env:
+          URL: ${{ inputs.url || 'https://miniapp-dev.gobeauty.site' }}
+        run: |
+          python3 tools/ci/miniapp_bundle_drift.py \
+            --url "$URL" \
+            --src apps/miniapp/src \
+            --dist apps/miniapp/dist

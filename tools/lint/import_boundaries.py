@@ -610,6 +610,17 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # also called outside a request (tests, and any future job), where
         # no tenant ContextVar is set.
         "apps/master_api/services/visit_source.py",
+        # DRF-1061 step 1 — the assistant's share of the per-master cost cap.
+        # Reads exactly one catalog row, by primary key, filtered on the
+        # tenant_id the caller named, to resolve `linked_bot_user_id`; there
+        # is no discovery here and no way to reach another tenant's catalog.
+        # Routing this through apps/marketplace/discovery.py would misuse it:
+        # that module returns the public MasterCard DTO, which deliberately
+        # carries no person-linkage fields. `.objects` is unavailable because
+        # check_cost_cap runs from the MAX consumer and from tasks, where no
+        # tenant ContextVar is set — the same reason as staff_invites.py and
+        # visit_source.py above.
+        "apps/master_api/services/ai_draft_limits.py",
         # DRF-1061 — invite redemption links a person to the master named
         # by the invite. Reads exactly one row, by primary key, filtered on
         # the invite's own tenant_id; there is no discovery here and no way

@@ -19,6 +19,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from django.utils import timezone
 
 from apps.channels.bot_registry import BotEntry
 from apps.channels.max.salon_handler import _extract_code, handle_salon_max_event
@@ -351,3 +352,138 @@ class TestTheThread:
             _handle("что у меня сегодня", tenant)
 
         assert sent.called
+
+
+class TestTheMasterAssistant:
+    """A master types a question and gets an answer (DRF-1061 step 1).
+
+    Before this the salon bot answered staff with a menu — right for
+    actions, useless for «когда у меня окно на два часа». The model is
+    stubbed: what is under test is the wiring, not its words.
+    """
+
+    def _make_master(self, tenant):
+        from apps.catalog.models import CatalogMaster
+
+        person = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=CHANNEL_USER_ID,
+            chat_id=CHAT_ID,
+        )
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            name="Ольга",
+            external_id=None,
+            external_updated_at=timezone.now(),
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            is_active=True,
+            linked_bot_user=person,
+        )
+        return person
+
+    def test_a_question_gets_an_answer_not_the_menu(self, tenant, sent):
+        self._make_master(tenant)
+
+        with patch("apps.master_api.services.assistant.answer_master_question") as answer:
+            from apps.master_api.services.assistant import AssistantReply
+
+            answer.return_value = AssistantReply(text="Завтра три записи.", tool_name="my_day")
+            _handle("что у меня завтра", tenant)
+
+        assert sent.call_args.kwargs["text"] == "Завтра три записи."
+
+    def test_the_answer_and_its_telemetry_land_in_the_thread(self, tenant, sent):
+        from apps.conversations.models import StaffAssistantMessage
+
+        self._make_master(tenant)
+
+        with patch("apps.master_api.services.assistant.answer_master_question") as answer:
+            from decimal import Decimal
+
+            from apps.master_api.services.assistant import AssistantReply
+
+            answer.return_value = AssistantReply(
+                text="Завтра три записи.",
+                tool_name="my_day",
+                tokens_in=120,
+                tokens_out=18,
+                llm_provider="openai",
+                llm_model="gpt-4o-mini",
+                llm_cost_usd=Decimal("0.000042"),
+            )
+            _handle("что у меня завтра", tenant)
+
+        row = StaffAssistantMessage.all_tenants.get(role="assistant")
+        assert row.tool_name == "my_day"
+        assert row.tokens_in == 120
+        assert str(row.llm_cost_usd) == "0.000042"
+
+    def test_the_question_is_not_handed_to_the_model_twice(self, tenant, sent):
+        """The inbound line is already in the thread before the model runs."""
+
+        self._make_master(tenant)
+
+        with patch("apps.master_api.services.assistant.answer_master_question") as answer:
+            from apps.master_api.services.assistant import AssistantReply
+
+            answer.return_value = AssistantReply(text="ок")
+            _handle("что у меня завтра", tenant)
+
+        history = answer.call_args.kwargs["history"]
+        assert [m.content for m in history] == []
+
+    def test_an_admin_without_a_master_card_still_gets_the_menu(self, tenant, sent):
+        # Step 1 gives an assistant to masters only: every tool reads one
+        # master's own schedule. An admin keeps what they had yesterday.
+        person = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id=CHANNEL_USER_ID, chat_id=CHAT_ID
+        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=person, role="admin")
+
+        _handle("что у меня завтра", tenant)
+
+        assert "Салон" in sent.call_args.kwargs["text"]
+
+    def test_a_failing_assistant_falls_back_to_the_menu(self, tenant, sent):
+        """A broken assistant must not leave a master with silence."""
+
+        self._make_master(tenant)
+
+        with patch(
+            "apps.master_api.services.assistant.answer_master_question",
+            side_effect=RuntimeError("boom"),
+        ):
+            _handle("что у меня завтра", tenant)
+
+        assert sent.called
+        assert "Салон" in sent.call_args.kwargs["text"]
+
+    def test_a_button_tap_never_reaches_the_assistant(self, tenant, sent):
+        self._make_master(tenant)
+
+        with patch("apps.master_api.services.assistant.answer_master_question") as answer:
+            with tenant_scope(tenant):
+                handle_salon_max_event(
+                    {
+                        "update_type": "message_callback",
+                        "timestamp": 1_700_000_000_000,
+                        "callback": {
+                            "callback_id": "cb-assist",
+                            "payload": "cb:staff:day",
+                            "timestamp": 1_700_000_000_000,
+                            "user": {"user_id": int(CHANNEL_USER_ID), "name": "Ольга"},
+                        },
+                        "message": {
+                            "body": {"mid": "m1", "seq": 1, "text": ""},
+                            "sender": {"user_id": 999, "name": "bot", "is_bot": True},
+                            "recipient": {
+                                "chat_id": int(CHAT_ID),
+                                "user_id": 999,
+                                "chat_type": "dialog",
+                            },
+                        },
+                    }
+                )
+
+        answer.assert_not_called()

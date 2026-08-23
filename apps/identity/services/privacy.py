@@ -35,7 +35,10 @@ Implements the bot-side half of ``PILOT_CONTRACTS_2026-08-15`` §6:
   the view maps ``all_ok=False`` to 502 so the miniapp can offer a retry
   (already-done steps no-op on that retry).
 * **Pilot scope (C5.2)** — personal context + memory + consents +
-  the bot-side profile identifiers on ``BotUser``.
+  the bot-side profile identifiers on ``BotUser`` + the staff
+  assistant's threads (DRF-1276: an employee is a ``BotUser`` like
+  anyone else, and what they dictated to the assistant is personal
+  data too).
   Transactional records (bookings, payments) follow statutory retention;
   their anonymisation is explicitly post-pilot.
 
@@ -318,6 +321,36 @@ def _erase_bot_user_pii(bot_user: BotUser, link: _PersonLink) -> None:
     bot_user.context = {}
 
 
+def _erase_staff_assistant(bot_user: BotUser, link: _PersonLink) -> None:
+    """Erase the person's staff-assistant dialogue (DRF-1276).
+
+    Step 0 of DRF-1061 introduced ``StaffAssistantThread`` /
+    ``StaffAssistantMessage`` without teaching this cascade about them, so
+    free text an employee dictated to the salon assistant survived
+    «удалите мои данные» verbatim. A staff member is a ``BotUser`` like
+    any other, and a *former* one (access revoked via DRF-1227) keeps the
+    same 152-ФЗ right.
+
+    Erase-in-place, same posture as the ``BotUser`` shell: message
+    ``content`` is blanked, the rows themselves stay — their telemetry
+    (tokens, cost) feeds finance reconciliation exactly like the AiDraft
+    metadata the draft purge keeps. The thread is soft-deleted via the
+    same flag pair :meth:`StaffAssistantThread.mark_deleted` sets, so a
+    person who comes back starts a fresh thread instead of resuming a
+    ghost — and so the partial-unique constraint lets them.
+
+    Idempotent: the ``deleted_at__isnull=True`` filter makes a repeated
+    confirmed DELETE a no-op here.
+    """
+    from apps.conversations.models import StaffAssistantMessage, StaffAssistantThread
+
+    ids = _person_shell_ids(bot_user, link)
+    threads = StaffAssistantThread.all_tenants.filter(bot_user_id__in=ids, deleted_at__isnull=True)
+    with transaction.atomic():
+        StaffAssistantMessage.all_tenants.filter(thread__in=threads).update(content="")
+        threads.update(is_active=False, deleted_at=timezone.now())
+
+
 # ---------------------------------------------------------------------------
 # Export (C5.1)
 # ---------------------------------------------------------------------------
@@ -550,6 +583,18 @@ def delete_personal_data(
     except Exception:  # noqa: BLE001 — per-step isolation, reported below
         logger.exception("identity.privacy.profile_pii_erase_failed")
         steps.append(DeleteStep("profile_pii_erase", False))
+
+    # Step 5 — staff assistant threads (DRF-1276). Ours alone, like step 4,
+    # and keyed on the same shell set: it exists whether or not the person
+    # was ever linked to Ayla, so it runs unconditionally.
+    try:
+        _erase_staff_assistant(bot_user, link)
+        steps.append(
+            DeleteStep("staff_assistant_erase", True, "own_row_only" if link.conflict else "")
+        )
+    except Exception:  # noqa: BLE001 — per-step isolation, reported below
+        logger.exception("identity.privacy.staff_assistant_erase_failed")
+        steps.append(DeleteStep("staff_assistant_erase", False))
 
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).
