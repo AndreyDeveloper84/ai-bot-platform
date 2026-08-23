@@ -1366,9 +1366,7 @@ class TestCustomerConsentGate:
         return service
 
     def _run(self, tenant, master, service, bot_user, owner_bot_user):
-        booking = _make_booking(
-            tenant=tenant, master=master, service=service, bot_user=bot_user
-        )
+        booking = _make_booking(tenant=tenant, master=master, service=service, bot_user=bot_user)
         sent: list[tuple[str, str]] = []
 
         def _capture(chat_id: str, text: str, **kw):  # noqa: ARG001
