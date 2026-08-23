@@ -77,7 +77,7 @@ class Command(BaseCommand):
                 "daily_report",
                 tasks.plan_daily_reports(
                     now_utc=now,
-                    fetch=(lambda _ext: (_STUB_SUMMARY, _STUB_WATER))
+                    fetch=(lambda _ext: (_STUB_SUMMARY, _STUB_WATER, None))
                     if options["no_ayla"]
                     else None,
                 ),

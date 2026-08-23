@@ -49,6 +49,17 @@ logger = logging.getLogger(__name__)
 
 #: Whole-message phrases, normalised (lowercased, ё->е, punctuation and
 #: repeated whitespace stripped). Deliberately short and unambiguous.
+#:
+#: Note what is NOT here: the «отпис-» family («отпиши меня», «отпишись»,
+#: «отписаться»). In a salon bot those mean *take me off the appointment*,
+#: not *stop messaging me* — «отпиши меня» and «отпишите меня» are both in
+#: the owner's cancellation corpus (``apps/skills/booking/tests/
+#: test_lookup_routing.py::OD_IR1_CANCEL_CORPUS``), and CI caught this skill
+#: stealing the turn from the booking flow. Claiming an ambiguous phrase and
+#: silently unsubscribing someone who wanted to cancel a visit is exactly the
+#: failure mode the closed match set exists to prevent, so the phrase family
+#: is dropped from this side rather than trimmed from the corpus.
+#: :class:`TestDoesNotStealBookingCancellations` keeps it that way.
 OPT_OUT_PHRASES: frozenset[str] = frozenset(
     {
         "не пиши мне",
@@ -57,9 +68,6 @@ OPT_OUT_PHRASES: frozenset[str] = frozenset(
         "больше не пиши мне",
         "не пиши первой",
         "не пиши",
-        "отпишись",
-        "отписаться",
-        "отпиши меня",
         "отключи напоминания",
         "выключи напоминания",
         "отключи уведомления",

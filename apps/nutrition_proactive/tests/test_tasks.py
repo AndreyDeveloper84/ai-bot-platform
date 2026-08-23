@@ -71,7 +71,7 @@ def water_reader(total_ml: int, norm_ml: int = 2000):
     return lambda _ext: WaterTodayResponse(total_ml=total_ml, norm_ml=norm_ml, entries=[])
 
 
-def summary_reader():
+def summary_reader(profile=None):
     summary = SummaryResponse(
         date="2026-08-23",
         calories_total=1500.0,
@@ -83,7 +83,7 @@ def summary_reader():
         raw={},
     )
     water = WaterTodayResponse(total_ml=1200, norm_ml=2000, entries=[])
-    return lambda _ext: (summary, water)
+    return lambda _ext: (summary, water, profile)
 
 
 def only(decisions, bot_user):
@@ -282,8 +282,8 @@ class TestDailyReportSchedule:
         make_user(tenant, report="19:00")
         decisions = tasks.plan_daily_reports(now_utc=at_msk(19), fetch=summary_reader())
         text = next(d.text for d in decisions if d.send)
-        assert "1500 из 1900 ккал" in text
-        assert "1200 из 2000 мл" in text
+        assert "Калории: 1500 из 1900 ккал." in text
+        assert "Вода: 1200 из 2000 мл." in text
         assert "не пиши мне" in text
 
 

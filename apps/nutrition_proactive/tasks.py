@@ -74,12 +74,13 @@ from apps.channels.max.outbound import MaxAPIError, send_message
 from apps.integrations.ayla import (
     NutritionAPIError,
     NutritionUnavailableError,
+    ProfileResponse,
     SummaryResponse,
     WaterTodayResponse,
     external_user_id_for,
     get_nutrition_client,
 )
-from apps.nutrition_proactive import prefs, selection
+from apps.nutrition_proactive import prefs, render, selection
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,13 @@ def enabled() -> bool:
 def dry_run() -> bool:
     """True unless an operator has explicitly turned the safety off."""
     return bool(getattr(settings, "NUTRITION_PROACTIVE_DRY_RUN", True))
+
+
+#: What one daily-report evaluation needs from Ayla. The profile is last
+#: and nullable because it is the only optional part: without it the report
+#: still renders (calories against the summary's own goal, macros without
+#: targets) and simply makes no remark.
+DailyPayload = tuple[SummaryResponse, WaterTodayResponse | None, ProfileResponse | None]
 
 
 @dataclass
@@ -131,7 +139,7 @@ class Decision:
 def plan_daily_reports(
     *,
     now_utc: datetime | None = None,
-    fetch: Callable[[str], tuple[SummaryResponse, WaterTodayResponse | None]] | None = None,
+    fetch: Callable[[str], DailyPayload] | None = None,
 ) -> list[Decision]:
     """Evaluate every candidate for the daily report at ``now_utc``.
 
@@ -186,7 +194,7 @@ def plan_daily_reports(
             continue
 
         try:
-            summary, water = fetch(ext)
+            summary, water, profile = fetch(ext)
         except (NutritionUnavailableError, NutritionAPIError) as exc:
             logger.warning("nutrition_proactive.report.fetch_failed ext=%s err=%s", ext, exc)
             decisions.append(decide("ayla_unavailable"))
@@ -196,7 +204,7 @@ def plan_daily_reports(
             decide(
                 "due",
                 send=True,
-                text=render_daily_report(summary, water),
+                text=render.render_daily_report(summary, water, profile),
                 pref_updates={"last_report_date": today_iso},
             )
         )
@@ -204,49 +212,29 @@ def plan_daily_reports(
     return decisions
 
 
-def _fetch_daily(ext: str) -> tuple[SummaryResponse, WaterTodayResponse | None]:
-    """Summary is required; water is a nice-to-have and degrades to None."""
+def _fetch_daily(ext: str) -> DailyPayload:
+    """Summary is required; water and profile degrade to ``None``.
+
+    Three calls once a day per recipient. The profile is fetched rather than
+    cached because its norms are what every printed target and every remark
+    is measured against -- a stale copy would put a number in a message that
+    no longer matches what the person sees in the Mini App.
+    """
     client = get_nutrition_client()
 
-    async def _run() -> tuple[SummaryResponse, WaterTodayResponse | None]:
+    async def _run() -> DailyPayload:
         summary = await client.daily_summary(external_user_id=ext, with_comment=True)
         try:
             water = await client.get_water_today(external_user_id=ext)
         except (NutritionUnavailableError, NutritionAPIError):
             water = None
-        return summary, water
+        try:
+            profile = await client.get_profile(external_user_id=ext)
+        except (NutritionUnavailableError, NutritionAPIError):
+            profile = None
+        return summary, water, profile
 
     return asyncio.run(_run())
-
-
-def render_daily_report(
-    summary: SummaryResponse,
-    water: WaterTodayResponse | None,
-) -> str:
-    """Compose the report body.
-
-    Numbers first, judgement never. The copy states what was logged against
-    what the profile expects and stops -- an unsolicited evening message
-    about someone's eating is the wrong place for an opinion the person did
-    not ask for. ``ai_comment`` is passed through when Ayla supplies one,
-    because that text is generated under Ayla's own safety rules.
-    """
-    lines = ["Итоги дня по питанию."]
-    if summary.calories_goal:
-        lines.append(f"Калории: {round(summary.calories_total)} из {summary.calories_goal} ккал.")
-    else:
-        lines.append(f"Калории: {round(summary.calories_total)} ккал.")
-    lines.append(
-        f"Белки {round(summary.protein_g)} г, "
-        f"жиры {round(summary.fat_g)} г, "
-        f"углеводы {round(summary.carbs_g)} г."
-    )
-    if water is not None and water.norm_ml:
-        lines.append(f"Вода: {water.total_ml} из {water.norm_ml} мл.")
-    if summary.ai_comment:
-        lines.append(summary.ai_comment)
-    lines.append("Если такие итоги не нужны — напиши «не пиши мне».")
-    return "\n".join(lines)
 
 
 @shared_task(name="nutrition_proactive.send_daily_reports")
@@ -356,7 +344,7 @@ def plan_water_reminders(
             decide(
                 "behind_proportional_norm",
                 send=True,
-                text=render_water_reminder(water),
+                text=render.render_water_reminder(water, proportional_ml=proportional),
                 detail=detail,
                 pref_updates={
                     "water": {
@@ -374,22 +362,6 @@ def plan_water_reminders(
 
 def _fetch_water(ext: str) -> WaterTodayResponse:
     return asyncio.run(get_nutrition_client().get_water_today(external_user_id=ext))
-
-
-def render_water_reminder(water: WaterTodayResponse) -> str:
-    """Short, factual, no scolding. The deficit is against the *day's* norm.
-
-    The proportional norm decides *whether* to write; the message quotes the
-    full-day figure because that is the number the person recognises from
-    the Mini App. Quoting the proportional figure instead would need a
-    paragraph of explanation to be honest.
-    """
-    deficit = max(0, water.norm_ml - water.total_ml)
-    return (
-        f"Сегодня выпито {water.total_ml} из {water.norm_ml} мл. "
-        f"До нормы ещё {deficit} мл.\n"
-        "Если напоминания не нужны — напиши «не пиши мне»."
-    )
 
 
 @shared_task(name="nutrition_proactive.send_water_reminders")

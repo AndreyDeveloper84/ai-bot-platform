@@ -137,6 +137,50 @@ class TestEffect:
         assert stored.context["last_followup_sent_at"] == "2026-08-22"
 
 
+class TestDoesNotStealBookingCancellations:
+    """The collision CI found, kept found.
+
+    This skill registers ahead of every domain skill, so any phrase it
+    claims is a phrase the booking flow never sees. «отпиши меня» reads as
+    "stop messaging me" in a vacuum and as "take me off the appointment" in
+    a salon — and the second reading is the one the owner's corpus encodes.
+    A person cancelling a visit who instead gets silently unsubscribed from
+    everything is the exact failure the closed match set exists to prevent.
+
+    Asserted against the owner's corpus itself rather than a copied list, so
+    a phrase added there is checked here on the next run without anyone
+    remembering to mirror it.
+    """
+
+    def test_no_cancellation_phrase_is_claimed(self, bot_user: BotUser) -> None:
+        from apps.skills.booking.tests.test_lookup_routing import (
+            OD_IR1_CANCEL_CORPUS,
+        )
+
+        skill = ProactiveOptOutSkill()
+        stolen = [p for p in OD_IR1_CANCEL_CORPUS if skill.matches(ctx(bot_user, p))]
+        assert stolen == []
+
+    def test_the_two_sets_are_disjoint(self) -> None:
+        from apps.skills.booking.tests.test_lookup_routing import (
+            OD_IR1_CANCEL_CORPUS,
+        )
+
+        assert OPT_OUT_PHRASES & {normalise(p) for p in OD_IR1_CANCEL_CORPUS} == set()
+
+    @pytest.mark.parametrize("phrase", ["отпиши меня", "отпишите меня", "отпишись", "отписаться"])
+    def test_the_otpis_family_stays_out(self, bot_user: BotUser, phrase: str) -> None:
+        """Named individually so re-adding one fails loudly rather than
+        silently shifting a corpus test in another app."""
+        assert ProactiveOptOutSkill().matches(ctx(bot_user, phrase)) is False
+
+    def test_privacy_erasure_phrases_are_not_claimed_either(self, bot_user: BotUser) -> None:
+        """`privacy_consent` owns «удали меня» / «удалите мои данные»."""
+        skill = ProactiveOptOutSkill()
+        for phrase in ("удали меня", "удалите мои данные", "удалить мои данные"):
+            assert skill.matches(ctx(bot_user, phrase)) is False
+
+
 class TestRegistration:
     def test_the_skill_is_registered_ahead_of_the_catch_all_fallbacks(self) -> None:
         """Registered late, the request to stop would be echo-claimed."""
