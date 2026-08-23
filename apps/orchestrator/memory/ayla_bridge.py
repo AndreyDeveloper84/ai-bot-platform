@@ -119,7 +119,7 @@ def bridge_candidates_to_ayla(
     if slots or districts:
         declared = get_declared_prefs(bot_user, client=client)
         if declared.status is not GateStatus.OK or declared.context is None:
-            logger.info("orchestrator.memory_bridge.read_blocked")
+            logger.info("orchestrator.memory_bridge.read_blocked reason=%s", declared.status.value)
             return 0
         current = declared.context.context or {}
 
@@ -157,8 +157,12 @@ def bridge_candidates_to_ayla(
         return 0
     result = patch_declared_prefs(bot_user, updates, client=client)
     if result.status is not GateStatus.OK:
+        # DRF-1311: `reason` is load-bearing. Without it the line cannot
+        # distinguish «consent gate shut» from «Ayla answered 500», and the
+        # 23.08 pilot block cost a full investigation to tell them apart.
         logger.info(
-            "orchestrator.memory_bridge.patch_blocked fields=%s",
+            "orchestrator.memory_bridge.patch_blocked reason=%s fields=%s",
+            result.status.value,
             ",".join(u["field"] for u in updates),
         )
         return 0
@@ -202,6 +206,6 @@ def clear_declared_fields(
         return 0
     result = patch_declared_prefs(bot_user, updates, client=client)
     if result.status is not GateStatus.OK:
-        logger.info("orchestrator.memory_bridge.clear_blocked")
+        logger.info("orchestrator.memory_bridge.clear_blocked reason=%s", result.status.value)
         return 0
     return len(updates)
