@@ -254,11 +254,13 @@ def _record_concierge_metric(
     conversation: Any,
     trace_id: str | None,
     message_text: str,
-    pass_index: int,
+    pass_index: int | None,
     outcome: str,
     latency_total_ms: int,
     dto: Any = None,
     llm_client: "RouterLLMClient | None" = None,
+    skill_selected: str = "concierge",
+    fallback_triggered: bool = False,
 ) -> None:
     """DRF-1211 — emit one ``AIRequestMetric`` row per concierge LLM pass.
 
@@ -273,6 +275,31 @@ def _record_concierge_metric(
     The metric row parks under the ``global_bot`` sentinel tenant — the
     same tenant that owns the global BotUser / Conversation rows — at
     ``current_tenant()=None``, exactly like the ``*_global_*`` services.
+
+    DRF-1283 widens this past LLM passes. The deterministic show-masters
+    branch (:func:`generate_direct_show_masters_reply`) answers the single
+    most common booking turn WITHOUT calling a model, and wrote nothing here
+    — so the busiest path in the funnel was missing from the very table the
+    pilot thresholds are computed from. That is not a cost under-count (the
+    turn genuinely cost nothing); it is a DENOMINATOR under-count, and it
+    biases every per-request threshold — Cost per Request, Latency p95,
+    Fallback Rate — by silently dropping the cheapest, fastest turns out of
+    the sample. «What share of turns needs the model at all» was not
+    answerable at all.
+
+    Such a row carries ``llm_pass_index=None`` and leaves every LLM column at
+    its no-call value — NULL tokens / NULL cost / empty provider, NOT zeros.
+    The schema already defines that shape («NULL when no LLM call (cached /
+    non-LLM skill path)» — see the model's help_text), so a non-LLM row is
+    something the table was built to hold rather than something bolted on.
+    Zeros would have been the wrong encoding: they would drag AVG(cost) and
+    AVG(tokens) toward zero, replacing an under-count with a distortion.
+    ``skill_selected`` separates the two writers so either can be isolated.
+
+    Exactly one row is written per turn per path: the deterministic branch
+    records only when it ANSWERS the turn. When it finds nobody it hands the
+    turn to the concierge (DRF-1283) and stays silent, so the model's own
+    rows are not double-counted against the same inbound message.
 
     Best-effort, mirroring ``pipeline._emit_ai_metric``: observability
     must never crash the turn — failures log WARN with trace_id.
@@ -318,7 +345,8 @@ def _record_concierge_metric(
             conversation=conversation,
             request_id=request_uuid,
             message_text_length=len(message_text),
-            skill_selected="concierge",
+            skill_selected=skill_selected,
+            fallback_triggered=fallback_triggered,
             latency_total_ms=latency_total_ms,
             latency_llm_ms=latency_llm_ms,
             llm_provider=llm_provider,
@@ -506,12 +534,27 @@ def _build_tool_result_message(user_text: str, cards: list[Any], args: dict[str,
         lines.append("- " + ", ".join(parts))
     if not cards:
         lines.append("(по этому запросу никого не нашлось)")
+        # DRF-1283 — the refusal is a distinct instruction, not a clause
+        # tacked onto the happy path. The old one ended «предложи уточнить
+        # город или услугу», which the model dutifully said back to a client
+        # who had just named both, and «уточните город или услугу» in answer
+        # to «покажи массажистов в пензе» reads as «я вас не понял». Name what
+        # WAS understood; ask only for what was not given.
+        lines.append(
+            "Список пуст. Ответь честно и коротко: покажи, что запрос ПОНЯТ — "
+            "назови своими словами услугу и город, о которых спросил клиент, — "
+            "и скажи, что именно такого у наших мастеров сейчас нет. НЕ проси "
+            "уточнить то, что клиент уже назвал: если и услуга, и город "
+            "названы, предложи другую услугу или другой город. Ничего не "
+            "выдумывай и не обещай перезвонить. Инструмент show_masters "
+            "повторно не вызывай — данных достаточно."
+        )
+        return "\n".join(lines)
     lines.append(
         "Ответь клиенту словами, опираясь ТОЛЬКО на эти данные: коротко "
-        "перечисли подходящих мастеров и предложи записаться. Если список "
-        "пуст — честно скажи, что никого не нашлось, и предложи уточнить "
-        "город или услугу. Ничего не выдумывай. Инструмент show_masters "
-        "повторно не вызывай — данных достаточно."
+        "перечисли подходящих мастеров и предложи записаться. Ничего не "
+        "выдумывай. Инструмент show_masters повторно не вызывай — данных "
+        "достаточно."
     )
     return "\n".join(lines)
 
@@ -569,6 +612,9 @@ def generate_concierge_reply(
     # budget-exhausted follow-up pass can still render real data instead of
     # the generic fallback line.
     pending_cards: list[Any] | None = None
+    # The tool arguments behind ``pending_cards`` — so a degraded render can
+    # still say WHAT was searched for (DRF-1283 / render_no_match).
+    pending_args: dict[str, Any] = {}
     dto: Any = None
     while pass_index < max_passes:
         pass_index += 1
@@ -602,7 +648,11 @@ def generate_concierge_reply(
                 # A follow-up pass failed AFTER the tool already returned
                 # data — render the cards deterministically rather than the
                 # generic fallback: the user asked for masters, we have them.
-                rendered = _render_master_cards(pending_cards[:_MAX_MASTER_CARDS])
+                rendered = _render_master_cards(
+                    pending_cards[:_MAX_MASTER_CARDS],
+                    city=pending_args.get("city"),
+                    specialization=pending_args.get("specialization"),
+                )
                 return DiscoveryReply(
                     text=rendered.text,
                     action_data=rendered.action_data,
@@ -660,13 +710,16 @@ def generate_concierge_reply(
                 trace_id,
                 pass_index,
             )
-            rendered = _render_master_cards(cards[:_MAX_MASTER_CARDS])
+            rendered = _render_master_cards(
+                cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+            )
             return DiscoveryReply(
                 text=rendered.text,
                 action_data=rendered.action_data,
                 persisted=True,
             )
         pending_cards = cards
+        pending_args = args
         current_text = _build_tool_result_message(message_text, cards, args)
 
     if dto.action_type == ActionType.ASK_CLARIFICATION:
@@ -693,8 +746,12 @@ def generate_concierge_reply(
 
 
 def generate_direct_show_masters_reply(
-    message_text: str, *, trace_id: str | None = None
-) -> DiscoveryReply:
+    message_text: str,
+    *,
+    trace_id: str | None = None,
+    bot_user: Any = None,
+    conversation: Any = None,
+) -> DiscoveryReply | None:
     """Deterministic show-masters short-circuit for a general booking request.
 
     DRF-1102 — the missing 8th branch in the pre-LLM detector chain in
@@ -708,20 +765,56 @@ def generate_direct_show_masters_reply(
     path that didn't require a full free-text round trip, and would loop
     re-asking instead of ever calling it (root cause per the DRF-1102 audit).
 
-    Skips the LLM entirely: the search layer already resolves free text fine
-    (``discover_masters`` token-matches the raw phrase — DRF-945), so there is
-    nothing for a model turn to decide here. Mirrors the per-tenant
-    ``MenuSkill``, which already treats the same signal as a last-resort
-    booking catch-all (``apps/skills/menu/skill.py``) — this is that same
-    catch-all, applied one level up (before the concierge instead of before
-    echo) because the global path has no salon-scoped booking skill to hand
-    off to yet; showing masters IS the equivalent next step here.
+    Skips the LLM when it can: the deterministic path is faster and cheaper,
+    and when it hits it is right. Mirrors the per-tenant ``MenuSkill``, which
+    already treats the same signal as a last-resort booking catch-all
+    (``apps/skills/menu/skill.py``) — this is that same catch-all, applied one
+    level up (before the concierge instead of before echo) because the global
+    path has no salon-scoped booking skill to hand off to yet; showing masters
+    IS the equivalent next step here.
+
+    ### Returning ``None`` (DRF-1283)
+
+    ``None`` means the search matched NOBODY, and the caller must hand the
+    turn to the concierge instead of sending anything.
+
+    Zero results is not an answer — it is this layer admitting it could not
+    resolve the request. Rendering it as «мастеров пока не нашлось» spends the
+    turn on a non-answer and forecloses the one thing that could still rescue
+    it. On the live pilot (23.08) «покажи массажистов в пензе» went out in
+    66ms as exactly that non-answer, with four massage masters in the salon
+    and no model call anywhere in the trace. The search bug behind that
+    particular zero is fixed (see ``apps.marketplace.discovery``), but the
+    structural point survives its fix: a deterministic matcher will always
+    have a tail it cannot phrase, and the model is what that tail is for.
+
+    Handing zero results back to the model was NOT safe when DRF-1102 wrote
+    this branch: the concierge was single-pass, so a ``show_masters`` call
+    consumed the whole turn and left the model nothing to say over the result
+    — which is why it re-asked forever instead of calling the tool. DRF-1266
+    (multi-pass, on the pilot since 23.08) removed that constraint: the tool
+    result comes back as an ordinary second message and the model speaks over
+    it, bounded by ``CONCIERGE_MAX_LLM_PASSES``. The fallback is safe now
+    because that landed, not because zero results became less bad.
+
+    The branch itself stays — a hit still answers here, without a model.
     """
+    started = time.monotonic()
     if not has_discovery_criteria(None, message_text):
         # Same guard as the LLM path: a blank turn carries no criteria, and the
         # unfiltered read behind it is the catalogue fallback canon forbids.
         logger.info("orchestrator.concierge.direct_show_masters.no_criteria trace=%s", trace_id)
-        return render_no_criteria_clarification()
+        reply = render_no_criteria_clarification()
+        _record_direct_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            started=started,
+            outcome=AIRequestMetric.OUTCOME_FALLBACK,
+            fallback_triggered=True,
+        )
+        return reply
     cards = discover_masters(
         specialization=message_text,
         limit=_MAX_MASTER_CARDS,
@@ -732,4 +825,54 @@ def generate_direct_show_masters_reply(
         len(cards),
         trace_id,
     )
-    return _render_master_cards(cards)
+    if not cards:
+        # Decline the turn; the handler routes it to the concierge. No metric
+        # row here on purpose — this path did not answer the inbound message,
+        # and the concierge writes its own row(s) for the same turn.
+        logger.info("orchestrator.concierge.direct_show_masters.empty_to_llm trace=%s", trace_id)
+        return None
+    _record_direct_metric(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        message_text=message_text,
+        started=started,
+        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+    )
+    return _render_master_cards(cards, specialization=message_text)
+
+
+def _record_direct_metric(
+    *,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str | None,
+    message_text: str,
+    started: float,
+    outcome: str,
+    fallback_triggered: bool = False,
+) -> None:
+    """One ``AIRequestMetric`` row for a turn the deterministic branch ANSWERED.
+
+    See :func:`_record_concierge_metric` for why a model-less turn belongs in
+    this table at all and why its LLM columns stay NULL rather than zero.
+
+    Skipped without a ``bot_user``: the row's whole value is being countable
+    alongside the concierge's rows for the same funnel, and a user-less row
+    (only reachable from a direct unit-test call) is noise in that count.
+    """
+    if bot_user is None:
+        return
+    _record_concierge_metric(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        message_text=message_text,
+        # No LLM pass happened — NULL, not 0. `llm_pass_index` counts model
+        # calls within a turn, and 0 would read as a zeroth call.
+        pass_index=None,
+        outcome=outcome,
+        latency_total_ms=int((time.monotonic() - started) * 1000),
+        skill_selected="concierge_direct",
+        fallback_triggered=fallback_triggered,
+    )
