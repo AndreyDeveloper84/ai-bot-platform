@@ -1294,6 +1294,31 @@ NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "tru
     "0",
 )
 
+# DRF-1301 — the same two switches in front of the post-visit follow-up
+# («как прошёл вчерашний визит?»), for the same reason and in the same
+# order. See apps/bookings/followups.py for the consent gate they guard.
+#
+# One difference from the nutrition pair above, and it is the whole point
+# of the ticket: those two tasks shipped dark, so their switches cost
+# nothing. This beat was LIVE and sending — seven messages had already
+# gone to two people on the pilot, neither of whom had consent_at set.
+# Defaulting ENABLED to False therefore turns a RUNNING feature off on
+# purpose. That is the right default for a proactive task found to be
+# writing to people who never consented: the operator re-enables it after
+# reading `manage.py post_visit_followup_dryrun` against the real
+# recipient list, not before.
+#
+# Sequencing, as with nutrition: ENABLED=True + DRY_RUN=True first, read
+# the `bookings.followup.dry_run` log lines, and only then DRY_RUN=False.
+POST_VISIT_FOLLOWUP_ENABLED = os.environ.get("POST_VISIT_FOLLOWUP_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+POST_VISIT_FOLLOWUP_DRY_RUN = os.environ.get("POST_VISIT_FOLLOWUP_DRY_RUN", "true").lower() not in (
+    "false",
+    "0",
+)
+
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
 # stored in Redis as `anthropic_tokens:<YYYY-MM-DD>` (TTL 24h, natural
 # UTC-midnight rollover). On overrun the provider raises
