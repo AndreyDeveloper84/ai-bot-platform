@@ -467,6 +467,13 @@ def render_no_services(
     name = (salon or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
     if name and not salon_known:
         text = f"Салона «{name}» среди подключённых пока нет. Могу показать, какие салоны есть."
+    elif name and service:
+        # The salon IS here and the query simply matched nothing in it —
+        # «услуги не загружены» would be a lie about a loaded catalog.
+        text = (
+            f"«{service}» в салоне «{name}» — такой услуги сейчас нет. "
+            "Могу показать всё, что там делают."
+        )
     elif name:
         text = f"В салоне «{name}» услуги пока не загружены."
     elif service and place:

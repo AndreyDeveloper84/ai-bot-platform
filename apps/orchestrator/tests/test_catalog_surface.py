@@ -195,6 +195,20 @@ class TestExecuteCatalogTool:
         assert reply is not None
         assert "не загружены" in reply.text
 
+    def test_show_services_known_salon_query_miss_names_both(self):
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        _service(tenant, "Массаж спины")
+
+        reply = execute_catalog_tool(
+            "show_services", {"salon": "bodyformula", "query": "такойуслугинет"}
+        )
+
+        assert reply is not None
+        # The salon IS here — «услуги не загружены» would be a lie about a
+        # loaded catalog; the miss is about the query.
+        assert "не загружены" not in reply.text
+        assert "такойуслугинет" in reply.text
+
     def test_show_services_query_no_match_is_honest(self):
         tenant = _salon("s1", "BodyFormula", city="Пенза")
         _service(tenant, "Массаж спины")
