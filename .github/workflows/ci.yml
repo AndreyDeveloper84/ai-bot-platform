@@ -79,6 +79,81 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ------------------------------------------------------------------
+      # DRF-1275 — secret guard. Before this ticket `detect-secrets` was
+      # declared ONLY in .pre-commit-config.yaml (`rev: v1.5.0`), so it
+      # defended exactly one population: engineers who had actually run
+      # `uv run pre-commit install`. It defended nobody in a fresh
+      # worktree or clone, nothing committed through the GitHub web UI,
+      # and nothing committed with `--no-verify`. `.secrets.baseline` was
+      # maintained but never enforced by anything automatic.
+      #
+      # The blast radius is worse here than in the Ayla backend: the bot
+      # is deployed by hand (a bundle is copied onto the host), so a
+      # leaked credential first surfaces on a live machine rather than in
+      # a pipeline.
+      #
+      # WHY FIRST IN THE JOB: the same argument that keeps the "eventbus
+      # booking lifecycle tests" step below as its own fast-fail gate — a
+      # cheap gate must not sit behind "pytest apps/ (full suite)"
+      # (~30 min). Measured on ubuntu-latest: the three steps below add
+      # ~2 min to a green run (the scan itself is ~1m45s over ~1800
+      # tracked files), and turn a leaked-credential run red at ~2 min
+      # instead of ~25. That ~2 min is a real, recurring cost on every
+      # push — recorded here rather than buried, same as the
+      # CI-feedback-latency note on `timeout-minutes` above.
+      #
+      # Placing it above `uv sync` also means the guard still runs when
+      # the private-dep fetch (GH_DEPLOY_TOKEN) is broken, which is
+      # precisely a moment when credentials are being moved around.
+      - name: Set up Python 3.12 (secret guard)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install detect-secrets
+        # Pinned to the SAME version as `rev: v1.5.0` of the
+        # Yelp/detect-secrets hook in .pre-commit-config.yaml. Different
+        # releases ship different plugins and filters, so an unpinned CI
+        # would drift away from the local hook silently — the one failure
+        # mode a second copy of a guard must not have.
+        #
+        # No `# pragma: allowlist secret` is needed on the pin: verified
+        # against v1.5.0's own plugin set that `detect-secrets==1.5.0`
+        # under a `run:` key does not trip the Secret Keyword heuristic.
+        # (The Ayla backend needed one because its pin sits inside a
+        # `run: |` block scalar.) Do not add a pragma speculatively — it
+        # would blind this line to a real secret later.
+        run: pip install "detect-secrets==1.5.0"
+
+      - name: detect-secrets (baseline audit)
+        # `detect-secrets-hook` is the GATING entry point: it exits
+        # non-zero on any secret that is not already recorded in
+        # `.secrets.baseline`. (`detect-secrets scan --baseline` only
+        # rewrites the baseline file; it does not fail a build.)
+        #
+        # The baseline is deliberately NOT regenerated here. Regenerating
+        # it in CI would silently bless whatever had already leaked —
+        # that is how junk gets INTO a baseline, not how it gets fixed.
+        #
+        # EXCLUSIONS: the grep alternation below is a literal
+        # transcription of the `exclude:` block of the `detect-secrets`
+        # hook in .pre-commit-config.yaml — same branches, same `^(...)$`
+        # anchoring, verbose-mode whitespace removed. Keeping one list in
+        # two files is a known hazard, so the rule is: if you touch one,
+        # touch the other in the same commit. A hook and a pipeline that
+        # disagree about WHICH paths are exempt produce two truths (green
+        # locally / red in CI, or worse the reverse), which is a defect in
+        # its own right.
+        #
+        # The one intended difference is SCOPE, not rules: pre-commit
+        # sees staged files only, CI sees every tracked file — CI is the
+        # wider net over an identical exemption set.
+        run: |
+          git ls-files \
+            | grep -vE '^(\.secrets\.baseline|uv\.lock|.*\.lock|tests/fixtures/.*|legacy_maxbot/.*|legacy_formulatela_mcp/.*|legacy_notifications/.*)$' \
+            | xargs detect-secrets-hook --baseline .secrets.baseline
+
       # postgresql-client (pg_dump / pg_restore) needed for
       # apps/identity/tests/test_backup_restore.py — the test verifies
       # ADR-0011 §11.1 invariant (tombstoned entries stay unreadable

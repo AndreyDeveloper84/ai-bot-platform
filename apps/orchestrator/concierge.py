@@ -36,6 +36,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import date
 from types import SimpleNamespace
@@ -43,14 +45,19 @@ from typing import Any
 
 from ayla_ai_core import ActionType, AIConcierge, ToolResult
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.utils import timezone
 
 from apps.conversations.services import (
     record_global_message,
     resolve_active_global_conversation,
 )
+from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
 from apps.marketplace.discovery import discover_masters
+from apps.observability.ai_metrics import record_ai_request
+from apps.observability.models import AIRequestMetric
 from apps.orchestrator.discovery import (
     _MAX_MASTER_CARDS,
     _MAX_REPLY_CHARS,
@@ -64,6 +71,7 @@ from apps.orchestrator.discovery import (
     render_no_criteria_clarification,
 )
 from apps.orchestrator.llm.templates import get_fallback
+from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +141,13 @@ class _RouterCompletions:
 
     def __init__(self, *, skill: str) -> None:
         self._skill = skill
+        # Telemetry of the most recent complete() call (DRF-1211). The
+        # router's CompletionResult carries the RESOLVED provider/model;
+        # the ai-core DTO does not surface them truthfully (dto.model is
+        # ai-core's configured default, dto.provider the passthrough
+        # adapter's constant) — so the metric reader picks them up here.
+        self.last_provider = ""
+        self.last_model = ""
 
     async def create(
         self,
@@ -147,6 +162,8 @@ class _RouterCompletions:
 
         provider = await sync_to_async(_resolve, thread_sensitive=False)()
         result = await provider.complete(messages, model=model, tools=tools)
+        self.last_provider = result.provider or ""
+        self.last_model = result.model or ""
         return _to_openai_shape(result)
 
 
@@ -155,6 +172,16 @@ class RouterLLMClient:
 
     def __init__(self, *, skill: str) -> None:
         self.chat = SimpleNamespace(completions=_RouterCompletions(skill=skill))
+
+    @property
+    def last_provider(self) -> str:
+        """Provider slug of the most recent completion (DRF-1211 telemetry)."""
+        return self.chat.completions.last_provider
+
+    @property
+    def last_model(self) -> str:
+        """Vendor-resolved model id of the most recent completion."""
+        return self.chat.completions.last_model
 
 
 class GlobalConversationStore:
@@ -221,6 +248,96 @@ class GlobalConversationStore:
 _KNOWN_TOOLS = frozenset({SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]})
 
 
+def _record_concierge_metric(
+    *,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str | None,
+    message_text: str,
+    pass_index: int,
+    outcome: str,
+    latency_total_ms: int,
+    dto: Any = None,
+    llm_client: "RouterLLMClient | None" = None,
+) -> None:
+    """DRF-1211 — emit one ``AIRequestMetric`` row per concierge LLM pass.
+
+    The live global-pilot path (``generate_concierge_reply``) never wrote
+    ``AIRequestMetric`` at all — the only writers were the dead tenant
+    pipeline and the shadow turn. Multi-pass (DRF-1266) doubles-triples
+    model calls per turn; without this row its cost would surface in the
+    invoice, not in data. ``llm_pass_index`` separates the first call from
+    follow-up passes so the cost of multi-pass is distinguishable from
+    general traffic growth.
+
+    The metric row parks under the ``global_bot`` sentinel tenant — the
+    same tenant that owns the global BotUser / Conversation rows — at
+    ``current_tenant()=None``, exactly like the ``*_global_*`` services.
+
+    Best-effort, mirroring ``pipeline._emit_ai_metric``: observability
+    must never crash the turn — failures log WARN with trace_id.
+    """
+    try:
+        try:
+            request_uuid = uuid.UUID(str(trace_id))
+        except (ValueError, TypeError, AttributeError):
+            # Same deterministic fallback as pipeline._emit_ai_metric: keeps
+            # log grep (raw trace_id string) and the metric row correlated
+            # even for non-UUID trace ids.
+            request_uuid = uuid.uuid5(
+                uuid.NAMESPACE_DNS, str(trace_id) if trace_id else "concierge-no-trace"
+            )
+
+        llm_provider = ""
+        llm_model = ""
+        tokens_in: int | None = None
+        tokens_out: int | None = None
+        latency_llm_ms: int | None = None
+        cost_usd = None
+        if dto is not None:
+            tokens_in = dto.tokens_in or None
+            tokens_out = dto.tokens_out or None
+            # Explicit None check — a sub-millisecond call legitimately
+            # measures 0, and 0 must not become NULL («no LLM call»).
+            latency_llm_ms = dto.latency_ms if dto.latency_ms is not None else None
+        if llm_client is not None:
+            llm_provider = llm_client.last_provider
+            llm_model = llm_client.last_model
+        if llm_model and tokens_in is not None:
+            try:
+                cost_usd = compute_cost(
+                    llm_model, input_tokens=tokens_in, output_tokens=tokens_out or 0
+                )
+            except UnknownModelError:
+                # Unpriced model — tokens + latency still recorded, cost NULL.
+                cost_usd = None
+
+        record_ai_request(
+            tenant=get_global_bot_tenant(),
+            bot_user=bot_user,
+            conversation=conversation,
+            request_id=request_uuid,
+            message_text_length=len(message_text),
+            skill_selected="concierge",
+            latency_total_ms=latency_total_ms,
+            latency_llm_ms=latency_llm_ms,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_tokens_input=tokens_in,
+            llm_tokens_output=tokens_out,
+            llm_cost_usd=cost_usd,
+            llm_pass_index=pass_index,
+            outcome=outcome,
+        )
+    except Exception as emit_exc:  # noqa: BLE001 — observability never crashes the turn
+        logger.warning(
+            "orchestrator.concierge.ai_metric_emit_failed trace=%s outcome=%s err=%s",
+            trace_id,
+            outcome,
+            emit_exc,
+        )
+
+
 def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
     """DRF-241 dispatcher — pure validation + argument normalisation.
 
@@ -283,8 +400,15 @@ def build_concierge_system_prompt(
     if today is None:
         today = timezone.localdate()
     voice = _discovery_voice_fields()
+    # The NAME comes from the surface table (apps.persona.voice), not from
+    # the raw frozen dict: `_SURFACE_NAMES` is what makes renaming a surface
+    # one product decision in one file (#1226). Reading `assistant_name`
+    # here would have quietly ignored a marketplace override — the same
+    # drift that put three different names in three files before. Same word
+    # today; what changes is that it can no longer diverge in silence.
+    identity = assistant_identity(SURFACE_MARKETPLACE)
     parts = [
-        f"Ты — {voice['assistant_name']}, AI-помощник «{voice['business_name']}».",
+        f"Ты — {identity.name}, AI-помощник «{voice['business_name']}».",
         # DRF-988 — date grounding (date + weekday + timezone).
         f"Сегодня: {today.isoformat()} ({_WEEKDAYS_RU[today.weekday()]}), "
         f"часовой пояс {timezone.get_current_timezone()}. Используй эту дату "
@@ -327,6 +451,63 @@ def build_concierge_system_prompt(
     return "\n\n".join(parts)
 
 
+def _max_llm_passes() -> int:
+    """Pass cap for the multi-pass concierge (DRF-1266).
+
+    ``settings.CONCIERGE_MAX_LLM_PASSES``, default 2 (primary call + one
+    tool-data pass), clamped to >= 1 so a misconfigured env can never mean
+    «call the model zero times» or loop unbounded on live traffic.
+    """
+    try:
+        return max(1, int(getattr(settings, "CONCIERGE_MAX_LLM_PASSES", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _build_tool_result_message(user_text: str, cards: list[Any], args: dict[str, Any]) -> str:
+    """Second-pass input: the executed ``show_masters`` result as plain text.
+
+    Deliberately a plain user-role message, NOT the OpenAI/Anthropic
+    tool-result protocol: the Anthropic adapter in ayla-ai-core
+    (``providers/anthropic.py``) does not assemble ``role="tool"`` blocks,
+    so a classic tool loop would work on OpenAI only and silently break
+    when an operator flips ``SKILL_LLM_PROVIDER`` — a decision of the
+    operator, not the developer. A plain message rides the same path on
+    every provider.
+
+    The original user question is embedded because the ai-core store
+    excludes the handler-persisted user turn from LLM history on every
+    pass (it expects the turn's text to arrive as ``message_text``).
+    """
+    lines = [
+        f"Клиент спросил: «{user_text}».",
+        f"Инструмент show_masters (город: {args.get('city') or '—'}, "
+        f"услуга: {args.get('specialization') or '—'}) вернул мастеров: {len(cards)}.",
+    ]
+    for card in cards[:_MAX_MASTER_CARDS]:
+        parts = [str(card.name)]
+        if getattr(card, "specialization", ""):
+            parts.append(str(card.specialization))
+        if getattr(card, "service_name", ""):
+            parts.append(str(card.service_name))
+        rating = getattr(card, "rating", None)
+        if rating is not None and rating >= 1:
+            parts.append(f"★ {rating}")
+        if getattr(card, "city", ""):
+            parts.append(str(card.city))
+        lines.append("- " + ", ".join(parts))
+    if not cards:
+        lines.append("(по этому запросу никого не нашлось)")
+    lines.append(
+        "Ответь клиенту словами, опираясь ТОЛЬКО на эти данные: коротко "
+        "перечисли подходящих мастеров и предложи записаться. Если список "
+        "пуст — честно скажи, что никого не нашлось, и предложи уточнить "
+        "город или услугу. Ничего не выдумывай. Инструмент show_masters "
+        "повторно не вызывай — данных достаточно."
+    )
+    return "\n".join(lines)
+
+
 def generate_concierge_reply(
     message_text: str,
     *,
@@ -339,13 +520,21 @@ def generate_concierge_reply(
 ) -> DiscoveryReply:
     """One concierge turn through ayla-ai-core AIConcierge (W5 / DRF-241).
 
+    Multi-pass (DRF-1266): when the model calls ``show_masters`` and the
+    pass budget allows, the executed tool's result is fed back as a plain
+    user message (see :func:`_build_tool_result_message` for why not the
+    tool protocol) and the model gets one more pass to phrase the answer
+    in words. Budget exhausted with the model still calling the tool →
+    the deterministic card render, i.e. exactly the pre-DRF-1266 reply.
+
     Persists the assistant turn via the store (``persisted=True`` on the
     returned reply so the handler does NOT double-record). On any LLM
     failure degrades to the same safe fallback line as the legacy
     discovery path — the concierge must never 500.
     """
+    llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
     concierge = AIConcierge(
-        openai_client=RouterLLMClient(skill=CONCIERGE_SKILL),
+        openai_client=llm_client,
         store=GlobalConversationStore(user_message_id=user_message_id),
         context_builder=lambda: ConciergeContext(
             candidates=[],
@@ -363,19 +552,68 @@ def generate_concierge_reply(
             extra_system=extra_system,
         )
 
-    try:
-        dto = asyncio.run(
-            concierge.send_message(
-                user_key=bot_user,
-                message_text=message_text,
-                prompt_renderer=_renderer,
+    max_passes = _max_llm_passes()
+    pass_index = 0
+    current_text = message_text
+    # Cards of the most recent show_masters execution — kept so a failing or
+    # budget-exhausted follow-up pass can still render real data instead of
+    # the generic fallback line.
+    pending_cards: list[Any] | None = None
+    dto: Any = None
+    while pass_index < max_passes:
+        pass_index += 1
+        started = time.monotonic()
+        try:
+            dto = asyncio.run(
+                concierge.send_message(
+                    user_key=bot_user,
+                    message_text=current_text,
+                    prompt_renderer=_renderer,
+                )
             )
+        except Exception as exc:  # noqa: BLE001 — degrade to safe fallback
+            logger.warning(
+                "orchestrator.concierge.llm_error trace=%s pass=%d err=%s",
+                trace_id,
+                pass_index,
+                exc,
+            )
+            _record_concierge_metric(
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                message_text=message_text,
+                pass_index=pass_index,
+                outcome=AIRequestMetric.OUTCOME_ERROR,
+                latency_total_ms=int((time.monotonic() - started) * 1000),
+                llm_client=llm_client,
+            )
+            if pending_cards is not None:
+                # A follow-up pass failed AFTER the tool already returned
+                # data — render the cards deterministically rather than the
+                # generic fallback: the user asked for masters, we have them.
+                rendered = _render_master_cards(pending_cards[:_MAX_MASTER_CARDS])
+                return DiscoveryReply(
+                    text=rendered.text,
+                    action_data=rendered.action_data,
+                    persisted=True,
+                )
+            return DiscoveryReply(text=get_fallback("ru"))
+        _record_concierge_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            pass_index=pass_index,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            latency_total_ms=int((time.monotonic() - started) * 1000),
+            dto=dto,
+            llm_client=llm_client,
         )
-    except Exception as exc:  # noqa: BLE001 — degrade to safe fallback
-        logger.warning("orchestrator.concierge.llm_error trace=%s err=%s", trace_id, exc)
-        return DiscoveryReply(text=get_fallback("ru"))
 
-    if dto.action_type == ActionType.SHOW_MASTERS:
+        if dto.action_type != ActionType.SHOW_MASTERS:
+            break
+
         args = (dto.action_data or {}).get("arguments", {})
         limit = args.get("limit")
         city = args.get("city") or None
@@ -397,16 +635,29 @@ def generate_concierge_reply(
             resolve_service=True,
         )
         logger.info(
-            "orchestrator.concierge.show_masters count=%d trace=%s",
+            "orchestrator.concierge.show_masters count=%d trace=%s pass=%d",
             len(cards),
             trace_id,
+            pass_index,
         )
-        rendered = _render_master_cards(cards[:_MAX_MASTER_CARDS])
-        return DiscoveryReply(
-            text=rendered.text,
-            action_data=rendered.action_data,
-            persisted=True,
-        )
+        if pass_index >= max_passes:
+            # Pass budget exhausted with the model still asking for the tool:
+            # the deterministic card render — byte-identical to the
+            # pre-DRF-1266 reply. The user sees real data, never silence
+            # or a raw tool dump.
+            logger.info(
+                "orchestrator.concierge.multipass_budget_exhausted trace=%s passes=%d",
+                trace_id,
+                pass_index,
+            )
+            rendered = _render_master_cards(cards[:_MAX_MASTER_CARDS])
+            return DiscoveryReply(
+                text=rendered.text,
+                action_data=rendered.action_data,
+                persisted=True,
+            )
+        pending_cards = cards
+        current_text = _build_tool_result_message(message_text, cards, args)
 
     if dto.action_type == ActionType.ASK_CLARIFICATION:
         data = dto.action_data or {}
