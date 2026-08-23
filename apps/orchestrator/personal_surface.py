@@ -212,9 +212,6 @@ CHIP_WATER = {"label": "💧 Записать стакан воды", "callback"
 #: Claimed by :func:`looks_like_diary_request` below.
 CHIP_DIARY = {"label": "📔 Мой дневник", "callback": "что я ел сегодня"}
 
-#: Claimed by ``memory_commands._SHOW_TRIGGERS``.
-CHIP_MEMORY = {"label": "🧠 Что ты обо мне помнишь", "callback": "что ты обо мне помнишь"}
-
 #: Said instead of an «Исправить» chip. There is NO correction command to put
 #: behind such a chip: correction in this system is implicit — a new explicit
 #: statement supersedes the old fact through ``record_explicit_green_facts`` /

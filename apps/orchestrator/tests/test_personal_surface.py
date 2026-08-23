@@ -360,13 +360,6 @@ class TestChipsExecute:
         entry.refresh_from_db()
         assert entry.soft_deleted_at is not None
 
-    def test_the_memory_chip_is_claimed_by_the_show_triggers(self):
-        from apps.persona.memory_commands import handle_memory_command
-
-        from apps.orchestrator.personal_surface import CHIP_MEMORY
-
-        assert handle_memory_command(user_id=uuid.uuid4(), text=CHIP_MEMORY["callback"]) is not None
-
     def test_no_forget_chip_when_there_is_nothing_to_forget(self):
         from apps.persona.memory_commands import memory_show_chips
 
