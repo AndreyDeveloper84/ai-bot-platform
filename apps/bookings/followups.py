@@ -83,22 +83,72 @@ either an LLM round-trip (adds latency + cost to a non-time-critical
 batch beat) or a local classifier (adds a heavyweight dep that we don't
 need yet). Phase 1 is "send the nudge"; sentiment ships later.
 
-### Privacy / consent gate
+### Privacy / consent gate (DRF-1301)
 
-The spec says "skip clients who have not consented (check the existing
-field on BotUser; if such a flag exists, gate on it)". Inspection of
-:class:`apps.identity.models.BotUser` (this commit) shows **no
-explicit consent boolean** — consent is recorded via
-:mod:`apps.consent.models` rows, not on the BotUser itself. Per the
-spec rule "do not invent one", we send to all clients with a non-empty
-``chat_id``. Empty chat_id is the only filter (no way to reach them).
-A follow-up ticket can wire in a query against ``ConsentRecord`` if
-ops decides to gate follow-ups on explicit consent.
+**This section used to say there was no consent gate and none was
+possible. Both halves were wrong, and the paragraph outlived the code
+by two months.** It claimed :class:`apps.identity.models.BotUser` has
+"no explicit consent boolean", so the task sent to everyone with a
+non-empty ``chat_id``. ``BotUser.consent_at`` — the 152-ФЗ welcome
+consent, stamped when the person taps «Да, продолжим» — has been on
+that model the whole time, three fields above the opt-out flag this
+module already reads. PR #874 later added the
+``proactive_messages_opt_out`` blocker without touching the paragraph,
+so an auditor reading top-down concluded the task had no gate at all
+while an auditor reading :func:`_should_send_b11` concluded it had one.
+Both were reading honestly. Only one of them was reading the code.
+
+What is gated now, in :func:`_consent_blocker`, and why each is here:
+
+* ``proactive_messages_opt_out`` — the person's global "do not write to
+  me first". Checked first and unconditionally, per the ordering
+  argument in :mod:`apps.nutrition_proactive.selection`: a veto
+  evaluated late is a veto a future edit can skip.
+* ``consent_at IS NULL`` — never consented under 152-ФЗ. This is the
+  hole DRF-1301 was filed for. Measured against the pilot database on
+  2026-08-23: **seven follow-ups had already gone to two people, and
+  neither of them had ``consent_at`` set.** Not a hypothetical.
+* an active ``ConsentRecord`` for ``PERSONAL_DATA``. ``consent_at`` is a
+  denormalised stamp and :func:`apps.consent.services.withdraw` never
+  clears it — it stamps ``withdrawn_at`` on the record and leaves the
+  BotUser column alone. Gating on ``consent_at`` alone would therefore
+  keep messaging somebody who explicitly withdrew: the same failure
+  this ticket is about, one step further along.
+* ``deleted_at`` — a GDPR erasure request is the strongest withdrawal
+  there is. ``soft_delete_user()`` scrubs display_name / avatar_url /
+  client_name / phone / context but **not** ``chat_id``, so an erased
+  person stays reachable and, before this commit, stayed a recipient.
+
+Deliberately NOT gated on ``ConsentType.MARKETING``. A «как прошёл
+визит?» nudge is arguably marketing, but nothing in this codebase
+collects that consent, so gating on it would silence the feature
+permanently while looking like it worked. That is an owner decision,
+not one to smuggle in under a bug fix — raised as an open question in
+``docs/REPORT_DRF1301.md``.
+
+### Two switches, both closed (DRF-1301)
+
+Copied from the DRF-1285 precedent rather than invented:
+
+* ``POST_VISIT_FOLLOWUP_ENABLED`` (default ``False``) — the task returns
+  immediately.
+* ``POST_VISIT_FOLLOWUP_DRY_RUN`` (default ``True``) — full selection,
+  full gate evaluation, logs exactly whom it would have written to and
+  why, sends nothing.
+
+Note what this changes. The nutrition tasks shipped dark, so their
+switches cost nothing. **This beat was live and sending.** Turning it
+off by default stops a running feature on purpose: it was writing to
+people who never consented, and the honest default for a task in that
+state is off, with the operator re-enabling after reading a dry run
+against the real recipient list. ``manage.py post_visit_followup_dryrun``
+prints exactly that list.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -119,6 +169,59 @@ logger = logging.getLogger(__name__)
 BATCH_LIMIT = 500
 MSK_TZ = ZoneInfo("Europe/Moscow")
 CONTEXT_KEY = "last_followup_sent_at"
+
+
+def enabled() -> bool:
+    """False until an operator opens the master switch (DRF-1301)."""
+    return bool(getattr(settings, "POST_VISIT_FOLLOWUP_ENABLED", False))
+
+
+def dry_run() -> bool:
+    """True unless an operator has explicitly turned the safety off."""
+    return bool(getattr(settings, "POST_VISIT_FOLLOWUP_DRY_RUN", True))
+
+
+def vet_outbound(text: str) -> tuple[str, str | None]:
+    """Run the composed nudge past the outbound safety check (DRF-1301).
+
+    Returns ``(text, None)`` when it may go out and ``("", reason)`` when
+    it may not.
+
+    This module writes its own copy, so at first glance there is nothing
+    for :func:`~apps.orchestrator.safety.outbound.evaluate_outbound` to
+    catch. There is exactly one thing: the nudge interpolates
+    ``reminder.master_name``, which is not ours. It is catalogue text
+    mirrored from Ayla, edited by salon staff, and a master name carrying
+    a phone number or an email trips the ``contact`` shape — which is the
+    pattern doing its job, not a false positive, because a contact detail
+    is the one thing DRF-1039 says these messages must never carry.
+
+    Applied at PLAN time, not at send time, so a dry run reports a
+    blocked message the same way it reports every other non-send and an
+    operator sees it before anything is enabled.
+
+    One deliberate difference from the conversational pipeline, taken
+    from DRF-1285 and re-argued rather than copied: a blocked reply there
+    is REPLACED with ``REPLACEMENT_TEXT`` («тут нужен человек…»), which
+    is right for an answer somebody is waiting for. Here the person asked
+    nothing, so «тут нужен человек» is a non-sequitur that would puzzle
+    them and hand an administrator a conversation with no question in it.
+    A hit means **send nothing at all**.
+
+    The idempotency key is not bumped either, and the reason differs from
+    the nutrition one. There, tomorrow's report is different text and
+    deserves a fresh evaluation. Here the text is stable, so not bumping
+    buys only a retry inside the same day — the same at-most-twice
+    semantics this module already applies to a failed send. That is the
+    point: a blocked message and a failed one leave identical state, so
+    no reader has to remember which branch bumps what.
+    """
+    from apps.orchestrator.safety.outbound import evaluate_outbound
+
+    verdict = evaluate_outbound(text)
+    if verdict.blocked:
+        return "", "outbound_safety_" + ("_".join(verdict.categories) or "hit")
+    return text, None
 
 
 # ── B11 conservative blockers (P0 PRE_PILOT, founder sequence #3) ──────────
@@ -222,11 +325,12 @@ def _should_send_b11(
 
     Reads BookingRequest via ``reminder.booking_request`` (FK). NULL
     FK = legacy / Ayla-path; can't check completed_at + booking.status
-    blockers, but ``proactive_messages_opt_out`` + payment-failure
-    gates still apply. Phase 1 Ayla event integration tightens this.
+    blockers, but the consent gate + payment-failure gate still apply.
+    Phase 1 Ayla event integration tightens this.
     """
-    if bot_user.proactive_messages_opt_out:
-        return (False, "opt_out")
+    consent_blocker = _consent_blocker(bot_user)
+    if consent_blocker:
+        return (False, consent_blocker)
 
     # Payment-failure check is tenant-scoped via reminder.tenant —
     # cascade в salon A must NOT block followup в salon B (CR #874 B2).
@@ -248,6 +352,61 @@ def _should_send_b11(
         return (False, f"booking_status_{booking_request.status}")
 
     return (True, None)
+
+
+def _consent_blocker(bot_user: Any) -> str | None:
+    """May we write to this person unprompted at all? (DRF-1301)
+
+    Returns a reason slug when we may not, ``None`` when we may. Four
+    conditions, in the order a person would state them, each a separate
+    slug so a dry run tells the operator *which* one fired rather than a
+    single undifferentiated "blocked".
+
+    Order matters: ``proactive_messages_opt_out`` is evaluated first and
+    unconditionally, because it is the one veto whose failure is a trust
+    break rather than a missed message. Nothing below it can re-enable a
+    message for somebody who set it.
+
+    The consent-record read uses
+    :func:`~apps.consent.services.has_global_consent`, not
+    :func:`~apps.consent.services.has_consent`. This beat is a
+    cross-tenant system task with no tenant in scope, and the
+    tenant-scoped reader raises there. That is not a workaround: the
+    pilot's client bot runs the global path, so the global reader is the
+    one that answers for the people this task actually writes to. It
+    anchors on ``bot_user``, whose FK already pins exactly one tenant, so
+    no cross-tenant row is reachable.
+
+    Distinguishing "never proved" from "withdrawn" costs a second query
+    on the failing branch only — the common case is one ``EXISTS``. The
+    distinction is worth it: they are different operator problems. A
+    ``consent_unproven`` row is a data-provenance gap left by grants
+    predating #1074, which stamped ``consent_at`` and the record
+    atomically. A ``consent_withdrawn`` row is somebody who said no.
+    """
+    if getattr(bot_user, "proactive_messages_opt_out", False):
+        return "opt_out"
+
+    if getattr(bot_user, "deleted_at", None) is not None:
+        return "deleted"
+
+    if getattr(bot_user, "consent_at", None) is None:
+        return "no_consent"
+
+    # Local imports: apps.consent imports identity models, and this module
+    # is imported from apps.bookings.tasks at module scope.
+    from apps.consent.models import ConsentRecord
+    from apps.consent.services import has_global_consent
+
+    personal_data = ConsentRecord.ConsentType.PERSONAL_DATA.value
+    if has_global_consent(bot_user, personal_data):
+        return None
+
+    ever = ConsentRecord.all_tenants.filter(
+        bot_user=bot_user,
+        consent_type=personal_data,
+    ).exists()
+    return "consent_withdrawn" if ever else "consent_unproven"
 
 
 def _payment_failures_blocker(bot_user: Any, tenant: Any) -> str | None:
@@ -374,11 +533,34 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
     Both rows for the same visit share ``visit_at`` exactly (the factory
     derives both from the same source datetime) so the order between
     them is by secondary key (PK) which is a stable UUID — good enough.
+
+    **Two vetoes are applied here as well as per-row in**
+    :func:`_consent_blocker` **(DRF-1301):** ``proactive_messages_opt_out``
+    and ``deleted_at``. Belt and braces, the same shape as
+    :func:`apps.nutrition_proactive.selection.base_queryset`. The ticket
+    asked that a person who opted out "never enters the selection", and a
+    filter that the batch limit is applied *after* is the only way to
+    mean that literally: with a post-fetch check alone, a large enough
+    run of opted-out rows could crowd a consenting person out of the
+    batch, and the only symptom would be a message that never arrived.
+
+    **Consent deliberately stays a per-row check and is NOT filtered
+    here**, which is the one place this diverges from the nutrition
+    precedent. Filtering it would make the people it excludes invisible:
+    they would vanish before the counters, the audit rows and the dry-run
+    listing ever saw them. "How many people did we not write to because
+    they never consented?" is precisely the number an operator needs in
+    order to decide whether to re-enable this beat, so it has to survive
+    into the output. Opt-out and erasure need no such visibility — both
+    are plain columns anyone can ``count()`` at any time, and neither is
+    a number that changes what the operator does next.
     """
     return list(
         BookingReminder.all_tenants.filter(
             visit_at__gte=window_start,
             visit_at__lt=window_end,
+            bot_user__proactive_messages_opt_out=False,
+            bot_user__deleted_at__isnull=True,
         )
         .exclude(status=BookingReminder.Status.CANCELLED)
         .select_related("tenant", "bot_user", "booking_request")
@@ -386,188 +568,260 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
     )
 
 
-@shared_task(name="bookings.send_post_visit_followups")
-def send_post_visit_followups() -> dict[str, int]:
-    """Send one "how was it?" nudge to every client whose visit was yesterday.
+@dataclass
+class Decision:
+    """One evaluated recipient. ``send=False`` always carries a ``reason``.
 
-    Per-row flow:
-
-    1. Compute yesterday's MSK day window once at task start.
-    2. Fetch reminders whose ``visit_at`` falls in the window and whose
-       status is not CANCELLED. Up to :data:`BATCH_LIMIT` rows.
-    3. Deduplicate by ``bot_user_id`` — a visit has two reminders, but
-       a follow-up is per-client-per-visit, not per-reminder.
-    4. For each unique client:
-       a. Skip if ``chat_id`` is empty (no way to reach them) — WARN.
-       b. Skip if ``context[last_followup_sent_at]`` equals today's
-          MSK date (already sent).
-       c. Send via MAX outbound. On exception: log, don't bump the
-          idempotency key, continue.
-       d. On success: update ``context[last_followup_sent_at]`` to
-          today's MSK ISO date, write audit row.
-
-    Returns ``{"sent": int, "skipped_already_sent": int,
-    "skipped_no_chat_id": int, "skipped_blocked": int, "send_failed": int}``
-    for telemetry / test visibility.
-
-    ``skipped_blocked`` counts B11 conservative blocker hits — opt_out,
-    completed_at NULL, terminal booking status, payment-failure threshold
-    (per ``_should_send_b11``).
+    The unit of a decision is the *person*, not the reminder: a visit has
+    a DAY_BEFORE and a TWO_HOURS row and the nudge is per client per
+    visit. ``reminder_id`` records which of the two the decision was made
+    against, so an audit row can be traced back to a specific row.
     """
-    now = timezone.now()
+
+    bot_user_id: Any
+    reminder_id: Any
+    tenant_slug: str
+    #: The visit this nudge is about. Carried so the sent-audit payload
+    #: keeps the shape it had before the plan/execute split — the rows
+    #: already on the pilot have it, and it is what ties an audit row to
+    #: a specific appointment when somebody reconstructs who was written
+    #: to and about what.
+    visit_at: datetime | None
+    send: bool
+    reason: str
+    chat_id: str = ""
+    text: str = ""
+
+    def as_log(self) -> dict[str, Any]:
+        """PII-free projection for logs and the dry-run listing.
+
+        ``text`` and ``chat_id`` are excluded on purpose. The rendered
+        nudge carries the master's name and the chat id is the address
+        itself; neither belongs in a log line an operator will paste into
+        a ticket.
+        """
+        return {
+            "bot_user_id": str(self.bot_user_id),
+            "reminder_id": str(self.reminder_id),
+            "tenant": self.tenant_slug,
+            "send": self.send,
+            "reason": self.reason,
+        }
+
+
+def plan_post_visit_followups(*, now_utc: datetime | None = None) -> list[Decision]:
+    """Evaluate every candidate for a post-visit nudge, send nothing.
+
+    The beat and ``manage.py post_visit_followup_dryrun`` both call this,
+    so "who would we write to?" can never be answered differently from
+    "who did we write to?" — the failure mode DRF-1285 called out and the
+    reason this is a shared planner rather than a second implementation.
+
+    Pure with respect to the outside world: reads the database, composes
+    text, runs the safety check, and returns. No sends, no writes.
+    """
+    now = now_utc or timezone.now()
     window_start, window_end, today_msk = _moscow_day_window(now)
-    today_iso = today_msk.isoformat()
 
-    sent = 0
-    skipped_already_sent = 0
-    skipped_no_chat_id = 0
-    skipped_blocked = 0
-    send_failed = 0
-
+    decisions: list[Decision] = []
     seen_bot_user_ids: set[Any] = set()
+
     for reminder in _eligible_reminders(window_start, window_end):
         bu = reminder.bot_user
         if bu is None:
             # Reminder rows have a non-null bot_user FK constraint
-            # (CASCADE in the model), so this branch is defensive — a
-            # row with a stale .bot_user attr (e.g. select_related cache
-            # miss after a concurrent GDPR purge) shouldn't crash the
-            # beat.
+            # (CASCADE in the model), so this branch is defensive — a row
+            # with a stale .bot_user attr (e.g. select_related cache miss
+            # after a concurrent GDPR purge) shouldn't crash the beat.
             continue
         if bu.pk in seen_bot_user_ids:
             # Duplicate visit reminder (DAY_BEFORE + TWO_HOURS for the
-            # same visit) — already processed above.
+            # same visit) — already decided above.
             continue
         seen_bot_user_ids.add(bu.pk)
+
+        tenant_slug = reminder.tenant.slug if reminder.tenant else ""
+
+        def decide(reason: str, *, send: bool = False, **kwargs: Any) -> Decision:
+            """Bind the row-invariant fields so no branch can forget one."""
+            return Decision(
+                bot_user_id=bu.pk,
+                reminder_id=reminder.pk,
+                tenant_slug=tenant_slug,
+                visit_at=reminder.visit_at,
+                send=send,
+                reason=reason,
+                **kwargs,
+            )
 
         chat_id = (bu.chat_id or "").strip()
         if not chat_id:
             logger.warning(
                 "bookings.followup.no_chat_id bot_user=%s tenant=%s",
                 bu.pk,
-                reminder.tenant.slug,
+                tenant_slug,
             )
-            skipped_no_chat_id += 1
+            decisions.append(decide("no_chat_id"))
             continue
 
         if _already_followed_up_today(bu.context, today_msk):
             logger.info(
                 "bookings.followup.already_sent bot_user=%s date=%s",
                 bu.pk,
-                today_iso,
+                today_msk.isoformat(),
             )
-            skipped_already_sent += 1
+            decisions.append(decide("already_sent"))
             continue
 
-        # B11 conservative blockers gate (P0 PRE_PILOT). 4 pilot blockers —
-        # if any triggers, log + audit + skip the send. Phase 1 extends к
-        # full Tau §4.1 list when Ayla event integration ships.
+        # The consent + B11 conservative blockers. If any triggers, the
+        # decision carries the reason and the caller audits it.
         should_send, block_reason = _should_send_b11(reminder, bu)
         if not should_send:
-            logger.info(
-                "bookings.followup.blocked bot_user=%s reason=%s",
-                bu.pk,
-                block_reason,
-            )
-            # Best-effort audit для post-pilot analytics («which blocker
-            # fires most» / «opt-out adoption rate»). Не failing the
-            # batch loop if audit raises.
-            try:
-                write_audit(
-                    action="bookings.followup.blocked",
-                    target="BotUser",
-                    target_id=bu.pk,
-                    payload={
-                        "reminder_id": str(reminder.pk),
-                        "reason": block_reason,
-                        "booking_request_id": (
-                            str(reminder.booking_request_id)
-                            if reminder.booking_request_id
-                            else None
-                        ),
-                    },
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "bookings.followup.block_audit_failed bot_user=%s reason=%s",
-                    bu.pk,
-                    block_reason,
-                )
-            skipped_blocked += 1
+            decisions.append(decide(block_reason or "blocked"))
             continue
 
-        text = _format_followup_text(reminder)
+        text, blocked_by = vet_outbound(_format_followup_text(reminder))
+        if blocked_by:
+            # Not sent, and the idempotency key is NOT bumped — see the
+            # reasoning in :func:`vet_outbound`.
+            decisions.append(decide(blocked_by))
+            continue
+
+        decisions.append(decide("due", send=True, chat_id=chat_id, text=text))
+
+    return decisions
+
+
+#: Decision reasons that are consent/blocker hits rather than routine
+#: skips. Kept as a set so the counter and the audit branch cannot drift
+#: apart — ``skipped_no_chat_id`` and ``skipped_already_sent`` have their
+#: own counters and are not blockers.
+_ROUTINE_SKIPS = frozenset({"no_chat_id", "already_sent"})
+
+
+@shared_task(name="bookings.send_post_visit_followups")
+def send_post_visit_followups() -> dict[str, int]:
+    """Send one «как прошёл визит?» nudge per client whose visit was yesterday.
+
+    Flow:
+
+    1. Return immediately unless ``POST_VISIT_FOLLOWUP_ENABLED``.
+    2. :func:`plan_post_visit_followups` evaluates every candidate.
+    3. Blocked decisions are audited (best-effort) for analytics.
+    4. Under ``POST_VISIT_FOLLOWUP_DRY_RUN`` (the default) the intended
+       recipients are logged and nothing is sent.
+    5. Otherwise each due decision is delivered, the idempotency key
+       bumped, and an audit row written.
+
+    Returns ``{"sent", "skipped_already_sent", "skipped_no_chat_id",
+    "skipped_blocked", "send_failed", "would_send", "dry_run"}``.
+
+    ``skipped_blocked`` counts consent-gate and B11 blocker hits —
+    ``opt_out``, ``no_consent``, ``consent_withdrawn``,
+    ``consent_unproven``, ``deleted``, ``completed_at_null``, terminal
+    booking status, payment-failure threshold, and an outbound-safety
+    hit (per :func:`_should_send_b11` and :func:`vet_outbound`).
+    """
+    if not enabled():
+        logger.info("bookings.followup.disabled")
+        return {
+            "sent": 0,
+            "skipped_already_sent": 0,
+            "skipped_no_chat_id": 0,
+            "skipped_blocked": 0,
+            "send_failed": 0,
+            "would_send": 0,
+            "dry_run": 1,
+        }
+
+    now = timezone.now()
+    _, _, today_msk = _moscow_day_window(now)
+    today_iso = today_msk.isoformat()
+
+    decisions = plan_post_visit_followups(now_utc=now)
+    is_dry = dry_run()
+
+    sent = 0
+    send_failed = 0
+    skipped_already_sent = sum(1 for d in decisions if d.reason == "already_sent")
+    skipped_no_chat_id = sum(1 for d in decisions if d.reason == "no_chat_id")
+    skipped_blocked = sum(1 for d in decisions if not d.send and d.reason not in _ROUTINE_SKIPS)
+
+    for decision in decisions:
+        if decision.send or decision.reason in _ROUTINE_SKIPS:
+            continue
+        _audit_blocked(decision)
+
+    to_send = [d for d in decisions if d.send]
+    for decision in to_send:
+        if is_dry:
+            logger.info(
+                "bookings.followup.dry_run would_send=%s",
+                decision.as_log(),
+            )
+            continue
         try:
-            send_message(chat_id=chat_id, text=text, attachments=None)
+            send_message(chat_id=decision.chat_id, text=decision.text, attachments=None)
         except MaxAPIError as exc:
             logger.warning(
                 "bookings.followup.send_failed bot_user=%s status=%s err=%s",
-                bu.pk,
+                decision.bot_user_id,
                 exc.status_code,
                 exc.body[:200] if exc.body else "",
             )
             write_audit(
                 action="bookings.followup.send_failed",
                 target="BotUser",
-                target_id=bu.pk,
+                target_id=decision.bot_user_id,
                 payload={
-                    "reminder_id": str(reminder.pk),
+                    "reminder_id": str(decision.reminder_id),
                     "status_code": exc.status_code,
                 },
             )
             send_failed += 1
             continue
         except Exception as exc:  # noqa: BLE001 — defensive, see escalation.py
-            logger.exception("bookings.followup.send_unexpected bot_user=%s", bu.pk)
+            logger.exception("bookings.followup.send_unexpected bot_user=%s", decision.bot_user_id)
             write_audit(
                 action="bookings.followup.send_failed",
                 target="BotUser",
-                target_id=bu.pk,
+                target_id=decision.bot_user_id,
                 payload={
-                    "reminder_id": str(reminder.pk),
+                    "reminder_id": str(decision.reminder_id),
                     "exception_type": type(exc).__name__,
                 },
             )
             send_failed += 1
             continue
 
-        # Success — bump the idempotency key.
-        #
-        # We re-load .context defensively rather than relying on the
-        # cached attr. Two reasons:
-        # 1. The fetch happened at task start; another process may have
-        #    touched .context in the interim.
-        # 2. .context defaults to ``{}`` per the model but legacy data
-        #    may have None — we normalise on write so future reads are
-        #    consistent.
-        current_context = dict(bu.context) if isinstance(bu.context, dict) else {}
-        current_context[CONTEXT_KEY] = today_iso
-        # Use ``all_tenants`` manager: this beat is cross-tenant and the
-        # default TenantScopedManager would refuse the update outside a
-        # tenant context.
-        type(bu).all_tenants.filter(pk=bu.pk).update(context=current_context)
-
+        _bump_idempotency_key(decision.bot_user_id, today_iso)
         write_audit(
             action="bookings.followup.sent",
             target="BotUser",
-            target_id=bu.pk,
+            target_id=decision.bot_user_id,
             payload={
-                "reminder_id": str(reminder.pk),
-                "visit_at": reminder.visit_at.isoformat(),
+                "reminder_id": str(decision.reminder_id),
+                "visit_at": (
+                    decision.visit_at.isoformat() if decision.visit_at is not None else None
+                ),
                 "date": today_iso,
             },
         )
         sent += 1
 
-    if sent or skipped_already_sent or skipped_no_chat_id or skipped_blocked or send_failed:
+    if decisions:
         logger.info(
-            "bookings.followup.summary sent=%d skipped_already_sent=%d "
-            "skipped_no_chat_id=%d skipped_blocked=%d send_failed=%d",
+            "bookings.followup.summary planned=%d would_send=%d sent=%d "
+            "skipped_already_sent=%d skipped_no_chat_id=%d skipped_blocked=%d "
+            "send_failed=%d dry_run=%s",
+            len(decisions),
+            len(to_send),
             sent,
             skipped_already_sent,
             skipped_no_chat_id,
             skipped_blocked,
             send_failed,
+            is_dry,
         )
     return {
         "sent": sent,
@@ -575,4 +829,58 @@ def send_post_visit_followups() -> dict[str, int]:
         "skipped_no_chat_id": skipped_no_chat_id,
         "skipped_blocked": skipped_blocked,
         "send_failed": send_failed,
+        "would_send": len(to_send),
+        "dry_run": int(is_dry),
     }
+
+
+def _audit_blocked(decision: Decision) -> None:
+    """Best-effort audit of a blocked decision.
+
+    Post-pilot analytics wants «which blocker fires most» and «opt-out
+    adoption rate». A failure here must not stop the batch.
+    """
+    logger.info(
+        "bookings.followup.blocked bot_user=%s reason=%s",
+        decision.bot_user_id,
+        decision.reason,
+    )
+    try:
+        write_audit(
+            action="bookings.followup.blocked",
+            target="BotUser",
+            target_id=decision.bot_user_id,
+            payload={
+                "reminder_id": str(decision.reminder_id),
+                "reason": decision.reason,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "bookings.followup.block_audit_failed bot_user=%s reason=%s",
+            decision.bot_user_id,
+            decision.reason,
+        )
+
+
+def _bump_idempotency_key(bot_user_id: Any, today_iso: str) -> None:
+    """Record that this person has been nudged today.
+
+    Re-reads ``context`` rather than trusting the copy fetched at plan
+    time: planning and delivery are now separated by the whole batch, so
+    another process has had longer to touch the row than it did when this
+    was one loop. ``context`` defaults to ``{}`` per the model but legacy
+    rows may hold ``None``; we normalise on write so future reads are
+    consistent.
+
+    Uses ``all_tenants``: this beat is cross-tenant and the default
+    TenantScopedManager would refuse the update outside a tenant context.
+    """
+    from apps.identity.models import BotUser
+
+    row = BotUser.all_tenants.filter(pk=bot_user_id).only("context").first()
+    if row is None:
+        return
+    context = dict(row.context) if isinstance(row.context, dict) else {}
+    context[CONTEXT_KEY] = today_iso
+    BotUser.all_tenants.filter(pk=bot_user_id).update(context=context)
