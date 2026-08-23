@@ -53,6 +53,11 @@ _SLOT_DISPLAY = {
 # deterministic extractor writes ``diet``; the block expects ``diet_type``.
 _INFERRED_KEY_MAP = {"diet": "diet_type"}
 
+# Values allowed to reach the block as a diet_type (Ayla contract vocabulary).
+_DIET_TYPE_VOCAB = frozenset(
+    {"omnivore", "vegetarian", "vegan", "keto", "halal", "kosher", "other"}
+)
+
 _DECLARED_CONFIDENCE = 1.0
 _INFERRED_CONFIDENCE = 0.6
 
@@ -127,8 +132,29 @@ def _merge_inferred(bot_user: Any, facts: dict, confidences: dict) -> None:
     for fact in view.green_facts:
         content = fact.content if isinstance(fact.content, dict) else {}
         raw_key = cast(str, content.get("key"))
+        # DRF-1261 keys whose local value shape is NOT the declared one:
+        # `price_range` carries a compact "min:…,max:…" scalar and
+        # `favorite_masters` carries a NAME (the block would render it as a
+        # bogus «id=Анна»). Both reach the prompt through the DECLARED side
+        # post-bridge; the local row is for the show/forget loop.
+        if raw_key in ("price_range", "favorite_masters"):
+            continue
         key = _INFERRED_KEY_MAP.get(raw_key, raw_key)
         value = content.get("value")
+        if raw_key == "diet":
+            # Only a named diet type is block-safe. New rows carry an
+            # explicit `diet_type`; legacy rows carry only `value` (already
+            # a diet-type word); «none» (retraction) and exclusion values
+            # are not diet_type vocabulary and never reach the block.
+            dt = content.get("diet_type")
+            if isinstance(dt, str) and dt:
+                value = dt
+            elif value not in _DIET_TYPE_VOCAB:
+                value = None
+        elif raw_key == "preferred_time_slots" and isinstance(value, str):
+            # Same display translation the declared side applies (contract
+            # slot vocabulary → ai-core label keys).
+            value = _SLOT_DISPLAY.get(value, value)
         if not (isinstance(key, str) and value not in (None, "", [])):
             continue
         if key_cardinality(raw_key) == CARDINALITY_MULTI:

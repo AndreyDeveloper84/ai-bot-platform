@@ -25,12 +25,14 @@ import uuid
 from apps.consent.memory import can_store_green_memory
 from apps.identity.models import MemoryEntry
 from apps.identity.services.ayla_link import ensure_ayla_link
+from apps.identity.services.memory_key_policy import CARDINALITY_SINGLE, key_cardinality
 from apps.identity.services.memory_reader import (
     get_or_create_personal_context,
+    read_green_entries,
     read_personal_context,
 )
-from apps.identity.services.memory_writer import write_entry
-from apps.persona.memory_extract import extract_green_facts
+from apps.identity.services.memory_writer import supersede_entries, write_entry
+from apps.persona.memory_extract import extract_user_facts
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,16 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
         return 0
 
     try:
-        candidates = extract_green_facts(text)
+        result = extract_user_facts(text)
+        candidates = result.candidates
+        if result.drops:
+            # Explicit drops (allergy perimeter, contract gaps) — counted in
+            # logs, never stored, never silent (DRF-1290 / owner ruling).
+            logger.info(
+                "orchestrator.memory.extraction_drops bot_user=%s reasons=%s",
+                bot_user.id,
+                sorted({d.reason for d in result.drops}),
+            )
         if not candidates:
             return 0
 
@@ -72,6 +83,10 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
         seen = {
             (f.kind, f.content.get("key"), f.content.get("value")) for f in existing.green_facts
         }
+        # Live rows for the supersession lifecycle (single-cardinality keys):
+        # a new explicit value displaces the previous live rows of its key
+        # with reason=changed (DRF-1261 «исправляю» path).
+        live_rows = read_green_entries(user_id)
 
         # UPC parent must exist for the FK; create an empty one if needed.
         upc = get_or_create_personal_context(user_id)
@@ -102,6 +117,18 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
             if entry is not None:
                 written += 1
                 seen.add(candidate.dedup_key)
+                key = candidate.content.get("key")
+                if key_cardinality(key) == CARDINALITY_SINGLE:
+                    displaced = [
+                        row
+                        for row in live_rows
+                        if row.id != entry.id
+                        and isinstance(row.content, dict)
+                        and row.content.get("key") == key
+                        and (row.kind, key, row.content.get("value")) != candidate.dedup_key
+                    ]
+                    if displaced:
+                        supersede_entries(replaced_by=entry, entries=displaced)
 
         if written:
             # Observe-only fill-rate signal (structured log — count + kinds only,
@@ -112,6 +139,20 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
                 bot_user.id,
                 written,
                 sorted({c.kind for c in candidates}),
+            )
+
+        # Bridge (DRF-1261): mirror this turn's user-stated facts into the
+        # Ayla declared prefs. ALL extracted candidates are offered (not only
+        # newly written rows) — PATCH is idempotent LWW, so a repeated
+        # statement heals a transient upstream failure. Best-effort inside.
+        try:
+            from apps.orchestrator.memory.ayla_bridge import bridge_candidates_to_ayla
+
+            bridge_candidates_to_ayla(bot_user, candidates)
+        except Exception:  # noqa: BLE001 — the bridge must never break the turn
+            logger.exception(
+                "orchestrator.memory.bridge_failed bot_user=%s",
+                getattr(bot_user, "id", "?"),
             )
         return written
     except Exception:  # noqa: BLE001 — memory write must never break the turn
