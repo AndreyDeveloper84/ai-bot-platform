@@ -512,3 +512,146 @@ class TestSwitches:
         assert result["sent"] == 0
         stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
         assert stored.get("water", {}).get("sent", 0) == 0
+
+
+# ────────────────────────────────────────────────────────────────────
+# DRF-1314 — who may be written to first
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestConsentGate:
+    """Who may be written to first, and why not.
+
+    The bug this suite exists for: :func:`selection.check_common` read
+    ``BotUser.consent_at`` and never ``ConsentRecord``.
+    :func:`apps.consent.services.withdraw` stamps ``withdrawn_at`` on the
+    record and deliberately leaves the column set, so somebody who
+    explicitly withdrew still read as consenting. Measured on the pilot
+    on 2026-08-23: five of twelve reachable rows had the stamp, and four
+    of those five had withdrawn.
+
+    Every case below builds a person who differs from :func:`make_user`
+    in exactly one respect, so a failure names the condition that broke.
+    Both planners are asserted on, not just one: the gate is called from
+    two places and a fix applied to one of them is not a fix.
+    """
+
+    def _both(self, tenant: Tenant, user: BotUser):
+        """Every decision either planner reaches about ``user``."""
+        water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
+        report = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        return [d for d in [*water, *report] if d.bot_user_id == user.pk]
+
+    def test_withdrawn_consent_is_not_written_to(self, tenant: Tenant) -> None:
+        """The case ``consent_at`` alone cannot see. The live pilot's shape.
+
+        Four people on the pilot are in exactly this state today, and the
+        layer that would have written to them was deployed and gated only
+        by a feature flag.
+        """
+        user = make_user(tenant, water=True, report="12:00")
+        ConsentRecord.all_tenants.filter(bot_user=user).update(withdrawn_at=NOON)
+        user.refresh_from_db()
+        assert user.consent_at is not None, "the column stays set — that is the trap"
+
+        decisions = self._both(tenant, user)
+        assert len(decisions) == 2
+        assert [d.reason for d in decisions] == ["consent_withdrawn"] * 2
+        assert all(d.send is False for d in decisions)
+
+    def test_consent_stamp_without_a_record_is_reported_as_unproven(self, tenant: Tenant) -> None:
+        """A stamp with no proof behind it is not consent we can show.
+
+        A distinct slug from ``consent_withdrawn`` on purpose: this is a
+        provenance gap left by grants predating #1074 (which made the
+        stamp and the record atomic), and it is a different operator
+        problem from somebody having said no.
+        """
+        user = make_user(tenant, water=True, report="12:00")
+        ConsentRecord.all_tenants.filter(bot_user=user).delete()
+
+        decisions = self._both(tenant, user)
+        assert [d.reason for d in decisions] == ["consent_unproven"] * 2
+
+    def test_never_consented_is_not_written_to(self, tenant: Tenant) -> None:
+        """``consent_at IS NULL`` — six of the pilot's twelve rows."""
+        user = make_user(tenant, consented=False, water=True, report="12:00")
+
+        decisions = self._both(tenant, user)
+        assert [d.reason for d in decisions] == ["no_consent"] * 2
+
+    def test_erased_user_is_not_written_to(self, tenant: Tenant) -> None:
+        """``soft_delete_user()`` does not clear ``chat_id``.
+
+        An erased row stays addressable, which is the whole reason this
+        condition is in the gate rather than left to the queryset. One
+        such row exists on the pilot.
+        """
+        user = make_user(tenant, water=True, report="12:00")
+        BotUser.all_tenants.filter(pk=user.pk).update(deleted_at=NOON)
+        user.refresh_from_db()
+        assert (user.chat_id or "").strip(), "still addressable — that is why this gate exists"
+
+        assert self._both(tenant, user) == []
+        assert selection.check_common(user) == "deleted"
+
+    def test_opt_out_is_still_the_first_veto(self, tenant: Tenant) -> None:
+        """Delegation must not demote the one veto whose failure is a trust break.
+
+        Asserted against a row that would fail a *later* condition too:
+        the reason must be ``opt_out``, which is only true if the veto is
+        evaluated before consent is even looked at.
+        """
+        user = make_user(tenant, opt_out=True, consented=False)
+        assert selection.check_common(user) == "opt_out"
+
+    def test_missing_food_consent_blocks_a_fully_consenting_person(self, tenant: Tenant) -> None:
+        """The nutrition-specific condition survived the delegation.
+
+        ``food_scanner_consent_at`` has no ``ConsentRecord`` behind it —
+        ``ConsentType`` has no food-scanner member — so it is still read
+        from the column, and it must still bite for somebody who cleared
+        the shared gate completely.
+        """
+        user = make_user(tenant, water=True, report="12:00")
+        BotUser.all_tenants.filter(pk=user.pk).update(food_scanner_consent_at=None)
+        user.refresh_from_db()
+
+        decisions = self._both(tenant, user)
+        assert [d.reason for d in decisions] == ["no_food_consent"] * 2
+
+    def test_a_consenting_person_still_receives_both_messages(self, tenant: Tenant) -> None:
+        """The other half of the proof.
+
+        Every assertion above is satisfied by a layer that writes to
+        nobody at all, which is exactly the ambiguity a zero-recipient
+        dry run carries. This one fails if the gate has been tightened
+        into a wall, so "nobody was written to" can be read as protection
+        rather than as breakage.
+        """
+        user = make_user(tenant, water=True, report="12:00")
+
+        decisions = self._both(tenant, user)
+        assert len(decisions) == 2
+        assert all(d.send is True for d in decisions), [d.reason for d in decisions]
+        assert {d.reason for d in decisions} == {"behind_proportional_norm", "due"}
+
+    def test_the_gate_is_the_shared_one_not_a_local_copy(self, tenant: Tenant) -> None:
+        """The four conditions are borrowed, not re-inlined.
+
+        The regression guarded against is a fourth copy of the gate.
+        Three things have to hold: the name this module calls **is** the
+        shared function, its whole vocabulary is declared here, and the
+        call actually happens on the live path — the last checked by
+        replacing it and watching ``check_common`` change its answer.
+        """
+        from apps.notifications import proactive
+
+        assert selection.consent_blocker is proactive.consent_blocker
+        assert set(proactive.BLOCK_REASONS) <= set(selection.BLOCK_REASONS)
+
+        user = make_user(tenant)
+        assert selection.check_common(user) is None
+        with patch.object(selection, "consent_blocker", return_value="opt_out") as gate:
+            assert selection.check_common(user) == "opt_out"
+        gate.assert_called_once_with(user)
