@@ -145,7 +145,11 @@ class TestHandleStart:
             "❓ Помощь",
             "▶️ Начать",
         ]
-        assert buttons[2]["url"] == "https://miniapp-dev.example/profile"
+        # DRF-1326: the whole client path, joined onto a bare-domain base.
+        # Was ``/profile`` — not a route; the client screen is
+        # ``/customer/profile``. Route existence is enforced against
+        # App.tsx by tests/test_miniapp_routes.py.
+        assert buttons[2]["url"] == "https://miniapp-dev.example/customer/profile"
 
     def test_web_app_takes_precedence_over_miniapp_url(self, settings):
         """If both are set, the native ``open_app`` UX wins."""
@@ -672,11 +676,16 @@ class TestS3S5Flow:
         # DRF-1167: link fallback points at the same Mini App routes the
         # slugs resolve to in max-sdk.ts::_ROUTE_MAP (previously /food_scan,
         # /goal_select etc. — none of which exist as routes).
+        # DRF-1326: «Найти услугу» was the last bare slug left here
+        # (``catalog``) — one table, one form, all of it under
+        # ``customer/``. Existence of each route is enforced against
+        # App.tsx by tests/test_miniapp_routes.py; this list only pins
+        # which screen each button opens.
         assert urls == [
             "https://miniapp-dev.example/customer/food-scanner/capture",
             "https://miniapp-dev.example/customer/wellness",
             "https://miniapp-dev.example/customer/goal-select",
-            "https://miniapp-dev.example/catalog",
+            "https://miniapp-dev.example/customer/catalog",
             "https://miniapp-dev.example/customer/main",
         ]
 

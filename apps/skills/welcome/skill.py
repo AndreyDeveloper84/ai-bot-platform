@@ -49,9 +49,12 @@ Only «👤 Профиль» needs a Mini App route. Behaviour follows config:
   the MAX client; the route comes from the ``callback`` field which MAX
   forwards into the Mini App's ``initData``).
 * ``settings.MAX_BOT_WEB_APP`` empty + ``settings.MAX_MINIAPP_URL`` set
-  → ``link`` button (opens in the external browser).
-* Both empty → «👤 Профиль» drops and the screen ships four bot-native
-  callbacks — zero-config fallback for tests + early dev.
+  → ``link`` button (opens in the external browser). The path comes from
+  :data:`MINIAPP_ROUTES`, joined onto the bare domain.
+* Both empty → «👤 Профиль» is **dropped entirely** — not downgraded to a
+  plain callback, because no bot turn answers ``open_profile`` and the
+  tap would do nothing. The screen ships four bot-native callbacks;
+  zero-config fallback for tests + early dev.
 
 The other four are always ``callback`` type — they don't need a Mini App
 route, just a follow-up bot turn.
@@ -131,6 +134,46 @@ from apps.skills.registry import register
 from apps.tenancy.context import current_tenant
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Mini App route table (DRF-1326)
+# ---------------------------------------------------------------------------
+#
+# ONE form for every Mini App button on both welcome surfaces. Before
+# DRF-1326 half the calls passed a bare slug (``profile``, ``catalog``,
+# ``visits``) and half passed a full client path (``customer/wellness``),
+# so no value of ``MAX_MINIAPP_URL`` could make all of them resolve:
+# a domain base broke the bare ones, a ``<domain>/customer`` base turned
+# the prefixed ones into ``/customer/customer/...``. «📋 Мои визиты»
+# was worse than inconsistent — ``visits`` is not a route at all; the
+# client screen is ``/customer/records``.
+#
+# Canonical form: **the whole path lives here, the base is the bare
+# domain**. An admin/master route (``admin/team``, ``master/dashboard``)
+# can therefore join the same table later without a second base setting.
+#
+# The key is the ``open_app`` callback payload MAX forwards into the Mini
+# App's ``initData.start_param``; the value is the path the Mini App
+# resolves it to. Both welcome branches read this one table, so the
+# in-MAX button and the external-link fallback can no longer drift apart.
+#
+# Two consumers must agree with this table, and a test enforces both
+# (``apps/skills/welcome/tests/test_miniapp_routes.py``):
+#   * ``apps/miniapp/src/App.tsx``          — the route must exist;
+#   * ``apps/miniapp/src/lib/max-sdk.ts``   — ``_ROUTE_MAP`` must resolve
+#     the slug to the same path.
+# Adding a button without adding the route fails the test instead of
+# shipping a deeplink into the SPA catch-all.
+MINIAPP_ROUTES: dict[str, str] = {
+    "open_profile": "customer/profile",
+    "open_catalog": "customer/catalog",
+    "open_visits": "customer/records",
+    "open_food_scan": "customer/food-scanner/capture",
+    "open_water_add_250": "customer/wellness",
+    "open_goal_select": "customer/goal-select",
+    "open_home": "customer/main",
+}
 
 
 # S1 greeting for a New User.
@@ -684,7 +727,9 @@ def _welcome_buttons() -> list[dict[str, str]]:
         )
     elif miniapp_url:
         # External link fallback — opens in the user's browser.
-        salon_buttons.append({"label": "👤 Профиль", "url": _join(miniapp_url, "profile")})
+        salon_buttons.append(
+            {"label": "👤 Профиль", "url": _miniapp_url(miniapp_url, "open_profile")},
+        )
     # Else: zero-config — no Mini App button; the bot-native pair still ships.
 
     return salon_buttons + _help_button() + _start_buttons()
@@ -700,9 +745,9 @@ def _legacy_salon_buttons(web_app: str, miniapp_url: str) -> list[dict[str, str]
         ]
     if miniapp_url:
         return [
-            {"label": "📅 Записаться", "url": _join(miniapp_url, "catalog")},
-            {"label": "📋 Мои визиты", "url": _join(miniapp_url, "visits")},
-            {"label": "👤 Профиль", "url": _join(miniapp_url, "profile")},
+            {"label": "📅 Записаться", "url": _miniapp_url(miniapp_url, "open_catalog")},
+            {"label": "📋 Мои визиты", "url": _miniapp_url(miniapp_url, "open_visits")},
+            {"label": "👤 Профиль", "url": _miniapp_url(miniapp_url, "open_profile")},
         ]
     return []
 
@@ -805,18 +850,17 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
         :data:`S5_PROMPT_TEXT` — allowed by AC-4.1 («Quick Actions are
         optional») now that the copy no longer promises a keyboard.
 
-    Routing per Tau §8 (resolved Mini App side — DRF-1167 fix):
-      * ``open_food_scan`` → /customer/food-scanner/capture
-      * ``open_water_add_250`` → /customer/wellness
-      * ``open_goal_select`` → /customer/goal-select
-      * ``open_catalog`` → /catalog
-      * ``open_home`` → /customer/main
+    Routing per Tau §8 — see :data:`MINIAPP_ROUTES`, which is now the
+    producer-side source of truth for slug→path (DRF-1326). Both
+    branches below read it: the ``open_app`` branch sends the slug, the
+    ``link`` branch sends ``base + MINIAPP_ROUTES[slug]``, so the two
+    can no longer name different screens for the same button.
 
-    Source of truth for slug→path resolution is the consumer-side
-    ``_ROUTE_MAP`` in ``apps/miniapp/src/lib/max-sdk.ts`` (CONTRACT MIRROR):
-    adding a button here requires adding the matching route there in the
-    same PR, otherwise the menu ships a dead deeplink. The ``link``
-    fallback below points at the same paths as the resolved slugs.
+    ``_ROUTE_MAP`` in ``apps/miniapp/src/lib/max-sdk.ts`` is the consumer
+    mirror and ``apps/miniapp/src/App.tsx`` is the route table; both are
+    checked against :data:`MINIAPP_ROUTES` by
+    ``tests/test_miniapp_routes.py``, so a button added here without its
+    route fails a test instead of shipping a dead deeplink.
     """
     web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
     miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
@@ -849,14 +893,14 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
         primary_actions = [
             {
                 "label": "📸 Сфотографировать еду",
-                "url": _join(miniapp_url, "customer/food-scanner/capture"),
+                "url": _miniapp_url(miniapp_url, "open_food_scan"),
             },
-            {"label": "💧 + стакан воды", "url": _join(miniapp_url, "customer/wellness")},
-            {"label": "🎯 Выбрать цель", "url": _join(miniapp_url, "customer/goal-select")},
-            {"label": "📅 Найти услугу", "url": _join(miniapp_url, "catalog")},
+            {"label": "💧 + стакан воды", "url": _miniapp_url(miniapp_url, "open_water_add_250")},
+            {"label": "🎯 Выбрать цель", "url": _miniapp_url(miniapp_url, "open_goal_select")},
+            {"label": "📅 Найти услугу", "url": _miniapp_url(miniapp_url, "open_catalog")},
         ]
         just_browse = [
-            {"label": "Просто посмотреть", "url": _join(miniapp_url, "customer/main")},
+            {"label": "Просто посмотреть", "url": _miniapp_url(miniapp_url, "open_home")},
         ]
     # Else: zero-config — no Mini-App buttons at all.
     # NOTE: Pilot deployment assumes MAX_BOT_WEB_APP IS configured (production-
@@ -867,6 +911,26 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
     # regression.
 
     return primary_actions + just_browse
+
+
+def _miniapp_url(base: str, slug: str) -> str:
+    """External-browser URL for the Mini App screen behind ``slug``.
+
+    The single entry point every ``link``-type welcome button goes
+    through (DRF-1326). Taking the *slug* rather than a free-form path
+    is the point: the path can only come from :data:`MINIAPP_ROUTES`, so
+    a caller cannot invent ``visits`` again, and the link button and the
+    ``open_app`` button for the same action are guaranteed to name the
+    same screen.
+
+    ``base`` is the Mini App **domain** (``MAX_MINIAPP_URL``) — never a
+    domain plus ``/customer``, or the joined path doubles the prefix.
+
+    Raises:
+        KeyError: slug missing from :data:`MINIAPP_ROUTES` — a
+            programming error, and louder than a dead button.
+    """
+    return _join(base, MINIAPP_ROUTES[slug])
 
 
 def _join(base: str, route: str) -> str:
