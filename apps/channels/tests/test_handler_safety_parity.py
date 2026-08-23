@@ -363,34 +363,53 @@ class TestIntentionalDivergence:
 # --------------------------------------------------------------------------- #
 class TestEveryLiveHandlerIsGated:
     """DRF-1300 was not a bug in a line of code — it was a channel that shipped
-    without anyone noticing the gate was missing. The behavioural parity tests
-    above only cover the channels someone remembered to add. This one covers the
-    channels nobody has written yet: it enumerates the live channel handler
-    modules from the filesystem and fails if any of them does not route through
-    ``evaluate_inbound``.
+    without anyone noticing the gate was missing. The behavioural tests above
+    only cover the channels somebody remembered to add. This one covers the
+    channel after next.
 
-    Deliberately a source-level check rather than a behavioural one: a brand-new
-    channel has no fixtures here to drive, so the only thing that can be
-    asserted about it on the day it lands is that it consults the gate at all.
+    The rule it encodes is the lesson itself: **if a module calls the brain, it
+    gates first.** ``orchestrate_turn`` is the single normalized entry into the
+    live brains (skill registry + concierge), and the seam is contractually
+    side-effect-free — it cannot gate on the caller's behalf, so every caller
+    must. A new adapter that wires up ``orchestrate_turn`` and forgets
+    ``evaluate_inbound`` reproduces DRF-1300 exactly, and fails here.
+
+    Why a source-level rule rather than another behavioural case: a channel
+    nobody has written yet has no fixtures here to drive. The only thing that
+    can be asserted about it on the day it lands is that it consults the gate.
+
+    What this deliberately does NOT flag: ``apps/channels/max/salon_handler.py``
+    — the salon/staff bot dispatches no skills and calls no seam. Its one LLM
+    branch delegates to ``apps.master_api.services.assistant.answer_master_question``,
+    which runs BOTH ``evaluate_inbound`` and ``evaluate_outbound`` itself. The
+    rule tracks the brain, not the filename, so that path is correctly silent
+    here instead of needing a hand-maintained exemption.
     """
 
-    def test_every_channel_handler_module_calls_the_gate(self):
+    def test_every_brain_caller_gates_first(self):
         import pathlib
 
-        channels_root = pathlib.Path(max_handler.__file__).resolve().parents[1]
-        handlers = sorted(
-            path for path in channels_root.glob("*/handler.py") if "tests" not in path.parts
+        apps_root = pathlib.Path(max_handler.__file__).resolve().parents[3]
+        brain_callers = []
+        for path in sorted(apps_root.rglob("*.py")):
+            if "tests" in path.parts or path.name.startswith("test_"):
+                continue
+            body = path.read_text(encoding="utf-8")
+            if "orchestrate_turn(" in body and "def orchestrate_turn" not in body:
+                brain_callers.append((path, body))
+
+        # Guard the guard: an empty scan would make this pass vacuously.
+        assert len(brain_callers) >= 2, (
+            f"expected the live brain callers, found {[str(p) for p, _ in brain_callers]}"
         )
-        # Guard the guard: an empty glob would make this pass vacuously.
-        assert len(handlers) >= 2, f"expected the live channel handlers, found {handlers}"
 
         ungated = [
-            str(path.relative_to(channels_root))
-            for path in handlers
-            if "evaluate_inbound" not in path.read_text(encoding="utf-8")
+            str(path.relative_to(apps_root))
+            for path, body in brain_callers
+            if "evaluate_inbound" not in body
         ]
         assert ungated == [], (
-            "channel handler(s) with no inbound safety gate: "
-            f"{ungated}. Every surface where the bot talks to a person must call "
-            "apps.orchestrator.safety.gate.evaluate_inbound (DRF-1300)."
+            f"module(s) calling orchestrate_turn with no inbound safety gate: {ungated}. "
+            "Every surface where the bot talks to a person must run "
+            "apps.orchestrator.safety.gate.evaluate_inbound before the brain (DRF-1300)."
         )
