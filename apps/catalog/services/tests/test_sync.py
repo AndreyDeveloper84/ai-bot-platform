@@ -70,6 +70,7 @@ class FakeHttpClient:
         self._raise_specialists = raise_on_specialists
         self._raise_specialist_services = raise_on_specialist_services
         self.tenant_ids_seen: list[str] = []
+        self.specialist_tenant_ids_seen: list[str] = []
         self.edge_tenant_ids_seen: list[str] = []
 
     def fetch_salon_services(self, *, tenant_id: str) -> list[CatalogSalonServiceDTO]:
@@ -78,9 +79,14 @@ class FakeHttpClient:
         self.tenant_ids_seen.append(tenant_id)
         return self._services
 
-    def fetch_specialists(self) -> list[CatalogSpecialistDTO]:
+    def fetch_specialists(self, *, tenant_id: str) -> list[CatalogSpecialistDTO]:
+        # Keyword-only ``tenant_id``, mirroring the real client after DRF-1313.
+        # Spelling it out rather than swallowing it in **kwargs is the point:
+        # a fake that accepts anything would have kept passing through exactly
+        # the call that made three salons unbookable.
         if self._raise_specialists is not None:
             raise self._raise_specialists("synthetic")
+        self.specialist_tenant_ids_seen.append(tenant_id)
         return self._specialists
 
     def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
@@ -114,6 +120,21 @@ class TestHappyPath:
         http = FakeHttpClient()
         CatalogSyncService(http_client=http).run(tenant)
         assert http.tenant_ids_seen == [str(tenant.id)]
+
+    def test_passes_tenant_id_to_every_one_of_the_three_fetches(
+        self,
+        tenant: Tenant,
+    ) -> None:
+        """DRF-1313. Two of the three pulls were scoped and one was not, which
+        is exactly why the gap survived a green suite and a code review: the
+        surrounding calls looked right. Assert all three together so the odd
+        one out cannot hide again.
+        """
+        http = FakeHttpClient()
+        CatalogSyncService(http_client=http).run(tenant)
+        assert http.tenant_ids_seen == [str(tenant.id)]
+        assert http.specialist_tenant_ids_seen == [str(tenant.id)]
+        assert http.edge_tenant_ids_seen == [str(tenant.id)]
 
     def test_cursor_unchanged_on_empty_pull(self, tenant: Tenant) -> None:
         http = FakeHttpClient()  # empty

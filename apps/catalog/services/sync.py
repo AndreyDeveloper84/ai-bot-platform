@@ -175,10 +175,15 @@ class CatalogSyncService:
         # S3B masters mirror (specialists → CatalogMaster). A specialists
         # fetch failure must not abort the services mirror that already
         # landed — logged, counted as error, services result stands.
+        #
+        # ``tenant_id`` is what makes this per-salon (DRF-1313). Without it the
+        # pull was the platform's whole active roster and the first tenant to
+        # sync claimed every master, leaving the rest with no masters and no
+        # edges — services present, nothing bookable.
         masters_res = UpsertResult()
         try:
             with http:
-                specialist_dtos = http.fetch_specialists()
+                specialist_dtos = http.fetch_specialists(tenant_id=str(tenant.id))
         except Exception as exc:  # noqa: BLE001 — per-mirror isolation
             logger.exception("catalog.sync.fetch_specialists_failed tenant_id=%s", tenant.id)
             specialist_dtos = []

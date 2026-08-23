@@ -38,7 +38,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from apps.catalog.models import CatalogService
 from apps.tenancy.context import tenant_scope
@@ -150,12 +150,37 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
     Missing-from-feed rows are kept as-is (same policy as salon-services:
     upsert-only, no proactive deactivation — documented in the S3B PR
     report). Per-row error isolation matches the services path.
+
+    ### Cross-tenant guard (DRF-1313)
+
+    ``fetch_specialists`` now sends ``?tenant=``, so the feed should already be
+    this tenant's masters and nobody else's. Should. The defect this guard
+    exists for was a filter that silently did not apply, and the cost of
+    trusting it was three of five pilot salons becoming unbookable — so the
+    payload's own ``tenant`` is re-checked here before anything is written,
+    exactly as :func:`upsert_master_services` already does for edges.
+
+    A DTO with no ``tenant`` (an Ayla that predates the field) is not a
+    mismatch and is not blocked: it is simply unverifiable, and blocking it
+    would turn a deploy-order skew into an outage.
     """
     from apps.catalog.models import CatalogMaster
 
     result = UpsertResult()
     with tenant_scope(tenant), transaction.atomic():
         for dto in dtos:
+            if dto.tenant and dto.tenant != str(tenant.id):
+                result.skipped += 1
+                logger.warning(
+                    "catalog.upsert.skipped model=CatalogMaster reason=foreign_tenant "
+                    "ayla_master_id=%s payload_tenant=%s sync_tenant=%s — the upstream "
+                    "?tenant= filter did not hold; writing this would attribute another "
+                    "salon's master to this one (DRF-1313).",
+                    dto.ayla_master_id,
+                    dto.tenant,
+                    tenant.id,
+                )
+                continue
             try:
                 with transaction.atomic():
                     _obj, created = CatalogMaster.objects.update_or_create(
@@ -177,6 +202,48 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                         result.created += 1
                     else:
                         result.updated += 1
+            except IntegrityError as exc:
+                # ``CatalogMaster.id`` is the global PK, so one Ayla master can
+                # exist under exactly one tenant at a time. Rows mis-attributed
+                # by the tenant-blind pull therefore keep the id hostage: the
+                # corrected sync cannot create the master under its real salon
+                # while the wrong salon still holds the row, and it fails here
+                # every beat until someone removes it.
+                #
+                # This branch does not repair anything — deleting or re-parenting
+                # live mirror rows is an owner decision, not a side effect of a
+                # sync beat. It exists so the failure names the row and says what
+                # has to happen, instead of surfacing as an opaque duplicate-key
+                # error once per beat forever.
+                #
+                # Who holds the row is deliberately NOT looked up: that would be
+                # a cross-tenant catalog read, which only apps/marketplace may do
+                # (MKT1). The inference needs no such read. ``update_or_create``
+                # only reaches an INSERT when the tenant-scoped ``get()`` found
+                # nothing, so a row still invisible in this tenant's scope after
+                # a unique violation means the id is taken outside it.
+                ayla_id = getattr(dto, "ayla_master_id", "?")
+                if CatalogMaster.objects.filter(pk=ayla_id).exists():
+                    result.errors.append({"ayla_master_id": ayla_id, "reason": str(exc)})
+                    logger.exception(
+                        "catalog.upsert.row_failed model=CatalogMaster ayla_master_id=%s",
+                        ayla_id,
+                    )
+                    continue
+                result.errors.append(
+                    {"ayla_master_id": ayla_id, "reason": "held_by_other_tenant"},
+                )
+                logger.error(
+                    "catalog.upsert.master_held_by_other_tenant model=CatalogMaster "
+                    "ayla_master_id=%s name=%r sync_tenant=%s — this id already exists "
+                    "under a different tenant, which is what a tenant-blind pull leaves "
+                    "behind (DRF-1313). The mis-attributed mirror row must be removed or "
+                    "re-parented before this salon can mirror its own master; sync will "
+                    "not do it.",
+                    ayla_id,
+                    dto.name,
+                    tenant.id,
+                )
             except Exception as exc:  # noqa: BLE001 — per-row safety net
                 ayla_id = getattr(dto, "ayla_master_id", "?")
                 result.errors.append({"ayla_master_id": ayla_id, "reason": str(exc)})
@@ -327,14 +394,13 @@ def _upsert_one_master_service(
     # service owned by another tenant simply isn't found and the edge is
     # skipped rather than mis-written.
     #
-    # The load-bearing half is the *service* lookup: salon-services is fetched
-    # with ``?tenant=``, so a foreign CatalogService is never mirrored here in
-    # the first place. The master lookup is a weaker guarantee —
-    # ``fetch_specialists()`` sends no tenant filter (pilot limitation noted on
-    # that method), so the same Ayla specialist is mirrored into every syncing
-    # tenant. That makes the master resolvable in more than one tenant, which
-    # is why the edge's own tenant (guard #1) and the service lookup both have
-    # to hold for a write to happen.
+    # Both lookups are now equally strong: salon-services and specialists are
+    # each fetched with ``?tenant=`` (DRF-1313 closed the masters half), and
+    # ``upsert_specialists`` re-checks the payload's tenant before writing, so
+    # a foreign CatalogService or CatalogMaster is never mirrored here in the
+    # first place. Guard #1 stays regardless — the edge asserting its own
+    # tenant is the check that does not depend on any other mirror having been
+    # correct first.
     master = master_model.objects.filter(id=dto.specialist).first()
     if master is None:
         result.skipped += 1
