@@ -76,6 +76,13 @@ class CatalogSalonServiceDTO:
     ``ayla_service_id`` is the stable ``SalonService.id`` (UUID str) the
     mirror re-keys on. Columnar fields the mirror stores map directly;
     ``template``/``category`` have no mirror column yet and ride in ``raw``.
+
+    ``goals`` (DRF-1308) arrives **already resolved** by Ayla — a list of
+    ``{"key", "label"}``. It has to: this platform has no category table at
+    all, so the ``category`` UUID above is an opaque string here and the
+    goal tree cannot be walked on this side. ADR-0009 — the mirror is a
+    read-replica, never the source of truth. An empty list is the honest
+    "no goal declared", not a sync failure.
     """
 
     ayla_service_id: str
@@ -87,6 +94,7 @@ class CatalogSalonServiceDTO:
     duration_min: int | None = None
     template: str | None = None
     category: str | None = None
+    goals: list[dict[str, str]] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -430,6 +438,26 @@ def _parse_int(raw: Any) -> int | None:
     return int(raw)
 
 
+def _parse_goals(raw: Any) -> list[dict[str, str]]:
+    """Ayla ``goals`` → mirror shape, defensively (DRF-1308).
+
+    The field is additive on the Ayla contract, so an older upstream simply
+    omits it. A malformed entry is dropped rather than aborting the row:
+    a goal is enrichment, and losing the whole service over it would be a
+    worse outcome than losing one label.
+    """
+    if not isinstance(raw, list):
+        return []
+    parsed: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        key, label = entry.get("key"), entry.get("label")
+        if isinstance(key, str) and isinstance(label, str) and key and label:
+            parsed.append({"key": key, "label": label})
+    return parsed
+
+
 def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
     return CatalogSalonServiceDTO(
         ayla_service_id=str(row["id"]),
@@ -441,6 +469,7 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
         duration_min=_parse_int(row.get("duration_minutes")),
         template=row.get("template"),
         category=row.get("category"),
+        goals=_parse_goals(row.get("goals")),
         raw=row,
     )
 
