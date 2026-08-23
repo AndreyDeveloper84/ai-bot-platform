@@ -21,6 +21,10 @@ blind.
     short_term.append(role="user")
         │
         ▼
+    evaluate_inbound(text)                       ← safety gate (DRF-1300)
+        │
+        ├─ not allowed (HANDOFF / BLOCK) → canned reply, send, return
+        ▼
     skill_dispatch(SkillContext(..., has_attachments=bool(.attachments)))
         │
         ▼  (skill returned should_send=True)
@@ -42,6 +46,23 @@ handler is called *directly from the webhook view* and the view enters
 explicit argument because (a) the outbound calls need it for the
 per-tenant bot token and (b) it provides a redundant cross-check that
 the in-scope tenant matches the URL-resolved one.
+
+### Inbound safety contract (DRF-1300)
+
+Telegram is a live, publicly routed client surface, so it runs the same
+inbound safety gate as both MAX paths:
+:func:`apps.orchestrator.safety.gate.evaluate_inbound`. A ``HANDOFF``
+verdict (self-harm / suicide / acute emergency) or a ``BLOCK`` verdict
+(specific drugs / diagnosis / legal advice) short-circuits the turn with
+the founder-approved canned reply BEFORE the orchestration seam, and the
+assistant turn is tagged ``action_type="safety_pre_check"`` exactly as on
+MAX. The verdict source and the reply texts are imported, never copied —
+the safety policy has one home.
+
+Two behaviours are carried over from the per-tenant MAX gate on purpose:
+the HUMAN_HANDOFF barge-guard (never speak over a live operator) and the
+"no AdminTask on a raw red flag" rule (detection + canned reply only; the
+AdminTask path fires on skill ``should_handoff``, not on ``pre_check``).
 
 ### Skill-pipeline integration
 
@@ -79,6 +100,7 @@ from apps.conversations.services import record_message, resolve_active_conversat
 from apps.events.services import emit
 from apps.identity.services import resolve_or_create_bot_user
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.orchestrator.turn_seam import (
     SURFACE_PER_TENANT,
     TurnContext,
@@ -175,6 +197,60 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
         trace_id=None,
     )
     short_term.append(conversation.id, role="user", content=event.text)
+
+    # --- Safety pre-check (DRF-1300) — BEFORE the orchestration seam ---
+    # Telegram shipped (DRF-848) after the MAX safety gate (#1053) and never
+    # picked it up: a crisis phrase reached the skill registry / concierge and
+    # came back as an ordinary model answer. The founder sign-off on PR #1084
+    # is about what a person in crisis reads, not about which adapter happens
+    # to be wired — so the SAME `evaluate_inbound` verdict source, the SAME
+    # canned texts and the SAME `action_type="safety_pre_check"` marker run
+    # here as on both MAX paths. Policy stays in ONE place; nothing about the
+    # texts is re-stated in this module.
+    #
+    # Placement mirrors `apps.channels.max.handler._handle_max_event_inner`:
+    # after the inbound turn is persisted (a crisis message must exist in the
+    # history even when the bot short-circuits) and before the brain runs, so
+    # no skill, LLM call or keyboard can preempt the crisis reply.
+    #
+    # HUMAN_HANDOFF barge-guard, identical to the per-tenant MAX gate: when an
+    # operator is already driving the conversation the bot stays silent. The
+    # gate runs before dispatch, so without this guard it would barge a canned
+    # reply over a live human at the worst possible moment. In handoff we fall
+    # through to the seam, which mutes the turn (should_send=False).
+    #
+    # The gate is deliberately NOT pushed down into `orchestrate_turn`: the
+    # seam is contractually side-effect-free (it never persists, never sends)
+    # and MAX already gates above it, so putting it there would either double-
+    # run the verdict or force side effects into the seam.
+    safety = evaluate_inbound(event.text)
+    if not safety.allowed and conversation.state != Conversation.State.HUMAN_HANDOFF:
+        _emit_safety_shortcircuit(bot_user, safety)
+        record_message(
+            conversation,
+            role="assistant",
+            content=safety.reply_text,
+            rendered_text=safety.reply_text,
+            action_type="safety_pre_check",
+            trace_id=None,
+        )
+        short_term.append(conversation.id, role="assistant", content=safety.reply_text)
+        _deliver_safety_reply(
+            chat_id=event.chat_id,
+            text=safety.reply_text,
+            tenant=tenant,
+            bot_user=bot_user,
+            conversation=conversation,
+        )
+        logger.info(
+            "channels.telegram.handler.safety_shortcircuit conversation=%s verdict=%s",
+            conversation.id,
+            safety.verdict,
+        )
+        # Clear the button spinner even on a short-circuit — same reason as the
+        # silenced branch below.
+        _answer_callback_if_present(event, tenant)
+        return
 
     # Routed via the normalized orchestration seam
     # (apps.orchestrator.turn_seam) — the same per-tenant skill-registry
@@ -277,6 +353,80 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
         len(reply_text),
         sent_ok,
     )
+
+
+def _emit_safety_shortcircuit(bot_user: Any, safety: Any) -> None:
+    """Emit the PII-safe observability event for a gated Telegram turn.
+
+    Mirrors :func:`apps.channels.max.handler._emit_safety_shortcircuit`: only
+    the verdict and the NUMBER of matched patterns ship. The raw text and the
+    matched substrings never leave the process — a suicide phrase must not end
+    up in the analytics bus. The event name is channel-scoped, matching the
+    existing ``channels.telegram.*`` namespace, so a dashboard can tell which
+    surface a crisis turn arrived on.
+    """
+    emit(
+        "channels.telegram.safety.pre_check_triggered",
+        payload={
+            "bot_user_id": str(getattr(bot_user, "id", "")),
+            "verdict": safety.verdict,
+            "matched_count": len(safety.matched_patterns),
+            "is_global_bot": False,
+        },
+    )
+
+
+def _deliver_safety_reply(
+    *,
+    chat_id: str,
+    text: str,
+    tenant: "Tenant",
+    bot_user: Any,
+    conversation: Any,
+) -> None:
+    """Send a safety reply, alerting LOUDLY when delivery fails.
+
+    Same reasoning as :func:`apps.channels.max.handler._deliver_crisis_reply`
+    (#1082): an undelivered crisis reply is categorically worse than an
+    undelivered ordinary one, because the DB now shows a reply the person
+    never read. Telegram's outbound returns ``False`` instead of raising, so
+    the loudness has to be added here: an ERROR log plus a distinct
+    ``channels.telegram.safety.crisis_delivery_failed`` event, separate from
+    the routine ``channels.telegram.outbound.failed``. Both are PII-safe —
+    neither carries the reply text nor the matched phrase.
+
+    Nothing is raised: the webhook view answers 200 unconditionally and a
+    5xx would only make Telegram retry the update forever.
+    """
+    sent_ok = outbound.send_message(chat_id=chat_id, text=text, tenant=tenant)
+    if sent_ok:
+        emit(
+            "channels.telegram.outbound.sent",
+            payload={
+                "conversation_id": str(conversation.id),
+                "chat_id": chat_id,
+                "has_keyboard": False,
+            },
+        )
+        return
+
+    logger.error(
+        "channels.telegram.safety.crisis_delivery_failed bot_user=%s conversation=%s chat_id=%s",
+        getattr(bot_user, "id", "?"),
+        conversation.id,
+        chat_id,
+    )
+    try:
+        emit(
+            "channels.telegram.safety.crisis_delivery_failed",
+            payload={
+                "bot_user_id": str(getattr(bot_user, "id", "")),
+                "conversation_id": str(conversation.id),
+                "chat_id": chat_id,
+            },
+        )
+    except Exception:  # noqa: BLE001 — the alert must not mask the send failure
+        logger.exception("channels.telegram.safety.crisis_delivery_alert_emit_failed")
 
 
 def _fallback_reply(event: CanonicalEvent) -> str:
