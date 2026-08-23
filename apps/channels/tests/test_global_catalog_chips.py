@@ -16,7 +16,9 @@ Three invariants:
 * a catalog tap NEVER reaches the LLM — it is a deterministic transition, and
   the model must not be handed a raw ``cb:…`` string to interpret;
 * a stale or malformed tap still gets an answer, not a fall-through;
-* the greeting does not swallow a tap on a card the bot itself drew.
+* the greeting does not swallow a tap on a card the bot itself drew;
+* the raw ``cb:…`` payload never lands in dialog history (DRF-988: the model
+  read such payloads as things the person had said and hallucinated on them).
 """
 
 from __future__ import annotations
@@ -181,6 +183,18 @@ class TestCatalogTaps:
 
         assert mock_send[-1]["text"] == CATALOG_STALE_CARD_TEXT
         spy_concierge.assert_not_called()
+
+    def test_tap_never_lands_in_dialog_history(self, mock_send, fake_redis, spy_concierge, salon):
+        from apps.conversations.models import Message
+
+        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.id}", mid="chip7")
+
+        user_turns = [m.content for m in Message.all_tenants.filter(role="user")]
+        assert all(not c.startswith("cb:") for c in user_turns), user_turns
+        # The answer IS recorded — that is the grounding the next turn needs.
+        assert any(
+            "Массаж спины" in m.content for m in Message.all_tenants.filter(role="assistant")
+        )
 
     def test_greeting_does_not_swallow_a_tap(
         self, mock_send, fake_redis, spy_concierge, salon, settings

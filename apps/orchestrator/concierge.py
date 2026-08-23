@@ -1103,8 +1103,11 @@ def generate_concierge_reply(
         args = (dto.action_data or {}).get("arguments", {})
         rendered = execute_catalog_tool(dto.action_type, args if isinstance(args, dict) else {})
         if rendered is not None:
+            # No re-clamp to _MAX_REPLY_CHARS here: the renderer already bounds
+            # this text by the catalog budget, and 600 would cut a real card
+            # list mid-word while its chips stayed (see _MAX_CATALOG_REPLY_CHARS).
             return DiscoveryReply(
-                text=rendered.text[:_MAX_REPLY_CHARS],
+                text=rendered.text,
                 action_data=rendered.action_data,
                 persisted=True,
             )

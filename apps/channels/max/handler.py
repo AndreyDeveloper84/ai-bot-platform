@@ -606,9 +606,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # refusal). Skip user-turn persistence for them; the assistant reply is
     # still recorded as usual.
     is_booking_callback = event.text.startswith(BOOKING_CALLBACK_PREFIXES)
+    # DRF-1304 — the catalog chips are the same class of event for the same
+    # reason: a tap is not something the person said, and «cb:catalog:services:
+    # {uuid}» sitting in history is exactly the raw payload DRF-988 found the
+    # model happy to interpret. The assistant reply (the salon/service list) is
+    # still recorded, so the next turn keeps the grounding that matters.
+    is_catalog_callback = event.text.startswith(CATALOG_CALLBACK_PREFIXES)
 
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    if is_booking_callback:
+    if is_booking_callback or is_catalog_callback:
         user_msg = None
     else:
         user_msg = record_global_message(

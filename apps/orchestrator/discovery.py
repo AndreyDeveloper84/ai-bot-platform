@@ -55,8 +55,20 @@ DISCOVERY_SKILL = "discovery"
 
 _MAX_REPLY_CHARS = 600
 _MAX_MASTER_CARDS = 5
-_MAX_SALON_CARDS = 8
+# Five, like the master cards: «какие салоны у вас есть» asks for an answer,
+# not for the catalog. The «…и это не все» tail carries the rest (DRF-1304).
+_MAX_SALON_CARDS = 5
 _MAX_SERVICE_CARDS = 8
+
+# Budget for the DETERMINISTIC catalog lists (DRF-1304). _MAX_REPLY_CHARS is a
+# leash on the MODEL's prose — it is literally in the prompt («Ответ не длиннее
+# 600 символов») — and a card list is neither prose nor model output. Real
+# Penza rows are long («Центр коррекции фигуры «Afrodita» — Пенза, ул.
+# Московская, 74, БЦ «Московский», 1 этаж»), so 600 cut five salons mid-word
+# and took the tail hint with them, while the chips for the cut rows still
+# rendered — a message whose text and buttons disagree. MAX's own limit is far
+# above this.
+_MAX_CATALOG_REPLY_CHARS = 1400
 
 # Callback prefix for the discovery → booking handoff button (#1020). Carries
 # the PUBLIC ids from the MasterCard DTO:
@@ -638,9 +650,9 @@ def _reply_with_chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryRepl
     as a broken message rather than as a message without buttons.
     """
     if not buttons:
-        return DiscoveryReply(text=text[:_MAX_REPLY_CHARS])
+        return DiscoveryReply(text=text[:_MAX_CATALOG_REPLY_CHARS])
     action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
-    return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], action_data=action_data)
+    return DiscoveryReply(text=text[:_MAX_CATALOG_REPLY_CHARS], action_data=action_data)
 
 
 def _parse_uuid_ref(callback_text: str, prefix: str) -> UUID | None:

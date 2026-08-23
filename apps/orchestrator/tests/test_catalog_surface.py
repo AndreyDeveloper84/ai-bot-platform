@@ -462,6 +462,31 @@ class TestCatalogChips:
         assert execute_catalog_callback("cb:visit:card:abc") is None
         assert execute_catalog_callback("какие салоны у вас есть") is None
 
+    def test_five_real_salons_render_whole(self):
+        # Real Penza rows (docs/catalog/MARKET_PENZA.md) are long: at the
+        # model's 600-char prose budget this list came out cut mid-word, with
+        # chips for salons the text no longer named.
+        rows = [
+            ("Центр коррекции фигуры «Afrodita»", "Пенза, ул. Московская, 74, БЦ «Московский»"),
+            ("Медиклиник", "Пенза, ул. Суворова, 122а"),
+            ("BodyFormula", "Пенза, ул. Леонова, 15а"),
+            ("Студия красоты «Багира»", "Пенза, ул. Кирова, 63"),
+            ("Лаборатория красоты", "Пенза, пр-т Строителей, 41"),
+        ]
+        for i, (name, address) in enumerate(rows):
+            tenant = _salon(f"s{i}", name, city="Пенза", address=address)
+            _service(tenant, "Лазерная эпиляция подмышечных впадин")
+
+        reply = execute_catalog_tool("show_salons", {"city": "Пенза"})
+
+        for name, address in rows:
+            assert name in reply.text
+            assert address in reply.text
+        assert "Нажмите на салон" in reply.text  # the tail survived too
+        # Set, not list: salon order is the DB collation's business, and it
+        # differs between SQLite and Postgres for mixed Latin/Cyrillic names.
+        assert {b["label"] for b in _buttons(reply)} == {name for name, _ in rows}
+
     def test_no_chips_means_no_empty_keyboard(self):
         # An inline_keyboard attachment with an empty button list renders as a
         # broken message, not as a message without buttons.
