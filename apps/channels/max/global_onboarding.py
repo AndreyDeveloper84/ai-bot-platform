@@ -347,14 +347,13 @@ def _record_consent_journal(bot_user: Any) -> None:
     cascades personal_data → memory_*, §8.4); this is the missing grant half.
     """
     from apps.consent.models import ConsentRecord
+    from apps.consent.services import record_global_consent
 
     for consent_type in (
         ConsentRecord.ConsentType.PERSONAL_DATA.value,
         ConsentRecord.ConsentType.MEMORY_GREEN.value,
     ):
         try:
-            from apps.consent.services import record_global_consent
-
             record_global_consent(
                 bot_user,
                 consent_type=consent_type,
