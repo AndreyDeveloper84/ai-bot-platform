@@ -34,6 +34,23 @@
 
 name: miniapp-drift
 
+# ### Which of these triggers actually fires — read before trusting one
+#
+# `push` is evaluated against the workflow file **on the branch being pushed**,
+# so this one works the moment it lands on `dev`. It is the trigger that
+# carries the guarantee, and it covers the case that caused this ticket: a Mini
+# App change merged to `dev` and never published.
+#
+# `schedule` and `workflow_dispatch` are read **only from the default branch**.
+# The default branch here is `main`, 885 commits behind, so until this file
+# reaches it BOTH are inert — the cron will not fire and the workflow will not
+# appear in the Actions dispatch list. This is stated rather than quietly
+# accepted because it is exactly how `deploy-dev.yml` died: commit ab2d164
+# moved it to a `workflow_run` trigger that only the default branch is read
+# for, and it has not auto-run since 2026-06-10. They are kept here so they
+# start working by themselves when `main` catches up; do not read a silent
+# `miniapp-drift` as a clean pilot until `gh run list --workflow=miniapp-drift.yml`
+# shows scheduled runs.
 on:
   push:
     branches: [dev]
@@ -42,7 +59,7 @@ on:
   # Catches the drift no commit causes: a host rebuilt from a stale checkout,
   # a release rolled back and never rolled forward, a directory restored from
   # a backup. Nothing in the repository moves in those cases, so only a
-  # wall-clock trigger can notice.
+  # wall-clock trigger can notice. Inert until this file is on `main` — see above.
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:

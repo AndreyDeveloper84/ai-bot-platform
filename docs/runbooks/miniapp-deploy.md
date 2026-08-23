@@ -170,3 +170,27 @@ Closing that last gap needs a working deploy pipeline to hang the step on, and
 Adding a Mini App build step to that workflow would attach it to something that
 neither fires nor works. Both are Python-deploy repairs and out of scope for
 DRF-1257 — they need their own ticket and an owner's decision.
+
+### 5.1 The same default-branch rule limits `miniapp-drift`
+
+`miniapp-drift` runs on **push to `dev`**, which works: `push` triggers are read
+from the branch being pushed. Its `schedule` and `workflow_dispatch` triggers
+are read **only from the default branch**, so while `main` is 885 commits
+behind, the daily run does not fire and the workflow does not appear in the
+Actions dispatch list.
+
+The push trigger is the one that carries the guarantee, and it covers the case
+that caused this ticket. What is missing until `main` catches up is the
+commit-less drift: a host rebuilt from a stale checkout, a release rolled back
+and never rolled forward. Until then, check that case by hand:
+
+```bash
+python3 tools/ci/miniapp_bundle_drift.py --url https://miniapp-dev.gobeauty.site
+```
+
+Do **not** read a silent `miniapp-drift` as a clean pilot. Confirm the schedule
+is alive before relying on it:
+
+```bash
+gh run list --workflow=miniapp-drift.yml
+```
