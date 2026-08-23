@@ -125,7 +125,14 @@ def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
 
     ``template``/``category`` have no mirror column yet — they ride in
     ``raw``. Fields with no salon-service source (slug, descriptions, seo_*,
-    goals, is_popular, contraindications) keep their model defaults.
+    is_popular, contraindications) keep their model defaults.
+
+    ``goals`` is written from the feed since DRF-1308. Before that it had no
+    source at all and stayed ``[]`` on every row, which is why the goal
+    layer was invisible to this platform end to end. Sync overwrites it
+    wholesale: goals are curated on the Ayla side, so an emptied list
+    upstream must empty the mirror too — otherwise a retracted goal would
+    live on here forever.
     """
     return {
         "external_updated_at": dto.external_updated_at,
@@ -134,6 +141,7 @@ def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
         "requires_health_check": dto.requires_health_check,
         "price_from": dto.price_from,
         "duration_min": dto.duration_min,
+        "goals": dto.goals,
         "raw": dto.raw,
     }
 

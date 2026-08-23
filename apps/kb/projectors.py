@@ -71,6 +71,29 @@ class ProjectionResult:
 # ---------------------------------------------------------------------------
 
 
+def _goal_labels(goals: object) -> list[str]:
+    """`CatalogService.goals` → human labels for the retrieval body.
+
+    Two shapes are accepted on purpose. Since DRF-1308 sync writes
+    ``{"key", "label"}`` objects — the key is what a structured goal filter
+    needs, the label is what belongs in text a model quotes back to a
+    person ("Подходит: relax" would be leaked jargon). Bare strings are
+    still honoured because rows synced before that change may sit in the
+    mirror until the next 15-minute pass rewrites them.
+    """
+    if not isinstance(goals, list):
+        return []
+    labels: list[str] = []
+    for entry in goals:
+        if isinstance(entry, str) and entry:
+            labels.append(entry)
+        elif isinstance(entry, dict):
+            label = entry.get("label") or entry.get("key")
+            if isinstance(label, str) and label:
+                labels.append(label)
+    return labels
+
+
 def service_to_body(row: "CatalogService") -> str:
     """Service mirror → KB body.
 
@@ -87,8 +110,9 @@ def service_to_body(row: "CatalogService") -> str:
         parts.append(f"Цена от: {row.price_from}")
     if row.duration_min is not None:
         parts.append(f"Длительность: {row.duration_min} мин")
-    if row.goals:
-        parts.append("Подходит: " + ", ".join(row.goals))
+    goal_labels = _goal_labels(row.goals)
+    if goal_labels:
+        parts.append("Подходит: " + ", ".join(goal_labels))
     if row.requires_health_check:
         parts.append("Требует медконсультации.")
     if row.contraindications:
