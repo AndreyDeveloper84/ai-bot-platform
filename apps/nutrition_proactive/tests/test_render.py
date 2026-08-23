@@ -204,6 +204,62 @@ class TestNeverTalksAboutTheBody:
         assert printed <= allowed, f"unexplained numbers: {printed - allowed}"
 
 
+class TestOwnCopyClearsTheOutboundGate:
+    """Our own sentences, checked against the shared outbound guard.
+
+    ``tasks.vet_outbound`` drops any message the guard blocks, so a copy
+    edit that trips one of its shapes would not produce a visible bug --
+    it would produce silence on the pilot, which is the hardest kind of
+    failure to notice. Swept over a spread of values rather than one
+    sample because two of the guard's three patterns are numeric, and a
+    phone-shaped run of digits is exactly the accident a single fixture
+    would miss.
+    """
+
+    @pytest.mark.parametrize("kcal", [0, 7, 800, 1900, 3500, 12000])
+    @pytest.mark.parametrize("prot", [0, 8, 95, 800])
+    def test_no_plausible_value_makes_the_report_unsendable(self, kcal: int, prot: int) -> None:
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        text = render.render_daily_report(
+            summary(calories_total=float(kcal), calories_goal=kcal, protein_g=float(prot)),
+            water(total_ml=prot * 8, norm_ml=kcal),
+            profile(protein_g=prot or 1),
+        )
+        assert evaluate_outbound(text).allowed is True
+
+    def test_an_absurd_upstream_number_degrades_to_silence_not_to_a_bad_send(
+        self,
+    ) -> None:
+        """Found by the sweep above, kept as documentation.
+
+        An eleven-digit calorie total from Ayla renders as a run of digits
+        the outbound guard reads as a phone number, and the message is
+        dropped. That is the safe direction — and it is not silent: the
+        planner records ``outbound_safety_contact`` on the decision, which
+        the dry run prints and the beat logs. No clamping or reformatting
+        here: inventing a display format to dodge a safety pattern is how
+        the pattern stops catching the thing it was written for.
+        """
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        text = render.render_daily_report(
+            summary(calories_total=88005553535.0, calories_goal=1900), water(), profile()
+        )
+        verdict = evaluate_outbound(text)
+        assert verdict.blocked is True
+        assert verdict.categories == ("contact",)
+
+    @pytest.mark.parametrize("total,norm", [(0, 2000), (8, 800), (555, 3535), (1, 1)])
+    def test_no_value_makes_the_nudge_unsendable(self, total: int, norm: int) -> None:
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        text = render.render_water_reminder(
+            water(total_ml=total, norm_ml=norm), proportional_ml=norm // 4
+        )
+        assert evaluate_outbound(text).allowed is True
+
+
 class TestSuppressedForFlaggedProfiles:
     @pytest.mark.parametrize("override", sorted(render.SENSITIVE_OVERRIDES))
     def test_no_remark_when_ayla_overrode_the_goal(self, override: str) -> None:
