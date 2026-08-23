@@ -455,20 +455,21 @@ def carry_time_preference(global_bot_user, conversation) -> None:
     Best-effort by contract: losing the preference costs the day chips, i.e.
     the ticket's own no-preference path, and must never cost the turn.
     """
-    from apps.conversations.services import resolve_active_conversation
+    from apps.conversations.services import resolve_active_global_conversation
     from apps.orchestrator.time_preference import (
         load_time_preference,
         save_time_preference,
     )
-    from apps.tenancy.context import tenant_scope
 
     if conversation is None:
         return
     try:
-        # The global conversation lives at the tenant-less scope the caller
-        # has already left, so read it back under that scope explicitly.
-        with tenant_scope(None):
-            source = resolve_active_conversation(global_bot_user)
+        # The global conversation is parked under the ``global_bot`` sentinel
+        # and is read through its own tenant-less resolver — NOT through
+        # ``resolve_active_conversation``, which would look inside
+        # ``tenant_scope(T)`` we are currently in and find nothing.
+        # ``create_if_missing=False``: reading a hint must never create a row.
+        source = resolve_active_global_conversation(global_bot_user, create_if_missing=False)
         pref = load_time_preference(source)
         if pref is not None:
             save_time_preference(conversation, pref)
