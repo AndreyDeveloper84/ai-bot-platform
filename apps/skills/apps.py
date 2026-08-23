@@ -12,6 +12,15 @@ class SkillsConfig(AppConfig):
         # the first matches() returning True wins. Echo MUST be last
         # because it always matches.
         from apps.skills.privacy_consent import skill as _privacy  # noqa: F401
+
+        # DRF-1285 - the proactive off-switch, in words. Registered at the
+        # very top, next to privacy, because it must never be shadowed: it
+        # matches a CLOSED set of whole-message phrases, so it cannot steal
+        # a turn from anyone, and the phrases it does own ("stop", "не пиши
+        # мне") would otherwise be claimed by the always-matching menu/echo
+        # fallbacks at the bottom - i.e. the request to stop would be
+        # answered by a generic reply and nothing would be turned off.
+        from apps.nutrition_proactive import optout_skill as _proactive_optout  # noqa: F401
         from apps.skills.human_handoff import skill as _handoff  # noqa: F401
 
         # Sprint 9 / P7 (DRF-824) — health_screening MUST precede every
