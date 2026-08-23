@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -35,6 +34,7 @@ from django.conf import settings as django_settings
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.llm.protocol import CompletionResult, ToolCall
+from apps.marketplace.dto import MasterCard
 from apps.orchestrator import concierge as concierge_mod
 from apps.orchestrator import discovery as discovery_mod
 from apps.orchestrator.discovery import (
@@ -182,16 +182,21 @@ class TestRenderMissingServices:
 
 
 class TestRenderMasterCards:
-    def _card(self) -> SimpleNamespace:
-        return SimpleNamespace(
-            tenant_id="t1",
-            master_id="m1",
+    def _card(self) -> MasterCard:
+        """The real DTO, not a stand-in.
+
+        The renderer's whole job is to project THIS shape, so a hand-rolled
+        namespace here would let a field rename pass the test and break the
+        reply.
+        """
+        return MasterCard(
+            tenant_id=uuid4(),
+            master_id=uuid4(),
             name="Архипкин Денис",
             specialization="",
             rating=None,
+            photo_url="",
             city="Пенза",
-            service_id=None,
-            service_name="",
         )
 
     def test_unchanged_when_everything_was_found(self) -> None:
@@ -226,6 +231,7 @@ class TestRenderMasterCards:
 
     def test_buttons_are_unaffected(self) -> None:
         reply = _render_master_cards([self._card()], missing_services=["маникюр"])
+        assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert len(buttons) == 1
         assert buttons[0]["callback"].startswith("cb:discover:book:")
