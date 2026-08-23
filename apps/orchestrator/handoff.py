@@ -355,6 +355,8 @@ def handoff_to_booking(
             )
             return DiscoveryReply(text=_UNAVAILABLE_REPLY)
 
+        carry_time_preference(global_bot_user, conversation)
+
         emit(
             "marketplace.handoff.entered",
             payload={
@@ -427,6 +429,10 @@ def handoff_to_booking(
 BOOKING_CALLBACK_PREFIXES = (
     "cb:book:pick_master:",
     "cb:book:pick_date:",
+    # DRF-1325 — the time chips. Both carry the master id first, exactly like
+    # pick_date, so tenant resolution below needs no new shape.
+    "cb:book:pick_part:",
+    "cb:book:more_dates:",
     "cb:book:pick_slot:",
     "cb:book:confirm:",
     "cb:book:cancel:",
@@ -436,6 +442,38 @@ BOOKING_CALLBACK_PREFIXES = (
 # keyboard after pending-row cleanup, forged id, flag-off int ids). Mirrors
 # the booking skill's own stale-context reply — the user restarts selection.
 _STALE_BOOKING_CALLBACK_REPLY = "Контекст записи устарел. Начните выбор услуги заново."
+
+
+def carry_time_preference(global_bot_user, conversation) -> None:
+    """Copy the user's «завтра вечером» onto tenant T's conversation (DRF-1325).
+
+    The person says WHEN on the global bot; the flow that has to honour it
+    runs inside ``tenant_scope(T)`` against a different ``Conversation`` row.
+    Without this copy the preference dies at the tenant boundary — a smaller
+    version of the exact defect the ticket is about.
+
+    Best-effort by contract: losing the preference costs the day chips, i.e.
+    the ticket's own no-preference path, and must never cost the turn.
+    """
+    from apps.conversations.services import resolve_active_conversation
+    from apps.orchestrator.time_preference import (
+        load_time_preference,
+        save_time_preference,
+    )
+    from apps.tenancy.context import tenant_scope
+
+    if conversation is None:
+        return
+    try:
+        # The global conversation lives at the tenant-less scope the caller
+        # has already left, so read it back under that scope explicitly.
+        with tenant_scope(None):
+            source = resolve_active_conversation(global_bot_user)
+        pref = load_time_preference(source)
+        if pref is not None:
+            save_time_preference(conversation, pref)
+    except Exception:  # noqa: BLE001 — a hint must never break a booking turn
+        logger.exception("marketplace.handoff.time_pref_carry_failed")
 
 
 def _resolve_booking_callback_tenant(callback_text: str):
@@ -465,7 +503,13 @@ def _resolve_booking_callback_tenant(callback_text: str):
         row = PendingBookingAction.all_tenants.filter(pk=token).only("tenant").first()
         return row.tenant if row is not None else None
 
-    for prefix in ("cb:book:pick_master:", "cb:book:pick_date:", "cb:book:pick_slot:"):
+    for prefix in (
+        "cb:book:pick_master:",
+        "cb:book:pick_date:",
+        "cb:book:pick_part:",
+        "cb:book:more_dates:",
+        "cb:book:pick_slot:",
+    ):
         if callback_text.startswith(prefix):
             raw_master = callback_text[len(prefix) :].split(":", 1)[0].strip()
             try:
@@ -530,6 +574,10 @@ def route_booking_callback(
                 trace_id,
             )
             return DiscoveryReply(text=_STALE_BOOKING_CALLBACK_REPLY)
+
+        # Re-carry on every tap: the day / part chips are separate turns and
+        # each of them has to know what the user asked for out loud.
+        carry_time_preference(global_bot_user, conversation)
 
         # Funnel visibility, symmetric with marketplace.handoff.entered.
         emit(

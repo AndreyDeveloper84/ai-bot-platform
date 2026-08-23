@@ -981,6 +981,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                         )
 
+    # DRF-1325 — the time half of «хочу на массаж завтра вечером». On
+    # 2026-08-23 it was dropped without a word and the booking landed five
+    # days out at 11:30. Runs on every turn of this surface, right before the
+    # reply is persisted, so it sees the FINAL reply and cannot change which
+    # branch produced it.
+    reply = _remember_time_preference(conversation, bot_user, event.text, reply)
+
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     # W5: the AIConcierge store already persisted concierge turns
     # (reply.persisted=True) — skip here to avoid a double row; every other
@@ -1042,6 +1049,91 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # the 152-ФЗ erasure. A forget/show turn must never write memory.
     if not was_memory_command:
         record_explicit_green_facts(bot_user, event.text)
+
+
+def _remember_time_preference(conversation, bot_user, text: str, reply):
+    """Parse «завтра вечером», store it, and say it was heard (DRF-1325).
+
+    Two separate jobs, deliberately not merged:
+
+    **Storing** happens on every turn that names a time. The preference is
+    read back inside ``tenant_scope(T)`` by the booking flow
+    (``apps.orchestrator.handoff.carry_time_preference``), which is what
+    turns «завтра вечером» into tomorrow's evening slots instead of a bare
+    calendar. It is stored even when this turn's reply says nothing about
+    time — the next tap is where it pays off.
+
+    **Acknowledging** happens only on a reply that offers masters to book
+    AND has not been persisted yet. The second condition is not cosmetic: a
+    concierge turn is written to the Message table by its own store before
+    control returns here, so prefixing its text would send one thing and
+    record another — and the replay fixtures read the record. On that path
+    the request is instead read back one tap later, by the picker itself
+    («Вы просили завтра вечером — вот что есть:»).
+
+    Best-effort throughout: a preference is a hint, and no hint is worth a
+    turn.
+    """
+    try:
+        from apps.orchestrator.time_preference import (
+            describe,
+            local_today,
+            parse_time_preference,
+            save_time_preference,
+        )
+
+        # Weekday words need to know what day it is; the global bot has no
+        # tenant, so this falls back to Europe/Moscow — the same default
+        # Tenant.timezone carries and the zone all nine pilot masters use.
+        today = local_today(getattr(bot_user, "tenant", None))
+        pref = parse_time_preference(text, weekday_today=today.weekday())
+        if pref is None:
+            return reply
+        save_time_preference(conversation, pref)
+
+        if reply.persisted or not _offers_booking(reply):
+            return reply
+        heard = describe(pref, None, today)
+        day = pref.day_offset
+        if day is not None:
+            from datetime import timedelta
+
+            heard = describe(pref, (today + timedelta(days=day)).isoformat(), today)
+        if not heard:
+            return reply
+        return DiscoveryReply(
+            text=f"{_TIME_HEARD_LINE.format(heard=heard)}\n\n{reply.text}",
+            action_data=reply.action_data,
+            persisted=reply.persisted,
+        )
+    except Exception:  # noqa: BLE001 — a hint must never break a turn
+        logger.exception("channels.max.global.time_pref_failed")
+        return reply
+
+
+# Deliberately not «записываю на завтра вечером»: nothing is booked yet and
+# no time has been checked. It states what was heard and what will be done
+# with it — which is exactly as much as this layer knows.
+_TIME_HEARD_LINE = "Поняла: {heard}. Подберу время под это."
+
+
+def _offers_booking(reply) -> bool:
+    """True when the reply carries at least one «записаться» button."""
+    data = getattr(reply, "action_data", None)
+    if not isinstance(data, dict):
+        return False
+    for attachment in data.get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        payload = attachment.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        for button in payload.get("buttons") or []:
+            if isinstance(button, dict) and str(button.get("callback") or "").startswith(
+                CALLBACK_DISCOVER_BOOK_PREFIX
+            ):
+                return True
+    return False
 
 
 def _discovery_handoff_reply(

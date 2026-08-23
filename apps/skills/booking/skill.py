@@ -72,8 +72,10 @@ from django.utils import timezone
 from apps.audit.services import write_audit
 from apps.booking.models import PendingBookingAction
 from apps.bookings.keyboards import (
+    CALLBACK_BOOK_MORE_DATES_PREFIX,
     CALLBACK_BOOK_PICK_DATE_PREFIX,
     CALLBACK_BOOK_PICK_MASTER_PREFIX,
+    CALLBACK_BOOK_PICK_PART_PREFIX,
     CALLBACK_BOOK_PICK_SLOT_PREFIX,
     confirm_2_button,
 )
@@ -92,6 +94,19 @@ from apps.skills.booking.lookup import (
     is_cancel_request,
     is_personal_booking_lookup,
     looks_like_flow_selection,
+)
+from apps.orchestrator.time_preference import (
+    PART_CHIP_LABELS,
+    PART_ORDER,
+    PART_PHRASES,
+    PART_RANGE_HINTS,
+    TimePreference,
+    day_label,
+    describe,
+    load_time_preference,
+    local_today,
+    part_of_iso_datetime,
+    resolve_date,
 )
 from apps.skills.booking.provider import YClientsScheduleUnavailableError
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
@@ -165,6 +180,38 @@ _SLOT_PICK_PROMPT = "Выберите время:"
 # Date picker — shown after master pick, before slot listing.
 _DATE_PICK_PROMPT = "Выберите дату:"
 _DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет свободных дат в ближайшее время."
+
+# ── DRF-1325: the human-time half of the flow ─────────────────────────────
+#
+# The wording rule behind every line below: name what the user asked for in
+# their own words before answering it. The pilot defect was not a wrong date
+# — it was a request that vanished without a trace, so the person had no way
+# to know it had been dropped.
+#
+# Nothing here claims a time is free. «Свободно» describes the schedule read
+# the flow just performed; the authoritative answer is still `create` with
+# its 409 (docs/OD_SALON_P0_CONTRACT.md).
+_PART_PICK_PROMPT = "Когда удобно {day}?"
+_PART_SLOT_PROMPT = "{day}, {part} — выберите время:"
+_HEARD_SLOT_PROMPT = "Вы просили {heard} — вот что есть:"
+_DAY_UNAVAILABLE_PROMPT = "На {day} у мастера свободного времени нет. Вот ближайшие дни:"
+_PART_UNAVAILABLE_PROMPT = "{day} {part} у мастера свободного времени нет. Есть так:"
+_PART_EMPTY_PROMPT = "Свободного времени на {part} в этот день нет. Вот весь день:"
+
+# «Точное время» — the escape hatch out of the chips into the full list of
+# the day. It must exist: chips are a shortcut for the common case, never a
+# cage, and somebody who wants 15:45 specifically has to be able to get it.
+_LABEL_EXACT_TIME = "Точное время"
+
+# Same role one step earlier: out of the three day chips into every free day
+# the master has.
+_LABEL_PICK_DATE = "Выбрать дату"
+
+# Number of day chips before «Выбрать дату» takes over. Three, because
+# «Сегодня / Завтра / Послезавтра» is the vocabulary people actually use for
+# a booking; past that a chip needs a date on it anyway, and a list of dates
+# is what the full picker already is.
+_MAX_DAY_CHIPS = 3
 
 # pick_slot deterministic short-circuit (RB1.1-D05) — safe local replies.
 # Stale/invalid callback context never reaches the backend; the user is
@@ -275,6 +322,11 @@ class BookingSkill:
         if text.startswith(CALLBACK_BOOK_PICK_DATE_PREFIX):
             return True
         if text.startswith(CALLBACK_BOOK_PICK_SLOT_PREFIX):
+            return True
+        # DRF-1325 — the time chips are booking callbacks like any other.
+        if text.startswith(CALLBACK_BOOK_PICK_PART_PREFIX):
+            return True
+        if text.startswith(CALLBACK_BOOK_MORE_DATES_PREFIX):
             return True
 
         intent = context.intent
@@ -414,6 +466,10 @@ class BookingSkill:
         # show_slots(master_id, date_from=<date>, service_id=<id>) on the
         # user's choice.
         text = (context.message_text or "").strip()
+        # DRF-1325 — set by the part-of-day chip; narrows the slot list the
+        # slot-cards short-circuit renders further down. None = «all times»,
+        # which is what every pre-DRF-1325 path produced.
+        part_filter: str | None = None
         if text.startswith(CALLBACK_BOOK_PICK_MASTER_PREFIX):
             raw_payload = text[len(CALLBACK_BOOK_PICK_MASTER_PREFIX) :].strip()
             parts = raw_payload.split(":", 1)
@@ -437,6 +493,34 @@ class BookingSkill:
                 service_id=service_id,
                 yclients=yclients,
                 tenant_id=tenant_id,
+                tenant=tenant,
+                pref=load_time_preference(context.conversation),
+            )
+
+        # ── «Выбрать дату» — expand the day chips (DRF-1325) ────────
+        # The three chips answer «когда?» for the overwhelming majority
+        # of taps; this is the escape hatch for everybody else, and it
+        # renders exactly what the picker rendered before this ticket.
+        if text.startswith(CALLBACK_BOOK_MORE_DATES_PREFIX):
+            payload = text[len(CALLBACK_BOOK_MORE_DATES_PREFIX) :].strip()
+            raw_master, _, raw_service = payload.partition(":")
+            master_id = _coerce_id(raw_master)
+            service_id = _coerce_id(raw_service)
+            if master_id is None or service_id is None:
+                logger.warning("booking.more_dates.bad_payload raw=%r", payload)
+                return _build_skill_result(
+                    text=_STALE_CONTEXT_TEXT,
+                    tool_calls_made=[],
+                    confidence=_CONFIDENCE_OK,
+                )
+            return _render_date_picker(
+                master_id=master_id,
+                service_id=service_id,
+                yclients=yclients,
+                tenant_id=tenant_id,
+                tenant=tenant,
+                pref=None,
+                expand_all=True,
             )
 
         # ── Slot-pick callback short-circuit (RB1.1-D05) ───────────
@@ -458,10 +542,16 @@ class BookingSkill:
             )
 
         # ── Date-pick callback short-circuit ────────────────────────
-        # User tapped a date button
+        # User tapped a day chip
         # (cb:book:pick_date:<master_id>:<date>:<service_id>).
-        # Synthesise show_slots(master_id, date_from=<date>, service_id=<id>)
-        # so the existing slot-cards short-circuit picks up + renders times.
+        #
+        # DRF-1325: this used to synthesise show_slots and dump every free
+        # time of the day into a keyboard — the «Выберите время» half of the
+        # bare calendar. Now it asks the question a person actually answers
+        # («утро / день / вечер») and only then lists times. The parts are
+        # derived from the day's ACTUAL slots, so a chip that appears always
+        # has something behind it; when only one part has slots the question
+        # is pointless and the times are shown straight away.
         if text.startswith(CALLBACK_BOOK_PICK_DATE_PREFIX):
             payload = text[len(CALLBACK_BOOK_PICK_DATE_PREFIX) :].strip()
             try:
@@ -489,11 +579,48 @@ class BookingSkill:
                     tool_calls_made=[],
                     confidence=_CONFIDENCE_OK,
                 )
+            return _render_part_picker(
+                master_id=master_id,
+                service_id=service_id,
+                date=raw_date,
+                yclients=yclients,
+                tenant_id=tenant_id,
+                tenant=tenant,
+                pref=load_time_preference(context.conversation),
+            )
+
+        # ── Part-of-day callback short-circuit (DRF-1325) ───────────
+        # cb:book:pick_part:<master_id>:<date>:<part>:<service_id>. Exactly
+        # the synth-ToolCall shape the date pick used before this ticket —
+        # the ONLY difference is that ``part_filter`` narrows the rendered
+        # list to the bucket the user tapped. ``any`` is «Точное время»: the
+        # unfiltered list, i.e. the pre-DRF-1325 behaviour, kept reachable.
+        if text.startswith(CALLBACK_BOOK_PICK_PART_PREFIX):
+            payload = text[len(CALLBACK_BOOK_PICK_PART_PREFIX) :].strip()
+            try:
+                raw_master, raw_date, raw_part, raw_service = payload.split(":", 3)
+            except (TypeError, ValueError):
+                logger.warning("booking.pick_part.bad_payload raw=%r", payload)
+                return _build_skill_result(
+                    text=_STALE_CONTEXT_TEXT,
+                    tool_calls_made=[],
+                    confidence=_CONFIDENCE_OK,
+                )
+            master_id = _coerce_id(raw_master)
+            service_id = _coerce_id(raw_service)
+            if master_id is None or service_id is None:
+                logger.warning("booking.pick_part.bad_payload raw=%r", payload)
+                return _build_skill_result(
+                    text=_STALE_CONTEXT_TEXT,
+                    tool_calls_made=[],
+                    confidence=_CONFIDENCE_OK,
+                )
+            part_filter = raw_part if raw_part in PART_ORDER else None
             first = CompletionResult(
                 text="",
                 tool_calls=[
                     ToolCall(
-                        id=f"synth:pick_date:{master_id}:{raw_date}",
+                        id=f"synth:pick_part:{master_id}:{raw_date}:{raw_part}",
                         name=SHOW_SLOTS_TOOL_SPEC["name"],
                         arguments={
                             "master_id": master_id,
@@ -721,12 +848,30 @@ class BookingSkill:
                     text=_FALLBACK_HANDOFF_TEXT,
                     tenant_id=tenant_id,
                 )
+            # DRF-1325 — the part chip narrows the list to the bucket the
+            # user asked for. An empty bucket is NOT rendered as an empty
+            # keyboard: fall back to the whole day and say so, because a
+            # message with no buttons is a dead end and the day's other
+            # times are a real answer.
+            slots = tool_result.slots
+            narrowed = _slots_in_part(slots, part_filter) if part_filter else slots
+            if part_filter and not narrowed:
+                return _build_skill_result(
+                    text=_PART_EMPTY_PROMPT.format(part=PART_CHIP_LABELS[part_filter].lower()),
+                    tool_calls_made=tool_calls_made,
+                    confidence=_CONFIDENCE_OK,
+                    action_data=_action_data_for_slot_pick(
+                        slots,
+                        master_id=master_id,
+                        service_id=service_id,
+                    ),
+                )
             return _build_skill_result(
                 text=_SLOT_PICK_PROMPT,
                 tool_calls_made=tool_calls_made,
                 confidence=_CONFIDENCE_OK,
                 action_data=_action_data_for_slot_pick(
-                    tool_result.slots,
+                    narrowed,
                     master_id=master_id,
                     service_id=service_id,
                 ),
@@ -1643,8 +1788,28 @@ def _render_date_picker(
     service_id: int | str,
     yclients: Any,
     tenant_id: str,
+    tenant: Any = None,
+    pref: TimePreference | None = None,
+    expand_all: bool = False,
 ) -> SkillResult:
-    """Build the date-picker SkillResult after a master pick.
+    """Build the "when?" reply after a master pick.
+
+    DRF-1325 changed WHAT is rendered, not where it comes from. Before,
+    every one of the master's free days went out as a keyboard of
+    ``2026-08-28``-shaped buttons — a bare calendar. Now the first three
+    free days carry human captions («Сегодня» / «Завтра» / «Послезавтра»,
+    a dated caption after that) and the rest hide behind «Выбрать дату»,
+    which re-enters here with ``expand_all`` and renders the old full list.
+    And when the user already SAID when («завтра вечером»), the day question
+    is skipped entirely: the answer goes straight to that day — or, if the
+    master has nothing on it, says so in one line and falls back to the
+    chips rather than dropping the request in silence.
+
+    Every caption is derived from ``dates``, the days the schedule read
+    actually returned. That is not an availability guarantee (there is no
+    authoritative availability contract; ``create`` still owns the final
+    409 — ``docs/OD_SALON_P0_CONTRACT.md``). It is the weaker, honest
+    property the ticket demands: a chip leads to something.
 
     Calls ``client.get_available_dates`` directly (no tool wrapper —
     the dates list isn't an LLM-grounded artefact, it's pure ops data).
@@ -1688,35 +1853,259 @@ def _render_date_picker(
             confidence=_CONFIDENCE_OK,
         )
 
-    capped = sorted(dates)[:_MAX_DATE_BUTTONS]
+    # «Сегодня» is computed in the SALON's zone, never the server's: the
+    # server runs on UTC and Moscow is three hours ahead of it, so a
+    # server-side "today" is the salon's yesterday for the first three hours
+    # of every day. day_label falls back to a dated caption for anything
+    # outside today..+2, so a stale day can never wear a relative word.
+    today = local_today(tenant)
+    ordered = sorted(dates)
+
+    # The user already named a day. Honouring it is the whole ticket.
+    wanted = resolve_date(pref, today)
+    if wanted and not expand_all:
+        if wanted in ordered:
+            return _render_part_picker(
+                master_id=master_id,
+                service_id=service_id,
+                date=wanted,
+                yclients=yclients,
+                tenant_id=tenant_id,
+                tenant=tenant,
+                pref=pref,
+                heard=describe(pref, wanted, today),
+            )
+        # Asked for a day the master has nothing on. Saying so IS the
+        # point: silence here is exactly the defect this ticket names.
+        logger.info("booking.time_pref.day_unavailable master=%s date=%s", master_id, wanted)
+        return _build_skill_result(
+            text=_DAY_UNAVAILABLE_PROMPT.format(day=day_label(wanted, today).lower()),
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+            action_data=_action_data_for_date_pick(
+                master_id,
+                ordered[:_MAX_DATE_BUTTONS],
+                service_id,
+                today=today,
+                collapse=True,
+            ),
+        )
+
+    capped = ordered[:_MAX_DATE_BUTTONS]
     return _build_skill_result(
         text=_DATE_PICK_PROMPT,
         tool_calls_made=[],
         confidence=_CONFIDENCE_OK,
-        action_data=_action_data_for_date_pick(master_id, capped, service_id),
+        action_data=_action_data_for_date_pick(
+            master_id, capped, service_id, today=today, collapse=not expand_all
+        ),
     )
+
+
+def _render_part_picker(
+    *,
+    master_id: int | str,
+    service_id: int | str,
+    date: str,
+    yclients: Any,
+    tenant_id: str,
+    tenant: Any = None,
+    pref: TimePreference | None = None,
+    heard: str = "",
+) -> SkillResult:
+    """Ask «утро / день / вечер» for one day — or skip straight to the times.
+
+    The buckets come from :mod:`apps.orchestrator.time_preference`, the one
+    place that defines where morning ends and evening begins, so the word on
+    the chip means the same thing here, in the parse of «завтра вечером» and
+    in the readback.
+
+    Three shortcuts keep this from adding a pointless tap:
+
+    * the user already named a part and it has slots → those slots;
+    * exactly one part has slots → that part's slots (a one-button question
+      is not a question);
+    * the day has no slots at all → the honest line instead of an empty
+      keyboard.
+    """
+    try:
+        service_ids = [service_id] if service_id is not None else None
+        times = yclients.get_available_times(staff_id=master_id, date=date, service_ids=service_ids)
+    except YClientsScheduleUnavailableError as exc:
+        logger.warning("booking.pick_date.schedule_unavailable master=%s err=%s", master_id, exc)
+        return _build_skill_result(
+            text=SCHEDULE_UNAVAILABLE_TEXT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+    except (YClientsAPIError, YClientsUnavailableError) as exc:
+        logger.warning("booking.pick_date.yclients_failed master=%s err=%s", master_id, exc)
+        return _handoff(
+            tool_calls_made=[],
+            reason="booking_yclients_failure",
+            text=_FALLBACK_HANDOFF_TEXT,
+            tenant_id=tenant_id,
+        )
+
+    slots = [c for c in (_to_slot_candidate(t, date) for t in times) if c is not None]
+    today = local_today(tenant)
+    if not slots:
+        return _build_skill_result(
+            text=_DAY_UNAVAILABLE_PROMPT.format(day=day_label(date, today).lower()),
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+
+    present = [p for p in PART_ORDER if _slots_in_part(slots, p)]
+
+    wanted_part = pref.part if pref is not None else None
+    if wanted_part is not None and wanted_part in present:
+        # These two branches render a slot keyboard without going through the
+        # show_slots TOOL, so the audit row the tool would have written has to
+        # be written here — a rendered slot list must be visible in the audit
+        # trail no matter which code path produced it.
+        _audit_handled(tenant_id=tenant_id, tool=SHOW_SLOTS_TOOL_SPEC["name"])
+        return _build_skill_result(
+            text=_slot_prompt(date, wanted_part, today, heard=heard),
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+            action_data=_action_data_for_slot_pick(
+                _slots_in_part(slots, wanted_part),
+                master_id=master_id,
+                service_id=service_id,
+            ),
+        )
+
+    if wanted_part is not None and present:
+        # Asked for an evening this day does not have. Name the gap, then
+        # offer what the day really holds — never a silent substitution.
+        logger.info(
+            "booking.time_pref.part_unavailable master=%s date=%s part=%s",
+            master_id,
+            date,
+            wanted_part,
+        )
+        return _build_skill_result(
+            text=_PART_UNAVAILABLE_PROMPT.format(
+                day=day_label(date, today).lower(),
+                part=PART_PHRASES[wanted_part],
+            ),
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+            action_data=_action_data_for_part_pick(master_id, date, present, service_id),
+        )
+
+    if len(present) == 1:
+        only = present[0]
+        _audit_handled(tenant_id=tenant_id, tool=SHOW_SLOTS_TOOL_SPEC["name"])
+        return _build_skill_result(
+            text=_slot_prompt(date, only, today, heard=heard),
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+            action_data=_action_data_for_slot_pick(
+                _slots_in_part(slots, only),
+                master_id=master_id,
+                service_id=service_id,
+            ),
+        )
+
+    return _build_skill_result(
+        text=_PART_PICK_PROMPT.format(day=day_label(date, today).lower()),
+        tool_calls_made=[],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_part_pick(master_id, date, present, service_id),
+    )
+
+
+def _slots_in_part(slots: list, part: str) -> list:
+    """Slots of ``slots`` inside ``part``. One definition, one call site each."""
+    return [s for s in slots if part_of_iso_datetime(getattr(s, "datetime", "") or "") == part]
+
+
+def _slot_prompt(date: str, part: str | None, today: Any, *, heard: str = "") -> str:
+    """«Завтра вечером — вот что свободно:» / «Выберите время:».
+
+    ``heard`` carries the user's own words when the narrowing came from what
+    they SAID rather than from a tap, so the reply shows the request was
+    heard instead of quietly acting on it.
+    """
+    if heard:
+        return _HEARD_SLOT_PROMPT.format(heard=heard)
+    if part is None:
+        return _SLOT_PICK_PROMPT
+    return _PART_SLOT_PROMPT.format(day=day_label(date, today), part=PART_PHRASES[part])
+
+
+def _action_data_for_part_pick(
+    master_id: int | str,
+    date: str,
+    parts: list[str],
+    service_id: int | str,
+) -> dict[str, Any]:
+    """Part-of-day chips + the «Точное время» escape hatch.
+
+    Only parts that HAVE slots on ``date`` are passed in — a chip must lead
+    to something, and «Вечер» on a day whose last slot is 15:00 is a button
+    into a dead end.
+    """
+    buttons = [
+        {
+            "label": f"{PART_CHIP_LABELS[p]} ({PART_RANGE_HINTS[p]})",
+            "callback": f"{CALLBACK_BOOK_PICK_PART_PREFIX}{master_id}:{date}:{p}:{service_id}",
+        }
+        for p in parts
+    ]
+    buttons.append(
+        {
+            "label": _LABEL_EXACT_TIME,
+            "callback": f"{CALLBACK_BOOK_PICK_PART_PREFIX}{master_id}:{date}:any:{service_id}",
+        }
+    )
+    return {
+        "attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}],
+        "kind": "part_pick",
+        "master_id": master_id,
+    }
 
 
 def _action_data_for_date_pick(
     master_id: int | str,
     dates: list[str],
     service_id: int | str | None = None,
+    *,
+    today: Any = None,
+    collapse: bool = False,
 ) -> dict[str, Any]:
-    """Build the date-cards keyboard from a YClients dates list.
+    """Build the day keyboard from a schedule dates list.
 
     One button per date, callback
     ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>:<service_id>``.
-    Master id and service id are embedded so the date-pick callback can
-    synthesise show_slots without re-fetching context from history.
+    Master id and service id are embedded so the date-pick callback stays
+    self-contained — no re-fetching context from history.
+
+    DRF-1325: with ``collapse`` the first :data:`_MAX_DAY_CHIPS` days are
+    captioned «Сегодня / Завтра / Послезавтра» (relative to ``today`` in the
+    SALON's zone, not the server's) and the remainder collapses into a single
+    «Выбрать дату» button that re-renders this same keyboard in full. The
+    callbacks are unchanged: a chip is the existing date button wearing a
+    word a person reads without decoding.
     """
     service_suffix = f":{service_id}" if service_id is not None else ""
+    shown = dates[:_MAX_DAY_CHIPS] if collapse else dates
     buttons = [
         {
-            "label": _date_button_label(d),
+            "label": day_label(d, today) if today is not None else _date_button_label(d),
             "callback": f"{CALLBACK_BOOK_PICK_DATE_PREFIX}{master_id}:{d}{service_suffix}",
         }
-        for d in dates
+        for d in shown
     ]
+    if collapse and len(dates) > len(shown) and service_id is not None:
+        buttons.append(
+            {
+                "label": _LABEL_PICK_DATE,
+                "callback": f"{CALLBACK_BOOK_MORE_DATES_PREFIX}{master_id}:{service_id}",
+            }
+        )
     return {
         "attachments": [
             {
