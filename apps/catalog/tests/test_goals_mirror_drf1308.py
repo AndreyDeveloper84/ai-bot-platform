@@ -17,6 +17,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -38,8 +39,16 @@ def tenant(db) -> Tenant:
     return Tenant.objects.create(slug="drf1308", name="DRF-1308")
 
 
-def _row(**overrides: object) -> dict:
-    row = {
+_UNSET: Any = object()
+
+
+def _row(goals: Any = _UNSET) -> dict[str, Any]:
+    """Одна строка ответа Ayla. `goals` опускается через ``_UNSET``.
+
+    Отличать «поле отсутствует» от «поле есть и равно None» нужно
+    буквально: это два разных случая, и парсер обязан пережить оба.
+    """
+    row: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "updated_at": "2026-08-23T09:00:00Z",
         "name": "Массаж спины",
@@ -49,22 +58,25 @@ def _row(**overrides: object) -> dict:
         "duration_minutes": 60,
         "template": None,
         "category": str(uuid.uuid4()),
-        "goals": [RELAX],
     }
-    row.update(overrides)
+    if goals is not _UNSET:
+        row["goals"] = goals
     return row
 
 
-def _dto(**overrides: object) -> CatalogSalonServiceDTO:
+def _dto(
+    *,
+    ayla_service_id: str | None = None,
+    goals: list[dict[str, str]] | None = None,
+) -> CatalogSalonServiceDTO:
     return CatalogSalonServiceDTO(
-        ayla_service_id=str(overrides.pop("ayla_service_id", uuid.uuid4())),
+        ayla_service_id=ayla_service_id or str(uuid.uuid4()),
         external_updated_at=datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc),
         name="Массаж спины",
         price_from=Decimal("1500.00"),
         duration_min=60,
-        goals=list(overrides.pop("goals", [RELAX])),  # type: ignore[arg-type]
+        goals=[RELAX] if goals is None else goals,
         raw={},
-        **overrides,  # type: ignore[arg-type]
     )
 
 
@@ -76,14 +88,14 @@ class TestPayloadParsing:
     def test_missing_field_is_an_empty_list_not_a_crash(self) -> None:
         """Поле аддитивное: старая Ayla его просто не пришлёт."""
         row = _row()
-        del row["goals"]
+        assert "goals" not in row
         assert _parse_salon_service(row).goals == []
 
     @pytest.mark.parametrize(
         "raw_goals",
         [None, "relax", {}, [None], ["relax"], [{"key": "relax"}], [{"label": ""}]],
     )
-    def test_malformed_entries_are_dropped_not_raised(self, raw_goals: object) -> None:
+    def test_malformed_entries_are_dropped_not_raised(self, raw_goals: Any) -> None:
         """Цель — обогащение; из-за неё нельзя терять всю услугу."""
         assert _parse_salon_service(_row(goals=raw_goals)).goals == []
 
@@ -115,7 +127,7 @@ class TestMirrorColumn:
 
 @pytest.mark.django_db
 class TestKbProjection:
-    def _service(self, tenant: Tenant, goals: object) -> CatalogService:
+    def _service(self, tenant: Tenant, goals: Any) -> CatalogService:
         return CatalogService.all_tenants.create(
             tenant=tenant,
             external_updated_at=datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc),
