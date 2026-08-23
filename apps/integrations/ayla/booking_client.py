@@ -343,6 +343,21 @@ class AylaBookingPage:
 
 
 @dataclass(frozen=True)
+class AylaAppointmentVersion:
+    """The four canonical facts a console needs before acting on a booking.
+
+    Deliberately not a booking card: everything else the salon console
+    shows it already has from its own mirror, and this crosses a service
+    boundary on every button press.
+    """
+
+    id: str
+    version: int
+    status: str
+    start_datetime: str
+
+
+@dataclass(frozen=True)
 class AylaRepeatIntent:
     """Prefill for the «Записаться ещё» CTA (``me/bookings/{id}/repeat-intent/``).
 
@@ -437,6 +452,14 @@ class AylaBookingClient(Protocol):
         *,
         external_user_id: str,
     ) -> list[AylaUserRecord]: ...
+
+    # NOTE: ``get_appointment_version`` (DRF-1233) is deliberately NOT a
+    # member of this Protocol. This seam exists for the booking skill's
+    # provider-selector, and the canonical version read belongs to the
+    # salon console, which holds a concrete client. Declaring it here
+    # would oblige every fake of the booking skill to implement a method
+    # that skill never calls — which is exactly what happened when it was
+    # first written this way, and what mypy caught.
 
 
 # ─── wire → DTO mappers ───────────────────────────────────────────────────────
@@ -1247,6 +1270,61 @@ class AylaBookingHTTPClient:
             )
             raise BookingUnavailableError("malformed_response")
         return _user_record_from_wire(payload)
+
+    def get_appointment_version(
+        self,
+        *,
+        external_user_id: str,
+        booking_id: str,
+    ) -> AylaAppointmentVersion:
+        """The canonical `version` of one booking (``GET appointments/{id}/``).
+
+        DRF-1233. Exists because Ayla requires ``expected_version`` on every
+        reschedule and closure — deliberately, since it is what stops two
+        people acting on the same booking with the second silently winning —
+        and the bot had nowhere to read it. The day journal here is built
+        from ``RemoteBookingProxy``, whose
+        ``last_applied_appointment_version`` is NULL unless a canonical
+        ``appointment.rescheduled`` event happened to be applied; measured on
+        the pilot 2026-08-21, two of twenty-three mirrored bookings carried a
+        version and the single future confirmed booking carried none.
+
+        The value must reach the write **through the operator**: read it, show
+        the operator what it describes, and send back what they saw. Reading
+        it inside the write instead would make the guard unfireable by
+        construction — the same defect DRF-1232 fixed, where a fresh
+        idempotency key was invented per request and a unique constraint
+        stood but never triggered.
+
+        A booking this actor may not see answers 404 identically to one that
+        does not exist (info-hidden upstream), surfacing here as a 4xx.
+        """
+        resp = self._request(
+            "GET", f"appointments/{booking_id}/", external_user_id=external_user_id
+        )
+        payload = self._ok(resp)
+        if not isinstance(payload, dict):
+            # A 200 we cannot read is an outage, not «no version». Returning
+            # a default would send a guess into a concurrency guard.
+            logger.warning(
+                "booking_client.appointment_version_unexpected_shape type=%s",
+                type(payload).__name__,
+            )
+            raise BookingUnavailableError("malformed_response")
+        try:
+            version = int(payload["version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "booking_client.appointment_version_missing payload_keys=%s",
+                sorted(payload) if isinstance(payload, dict) else "?",
+            )
+            raise BookingUnavailableError("version_missing") from exc
+        return AylaAppointmentVersion(
+            id=str(payload.get("id") or booking_id),
+            version=version,
+            status=str(payload.get("status") or ""),
+            start_datetime=str(payload.get("start_datetime") or ""),
+        )
 
     def get_repeat_intent(
         self,

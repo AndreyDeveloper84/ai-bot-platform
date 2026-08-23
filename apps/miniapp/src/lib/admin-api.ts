@@ -132,6 +132,15 @@ export const getMe = (): Promise<MeResponse> =>
  */
 export interface SalonDayVisit {
   id: string;
+  /**
+   * Catalog service id — what the slots endpoint takes.
+   *
+   * Empty when the mirrored booking's Ayla service maps to nothing local.
+   * A reschedule cannot be offered then: there is no way to ask which
+   * starts are bookable, and offering arbitrary times would be the
+   * client inventing availability (§17).
+   */
+  service_id: string;
   start_at: string | null;
   end_at: string | null;
   duration_min: number;
@@ -192,6 +201,255 @@ export const getSalonDay = (
   });
 };
 
+// --- POST /api/v1/admin/bookings/ (UX contract §18) -----------------------
+
+/**
+ * What happened to a submitted booking.
+ *
+ * Mirrors `SubmitOutcome` in `booking-draft.ts` and the backend's
+ * `outcome` field. The backend sends it explicitly rather than letting
+ * the client infer it from a status code, because a code is lossy: 409
+ * could be «slot taken» or «already exists», and the screen must react
+ * differently.
+ */
+export interface CreateBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+  /** Returned on `pending` so a retry can be the same write, not a new one. */
+  idempotency_key?: string;
+}
+
+export interface CreateBookingBody {
+  master_id: string;
+  service_id: string;
+  /** ISO start, as the schedule gave it. */
+  start_at: string;
+  /** Stable across retries of the same draft — see the screen. */
+  idempotency_key: string;
+  /** Exactly one of these two paths (§14). */
+  client_id?: string;
+  client_name?: string;
+  client_phone?: string;
+}
+
+/**
+ * Create the appointment.
+ *
+ * Never throws on a business outcome — every one of the five is a normal
+ * answer the screen renders differently. Only a transport failure throws,
+ * and that is itself reported as `pending`: a write that did not answer
+ * may still have landed, and «Do not claim creation» cuts both ways.
+ */
+export const createSalonBooking = async (
+  body: CreateBookingBody,
+): Promise<CreateBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch("/api/v1/admin/bookings/", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return {
+      outcome: "pending",
+      detail: "нет ответа от сети",
+      idempotency_key: body.idempotency_key,
+    };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CreateBookingResult>;
+    if (data.outcome) return data as CreateBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    // A body we cannot read on a write is not evidence that nothing
+    // happened. Treat it as unknown rather than as failure.
+    return {
+      outcome: "pending",
+      detail: "ответ не прочитан",
+      idempotency_key: body.idempotency_key,
+    };
+  }
+};
+
+// --- POST /api/v1/admin/bookings/<id>/cancel/ (UX contract §19) ----------
+
+/** The salon's closed allowlist of cancellation reasons. */
+export const CANCEL_REASONS = [
+  { code: "master_unavailable", label: "Мастер не сможет" },
+  { code: "tenant_closed_slot", label: "Салон закрыт" },
+  { code: "other", label: "Другое" },
+] as const;
+
+export type CancelReasonCode = (typeof CANCEL_REASONS)[number]["code"];
+
+export interface CancelBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+}
+
+/**
+ * Cancel a booking.
+ *
+ * Same five outcomes as creation and, as there, never throws on a
+ * business answer. `pending` carries more weight here than anywhere
+ * else: a cancellation reported as failed invites a second press, and a
+ * second press on an already-cancelled booking is how a customer gets
+ * told twice that their appointment is off.
+ */
+export const cancelSalonBooking = async (
+  appointmentId: string,
+  body: { reason_code?: CancelReasonCode; reason?: string } = {},
+): Promise<CancelBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/cancel/`,
+      { method: "POST", headers, body: JSON.stringify(body) },
+    );
+  } catch {
+    return { outcome: "pending", detail: "нет ответа от сети" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CancelBookingResult>;
+    if (data.outcome) return data as CancelBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    // Unreadable body on a write is not evidence that nothing happened.
+    return { outcome: "pending", detail: "ответ не прочитан" };
+  }
+};
+
+// --- closing a visit (UX contract §19) -----------------------------------
+
+/** The canonical facts, read straight from the schedule. */
+export interface BookingVersion {
+  id: string;
+  version: number;
+  status: string;
+  start_datetime: string;
+}
+
+/**
+ * GET /api/v1/admin/bookings/<id>/ — the canonical version.
+ *
+ * Read before the confirmation, never inside the write. `expected_version`
+ * protects against acting on a booking that changed since the operator
+ * looked at it; a version fetched by the write itself would always match
+ * and protect nothing. The human pause between this call and the confirm
+ * IS the window the guard covers.
+ */
+export const getBookingVersion = (
+  appointmentId: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<BookingVersion> =>
+  request<BookingVersion>(
+    `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/`,
+    { signal: init.signal },
+  );
+
+export interface CompleteBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+}
+
+/**
+ * POST /api/v1/admin/bookings/<id>/complete/ — close the visit.
+ *
+ * `expectedVersion` must be the value the operator was shown. Same five
+ * outcomes as the other writes, and the same rule: never throws on a
+ * business answer, and `pending` is «unknown», not «failed».
+ */
+export const completeSalonBooking = async (
+  appointmentId: string,
+  expectedVersion: number,
+): Promise<CompleteBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/complete/`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ expected_version: expectedVersion }),
+      },
+    );
+  } catch {
+    return { outcome: "pending", detail: "нет ответа от сети" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CompleteBookingResult>;
+    if (data.outcome) return data as CompleteBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    return { outcome: "pending", detail: "ответ не прочитан" };
+  }
+};
+
+/**
+ * POST /api/v1/admin/bookings/<id>/reschedule/ — move it.
+ *
+ * `expectedVersion` is the value the operator was shown, exactly as for
+ * closure. `newStartAt` must be a start the schedule offered — the screen
+ * picks it from the slots endpoint, and Ayla re-checks at commit anyway.
+ */
+export const rescheduleSalonBooking = async (
+  appointmentId: string,
+  expectedVersion: number,
+  newStartAt: string,
+): Promise<CompleteBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/reschedule/`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          expected_version: expectedVersion,
+          new_start_at: newStartAt,
+        }),
+      },
+    );
+  } catch {
+    return { outcome: "pending", detail: "нет ответа от сети" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<CompleteBookingResult>;
+    if (data.outcome) return data as CompleteBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    return { outcome: "pending", detail: "ответ не прочитан" };
+  }
+};
+
 // --- salon customers (UX contract §13) -----------------------------------
 
 /**
@@ -205,8 +463,23 @@ export const getSalonDay = (
  */
 export interface SalonCustomer {
   id: string;
+  /** Never blank: an unnamed customer arrives as «Без имени». */
   name: string;
-  phone_masked: string;
+  /**
+   * False when `name` is the placeholder rather than a real name.
+   *
+   * Upstream may hold no name at all — deliberately, since inventing
+   * «Клиент №4» would make the record look more certain than it is.
+   */
+  named: boolean;
+  /**
+   * Absent today: the canonical lookup returns no phone at all
+   * (DRF-1039 — the number is an input, never an output). Decision B-6
+   * says the administrator should see a masked one, which this contract
+   * cannot currently satisfy; reported, and optional here so that
+   * nothing changes on this side when it can.
+   */
+  phone_masked?: string;
 }
 
 /**
@@ -225,23 +498,48 @@ export class CustomerSearchUnavailable extends Error {
   }
 }
 
+/** Minimum the canonical lookup accepts; a shorter query is refused. */
+export const CUSTOMER_SEARCH_MIN_QUERY = 2;
+
 /**
- * Search the salon's customers by name or phone.
+ * GET /api/v1/admin/customers/?q=… — search this salon's customers.
  *
- * NOT WIRED YET — the canonical `customers/` contract is still being
- * settled, and guessing its shape is how a client ends up decoding a
- * payload nobody promised. Until then this throws
- * {@link CustomerSearchUnavailable}, which the UI renders as «поиск
- * недоступен» rather than as an empty result.
+ * Matches a name from the start, or a phone **exactly** — a prefix match
+ * on digits would turn this into a way to sweep the customer list a few
+ * keystrokes at a time, so the canonical lookup does not offer one.
  *
- * When the contract lands, only this function body changes; every state
- * the screen can show is already built and tested against it.
+ * Every failure becomes {@link CustomerSearchUnavailable}, never an empty
+ * array. §13: «A failed search is not proof that the customer does not
+ * exist» — the two look identical on screen and mean opposite things, and
+ * getting it wrong creates a duplicate of somebody already in the book.
  */
 export const searchSalonCustomers = async (
-  _query: string,
-  _init: { signal?: AbortSignal } = {},
+  query: string,
+  init: { signal?: AbortSignal } = {},
 ): Promise<SalonCustomer[]> => {
-  throw new CustomerSearchUnavailable();
+  const q = query.trim();
+  if (q.length < CUSTOMER_SEARCH_MIN_QUERY) return [];
+
+  let payload: { results?: unknown };
+  try {
+    payload = await request<{ results?: unknown }>(
+      `/api/v1/admin/customers/?q=${encodeURIComponent(q)}`,
+      { signal: init.signal },
+    );
+  } catch (err) {
+    // An aborted keystroke is not a failed search — let the caller's
+    // abort handling see it unchanged.
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new CustomerSearchUnavailable(
+      err instanceof Error ? err.message : undefined,
+    );
+  }
+
+  if (!Array.isArray(payload.results)) {
+    // A success shape we do not recognise is not «nobody matched».
+    throw new CustomerSearchUnavailable("unrecognised search payload");
+  }
+  return payload.results as SalonCustomer[];
 };
 
 // --- /api/v1/admin/booking-slots/ ----------------------------------------
