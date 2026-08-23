@@ -202,8 +202,18 @@ class LLMProvider(Protocol):
         temperature: float = 0.0,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> CompletionResult:
-        """Chat completion. Pass ``tools`` for function-calling."""
+        """Chat completion. Pass ``tools`` for function-calling.
+
+        ``tool_choice`` (DRF-1286) takes the canonical OpenAI strings —
+        ``"auto"`` / ``"required"`` / ``"none"`` — because the OpenAI spec
+        is this Protocol's canonical shape (see module docstring). Ignored
+        when ``tools`` is empty. Providers translate: OpenAI passes the
+        string through, Anthropic maps it onto its object form
+        (``{"type": "auto" | "any" | "none"}``) — ``"required"`` →
+        ``{"type": "any"}``, i.e. «the model MUST emit a tool call».
+        """
         ...
 
     async def embedding(self, text: str, *, model: str) -> list[float]:

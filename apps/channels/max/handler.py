@@ -139,6 +139,8 @@ from apps.orchestrator.handoff import (
     route_booking_callback,
     route_global_human_handoff,
 )
+from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
+from apps.orchestrator.nutrition_global import try_handle_structured_nutrition_turn
 from apps.orchestrator.visits import (
     CALLBACK_VISIT_REPEAT_PREFIX,
     VISIT_CALLBACK_PREFIXES,
@@ -686,6 +688,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
     was_memory_command = False
+    concierge_turn_ran = False
     safety = evaluate_inbound(event.text)
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
@@ -820,96 +823,127 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 reply = direct_reply
                 assistant_action_type = "discovery_show_masters_direct"
             else:
-                # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
-                # the discovery prompt. Best-effort: these DB reads run BEFORE the reply
-                # is sent, so a transient error must degrade to «no memory», never abort
-                # the turn (the idempotency key is already claimed — a raise would lose
-                # the reply on retry).
-                personal_context_block = ""
+                # DRF-1268 — structured nutrition turns (cb:anketa:* /
+                # cb:food:* taps, /anketa, an active anketa FSM claiming its
+                # answer, photo-only turns) route to the nutrition skills
+                # DETERMINISTICALLY, before the concierge LLM. Free text is
+                # never claimed here — it belongs to the concierge with the
+                # nutrition tools. Best-effort: a failure degrades to the
+                # concierge turn below.
+                nutrition_result = None
                 try:
-                    if ayla_user_id is not None:
-                        personal_context_block = render_current_personal_context(ayla_user_id) or ""
-                except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
-                    logger.exception(
-                        "channels.max.global.memory_surface_failed bot_user=%s", bot_user.id
-                    )
-                    personal_context_block = ""
-                # W5 task 2: consent-gated ai-core memory block (declared prefs +
-                # inferred green). "" when the memory_green gate is closed —
-                # not a single fact reaches the prompt then. Fail-closed.
-                memory_block = ""
-                try:
-                    memory_block = build_concierge_memory_block(bot_user)
-                except Exception:  # noqa: BLE001 — belt-and-braces; the module is fail-closed
-                    logger.exception(
-                        "channels.max.global.memory_block_failed bot_user=%s", bot_user.id
-                    )
-                    memory_block = ""
-                # DRF-1284: the weekly nutrition picture (Ayla deficits
-                # aggregate). "" whenever the 152-ФЗ gate is closed
-                # (PERSONAL_DATA + HEALTH, both required — nutrition is
-                # special-category health data, not the green zone the block
-                # above rides), or Ayla is unreachable, or the week is empty.
-                # Best-effort exactly like its neighbours: this runs AFTER the
-                # idempotency key is claimed, so a raise would lose the reply
-                # on retry rather than retry it.
-                nutrition_block = ""
-                try:
-                    nutrition_block = build_nutrition_context_block(bot_user)
-                except Exception:  # noqa: BLE001 — belt-and-braces; module is fail-closed
-                    logger.exception(
-                        "channels.max.global.nutrition_context_failed bot_user=%s",
-                        bot_user.id,
-                    )
-                    nutrition_block = ""
-                if nutrition_block:
-                    # Cost attribution (DRF-1211): the block grows the prompt,
-                    # and the growth lands in AIRequestMetric.llm_tokens_input.
-                    # Without this line that growth is unattributable — the
-                    # metric row's request_id IS trace_id, so this joins the
-                    # two. Length only: the block holds health data.
-                    logger.info(
-                        "channels.max.global.nutrition_context_attached trace=%s chars=%d",
-                        trace_id,
-                        len(nutrition_block),
-                    )
-                # W5 task 1: the concierge DM runs on ayla-ai-core AIConcierge
-                # (apps.orchestrator.concierge) — history from the Message table,
-                # assistant turn persisted by its store (reply.persisted=True).
-                # Routed via the normalized orchestration seam
-                # (apps.orchestrator.turn_seam): tenant=None is the designed
-                # global-pilot input (OR-BOT-3), the concierge brain is unchanged.
-                turn_reply = orchestrate_turn(
-                    TurnContext(
-                        surface=SURFACE_GLOBAL,
-                        conversation=conversation,
-                        bot_user=bot_user,
+                    nutrition_result = try_handle_structured_nutrition_turn(
                         text=event.text,
-                        channel=event.channel,
+                        attachments=event.attachments,
+                        bot_user=bot_user,
+                        conversation=conversation,
                         trace_id=str(trace_id) if trace_id else "",
-                        tenant=None,
-                        # Booking callbacks never reach this branch (2.5 above), so
-                        # the skipped user-turn persistence can't leak a None here.
-                        user_message_id=user_msg.id if user_msg is not None else None,
-                        memory_block=memory_block,
-                        nutrition_block=nutrition_block,
-                        extra_system=personal_context_block or "",
                     )
-                )
-                reply = DiscoveryReply(
-                    text=turn_reply.reply_text,
-                    action_data=turn_reply.action_data,
-                    persisted=turn_reply.assistant_persisted,
-                )
-                # W5 (S3.5): organically weave ONE memory question when the Ayla
-                # anti-spam engine allows asking. Best-effort.
-                try:
-                    reply = maybe_weave_question(conversation, bot_user, reply)
                 except Exception:  # noqa: BLE001
                     logger.exception(
-                        "channels.max.global.memory_ask_weave_failed bot_user=%s",
-                        bot_user.id,
+                        "channels.max.global.nutrition_turn_failed bot_user=%s", bot_user.id
                     )
+                    nutrition_result = None
+                if nutrition_result is not None:
+                    reply = DiscoveryReply(
+                        text=nutrition_result.reply_text,
+                        action_data=nutrition_result.action_data,
+                    )
+                    assistant_action_type = nutrition_result.action_type or "nutrition_skill"
+                else:
+                    # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
+                    # the discovery prompt. Best-effort: these DB reads run BEFORE the reply
+                    # is sent, so a transient error must degrade to «no memory», never abort
+                    # the turn (the idempotency key is already claimed — a raise would lose
+                    # the reply on retry).
+                    personal_context_block = ""
+                    try:
+                        if ayla_user_id is not None:
+                            personal_context_block = (
+                                render_current_personal_context(ayla_user_id) or ""
+                            )
+                    except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
+                        logger.exception(
+                            "channels.max.global.memory_surface_failed bot_user=%s", bot_user.id
+                        )
+                        personal_context_block = ""
+                    # W5 task 2: consent-gated ai-core memory block (declared prefs +
+                    # inferred green). "" when the memory_green gate is closed —
+                    # not a single fact reaches the prompt then. Fail-closed.
+                    memory_block = ""
+                    try:
+                        memory_block = build_concierge_memory_block(bot_user)
+                    except Exception:  # noqa: BLE001 — belt-and-braces; the module is fail-closed
+                        logger.exception(
+                            "channels.max.global.memory_block_failed bot_user=%s", bot_user.id
+                        )
+                        memory_block = ""
+                    # DRF-1284: the weekly nutrition picture (Ayla deficits
+                    # aggregate). "" whenever the 152-ФЗ gate is closed
+                    # (PERSONAL_DATA + HEALTH, both required — nutrition is
+                    # special-category health data, not the green zone the block
+                    # above rides), or Ayla is unreachable, or the week is empty.
+                    # Best-effort exactly like its neighbours: this runs AFTER the
+                    # idempotency key is claimed, so a raise would lose the reply
+                    # on retry rather than retry it.
+                    nutrition_block = ""
+                    try:
+                        nutrition_block = build_nutrition_context_block(bot_user)
+                    except Exception:  # noqa: BLE001 — belt-and-braces; module is fail-closed
+                        logger.exception(
+                            "channels.max.global.nutrition_context_failed bot_user=%s",
+                            bot_user.id,
+                        )
+                        nutrition_block = ""
+                    if nutrition_block:
+                        # Cost attribution (DRF-1211): the block grows the prompt,
+                        # and the growth lands in AIRequestMetric.llm_tokens_input.
+                        # Without this line that growth is unattributable — the
+                        # metric row's request_id IS trace_id, so this joins the
+                        # two. Length only: the block holds health data.
+                        logger.info(
+                            "channels.max.global.nutrition_context_attached trace=%s chars=%d",
+                            trace_id,
+                            len(nutrition_block),
+                        )
+                    # W5 task 1: the concierge DM runs on ayla-ai-core AIConcierge
+                    # (apps.orchestrator.concierge) — history from the Message table,
+                    # assistant turn persisted by its store (reply.persisted=True).
+                    # Routed via the normalized orchestration seam
+                    # (apps.orchestrator.turn_seam): tenant=None is the designed
+                    # global-pilot input (OR-BOT-3), the concierge brain is unchanged.
+                    turn_reply = orchestrate_turn(
+                        TurnContext(
+                            surface=SURFACE_GLOBAL,
+                            conversation=conversation,
+                            bot_user=bot_user,
+                            text=event.text,
+                            channel=event.channel,
+                            trace_id=str(trace_id) if trace_id else "",
+                            tenant=None,
+                            # Booking callbacks never reach this branch (2.5 above), so
+                            # the skipped user-turn persistence can't leak a None here.
+                            user_message_id=user_msg.id if user_msg is not None else None,
+                            memory_block=memory_block,
+                            nutrition_block=nutrition_block,
+                            extra_system=personal_context_block or "",
+                        )
+                    )
+                    reply = DiscoveryReply(
+                        text=turn_reply.reply_text,
+                        action_data=turn_reply.action_data,
+                        persisted=turn_reply.assistant_persisted,
+                    )
+                    concierge_turn_ran = True
+                    # W5 (S3.5): organically weave ONE memory question when the Ayla
+                    # anti-spam engine allows asking. Best-effort.
+                    try:
+                        reply = maybe_weave_question(conversation, bot_user, reply)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "channels.max.global.memory_ask_weave_failed bot_user=%s",
+                            bot_user.id,
+                        )
 
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     # W5: the AIConcierge store already persisted concierge turns
@@ -941,6 +975,26 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             text=reply.text,
             attachments=_build_attachments(reply.action_data),
         )
+
+    # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
+    # free-text concierge turns. Runs AFTER the reply is delivered: zero
+    # added user-visible latency, and a resolver failure can never affect
+    # what the user saw. Best-effort, flag-gated inside
+    # (INTENT_RESOLUTION_LIVE_ENABLED); the contract lands in the turn log
+    # as ``orchestrator.intent_resolution.ok``.
+    if concierge_turn_ran:
+        try:
+            resolve_and_log_turn_intent(
+                text=event.text,
+                bot_user=bot_user,
+                conversation=conversation,
+                user_message_id=user_msg.id if user_msg is not None else None,
+                trace_id=str(trace_id) if trace_id else "",
+            )
+        except Exception:  # noqa: BLE001 — resolution must never break the turn
+            logger.exception(
+                "channels.max.global.intent_resolution_failed bot_user=%s", bot_user.id
+            )
 
     # Memory write (M-B2 / #1099): learn explicit green facts the user stated
     # this turn (e.g. «я веган»). Best-effort + consent-gated inside; never

@@ -269,6 +269,80 @@ class TestToolCalling:
         # Tools rewritten to Anthropic shape.
         assert kw["tools"][0]["input_schema"] == spec["parameters"]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("canonical", "expected"),
+        [
+            ("required", {"type": "any"}),
+            ("auto", {"type": "auto"}),
+            ("none", {"type": "none"}),
+        ],
+    )
+    async def test_tool_choice_mapped_to_anthropic_object(
+        self,
+        patched_provider: tuple[AnthropicProvider, MagicMock],
+        canonical: str,
+        expected: dict[str, str],
+    ) -> None:
+        """DRF-1286 — forced tool use is renamed on Anthropic, not missing.
+
+        OpenAI says ``tool_choice="required"``; Anthropic says
+        ``tool_choice={"type": "any"}``. The provider is an operator
+        switch (``SKILL_LLM_PROVIDER``), so the canonical string MUST
+        reach the vendor in the vendor's own shape — a forced retry that
+        silently degrades to a normal call after an operator flips
+        providers is exactly the defect class this asserts against.
+        """
+        provider, client = patched_provider
+        client.messages.create.return_value = _make_response()
+        await provider.complete(
+            [{"role": "user", "content": "x"}],
+            tools=[{"name": "t", "description": "d", "parameters": {"type": "object"}}],
+            tool_choice=canonical,
+        )
+        assert client.messages.create.await_args.kwargs["tool_choice"] == expected
+
+    @pytest.mark.asyncio
+    async def test_tool_choice_ignored_without_tools(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        """Anthropic 400s on tool_choice with no tools — never send it."""
+        provider, client = patched_provider
+        client.messages.create.return_value = _make_response()
+        await provider.complete([{"role": "user", "content": "x"}], tool_choice="required")
+        assert "tool_choice" not in client.messages.create.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_choice_dropped_not_forwarded(
+        self, patched_provider: tuple[AnthropicProvider, MagicMock]
+    ) -> None:
+        """A caller typo must not become a customer-visible 400."""
+        provider, client = patched_provider
+        client.messages.create.return_value = _make_response()
+        await provider.complete(
+            [{"role": "user", "content": "x"}],
+            tools=[{"name": "t", "description": "d", "parameters": {"type": "object"}}],
+            tool_choice="mandatory",
+        )
+        assert "tool_choice" not in client.messages.create.await_args.kwargs
+
+    def test_installed_sdk_accepts_the_shape_we_send(self) -> None:
+        """DRF-1286 — the mapping above is checked against the real SDK.
+
+        The mocked tests prove OUR wiring; this one proves the target
+        exists: the installed ``anthropic`` SDK declares a ``tool_choice``
+        parameter on ``messages.create`` and a ``{"type": "any"}`` variant
+        in its ``ToolChoiceParam`` union. Cheap insurance against an SDK
+        pin that silently drops the parameter.
+        """
+        import inspect
+
+        from anthropic.resources.messages import AsyncMessages
+        from anthropic.types import ToolChoiceAnyParam
+
+        assert "tool_choice" in inspect.signature(AsyncMessages.create).parameters
+        assert ToolChoiceAnyParam.__annotations__["type"] is not None
+
 
 # ---------------------------------------------------------------------------
 # Error mapping

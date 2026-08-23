@@ -178,6 +178,7 @@ class OpenAIProvider:
         temperature: float = 0.0,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> CompletionResult:
         """Chat completion + optional function-calling.
 
@@ -185,6 +186,11 @@ class OpenAIProvider:
         model emitted natural-language text, tool calls, or both.
         Malformed tool-call JSON raises :class:`LLMError` so the caller
         can fall back rather than silently drop the request.
+
+        ``tool_choice`` (DRF-1286) is the canonical protocol string
+        (``"auto"`` / ``"required"`` / ``"none"``) — OpenAI's Chat
+        Completions API takes exactly these values, so it passes through
+        verbatim. Ignored without ``tools`` (OpenAI rejects the pair).
         """
         chosen_model = model or self.default_completion_model
 
@@ -213,6 +219,10 @@ class OpenAIProvider:
             # Canonical OpenAI tool spec — wrap the platform-agnostic
             # specs into the SDK's `tools` envelope.
             kwargs["tools"] = [{"type": "function", "function": spec} for spec in tools]
+            # DRF-1286 — forced tool use. Only meaningful alongside
+            # `tools`; OpenAI 400s on `tool_choice` without them.
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
 
         # Phase 1 / PI7 (DRF-858) — wrap the SDK call in exponential-
         # backoff retry. ~95% of OpenAI 429 / 5xx are transient and
