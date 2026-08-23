@@ -149,6 +149,7 @@ from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
+from apps.orchestrator.nutrition_context import build_nutrition_context_block
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.orchestrator.turn_seam import (
     SURFACE_GLOBAL,
@@ -788,17 +789,38 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             except Exception:  # noqa: BLE001
                 logger.exception("channels.max.global.memory_ask_failed bot_user=%s", bot_user.id)
                 ask_reply = None
+            # DRF-1102 — the deterministic branch: answer a general
+            # booking/service request without the concierge LLM. It is faster
+            # and cheaper than a model turn, and when it finds masters it is
+            # right.
+            #
+            # DRF-1283 — but it no longer owns the turn unconditionally. It
+            # returns None when the search matched NOBODY, and that is not an
+            # answer: it is the deterministic layer admitting it could not
+            # resolve the request, at which point the model is exactly what
+            # should run. The turn then falls through to the concierge below
+            # — same path an unrecognised turn takes, memory blocks and all.
+            #
+            # This was unsafe until 23.08: the concierge was single-pass, so a
+            # show_masters call ate the whole turn and the model, with nothing
+            # to say over the tool result, re-asked forever — the very failure
+            # DRF-1102 added this branch to stop. DRF-1266 made it multi-pass
+            # (tool result comes back as an ordinary message, capped by
+            # CONCIERGE_MAX_LLM_PASSES), which is what makes the fallthrough
+            # safe now.
+            direct_reply: DiscoveryReply | None = None
+            if ask_reply is None and looks_like_booking_request(event.text):
+                direct_reply = generate_direct_show_masters_reply(
+                    event.text,
+                    trace_id=str(trace_id) if trace_id else None,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                )
+
             if ask_reply is not None:
                 reply = ask_reply
-            elif looks_like_booking_request(event.text):
-                # DRF-1102 — the missing branch: skip the concierge LLM
-                # entirely for a general booking/service request. The search
-                # layer already resolves free text fine (discover_masters
-                # token-matches the raw phrase, DRF-945); the funnel just
-                # needs to reach it instead of the LLM re-asking forever.
-                reply = generate_direct_show_masters_reply(
-                    event.text, trace_id=str(trace_id) if trace_id else None
-                )
+            elif direct_reply is not None:
+                reply = direct_reply
                 assistant_action_type = "discovery_show_masters_direct"
             else:
                 # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
@@ -826,6 +848,34 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         "channels.max.global.memory_block_failed bot_user=%s", bot_user.id
                     )
                     memory_block = ""
+                # DRF-1284: the weekly nutrition picture (Ayla deficits
+                # aggregate). "" whenever the 152-ФЗ gate is closed
+                # (PERSONAL_DATA + HEALTH, both required — nutrition is
+                # special-category health data, not the green zone the block
+                # above rides), or Ayla is unreachable, or the week is empty.
+                # Best-effort exactly like its neighbours: this runs AFTER the
+                # idempotency key is claimed, so a raise would lose the reply
+                # on retry rather than retry it.
+                nutrition_block = ""
+                try:
+                    nutrition_block = build_nutrition_context_block(bot_user)
+                except Exception:  # noqa: BLE001 — belt-and-braces; module is fail-closed
+                    logger.exception(
+                        "channels.max.global.nutrition_context_failed bot_user=%s",
+                        bot_user.id,
+                    )
+                    nutrition_block = ""
+                if nutrition_block:
+                    # Cost attribution (DRF-1211): the block grows the prompt,
+                    # and the growth lands in AIRequestMetric.llm_tokens_input.
+                    # Without this line that growth is unattributable — the
+                    # metric row's request_id IS trace_id, so this joins the
+                    # two. Length only: the block holds health data.
+                    logger.info(
+                        "channels.max.global.nutrition_context_attached trace=%s chars=%d",
+                        trace_id,
+                        len(nutrition_block),
+                    )
                 # W5 task 1: the concierge DM runs on ayla-ai-core AIConcierge
                 # (apps.orchestrator.concierge) — history from the Message table,
                 # assistant turn persisted by its store (reply.persisted=True).
@@ -845,6 +895,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         # the skipped user-turn persistence can't leak a None here.
                         user_message_id=user_msg.id if user_msg is not None else None,
                         memory_block=memory_block,
+                        nutrition_block=nutrition_block,
                         extra_system=personal_context_block or "",
                     )
                 )

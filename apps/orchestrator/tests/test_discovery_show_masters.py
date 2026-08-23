@@ -95,6 +95,9 @@ def test_show_masters_resolved_service_rides_the_callback(monkeypatch) -> None:
 def test_show_masters_no_results_graceful(monkeypatch) -> None:
     """A real query that matches nothing → honest no-match line.
 
+    «Honest» is the DRF-1283 bar: the line must show the request was
+    understood, not ask for what the client already said.
+
     DRF-1201 changed the arguments from ``{}`` to a real specialization: an
     empty-argument call no longer reaches ``discover_masters`` at all (see
     ``test_show_masters_without_criteria_asks_instead_of_listing_catalogue``),
@@ -111,7 +114,10 @@ def test_show_masters_no_results_graceful(monkeypatch) -> None:
     monkeypatch.setattr(discovery, "get_router", lambda: _Router(_Provider(result)))
 
     reply = discovery.generate_discovery_reply("маникюр")
-    assert "не нашлось" in reply.text
+    # DRF-1283 — the refusal names back what was searched for instead of
+    # asking the client to «уточнить услугу» they had just named.
+    assert "маникюр" in reply.text
+    assert "уточните город или услугу" not in reply.text
     assert reply.action_data is None
 
 
