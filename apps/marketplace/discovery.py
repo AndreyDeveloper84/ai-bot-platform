@@ -369,6 +369,26 @@ def _parse_query(raw: str) -> tuple[list[str], list[str]]:
     return [t[:_STEM_LEN] for t in service_tokens], named_cities
 
 
+def _trim_filler_edges(part: str) -> str:
+    """Drop leading/trailing filler words from an enumeration part (DRF-1312).
+
+    The part is quoted back at the user, so «и ещё маникюр» has to come back as
+    «маникюр» — the surviving substring is still their own wording, just
+    without the connective that only ever joined it to the previous part.
+
+    Edges only, and never the middle: the words between the first and last
+    content word are the service's own name, and «Массаж на дому» must not
+    become «Массаж дому» because «на» is in the filler list.
+    """
+    words = list(re.finditer(r"\w+", part, re.UNICODE))
+    content = [m for m in words if m.group(0).casefold() not in _FILLER_TOKENS]
+    if not content or len(content) == len(words):
+        # All filler (nothing to keep — the caller drops it anyway) or no
+        # filler at all: either way the string is already what it should be.
+        return part
+    return part[content[0].start() : content[-1].end()]
+
+
 def split_requested_services(raw: str) -> list[str]:
     """Split an ENUMERATION of services into the parts that name a service.
 
@@ -414,7 +434,7 @@ def split_requested_services(raw: str) -> list[str]:
     """
     chunks: list[str] = []
     for chunk in _SERVICE_SPLIT_RE.split(raw or ""):
-        part = chunk.strip().strip("«»\"'.!?-—–…").strip()
+        part = _trim_filler_edges(chunk.strip().strip("«»\"'.!?-—–…").strip())
         if part:
             chunks.append(part)
     if len(chunks) < 2:
@@ -474,8 +494,13 @@ def service_coverage(
         if key in seen:
             continue
         seen.add(key)
-        stems, _named_cities = _parse_query(name)
-        if not stems:
+        # _content_tokens, NOT _parse_query: the latter falls back to the raw
+        # words for an all-filler input («хочу»), which is right for a query
+        # that still has to be searched with something and wrong here — a name
+        # that reduces to nothing must make no claim, or «хочу» ends up quoted
+        # back as a service we do not offer.
+        service_tokens, _named_cities = _split_known_cities(_content_tokens(name))
+        if not service_tokens:
             continue
         if _bookable_qs(city=city, specialization=name).exists():
             available.append(name)
