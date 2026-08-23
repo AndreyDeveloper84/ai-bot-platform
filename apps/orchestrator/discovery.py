@@ -464,6 +464,25 @@ def render_no_salons(city: str | None = None) -> DiscoveryReply:
     return DiscoveryReply(text=text[:_MAX_REPLY_CHARS])
 
 
+def _salon_place(card: SalonCard) -> str:
+    """« — Пенза, ул. Леонова, 15а» / « — Пенза» / «» for a salon card.
+
+    The mirrored address usually ALREADY starts with the city (live pilot:
+    «Пенза, ул. Карпинского, 33А»), and gluing city + address unconditionally
+    printed it twice — «SPAtrium — Пенза, Пенза, ул. Карпинского, 33А». The
+    city is dropped from the prefix exactly when the address opens with it;
+    an address from another city (mirror drift) still shows both, because
+    then the two really are different facts.
+    """
+    city = (card.city or "").strip()
+    address = (card.address or "").strip()
+    if not address:
+        return f" — {city}" if city else ""
+    if city and address.casefold().startswith(city.casefold()):
+        return f" — {address}"
+    return f" — {city}, {address}" if city else f" — {address}"
+
+
 def _render_salon_cards(
     salons: list[SalonCard], *, shown: int, city: str | None = None
 ) -> DiscoveryReply:
@@ -485,9 +504,7 @@ def _render_salon_cards(
     lines = [header]
     buttons: list[dict[str, str]] = []
     for card in salons[:shown]:
-        place = f" — {card.city}" if card.city else ""
-        address = f", {card.address}" if card.address else ""
-        lines.append(f"• {card.name}{place}{address}")
+        lines.append(f"• {card.name}{_salon_place(card)}")
         if card.sample_services:
             more = card.service_count - len(card.sample_services)
             tail = f" и ещё {more}" if more > 0 else ""
