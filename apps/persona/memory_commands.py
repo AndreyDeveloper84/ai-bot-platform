@@ -26,9 +26,11 @@ dormant these commands never fire and the discovery happy-path is unchanged.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from apps.identity.services.memory_deleter import (
     request_forget_all,
@@ -37,6 +39,8 @@ from apps.identity.services.memory_deleter import (
 from apps.identity.services.memory_key_policy import read_current_view, select_current_facts
 from apps.identity.services.memory_reader import read_green_entries
 from apps.persona.memory_surface import describe_green_content
+
+logger = logging.getLogger(__name__)
 
 # Assistant turn that asks for the «забудь всё» confirmation carries this exact
 # closing line; the next turn detects the pending state by matching it in the
@@ -68,11 +72,16 @@ _SHOW_TRIGGERS = (
 )
 
 # «forget everything» — checked BEFORE «forget {field}» so «всё» is not treated
-# as a field name. «удали/сотри меня» is deliberately EXCLUDED: it reads as
-# account/newsletter removal, not memory reset — «forget me» is only honoured via
-# the memory verb «забудь меня».
+# as a field name. The negative lookahead keeps «забудь всё ПРО моё питание»
+# OUT of forget-all: that is a DOMAIN forget (DRF-1261 proof step 4 — removes
+# the diet domain only, never the whole memory). «удали/сотри меня» is
+# deliberately EXCLUDED: it reads as account/newsletter removal, not memory
+# reset — «forget me» is only honoured via the memory verb «забудь меня».
 _FORGET_ALL_RE = re.compile(
-    r"\b(?:забудь\s+(?:вс[её]|меня)|удали\s+вс[её]|сотри\s+(?:вс[её]|память))\b"
+    r"\b(?:забудь\s+меня"
+    r"|забудь\s+вс[её]\b(?!\s+(?:про|о|об)\b)"
+    r"|удали\s+вс[её]\b(?!\s+(?:про|о|об)\b)"
+    r"|сотри\s+(?:вс[её]\b(?!\s+(?:про|о|об)\b)|память))\b"
 )
 
 # «forget {field}» — a forget verb followed by a target that is not «всё/меня».
@@ -84,14 +93,34 @@ _FORGET_FIELD_RE = re.compile(
 # command (avoids hijacking «забудь это», «удали меня из рассылки» → discovery).
 _NON_FIELD_TARGETS = frozenset({"это", "этот", "эту", "эти", "то", "об этом", "про это"})
 
-# Green-fact matchers for «забудь {X}»: (key, value) → keyword stems, plus
-# per-key generic stems. Match if the target contains any stem.
+# Green-fact matchers for «забудь {X}»: (key, value) → keyword stems for a
+# SPECIFIC fact («забудь, что я веган»), plus per-key DOMAIN stems («забудь
+# всё про питание» removes the whole domain). Match if the target contains
+# any stem.
 _FACT_KEYWORDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("diet", "vegan"): ("веган",),
-    ("diet", "vegetarian"): ("вегетар", "мяс"),
+    ("diet", "vegetarian"): ("вегетар",),
+    ("diet", "keto"): ("кето",),
+    ("diet", "halal"): ("халял",),
+    ("diet", "kosher"): ("кошер",),
 }
 _KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "diet": ("диет", "питани", "еда", "ем "),
+    "diet": ("диет", "питани", "пищ", "еда", "ем "),
+    "preferred_time_slots": ("времен", "удобное время"),
+    "preferred_districts": ("район", "метро", "округ", "географ"),
+    "price_range": ("бюджет", "цен", "стоимост", "деньг", "рубл"),
+    "favorite_masters": ("мастер",),
+}
+
+# Human label per domain for the domain-forget acknowledgement — naming the
+# DOMAIN, not a stored row (the first live row may be a superseded value and
+# would mislabel what was forgotten).
+_DOMAIN_LABELS: dict[str, str] = {
+    "diet": "питание",
+    "preferred_time_slots": "удобное время",
+    "preferred_districts": "районы",
+    "price_range": "бюджет",
+    "favorite_masters": "любимых мастеров",
 }
 
 
@@ -109,18 +138,25 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower().replace("ё", "е"))
 
 
-def _entry_keywords(content: dict) -> tuple[str, ...]:
+def _fact_keywords(content: dict) -> tuple[str, ...]:
+    """Value-specific stems only («забудь, что я веган» → the vegan row)."""
+
     key = content.get("key")
     value = content.get("value")
-    kws: tuple[str, ...] = ()
     if isinstance(key, str) and isinstance(value, str):
-        kws += _FACT_KEYWORDS.get((key, value), ())
-    if isinstance(key, str):
-        kws += _KEY_KEYWORDS.get(key, ())
-    return kws
+        return _FACT_KEYWORDS.get((key, value), ())
+    return ()
 
 
-def _summary_line(facts: list) -> str:
+def _entry_key(entry: Any) -> str | None:
+    """The entry's memory key, or None when content carries no usable key."""
+
+    content = entry.content if isinstance(entry.content, dict) else {}
+    key = content.get("key")
+    return key if isinstance(key, str) and key else None
+
+
+def _summary_line(facts: list, declared_phrases: dict[str, str] | None = None) -> str:
     """Render «помню, что ты …» from an ALREADY conflict-resolved fact list.
 
     DRF-1262: callers must pass the CURRENT view (`read_current_view` /
@@ -130,14 +166,65 @@ def _summary_line(facts: list) -> str:
     through the key policy, sees exactly one of them. Showing the person
     something other than what the system uses is the defect.
 
+    ``declared_phrases`` (memory_key → phrase) merges the Ayla-side declared
+    prefs into the SAME list (silent-remember ruling 2026-08-23: the person
+    must see the FULL active memory). A declared phrase is shown only when no
+    local fact of that key was rendered — the bridged copy must not duplicate
+    the local row.
+
     Accepts anything with a ``.content`` dict: `MemoryEntry` rows or
     `GreenFact` view items.
     """
 
-    phrases = [p for f in facts if (p := describe_green_content(f.content))]
+    phrases: list[str] = []
+    seen_keys: set[str] = set()
+    for f in facts:
+        phrase = describe_green_content(f.content)
+        if phrase:
+            phrases.append(phrase)
+            key = f.content.get("key")
+            if isinstance(key, str):
+                seen_keys.add(key)
+    for key, phrase in (declared_phrases or {}).items():
+        if key not in seen_keys and phrase not in phrases:
+            phrases.append(phrase)
     if not phrases:
         return "Я пока ничего о тебе не запомнила."
     return "Помню, что ты " + "; ".join(phrases) + "."
+
+
+def _declared_phrases_for_show(bot_user) -> dict[str, str]:
+    """Best-effort Ayla declared prefs for the show merge; {} on any failure."""
+
+    if bot_user is None:
+        return {}
+    try:
+        from apps.identity.services.personal_context import (
+            GateStatus,
+            get_declared_prefs,
+        )
+        from apps.persona.memory_surface import describe_declared_prefs
+
+        result = get_declared_prefs(bot_user)
+        if result.status is not GateStatus.OK or result.context is None:
+            return {}
+        return describe_declared_prefs(result.context.context)
+    except Exception:  # noqa: BLE001 — the show must never break the turn
+        logger.exception("persona.memory_commands.declared_show_failed")
+        return {}
+
+
+def _bridge_clear(bot_user, memory_keys: list[str]) -> None:
+    """Clear the Ayla declared fields for forgotten keys. Best-effort."""
+
+    if bot_user is None:
+        return
+    try:
+        from apps.orchestrator.memory.ayla_bridge import clear_declared_fields
+
+        clear_declared_fields(bot_user, memory_keys)
+    except Exception:  # noqa: BLE001 — forget must never break the turn
+        logger.exception("persona.memory_commands.bridge_clear_failed")
 
 
 def handle_memory_command(
@@ -145,6 +232,7 @@ def handle_memory_command(
     user_id: uuid.UUID,
     text: str,
     last_assistant_text: str | None = None,
+    bot_user=None,
 ) -> MemoryCommandResult | None:
     """Handle a memory command, or return None if `text` isn't one.
 
@@ -153,6 +241,10 @@ def handle_memory_command(
       text: the inbound user message.
       last_assistant_text: the previous assistant turn (for the «забудь всё»
         two-step confirmation).
+      bot_user: the channel user — enables the Ayla-side half of the loop
+        (declared-prefs merge into «покажи», declared-field clearing on
+        «забудь»). Optional for backwards compatibility; without it the
+        command works bot-locally only.
     """
 
     norm = _normalise(text)
@@ -164,6 +256,11 @@ def handle_memory_command(
     if norm.rstrip(".!") == _CONFIRM_WORD:
         if last_assistant_text and _FORGET_ALL_MARKER in _normalise(last_assistant_text):
             request_forget_all(user_id)
+            # Forget must be REAL, not a mark (silent-remember ruling): the
+            # Ayla-side declared fields go back to empty in the same breath.
+            # price_range has no clear encoding in the frozen contract — the
+            # bridge logs that gap explicitly.
+            _bridge_clear(bot_user, sorted(_KEY_KEYWORDS))
             return MemoryCommandResult(text=_FORGET_ALL_DONE)
         return None  # bare «удалить» with no pending prompt → not a command
 
@@ -171,7 +268,7 @@ def handle_memory_command(
     if _FORGET_ALL_RE.search(norm):
         return MemoryCommandResult(text=FORGET_ALL_PROMPT, action_type="memory_forget_all_prompt")
 
-    # 3. «забудь {field}» → soft-delete the matching green fact.
+    # 3. «забудь {field}» → soft-delete the matching green fact(s).
     field_match = _FORGET_FIELD_RE.search(norm)
     if field_match:
         target = field_match.group(1).strip(" .!?,")
@@ -189,22 +286,55 @@ def handle_memory_command(
         entries = read_green_entries(user_id)
         if not entries:
             return MemoryCommandResult(text="Мне пока нечего о тебе забывать.")
-        matched = [e for e in entries if any(kw in target for kw in _entry_keywords(e.content))]
-        if len(matched) == 1:
-            label = describe_green_content(matched[0].content) or "это"
-            soft_delete_green_entries(user_id, [matched[0].id])
+
+        # A SPECIFIC fact named («забудь, что я веган») → delete the rows whose
+        # value-stem matches. A DOMAIN named («забудь всё про моё питание») →
+        # delete EVERY live row of the matching key(s) — proof step 4: the
+        # whole domain goes, history rows and other domains stay untouched.
+        fact_matched = [e for e in entries if any(kw in target for kw in _fact_keywords(e.content))]
+        if fact_matched:
+            keys = sorted({k for e in fact_matched if (k := _entry_key(e)) is not None})
+            soft_delete_green_entries(user_id, [e.id for e in fact_matched])
+            _bridge_clear(bot_user, keys)
+            label = describe_green_content(fact_matched[0].content) or "это"
             return MemoryCommandResult(text=f"Готово — забыла: {label}.")
-        # 0 or >1 matches → clarify by showing what's remembered (DRF-1262:
+
+        domain_keys = sorted(
+            {
+                k
+                for e in entries
+                if (k := _entry_key(e)) is not None
+                and any(kw in target for kw in _KEY_KEYWORDS.get(k, ()))
+            }
+        )
+        if len(domain_keys) == 1:
+            doomed = [e for e in entries if _entry_key(e) == domain_keys[0]]
+            soft_delete_green_entries(user_id, [e.id for e in doomed])
+            _bridge_clear(bot_user, domain_keys)
+            label = _DOMAIN_LABELS.get(domain_keys[0], domain_keys[0])
+            return MemoryCommandResult(text=f"Готово — забыла всё, что знала: {label}.")
+
+        # 0 or several domains → clarify by showing what's remembered (DRF-1262:
         # the current view, so the clarification itself is not a contradiction).
         return MemoryCommandResult(
             text="Не совсем поняла, что именно забыть. "
-            + _summary_line(select_current_facts(entries))
+            + _summary_line(
+                select_current_facts(entries),
+                _declared_phrases_for_show(bot_user),
+            )
         )
 
-    # 4. «покажи что знаешь обо мне» → green-only summary, through the SAME
-    #    conflict-resolving read the prompt uses (DRF-1262). Before this the
-    #    person was shown every live row while Ayla acted on one.
+    # 4. «покажи что знаешь обо мне» → the FULL active memory, humanly:
+    #    bot-local facts through the SAME conflict-resolving read the prompt
+    #    uses (DRF-1262) + Ayla declared prefs merged in (silent-remember
+    #    ruling 2026-08-23). No internal analytics, no proposals, no
+    #    confidence scores — only what the person can correct or forget.
     if any(trigger in norm for trigger in _SHOW_TRIGGERS):
-        return MemoryCommandResult(text=_summary_line(read_current_view(user_id).green_facts))
+        return MemoryCommandResult(
+            text=_summary_line(
+                read_current_view(user_id).green_facts,
+                _declared_phrases_for_show(bot_user),
+            )
+        )
 
     return None
