@@ -139,6 +139,7 @@ from apps.orchestrator.handoff import (
     route_booking_callback,
     route_global_human_handoff,
 )
+from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
 from apps.orchestrator.visits import (
     CALLBACK_VISIT_REPEAT_PREFIX,
     VISIT_CALLBACK_PREFIXES,
@@ -685,6 +686,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
     was_memory_command = False
+    concierge_turn_ran = False
     safety = evaluate_inbound(event.text)
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
@@ -850,6 +852,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     action_data=turn_reply.action_data,
                     persisted=turn_reply.assistant_persisted,
                 )
+                concierge_turn_ran = True
                 # W5 (S3.5): organically weave ONE memory question when the Ayla
                 # anti-spam engine allows asking. Best-effort.
                 try:
@@ -890,6 +893,26 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             text=reply.text,
             attachments=_build_attachments(reply.action_data),
         )
+
+    # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
+    # free-text concierge turns. Runs AFTER the reply is delivered: zero
+    # added user-visible latency, and a resolver failure can never affect
+    # what the user saw. Best-effort, flag-gated inside
+    # (INTENT_RESOLUTION_LIVE_ENABLED); the contract lands in the turn log
+    # as ``orchestrator.intent_resolution.ok``.
+    if concierge_turn_ran:
+        try:
+            resolve_and_log_turn_intent(
+                text=event.text,
+                bot_user=bot_user,
+                conversation=conversation,
+                user_message_id=user_msg.id if user_msg is not None else None,
+                trace_id=str(trace_id) if trace_id else "",
+            )
+        except Exception:  # noqa: BLE001 — resolution must never break the turn
+            logger.exception(
+                "channels.max.global.intent_resolution_failed bot_user=%s", bot_user.id
+            )
 
     # Memory write (M-B2 / #1099): learn explicit green facts the user stated
     # this turn (e.g. «я веган»). Best-effort + consent-gated inside; never
