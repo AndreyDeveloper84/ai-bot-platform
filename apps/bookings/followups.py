@@ -534,20 +534,26 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
     derives both from the same source datetime) so the order between
     them is by secondary key (PK) which is a stable UUID — good enough.
 
-    **The opt-out veto is applied here as well as per-row in**
-    :func:`_consent_blocker` **(DRF-1301).** Belt and braces on the one
-    condition whose failure is a trust break, and the same shape as
+    **Two vetoes are applied here as well as per-row in**
+    :func:`_consent_blocker` **(DRF-1301):** ``proactive_messages_opt_out``
+    and ``deleted_at``. Belt and braces, the same shape as
     :func:`apps.nutrition_proactive.selection.base_queryset`. The ticket
-    asked that a person who opted out "never enters the selection", and
-    a filter the batch limit is applied *after* is the only way to mean
-    that literally: with a post-fetch check alone, 500 opted-out rows
-    could crowd a consenting person out of the batch entirely, and the
-    only symptom would be a message that never arrived.
+    asked that a person who opted out "never enters the selection", and a
+    filter that the batch limit is applied *after* is the only way to
+    mean that literally: with a post-fetch check alone, a large enough
+    run of opted-out rows could crowd a consenting person out of the
+    batch, and the only symptom would be a message that never arrived.
 
-    ``consent_at`` is filtered here too, for the same crowding reason.
-    The record-level checks (withdrawal, provenance) stay per-row: they
-    need a join this filter cannot express cheaply, and the per-row gate
-    is authoritative regardless.
+    **Consent deliberately stays a per-row check and is NOT filtered
+    here**, which is the one place this diverges from the nutrition
+    precedent. Filtering it would make the people it excludes invisible:
+    they would vanish before the counters, the audit rows and the dry-run
+    listing ever saw them. "How many people did we not write to because
+    they never consented?" is precisely the number an operator needs in
+    order to decide whether to re-enable this beat, so it has to survive
+    into the output. Opt-out and erasure need no such visibility — both
+    are plain columns anyone can ``count()`` at any time, and neither is
+    a number that changes what the operator does next.
     """
     return list(
         BookingReminder.all_tenants.filter(
@@ -555,7 +561,6 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
             visit_at__lt=window_end,
             bot_user__proactive_messages_opt_out=False,
             bot_user__deleted_at__isnull=True,
-            bot_user__consent_at__isnull=False,
         )
         .exclude(status=BookingReminder.Status.CANCELLED)
         .select_related("tenant", "bot_user", "booking_request")
