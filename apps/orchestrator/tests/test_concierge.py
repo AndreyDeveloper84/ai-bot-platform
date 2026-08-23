@@ -324,6 +324,11 @@ class TestGenerateConciergeReply:
 
         reply = concierge.generate_direct_show_masters_reply("   ")
 
+        # NOT None (DRF-1283): «no criteria» and «found nobody» are different
+        # answers. A criteria-less turn is the branch's own business — asking
+        # is the canon-prescribed reply (BOT-003 §9), and handing it to the
+        # model instead would spend an LLM turn re-deriving the same question.
+        assert reply is not None
         assert reply.text == discovery.NO_CRITERIA_QUESTION
 
     def test_llm_error_falls_back_and_not_persisted(self, monkeypatch) -> None:
