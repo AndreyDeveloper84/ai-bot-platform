@@ -11,11 +11,14 @@ docstrings below:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone as dt_timezone
+from io import StringIO
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from django.core.management import call_command
 
 from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
@@ -655,3 +658,97 @@ class TestConsentGate:
         with patch.object(selection, "consent_blocker", return_value="opt_out") as gate:
             assert selection.check_common(user) == "opt_out"
         gate.assert_called_once_with(user)
+
+
+class TestDryRunCommandShowsTheGate:
+    """The operator-facing dry run answers the same question as the beat.
+
+    ``nutrition_proactive_dryrun`` runs the planners rather than a
+    parallel reimplementation, so this is a regression test on that
+    property as much as on the gate: if the command ever grew its own
+    selection, the five people below would stop lining up with
+    ``TestConsentGate``.
+    """
+
+    def _run(self, task: str = "both") -> str:
+        out = StringIO()
+        call_command(
+            "nutrition_proactive_dryrun",
+            "--task",
+            task,
+            "--at",
+            NOON.astimezone(MSK).isoformat(),
+            "--no-ayla",
+            stdout=out,
+        )
+        return out.getvalue()
+
+    @staticmethod
+    def _rows(report: str) -> dict[str, dict]:
+        """The daily-report block, keyed by bot_user_id.
+
+        Only the report block: ``--no-ayla`` stubs water with
+        ``norm_ml=0``, so every water decision ends at ``no_norm`` and
+        that half of the output can never exhibit a recipient. Worth
+        knowing before trusting a ``--no-ayla --task water`` run to say
+        anything about who would be written to.
+        """
+        rows: dict[str, dict] = {}
+        in_block = False
+        for line in report.splitlines():
+            line = line.strip()
+            if line.startswith("== "):
+                in_block = line.startswith("== daily_report")
+                continue
+            if in_block and line.startswith("{"):
+                row = json.loads(line)
+                rows[row["bot_user_id"]] = row
+        return rows
+
+    def test_the_four_blocked_shapes_and_the_one_recipient(self, tenant: Tenant) -> None:
+        """Four who must not be written to, and one who must.
+
+        A zero-recipient dry run proves nothing on its own — it is also
+        what a wall produces. The fifth row is the control that tells
+        the two apart.
+        """
+        withdrawn = make_user(tenant, suffix="withdrawn", report="12:00")
+        ConsentRecord.all_tenants.filter(bot_user=withdrawn).update(withdrawn_at=NOON)
+
+        never = make_user(tenant, suffix="never", report="12:00", consented=False)
+
+        erased = make_user(tenant, suffix="erased", report="12:00")
+        BotUser.all_tenants.filter(pk=erased.pk).update(deleted_at=NOON)
+
+        opted_out = make_user(tenant, suffix="optout", report="12:00", opt_out=True)
+
+        recipient = make_user(tenant, suffix="ok", report="12:00")
+
+        report = self._run()
+        rows = self._rows(report)
+
+        assert rows[str(withdrawn.pk)]["reason"] == "consent_withdrawn"
+        assert rows[str(never.pk)]["reason"] == "no_consent"
+        assert rows[str(recipient.pk)]["send"] is True
+        assert rows[str(recipient.pk)]["reason"] == "due"
+
+        # Erased and opted-out never reach a decision at all: the
+        # queryset drops them before the per-row gate is consulted.
+        assert str(erased.pk) not in rows
+        assert str(opted_out.pk) not in rows
+
+        assert all(row["send"] is False for pk, row in rows.items() if pk != str(recipient.pk))
+        assert "== daily_report: 3 candidates, 1 would receive a message ==" in report
+
+    def test_no_message_text_reaches_the_report(self, tenant: Tenant) -> None:
+        """A rendered report carries somebody's calorie and macro numbers."""
+        make_user(tenant, suffix="ok", report="12:00")
+        rows = self._rows(self._run())
+        assert all("text" not in row for row in rows.values())
+
+    def test_the_flags_are_printed_and_still_closed(self, tenant: Tenant) -> None:
+        """The report says out loud that nothing can actually be sent."""
+        make_user(tenant, suffix="flags")
+        report = self._run()
+        assert "NUTRITION_PROACTIVE_ENABLED=False" in report
+        assert "NUTRITION_PROACTIVE_DRY_RUN=True" in report
