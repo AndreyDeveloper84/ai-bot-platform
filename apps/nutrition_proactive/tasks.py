@@ -9,13 +9,22 @@ during quiet hours and unless intake is behind the *proportional* norm.
 
 ### What is deliberately not here
 
-The legacy ``mysite`` bot shipped a 420-line nudge engine
-(``legacy_maxbot/nudges/``): a rule registry, quotas, cooldowns, race
-guards, auto-disable after repeated ignores. The policy design is sound.
-The implementation is not wired: ``evaluate_nudge`` has no production
-caller (only tests reach it), and ``PatternRule.detector_function`` points
-at ``maxbot/nudges/detectors.py``, a module that does not exist. Porting it
-would move a decorative engine, not a working one.
+The legacy ``mysite`` bot shipped a nudge engine -- ``legacy_maxbot/
+nudges/``, 481 lines across ten modules: a rule registry with priorities
+and per-kind cooldowns, daily caps, race guards, mute handlers,
+auto-disable after repeated ignores. The policy design is sound.
+
+It is also dead. ``evaluate_nudge`` (``nudges/dispatcher.py:29``) has
+**zero** callers anywhere in this repository -- not one production call
+site, and not a test either. Porting it would move a decorative engine,
+not a working one.
+
+(The ticket brief also reported that ``PatternRule.detector_function``
+points at a missing ``detectors`` module. Neither ``PatternRule`` nor
+``detector_function`` exists in the vendored copy at all -- that symbol
+lives in the mysite Django models, which are not in this repo. The claim
+is therefore unverifiable from here, and unnecessary: "no callers" is
+already the stronger finding.)
 
 So three of its ideas are re-implemented inline, at the size the two tasks
 actually need, and the rest is left behind:
