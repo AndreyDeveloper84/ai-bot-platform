@@ -64,13 +64,23 @@ def _resolve_ayla_user_id(bot_user) -> uuid.UUID | None:
 
 
 def _gate(bot_user) -> uuid.UUID | None:
-    """The memory_green gate. Returns the ayla_user_id when open, else None."""
+    """The memory_green gate. Returns the ayla_user_id when open, else None.
+
+    Both closed branches log with a ``reason``: BLOCKED_CONSENT collapses
+    «not linked to Ayla» and «no memory_green consent» into one status, and
+    telling them apart from the log is the difference between «wait for the
+    identity resolver» and «the consent was never granted» (DRF-1311).
+    """
     ayla_user_id = _resolve_ayla_user_id(bot_user)
     if ayla_user_id is None:
+        logger.info(
+            "identity.personal_context.gate_closed reason=unlinked bot_user=%s",
+            getattr(bot_user, "id", "?"),
+        )
         return None
     if not has_memory_consent(ayla_user_id, "green"):
         logger.info(
-            "identity.personal_context.gate_closed bot_user=%s",
+            "identity.personal_context.gate_closed reason=no_memory_green bot_user=%s",
             getattr(bot_user, "id", "?"),
         )
         return None
