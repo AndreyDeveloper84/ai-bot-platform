@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import socket
 import uuid
+from collections.abc import Iterable
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -207,6 +208,48 @@ def write_entry(
         ttl_days=ttl_days,
         **canonical,
     )
+
+
+def supersede_entries(
+    *,
+    replaced_by: MemoryEntry,
+    entries: Iterable[MemoryEntry],
+    reason: str = MemoryEntry.SUPERSESSION_CHANGED,
+) -> int:
+    """Mark live entries as superseded by ``replaced_by`` (§3.1 lifecycle).
+
+    The write-side half of «исправляю» (DRF-1261): a new explicit
+    user-stated fact for a single-cardinality key displaces the previous
+    live rows of that key. Supersession is NOT deletion (§3.1): the old
+    rows keep their tombstone-free history, stay in scope for the 152-ФЗ
+    export/erasure, and leave the read paths through the key policy
+    (``select_current_facts``). ``updated_at`` moves — a state transition
+    (MDC §3.1) — and is the only trace of when it happened.
+
+    Scoped hard: only the caller's rows, only live ones, never an
+    already-superseded/deleted row (idempotent re-run is a no-op).
+    """
+
+    ids = [e.id for e in entries]
+    if not ids:
+        return 0
+    now = timezone.now()
+    with transaction.atomic():
+        return (
+            MemoryEntry.objects.filter(
+                id__in=ids,
+                soft_deleted_at__isnull=True,
+                delete_requested_at__isnull=True,
+            )
+            .exclude(status=MemoryEntry.STATUS_SUPERSEDED)
+            .exclude(pk=replaced_by.pk)
+            .update(
+                status=MemoryEntry.STATUS_SUPERSEDED,
+                superseded_by=replaced_by,
+                supersession_reason=reason,
+                updated_at=now,
+            )
+        )
 
 
 def promote_zone(

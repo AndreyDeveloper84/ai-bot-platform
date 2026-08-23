@@ -47,10 +47,17 @@ from apps.identity.services.memory_reader import (
 CARDINALITY_SINGLE = "single"
 CARDINALITY_MULTI = "multi"
 
-# memory key → cardinality. The pilot's only prod key is `diet` (single).
-# Unknown keys default to single: conservative — no contradictions by default.
+# memory key → cardinality. Pilot keys (owner ruling 2026-08-23, DRF-1260):
+# `diet` and `price_range` are single (one current diet / one current budget);
+# `preferred_districts`, `preferred_time_slots`, `favorite_masters` are multi
+# (several districts / slots / masters legitimately coexist). Unknown keys
+# default to single: conservative — no contradictions by default.
 _KEY_CARDINALITY: dict[str, str] = {
     "diet": CARDINALITY_SINGLE,
+    "price_range": CARDINALITY_SINGLE,
+    "preferred_districts": CARDINALITY_MULTI,
+    "preferred_time_slots": CARDINALITY_MULTI,
+    "favorite_masters": CARDINALITY_MULTI,
 }
 
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)

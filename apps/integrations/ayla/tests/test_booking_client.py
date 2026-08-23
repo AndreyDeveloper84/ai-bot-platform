@@ -1033,3 +1033,81 @@ class TestWriteCacheInvalidation:
         assert cache.get(new_slots_key) is None
         assert cache.get(dates_key) is None
         cache.clear()
+
+
+class TestCanonicalVersionRead:
+    """DRF-1233 — the value a concurrency guard is built on.
+
+    Every failure mode here ends in an exception rather than a default,
+    and that is the point: a guessed version does not make the guard
+    fail loudly, it makes it pass wrongly. The booking would be closed
+    or moved against a revision nobody looked at.
+    """
+
+    def _handler(self, payload, status=200):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.seen = request
+            return httpx.Response(status, json=payload)
+
+        return handler
+
+    def test_reads_the_four_canonical_facts(self) -> None:
+        client = _client_with(
+            self._handler(
+                {
+                    "data": {
+                        "id": "appt-1",
+                        "version": 4,
+                        "status": "confirmed",
+                        "start_datetime": "2026-08-22T15:00:00+03:00",
+                    }
+                }
+            )
+        )
+
+        got = client.get_appointment_version(
+            external_user_id="bot:max:1",
+            booking_id="appt-1",
+        )
+
+        assert got.version == 4
+        assert got.status == "confirmed"
+        assert got.start_datetime == "2026-08-22T15:00:00+03:00"
+        assert str(self.seen.url).endswith("/api/v1/internal/appointments/appt-1/")
+
+    def test_the_actor_travels(self) -> None:
+        """Upstream hides a booking this actor may not see; it can only do
+        that if we say who is asking."""
+        client = _client_with(self._handler({"data": {"id": "a", "version": 1}}))
+
+        client.get_appointment_version(
+            external_user_id="bot:max:83146139",
+            booking_id="a",
+        )
+
+        assert self.seen.headers["x-external-user-id"] == "bot:max:83146139"
+
+    def test_a_missing_version_is_an_outage_not_a_default(self) -> None:
+        client = _client_with(self._handler({"data": {"id": "a", "status": "confirmed"}}))
+
+        with pytest.raises(bc.BookingUnavailableError):
+            client.get_appointment_version(external_user_id="bot:max:1", booking_id="a")
+
+    def test_a_non_numeric_version_is_refused(self) -> None:
+        client = _client_with(self._handler({"data": {"id": "a", "version": "later"}}))
+
+        with pytest.raises(bc.BookingUnavailableError):
+            client.get_appointment_version(external_user_id="bot:max:1", booking_id="a")
+
+    def test_a_shape_we_cannot_read_is_refused(self) -> None:
+        client = _client_with(self._handler({"data": ["not", "a", "dict"]}))
+
+        with pytest.raises(bc.BookingUnavailableError):
+            client.get_appointment_version(external_user_id="bot:max:1", booking_id="a")
+
+    def test_a_hidden_booking_surfaces_as_an_error(self) -> None:
+        """404 upstream covers both «no such booking» and «not yours»."""
+        client = _client_with(self._handler({"error": {"code": "NOT_FOUND"}}, status=404))
+
+        with pytest.raises(bc.BookingAPIError):
+            client.get_appointment_version(external_user_id="bot:max:1", booking_id="a")

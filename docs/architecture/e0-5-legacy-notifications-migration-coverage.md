@@ -16,7 +16,7 @@
 4. Confirmed `services_app`, `payments`, `website` (the legacy Django siblings that imported these functions) **do not exist in this repo** — they belong to the original `formula_tela` mysite codebase.
 5. Read the candidate ports: `apps/notifications/{__init__,models,apps}.py`, `apps/channels/max/outbound.py`, `apps/orchestrator/llm/telegram_alert.py`, `apps/orchestrator/llm/breaker.py` (alert-call site).
 6. Cross-checked against E0.2 (MAX handlers) coverage doc which already classified `max_bot.py` as FULL coverage delete-ready.
-7. Checked the `pyproject.toml` / `.importlinter` / `.pre-commit-config.yaml` / `.secrets.baseline` posture for the legacy package.
+7. Checked the `pyproject.toml` (ruff `flake8-tidy-imports.banned-api`, TID251) / `.pre-commit-config.yaml` / `.secrets.baseline` posture for the legacy package. (An earlier draft listed a `.importlinter` file here — no such file exists in the repo; see the line 125 correction.)
 
 ---
 
@@ -122,7 +122,9 @@ Per founder constraint **«legacy код нельзя удалять, надо �
 | `legacy_notifications/max_bot.py` | YES once `telegram_alert.py` shim is cut over (~30 min work) | **HIGH** (after shim cutover) | One live importlib caller in `apps/orchestrator/llm/telegram_alert.py:80`. Functional equivalent already exists at `apps/channels/max/outbound.py::send_message`. |
 | `legacy_notifications/MIGRATION_NOTICE.md` | Keep until both `.py` files are retired. | — | Documentation of the freeze policy. |
 
-Posture today (`pyproject.toml:153,176,188,194` + `.importlinter:21,42-48`) already enforces that `apps/*` **must not statically import** `legacy_notifications` (G1.2 contract). The importlib hop in `telegram_alert.py` is the documented escape hatch; the lint contract is intact.
+Posture today: the ruff `[tool.ruff.lint.flake8-tidy-imports.banned-api]` rule (TID251) in `pyproject.toml` already enforces that `apps/*` **must not statically import** `legacy_notifications` (the G1.2 ADR-0009 import-edge). The importlib hop in `telegram_alert.py` is the documented escape hatch; the ruff banned-api rule is intact.
+
+> **Correction (S5, 2026-06-03):** an earlier revision cited a `.importlinter:21,42-48` file as the enforcement mechanism. **No `.importlinter*` file exists or has ever existed in this repo** — that was a *planned-as-done* error (roadmap item A11, which proposed import-linter, never shipped; see the S5 provenance trace on #968). Legacy_* import bans are enforced by ruff TID251 today. Broader G1–G10 ADR-0009 edges are moving to the `tools/lint/` AST-linter (Option B per orchestrator 2026-06-03), not import-linter.
 
 ---
 

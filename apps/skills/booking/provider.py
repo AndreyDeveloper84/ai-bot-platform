@@ -217,7 +217,15 @@ class AylaYClientsAdapter:
                 idempotency_key=key,
                 payment_required=payment_required,
             )
-        return BookingRecord(record_id=0, record_hash="", raw=_mirror_raw(record))
+        return BookingRecord(
+            record_id=0,
+            record_hash="",
+            raw=_mirror_raw(
+                record,
+                requested_service_id=service_id or None,
+                requested_specialist_id=str(staff_id) or None,
+            ),
+        )
 
     def cancel_record(self, *, record_id: int | str) -> bool:
         key = _idempotency_key(self._external_user_id, "cancel", record_id)
@@ -280,7 +288,18 @@ class AylaYClientsAdapter:
                 service_id=service_id,
                 old_date=old_date,
             )
-        return BookingRecord(record_id=0, record_hash="", raw=_mirror_raw(record))
+        # The move does not change what was booked; these come from the
+        # existing mirror row a few lines above, so a response that omits
+        # them cannot blank out what we already knew.
+        return BookingRecord(
+            record_id=0,
+            record_hash="",
+            raw=_mirror_raw(
+                record,
+                requested_service_id=service_id or None,
+                requested_specialist_id=specialist_id or None,
+            ),
+        )
 
     def get_user_records(self) -> list[UserRecord]:
         with _translate_errors():
@@ -430,9 +449,32 @@ def _first_id(ids: list[int] | list[str] | None) -> str | None:
     return str(first) if first is not None else None
 
 
-def _mirror_raw(record: AylaBookingRecord) -> dict[str, Any]:
+def _mirror_raw(
+    record: AylaBookingRecord,
+    *,
+    requested_service_id: str | None = None,
+    requested_specialist_id: str | None = None,
+) -> dict[str, Any]:
     """Normalise a create/reschedule result into the keys the booking tools
-    upsert onto ``RemoteBookingProxy`` (typed UUID columns + schedule window)."""
+    upsert onto ``RemoteBookingProxy`` (typed UUID columns + schedule window).
+
+    ``requested_*`` are what WE asked Ayla to book, and they are the last
+    resort rather than the first: the response is authoritative when it
+    says anything.
+
+    They are needed because on a salon booking the response says nothing.
+    Ayla stores the salon service in ``Appointment.salon_service`` and
+    leaves the marketplace ``service`` null, and
+    ``AppointmentDetailSerializer`` does not expose ``salon_service`` at
+    all — so the service simply is not in the payload to read back.
+    Measured on the pilot 2026-08-22: of 23 mirrored bookings, all 17 from
+    ``mobile_app`` carry a service and all 6 from ``automation`` — this
+    path — carry none. On the day board those six render with no service
+    name, and the front desk cannot tell what the customer is booked for.
+
+    Ayla exposing the salon service is the real fix and is reported
+    separately; this stops the bot discarding a value it had in its hand.
+    """
     raw = dict(record.raw)
     service = raw.get("service") if isinstance(raw.get("service"), dict) else {}
     specialist = raw.get("specialist") if isinstance(raw.get("specialist"), dict) else {}
@@ -441,8 +483,10 @@ def _mirror_raw(record: AylaBookingRecord) -> dict[str, Any]:
         "ayla_appointment_id": record.appointment_id,
         "start_at": raw.get("start_datetime") or raw.get("start_at"),
         "end_at": raw.get("end_datetime") or raw.get("end_at"),
-        "service_id": (service or {}).get("id") or raw.get("service_id"),
-        "specialist_id": (specialist or {}).get("id") or raw.get("specialist_id"),
+        "service_id": ((service or {}).get("id") or raw.get("service_id") or requested_service_id),
+        "specialist_id": (
+            (specialist or {}).get("id") or raw.get("specialist_id") or requested_specialist_id
+        ),
         "status": raw.get("status"),
     }
 

@@ -121,6 +121,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
         Auth.BEARER_EXT,
         frozenset({"x-idempotency-key"}),
     ),
+    # DRF-1233 — the canonical version, without which the salon console
+    # cannot offer a reschedule or a closure at all.
+    Route("GET", "/api/v1/internal/appointments/{id}/", Auth.BEARER_EXT),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
     # DRF-1032 customer records: visit card + «Записаться ещё» prefill.
     Route("GET", "/api/v1/internal/me/bookings/{id}/", Auth.BEARER_EXT),
@@ -362,6 +365,8 @@ def _exercise_booking() -> None:
     # DRF-1032 records reads.
     _swallow(lambda: c.get_booking_detail(external_user_id=_EXT_USER, booking_id="APPTID"))
     _swallow(lambda: c.get_repeat_intent(external_user_id=_EXT_USER, booking_id="APPTID"))
+    # DRF-1233 canonical version read.
+    _swallow(lambda: c.get_appointment_version(external_user_id=_EXT_USER, booking_id="APPTID"))
 
 
 def _exercise_profile() -> None:

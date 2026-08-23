@@ -51,7 +51,7 @@ class TestRecordExplicitGreenFacts:
         assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN
         assert entry.source == MemoryEntry.SOURCE_EXPLICIT
         assert entry.consent_at is None  # green: service-contract basis
-        assert entry.content == {"key": "diet", "value": "vegan"}
+        assert entry.content == {"key": "diet", "value": "vegan", "diet_type": "vegan"}
         # UPC parent auto-created.
         assert UserPersonalContext.objects.filter(user_id=bu.ayla_user_id).exists()
 
@@ -67,7 +67,10 @@ class TestRecordExplicitGreenFacts:
         _consent(bu, settings)
         record_explicit_green_facts(bu, "я вегетарианка")
         view = read_personal_context(bu.ayla_user_id)
-        assert any(f.content == {"key": "diet", "value": "vegetarian"} for f in view.green_facts)
+        assert any(
+            f.content == {"key": "diet", "value": "vegetarian", "diet_type": "vegetarian"}
+            for f in view.green_facts
+        )
 
     def test_observe_log_has_count_not_value(self, settings, caplog):
         import logging

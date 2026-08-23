@@ -171,12 +171,52 @@ class TestShowDoesNotContradictItself:
         assert res is not None
         assert "веганского питания" in res.text
 
+    def test_domain_forget_deletes_every_row_of_the_key(self):
+        """DRF-1261 proof step 4 — «забудь всё про моё питание» removes the
+        whole diet domain (all live rows, including the stale vegan one),
+        and nothing else. Replaces the pre-DRF-1261 «clarify» behaviour: a
+        domain word is not ambiguity, it is a target."""
+        upc = _upc_with_green("vegan")
+        _add_green(upc, "vegetarian")
+
+        res = handle_memory_command(user_id=upc.user_id, text="забудь всё про моё питание")
+
+        assert res is not None
+        assert "забыла" in res.text.lower()
+        assert res.action_type != "memory_forget_all_prompt", (
+            "«забудь всё про питание» is a DOMAIN forget — forget-all must "
+            "not fire (it would nuke every domain)"
+        )
+        remaining = MemoryEntry.objects.filter(user_id=upc.user_id, soft_deleted_at__isnull=True)
+        assert list(remaining) == []
+        # History is NOT hard-deleted — tombstoned rows stay for the audit.
+        assert MemoryEntry.objects.filter(user_id=upc.user_id).count() == 2
+
+    def test_domain_forget_leaves_other_domains(self):
+        upc = _upc_with_green("vegan")
+        MemoryEntry.objects.create(
+            user_id=upc.user_id,
+            personal_context=upc,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+            source=MemoryEntry.SOURCE_EXPLICIT,
+            provenance=MemoryEntry.PROVENANCE_USER_STATED,
+            kind="preference",
+            content={"key": "preferred_time_slots", "value": "evening"},
+        )
+
+        res = handle_memory_command(user_id=upc.user_id, text="забудь всё про питание")
+
+        assert res is not None
+        assert "забыла" in res.text.lower()
+        alive = MemoryEntry.objects.filter(user_id=upc.user_id, soft_deleted_at__isnull=True)
+        assert [e.content["key"] for e in alive] == ["preferred_time_slots"]
+
     def test_clarify_summary_is_also_conflict_resolved(self):
         """The «не поняла, что забыть» fallback renders the same view."""
         upc = _upc_with_green("vegan")
         _add_green(upc, "vegetarian")
 
-        res = handle_memory_command(user_id=upc.user_id, text="забудь мою диету")
+        res = handle_memory_command(user_id=upc.user_id, text="забудь мой адрес")
 
         assert res is not None
         assert "Не совсем поняла" in res.text

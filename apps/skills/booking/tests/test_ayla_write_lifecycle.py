@@ -470,3 +470,58 @@ class TestShowMyBookingsFlagOn:
         with tenant_scope(tenant):
             result = show_my_bookings(client=_adapter(FakeAyla()), tenant=tenant, bot_user=bot_user)
         assert len(result.bookings) == 1
+
+
+class TestTheMirrorKeepsTheService:
+    """DRF-1240 — a salon booking's service must survive the round trip.
+
+    Measured on the pilot 2026-08-22: of 23 mirrored bookings, all 17 from
+    `mobile_app` carried a service and all 6 from `automation` — this path
+    — carried none. Those six render on the day board with no service
+    name, and the front desk cannot tell what the customer is booked for.
+
+    Root cause is upstream: Ayla stores a salon booking's service in
+    `Appointment.salon_service`, leaves the marketplace `service` null,
+    and `AppointmentDetailSerializer` exposes neither — so there is
+    nothing to read back. What the bot CAN do is stop discarding the value
+    it asked with, and stop overwriting a good one with nothing.
+    """
+
+    def test_the_requested_service_is_kept_when_the_response_omits_it(self):
+        from apps.skills.booking.provider import _mirror_raw
+
+        class _Rec:
+            appointment_id = "appt-1"
+            raw = {"id": "appt-1", "status": "confirmed", "service": None}
+
+        out = _mirror_raw(_Rec(), requested_service_id="svc-1", requested_specialist_id="spec-1")
+
+        assert out["service_id"] == "svc-1"
+        assert out["specialist_id"] == "spec-1"
+
+    def test_the_response_still_wins_when_it_says_something(self):
+        """The fallback is a last resort, not a preference — Ayla is the
+        owner of the booking and may have booked something else."""
+        from apps.skills.booking.provider import _mirror_raw
+
+        class _Rec:
+            appointment_id = "appt-1"
+            raw = {"service": {"id": "svc-from-ayla"}, "specialist": {"id": "spec-ayla"}}
+
+        out = _mirror_raw(_Rec(), requested_service_id="svc-1", requested_specialist_id="spec-1")
+
+        assert out["service_id"] == "svc-from-ayla"
+        assert out["specialist_id"] == "spec-ayla"
+
+    def test_absent_means_no_news_not_gone(self):
+        from apps.skills.booking.provider import _mirror_raw
+
+        class _Rec:
+            appointment_id = "appt-1"
+            raw = {"status": "confirmed"}
+
+        out = _mirror_raw(_Rec())
+
+        # Nothing known and nothing requested — the upsert must then leave
+        # whatever the row already had, which is asserted below.
+        assert out["service_id"] is None
