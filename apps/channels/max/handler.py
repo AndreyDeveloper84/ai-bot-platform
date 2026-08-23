@@ -141,6 +141,7 @@ from apps.orchestrator.handoff import (
 )
 from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
 from apps.orchestrator.nutrition_global import try_handle_structured_nutrition_turn
+from apps.nutrition_proactive.optout import try_handle_opt_out
 from apps.orchestrator.visits import (
     CALLBACK_VISIT_REPEAT_PREFIX,
     VISIT_CALLBACK_PREFIXES,
@@ -696,6 +697,19 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # Tag the safety turn so it is distinguishable in the Message table on the
         # global path too — parity with the per-tenant handler (#1053 de-drift).
         assistant_action_type = "safety_pre_check"
+    elif (_opt_out_reply := try_handle_opt_out(text=event.text, bot_user=bot_user)) is not None:
+        # DRF-1285 — «не пиши мне» must work on THIS surface too. The skill
+        # registry is dispatched only on the per-tenant path below, and the
+        # pilot runs the global bot, so an off-switch that lived only in the
+        # registry was an off-switch nobody on the pilot could reach.
+        #
+        # Placed directly after the safety gate and before every other
+        # branch: safety always wins, and after that a request to stop being
+        # written to outranks whatever else the turn might have been — an
+        # active anketa FSM included. The match set is closed and
+        # whole-message, so no other branch's phrases can reach it.
+        reply = DiscoveryReply(text=_opt_out_reply)
+        assistant_action_type = "proactive_opt_out"
     elif matches_human_handoff_request(event.text):
         reply = route_global_human_handoff(
             global_bot_user=bot_user,
