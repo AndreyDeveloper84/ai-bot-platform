@@ -321,7 +321,15 @@ allowed`) — и они правы: хелпер представления, к�
 `test_partial_coverage_reply` + `test_catalog_surface` +
 `test_marketplace_handoff_e2e` + `test_global_catalog_chips` —
 **304 passed**. `ruff check` по всему `apps/` чисто, `ruff format` чисто,
-`mypy` по четырём правленым файлам чисто. Полный прогон — в CI на PR.
+`mypy` по четырём правленым файлам чисто.
+
+**Полный прогон в CI на PR #1255 (`f4f5d47`) — зелёный:** `pytest + ruff +
+mypy` **pass** (31m51s на push-прогоне, 33m47s на PR-прогоне — оба на одном
+коммите), `miniapp` pass, `replay` **success**. В `gh pr checks` рядом висят
+две строки `fail` — это **отменённые** дубли (`conclusion: cancelled`),
+снятые конкурентностью, ровно та ловушка, что описана в §0-bis
+`HANDOFF_MAIN_WINDOW.md`. Проверять надо `gh run view <id> --json conclusion`,
+а не колонку `gh pr checks`.
 
 Оба модуля помечены Postgres-only (`skipif`) по той же причине, что
 `test_discovery_by_service`: `goals__contains` — это jsonb `@>`, а сравнение —
