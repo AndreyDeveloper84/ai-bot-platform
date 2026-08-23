@@ -370,11 +370,18 @@ def _parse_query(raw: str) -> tuple[list[str], list[str]]:
 
 
 def split_requested_services(raw: str) -> list[str]:
-    """Split an enumeration of services into the parts that name a service.
+    """Split an ENUMERATION of services into the parts that name a service.
 
     DRF-1312. «массаж классика, и маникюр» → ``["массаж классика", "маникюр"]``.
     Parts are returned in the caller's OWN spelling, because a caller that
     reports one back to the user must quote what they wrote, not a stem.
+
+    Empty for anything that is not an enumeration — text with no separator in
+    it («спортивный массаж») has no part that could have been dropped
+    silently, which is the only thing this function exists to find. Answering
+    ``[]`` there rather than ``[raw]`` also keeps the ONE query it costs
+    (:func:`_known_cities`) off the single-service turn, the busiest in the
+    funnel.
 
     A part survives only if it still has a content token after greeting
     stripping, filler removal (:func:`_content_tokens`) and city recognition
@@ -405,13 +412,16 @@ def split_requested_services(raw: str) -> list[str]:
       which is already normalized to service wording, and only as the fallback
       for a model that did not fill ``services``.
     """
+    chunks: list[str] = []
+    for chunk in _SERVICE_SPLIT_RE.split(raw or ""):
+        part = chunk.strip().strip("«»\"'.!?-—–…").strip()
+        if part:
+            chunks.append(part)
+    if len(chunks) < 2:
+        return []
     cities = _known_cities()
     parts: list[str] = []
-    for chunk in _SERVICE_SPLIT_RE.split(raw or ""):
-        part = chunk.strip().strip("«»\"'.!?-—–…")
-        part = part.strip()
-        if not part:
-            continue
+    for part in chunks:
         service_tokens, _named = _split_known_cities(_content_tokens(part), cities)
         if service_tokens:
             parts.append(part)
