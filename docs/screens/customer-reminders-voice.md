@@ -179,7 +179,117 @@ Backend may also offer «Подтвердить / Перенести / Отме�
 
 No buttons per backend (text-only). If customer wants action — она opens booking via main app или taps deeplink в text.
 
-### 3.3 B11 — T+24h followup NEW
+### 3.3 B7 — T-15min final pre-visit NEW (pre-write, task #103, awaiting backend)
+
+> **Trigger condition:** booking.status == 'confirmed' AND scheduled_at - 15min ≤ now() AND no preceding cancel/no-show flag. Same blocker list as B5/B6 applies (see §4.1). Send-time state re-check mandatory (§5).
+
+```
+Через 15 минут — {service_name} у {master_name}.
+Адрес: {address}.{room_info?}{dress_code?}
+
+Если опаздываешь — можно написать мастеру по записи.
+```
+
+Where:
+- `{room_info?}` — optional inline ` Кабинет: {room}.` if `appointment.room` is set (skip otherwise — no «Кабинет: —» dashes)
+- `{dress_code?}` — optional inline ` На услугу удобно прийти {dress_code_hint}.` if `service.dress_code_hint` exists. Examples: «в свободной одежде», «без макияжа». MVP: probably empty for most services.
+
+**Voice rules applied:**
+- ✅ First-line useful fact (time-to-event + service + master) — same rule as B5/B6
+- ✅ Single emoji avoidance — text-only, no «⏰» or «🚶‍♀️» (avoid urgency manipulation per Brand Guardian)
+- ✅ «ты» — «опаздываешь», «можно написать»
+- ✅ Soft non-pressure on lateness — «если опаздываешь», not «если задерживаешься» (which sounds judgmental)
+- ✅ Ayla-mediated messaging entry «написать мастеру по записи» — consistent with B6
+- ❌ No «не опаздывай!» (parental tone)
+- ❌ No «жду тебя!» from Ayla (mismatched POV — мастер is host, not Ayla)
+- ❌ No «постарайся прийти вовремя» (passive-aggressive)
+- ❌ No salon-side «мы ждём» («мы» voice)
+
+**Inline keyboard:** none (text-only по аналогии с B6 — customer uses Mini App deeplink or replies)
+
+**Anti-patterns specific to B7 (because it's the urgency-window message):**
+- ❌ «Скорее!» / «Поторопись!» (urgency manipulation)
+- ❌ «Уже почти время!» (anxious tone)
+- ❌ Counter «13 минут осталось» (counter-pressure)
+- ❌ «На связи?» (intrusive check-in)
+
+**ED-mode + sensitive-state interaction:** B7 should fire normally — it's a logistics ping, not nutrition / not a calorie call. No special branching.
+
+**Backend asks for W2/Alpha (#103):**
+- New `BookingReminder.kind = 'FINAL_PRE_VISIT'`
+- Celery beat schedules T-15min trigger atomically с B5/B6/B11
+- Re-check booking state at dispatch (per §5)
+- Optional fields: `appointment.room`, `service.dress_code_hint` — Alpha owns
+- `customer.proactive_messages_opt_out == false` filter applies same as B5/B6/B11
+
+### 3.4 B9 — T+2h care notes NEW (pre-write, task #104, awaiting backend)
+
+> **Trigger condition:** booking.status == 'completed' AND completed_at + 2h ≤ now() AND service has aftercare guidance template AND customer.proactive_messages_opt_out == false AND all B11 blockers (§4.1) NOT active (refund/dispute/no-fault кolders also block B9).
+
+#### 3.4.1 Generic structure (service-agnostic)
+
+```
+{service_name} — готово.{aftercare_template}
+
+Если есть вопросы — можно написать мастеру по записи.
+```
+
+Where `{aftercare_template}` is service-specific copy. Pre-written per category below.
+
+#### 3.4.2 Service category templates (MVP set)
+
+| Service category | Aftercare template | Source/voice rule |
+|---|---|---|
+| Маникюр / Педикюр | ` Первые 2 часа береги покрытие — без перчаток и горячей воды.` | Practical, calm imperative «береги» (not «не делайте!») |
+| Окрашивание волос | ` Первые 48 часов лучше не мыть голову — пигмент закрепится глубже.` | «Лучше» soft, not «нельзя»/«запрещено» |
+| Стрижка | ` Первое мытьё через сутки даёт укладке лечь точнее.` | Practical-positive framing, not warning |
+| Брови / Ламинирование | ` Первые 24 часа не мочи и не три брови — состав ещё закрепляется.` | «Состав закрепляется» вместо «процесс не завершён» (technical) |
+| Массаж | ` Сегодня пей больше воды — это помогает после массажа.` | Practical, soft tip |
+| Косметология (peel/чистка) | ` Сегодня без сауны, бассейна и активного солнца — кожа отдыхает.` | «Кожа отдыхает» framing, не «пациент следует протоколу» (medical) |
+| Эпиляция / Депиляция | ` Первые 24 часа без сауны, бассейна и тесной одежды — коже легче восстановиться.` | Same calm framing |
+| **DEFAULT fallback** (service without specific template) | _(no aftercare paragraph, just generic line)_ | Don't fabricate aftercare for services без guidance |
+
+#### 3.4.3 Default fallback variant (no aftercare available)
+
+```
+{service_name} — готово.
+
+Если есть вопросы — можно написать мастеру по записи.
+```
+
+#### 3.4.4 Voice rules applied (B9)
+
+- ✅ Opener «{service_name} — готово.» — first-line closure, не «Привет! Как прошло...» (that's B11's job at T+24h)
+- ✅ Aftercare framed as care, not rules: «береги», «лучше не», «помогает» — not «не делайте», «запрещено», «обязательно»
+- ✅ «ты» — «береги», «пей», «не три»
+- ✅ Closing «можно написать мастеру по записи» — Ayla-mediated entry, consistent with B5/B6/B7
+- ✅ No emoji — text-only, calm closure tone
+- ❌ No medical-sounding language («процедура», «противопоказания», «реабилитация») — Brand Guardian anti-medical rule
+- ❌ No «следуйте инструкциям» (clinical)
+- ❌ No «рекомендуем» («мы» voice + salon-side)
+- ❌ No upsell («запишись на повторный визит со скидкой»)
+- ❌ No review prompt — B11 already handles that at T+24h. B9 is care-only.
+
+**Anti-patterns specific to B9 (because it's near-completion check-in):**
+- ❌ «Как самочувствие?» (medical implication — service was a treatment, not a procedure)
+- ❌ «Всё хорошо?» (Ayla pretending to be a clinician)
+- ❌ «Не забудьте оставить отзыв!» (preempts B11 + sales-y)
+- ❌ Service-quality language («процедура прошла успешно»)
+
+**ED-mode + sensitive-state interaction:**
+- B9 for nutrition/diet-related services (none expected in MVP catalogue, but if added) MUST be deactivated for `user.eating_disorder_flag = true` customers per memory `cross-domain-insight-safety-gap`.
+- B9 for beauty services (90%+ of pilot) — fires normally.
+- Rule: backend MUST check ED flag against service category before dispatch.
+
+**Backend asks for W2/Alpha (#104):**
+- New `BookingReminder.kind = 'POST_VISIT_CARE'`
+- Celery beat schedules T+2h trigger
+- Service-template registry: `service.aftercare_template_key` → looks up §3.4.2 strings (Tau owns string registry, Alpha owns lookup)
+- DEFAULT fallback (§3.4.3) when no template registered for service category
+- All B11 blockers (§4.1) apply identically — refund/dispute/no-fault states block B9
+- ED-flag interaction (deactivate for nutrition-category services) — even though MVP catalogue is beauty-only, gate is required for future-proofing
+
+### 3.5 B11 — T+24h followup NEW
 
 ```
 Как прошёл визит?
@@ -489,12 +599,14 @@ Per tech lead approval — Tau documents, W2/Alpha implements:
 ### Issue B7 — T-15min final pre-visit (task #103)
 
 **Owner:** W2/Alpha — backend follow-up
-**Required:** new reminder kind FINAL_PRE_VISIT + Celery beat trigger T-15min + copy template (Tau will provide когда backend ready)
+**Required:** new reminder kind FINAL_PRE_VISIT + Celery beat trigger T-15min + send-time state re-check (§5)
+**Copy template:** ✅ pre-written §3.3 (r2 2026-06-02) — pickup ready when backend ships
 
 ### Issue B9 — T+2h care notes (task #104)
 
 **Owner:** W2/Alpha — backend follow-up
-**Required:** new beat task T+2h after visit completion + service-specific care text mapping + copy template
+**Required:** new beat task T+2h after visit completion + service-template registry + send-time state re-check (§5) + ED-flag gate for nutrition-category services (future-proof, MVP catalogue is beauty-only)
+**Copy template:** ✅ pre-written §3.4 (r2 2026-06-02) — 8 service-category templates + DEFAULT fallback. Pickup ready when backend ships.
 
 ### Issue B8 — «я пришла» customer intent (task #107) — post-pilot
 
@@ -543,4 +655,6 @@ Per tech lead approval — Tau documents, W2/Alpha implements:
 | Accessibility | ☐ | (pending pilot) |
 
 ## Last verified
+2026-06-02 r2 — B7 (T-15min final pre-visit, #103) + B9 (T+2h care notes, #104) voice templates pre-written per tech-lead support-mode directive. Backend asks documented in §3.3 + §3.4 — W2/Alpha pickup-ready. 8 service-category aftercare templates + DEFAULT fallback. ED-flag gate added for nutrition-category services (future-proof).
+
 2026-05-26 r1 — Phase A taxonomy confirmed via code reading. Tech lead approved scope only B5/B6/B11. Batched CTA unification + «ты» lock в этом PR. W2/Alpha follow-up tickets explicit для backend implementation.

@@ -203,7 +203,9 @@ R6 — Empty / first-time states                                               �
 
 ### 4.2 «Подробнее о данных» collapsed disclosure
 
-Tap → expanded sheet/section:
+Tap → expanded sheet/section. **Expanded pre-draft per #947 — REQUIRES legal sign-off before pilot ship. Current shipped copy (`DisclosureSheet.tsx`) is the smaller r1 starting point; legal verdict drives whether to expand to r2 below.**
+
+#### 4.2.1 r1 — shipped copy (`DisclosureSheet.tsx`)
 
 ```
 Где и как обрабатываются данные
@@ -226,7 +228,213 @@ AI-обработку через внешних поставщиков (вклю
 [ Закрыть ]
 ```
 
-**LEGAL-REVIEW-REQUIRED:** Exact cross-border wording (включая Anthropic mention + США clarification) must be reviewed by legal/compliance before pilot ship. Draft text above is starting point.
+#### 4.2.2 r2 — Tau pre-draft (for legal review)
+
+```
+Где и как обрабатываются данные
+
+Основные данные хранятся на серверах в России —
+так требует 152-ФЗ.
+
+Чтобы понимать твои сообщения, Ayla отправляет их в
+AI-сервис от компании Anthropic (США). Передача
+защищена шифрованием TLS 1.3, ответ возвращается тоже
+шифрованным. Anthropic обрабатывает текст в момент
+ответа и не хранит твою переписку у себя.
+
+Что мы делаем со ВНЕШНИМИ передачами:
+• Передаём только текст сообщения — без имени,
+  телефона и других контактов
+• Шифруем передачу TLS 1.3
+• Не передаём фото из дневника питания на Anthropic —
+  распознавание блюд работает внутри российского
+  контура
+
+Что мы НЕ делаем:
+• Не продаём данные никому со стороны
+• Не используем твою переписку для рекламы
+• Не отдаём салонам ничего, кроме того, что нужно
+  для записи (имя, услуга, время)
+• Не показываем мастеру память Ayla или wellness-логи
+
+Сколько храним:
+• Сообщения с Ayla — 180 дней, потом анонимизируется
+• Записи на услуги и оплаты — 7 лет (требует ФЗ-2300-1
+  и ФЗ-54 — закон не даёт удалить раньше)
+• Память Ayla про тебя — пока ты сама не удалишь
+• Аудит факта удаления — храним по закону, но без
+  твоего имени
+
+Согласие можно отозвать. Полный отзыв = удаление
+аккаунта (это можно сделать в разделе «Удалить
+аккаунт»). Частичный — управляй переключателями
+выше.
+
+[ Закрыть ]
+```
+
+#### 4.2.3 LEGAL_REVIEW_REQUIRED — explicit asks for legal/compliance (#947)
+
+Pre-draft r2 above is **Tau starting point** for legal. Please verify and mark up each of the following points:
+
+1. **Anthropic + USA framing**
+   - r2: «AI-сервис от компании Anthropic (США)»
+   - Question: is the country mention required at this level of disclosure, or sufficient to say «иностранный сервис» with detail in privacy policy? 152-ФЗ ст.12 (transborder transfer) interpretation.
+   - Alternative phrasing to consider: «зарубежный AI-сервис (Anthropic, США)» — more precise about who and where.
+
+2. **TLS 1.3 mention**
+   - r2: «шифрованием TLS 1.3»
+   - Question: do we want a specific protocol version in customer-facing copy (commits us technically) or generic «современное шифрование»?
+   - Tau lean: generic is friendlier; specific is more credible to a technical reviewer.
+
+3. **Anthropic non-retention claim**
+   - r2: «Anthropic обрабатывает текст в момент ответа и не хранит твою переписку у себя»
+   - Question: does this match actual Anthropic Data Processing Agreement / our contract terms? If we have zero-retention tier, this is honest; if we use default retention, this overpromises.
+   - **MUST verify with vendor contract before shipping.**
+
+4. **Photo separation claim**
+   - r2: «Не передаём фото из дневника питания на Anthropic — распознавание блюд работает внутри российского контура»
+   - Question: is this true at pilot ship (food scanner uses internal vision pipeline, no Anthropic photo path)? If photo path adds Anthropic post-pilot, this becomes a breach — needs updating before that change.
+   - Tau lean: ship the claim if true at pilot; flag a follow-up to legal if photo pipeline architecture changes.
+
+5. **«никому со стороны» replacement for «третьим лицам»**
+   - Per adversarial CR (Profile Phase B PR agent `a93d90bebc68bba10`): «третьим лицам» reads as §14 legal jargon
+   - r2: «Не продаём данные никому со стороны»
+   - Question: is «никому со стороны» legally equivalent to «третьим лицам» under 152-ФЗ? Or does the legal term need to stay?
+   - Tau lean: prefer the friendly phrasing if compliance allows.
+
+6. **Retention specifics**
+   - 180 days for messages: matches `STRICT_TENANT_REFUSE` runbook + memory layer policy. ⚠ **See §4.2.5 retention audit — code-level grep shows policy exists but no anonymizer job implemented.**
+   - 7 years for bookings/payments: matches consumer-protection law minimum (ФЗ-2300-1 ст.10) + accounting law. ⚠ **See §4.2.5 — Alpha-side reality not verified by Tau.**
+   - Memory «пока ты не удалишь»: matches `apps/skills/privacy_consent` skill behavior
+   - Audit «храним по закону»: matches 152-ФЗ ст.18 + ст.21
+   - Question: are these numbers accurate AND legally minimal (we're not retaining longer than necessary)?
+
+7. **Tone**
+   - Tau wrote in Ayla voice (warm, «ты», first-person where natural). This may need to shift to more formal legal voice for the cross-border section specifically.
+   - Question: does legal want this rewritten in third-person formal Russian («Ayla обрабатывает...»), or is first-person acceptable in this context?
+
+8. **Withdrawal mechanics**
+   - r2: «Полный отзыв = удаление аккаунта»
+   - Question: under 152-ФЗ ст.9 ч.5, must we offer a more granular withdrawal path (per-purpose consent)? Or is the locked-on/toggle-off + full-delete combination sufficient?
+
+#### 4.2.4 Process
+
+1. Tau shipped pre-draft (r2 above) merged into spec — this is the **starting point**, NOT shipped customer copy
+2. Legal reviews + marks up via PR comment on this file OR direct edit of §4.2.2
+3. After legal verdict → §4.2.1 shipped copy updated to final wording, `LEGAL_REVIEW_REQUIRED` flag removed
+4. W4 updates `apps/miniapp/src/components/DisclosureSheet.tsx` with final wording
+5. P-6 gate (pre-pilot ship) — verify final wording in production build
+
+**Until legal verdict ships:** r1 (§4.2.1) is what customers see in current shipped build. Whether to ship r2 expansion vs keep r1 is `pilot-pre-ship-blocked` on legal verdict.
+
+#### 4.2.5 Retention reality audit — Tau findings 2026-06-02 (#950)
+
+> **Acceptance check per #950:** "Confirm with Alpha (Ayla backend) + W2 (bot-platform retention jobs) that 180d / 7y numbers match production reality."
+>
+> Tau ran a code-level grep audit on `ai-bot-platform` (this repo). Findings below — **Alpha + W2 MUST confirm or correct before pilot ship.**
+
+##### Finding R-1 — 180-day message anonymization: POLICY EXISTS, BACKEND JOB NOT FOUND ⚠
+
+- **Policy source:** `docs/design/policies/conversation-ownership-policy.md` §6 — "Retention: 180 days"
+- **Customer claim (shipped r1 + pre-draft r2):** «Сообщения с Ayla — 180 дней, потом анонимизируется»
+- **Code reality (2026-06-02 grep):**
+  - `apps/conversations/tasks.py::purge_old_ai_drafts` exists — but scope is `AiDraft` (operator-side AI drafts), NOT customer Message rows. Retention = 30 days, not 180.
+  - No `timedelta(days=180)` found anywhere в `apps/`.
+  - No `anonymize_message` / `purge_old_messages` task found.
+- **Risk:** Customer told "180 days then anonymized" — backend has no anonymizer job → messages retained INDEFINITELY. Variant 3 truthfulness violation per adversarial CR P8.
+- **Action required (W2):** either
+  - **(a)** implement the 180-day message anonymizer job before pilot ship (matches policy + customer copy), OR
+  - **(b)** Tau rewrites customer copy to reflect actual retention (likely «храним столько, сколько работаем с тобой» + honest manual-delete path), OR
+  - **(c)** mark feature as `policy-only-not-shipped` and drop the customer-facing 180-day promise. Tau lean: **(a) preferred**; **(c) acceptable** if (a) doesn't fit pilot scope; **(b) is fallback** if neither (a) nor (c) works.
+
+##### Finding R-2 — 7-year booking/payment retention: REQUIRES ALPHA CONFIRMATION ⚠
+
+- **Customer claim:** «Записи на услуги и оплаты — 7 лет (требует ФЗ-2300-1 и ФЗ-54 — закон не даёт удалить раньше)»
+- **Code reality (2026-06-02 grep on bot-platform):** booking/payment retention LIVES IN AYLA DJANGOPROJECT (beautygo), not this repo. Per ADR-0009 split-domain — bot-platform does not own this data.
+- **Risk:** if Ayla side has a shorter retention OR auto-deletes earlier OR (worse) retains LONGER than 7 years without legal basis — customer copy is false.
+- **Action required (Alpha):** confirm beautygo `Appointment` + `Payment` retention is:
+  - At least 7 years (per ФЗ-2300-1 ст.10 + ФЗ-54 ст.4.7)
+  - NOT longer than 7 years for anonymized fields (over-retention without basis = 152-ФЗ ст.5 ч.7 violation)
+  - Specifically check: is there a scheduled purge job at 7y+1d? If not, this is an over-retention risk.
+
+##### Finding R-3 — Memory retention "пока не удалишь": CHECK STRICT_TENANT_REFUSE INTERACTION ⚠
+
+- **Customer claim (r2 only):** «Память Ayla про тебя — пока ты сама не удалишь»
+- **Code reality:** `apps/identity/UserPersonalContext` lives indefinitely. Customer hard-delete via `apps/skills/privacy_consent` clears it immediately.
+- **Edge case:** what if customer's TenantUserRelationship is removed (tenant offboarding) but customer doesn't delete account? Per memory `strict-tenant-refuse-soak`, STRICT_TENANT_REFUSE may surface scoping issues — confirm memory persists even when tenant link breaks.
+- **Action required (W4 / Alpha):** confirm memory lifecycle is purely customer-controlled, not tenant-controlled.
+
+##### Finding R-4 — Audit retention "храним по закону, но без имени": CONFIRM 30-DAY ANONYMIZATION ✅
+
+- **Customer claim (r2 only):** «Аудит факта удаления — храним по закону, но без твоего имени»
+- **Code reality (2026-06-02):** `apps/audit/tasks.py` shows `retention_days==30` in tests (audit row anonymized after 30 days). Matches policy `customer-privacy-data-closure-ux.md` Q-CP14.
+- **Risk:** ✅ LOW — code matches policy. Customer-facing claim is honest. No action.
+
+##### Summary — what blocks pilot ship
+
+| Finding | Risk | Owner | Blocker tier |
+|---|---|---|---|
+| R-1: 180-day message anonymizer not implemented | HIGH (false promise) | W2 | **pilot-blocking-hard** |
+| R-2: 7-year retention not verified Alpha-side | MEDIUM (potential false promise) | Alpha | **pilot-blocking-soft** |
+| R-3: memory lifecycle vs tenant-offboarding edge | LOW (corner case) | W4 + Alpha | **follow-up** |
+| R-4: audit 30-day anonymization | ✅ matches | — | none |
+
+**Tau recommendation:** treat R-1 as P-7 blocker (same tier as #949 SUPPORT_DEEPLINK wiring). R-2 needs Alpha sign-off as part of P-6 legal review (#947). Without R-1 fix, customer copy in r1 §4.2.1 (which is SHIPPED) is already dishonest — either implement (a), or rewrite (b), or drop (c) before pilot opens.
+
+#### 4.2.6 Tech-lead resolution 2026-06-02 — path (b) + path (a) deferred post-pilot
+
+Tech lead reviewed §4.2.5 findings and chose **(b) now + (a) post-pilot** as recommendation to founder (founder verdict pending):
+
+- **Now (b):** rewrite customer copy to reflect actual retention behavior — «храним, пока активен аккаунт; удаляются, когда удаляешь аккаунт». This is honest (`apps/skills/privacy_consent/skill.py::data_delete` already implements customer-controlled deletion), 152-ФЗ-defensible through the right-to-erasure path, and ships immediately without blocking W2 (who is loaded on #842 PII critpath).
+- **Post-pilot (a):** implement actual 180-day message anonymizer for proper retention limitation. Owned by W2 — separate ticket, not pilot-blocker.
+- Tau writes voice → legal confirms wording as part of #947 → W1 ships corrected `DisclosureSheet.tsx` (one-line copy patch, anti-touch-safe).
+
+**Tau path-(b) draft copy** (replaces «Сколько храним» block in both r1 §4.2.1 + r2 §4.2.2 «Сколько храним» section):
+
+```
+Сколько храним:
+• Сообщения с Ayla — пока активен твой аккаунт. Когда
+  удалишь аккаунт — удаляются вместе с ним.
+• Записи на услуги и оплаты — 7 лет (этого требует закон,
+  записи и оплаты не удаляются раньше).
+• Память Ayla про тебя — пока ты не очистишь или не
+  удалишь аккаунт.
+• Аудит факта удаления — храним по закону, но без
+  твоего имени.
+```
+
+**Voice rules applied (path-(b)):**
+
+| Element | Rule | Status |
+|---|---|---|
+| «пока активен твой аккаунт» | Honest scope — matches `data_delete` skill reality | ✅ |
+| «удалишь аккаунт — удаляются вместе с ним» | Cause-effect framing, customer agency surfaced | ✅ |
+| «закон не удаляет раньше» | Inverted from «нельзя удалить» — honest about WHY 7y is fixed | ✅ |
+| «пока ты не очистишь или не удалишь» | Two-path customer control — clear/delete | ✅ |
+| «ты» throughout | Register canon | ✅ |
+| No «анонимизируется» / «потом» promise | Removes the dishonest claim entirely | ✅ |
+| No backend-overpromise language («автоматически удалим», «через X дней») | Pattern 4 avoided | ✅ |
+| Audit retention same as r2 (✅ R-4 matches policy) | No change needed | ✅ |
+
+**Voice rules deliberately NOT used:**
+- ❌ «храним только пока необходимо» (legally weasel — what is «necessary»?)
+- ❌ «удалим автоматически если ты долго не пользуешься» (would be partial (a) — not shipping)
+- ❌ «соблюдаем GDPR-стандарты» (vendor-speak, не applicable RU)
+- ❌ «безопасно храним» (security claim без backing)
+
+**Path-(b) handoff:**
+
+| Recipient | Action | Owner | Status |
+|---|---|---|---|
+| Founder | Approve (b)+later vs (a)-in-pilot tradeoff | founder | ⚠ pending verdict |
+| Legal | Confirm (b) wording as 152-ФЗ-defensible (part of #947 review pass) | legal advisor | ⚠ pending |
+| W1 | Ship `DisclosureSheet.tsx` retention-block copy update once founder + legal verdicts land | W1 | ⚠ blocked on founder verdict |
+| W2 | NO action pilot-side. Post-pilot ticket: 180-day message anonymizer (path (a)). | W2 | post-pilot queue |
+
+**If founder picks (a)-in-pilot instead:** keep r1/r2 copy as-is, W2 must implement 180-day anonymizer before pilot ship. Tau prepares NO additional voice — current 180-day copy stands as-written.
+
+**Until founder verdict ships:** customer in production sees r1 §4.2.1 (the dishonest «180 дней потом анонимизируется» version). Verdict urgency = P-7 (matches #949 SUPPORT_DEEPLINK).
 
 ### 4.3 «Запросить данные» — DEFERRED for pilot (export via support)
 
@@ -276,6 +484,33 @@ Tap → entry sheet (routes to support, NO in-app deletion):
 
 **Post-pilot (ADR-0015 epic):** ратифицировать cross-service delete-контракт, построить service-to-service delete hook, затем (отдельно) реальный `DeleteRequest` + 30-day grace + cancel flow. Тогда — вернуть in-app поток и обновить copy.
 
+### 4.5 SupportEntrySheet voice — Brand Guardian pass on shipped copy (2026-06-02, per tech-lead pickup directive)
+
+Tau ran a 12-pattern Brand Guardian pass on shipped `SupportEntrySheet.tsx::COPY` post-merge of PR #954. Three presets reviewed: `export` (§4.3), `delete` (§4.4), `notifications` (§7).
+
+| Preset | Verdict | Notes |
+|---|---|---|
+| `export` (§4.3) | ✅ PASS | Honest scope «не делаю выгрузку прямо здесь»; first-person Ayla; «ты»; 152-ФЗ legal citation is credible without being scary; SLA promise absent (correct — operator owns SLA). One «нам» borderline-acceptable as Ayla+support team collective, NOT salon-side framing. |
+| `delete` (§4.4) | ✅ PASS | Honest cross-service explanation «во всех системах правильно»; retention preview §2; NO 30-day grace; NO fear-mongering; «я уверена» first-person. One «нам» borderline-acceptable. |
+| `notifications` (§7 route) | ⚠ MINOR — refine post-pilot | Double «мы»-weight («мы соберём» + «нам») reads slightly more team-side than other presets. Not Variant-3-truthfulness violation, but voice-tone-asymmetric within the three presets. Acceptable for pilot ship; queue voice patch post-pilot. Suggested rewrite: «Пока этим занимается поддержка — оператор соберёт настройки вручную. Напиши, что хочешь поменять.» |
+
+**Patterns explicitly checked and PASSED across all three presets:**
+
+1. AI cliché («unleash potential») — none
+2. Vendor speak («next-generation») — none
+3. Salon-side framing («мы», «наш сервис») — borderline «нам» but contextually team-collective, acceptable
+4. Backend overpromise — none (no SLA promises, no 30-day grace)
+5. Pre-mature marketing («скоро будет!») — none in SupportEntrySheet; mitigated in ComingSoonCard (see §5.bis)
+6. Urgency manipulation — none
+7. Apology («к сожалению…») — none
+8. Sterile UI text («Загрузка…», «Ошибка!») — none
+9. Medical/diagnostic — n/a in this surface
+10. Gamification — none
+11. Empty data dashes — none
+12. Anti-empathy ED-anxiety — n/a in this surface
+
+**Ship verdict:** SupportEntrySheet copy is ✅ pilot-ready. Notification preset has minor «мы» asymmetry — file as post-pilot voice patch, NOT pilot-blocker.
+
 ---
 
 ## 5. R3 — Memory Transparency — DEFERRED for pilot (coming-soon)
@@ -301,6 +536,27 @@ Tap → entry sheet (routes to support, NO in-app deletion):
 │                                               │
 └──────────────────────────────────────────────┘
 ```
+
+### 5.0.bis ComingSoonCard — Brand Guardian pass on shipped copy (2026-06-02)
+
+Shipped copy lives in `apps/miniapp/src/components/ComingSoonCard.tsx`. Brand Guardian 12-pattern pass result:
+
+| Element | Pattern check | Verdict |
+|---|---|---|
+| «Скоро я смогу показать…» | Pattern 5 (premature marketing) | ⚠ mitigated — see secondary line |
+| «любимые услуги, удобное время, настройки» | Concrete preview, not vague «много возможностей» | ✅ honest specificity |
+| «и дать это очистить» | Concrete control action surfaced | ✅ |
+| «Пока этот раздел готовится» | Honest «not yet shipped» — not «временно недоступно» (apology) | ✅ |
+| «Я не показываю лишнего и не делаю вид, что уже всё умею» | Explicit anti-vendor-speak meta-honesty | ✅ Brand Guardian reference quality |
+| First-person Ayla («я смогу», «я не делаю вид») | Voice rule | ✅ |
+| «ты» («тебе», «о тебе») | Register rule | ✅ |
+| No emoji | Calm placeholder, not celebratory | ✅ |
+| No CTA («Подписаться на уведомления!») | No marketing engagement loop | ✅ |
+| No timeline («доступно с июля!») | Pattern 4 (backend overpromise) avoided | ✅ |
+
+**Verdict:** ✅ PASS, reference-quality honesty. The «Скоро» pattern-5 risk is fully mitigated by the secondary line's explicit anti-vendor-speak («не делаю вид, что уже всё умею»). This is the model copy for any other future deferred-state surface in MVP — treat it as the template.
+
+**Ship verdict:** ComingSoonCard is pilot-ready, no changes recommended.
 
 ### 5.1 Coming-soon rules
 
