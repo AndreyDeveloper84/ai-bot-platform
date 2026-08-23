@@ -786,17 +786,38 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             except Exception:  # noqa: BLE001
                 logger.exception("channels.max.global.memory_ask_failed bot_user=%s", bot_user.id)
                 ask_reply = None
+            # DRF-1102 — the deterministic branch: answer a general
+            # booking/service request without the concierge LLM. It is faster
+            # and cheaper than a model turn, and when it finds masters it is
+            # right.
+            #
+            # DRF-1283 — but it no longer owns the turn unconditionally. It
+            # returns None when the search matched NOBODY, and that is not an
+            # answer: it is the deterministic layer admitting it could not
+            # resolve the request, at which point the model is exactly what
+            # should run. The turn then falls through to the concierge below
+            # — same path an unrecognised turn takes, memory blocks and all.
+            #
+            # This was unsafe until 23.08: the concierge was single-pass, so a
+            # show_masters call ate the whole turn and the model, with nothing
+            # to say over the tool result, re-asked forever — the very failure
+            # DRF-1102 added this branch to stop. DRF-1266 made it multi-pass
+            # (tool result comes back as an ordinary message, capped by
+            # CONCIERGE_MAX_LLM_PASSES), which is what makes the fallthrough
+            # safe now.
+            direct_reply: DiscoveryReply | None = None
+            if ask_reply is None and looks_like_booking_request(event.text):
+                direct_reply = generate_direct_show_masters_reply(
+                    event.text,
+                    trace_id=str(trace_id) if trace_id else None,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                )
+
             if ask_reply is not None:
                 reply = ask_reply
-            elif looks_like_booking_request(event.text):
-                # DRF-1102 — the missing branch: skip the concierge LLM
-                # entirely for a general booking/service request. The search
-                # layer already resolves free text fine (discover_masters
-                # token-matches the raw phrase, DRF-945); the funnel just
-                # needs to reach it instead of the LLM re-asking forever.
-                reply = generate_direct_show_masters_reply(
-                    event.text, trace_id=str(trace_id) if trace_id else None
-                )
+            elif direct_reply is not None:
+                reply = direct_reply
                 assistant_action_type = "discovery_show_masters_direct"
             else:
                 # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
