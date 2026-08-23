@@ -142,19 +142,47 @@ class TestServiceRelationMatch:
 
         assert {c.name for c in cards} == {"Спортивный мастер", "Классический мастер"}
 
-    def test_tokens_must_match_the_same_service(self, penza: Tenant) -> None:
-        """AND binds within one joined row, not across a master's whole list.
+    def test_score_binds_within_one_service_not_across_the_list(
+        self, penza: Tenant, settings
+    ) -> None:
+        """Scoring binds within one joined row, not across a master's list.
 
-        A master doing «Спортивный маникюр» and «Тайский массаж» must NOT
-        answer «спортивный массаж» — neither service is that.
+        A master doing «Спортивный маникюр» and «Тайский массаж» matches
+        «спортивный массаж» on each word, but never both in ONE service — so
+        they score 1, not 2, and rank BELOW a master who actually performs
+        «Спортивный массаж».
+
+        Until DRF-1283 this master was excluded outright (tokens were AND-ed).
+        Exclusion is what made «массаж пенза» return nobody: a token the
+        catalog cannot contain — a city, a profession, a stray verb — erased
+        the whole query. Ranking keeps the discrimination without the cliff,
+        and the honesty guard is below: the loose match carries NO service
+        stamp, so no button promises a service the master does not perform.
         """
-        master = _master(penza, "Универсал", specialization="")
-        _link(penza, master, _service(penza, "Спортивный маникюр", slug="sport-nails"))
-        _link(penza, master, _service(penza, "Тайский массаж", slug="thai"))
+        settings.BOOKING_VIA_AYLA_REST = True
+        universal = _master(penza, "Универсал", specialization="")
+        _link(penza, universal, _service(penza, "Спортивный маникюр", slug="sport-nails"))
+        _link(
+            penza,
+            universal,
+            _service(penza, "Тайский массаж", slug="thai", ayla_service_id=uuid4()),
+        )
+        exact = _master(penza, "Точный мастер", specialization="")
+        _link(
+            penza,
+            exact,
+            _service(penza, "Спортивный массаж", slug="sport", ayla_service_id=uuid4()),
+        )
 
-        cards = discover_masters(city="Пенза", specialization="спортивный массаж")
+        cards = discover_masters(
+            city="Пенза", specialization="спортивный массаж", resolve_service=True
+        )
 
-        assert cards == []
+        assert [c.name for c in cards] == ["Точный мастер", "Универсал"]
+        assert cards[0].service_name == "Спортивный массаж"
+        # Two services tie at score 1 for the universal — ambiguous, so the
+        # card carries no service and the tap asks instead of assuming.
+        assert cards[1].service_id is None
 
     def test_case_insensitive(self, penza: Tenant) -> None:
         master = _master(penza, "Массажист", specialization="")
@@ -495,9 +523,10 @@ class TestPunctuationAndFillerDoNotBreakMatching:
         «маникюр,».
 
         Scope note: this is about the COMMA, not about multi-service requests.
-        Two *separate* services «Маникюр» + «Педикюр» on one master still
-        return nothing — tokens are AND-ed within a single service row by
-        design (see ``test_tokens_must_match_the_same_service``).
+        Since DRF-1283 two *separate* services «Маникюр» + «Педикюр» on one
+        master DO match — each word scores on its own row — but they score 1
+        where a single «Маникюр педикюр» row scores 2, so the combined service
+        still wins (see ``test_score_binds_within_one_service_not_across_the_list``).
         """
         master = _master(penza, "Мастер", specialization="")
         _link(penza, master, _service(penza, "Маникюр педикюр", slug="mani-pedi"))
@@ -571,8 +600,15 @@ class TestDegenerateQueryFailsClosed:
         ids=["хочу", "ищу", "мне-нужен", "polite-sentence", "master-plus-please"],
     )
     def test_filler_words_do_not_defeat_the_request(self, penza: Tenant, query: str) -> None:
-        """Every token is AND-ed against ONE service name, so a stray «хочу»
-        would otherwise reduce a valid request to zero results."""
+        """Filler must not dilute the request.
+
+        Historically this guarded against a hard zero: tokens were AND-ed, so
+        one stray «хочу» reduced a valid request to nothing. DRF-1283 removed
+        that cliff, and these queries would now survive on the OR alone — the
+        guard stays because filler still costs ranking precision, and because
+        a regression back to AND must fail here loudly rather than only on the
+        city-shaped queries below.
+        """
         master = _master(penza, "Массажист", specialization="")
         _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
 
@@ -584,6 +620,119 @@ class TestDegenerateQueryFailsClosed:
         _link(penza, master, _service(penza, "Спортивный массаж", slug="sport"))
 
         assert discover_masters(specialization="хочу записаться пожалуйста") == []
+
+
+class TestOrRankingAndStemming:
+    """DRF-1283 — the live pilot turn, and the two defects behind it.
+
+        человек: «покажи массажистов в пензе»
+        бот:     «По вашему запросу мастеров пока не нашлось — уточните
+                  город или услугу.»                      (66ms, no LLM call)
+
+    Four masters in that salon massage. Measured on the pilot before the fix,
+    ``discover_masters(specialization=…)`` returned 4 for «хочу массаж» and 0
+    for «массаж пенза», «массажист», «массажистов» and the live turn itself.
+    """
+
+    @pytest.fixture
+    def salon(self, penza: Tenant) -> dict[str, CatalogMaster]:
+        sport = _master(penza, "Спортивный мастер", specialization="")
+        classic = _master(penza, "Классический мастер", specialization="")
+        nails = _master(penza, "Ногтевой мастер", specialization="")
+        _link(penza, sport, _service(penza, "Спортивный массаж", slug="sport"))
+        _link(penza, classic, _service(penza, "Классический массаж", slug="classic"))
+        _link(penza, nails, _service(penza, "Маникюр", slug="manicure"))
+        return {"sport": sport, "classic": classic, "nails": nails}
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "хочу массаж",
+            "массаж пенза",
+            "массажист",
+            "массажистов",
+            "покажи массажистов в пензе",
+            "запиши меня на массаж в пензе",
+        ],
+        ids=[
+            "baseline-worked-before",
+            "city-token-used-to-zero",
+            "profession-used-to-zero",
+            "profession-plural-used-to-zero",
+            "the-live-turn",
+            "imperative-plus-city",
+        ],
+    )
+    def test_the_live_turn_and_its_neighbours_find_the_massage_masters(
+        self, salon: dict, query: str
+    ) -> None:
+        names = {c.name for c in discover_masters(specialization=query)}
+
+        assert names == {"Спортивный мастер", "Классический мастер"}
+
+    def test_profession_reaches_the_shorter_service_name(self, salon: dict) -> None:
+        """Defect 2 in isolation: «массажист» is LONGER than «Массаж».
+
+        The old match asked whether the stored name contains the user's word,
+        so «масс» found «Массаж» and «массажист» did not. Both directions work
+        now, via a bounded prefix rather than a morphological analyser.
+        """
+        assert {c.name for c in discover_masters(specialization="масс")} == {
+            "Спортивный мастер",
+            "Классический мастер",
+        }
+        assert {c.name for c in discover_masters(specialization="массажистка")} == {
+            "Спортивный мастер",
+            "Классический мастер",
+        }
+
+    def test_precision_survives_as_ranking(self, salon: dict) -> None:
+        """OR must not flatten the result: the exact service still comes first."""
+        cards = discover_masters(specialization="спортивный массаж")
+
+        assert [c.name for c in cards] == ["Спортивный мастер", "Классический мастер"]
+
+    def test_city_token_is_routed_to_the_city_field(self, salon: dict, moscow: Tenant) -> None:
+        """«пензе» narrows by city — it is not searched for in service names.
+
+        A Moscow master offering the same service must not answer a Penza
+        query, and the city half of «покажи массажистов в пензе» is the only
+        thing that can tell them apart.
+        """
+        moscow_master = _master(moscow, "Московский мастер", specialization="")
+        _link(moscow, moscow_master, _service(moscow, "Спортивный массаж", slug="msk-sport"))
+
+        names = {c.name for c in discover_masters(specialization="массаж в пензе")}
+
+        assert names == {"Спортивный мастер", "Классический мастер"}
+        assert "Московский мастер" not in names
+
+    def test_city_alone_is_an_answerable_request(self, salon: dict) -> None:
+        """«мастера в пензе» names no service — that is not a failed parse.
+
+        Every token here is either filler or a city, which before DRF-1283
+        left an empty token list and the fail-closed ``qs.none()``: an honest
+        request answered with «никого не нашлось».
+        """
+        names = {c.name for c in discover_masters(specialization="мастера в пензе")}
+
+        assert names == {"Спортивный мастер", "Классический мастер", "Ногтевой мастер"}
+
+    def test_a_service_the_salon_does_not_offer_still_returns_nothing(self, salon: dict) -> None:
+        """The control: widening must not turn into answering everything."""
+        assert discover_masters(specialization="наращивание ресниц в пензе") == []
+        assert discover_masters(specialization="хочу криолиполиз") == []
+
+    def test_unrelated_service_is_not_dragged_in_by_a_stray_token(self, salon: dict) -> None:
+        """The nail master shares «в пензе» with the query but no service word."""
+        names = {c.name for c in discover_masters(specialization="покажи массажистов в пензе")}
+
+        assert "Ногтевой мастер" not in names
+
+    def test_untokenizable_query_still_fails_closed(self, salon: dict) -> None:
+        """OR widens matching; it must not weaken the degenerate-query guard."""
+        assert discover_masters(specialization="я") == []
+        assert discover_masters(specialization="😀") == []
 
 
 class TestGreetingIsStrippedAsAPhrase:

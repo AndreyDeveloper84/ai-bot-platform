@@ -185,15 +185,28 @@ def test_master_is_reachable_without_any_specialization_text(
 def test_genuinely_absent_service_still_falls_back(
     monkeypatch, penza_massage_salon: CatalogMaster
 ) -> None:
-    """The fallback must still fire on a real zero — the fix must not make
-    discovery answer everything."""
+    """A real zero must still refuse — the fix must not answer everything.
+
+    DRF-1283 changed WHAT the refusal says, not whether it fires. The old line
+    asked the client to «уточните город или услугу» after they had named both,
+    which reads as «я вас не понял» — a worse failure than the missing result,
+    because it denies understanding a sentence we understood. The refusal now
+    names back what was searched for and asks only for what was not given.
+    """
     reply = _run_turn(
         monkeypatch,
         tool_args={"city": "Пенза", "specialization": "наращивание ресниц"},
     )
 
-    assert _ZERO_RESULT_FALLBACK in reply.text
     assert reply.action_data is None
+    # Refuses…
+    assert "Массажист Пилот" not in reply.text
+    # …while showing the request was understood, both halves of it.
+    assert "наращивание ресниц" in reply.text
+    assert "Пенза" in reply.text
+    # …and without asking for what the client already said.
+    assert _ZERO_RESULT_FALLBACK not in reply.text
+    assert "уточните город или услугу" not in reply.text
 
 
 def test_wrong_city_still_falls_back(monkeypatch, penza_massage_salon: CatalogMaster) -> None:
@@ -202,4 +215,19 @@ def test_wrong_city_still_falls_back(monkeypatch, penza_massage_salon: CatalogMa
         tool_args={"city": "Москва", "specialization": "спортивный массаж"},
     )
 
-    assert _ZERO_RESULT_FALLBACK in reply.text
+    assert "Массажист Пилот" not in reply.text
+    assert "Москва" in reply.text
+    assert _ZERO_RESULT_FALLBACK not in reply.text
+
+
+def test_no_criteria_at_all_still_gets_the_generic_line(
+    monkeypatch, penza_massage_salon: CatalogMaster
+) -> None:
+    """The old wording survives for the one case it is right for.
+
+    With neither half named there is nothing to acknowledge, so asking for the
+    city AND the service is the honest question rather than a deaf one.
+    """
+    from apps.orchestrator.discovery import render_no_match
+
+    assert _ZERO_RESULT_FALLBACK in render_no_match().text
