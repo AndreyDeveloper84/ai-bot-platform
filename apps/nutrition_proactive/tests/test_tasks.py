@@ -340,6 +340,85 @@ class TestQuotaAndAutoDisable:
         assert decision.pref_updates["water"]["ignored_streak"] == 0
 
 
+class TestOutboundSafety:
+    """The report passes Ayla's ``ai_comment`` through verbatim, and that
+    sentence is written by a model nothing on our side reviewed. A proactive
+    message is the worst place for it to land unchecked: the person asked
+    nothing, so they have no reason to read it sceptically.
+    """
+
+    def _reader_with_comment(self, comment: str):
+        summary = SummaryResponse(
+            date="2026-08-23",
+            calories_total=1500.0,
+            calories_goal=1900,
+            protein_g=80.0,
+            fat_g=55.0,
+            carbs_g=160.0,
+            entries=[{"id": 1}],
+            raw={},
+            ai_comment=comment,
+        )
+        water = WaterTodayResponse(total_ml=1200, norm_ml=2000, entries=[])
+        return lambda _ext: (summary, water, None)
+
+    def test_a_medical_claim_from_ayla_stops_the_send(self, tenant: Tenant) -> None:
+        user = make_user(tenant, report="19:00")
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19),
+            fetch=self._reader_with_comment("У вас аллергия на глютен, примите антибиотик."),
+        )
+        decision = only(decisions, user)
+        assert decision.send is False
+        assert decision.reason.startswith("outbound_safety")
+
+    def test_a_blocked_report_is_dropped_not_replaced(self, tenant: Tenant) -> None:
+        """The pipeline swaps in «тут нужен человек» because someone is
+        waiting for an answer. Unsolicited, that line is a non-sequitur —
+        silence is the correct outcome."""
+        from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT
+
+        make_user(tenant, report="19:00")
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19),
+            fetch=self._reader_with_comment("Гарантирую результат, вернём деньги."),
+        )
+        assert all(REPLACEMENT_TEXT not in d.text for d in decisions)
+        assert all(d.send is False for d in decisions)
+
+    def test_a_blocked_report_does_not_burn_the_day(self, tenant: Tenant) -> None:
+        """No idempotency bump — tomorrow's report is a different text and
+        deserves its own evaluation."""
+        user = make_user(tenant, report="19:00")
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19),
+            fetch=self._reader_with_comment("У вас инфекция."),
+        )
+        assert only(decisions, user).pref_updates == {}
+
+    def test_a_clean_comment_goes_through(self, tenant: Tenant) -> None:
+        user = make_user(tenant, report="19:00")
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19),
+            fetch=self._reader_with_comment("Сегодня в рационе много овощей."),
+        )
+        decision = only(decisions, user)
+        assert decision.send is True
+        assert "много овощей" in decision.text
+
+    def test_our_own_copy_passes_the_gate(self, tenant: Tenant) -> None:
+        """Regression guard on the copy this module writes: if a future
+        edit puts a blocked shape into the report or the nudge, this fails
+        here rather than going silent on the pilot."""
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        make_user(tenant, report="19:00")
+        report = tasks.plan_daily_reports(now_utc=at_msk(19), fetch=summary_reader())
+        water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(50))
+        for decision in [d for d in report + water if d.send]:
+            assert evaluate_outbound(decision.text).allowed is True
+
+
 class TestSwitches:
     def test_disabled_task_touches_nothing(self, tenant: Tenant, settings) -> None:
         make_user(tenant)

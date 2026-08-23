@@ -11,45 +11,49 @@ Pure functions, no database.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any
+
 import pytest
 
 from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
 from apps.nutrition_proactive import render
 
 
-def profile(**overrides) -> ProfileResponse:
-    base = dict(
-        gender="female",
-        age=32,
-        height_cm=168,
-        weight_kg=64,
-        goal="lose",
-        daily_kcal=1900,
-        protein_g=95,
-        fat_g=60,
-        carbs_g=210,
-        water_ml=2000,
-        bmr=1400,
-        health_flags={},
-        disclaimer_acked=None,
-    )
-    base.update(overrides)
-    return ProfileResponse(**base)
+_BASE_PROFILE = ProfileResponse(
+    gender="female",
+    age=32,
+    height_cm=168,
+    weight_kg=64,
+    goal="lose",
+    daily_kcal=1900,
+    protein_g=95,
+    fat_g=60,
+    carbs_g=210,
+    water_ml=2000,
+    bmr=1400,
+    health_flags={},
+    disclaimer_acked=None,
+)
+
+_BASE_SUMMARY = SummaryResponse(
+    date="2026-08-23",
+    calories_total=1500.0,
+    calories_goal=1900,
+    protein_g=80.0,
+    fat_g=55.0,
+    carbs_g=160.0,
+    entries=[{"id": 1}],
+    raw={},
+)
 
 
-def summary(**overrides) -> SummaryResponse:
-    base = dict(
-        date="2026-08-23",
-        calories_total=1500.0,
-        calories_goal=1900,
-        protein_g=80.0,
-        fat_g=55.0,
-        carbs_g=160.0,
-        entries=[{"id": 1}],
-        raw={},
-    )
-    base.update(overrides)
-    return SummaryResponse(**base)
+def profile(**overrides: Any) -> ProfileResponse:
+    return replace(_BASE_PROFILE, **overrides)
+
+
+def summary(**overrides: Any) -> SummaryResponse:
+    return replace(_BASE_SUMMARY, **overrides)
 
 
 def water(total_ml: int = 1600, norm_ml: int = 2000) -> WaterTodayResponse:
