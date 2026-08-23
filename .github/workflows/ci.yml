@@ -609,6 +609,40 @@ jobs:
         working-directory: apps/miniapp
         run: npx vitest run
 
+      # DRF-1257 — the step this job was missing. Until now nothing in any
+      # pipeline ever ran the bundler: `tsc --noEmit` type-checks, and vitest
+      # puts modules through Vite's *dev* transform. Neither one is
+      # `vite build`. A change can be green on both and still fail to build —
+      # an unresolvable asset URL, a bad dynamic import, a CSS `@import` only
+      # the production extractor sees. That failure would then be found by
+      # hand on the pilot, at the moment someone was trying to publish, which
+      # is the worst possible time to find it.
+      #
+      # `npm run build` is deliberately NOT used: it is `tsc --noEmit && vite
+      # build`, and the typecheck already ran as its own step above. Invoking
+      # the bundler directly keeps one failure per step, so a red X names the
+      # thing that actually broke.
+      - name: vite build (the production bundle must actually build)
+        if: steps.detect.outputs.run_fe == 'true'
+        working-directory: apps/miniapp
+        run: npx vite build
+
+      # The artefact is the point, not a by-product. `apps/miniapp/dist` is
+      # gitignored and the pilot builds its own copy, so without this upload a
+      # green build leaves nothing behind: no way to inspect what a commit
+      # produces, and no known-good bundle to compare against when a build on
+      # the host misbehaves. Sourcemaps ride along on purpose — they are what
+      # tools/ci/miniapp_bundle_drift.py reads to prove which sources a served
+      # bundle was built from.
+      - name: Upload dist artefact
+        if: steps.detect.outputs.run_fe == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: miniapp-dist-${{ github.sha }}
+          path: apps/miniapp/dist
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Skipped — apps/miniapp untouched
         if: steps.detect.outputs.run_fe != 'true'
         run: echo "✓ No apps/miniapp/** changes in this ref. Front-end checks not needed; reporting success so branch protection is satisfied."
