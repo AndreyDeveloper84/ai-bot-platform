@@ -96,3 +96,22 @@ repos:
         # stale-baseline check to be accurate (partial scans skip it).
         files: ^apps/.*\.py$
         pass_filenames: false
+
+      # Consent-column direct-read guard (DRF-1314). `BotUser.consent_at`
+      # is a denormalised stamp; `consent.services.withdraw()` marks the
+      # ConsentRecord and deliberately leaves the column set, so the
+      # column says "ever consented", never "may we write to them".
+      # Three surfaces derived a proactive-messaging permission from it;
+      # on the pilot, four of the five stamped rows had withdrawn. Reads
+      # are refused outside the shared gate
+      # (`apps/notifications/proactive.py`), the two stamping sites and
+      # the operator census. See `tools/lint/consent_column_guard.py`
+      # for the allowlist and the documented limitations.
+      - id: consent-column-guard
+        name: Consent-column direct-read guard (AST lint)
+        entry: python tools/lint/consent_column_guard.py apps/
+        language: system
+        # Whole-`apps/` scan (own globbing) — `pass_filenames` off, same
+        # as the two guards above.
+        files: ^apps/.*\.py$
+        pass_filenames: false
