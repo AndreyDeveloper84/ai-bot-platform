@@ -46,7 +46,7 @@ from django.conf import settings as dj_settings
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.services import resolve_or_create_global_bot_user
-from apps.marketplace.discovery import ParsedQuery, parse_query
+from apps.marketplace.discovery import parse_query, parse_stems, query_stems
 from apps.marketplace.dto import MasterCard
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
@@ -137,32 +137,63 @@ def _buttons(reply: DiscoveryReply) -> list[dict[str, str]]:
 class TestQueryRefCodec:
     """The callback has to carry the request across a wire of unknown rules."""
 
-    def test_round_trips_stems(self) -> None:
-        parsed = parse_query("запиши на лимфодренаж?")
-        assert parsed.stems == ["лимфод"]
-        assert decode_query_ref(encode_query_ref(parsed)).stems == ["лимфод"]
+    def test_round_trips_the_stems(self) -> None:
+        assert decode_query_ref(encode_query_ref("запиши на лимфодренаж?")) == ["лимфод"]
 
-    def test_round_trips_goals(self, sazonova: tuple) -> None:
-        parsed = parse_query("хочу расслабиться")
-        assert parsed.goals == ["relax"]
-        assert decode_query_ref(encode_query_ref(parsed)).goals == ["relax"]
+    def test_encoding_reads_no_catalog(self, django_assert_num_queries) -> None:
+        """The renderer that calls this is a pure function of its DTOs — three
+        suites render cards with no database at all. A querying encoder would
+        break every one of them, and that would be a layering error, not a
+        test problem."""
+        with django_assert_num_queries(0):
+            assert encode_query_ref("хочу расслабиться в пензе")
 
     def test_the_ref_is_ascii_and_colon_free(self) -> None:
         """Every existing ``cb:`` payload is hex. A Cyrillic one would be the
         first on the wire and is not something to discover on a live pilot —
         and a ``:`` inside it would break the handler's colon split."""
-        ref = encode_query_ref(parse_query("хочу лимфодренаж и массаж спины"))
+        ref = encode_query_ref("хочу лимфодренаж и массаж спины")
         assert ref
         assert ref.isascii() and ":" not in ref and "=" not in ref
 
     def test_nothing_to_carry_encodes_to_nothing(self) -> None:
-        assert encode_query_ref(ParsedQuery(stems=[], cities=["Пенза"], goals=[])) == ""
+        assert encode_query_ref("") == ""
+        assert encode_query_ref("   ") == ""
 
-    @pytest.mark.parametrize("ref", ["", "   ", "!!!!", "____", "x" * 200, "Zm9v"])
+    @pytest.mark.parametrize("ref", ["", "   ", "!!!!", "____", "x" * 200])
     def test_garbage_decodes_to_do_not_narrow(self, ref: str) -> None:
         """A forged, truncated or stale ref must degrade to the full menu —
         never to an empty one, and never to somebody else's service."""
-        assert decode_query_ref(ref).is_empty
+        assert decode_query_ref(ref) == []
+
+    def test_a_hand_written_payload_is_bounded(self) -> None:
+        """The tokenizer caps stems at five; a decoder must cap what it
+        ACCEPTS on its own, because a payload is not obliged to have come from
+        the encoder."""
+        import base64
+
+        forged = base64.urlsafe_b64encode(b",".join([b"aaaaaa"] * 40)).decode().rstrip("=")
+        assert len(decode_query_ref(forged)) <= 5
+
+
+class TestTheCatalogHalfRunsAtTheTap:
+    """`query_stems` is pure; `parse_stems` is where the catalog gets a say."""
+
+    def test_stems_alone_carry_no_city_knowledge(self) -> None:
+        assert query_stems("хочу расслабиться в пензе") == ["рассла", "пензе"]
+
+    def test_the_tap_splits_the_city_and_recognises_the_goal(self, sazonova: tuple) -> None:
+        parsed = parse_stems(query_stems("хочу расслабиться в пензе"))
+        assert parsed.goals == ["relax"]
+        assert parsed.cities == ["Пенза"]
+        assert parsed.stems == []
+
+    def test_recognition_off_a_stem_equals_recognition_off_the_word(self, sazonova: tuple) -> None:
+        """Stems are cut to the same width the goal comparison cuts to, so a
+        request read off a button must mean what it meant when it produced the
+        card."""
+        for raw in ["хочу расслабиться", "запиши на лимфодренаж?", "снятие отёков"]:
+            assert parse_stems(query_stems(raw)) == parse_query(raw)
 
 
 class TestTheCardCarriesTheRequest:
@@ -189,7 +220,7 @@ class TestTheCardCarriesTheRequest:
         parts = payload[len(CALLBACK_DISCOVER_BOOK_PREFIX) :].split(":")
         assert len(parts) == 4
         assert parts[2] == ""
-        assert decode_query_ref(parts[3]).stems == ["лимфод"]
+        assert decode_query_ref(parts[3]) == ["лимфод"]
 
     def test_a_card_without_a_query_keeps_the_old_shape(self, sazonova: tuple) -> None:
         tenant, master = sazonova
@@ -223,7 +254,7 @@ class TestTheMenuIsTheMenuOfTheRequest:
     ) -> None:
         """The owner's proof, verbatim: лимфодренаж present, детский absent."""
         tenant, master = sazonova
-        ref = encode_query_ref(parse_query("запиши на лимфодренаж?"))
+        ref = encode_query_ref("запиши на лимфодренаж?")
         reply = self._tap(tenant, master, monkeypatch, ref=ref)
 
         assert _lines(reply) == [
@@ -242,14 +273,14 @@ class TestTheMenuIsTheMenuOfTheRequest:
         """«Показаны первые N услуг» under a FILTERED list would claim the
         master has N services. Two different statements; only one is true."""
         tenant, master = sazonova
-        ref = encode_query_ref(parse_query("запиши на лимфодренаж?"))
+        ref = encode_query_ref("запиши на лимфодренаж?")
         reply = self._tap(tenant, master, monkeypatch, ref=ref)
         assert "Показаны услуги по вашему запросу" in reply.text
         assert "Показаны первые" not in reply.text
 
     def test_a_goal_request_narrows_the_menu_too(self, sazonova: tuple, monkeypatch) -> None:
         tenant, master = sazonova
-        ref = encode_query_ref(parse_query("хочу расслабиться"))
+        ref = encode_query_ref("хочу расслабиться")
         reply = self._tap(tenant, master, monkeypatch, ref=ref)
         assert _lines(reply) == ["Классический массаж"]
 
@@ -270,7 +301,7 @@ class TestTheMenuIsTheMenuOfTheRequest:
         strand the tap on an empty menu. The full roster is a worse answer than
         the narrowed one and a far better answer than none."""
         tenant, master = sazonova
-        ref = encode_query_ref(ParsedQuery(stems=["маникю"], cities=[], goals=[]))
+        ref = encode_query_ref("маникюр")
         reply = self._tap(tenant, master, monkeypatch, ref=ref)
         assert _lines(reply) == sorted(_ROSTER)[:10]
         assert "Показаны услуги по вашему запросу" not in reply.text
@@ -279,7 +310,7 @@ class TestTheMenuIsTheMenuOfTheRequest:
         """Each button re-enters the handoff with a resolved service id, so the
         next tap dispatches booking instead of landing back on this reply."""
         tenant, master = sazonova
-        ref = encode_query_ref(parse_query("запиши на лимфодренаж?"))
+        ref = encode_query_ref("запиши на лимфодренаж?")
         reply = self._tap(tenant, master, monkeypatch, ref=ref)
         for button in _buttons(reply):
             prefix, _, rest = button["callback"].partition(CALLBACK_DISCOVER_BOOK_PREFIX)

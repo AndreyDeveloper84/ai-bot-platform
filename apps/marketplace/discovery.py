@@ -553,17 +553,56 @@ def _parse_query(raw: str) -> ParsedQuery:
 def parse_query(raw: str) -> ParsedQuery:
     """Public wrapper over :func:`_parse_query` for callers OUTSIDE matching.
 
-    The reply renderer needs the parse to stamp the query onto a card's
-    booking callback (DRF-1324), so the master's service menu behind the tap
-    can be narrowed by the SAME request that surfaced the master. It must not
-    re-derive that parse with its own rules, hence one exported entry point
-    rather than a second copy of the tokenizer.
-
-    Costs the two small vocabulary reads (:func:`_known_cities`,
-    :func:`_known_goals`); callers already inside this module use the private
-    form and pay them once per search.
+    One exported entry point rather than a second copy of the rule. Costs the
+    two small vocabulary reads (:func:`_known_cities`, :func:`_known_goals`);
+    callers already inside this module use the private form and pay them once
+    per search.
     """
     return _parse_query(raw)
+
+
+def query_stems(raw: str) -> list[str]:
+    """The stem list of a query, WITHOUT reading the catalog (DRF-1324).
+
+    Half of :func:`_parse_query` — the pure half. City recognition and goal
+    recognition both need the catalog, so they are deliberately absent, and a
+    city token therefore survives into the list here.
+
+    This exists for the card's booking callback. The reply renderer is a pure
+    function of the DTOs it is handed — three suites render cards with no
+    database at all, and a renderer that queried would be a layering error,
+    not a test problem. So the button carries the stems and the catalog-aware
+    half runs at the TAP (:func:`parse_stems`), which is already inside a
+    database context.
+
+    A surviving city token is harmless to the name filter it would feed: an
+    extra term in an OR that matches no service name adds nothing.
+    :func:`parse_stems` strips it properly anyway.
+    """
+    return [t[:_STEM_LEN] for t in _query_tokens(raw)]
+
+
+def parse_stems(stems: list[str]) -> ParsedQuery:
+    """Apply the catalog-aware half of the parse to stems carried on a callback.
+
+    The counterpart of :func:`query_stems`, and the SAME two steps
+    :func:`_parse_query` runs in the same order — city split first, then goal
+    recognition on what is left — so a request read off a button means exactly
+    what it meant when it produced the card. Not a second copy of the rule:
+    both call the same two functions.
+
+    Stems are already cut to ``_STEM_LEN``, which is what the goal comparison
+    cuts to anyway, so recognition off a stem is identical to recognition off
+    the whole word.
+    """
+    stems = [s for s in stems if s]
+    if not stems:
+        return ParsedQuery(stems=[], cities=[], goals=[])
+    service_stems, cities = _split_known_cities(stems)
+    goal_keys = _match_goal_keys(service_stems)
+    if goal_keys:
+        return ParsedQuery(stems=[], cities=cities, goals=goal_keys)
+    return ParsedQuery(stems=service_stems, cities=cities, goals=[])
 
 
 def _trim_filler_edges(part: str) -> str:

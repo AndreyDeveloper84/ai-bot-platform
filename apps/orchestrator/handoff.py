@@ -27,7 +27,11 @@ import uuid
 from django.conf import settings
 
 from apps.events.services import emit
-from apps.marketplace.discovery import service_rows_match_q, service_rows_score
+from apps.marketplace.discovery import (
+    parse_stems,
+    service_rows_match_q,
+    service_rows_score,
+)
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
@@ -373,7 +377,13 @@ def handoff_to_booking(
                 # callback is from an old render — and answering with an empty
                 # menu would strand the tap. Falling back to the full roster is
                 # the pre-DRF-1324 answer, which is worse but never a dead end.
-                parsed = decode_query_ref(query_ref)
+                # ``parse_stems`` is the catalog-aware half of the search's
+                # own parse — city split, then goal recognition — run HERE
+                # rather than at render time, because it reads the catalog and
+                # rendering must not. Same functions, same order, so a request
+                # read off a button means what it meant when it produced the
+                # card.
+                parsed = parse_stems(decode_query_ref(query_ref))
                 if not parsed.is_empty:
                     narrowed = menu_qs.filter(service_rows_match_q(parsed))
                     score = service_rows_score(parsed)
