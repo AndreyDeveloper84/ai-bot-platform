@@ -1383,6 +1383,16 @@ GLOBAL_BOT_ONBOARDING = os.environ.get("GLOBAL_BOT_ONBOARDING", "false").lower()
 # services are not even called. The concierge dialog itself keeps working.
 CONCIERGE_MEMORY_ENABLED = os.environ.get("CONCIERGE_MEMORY_ENABLED", "true").lower() == "true"
 
+# DRF-1266 (slice 1, multi-pass concierge) — cap on LLM passes per concierge
+# turn. Pass 1 is the primary call; each further pass feeds the executed
+# tool's result back as a plain user message (NO tool protocol — the
+# Anthropic adapter in ayla-ai-core does not assemble role="tool" blocks,
+# so a classic tool loop would silently break when an operator flips
+# SKILL_LLM_PROVIDER). Default 2 = primary call + one tool-data pass.
+# Set "1" to restore the pre-DRF-1266 single-pass behaviour exactly
+# (rollback without a deploy). Values < 1 clamp to 1.
+CONCIERGE_MAX_LLM_PASSES = int(os.environ.get("CONCIERGE_MAX_LLM_PASSES", "2"))
+
 # DRF-963 (Wave 1, variant A) — rollback switch for the pilot conversational
 # UX. Default ON (the feature ships enabled); set "false" to roll back WITHOUT
 # a deploy. OFF restores the pre-DRF-963 behaviour exactly:
