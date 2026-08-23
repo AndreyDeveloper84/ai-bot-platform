@@ -361,8 +361,8 @@ class TestConciergePartialCoverage:
             turn="массаж и маникюр",
         )
 
-        assert "нет" not in reply.text.lower() or "Архипкин" in reply.text
         assert "такой услуги" not in reply.text
+        assert "таких услуг" not in reply.text
         assert provider.complete.await_count == 2
 
     def test_neither_offered_keeps_the_zero_result_path(
