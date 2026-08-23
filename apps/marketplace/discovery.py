@@ -24,8 +24,9 @@ from django.db.models import Case, F, IntegerField, Max, Q, QuerySet, Value, Whe
 from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Coalesce
 
-from apps.catalog.models import CatalogMaster
-from apps.marketplace.dto import MasterCard
+from apps.catalog.models import CatalogMaster, CatalogService
+from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
+from apps.tenancy.models import Tenant
 
 # Cap to keep a discovery call bounded; callers paginate by re-querying with
 # a tighter filter for now (cursor pagination lands with the HTTP surface).
@@ -639,6 +640,176 @@ def get_master(master_id: UUID) -> MasterCard | None:
     """
     master = _bookable_qs().filter(id=master_id).first()
     return _to_card(master) if master is not None else None
+
+
+# ─── DRF-1304: salons & services on the discovery surface ────────────────────
+#
+# The concierge could show masters (``show_masters``) but had no tool for the
+# two questions the live owner actually asked on 23.08: «какие салоны у нас
+# есть?» and «что у вас есть по лицу». These two readers answer them from the
+# same mirror and the same bookable predicate as master discovery — a salon is
+# a tenant with at least one bookable master, a service is an ACTIVE mirror row
+# of such a tenant. Nothing here invents data: an empty result is the honest
+# answer, and missing fields (address, price, duration) stay missing.
+#
+# Deliberately NOT grouped by the canonical service template: the pilot
+# salon's canonical coverage is 0 of 58 rows (35 of 36 for the loaded salons)
+# and the template link has no mirror column — it rides in
+# ``CatalogService.raw`` at best. A canonical grouping would silently show a
+# fraction of the catalog; a flat list shows it all.
+
+# How many service names ride a salon card as the «что там делают» sample.
+_SALON_SERVICE_SAMPLES = 3
+
+
+def _bookable_tenants(*, city: str | None = None) -> dict[UUID, Tenant]:
+    """Active tenants having at least one bookable master, keyed by id.
+
+    ``order_by()`` clears the master ordering before DISTINCT — Postgres
+    rejects SELECT DISTINCT whose ORDER BY columns are not in the select list.
+    """
+    tenant_ids = _bookable_qs(city=city).order_by().values_list("tenant_id", flat=True).distinct()
+    return {t.id: t for t in Tenant.objects.filter(id__in=tenant_ids)}
+
+
+def _master_address(master: CatalogMaster) -> str:
+    """The salon address as mirrored on a master row, or "".
+
+    The address is per-master, not per-tenant: ``Tenant`` has no address
+    column — the Ayla specialists feed carries it in the specialist payload,
+    mirrored into ``CatalogMaster.raw``. Four of the pilot's masters carry
+    none, so "" is a normal value, not an error.
+    """
+    raw = master.raw
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("address") or "").strip()
+
+
+def discover_salons(*, city: str | None = None, limit: int = _DEFAULT_LIMIT) -> list[SalonCard]:
+    """Return salons (tenants with bookable masters) as public DTOs.
+
+    Optional ``city`` (exact, case-insensitive, on the tenant) narrows the
+    result — same semantics as :func:`discover_masters`. Each card carries
+    the salon's address (first non-empty one among its bookable masters —
+    "" when none of them has one), its bookable-master count, and a count +
+    short sample of its active services («что там делают»). Three bounded
+    queries total: masters, tenants, service names.
+    """
+    limit = max(1, min(limit, _MAX_LIMIT))
+    masters = list(_bookable_qs(city=city))
+    if not masters:
+        return []
+    masters_by_tenant: dict[UUID, list[CatalogMaster]] = {}
+    for master in masters:
+        masters_by_tenant.setdefault(master.tenant_id, []).append(master)
+    tenants = _bookable_tenants(city=city)
+    service_rows = (
+        CatalogService.all_tenants.filter(tenant_id__in=tenants, is_active=True)
+        .order_by("name")
+        .values_list("tenant_id", "name")
+    )
+    services_by_tenant: dict[UUID, list[str]] = {}
+    for tenant_id, service_name in service_rows:
+        services_by_tenant.setdefault(tenant_id, []).append(service_name)
+
+    cards: list[SalonCard] = []
+    for tenant_id, tenant in sorted(tenants.items(), key=lambda kv: (kv[1].name, str(kv[0]))):
+        salon_masters = masters_by_tenant.get(tenant_id, [])
+        if not salon_masters:
+            continue  # inactive tenant — its masters are not a public salon
+        address = next((a for a in (_master_address(m) for m in salon_masters) if a), "")
+        service_names = services_by_tenant.get(tenant_id, [])
+        cards.append(
+            SalonCard(
+                tenant_id=tenant_id,
+                name=tenant.name,
+                city=tenant.city,
+                address=address,
+                master_count=len(salon_masters),
+                service_count=len(service_names),
+                sample_services=tuple(service_names[:_SALON_SERVICE_SAMPLES]),
+            )
+        )
+        if len(cards) >= limit:
+            break
+    return cards
+
+
+def discover_services(
+    *,
+    salon: str | None = None,
+    city: str | None = None,
+    query: str | None = None,
+    limit: int = _DEFAULT_LIMIT,
+) -> list[ServiceCard]:
+    """Return active services of salons on the platform, as public DTOs.
+
+    Filters (all optional, AND-ed): ``salon`` — substring of the tenant name;
+    ``city`` — exact, case-insensitive, on the tenant; ``query`` — free text
+    matched against service names through the same stem machinery as master
+    discovery (:func:`_parse_query`): tokens OR-ed, ranked by how many stems
+    one name matched, and a token naming a city we serve routes to the city
+    filter, so «массаж в пензе» works here exactly as it does for masters.
+    An untokenizable query fails CLOSED (empty list) rather than dropping the
+    filter — same posture as ``_bookable_qs``.
+
+    Only services of tenants with at least one bookable master are shown:
+    a salon no client can book at is not on the surface.
+    """
+    limit = max(1, min(limit, _MAX_LIMIT))
+    bookable_tenant_ids = _bookable_qs().order_by().values_list("tenant_id", flat=True).distinct()
+    qs = CatalogService.all_tenants.filter(
+        is_active=True,
+        tenant__is_active=True,
+        tenant_id__in=bookable_tenant_ids,
+    ).select_related("tenant")
+
+    salon = (salon or "").strip()
+    city = (city or "").strip()
+    query = (query or "").strip()
+    if salon:
+        qs = qs.filter(tenant__name__icontains=salon)
+    if city:
+        qs = qs.filter(tenant__city__iexact=city)
+
+    order: tuple[str, ...] = ("tenant__name", "name", "id")
+    if query:
+        stems, named_cities = _parse_query(query)
+        if not stems and not named_cities:
+            return []
+        if named_cities and not city:
+            qs = qs.filter(tenant__city__in=named_cities)
+        if stems:
+            any_stem = Q()
+            # No join multiplication here (the tenant join is many-to-one and
+            # the filter binds the row's own name), so a plain per-row CASE
+            # sum ranks — MAX-over-rows is the master-side requirement only.
+            score: Case | CombinedExpression | None = None
+            for stem in stems:
+                cond = Q(name__icontains=stem)
+                any_stem |= cond
+                term = Case(
+                    When(cond, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+                score = term if score is None else score + term
+            qs = qs.filter(any_stem).annotate(match_score=score)
+            order = ("-match_score", "name", "id")
+    rows = qs.order_by(*order)[:limit]
+    return [
+        ServiceCard(
+            tenant_id=service.tenant_id,
+            service_id=service.id,
+            name=service.name,
+            price_from=service.price_from,
+            duration_min=service.duration_min,
+            salon_name=service.tenant.name,
+            city=service.tenant.city,
+        )
+        for service in rows
+    ]
 
 
 def _to_card(master: CatalogMaster) -> MasterCard:
