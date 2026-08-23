@@ -6,7 +6,9 @@ bot-platform's OWN LLM runtime (``apps.llm.router``) — the same mechanism the
 per-tenant skills use. Since W5 (pilot 2026-08-15) the concierge DM itself
 runs on ayla-ai-core's ``AIConcierge`` — see
 :mod:`apps.orchestrator.concierge`. This module keeps the shared building
-blocks (prompt builder, ``SHOW_MASTERS_TOOL_SPEC``, card renderer) plus the
+blocks (prompt builder, ``SHOW_MASTERS_TOOL_SPEC`` — joined by
+``SHOW_SALONS_TOOL_SPEC`` / ``SHOW_SERVICES_TOOL_SPEC`` and their deterministic
+executor since DRF-1304 — and the card renderers) plus the
 hand-rolled reply generator as the tested fallback.
 
 Tenant-independent by construction: ``get_provider(None, ...)`` short-circuits
@@ -31,8 +33,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from apps.llm.router import get_router
-from apps.marketplace.discovery import discover_masters
-from apps.marketplace.dto import MasterCard
+from apps.marketplace.discovery import discover_masters, discover_salons, discover_services
+from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.orchestrator.llm.templates import get_fallback
 from apps.persona.memory_surface import render_personal_context
 
@@ -46,6 +48,8 @@ DISCOVERY_SKILL = "discovery"
 
 _MAX_REPLY_CHARS = 600
 _MAX_MASTER_CARDS = 5
+_MAX_SALON_CARDS = 8
+_MAX_SERVICE_CARDS = 8
 
 # Callback prefix for the discovery → booking handoff button (#1020). Carries
 # the PUBLIC ids from the MasterCard DTO:
@@ -88,6 +92,72 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
         "required": [],
     },
 }
+
+# OpenAI-shaped function specs (DRF-1304) — the two questions the concierge
+# could not answer on the live pilot (23.08: «какие салоны у нас есть?» met
+# silence, while the mirror held 6 tenants / 9 masters / 94 services). Same
+# flat shape as SHOW_MASTERS_TOOL_SPEC; executed through the same sanctioned
+# marketplace carve-out, which is now the sole cross-tenant reader for salons
+# (discover_salons) and services (discover_services) too.
+SHOW_SALONS_TOOL_SPEC: dict[str, Any] = {
+    "name": "show_salons",
+    "description": (
+        "Показать подключённые салоны (НЕ отдельных мастеров): название, город, "
+        "адрес и что там делают. Вызывай, когда пользователь спрашивает про салоны "
+        "или адреса — «какие салоны у вас есть», «где вы находитесь», «куда можно "
+        "прийти». Город необязателен: без него перечисли все подключённые салоны "
+        "(их немного — это ответ на вопрос, а не перечисление каталога)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "Город для фильтра (необязательно)."},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": _MAX_SALON_CARDS,
+                "description": "Сколько салонов показать.",
+            },
+        },
+        "required": [],
+    },
+}
+
+SHOW_SERVICES_TOOL_SPEC: dict[str, Any] = {
+    "name": "show_services",
+    "description": (
+        "Показать услуги с ценой и длительностью. Вызывай, когда пользователь "
+        "спрашивает, что делают в конкретном салоне («какие услуги в BodyFormula»), "
+        "или ищет услугу по запросу («что у вас есть по лицу», «сколько стоит "
+        "массаж»). Нужен хотя бы один фильтр — салон, город или запрос; без них "
+        "уточняй через ask_clarification, каталог целиком не перечисляй."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "salon": {
+                "type": "string",
+                "description": "Название салона (подстрока, необязательно), e.g. 'BodyFormula'.",
+            },
+            "city": {"type": "string", "description": "Город для фильтра (необязательно)."},
+            "query": {
+                "type": "string",
+                "description": "Подстрока услуги (необязательно), e.g. 'лицо', 'массаж'.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": _MAX_SERVICE_CARDS,
+                "description": "Сколько услуг показать.",
+            },
+        },
+        "required": [],
+    },
+}
+
+#: action_type values the concierge executes deterministically — real mirror
+#: data rendered as-is, no second model pass spent on rephrasing them.
+CATALOG_TOOL_ACTIONS = frozenset({SHOW_SALONS_TOOL_SPEC["name"], SHOW_SERVICES_TOOL_SPEC["name"]})
 
 # OpenAI-shaped function spec (DRF-1102) — lets the concierge ask a clarifying
 # question AS A TOOL CALL, with tappable options, instead of the only other
@@ -319,6 +389,212 @@ def _render_master_cards(
         )
     action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
     return DiscoveryReply(text="\n".join(lines)[:_MAX_REPLY_CHARS], action_data=action_data)
+
+
+# ─── DRF-1304: salon / service card renderers + deterministic executor ──────
+#
+# No keyboards here, on purpose: the global path builds no welcome keyboard
+# (DRF-1220), and this ticket adds concierge TOOLS, not buttons. Everything
+# below renders real mirror data or says honestly that there is none — a
+# missing address/price/duration is omitted from the line, never rendered as
+# «None» and never invented.
+
+
+def render_no_salons(city: str | None = None) -> DiscoveryReply:
+    """The honest empty answer for ``show_salons`` — names the city if given."""
+    place = (city or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    if place:
+        text = (
+            f"В городе {place} подключённых салонов пока нет. Назовите другой город — проверю там."
+        )
+    else:
+        text = "Подключённых салонов пока нет."
+    return DiscoveryReply(text=text[:_MAX_REPLY_CHARS])
+
+
+def _render_salon_cards(
+    salons: list[SalonCard], *, shown: int, city: str | None = None
+) -> DiscoveryReply:
+    """Render salons: name — city, address + a short «что там делают» sample.
+
+    ``address`` may legitimately be "" (the pilot salon's masters carry none)
+    — the line simply goes without it. A salon whose mirror holds no active
+    services says «Услуги пока не загружены» instead of inventing a list.
+    """
+    if not salons:
+        return render_no_salons(city=city)
+    header = (
+        f"Вот наши салоны в городе {city.strip()[:_MAX_ECHOED_QUERY_CHARS]}:"
+        if city and city.strip()
+        else "Вот салоны, которые к нам подключены:"
+    )
+    lines = [header]
+    for card in salons[:shown]:
+        place = f" — {card.city}" if card.city else ""
+        address = f", {card.address}" if card.address else ""
+        lines.append(f"• {card.name}{place}{address}")
+        if card.sample_services:
+            more = card.service_count - len(card.sample_services)
+            tail = f" и ещё {more}" if more > 0 else ""
+            lines.append(f"  Что делают: {', '.join(card.sample_services)}{tail}.")
+        else:
+            lines.append("  Услуги пока не загружены.")
+    if len(salons) > shown:
+        lines.append("…и это не все — назовите город, покажу точнее.")
+    return DiscoveryReply(text="\n".join(lines)[:_MAX_REPLY_CHARS])
+
+
+def _format_price(price: Any) -> str:
+    """«1700» for an integral Decimal, «1700.50» otherwise — no trailing .00."""
+    return str(int(price)) if price == price.to_integral_value() else str(price.normalize())
+
+
+def render_no_services(
+    *,
+    salon: str | None = None,
+    city: str | None = None,
+    query: str | None = None,
+    salon_known: bool = False,
+) -> DiscoveryReply:
+    """The honest empty answer for ``show_services`` (DRF-1283's rule applied
+    here too: name back what WAS understood, ask only for what was not given).
+
+    ``salon_known`` separates «no such salon on the platform» from «the salon
+    is here but its service list is empty» — two different truths.
+    """
+    place = (city or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    service = (query or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    name = (salon or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    if name and not salon_known:
+        text = f"Салона «{name}» среди подключённых пока нет. Могу показать, какие салоны есть."
+    elif name:
+        text = f"В салоне «{name}» услуги пока не загружены."
+    elif service and place:
+        text = (
+            f"«{service}» в городе {place} — таких услуг у нас сейчас нет. "
+            "Назовите другую услугу или другой город, и я поищу ещё."
+        )
+    elif service:
+        text = (
+            f"«{service}» — такой услуги у нас сейчас нет. "
+            "Подскажите другую или спросите, что есть в конкретном салоне."
+        )
+    elif place:
+        text = f"В городе {place} услуг пока не нашлось. Назовите другой город — проверю там."
+    else:
+        text = "Услуги пока не загружены — попробуйте спросить про конкретный салон."
+    return DiscoveryReply(text=text[:_MAX_REPLY_CHARS])
+
+
+def _render_service_cards(
+    services: list[ServiceCard],
+    *,
+    shown: int,
+    salon: str | None = None,
+    city: str | None = None,
+    query: str | None = None,
+) -> DiscoveryReply:
+    """Render services: name — price · duration, salon named when results span
+    several.
+
+    Price renders only when the mirror carries a real one: ``price_from`` NULL
+    or 0.00 is omitted — «от 0 ₽» would read as «бесплатно» for rows whose
+    price was simply never filled (the CATALOG_NORMALIZATION В-4 concern), and
+    a missing price must not be invented. Same for ``duration_min``. Services
+    not linked to a canonical template are shown AS IS — linking covers only
+    part of the catalog (0 of 58 at the pilot salon), so a canonical grouping
+    would silently hide most of it.
+    """
+    if not services:
+        return render_no_services(salon=salon, city=city, query=query)
+    visible = services[:shown]
+    salon_names = {card.salon_name for card in visible}
+    if query and query.strip():
+        header = f"Вот что есть по «{query.strip()[:_MAX_ECHOED_QUERY_CHARS]}»:"
+    elif city and city.strip():
+        header = f"Вот услуги в городе {city.strip()[:_MAX_ECHOED_QUERY_CHARS]}:"
+    elif salon and salon.strip():
+        header = "Вот услуги этого салона:"
+    else:
+        header = "Вот услуги, которые есть:"
+    lines = [header]
+    for card in visible:
+        line = f"• {card.name}"
+        if card.price_from is not None and card.price_from > 0:
+            line += f" — от {_format_price(card.price_from)} ₽"
+        if card.duration_min:
+            line += f" · {card.duration_min} мин"
+        if len(salon_names) > 1:
+            line += f" ({card.salon_name})"
+        lines.append(line)
+    if len(services) > shown:
+        lines.append("…это не всё — уточните запрос, и я покажу точнее.")
+    return DiscoveryReply(text="\n".join(lines)[:_MAX_REPLY_CHARS])
+
+
+# BOT-003 §9 / prohibition #22 applies to services the same way it applies to
+# masters: «какие у вас услуги?» with no salon, city, or query can only be
+# answered by dumping the whole catalog — enumeration standing in for an
+# answer. The question asks for exactly the information that makes the answer
+# real.
+NO_SERVICE_CRITERIA_QUESTION = (
+    "Что именно подсказать — услуги конкретного салона или что-то по виду, "
+    "например «лицо» или «массаж»?"
+)
+
+
+def has_service_criteria(salon: str | None, city: str | None, query: str | None) -> bool:
+    """True when a ``show_services`` call carries at least one real filter."""
+    return bool((salon or "").strip() or (city or "").strip() or (query or "").strip())
+
+
+def render_no_service_criteria_clarification() -> DiscoveryReply:
+    """The canon-prescribed reply to a criteria-less ``show_services`` call."""
+    return _render_ask_clarification(NO_SERVICE_CRITERIA_QUESTION, [])
+
+
+def execute_catalog_tool(name: str, args: dict[str, Any]) -> DiscoveryReply | None:
+    """Run the marketplace read behind a model-called salon/service tool.
+
+    Deterministic, like the nutrition tools (DRF-1268): the reply is rendered
+    from real mirror data right here, so the turn's cost does not grow — no
+    second model pass rephrases it. Returns ``None`` for an unknown tool name
+    (the caller degrades to the safe line, same as today).
+    """
+    if not isinstance(args, dict):
+        args = {}
+
+    def _limit(raw: Any, default: int) -> int:
+        return min(int(raw), default) if isinstance(raw, int) and raw > 0 else default
+
+    if name == SHOW_SALONS_TOOL_SPEC["name"]:
+        city = args.get("city") or None
+        limit = _limit(args.get("limit"), _MAX_SALON_CARDS)
+        # limit+1: the «это не всё» tail must KNOW there is more, not guess it
+        # from a list that happens to fill the page.
+        salons = discover_salons(city=city, limit=limit + 1)
+        logger.info("orchestrator.discovery.show_salons count=%d", len(salons))
+        return _render_salon_cards(salons, shown=limit, city=city)
+
+    if name == SHOW_SERVICES_TOOL_SPEC["name"]:
+        salon = args.get("salon") or None
+        city = args.get("city") or None
+        query = args.get("query") or None
+        if not has_service_criteria(salon, city, query):
+            return render_no_service_criteria_clarification()
+        limit = _limit(args.get("limit"), _MAX_SERVICE_CARDS)
+        services = discover_services(salon=salon, city=city, query=query, limit=limit + 1)
+        logger.info("orchestrator.discovery.show_services count=%d", len(services))
+        if not services and salon:
+            # «No such salon» and «the salon is here but its list is empty»
+            # are different truths — check the name against the salons we
+            # actually have before choosing which one to say.
+            needle = salon.strip().casefold()
+            salon_known = any(needle in card.name.casefold() for card in discover_salons(city=city))
+            return render_no_services(salon=salon, city=city, query=query, salon_known=salon_known)
+        return _render_service_cards(services, shown=limit, salon=salon, city=city, query=query)
+
+    return None
 
 
 def _render_ask_clarification(question: str, options: list[str]) -> DiscoveryReply:
