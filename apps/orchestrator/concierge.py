@@ -604,6 +604,7 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
 def build_concierge_system_prompt(
     *,
     memory_block: str = "",
+    nutrition_block: str = "",
     extra_system: str = "",
     today: date | None = None,
 ) -> str:
@@ -611,7 +612,12 @@ def build_concierge_system_prompt(
 
     Frozen ``AYLA_MARKETPLACE_VOICE`` fields (consumed, never modified) +
     discovery framing + boundary rules (no-sales, helpful restraint, S8
-    medical boundary) + optional consent-gated memory block (W5 task 2).
+    medical boundary) + optional consent-gated memory block (W5 task 2)
+    + optional consent-gated weekly nutrition picture (DRF-1284).
+
+    ``nutrition_block`` lands AFTER the boundary rules on purpose: the
+    medical boundary must already be established when the model first
+    sees the client's protein numbers, not argued afterwards.
 
     ``today`` grounds the model in the current date (DRF-988): without it
     the model lives at its training cutoff and rejects real near-future
@@ -668,6 +674,8 @@ def build_concierge_system_prompt(
     ]
     if memory_block:
         parts.append(memory_block)
+    if nutrition_block:
+        parts.append(nutrition_block)
     if extra_system:
         parts.append(extra_system)
     return "\n\n".join(parts)
@@ -737,6 +745,7 @@ def generate_concierge_reply(
     conversation: Any,
     user_message_id: Any = None,
     memory_block: str = "",
+    nutrition_block: str = "",
     extra_system: str = "",
     trace_id: str | None = None,
 ) -> DiscoveryReply:
@@ -780,6 +789,7 @@ def generate_concierge_reply(
     def _renderer(_ctx: Any) -> str:
         return build_concierge_system_prompt(
             memory_block=memory_block,
+            nutrition_block=nutrition_block,
             extra_system=extra_system,
         )
 

@@ -177,31 +177,19 @@ class TestDataDelete:
         with tenant_scope(tenant), pytest.raises(ProtectedError):
             data_delete(bot_user)
 
-    def test_raises_protected_error_on_staff_assistant_thread(self, tenant, bot_user):
-        """DRF-1061 — the staff assistant thread joined the PROTECT wall.
+    def test_staff_assistant_thread_wiped_with_the_user(self, tenant, bot_user):
+        """DRF-1276 — the staff assistant thread no longer blocks the wipe.
 
         ``StaffAssistantThread.bot_user`` is PROTECT, deliberately
-        mirroring ``Conversation.bot_user``. Only half the mirror was
-        built: ``delete_bot_user_data`` clears the Conversations before
-        ``bot_user.delete()``, nothing clears the threads. So an employee
-        who ever wrote to the assistant cannot be wiped by this helper at
-        all — the whole cascade aborts, and the rows above it roll back
-        with it.
-
-        Pinned rather than fixed: completing the mirror changes deletion
-        behaviour, which is out of scope for step 0. Its live counterpart
-        — the customer-facing cascade, which does not abort but simply
-        never reaches these rows — is pinned in
-        ``apps/identity/services/tests/test_privacy.py``
-        (``test_staff_assistant_thread_survives_the_cascade``).
-
-        Without this test the class above goes green while saying nothing
-        about the new tables: none of its fixtures ever open a thread, so
-        "the cascade is complete" would be an assertion about absence.
+        mirroring ``Conversation.bot_user`` — and until DRF-1276 only half
+        the mirror was built: ``delete_bot_user_data`` cleared the
+        Conversations before ``bot_user.delete()``, but nothing cleared
+        the threads, so an employee who ever wrote to the assistant made
+        the whole cascade abort on ProtectedError. The threads now get the
+        same treatment: soft-delete breadcrumb, then hard delete, and the
+        messages cascade off the thread.
         """
-        from django.db.models import ProtectedError
-
-        from apps.conversations.models import StaffAssistantThread
+        from apps.conversations.models import StaffAssistantMessage, StaffAssistantThread
         from apps.conversations.staff_assistant import (
             record_staff_message,
             resolve_active_staff_thread,
@@ -212,11 +200,12 @@ class TestDataDelete:
             assert thread is not None
             record_staff_message(thread, role="user", content="во сколько я завтра")
 
-        with tenant_scope(tenant), pytest.raises(ProtectedError):
+        with tenant_scope(tenant):
             data_delete(bot_user)
 
-        # And the thread is still there — the abort is not a partial wipe.
-        assert StaffAssistantThread.all_tenants.filter(bot_user=bot_user).exists()
+        assert not StaffAssistantMessage.all_tenants.filter(thread_id=thread.id).exists()
+        assert not StaffAssistantThread.all_tenants.filter(bot_user_id=bot_user.id).exists()
+        assert not BotUser.all_tenants.filter(pk=bot_user.id).exists()
 
 
 class TestSkillHandle:

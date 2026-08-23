@@ -253,11 +253,59 @@ def check_and_consume_rate_limit(master_id: Any) -> RateLimitResult:
     return RateLimitResult(allowed=True)
 
 
+def _as_decimal(raw: Any) -> Decimal:
+    if raw is None:
+        return Decimal(0)
+    if isinstance(raw, Decimal):
+        return raw
+    return Decimal(str(raw))
+
+
+def _assistant_spend(*, tenant_id: Any, master_id: Any, since: Any) -> Decimal:
+    """What the master's chat assistant spent in the same window.
+
+    DRF-1061 step 1 added a second thing that bills to a master: the salon
+    bot's assistant, whose turns live in ``StaffAssistantMessage``. Counting
+    only drafts would have given every master two separate daily budgets
+    without anyone deciding to grant them — spend the cap on drafts, then
+    spend it again on the assistant.
+
+    The link is the person, not the master row: assistant threads belong to
+    a ``BotUser``, and the master is the catalog row that BotUser signs in
+    as. A master with nobody linked simply has no assistant spend.
+
+    Never raises. A failure here must not become a refusal to answer; the
+    draft-side total still applies.
+    """
+
+    from apps.catalog.models import CatalogMaster
+    from apps.conversations.models import StaffAssistantMessage
+
+    try:
+        bot_user_id = (
+            CatalogMaster.all_tenants.filter(pk=master_id, tenant_id=tenant_id)
+            .values_list("linked_bot_user_id", flat=True)
+            .first()
+        )
+        if not bot_user_id:
+            return Decimal(0)
+        agg = StaffAssistantMessage.all_tenants.filter(
+            tenant_id=tenant_id,
+            thread__bot_user_id=bot_user_id,
+            created_at__gte=since,
+        ).aggregate(total=Sum("llm_cost_usd"))
+        return _as_decimal(agg.get("total"))
+    except Exception:  # noqa: BLE001 — a guard that crashes is worse than one that under-counts
+        logger.exception("ai_drafts.cost_cap.assistant_spend_failed master=%s", master_id)
+        return Decimal(0)
+
+
 def check_cost_cap(master_id: Any, tenant_id: Any) -> RateLimitResult:
     """Cumulative cost guard — rejects when the master has spent ≥ cap in 24h.
 
-    Sums :attr:`AiDraft.llm_cost_usd` over the last
-    :data:`COST_WINDOW` for ``(tenant, master)``. The DB column is the
+    Sums :attr:`AiDraft.llm_cost_usd` **and** the master's
+    ``StaffAssistantMessage`` spend over the last :data:`COST_WINDOW` for
+    ``(tenant, master)`` — one budget per person, not one per feature. The DB column is the
     source of truth because:
       * It survives worker restarts (cache can be flushed).
       * It already exists on terminal drafts even after content is
@@ -294,13 +342,9 @@ def check_cost_cap(master_id: Any, tenant_id: Any) -> RateLimitResult:
         master_id=master_id,
         created_at__gte=since,
     ).aggregate(total=Sum("llm_cost_usd"))
-    total_raw = agg.get("total")
-    if total_raw is None:
-        total = Decimal(0)
-    elif isinstance(total_raw, Decimal):
-        total = total_raw
-    else:
-        total = Decimal(str(total_raw))
+    total = _as_decimal(agg.get("total")) + _assistant_spend(
+        tenant_id=tenant_id, master_id=master_id, since=since
+    )
 
     if total >= cap:
         logger.warning(

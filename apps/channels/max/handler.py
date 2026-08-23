@@ -149,6 +149,7 @@ from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
+from apps.orchestrator.nutrition_context import build_nutrition_context_block
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.orchestrator.turn_seam import (
     SURFACE_GLOBAL,
@@ -823,6 +824,34 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         "channels.max.global.memory_block_failed bot_user=%s", bot_user.id
                     )
                     memory_block = ""
+                # DRF-1284: the weekly nutrition picture (Ayla deficits
+                # aggregate). "" whenever the 152-ФЗ gate is closed
+                # (PERSONAL_DATA + HEALTH, both required — nutrition is
+                # special-category health data, not the green zone the block
+                # above rides), or Ayla is unreachable, or the week is empty.
+                # Best-effort exactly like its neighbours: this runs AFTER the
+                # idempotency key is claimed, so a raise would lose the reply
+                # on retry rather than retry it.
+                nutrition_block = ""
+                try:
+                    nutrition_block = build_nutrition_context_block(bot_user)
+                except Exception:  # noqa: BLE001 — belt-and-braces; module is fail-closed
+                    logger.exception(
+                        "channels.max.global.nutrition_context_failed bot_user=%s",
+                        bot_user.id,
+                    )
+                    nutrition_block = ""
+                if nutrition_block:
+                    # Cost attribution (DRF-1211): the block grows the prompt,
+                    # and the growth lands in AIRequestMetric.llm_tokens_input.
+                    # Without this line that growth is unattributable — the
+                    # metric row's request_id IS trace_id, so this joins the
+                    # two. Length only: the block holds health data.
+                    logger.info(
+                        "channels.max.global.nutrition_context_attached trace=%s chars=%d",
+                        trace_id,
+                        len(nutrition_block),
+                    )
                 # W5 task 1: the concierge DM runs on ayla-ai-core AIConcierge
                 # (apps.orchestrator.concierge) — history from the Message table,
                 # assistant turn persisted by its store (reply.persisted=True).
@@ -842,6 +871,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         # the skipped user-turn persistence can't leak a None here.
                         user_message_id=user_msg.id if user_msg is not None else None,
                         memory_block=memory_block,
+                        nutrition_block=nutrition_block,
                         extra_system=personal_context_block or "",
                     )
                 )

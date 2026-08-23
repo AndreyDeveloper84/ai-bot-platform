@@ -245,7 +245,7 @@ def resolve_or_create_global_bot_user(
 
 
 def delete_bot_user_data(bot_user) -> int:
-    """Soft-delete a BotUser's conversations + hard-delete the BotUser.
+    """Soft-delete a BotUser's conversations + staff threads, hard-delete the BotUser.
 
     Single entry point for the 152-ФЗ "удалить мои данные" workflow
     (Sprint 3 PrivacyConsentSkill calls this) and any future admin
@@ -258,13 +258,20 @@ def delete_bot_user_data(bot_user) -> int:
     (preserving forensic Messages via mark_deleted), then hard-deletes
     the BotUser row.
 
+    DRF-1276: ``StaffAssistantThread.bot_user`` is PROTECT for the same
+    reason, and until now nothing cleared the threads — an employee who
+    ever wrote to the assistant made the whole wipe abort on
+    ProtectedError, rolling back the rows above with it. Threads get the
+    same treatment as conversations: soft-delete breadcrumb, then hard
+    delete (``StaffAssistantMessage`` cascades off the thread).
+
     Returns:
       Number of conversations soft-deleted (excludes Messages — those
       stay in DB tied to the now-soft-deleted Conversation).
     """
 
     from apps.audit.services import write_audit
-    from apps.conversations.models import Conversation
+    from apps.conversations.models import Conversation, StaffAssistantThread
     from django.db import transaction
 
     write_audit(
@@ -275,6 +282,7 @@ def delete_bot_user_data(bot_user) -> int:
     )
 
     soft_deleted = 0
+    staff_threads_deleted = 0
     with transaction.atomic():
         # Use `Conversation.all_tenants.filter(bot_user=...)` — reverse
         # related-manager `bot_user.conversations` is a Django auto-built
@@ -289,12 +297,21 @@ def delete_bot_user_data(bot_user) -> int:
         # Now hard-delete: cascades through Messages. Sprint 3
         # PrivacyConsentSkill writes its own audit BEFORE this call.
         conversations.delete()
+        threads = StaffAssistantThread.all_tenants.filter(bot_user=bot_user)
+        for thread in threads:
+            if thread.is_active or thread.deleted_at is None:
+                thread.mark_deleted()
+                staff_threads_deleted += 1
+        threads.delete()
         bot_user.delete()
 
     write_audit(
         "identity.bot_user.delete_finished",
         target="BotUser",
         target_id=bot_user.id,
-        payload={"conversations_deleted": soft_deleted},
+        payload={
+            "conversations_deleted": soft_deleted,
+            "staff_threads_deleted": staff_threads_deleted,
+        },
     )
     return soft_deleted

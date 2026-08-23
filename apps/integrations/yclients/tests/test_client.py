@@ -437,7 +437,10 @@ class TestRetroB2RetryPolicy:
         yc.reset_yclients_client()
         instance = yc.get_yclients_client()
         # Pull the mounted HTTPAdapter to inspect its retry policy.
+        from requests.adapters import HTTPAdapter
+
         adapter = instance._session.get_adapter("https://api.yclients.com/")
+        assert isinstance(adapter, HTTPAdapter)  # types-requests: BaseAdapter has no max_retries
         retry = adapter.max_retries
         allowed = {m.upper() for m in (retry.allowed_methods or [])}
         # Idempotent verbs only.
