@@ -60,7 +60,11 @@ logger = logging.getLogger(__name__)
 # predates this feature has ``welcomed_at IS NULL`` (the global path never stamped
 # it), so without this guard the first post-flag-flip booking tap of an existing
 # user would be swallowed by the welcome greeting.
-_DISCOVER_CALLBACK_PREFIX = "cb:discover:"
+#
+# DRF-1304 adds ``cb:catalog:*`` (the salon / service chips) for exactly the same
+# reason: those chips lead INTO the booking chain, and the greeting must not
+# swallow a tap on a card the bot itself just drew.
+_PASSTHROUGH_CALLBACK_PREFIXES = ("cb:discover:", "cb:catalog:")
 
 
 # Marketplace-framed welcome. WelcomeSkill.WELCOME_TEXT names the «Формула тела»
@@ -202,15 +206,16 @@ def needs_onboarding(bot_user: Any, text: str, conversation: Any = None) -> bool
     who opens with an intent still meets the greeting + consent offer on their
     next non-intent turn.
 
-    A ``cb:discover:*`` callback (the booking handoff, #1020) is explicitly NOT
-    onboarding even when ``welcomed_at IS NULL`` — a booking tap must reach the
-    booking flow, never the welcome greeting. This matters at flag flip: every
+    A ``cb:discover:*`` callback (the booking handoff, #1020) or a ``cb:catalog:*``
+    one (the salon / service chips, DRF-1304) is explicitly NOT onboarding even
+    when ``welcomed_at IS NULL`` — a tap on a card the bot itself drew must reach
+    what the card promised, never the welcome greeting. This matters at flag flip: every
     pre-existing global BotUser has ``welcomed_at IS NULL``, so without this guard
     their first booking tap after enabling the flag would be swallowed.
     """
     stripped = (text or "").strip()
-    # Booking handoff wins over onboarding, unconditionally.
-    if stripped.startswith(_DISCOVER_CALLBACK_PREFIX):
+    # A tap on a card the bot drew wins over onboarding, unconditionally.
+    if stripped.startswith(_PASSTHROUGH_CALLBACK_PREFIXES):
         return False
     if stripped == "/start" or stripped.startswith("/start "):
         return True
