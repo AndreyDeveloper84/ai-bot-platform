@@ -303,11 +303,39 @@ class TestChipsExecute:
         )
 
     def test_the_water_chip_parses_as_a_real_drink(self):
+        """The far end: once ``log_water`` is selected, the skill logs rather
+        than asks. A confident parse is what separates a log from the
+        diary-or-typo card (DRF-819)."""
         from apps.skills.water.parser import BeverageMatch, parse_beverage
 
         parsed = parse_beverage(CHIP_WATER["callback"])
         assert isinstance(parsed, BeverageMatch)
         assert parsed.ml > 0
+
+    def test_the_water_chip_is_the_phrase_the_model_is_taught(self):
+        """The near end — and the one chip that has no deterministic claim.
+
+        DRF-1268 routes all free text on this path through the concierge, so
+        this tap reaches ``WaterSkill`` only if the model picks ``log_water``.
+        What makes that safe is that the callback IS the literal example the
+        model is given, twice: in the tool description and again in the
+        prompt's nutrition-priority block. This test fails the day someone
+        rewords either one, which is the only way the chip could quietly stop
+        working.
+        """
+        from apps.orchestrator.concierge import build_concierge_system_prompt
+        from apps.orchestrator.nutrition_global import LOG_WATER_TOOL_SPEC
+
+        callback = CHIP_WATER["callback"]
+        assert callback in LOG_WATER_TOOL_SPEC["description"]
+        assert callback in build_concierge_system_prompt()
+
+    def test_the_diary_ask_the_tool_advertises_is_the_one_the_matcher_claims(self):
+        """Same drift guard for the read tool: the phrase its description
+        teaches the model must be a phrase the deterministic layer also owns,
+        so the two entrances cannot answer differently."""
+        assert looks_like_diary_request("что я ел сегодня") == "today"
+        assert "что я ел сегодня" in SHOW_MY_RECORDS_TOOL_SPEC["description"]
 
     def test_the_diary_chip_is_claimed_by_the_diary_matcher(self):
         assert looks_like_diary_request(CHIP_DIARY["callback"]) == "today"

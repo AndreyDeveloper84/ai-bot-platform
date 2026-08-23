@@ -34,14 +34,21 @@ the measurement.
    the same place ``/anketa`` is claimed. Memory keeps its existing
    deterministic claim in ``memory_commands``.
 
-   This layer is what makes a CHIP honest. A chip whose callback rides
-   the LLM is a chip that *probably* executes; the brief's rule is that a
-   chip must lead to something that runs. Every chip this module emits
-   carries a callback string that one of the two deterministic matchers
-   claims — «/anketa», «стакан воды», «что я ел сегодня», «забудь
-   питание» — so the tap is a typed message that a matcher already owns.
-   (Tap == typed message is the established contract on this path; see
-   ``_render_ask_clarification`` in :mod:`apps.orchestrator.discovery`.)
+   This layer is what makes a CHIP honest. Tap == typed message on this
+   path (see ``_render_ask_clarification`` in
+   :mod:`apps.orchestrator.discovery`), so a chip executes only if
+   something on OUR side claims the string it carries. Three of the four
+   chips here are claimed by a deterministic matcher — «/anketa»
+   (``is_structured_nutrition_turn``), «что я ел сегодня»
+   (``looks_like_diary_request``), «забудь питание»
+   (``handle_memory_command``).
+
+   The fourth, «стакан воды», is model-routed and is called out as such
+   at :data:`CHIP_WATER`: DRF-1268 gives all free text on this path to the
+   concierge, and no deterministic entry for a drink exists to claim. Its
+   safeguard is different in kind — the callback is the literal example the
+   tool description and the prompt both teach — and a test pins that so the
+   two cannot drift.
 
 2. **The phrasing tail goes to the model as a tool.**
    :data:`SHOW_MY_RECORDS_TOOL_SPEC` — one tool, one ``section``
@@ -182,9 +189,24 @@ PERSONAL_TOOL_ACTIONS = frozenset({SHOW_MY_RECORDS_TOOL_SPEC["name"]})
 #: (``stripped == "/anketa"``), so the tap runs the FSM, not the model.
 CHIP_ANKETA = {"label": "📋 Пройти анкету", "callback": "/anketa"}
 
-#: Claimed by ``WaterSkill.matches`` → ``parse_beverage("стакан воды")`` →
-#: 250 ml. A one-tap log of the single most-logged drink; the person taps it
-#: because they drank one, exactly as they would have typed it.
+#: The ONE chip here that is model-routed rather than matcher-claimed, and the
+#: distinction is worth naming because the rest of this module leans on it.
+#:
+#: DRF-1268 sends all free text on the global path to the concierge, so
+#: «стакан воды» reaches ``WaterSkill`` only after the model picks
+#: ``log_water``. There is no deterministic entry for a drink and inventing one
+#: would fight that ticket's design, not extend it.
+#:
+#: What makes the chip safe anyway is that its callback is the LITERAL example
+#: the model is given twice — in ``LOG_WATER_TOOL_SPEC["description"]`` and
+#: again in the concierge prompt's nutrition-priority block, both of which name
+#: «стакан воды» in so many words and forbid routing it to
+#: ``clarify_food_entry`` (DRF-819). ``test_the_water_chip_is_the_phrase_the_model_is_taught``
+#: fails the day the chip and those two strings drift apart, which is the only
+#: way this one could quietly stop working.
+#:
+#: And the far end still holds: ``parse_beverage("стакан воды")`` is a
+#: confident 250 ml, so once selected the skill logs rather than asks.
 CHIP_WATER = {"label": "💧 Записать стакан воды", "callback": "стакан воды"}
 
 #: Claimed by :func:`looks_like_diary_request` below.
