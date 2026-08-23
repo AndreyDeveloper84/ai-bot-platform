@@ -26,6 +26,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,7 +96,7 @@ def spy_concierge(monkeypatch):
 
 
 @pytest.fixture
-def salon() -> Tenant:
+def salon() -> SimpleNamespace:
     """A salon with one bookable master performing one real service."""
     tenant = Tenant.objects.create(slug="bodyformula", name="BodyFormula", city="Пенза")
     ts = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
@@ -117,8 +118,7 @@ def salon() -> Tenant:
         duration_min=45,
     )
     MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
-    tenant.service = service  # convenience handle for the tests
-    return tenant
+    return SimpleNamespace(tenant=tenant, master=master, service=service)
 
 
 def _keyboard(sent: dict) -> list[list[dict]]:
@@ -133,7 +133,7 @@ class TestCatalogTaps:
     def test_salon_tap_answers_with_that_salons_services(
         self, mock_send, fake_redis, spy_concierge, salon
     ):
-        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.id}", mid="chip1")
+        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.tenant.id}", mid="chip1")
 
         sent = mock_send[-1]
         assert "Массаж спины" in sent["text"]
@@ -144,7 +144,7 @@ class TestCatalogTaps:
     def test_salon_tap_ships_a_real_keyboard_so_the_next_tap_exists(
         self, mock_send, fake_redis, spy_concierge, salon
     ):
-        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.id}", mid="chip2")
+        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.tenant.id}", mid="chip2")
 
         rows = _keyboard(mock_send[-1])
         assert rows == [
@@ -187,7 +187,7 @@ class TestCatalogTaps:
     def test_tap_never_lands_in_dialog_history(self, mock_send, fake_redis, spy_concierge, salon):
         from apps.conversations.models import Message
 
-        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.id}", mid="chip7")
+        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.tenant.id}", mid="chip7")
 
         user_turns = [m.content for m in Message.all_tenants.filter(role="user")]
         assert all(not c.startswith("cb:") for c in user_turns), user_turns
@@ -204,6 +204,6 @@ class TestCatalogTaps:
         # taps a chip for the first time.
         settings.GLOBAL_BOT_ONBOARDING = True
 
-        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.id}", mid="chip6")
+        _run_global(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{salon.tenant.id}", mid="chip6")
 
         assert "Массаж спины" in mock_send[-1]["text"]
