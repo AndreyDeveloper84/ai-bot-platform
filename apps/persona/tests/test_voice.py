@@ -92,6 +92,33 @@ class TestTheCallersUseIt:
 
         assert assistant_identity(SURFACE_MARKETPLACE).name in prompt
 
+    def test_the_concierge_follows_a_marketplace_rename(self, monkeypatch):
+        """The prompt must follow `_SURFACE_NAMES`, not the raw frozen dict.
+
+        The test above passes either way: today the table holds no
+        marketplace override, so the surface name and
+        ``frozen_voice_fields()["assistant_name"]`` are the same word. A
+        caller reading the raw field looks correct right up until someone
+        renames the surface — and then the bot introduces itself one way in
+        the concierge and another everywhere else, discovered by a person
+        in a chat rather than by CI.
+
+        So: rename the surface and require the prompt to notice.
+        """
+
+        import apps.persona.voice as voice_module
+        from apps.orchestrator.concierge import build_concierge_system_prompt
+
+        monkeypatch.setitem(voice_module._SURFACE_NAMES, SURFACE_MARKETPLACE, "Айла")
+
+        prompt = build_concierge_system_prompt()
+
+        assert assistant_identity(SURFACE_MARKETPLACE).name == "Айла"  # the setup took
+        assert "Айла" in prompt
+        # And the pre-rename name is gone from the self-introduction: a
+        # prompt that carries both names has not renamed anything.
+        assert "Ты — Ayla" not in prompt
+
     def test_discovery_reads_the_shared_source(self):
         from apps.orchestrator.discovery import _discovery_voice_fields
 
