@@ -71,6 +71,7 @@ from apps.orchestrator.discovery import (
     render_no_criteria_clarification,
 )
 from apps.orchestrator.llm.templates import get_fallback
+from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
 
 logger = logging.getLogger(__name__)
 
@@ -621,8 +622,15 @@ def build_concierge_system_prompt(
     if today is None:
         today = timezone.localdate()
     voice = _discovery_voice_fields()
+    # The NAME comes from the surface table (apps.persona.voice), not from
+    # the raw frozen dict: `_SURFACE_NAMES` is what makes renaming a surface
+    # one product decision in one file (#1226). Reading `assistant_name`
+    # here would have quietly ignored a marketplace override — the same
+    # drift that put three different names in three files before. Same word
+    # today; what changes is that it can no longer diverge in silence.
+    identity = assistant_identity(SURFACE_MARKETPLACE)
     parts = [
-        f"Ты — {voice['assistant_name']}, AI-помощник «{voice['business_name']}».",
+        f"Ты — {identity.name}, AI-помощник «{voice['business_name']}».",
         # DRF-988 — date grounding (date + weekday + timezone).
         f"Сегодня: {today.isoformat()} ({_WEEKDAYS_RU[today.weekday()]}), "
         f"часовой пояс {timezone.get_current_timezone()}. Используй эту дату "
