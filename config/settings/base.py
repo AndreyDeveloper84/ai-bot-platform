@@ -1393,6 +1393,29 @@ CONCIERGE_MEMORY_ENABLED = os.environ.get("CONCIERGE_MEMORY_ENABLED", "true").lo
 # (rollback without a deploy). Values < 1 clamp to 1.
 CONCIERGE_MAX_LLM_PASSES = int(os.environ.get("CONCIERGE_MAX_LLM_PASSES", "2"))
 
+# DRF-1284 — switch for the concierge weekly-nutrition context
+# (apps.orchestrator.nutrition_context). Default OFF: with it off the Ayla
+# deficits endpoint is not called at all and the concierge prompt is
+# byte-identical to the pre-DRF-1284 one.
+#
+# OFF by default because the pilot measurement (2026-08-23) showed the block
+# reaching the model — llm_tokens_input +~200/turn, payload verifiably in the
+# rendered prompt — WITHOUT changing the reply: the concierge prompt redirects
+# anything that is not about booking a master, and its medical boundary makes
+# the model answer «я не врач» to a nutrition signal. Turning this on before
+# the concierge's scope is widened would buy ~200 input tokens per consented
+# turn and nothing else. Flip it together with that prompt decision.
+#
+# The flag is NOT the privacy control. Nutrition is health data (152-ФЗ ст. 10
+# special category), so the real gate is consent — PERSONAL_DATA *and* HEALTH,
+# both fail-closed — checked before any Ayla call regardless of this flag. Nor
+# is this surface gated by NUTRITION_ENABLED: that flag's documented scope is
+# the food-log / diary / water surface and explicitly excludes nutrition
+# advice and weekly reports.
+CONCIERGE_NUTRITION_CONTEXT_ENABLED = (
+    os.environ.get("CONCIERGE_NUTRITION_CONTEXT_ENABLED", "false").lower() == "true"
+)
+
 # DRF-963 (Wave 1, variant A) — rollback switch for the pilot conversational
 # UX. Default ON (the feature ships enabled); set "false" to roll back WITHOUT
 # a deploy. OFF restores the pre-DRF-963 behaviour exactly:
