@@ -56,6 +56,11 @@ class TurnContext:
     # Global-brain-only inputs (concierge call kwargs).
     user_message_id: Any = None
     memory_block: str = ""
+    # DRF-1284: consent-gated weekly nutrition picture. "" when the gate is
+    # closed or Ayla gave nothing — the seam stays a pure carrier and never
+    # builds it (the handler owns every consent read, per this module's
+    # contract).
+    nutrition_block: str = ""
     extra_system: str = ""
 
 
@@ -171,6 +176,7 @@ def _global_legacy_adapter(context: TurnContext) -> TurnReply:
         conversation=context.conversation,
         user_message_id=context.user_message_id,
         memory_block=context.memory_block,
+        nutrition_block=context.nutrition_block,
         extra_system=context.extra_system,
         trace_id=context.trace_id or None,
     )
