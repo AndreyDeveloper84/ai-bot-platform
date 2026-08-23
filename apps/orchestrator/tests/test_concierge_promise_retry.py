@@ -162,6 +162,39 @@ class TestPromiseDetector:
     def test_none_is_not_a_promise(self) -> None:
         assert _looks_like_promise_without_tool(None) is False
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # DRF-1268 — the nutrition tools (log_water, clarify_food_entry,
+            # start_nutrition_anketa, health_screening) attract recording
+            # verbs, not search verbs. The retry GATE never cared which tool
+            # was expected — it fires on "the model called no tool at all" —
+            # but this list was tuned on master-search vocabulary and used to
+            # miss every one of these.
+            "Записываю 200 мл воды.",
+            "Сейчас запишу вашу воду.",
+            "Сохраню эту запись о еде.",
+            "Оформлю скрининг здоровья.",
+            "Давайте заполним анкету по питанию.",
+            "Секундочку, зафиксирую приём пищи.",
+        ],
+    )
+    def test_recording_promises_detected(self, text: str) -> None:
+        assert _looks_like_promise_without_tool(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # «добавлю» / «отмечу» are ordinary discourse markers, not
+            # promises to act. Including them would force a tool call onto
+            # turns the model answered correctly in words.
+            "Добавлю, что цены могут отличаться в выходные.",
+            "Отмечу, что мастер работает только по записи.",
+        ],
+    )
+    def test_discourse_markers_are_not_promises(self, text: str) -> None:
+        assert _looks_like_promise_without_tool(text) is False
+
 
 # ---------------------------------------------------------------------------
 # Reproduction + closure
@@ -245,6 +278,39 @@ class TestForcedToolRetry:
         # The FIRST answer is kept: shipping the second tool-less reply
         # would buy the client nothing.
         assert "подберу" in reply.text
+
+    def test_gate_is_tool_agnostic_not_bound_to_show_masters(self, monkeypatch) -> None:
+        """DRF-1268 — the retry must not be wired to one tool name.
+
+        The gate reads the raw provider result (`no tool_calls at all`), NOT
+        `dto.action_type`, so a tool this module has never heard of — here a
+        nutrition tool — gets the same forced retry. If the condition were
+        ever narrowed to `show_masters`, this turn would silently keep the
+        promise and drop the action.
+        """
+        logged = CompletionResult(
+            text="",
+            tool_calls=[ToolCall(id="c9", name="log_water", arguments={"ml": 200})],
+            prompt_tokens=30,
+            completion_tokens=6,
+            model="gpt-4o-mini",
+            provider="openai",
+            finish_reason="tool_calls",
+        )
+        provider = AsyncMock()
+        provider.complete.side_effect = [_promise("Записываю 200 мл воды."), logged]
+        monkeypatch.setattr(concierge, "get_router", lambda: _router_returning(provider))
+        bot_user, conversation = _bot_user_and_conversation()
+
+        generate_concierge_reply(
+            "выпил стакан воды",
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=TRACE_ID,
+        )
+
+        # The forced retry happened, and it was NOT gated on show_masters.
+        assert _tool_choices(provider) == [None, "required"]
 
     def test_no_retry_when_the_model_called_the_tool(self, monkeypatch) -> None:
         provider = AsyncMock()

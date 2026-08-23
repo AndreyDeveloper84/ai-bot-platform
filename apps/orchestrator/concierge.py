@@ -208,6 +208,29 @@ _PROMISE_STEMS: tuple[str, ...] = (
     "давай подбер",
     "давайте уточн",
     "давай уточн",
+    # DRF-1268 — the gate itself is tool-agnostic (it fires on "the model
+    # called NO tool", not on a list of action types), but this LEXICON was
+    # tuned on master-search vocabulary and missed "записываю 200 мл воды"
+    # entirely. Recording verbs are the promise form the nutrition tools
+    # (log_water, clarify_food_entry, start_nutrition_anketa,
+    # health_screening) attract, so they belong here too.
+    "запишу",
+    "запишем",
+    "записываю",
+    "сохраню",
+    "сохраним",
+    "сохраняю",
+    "зафиксирую",
+    "зафиксируем",
+    "оформлю",
+    "оформим",
+    "заполню",
+    "заполним",
+    "заведу",
+    # Deliberately NOT here: "добавлю" / "отмечу". Both are ordinary Russian
+    # discourse markers ("Добавлю, что цены могут отличаться") and would fire
+    # on turns the model answered correctly in words — the same false-positive
+    # cost that made this list narrower than the legacy one.
 )
 
 
