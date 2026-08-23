@@ -98,7 +98,10 @@ so an auditor reading top-down concluded the task had no gate at all
 while an auditor reading :func:`_should_send_b11` concluded it had one.
 Both were reading honestly. Only one of them was reading the code.
 
-What is gated now, in :func:`_consent_blocker`, and why each is here:
+What is gated now, in :func:`apps.consent.outreach.outreach_blocker`
+(reached through this module's :func:`_consent_blocker`, and shared
+with the master-deactivation broadcast since DRF-1307), and why each
+is here:
 
 * ``proactive_messages_opt_out`` — the person's global "do not write to
   me first". Checked first and unconditionally, per the ordering
@@ -361,47 +364,21 @@ def _should_send_b11(
 def _consent_blocker(bot_user: Any) -> str | None:
     """May we write to this person unprompted at all? (DRF-1301)
 
-    Returns a reason slug when we may not, ``None`` when we may. Four
-    conditions, in the order a person would state them, each a separate
-    slug so a dry run tells the operator *which* one fired rather than a
-    single undifferentiated "blocked".
+    Delegates to :func:`apps.consent.outreach.outreach_blocker`, which is
+    where the four conditions now live. DRF-1307 found the identical hole
+    in the master-deactivation broadcast; rather than a third copy of the
+    same four checks, the implementation moved to one home and this stays
+    as the name the module's own callers and tests already use.
 
-    Order matters: ``proactive_messages_opt_out`` is evaluated first and
-    unconditionally, because it is the one veto whose failure is a trust
-    break rather than a missed message. Nothing below it can re-enable a
-    message for somebody who set it.
-
-    The consent-record read uses
-    :func:`~apps.consent.services.has_global_consent`, not
-    :func:`~apps.consent.services.has_consent`. This beat is a
-    cross-tenant system task with no tenant in scope, and the
-    tenant-scoped reader raises there. That is not a workaround: the
-    pilot's client bot runs the global path, so the global reader is the
-    one that answers for the people this task actually writes to. It
-    anchors on ``bot_user``, whose FK already pins exactly one tenant, so
-    no cross-tenant row is reachable.
-
-    Distinguishing "never proved" from "withdrawn" costs a second query
-    on the failing branch only — the common case is one ``EXISTS``. The
-    distinction is worth it: they are different operator problems. A
-    ``consent_unproven`` row is a data-provenance gap left by grants
-    predating #1074, which stamped ``consent_at`` and the record
-    atomically. A ``consent_withdrawn`` row is somebody who said no.
-
-    **The implementation moved to
-    :func:`apps.notifications.proactive.consent_blocker` in DRF-1307.**
-    The master-deactivation cascade needed the same four conditions and
-    a second copy of them would have been the third in this repo — the
-    two that already existed (here and in
-    :mod:`apps.nutrition_proactive.selection`) had drifted apart, and
-    the older one still writes to people who withdrew. This name stays
-    as the beat's own entry point; the reasoning above is why each
-    condition is in the shared gate.
+    The conditions, their order, and every returned slug are unchanged by
+    the move — the tests in ``test_followups.py`` are what proves it.
+    Read :mod:`apps.consent.outreach` before changing any of them, in
+    particular its note on proactive vs contract-required messages: this
+    caller is squarely proactive, the other one is not.
     """
+    from apps.consent.outreach import outreach_blocker
 
-    from apps.notifications.proactive import consent_blocker
-
-    return consent_blocker(bot_user)
+    return outreach_blocker(bot_user)
 
 
 def _payment_failures_blocker(bot_user: Any, tenant: Any) -> str | None:
