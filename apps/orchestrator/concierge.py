@@ -71,6 +71,11 @@ from apps.orchestrator.discovery import (
     render_no_criteria_clarification,
 )
 from apps.orchestrator.llm.templates import get_fallback
+from apps.orchestrator.nutrition_global import (
+    NUTRITION_TOOL_ACTIONS,
+    NUTRITION_TOOL_SPECS,
+    execute_nutrition_tool,
+)
 from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
 
 logger = logging.getLogger(__name__)
@@ -245,7 +250,9 @@ class GlobalConversationStore:
         return list(reversed(qs[:limit]))
 
 
-_KNOWN_TOOLS = frozenset({SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]})
+_KNOWN_TOOLS = frozenset(
+    {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]} | NUTRITION_TOOL_ACTIONS
+)
 
 
 def _record_concierge_metric(
@@ -373,6 +380,10 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
                 "options": args.get("options") or [],
             },
         )
+    if name in NUTRITION_TOOL_ACTIONS:
+        # DRF-1268 — selection only. The skill executes in the wrapper's
+        # sync scope after asyncio.run returns (same shape as show_masters).
+        return ToolResult(action_type=name, action_data={"arguments": args})
     return ToolResult(
         action_type=ActionType.SHOW_MASTERS,
         action_data={"arguments": args},
@@ -426,6 +437,19 @@ def build_concierge_system_prompt(
         "Если нужно уточнение — вызывай инструмент ask_clarification с "
         "вариантами ответа, а НЕ пиши уточняющий вопрос обычным текстом: "
         "так клиент отвечает одним тапом, а не гадает формулировку.",
+        # DRF-1268 — the nutrition tools exist now (tool_definitions). The
+        # load-bearing registry order of apps/skills/apps.py is restated
+        # here as model-facing priority: the reasons for that order do not
+        # disappear with the transfer, they become prompt requirements.
+        "Инструменты питания (приоритет обязателен):\n"
+        "- Жалоба на боль или симптомы («болит спина», «онемела рука») — "
+        "вызывай health_screening ПЕРВЫМ, раньше любых других инструментов "
+        "и раньше show_masters.\n"
+        "- Напиток («стакан воды», «кофе 200 мл») — только log_water, "
+        "никогда не clarify_food_entry.\n"
+        "- Короткий текст про еду («борщ 300г») — clarify_food_entry.\n"
+        "- Просьба заполнить или продолжить анкету питания — "
+        "start_nutrition_anketa.",
         f"Если вопрос не про запись к мастеру — мягко верни в тему: "
         f"«{voice['off_topic_redirect']}»",
         # Boundaries (W5 task 4) — Constitution Art. X (helpful restraint),
@@ -542,7 +566,11 @@ def generate_concierge_reply(
             summary_text="",
             tenant_id=GLOBAL_TENANT_ID,
         ),
-        tool_definitions=[SHOW_MASTERS_TOOL_SPEC, ASK_CLARIFICATION_TOOL_SPEC],
+        tool_definitions=[
+            SHOW_MASTERS_TOOL_SPEC,
+            ASK_CLARIFICATION_TOOL_SPEC,
+            *NUTRITION_TOOL_SPECS,
+        ],
         tool_dispatcher=_dispatch_tool,
     )
 
@@ -658,6 +686,33 @@ def generate_concierge_reply(
             )
         pending_cards = cards
         current_text = _build_tool_result_message(message_text, cards, args)
+
+    if dto.action_type in NUTRITION_TOOL_ACTIONS:
+        # DRF-1268 — a nutrition skill selected by the model as a tool.
+        # The deterministic reply comes from the skill itself (its own
+        # product-approved text + keyboard); no extra LLM pass is spent
+        # on rephrasing a log confirmation.
+        args = (dto.action_data or {}).get("arguments", {})
+        result = execute_nutrition_tool(
+            dto.action_type,
+            args if isinstance(args, dict) else {},
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id or "",
+        )
+        if result is not None and result.reply_text:
+            return DiscoveryReply(
+                text=result.reply_text[:_MAX_REPLY_CHARS],
+                action_data=result.action_data,
+                persisted=True,
+            )
+        # Parser refused the phrase the model passed (or the skill
+        # declined): fall back to whatever text the model produced
+        # alongside the call, else the safe line.
+        text = (dto.content or "").strip()
+        if text:
+            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
 
     if dto.action_type == ActionType.ASK_CLARIFICATION:
         data = dto.action_data or {}
