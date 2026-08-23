@@ -267,6 +267,31 @@ class TestToolCalling:
             {"type": "function", "function": spec},
         ]
 
+    @pytest.mark.asyncio
+    async def test_tool_choice_passed_through_verbatim(
+        self, patched_provider: tuple[OpenAIProvider, MagicMock]
+    ) -> None:
+        """DRF-1286 — OpenAI takes the canonical string as-is."""
+        provider, client = patched_provider
+        client.chat.completions.create.return_value = _make_completion_response()
+        await provider.complete(
+            [{"role": "user", "content": "x"}],
+            tools=[{"name": "t", "description": "d", "parameters": {"type": "object"}}],
+            tool_choice="required",
+        )
+        kw = client.chat.completions.create.await_args.kwargs
+        assert kw["tool_choice"] == "required"
+
+    @pytest.mark.asyncio
+    async def test_tool_choice_ignored_without_tools(
+        self, patched_provider: tuple[OpenAIProvider, MagicMock]
+    ) -> None:
+        """OpenAI 400s on tool_choice with no tools — never send it."""
+        provider, client = patched_provider
+        client.chat.completions.create.return_value = _make_completion_response()
+        await provider.complete([{"role": "user", "content": "x"}], tool_choice="required")
+        assert "tool_choice" not in client.chat.completions.create.await_args.kwargs
+
 
 # ---------------------------------------------------------------------------
 # Exception mapping

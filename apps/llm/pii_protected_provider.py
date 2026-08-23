@@ -132,6 +132,7 @@ class PIITokenizingProvider:
         temperature: float = 0.0,
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int | None = None,
+        tool_choice: str | None = None,
     ) -> CompletionResult:
         """Tokenize messages → wrapped.complete() → detokenize response."""
         # Settings gate — allows tests / smoke flows to disable PII
@@ -147,6 +148,7 @@ class PIITokenizingProvider:
                 temperature=temperature,
                 tools=tools,
                 max_tokens=max_tokens,
+                tool_choice=tool_choice,
             )
 
         conversation_id = pii_tokenizer.current_conversation_id()
@@ -167,6 +169,7 @@ class PIITokenizingProvider:
                 temperature=temperature,
                 tools=tools,
                 max_tokens=max_tokens,
+                tool_choice=tool_choice,
             )
 
         tokenized_messages = [
@@ -179,6 +182,7 @@ class PIITokenizingProvider:
             temperature=temperature,
             tools=tools,
             max_tokens=max_tokens,
+            tool_choice=tool_choice,
         )
         # Audit row — 152-ФЗ transit pseudonymisation evidence. Payload
         # carries ONLY tokenized-counts + structured metadata; raw user
