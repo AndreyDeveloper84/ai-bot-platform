@@ -201,7 +201,69 @@ def build_discovery_prompt(
     return messages
 
 
-def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
+# Cap on the query text echoed back in a no-match refusal. The strings come
+# from the model's tool arguments (or, on degraded paths, the user's own turn)
+# — bounded enough to trust, not bounded enough to paste unclipped into a
+# reply that also has a _MAX_REPLY_CHARS budget to keep.
+_MAX_ECHOED_QUERY_CHARS = 60
+
+
+def render_no_match(city: str | None = None, specialization: str | None = None) -> DiscoveryReply:
+    """The honest refusal for a search that genuinely matched nobody (DRF-1283).
+
+    The line this replaces — «По вашему запросу мастеров пока не нашлось —
+    уточните город или услугу» — asked for the two things the user had most
+    likely just supplied. On the live turn «покажи массажистов в пензе» both
+    the service AND the city were named, and answering «уточните город или
+    услугу» reads as «я вас не понял»: the bot denies understanding a sentence
+    it understood, which is worse than the missing result itself.
+
+    So: name back what WAS understood, say what specifically is not there, and
+    ask only for something not already given. Asking for a city is right when
+    no city was named and wrong when one was — the branch below is that
+    distinction, nothing more.
+
+    NOTE this is the deterministic wording, and since DRF-1283 the common
+    zero-result path does not reach it: the handler hands a zero-result
+    booking turn to the concierge, which phrases the refusal itself off
+    ``_build_tool_result_message``. This is the wording for the degraded
+    paths — pass budget exhausted, follow-up pass failed, legacy generator —
+    where no model turn is available to do it.
+    """
+    service = (specialization or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    place = (city or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    if service and place:
+        # «такого … нет», not «такой услуги … нет»: with both halves named we
+        # know the COMBINATION matched nobody, not which half is missing —
+        # the service may exist elsewhere, the city may have no masters yet.
+        # Saying the narrower thing would be a confident guess.
+        text = (
+            f"«{service}» в городе {place} — такого у наших мастеров сейчас нет. "
+            "Назовите другую услугу или другой город, и я поищу ещё."
+        )
+    elif service:
+        text = (
+            f"«{service}» — такой услуги у наших мастеров сейчас нет. "
+            "Подскажите город или другую услугу, и я поищу ещё."
+        )
+    elif place:
+        text = (
+            f"В городе {place} подключённых мастеров пока нет. "
+            "Назовите другой город, и я поищу ещё."
+        )
+    else:
+        # Genuinely nothing to acknowledge — the only case where asking for
+        # both the city and the service is the honest question.
+        text = "По вашему запросу мастеров пока не нашлось — уточните город или услугу."
+    return DiscoveryReply(text=text[:_MAX_REPLY_CHARS])
+
+
+def _render_master_cards(
+    cards: list[MasterCard],
+    *,
+    city: str | None = None,
+    specialization: str | None = None,
+) -> DiscoveryReply:
     """Render discovered masters as a reply + a one-button-per-card keyboard.
 
     PUBLIC fields only (the DTO carries nothing else). Each button's callback
@@ -209,11 +271,14 @@ def _render_master_cards(cards: list[MasterCard]) -> DiscoveryReply:
     (#1020) — extended with ``:{service_id}`` when discovery resolved the
     queried service unambiguously (DRF-962), so the tap enters booking with
     the service context instead of the stale-context dead-end.
+
+    ``city`` / ``specialization`` are the query that produced ``cards`` and are
+    used ONLY for the empty case, so the refusal can name what was searched for
+    (DRF-1283 — see :func:`render_no_match`). Callers that have the query
+    should pass it; callers that don't get the generic line.
     """
     if not cards:
-        return DiscoveryReply(
-            text="По вашему запросу мастеров пока не нашлось — уточните город или услугу.",
-        )
+        return render_no_match(city=city, specialization=specialization)
 
     lines = ["Вот мастера, которые могут подойти:"]
     buttons: list[dict[str, str]] = []
@@ -365,7 +430,9 @@ def generate_discovery_reply(
             logger.info(
                 "orchestrator.discovery.show_masters count=%d trace=%s", len(cards), trace_id
             )
-            return _render_master_cards(cards[:_MAX_MASTER_CARDS])
+            return _render_master_cards(
+                cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+            )
 
     text = (result.text or "").strip()
     if not text:

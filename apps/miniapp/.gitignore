@@ -5,3 +5,5 @@ dist/
 *.log
 .vite/
 coverage/
+releases/
+dist.bak-*/
