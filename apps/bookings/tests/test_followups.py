@@ -1432,3 +1432,29 @@ class TestOutboundSafety:
         mock_send.assert_not_called()
         bot_user.refresh_from_db()
         assert CONTEXT_KEY not in (bot_user.context or {})
+
+
+class TestSentAuditShape:
+    def test_sent_audit_keeps_visit_at(self, tenant: Tenant, bot_user: BotUser) -> None:
+        """The sent-audit payload must keep naming the visit.
+
+        Splitting the task into plan/execute dropped ``visit_at`` from
+        this payload by accident. The rows already on the pilot carry it,
+        and it is what ties an audit row to a specific appointment when
+        somebody reconstructs who was written to and about what — which
+        is exactly the reconstruction DRF-1301 asks for. Pinned here so
+        the next refactor has to mean it.
+        """
+        from apps.audit.models import AuditLog
+
+        visit_at = _msk(2026, 5, 15, 18, 0)
+        _make_reminder(tenant=tenant, bot_user=bot_user, visit_at=visit_at)
+        with patch("apps.bookings.followups.send_message"):
+            send_post_visit_followups()
+        row = AuditLog.all_tenants.filter(
+            action="bookings.followup.sent", target_id=bot_user.pk
+        ).first()
+        assert row is not None
+        assert row.payload["visit_at"] == visit_at.isoformat()
+        assert row.payload["date"] == TODAY_MSK_ISO
+        assert row.payload["reminder_id"]

@@ -581,6 +581,12 @@ class Decision:
     bot_user_id: Any
     reminder_id: Any
     tenant_slug: str
+    #: The visit this nudge is about. Carried so the sent-audit payload
+    #: keeps the shape it had before the plan/execute split — the rows
+    #: already on the pilot have it, and it is what ties an audit row to
+    #: a specific appointment when somebody reconstructs who was written
+    #: to and about what.
+    visit_at: datetime | None
     send: bool
     reason: str
     chat_id: str = ""
@@ -642,6 +648,7 @@ def plan_post_visit_followups(*, now_utc: datetime | None = None) -> list[Decisi
                 bot_user_id=bu.pk,
                 reminder_id=reminder.pk,
                 tenant_slug=tenant_slug,
+                visit_at=reminder.visit_at,
                 send=send,
                 reason=reason,
                 **kwargs,
@@ -794,6 +801,9 @@ def send_post_visit_followups() -> dict[str, int]:
             target_id=decision.bot_user_id,
             payload={
                 "reminder_id": str(decision.reminder_id),
+                "visit_at": (
+                    decision.visit_at.isoformat() if decision.visit_at is not None else None
+                ),
                 "date": today_iso,
             },
         )
