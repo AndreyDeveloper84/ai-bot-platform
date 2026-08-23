@@ -27,6 +27,8 @@ the prompt is unchanged (happy-path intact).
 
 from __future__ import annotations
 
+import base64
+
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -35,11 +37,13 @@ from uuid import UUID
 
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
+    ParsedQuery,
     discover_masters,
     discover_masters_for_service,
     discover_salons,
     discover_services,
     get_salon,
+    parse_query,
     service_coverage,
     split_requested_services,
 )
@@ -423,6 +427,103 @@ def render_missing_services(missing: list[str], city: str | None = None) -> str:
     return f"{quoted} — {subject} у наших мастеров сейчас нет."
 
 
+# ─── DRF-1324: the card's button carries the REQUEST, not just the ids ─────
+#
+# Live pilot 23.08, the first booking ever made through the bot. «запиши на
+# лимфодренаж» surfaced the three masters who really do perform lymphatic
+# drainage — the master search was right. The tap then asked «Выберите услугу
+# мастера Сазонова Инна» and offered the first TEN of her nineteen services in
+# alphabetical order: «Биоэнергетический массаж детский» second, the two
+# lymphatic-drainage services sixth and seventh. The booking that came out of
+# that tap was for the children's massage.
+#
+# The request died at the callback boundary. ``cb:discover:book:{T}:{M}``
+# carries who, and — since DRF-962 — sometimes what, but never WHY this master
+# was on the list, so the menu behind the tap could not be the menu of the
+# request. Everything else about the turn was correct.
+#
+# The fix is the grammar the module already believes in: a button carries what
+# it means (``_render_salon_cards``: «a chip tap addresses a salon by the id
+# the bot itself rendered, never by the name substring»). Re-deriving the
+# query from the conversation at tap time would break that rule and would be
+# wrong the moment the user types something else between the render and the
+# tap; the callback is the only place the query is provably the one that
+# produced this very card.
+#
+# ### Encoding
+#
+# ``base64url`` of the PARSED query, not of the raw turn:
+#
+# * ASCII out — every existing ``cb:`` payload is hex, so a Cyrillic payload
+#   would be the first one on the wire and is not something to find out about
+#   on a live pilot;
+# * no ``:`` in the base64url alphabet (``A-Za-z0-9-_``), so the colon split
+#   the handler does stays unambiguous;
+# * the PARSE and not the text, so a catalog change between render and tap
+#   cannot re-interpret the query — and so the stems are ≤ 6 characters each,
+#   which keeps the segment short.
+#
+# Padding is stripped and restored: ``=`` is the one character MAX rejects in
+# an ``open_app`` payload (``apps/channels/max/outbound.py``), and while this
+# is a ``callback`` payload, spending nothing to stay inside the stricter rule
+# is cheaper than discovering the difference in production.
+_QUERY_REF_GOAL_PREFIX = "g"
+_QUERY_REF_STEM_PREFIX = "s"
+_QUERY_REF_SEP = ","
+
+# A query ref longer than this is dropped and the tap degrades to the
+# unfiltered menu — the pre-DRF-1324 behaviour. MAX documents no callback
+# payload limit we can rely on, and the two UUIDs already spend ~90
+# characters, so the ceiling is deliberately generous enough for a real query
+# (five six-character stems encode to 44) and still far short of anything that
+# could truncate a payload silently.
+_MAX_QUERY_REF_CHARS = 96
+
+
+def encode_query_ref(parsed: ParsedQuery) -> str:
+    """Encode a parsed discovery query for a booking callback, or ``""``.
+
+    ``""`` for a query with nothing to carry (a bare city, an untokenizable
+    turn) and for one that would not fit — both mean «the menu behind this tap
+    cannot be narrowed», which the handoff answers with the full list exactly
+    as it did before DRF-1324.
+    """
+    if parsed.goals:
+        payload = _QUERY_REF_GOAL_PREFIX + _QUERY_REF_SEP.join(parsed.goals)
+    elif parsed.stems:
+        payload = _QUERY_REF_STEM_PREFIX + _QUERY_REF_SEP.join(parsed.stems)
+    else:
+        return ""
+    ref = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    return ref if len(ref) <= _MAX_QUERY_REF_CHARS else ""
+
+
+def decode_query_ref(ref: str) -> ParsedQuery:
+    """Decode what :func:`encode_query_ref` wrote; empty on anything unexpected.
+
+    A forged, truncated or stale ref decodes to an EMPTY
+    :class:`~apps.marketplace.discovery.ParsedQuery`, which every caller reads
+    as «do not narrow». Degrading to the full service menu is the honest
+    failure here: it is the answer this surface gave for a year, and it can
+    only ever show the user more of their own master's real services — never
+    fewer, and never a service someone else performs.
+    """
+    ref = (ref or "").strip()
+    if not ref or len(ref) > _MAX_QUERY_REF_CHARS:
+        return ParsedQuery(stems=[], cities=[], goals=[])
+    try:
+        payload = base64.urlsafe_b64decode(ref + "=" * (-len(ref) % 4)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ParsedQuery(stems=[], cities=[], goals=[])
+    kind, rest = payload[:1], payload[1:]
+    parts = [p for p in rest.split(_QUERY_REF_SEP) if p]
+    if kind == _QUERY_REF_GOAL_PREFIX and parts:
+        return ParsedQuery(stems=[], cities=[], goals=parts)
+    if kind == _QUERY_REF_STEM_PREFIX and parts:
+        return ParsedQuery(stems=parts, cities=[], goals=[])
+    return ParsedQuery(stems=[], cities=[], goals=[])
+
+
 def _render_master_cards(
     cards: list[MasterCard],
     *,
@@ -437,7 +538,10 @@ def _render_master_cards(
     is ``cb:discover:book:{tenant_id}:{master_id}`` — the handoff seam
     (#1020) — extended with ``:{service_id}`` when discovery resolved the
     queried service unambiguously (DRF-962), so the tap enters booking with
-    the service context instead of the stale-context dead-end.
+    the service context instead of the stale-context dead-end, and with a
+    fourth ``:{query_ref}`` segment (DRF-1324) carrying the REQUEST, so the
+    ask-the-service menu behind an unresolved tap is the menu of that request
+    rather than the master's whole roster in alphabetical order.
 
     ``city`` / ``specialization`` are the query that produced ``cards`` and are
     used ONLY for the empty case, so the refusal can name what was searched for
@@ -462,6 +566,12 @@ def _render_master_cards(
     """
     if not cards:
         return render_no_match(city=city, specialization=specialization)
+
+    # Parsed ONCE for the whole keyboard (it costs the two small vocabulary
+    # reads) and stamped onto every button, so whichever master is tapped, the
+    # service menu behind them is narrowed by the request that put them all on
+    # this list.
+    query_ref = encode_query_ref(parse_query(specialization)) if specialization else ""
 
     missing_line = render_missing_services(missing_services or [], city)
     lines: list[str] = []
@@ -501,13 +611,19 @@ def _render_master_cards(
         # The id still rides the callback below regardless of the name.
         service = f" · {card.service_name}" if card.service_name else ""
         lines.append(f"• {card.name}{spec}{service}{rating}{city}")
-        service_suffix = f":{card.service_id}" if card.service_id is not None else ""
+        # The service segment stays positional, so a query ref without a
+        # resolved service rides behind an EMPTY one — «::ref», not «:ref» —
+        # or the handler would read the ref as a malformed service id and the
+        # tap would lose both.
+        service_part = str(card.service_id) if card.service_id is not None else ""
+        suffix = f":{service_part}" if (service_part or query_ref) else ""
+        if query_ref:
+            suffix += f":{query_ref}"
         buttons.append(
             {
                 "label": f"Записаться к {card.name}",
                 "callback": (
-                    f"{CALLBACK_DISCOVER_BOOK_PREFIX}"
-                    f"{card.tenant_id}:{card.master_id}{service_suffix}"
+                    f"{CALLBACK_DISCOVER_BOOK_PREFIX}{card.tenant_id}:{card.master_id}{suffix}"
                 ),
             }
         )

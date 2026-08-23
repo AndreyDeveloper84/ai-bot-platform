@@ -1047,21 +1047,31 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
 def _discovery_handoff_reply(
     event: CanonicalEvent, global_bot_user, trace_id: str | uuid.UUID | None
 ) -> DiscoveryReply:
-    """Parse the ``cb:discover:book:{tenant_id}:{master_id}[:{service_id}]``
+    """Parse the ``cb:discover:book:{tenant}:{master}[:{service}[:{query}]]``
     callback and route into tenant T's booking flow via the handoff layer
-    (#1020, service context DRF-962).
+    (#1020, service context DRF-962, query context DRF-1324).
 
-    All ids are UUIDs (no ``:`` inside), so colon splits are unambiguous. The
-    service part is optional: cards rendered before DRF-962 — or for a query
-    where no single service matched — carry only two ids, and the handoff
-    layer answers those with an ask-the-service reply instead of a doomed
-    booking dispatch. Malformed payloads degrade to a graceful reply.
+    All ids are UUIDs (no ``:`` inside) and the query ref is base64url (whose
+    alphabet has no ``:`` either), so colon splits stay unambiguous.
+
+    Both trailing segments are optional and POSITIONAL. The service part is
+    absent on cards rendered before DRF-962 and on a query where no single
+    service matched; the query part is absent on cards rendered before
+    DRF-1324 and on a query with nothing to carry. A serviceless card that
+    DOES carry a query sends an EMPTY third segment («…:{master}::{ref}»), so
+    the fourth position always means the same thing.
+
+    Every degradation here is one-way: a malformed id loses the whole tap
+    (generic reply), a malformed service or query segment loses only itself
+    and the handoff answers with the ask-the-service menu — narrowed if the
+    query survived, whole if it did not. Nothing about a bad segment can send
+    the user to a service they did not ask for.
     """
     payload = event.text[len(CALLBACK_DISCOVER_BOOK_PREFIX) :]
     try:
         parts = payload.split(":")
-        if len(parts) not in (2, 3):
-            raise ValueError(f"expected 2 or 3 ids, got {len(parts)}")
+        if len(parts) not in (2, 3, 4):
+            raise ValueError(f"expected 2 to 4 segments, got {len(parts)}")
         tenant_id = uuid.UUID(parts[0])
         master_id = uuid.UUID(parts[1])
     except (ValueError, AttributeError):
@@ -1074,17 +1084,20 @@ def _discovery_handoff_reply(
     # throw away two valid ids — degrade to the serviceless handoff (which
     # asks for the service) instead of the generic error.
     service_id: uuid.UUID | None = None
-    if len(parts) == 3:
+    if len(parts) >= 3 and parts[2]:
         try:
             service_id = uuid.UUID(parts[2])
         except (ValueError, AttributeError):
             logger.warning("channels.max.global.handoff.bad_service_part payload=%r", payload)
+
+    query_ref = parts[3] if len(parts) == 4 else ""
 
     return handoff_to_booking(
         global_bot_user=global_bot_user,
         tenant_id=tenant_id,
         master_id=master_id,
         service_id=service_id,
+        query_ref=query_ref,
         chat_id=event.chat_id,
         trace_id=trace_id,
     )

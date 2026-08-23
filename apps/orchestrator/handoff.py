@@ -27,7 +27,12 @@ import uuid
 from django.conf import settings
 
 from apps.events.services import emit
-from apps.orchestrator.discovery import CALLBACK_DISCOVER_BOOK_PREFIX, DiscoveryReply
+from apps.marketplace.discovery import service_rows_match_q, service_rows_score
+from apps.orchestrator.discovery import (
+    CALLBACK_DISCOVER_BOOK_PREFIX,
+    DiscoveryReply,
+    decode_query_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +88,18 @@ _ASK_SERVICE_REPLY_BARE = (
 _ASK_SERVICE_TRUNCATED_NOTE = (
     "Показаны первые {shown} услуг — если нужной нет в списке, напишите её название."
 )
+# DRF-1324 — the menu was narrowed by the request that surfaced this master,
+# so it is NOT the master's whole roster and must not read as one. Live pilot
+# 23.08: «запиши на лимфодренаж» → ten of Сазонова's nineteen services in
+# alphabetical order, «Биоэнергетический массаж детский» second, lymphatic
+# drainage sixth — and the booking that came out of that tap was the
+# children's massage. The list is now the услуги of the request; this line is
+# the escape hatch for a person who wanted something else after all, and it
+# replaces the truncation note rather than joining it (the count of a filtered
+# list says nothing about a roster).
+_ASK_SERVICE_FILTERED_NOTE = (
+    "Показаны услуги по вашему запросу — если нужно другое, напишите название."
+)
 # Keyboard budget for the service menu. MAX hard-caps an inline_keyboard at
 # ``apps.channels.max.outbound.MAX_KEYBOARD_ROWS`` (29) and silently clamps
 # past it, so any limit must sit below that; 10 also keeps the mirrored text
@@ -100,6 +117,7 @@ def _ask_service_reply(
     rows: list[tuple[uuid.UUID, str]],
     truncated: bool,
     not_offered_name: str | None,
+    filtered: bool = False,
 ) -> DiscoveryReply:
     """Render the ask-the-service answer: buttons + a mirrored text list.
 
@@ -137,7 +155,12 @@ def _ask_service_reply(
     )
     lines = [header]
     lines.extend(f"• {name}" for _, name in rows)
-    if truncated:
+    if filtered:
+        # Said whether or not the list was also truncated: «показаны первые N»
+        # under a filtered list would claim the master has N services, which
+        # is a different and false statement.
+        lines.append(_ASK_SERVICE_FILTERED_NOTE)
+    elif truncated:
         lines.append(_ASK_SERVICE_TRUNCATED_NOTE.format(shown=len(rows)))
     buttons = [
         {
@@ -146,6 +169,10 @@ def _ask_service_reply(
         }
         for service_pk, name in rows
     ]
+    # No query ref on these: each button already names ONE service, so the tap
+    # re-enters with a resolved ``service_id`` and never reaches the menu
+    # branch that would use it. Carrying it anyway would only lengthen the
+    # payload of the path where it can have no effect.
     return DiscoveryReply(
         text="\n".join(lines),
         action_data={"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]},
@@ -158,6 +185,7 @@ def handoff_to_booking(
     tenant_id: uuid.UUID,
     master_id: uuid.UUID,
     service_id: uuid.UUID | None = None,
+    query_ref: str = "",
     chat_id: str = "",
     trace_id: str | uuid.UUID | None = None,
 ) -> DiscoveryReply:
@@ -169,6 +197,11 @@ def handoff_to_booking(
       service_id: PUBLIC catalog id of the service discovery matched
         (DRF-962), or ``None`` for a serviceless card — answered with an
         ask-the-service reply, never a doomed booking dispatch.
+      query_ref: the encoded request that surfaced this master (DRF-1324),
+        used to narrow that ask-the-service reply to the services the person
+        actually asked about. Empty — or undecodable — means «do not narrow»,
+        and the reply falls back to the master's whole roster, which is what
+        this surface did before DRF-1324.
       chat_id: MAX chat id (outbound is chat-based, tenant-free).
 
     Returns:
@@ -322,20 +355,61 @@ def handoff_to_booking(
             # the legacy flag is already a dead end and is not this ticket.
             rows: list[tuple[uuid.UUID, str]] = []
             truncated = False
+            filtered = False
             if flag_on:
                 menu_qs = CatalogService.objects.filter(
                     masters_offering__master=master,
                     is_active=True,
                     ayla_service_id__isnull=False,
                 )
-                # +1 row to detect truncation without a second COUNT query.
-                rows = list(
-                    menu_qs.order_by("name").values_list("id", "name")[
-                        : _ASK_SERVICE_BUTTON_LIMIT + 1
-                    ]
-                )
+                # DRF-1324 — narrow by the request that surfaced this master.
+                # The SAME predicate the search used (imported, not
+                # re-implemented), so the menu can never disagree with the
+                # list the person tapped from.
+                #
+                # Applied only when it leaves something: an empty result means
+                # the request no longer matches anything this master can
+                # ground — the service went inactive, the mirror moved, the
+                # callback is from an old render — and answering with an empty
+                # menu would strand the tap. Falling back to the full roster is
+                # the pre-DRF-1324 answer, which is worse but never a dead end.
+                parsed = decode_query_ref(query_ref)
+                if not parsed.is_empty:
+                    narrowed = menu_qs.filter(service_rows_match_q(parsed))
+                    score = service_rows_score(parsed)
+                    if score is not None:
+                        # Best match first — «Лимфодренажный массаж» above a
+                        # service that merely shares one stem. A goal query
+                        # has no score (carrying a goal is not a matter of
+                        # degree) and keeps the name order.
+                        narrowed = narrowed.annotate(menu_score=score).order_by(
+                            "-menu_score", "name"
+                        )
+                    else:
+                        narrowed = narrowed.order_by("name")
+                    narrowed_rows = list(
+                        narrowed.values_list("id", "name")[: _ASK_SERVICE_BUTTON_LIMIT + 1]
+                    )
+                    if narrowed_rows:
+                        rows, filtered = narrowed_rows, True
+                if not filtered:
+                    # +1 row to detect truncation without a second COUNT query
+                    # (the narrowed read above takes the same +1 for the same
+                    # reason).
+                    rows = list(
+                        menu_qs.order_by("name").values_list("id", "name")[
+                            : _ASK_SERVICE_BUTTON_LIMIT + 1
+                        ]
+                    )
                 truncated = len(rows) > _ASK_SERVICE_BUTTON_LIMIT
                 rows = rows[:_ASK_SERVICE_BUTTON_LIMIT]
+            logger.info(
+                "marketplace.handoff.ask_service master=%s filtered=%s rows=%d trace=%s",
+                master_id,
+                filtered,
+                len(rows),
+                trace_id,
+            )
             return _ask_service_reply(
                 tenant_id=tenant_id,
                 master_id=master_id,
@@ -343,6 +417,7 @@ def handoff_to_booking(
                 rows=rows,
                 truncated=truncated,
                 not_offered_name=not_offered_name,
+                filtered=filtered,
             )
 
         conversation = resolve_active_conversation(per_tenant_bot_user)

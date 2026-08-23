@@ -106,6 +106,60 @@ _STEM_LEN = 6
 _CITY_MIN_PREFIX = 4
 _CITY_MAX_SUFFIX = 2
 
+# ─── DRF-1324: naming a GOAL is not naming a service ─────────────────────
+#
+# Live pilot 23.08, the first booking ever made through the bot: «запиши на
+# лимфодренаж» found the three masters who really do perform it (the service
+# relation did its job), but «хочу расслабиться» is a different kind of
+# request and the same machinery answers it wrongly. Measured on the contour
+# the same evening: «расслабиться» stems to «рассла», the ILIKE finds exactly
+# ONE service name containing it — «Массаж ног — глубокое расслабление и
+# лимфодренаж» — whose curated goal is ``recharge``, and every one of the
+# NINE services actually carrying ``relax`` (Массаж головы, Классический
+# массаж, Парный массаж …) is missed. The one hit is a word match with the
+# wrong goal; the nine misses are the answer. «хочу подтянуть фигуру» is
+# worse still: «подтян» / «фигуру» occur in no service name at all, so the
+# turn returns NOBODY while fifteen services carry ``body_shape``.
+#
+# The catalog already answers this properly. DRF-1308 put the curated goal on
+# every mirrored service as ``{"key", "label"}`` — the key deliberately, for
+# exactly this filter — and DRF-1317 moved the curation off the «Массаж тела»
+# root onto the sub-branches, so the keys are trustworthy. Selecting on the
+# key is selection by a FACT of the catalog; selecting on the word is not.
+#
+# The recognition vocabulary is the LABELS, read from the mirror the same way
+# ``_known_cities`` reads the cities: the label is what the client app puts
+# in front of the person as a goal chip, so it is also the wording they echo.
+# No new vocabulary, no synonym list, no model call — AYLA-DEC-0045 / OD-9 is
+# not merely respected here, it is unreachable: nothing infers, the code reads
+# a curated key and filters on it.
+#
+# ### Why a goal query REPLACES the name search rather than joining it
+#
+# A goal is recognised only when EVERY service token of the query is
+# accounted for by ONE goal's label. That is a deliberately tight gate and it
+# is what makes the replacement safe:
+#
+#   «хочу расслабиться»      → {расслабиться} ⊆ «Расслабиться и снять стресс»
+#                              → goal relax, name search dropped
+#   «снять отёки»            → «отёки» is in no label → NOT a goal query,
+#                              the name search runs exactly as before
+#   «расслабляющий массаж»   → «массаж» is in no label → name search
+#   «лимфодренаж»            → in no label → name search
+#
+# So the only queries that lose the name search are the ones that named an
+# outcome and nothing else — where the name search is precisely what produced
+# the wrong answer. Anything with a service word in it keeps DRF-1283's
+# OR-ranking untouched. The two modes are mutually exclusive by construction
+# (:func:`_parse_query`), which is why no rule is needed for combining them.
+#
+# ``_GOAL_MIN_PREFIX`` mirrors ``_CITY_MIN_PREFIX``: a token shorter than four
+# characters carries no evidence that it named a goal. The stem comparison
+# itself reuses ``_STEM_LEN`` — «подтянуть» ↔ «подтянуть», «расслабиться» ↔
+# «расслабиться» — for the same reason and with the same limits as everywhere
+# else in this module, and NOT a morphological analyser.
+_GOAL_MIN_PREFIX = 4
+
 # Filler words a booking request carries around the actual service name. The
 # tool spec asks the model for a service substring, but it does sometimes
 # forward the user's phrasing verbatim — «хочу спортивный массаж».
@@ -352,22 +406,164 @@ def _split_known_cities(
     return service_tokens, named
 
 
-def _parse_query(raw: str) -> tuple[list[str], list[str]]:
-    """Parse a free-text discovery query into ``(service_stems, named_cities)``.
+class ParsedQuery(NamedTuple):
+    """What one discovery query asked for, in the three shapes we can match.
+
+    ``stems`` and ``goals`` are MUTUALLY EXCLUSIVE — see :func:`_parse_query`.
+    A query either named a service (stems) or named an outcome (goals); the
+    ``cities`` are orthogonal to both and narrow either.
+    """
+
+    stems: list[str]
+    cities: list[str]
+    goals: list[str]
+
+    @property
+    def is_empty(self) -> bool:
+        """True when the query yielded nothing to match on — fail closed."""
+        return not self.stems and not self.cities and not self.goals
+
+
+def _known_goals() -> dict[str, str]:
+    """``{goal_key: label}`` for every goal curated onto a live service.
+
+    The recognition vocabulary for :func:`_match_goal_keys` — read from the
+    mirror, exactly as :func:`_known_cities` reads the cities, so «a goal we
+    recognise» can only ever mean «a goal some live service actually
+    carries». The labels are the ones DRF-1308 ships in the ``{"key",
+    "label"}`` pair, i.e. the wording the client app shows as a goal chip and
+    therefore the wording a person echoes back.
+
+    One query, and ``DISTINCT`` on the jsonb column collapses the pilot's 94
+    active services to the handful of distinct goal ARRAYS behind them before
+    anything is transferred — the vocabulary is tiny by nature and the row
+    count should not decide what this costs. The ``all_tenants`` carve-out
+    (MKT1) applies for the same reason it applies to discovery itself: the
+    goal taxonomy is shared across tenants.
+
+    A malformed element is skipped rather than raising — the mirror sync
+    already drops broken items (DRF-1308), and a read on the query path must
+    not become the place that discovers bad data.
+    """
+    labels: dict[str, str] = {}
+    rows = (
+        CatalogService.all_tenants.filter(is_active=True)
+        .order_by()
+        .values_list("goals", flat=True)
+        .distinct()
+    )
+    for row in rows:
+        for item in row or []:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key")
+            label = item.get("label")
+            if isinstance(key, str) and key and isinstance(label, str) and label:
+                labels.setdefault(key, label)
+    return labels
+
+
+def _goal_label_words(label: str) -> list[str]:
+    """Content words of a goal label, casefolded — the tokens it can be named by.
+
+    «Расслабиться и снять стресс» → ``["расслабиться", "снять", "стресс"]``.
+    Words shorter than ``_GOAL_MIN_PREFIX`` are dropped: «и», «в», «о» carry
+    no evidence, and letting them count would let any query claim any goal.
+    """
+    return [
+        w for w in re.findall(r"\w+", label.casefold(), re.UNICODE) if len(w) >= _GOAL_MIN_PREFIX
+    ]
+
+
+def _token_names_word(token: str, word: str) -> bool:
+    """True when a query token names a goal-label word.
+
+    The same six-character stem cut the service search uses, applied to both
+    sides so the match holds in either direction. Both sides must clear
+    ``_GOAL_MIN_PREFIX`` first, so a short token can never name a goal.
+
+    The cut is also what keeps «снятие отёков» off ``relax``'s «снять»:
+    the two disagree inside six characters, so that query stays a
+    service-name query — which is the correct answer for it.
+    """
+    if len(token) < _GOAL_MIN_PREFIX or len(word) < _GOAL_MIN_PREFIX:
+        return False
+    return token[:_STEM_LEN] == word[:_STEM_LEN]
+
+
+def _match_goal_keys(tokens: list[str]) -> list[str]:
+    """Goal keys whose label accounts for EVERY token — usually zero or one.
+
+    The tight gate described in the constants block. A goal qualifies only
+    when each of the query's service tokens names some content word of that
+    goal's label; a single unaccounted token («отёки», «массаж»,
+    «лимфодренаж») disqualifies every goal and the caller falls back to the
+    name search.
+
+    Requiring one goal to cover the tokens ALONE — rather than letting two
+    goals split them between themselves — is what keeps this selection rather
+    than interpretation: «подтянуть кожу» is not «body_shape plus skin_care»,
+    it is a request this vocabulary cannot account for, and the honest answer
+    is to search service names for it.
+
+    Several goals can still qualify when their labels share the naming word;
+    the caller OR-s them. Order is by key, so the result is stable.
+    """
+    if not tokens:
+        return []
+    matched: list[str] = []
+    for key, label in sorted(_known_goals().items()):
+        words = _goal_label_words(label)
+        if not words:
+            continue
+        if all(any(_token_names_word(t, w) for w in words) for t in tokens):
+            matched.append(key)
+    return matched
+
+
+def _parse_query(raw: str) -> ParsedQuery:
+    """Parse a free-text discovery query into stems, cities and goals.
 
     The ONE parse point, shared by :func:`_bookable_qs` (who matches) and
     :func:`discover_masters` → :func:`_matched_services` (which service
     matched), for the same reason :func:`_service_match_q` is shared: the two
     must never disagree about what the query said.
 
-    Empty stems with NO city means «asked for something we could not turn into
-    a usable token» — the caller fails closed. Empty stems WITH a city means
-    «named a place, not a service» («мастера в пензе»), which is a perfectly
-    answerable request and must not fail closed.
+    Order matters and is load-bearing. Cities are split off FIRST, so «хочу
+    расслабиться в пензе» still reads as a goal request narrowed to a city
+    rather than as a query with one unaccounted token. Goal recognition then
+    runs on what is left, and only if it accounts for ALL of it does the query
+    become a goal query — in which case ``stems`` is deliberately EMPTY
+    (DRF-1324): the words that named the outcome are not service names, and
+    searching for them is the defect being fixed.
+
+    An empty :class:`ParsedQuery` means «asked for something we could not turn
+    into anything usable» — the caller fails closed. Stems empty WITH a city
+    means «named a place, not a service» («мастера в пензе»), which is a
+    perfectly answerable request and must not fail closed.
     """
     tokens = _query_tokens(raw)
     service_tokens, named_cities = _split_known_cities(tokens)
-    return [t[:_STEM_LEN] for t in service_tokens], named_cities
+    goal_keys = _match_goal_keys(service_tokens)
+    if goal_keys:
+        return ParsedQuery(stems=[], cities=named_cities, goals=goal_keys)
+    return ParsedQuery(stems=[t[:_STEM_LEN] for t in service_tokens], cities=named_cities, goals=[])
+
+
+def parse_query(raw: str) -> ParsedQuery:
+    """Public wrapper over :func:`_parse_query` for callers OUTSIDE matching.
+
+    The reply renderer needs the parse to stamp the query onto a card's
+    booking callback (DRF-1324), so the master's service menu behind the tap
+    can be narrowed by the SAME request that surfaced the master. It must not
+    re-derive that parse with its own rules, hence one exported entry point
+    rather than a second copy of the tokenizer.
+
+    Costs the two small vocabulary reads (:func:`_known_cities`,
+    :func:`_known_goals`); callers already inside this module use the private
+    form and pay them once per search.
+    """
+    return _parse_query(raw)
 
 
 def _trim_filler_edges(part: str) -> str:
@@ -564,6 +760,44 @@ def _service_match_q(stems: list[str]) -> Q:
     return _service_row_q() & any_stem
 
 
+def _goal_row_q(goal_keys: list[str]) -> Q:
+    """The service-relation match for a GOAL query — ANY goal, ONE row.
+
+    The structural counterpart of :func:`_service_match_q` (DRF-1324). Where
+    that one asks «is the query's word inside this service's NAME», this asks
+    «does this service CARRY the goal the person named» — a curated fact of
+    the catalog (DRF-1308 puts it there, DRF-1317 curates it), not a string
+    coincidence.
+
+    ``goals`` is jsonb, so ``__contains=[{"key": k}]`` is a structural
+    containment test (``@>``): it matches the element regardless of the
+    ``label`` beside the key, which is exactly why DRF-1308 stored the pair
+    instead of a bare string.
+
+    Bound into the same joined row as :func:`_service_row_q` for the same
+    reason the name match is: the row that qualifies the master must be a row
+    the master really performs, in their own tenant.
+    """
+    any_goal = Q()
+    for key in goal_keys:
+        any_goal |= Q(services_offered__service__goals__contains=[{"key": key}])
+    return _service_row_q() & any_goal
+
+
+def _relation_match_q(parsed: "ParsedQuery") -> Q:
+    """The service-relation match for a parsed query, whichever mode it is in.
+
+    ``stems`` and ``goals`` are mutually exclusive (:func:`_parse_query`), so
+    this is a routing point and not a combination rule. It exists so that
+    :func:`_bookable_qs` and :func:`_matched_services` cannot drift apart
+    about which mode a query was in — the same reason
+    :func:`_service_match_q` is shared.
+    """
+    if parsed.goals:
+        return _goal_row_q(parsed.goals)
+    return _service_match_q(parsed.stems)
+
+
 def _match_score(stems: list[str]) -> Coalesce:
     """Rank expression: how many stems the master's BEST service row matched.
 
@@ -595,7 +829,9 @@ def _match_score(stems: list[str]) -> Coalesce:
     return Coalesce(Max(total), Value(0), output_field=IntegerField())
 
 
-def _matched_services(master_ids: list[UUID], stems: list[str]) -> dict[UUID, tuple[UUID, str]]:
+def _matched_services(
+    master_ids: list[UUID], parsed: "ParsedQuery"
+) -> dict[UUID, tuple[UUID, str]]:
     """Resolve which service matched the query, per master — when unambiguous
     AND deliverable to the booking flow.
 
@@ -637,7 +873,8 @@ def _matched_services(master_ids: list[UUID], stems: list[str]) -> dict[UUID, tu
     """
     from django.conf import settings
 
-    if not master_ids or not stems:
+    stems = parsed.stems
+    if not master_ids or (not stems and not parsed.goals):
         return {}
     if not bool(getattr(settings, "BOOKING_VIA_AYLA_REST", False)):
         return {}
@@ -648,7 +885,7 @@ def _matched_services(master_ids: list[UUID], stems: list[str]) -> dict[UUID, tu
     rows = (
         CatalogMaster.all_tenants.filter(id__in=master_ids)
         .filter(
-            _service_match_q(stems) & Q(services_offered__service__ayla_service_id__isnull=False)
+            _relation_match_q(parsed) & Q(services_offered__service__ayla_service_id__isnull=False)
         )
         .values_list(
             "id",
@@ -659,6 +896,14 @@ def _matched_services(master_ids: list[UUID], stems: list[str]) -> dict[UUID, tu
     # {master_id: (best_score, {(service_id, name), ...})} — only the master's
     # own top tier survives, same rule as _match_score. Stems are already
     # casefolded by _query_tokens, so ``in`` here means what ILIKE meant there.
+    #
+    # A GOAL query has no stems, so every matching row scores 0 and they all
+    # share the top tier — carrying the named goal is not a matter of degree,
+    # and ranking one carrier above another would be the recommendation engine
+    # this ticket is bounded away from. The «exactly one service» rule below
+    # then decides on its own: a master with one service for that goal gets
+    # the stamp, a master with four is ambiguous and falls through to the menu
+    # (which DRF-1324 narrows by the same goal).
     best: dict[UUID, tuple[int, set[tuple[UUID, str]]]] = {}
     for master_id, service_id, service_name in rows:
         name = service_name or ""
@@ -718,6 +963,17 @@ def _bookable_qs(
     service name (:func:`_split_known_cities`) — an explicit ``city`` argument
     still wins, since a caller that parsed the city itself (the LLM path) knows
     better than a token heuristic.
+
+    ### Naming a goal (DRF-1324)
+
+    A query whose every remaining token is accounted for by ONE curated goal
+    label («хочу расслабиться», «хочу подтянуть фигуру») selects on the goal
+    KEY the mirror carries instead of on the service name. That is a different
+    question, not a wider one: on the contour «расслабиться» matches one
+    service by name and its curated goal is ``recharge``, while the nine
+    services that really carry ``relax`` match nothing. See the constants
+    block for why the gate is tight enough to replace the name search rather
+    than join it.
     """
     qs = (
         CatalogMaster.all_tenants.filter(
@@ -742,8 +998,9 @@ def _bookable_qs(
     # every bookable master is the right answer; «я» conveys a request we
     # cannot serve, and answering it with the whole directory would be wrong.
     if specialization and specialization.strip():
-        stems, named_cities = _parse_query(specialization)
-        if not stems and not named_cities:
+        parsed = _parse_query(specialization)
+        stems, named_cities = parsed.stems, parsed.cities
+        if parsed.is_empty:
             # The caller asked for something and we could not turn it into a
             # single usable token («я», an emoji, bare punctuation). Fail
             # CLOSED. Falling through would drop the filter entirely and hand
@@ -754,6 +1011,28 @@ def _bookable_qs(
 
         if named_cities and not city:
             qs = qs.filter(tenant__city__in=named_cities)
+
+        if parsed.goals:
+            # The query named an OUTCOME (DRF-1324). Select the masters who
+            # perform a service CARRYING that goal and stop — no name match
+            # runs, because the words that named the goal are not service
+            # names and matching them is the defect: on the contour
+            # «расслабиться» finds one service by name and its curated goal is
+            # ``recharge``, while all nine ``relax`` services are missed.
+            #
+            # No ranking annotation: carrying the goal is a yes/no fact, so
+            # every result is an equal answer and the stable ``name`` order
+            # from above is the honest one. Ordering carriers against each
+            # other would be choosing FOR the person — the line the ticket
+            # draws between selection and recommendation.
+            #
+            # DISTINCT is therefore back, and load-bearing. The stem path
+            # below drops it because its aggregate annotation groups by the
+            # master and collapses the join multiplication for free; with no
+            # aggregate to lean on, a master carrying two ``relax`` services
+            # would render TWICE — the duplicate-card bug DRF-1283's
+            # annotation was written to remove.
+            return qs.filter(_goal_row_q(parsed.goals)).distinct()
 
         if not stems:
             # Every token named a place we serve («мастера в пензе»). The city
@@ -811,9 +1090,7 @@ def discover_masters(
     masters = list(qs[:limit])
     cards = [_to_card(master) for master in masters]
     if resolve_service and specialization and specialization.strip():
-        matched = _matched_services(
-            [master.id for master in masters], _parse_query(specialization)[0]
-        )
+        matched = _matched_services([master.id for master in masters], _parse_query(specialization))
         cards = [
             (
                 replace(card, service_id=pair[0], service_name=pair[1])
@@ -984,6 +1261,56 @@ def get_salon(tenant_id: UUID) -> SalonCard | None:
     return next(iter(discover_salons(tenant_id=tenant_id, limit=1)), None)
 
 
+def service_rows_match_q(parsed: "ParsedQuery") -> Q:
+    """Narrow a ``CatalogService`` queryset by a parsed query — the ROW form.
+
+    The counterpart of :func:`_relation_match_q`, for callers holding services
+    directly rather than reaching them through a master. Same routing, same
+    mutual exclusion: a goal query tests the curated ``goals`` key, a service
+    query tests the name.
+
+    Exported because the discovery → booking handoff must narrow the master's
+    service menu by the SAME request that surfaced that master (DRF-1324). The
+    live failure it removes: «запиши на лимфодренаж» found the three masters
+    who really perform it, and then offered the first ten of Сазонова's
+    nineteen services in alphabetical order — «Биоэнергетический массаж
+    детский» second, the two lymphatic-drainage services sixth and seventh —
+    and the booking that came out of that tap was for the children's massage.
+    The master was selected by the request; the menu behind them was not.
+
+    An empty ``Q()`` — a parse that yielded neither stems nor goals — matches
+    everything. Callers must check the parse before using it, exactly as
+    :func:`_bookable_qs` fails closed rather than dropping its filter.
+    """
+    if parsed.goals:
+        any_goal = Q()
+        for key in parsed.goals:
+            any_goal |= Q(goals__contains=[{"key": key}])
+        return any_goal
+    any_stem = Q()
+    for stem in parsed.stems:
+        any_stem |= Q(name__icontains=stem)
+    return any_stem
+
+
+def service_rows_score(parsed: "ParsedQuery") -> Case | CombinedExpression | None:
+    """Rank expression for :func:`service_rows_match_q`, or ``None``.
+
+    ``None`` for a goal query, deliberately: carrying a goal is a yes/no fact
+    and ordering its carriers against each other would be recommendation, not
+    selection. Callers fall back to their stable name order there.
+    """
+    score: Case | CombinedExpression | None = None
+    for stem in parsed.stems:
+        term = Case(
+            When(Q(name__icontains=stem), then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        )
+        score = term if score is None else score + term
+    return score
+
+
 def discover_services(
     *,
     salon: str | None = None,
@@ -1002,6 +1329,8 @@ def discover_services(
     discovery (:func:`_parse_query`): tokens OR-ed, ranked by how many stems
     one name matched, and a token naming a city we serve routes to the city
     filter, so «массаж в пензе» works here exactly as it does for masters.
+    A query that names a GOAL and nothing else selects on the curated goal key
+    instead (DRF-1324), unranked — see :func:`service_rows_score`.
     An untokenizable query fails CLOSED (empty list) rather than dropping the
     filter — same posture as ``_bookable_qs``.
 
@@ -1028,12 +1357,18 @@ def discover_services(
 
     order: tuple[str, ...] = ("tenant__name", "name", "id")
     if query:
-        stems, named_cities = _parse_query(query)
-        if not stems and not named_cities:
+        parsed = _parse_query(query)
+        stems, named_cities = parsed.stems, parsed.cities
+        if parsed.is_empty:
             return []
         if named_cities and not city:
             qs = qs.filter(tenant__city__in=named_cities)
-        if stems:
+        if parsed.goals:
+            # «хочу расслабиться» selects the services that CARRY ``relax``,
+            # not the ones whose name happens to contain «рассла» (DRF-1324).
+            # No ranking annotation — see :func:`service_rows_score`.
+            qs = qs.filter(service_rows_match_q(parsed))
+        elif stems:
             any_stem = Q()
             # No join multiplication here (the tenant join is many-to-one and
             # the filter binds the row's own name), so a plain per-row CASE
