@@ -161,7 +161,15 @@ class TestServiceRelationMatch:
         """
         settings.BOOKING_VIA_AYLA_REST = True
         universal = _master(penza, "Универсал", specialization="")
-        _link(penza, universal, _service(penza, "Спортивный маникюр", slug="sport-nails"))
+        # Both services carry an Ayla id, so both are stampable and can tie.
+        # Without that the manicure is filtered out by the deliverability gate
+        # and the massage wins by default — the test would then pin the gate,
+        # not the tie-breaking this is about.
+        _link(
+            penza,
+            universal,
+            _service(penza, "Спортивный маникюр", slug="sport-nails", ayla_service_id=uuid4()),
+        )
         _link(
             penza,
             universal,
@@ -745,6 +753,14 @@ class TestGreetingIsStrippedAsAPhrase:
     """
 
     def test_day_package_is_not_diluted(self, penza: Tenant) -> None:
+        """«день» must survive tokenization, or the package loses its identity.
+
+        Since DRF-1283 «diluted» means demoted, not excluded: the weaker match
+        «Массаж для красоты тела» still surfaces on «красот» alone, one rank
+        down. The discriminating assertion is the ORDER — if «день» were
+        stripped as filler both would score 1 on «красот» and the tie would
+        break alphabetically, putting «Другой мастер» first.
+        """
         package_master = _master(penza, "Пакетный мастер", specialization="")
         _link(penza, package_master, _service(penza, "День красоты", slug="beauty-day"))
         other = _master(penza, "Другой мастер", specialization="")
@@ -752,7 +768,7 @@ class TestGreetingIsStrippedAsAPhrase:
 
         cards = discover_masters(specialization="день красоты")
 
-        assert {c.name for c in cards} == {"Пакетный мастер"}
+        assert [c.name for c in cards] == ["Пакетный мастер", "Другой мастер"]
 
     @pytest.mark.parametrize(
         "greeting",
@@ -832,14 +848,20 @@ class TestTokenCapKeepsTheTail:
         assert {c.name for c in cards} == {"Массажист"}
 
     def test_leading_tokens_are_the_ones_dropped(self, penza: Tenant) -> None:
-        """The mirror image: a service named after the LEADING words is NOT found.
+        """The mirror image: a service named after the DROPPED words is not found.
 
-        The name must be matched by the first five tokens and not by the last
-        five, otherwise the assertion holds under either slice direction and
-        proves nothing. «Один два три четыре пять» is exactly `first5`, so this
-        fails the moment the code goes back to ``tokens[:_MAX_TOKENS]``.
+        The name must be made of tokens the slice throws away and of nothing
+        else, or the assertion holds under either slice direction and proves
+        nothing. «Один два» is exactly what the tail slice drops from this
+        query, so it scores zero under ``tokens[-_MAX_TOKENS:]`` and two under
+        ``tokens[:_MAX_TOKENS]``.
+
+        Pre-DRF-1283 this used the full «Один два три четыре пять», which
+        discriminated only while tokens were AND-ed — under OR that name
+        matches «три»/«четыре»/«пять» whichever end is sliced, so the old
+        fixture would now pass for the wrong reason.
         """
         master = _master(penza, "Массажист", specialization="")
-        _link(penza, master, _service(penza, "Один два три четыре пять", slug="leading"))
+        _link(penza, master, _service(penza, "Один два", slug="leading"))
 
         assert discover_masters(specialization="один два три четыре пять шесть массаж") == []
