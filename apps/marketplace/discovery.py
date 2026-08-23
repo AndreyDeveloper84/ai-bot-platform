@@ -155,8 +155,53 @@ _FILLER_TOKENS = frozenset(
         "мастер",
         "мастера",
         "салон",
+        # DRF-1312 — enumeration glue. A composite request («давай будет
+        # несколько: массаж классика, и маникюр») carries a lead-in clause
+        # that names no service, and DRF-1312 splits such a request into parts
+        # and says out loud when a part matches nothing in the catalog. A part
+        # built entirely of these words must therefore reduce to ZERO content
+        # tokens (:func:`_content_tokens`), or the bot would announce that
+        # «давай будет несколько» is a service it does not offer — a confident
+        # lie, and a worse failure than the silence DRF-1312 removes.
+        #
+        # Same safety argument as the rest of the list: a word here can only
+        # widen a search, never narrow it, and none of these nine occurs as a
+        # standalone word in a service name.
+        "давай",
+        "давайте",
+        "будет",
+        "будут",
+        "несколько",
+        "ещё",
+        "еще",
+        "также",
+        "тоже",
     }
 )
+
+
+# DRF-1312 — the separators an enumeration of services is written with.
+#
+# Splits «массаж классика, и маникюр» into parts, so each part can be checked
+# against the catalog SEPARATELY and the ones nobody offers can be named out
+# loud instead of vanishing into an OR-ranked list that silently answers only
+# the half we can serve.
+#
+# ``re.IGNORECASE`` rather than the module's usual casefold-first, because the
+# caller keeps the ORIGINAL substring as the label it will quote back at the
+# user — «Маникюр» must not come back as «маникюр» in their own words.
+#
+# ``-`` is deliberately absent: «гель-лак» is one service, not two. ``:`` is
+# present because a lead-in clause ends with one («давай будет несколько:
+# массаж…») and the clause must land in its own part to be discarded.
+_SERVICE_SPLIT_RE = re.compile(
+    r"\s*(?:[,;:/+]|\bи\b|\bплюс\b|\bа\s+также\b)\s*",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Upper bound on the parts of one enumeration we will check and quote back.
+# Each part costs one EXISTS query and one clause of the reply.
+_MAX_SERVICE_PARTS = 5
 
 
 # Greetings are stripped as PHRASES, before tokenizing, and deliberately not
@@ -181,6 +226,30 @@ _GREETING_RE = re.compile(
 )
 
 
+def _content_tokens(raw: str) -> list[str]:
+    """Word runs of ``raw``, greeting- and filler-free, WITHOUT any fallback.
+
+    Split out of :func:`_query_tokens` for DRF-1312. The two differ on exactly
+    one question — «what does an all-filler input mean?» — and they must
+    answer it differently:
+
+    * A whole QUERY that is all filler still has to be searched with
+      something, so :func:`_query_tokens` drops back to the raw words.
+    * A PART of an enumeration that is all filler is a lead-in clause, not a
+      service («давай будет несколько», «и ещё»), and the honest thing to
+      report about it is nothing at all. An empty list is that answer.
+
+    Returning the raw words here instead would make :func:`split_requested_services`
+    hand a glue clause to the coverage check, which would find no service
+    named «давай будет несколько» and say so out loud.
+    """
+    without_greeting = _GREETING_RE.sub(" ", raw.casefold())
+    words = [
+        t for t in re.findall(r"\w+", without_greeting, re.UNICODE) if len(t) >= _MIN_TOKEN_LEN
+    ]
+    return [t for t in words if t not in _FILLER_TOKENS]
+
+
 def _query_tokens(raw: str) -> list[str]:
     """Normalize a discovery query into match tokens.
 
@@ -201,16 +270,15 @@ def _query_tokens(raw: str) -> list[str]:
     that can never match the stored «ё». Casefolding is fine because ILIKE is
     already case-insensitive.
     """
-    without_greeting = _GREETING_RE.sub(" ", raw.casefold())
-    words = [
-        t for t in re.findall(r"\w+", without_greeting, re.UNICODE) if len(t) >= _MIN_TOKEN_LEN
-    ]
-    tokens = [t for t in words if t not in _FILLER_TOKENS]
+    tokens = _content_tokens(raw)
     # If the request was ENTIRELY filler there is nothing to drop back to —
     # keep the raw words so the caller sees a real (if unhelpful) query rather
     # than an empty one it would read as "untokenizable".
     if not tokens:
-        tokens = words
+        without_greeting = _GREETING_RE.sub(" ", raw.casefold())
+        tokens = [
+            t for t in re.findall(r"\w+", without_greeting, re.UNICODE) if len(t) >= _MIN_TOKEN_LEN
+        ]
     # Keep the LAST tokens, not the first. Russian puts the informative noun at
     # the end, so a request longer than the cap is far likelier to be
     # «…записаться на спортивный массаж» than to lead with the service name.
@@ -253,15 +321,23 @@ def _is_city_token(token: str, city_folded: str) -> bool:
     return common >= _CITY_MIN_PREFIX and common >= len(city_folded) - _CITY_MAX_SUFFIX
 
 
-def _split_known_cities(tokens: list[str]) -> tuple[list[str], list[str]]:
+def _split_known_cities(
+    tokens: list[str], cities: list[str] | None = None
+) -> tuple[list[str], list[str]]:
     """Split query tokens into ``(service_tokens, named_cities)``.
 
     A token that names a city we serve is NOT a service token — «пензе» can
     never be a substring of a service name, and before DRF-1283 its presence
     in the AND chain is exactly what zeroed the live query. Returned city
     names are the STORED spellings, ready for a ``tenant__city__in`` filter.
+
+    ``cities`` may be supplied by a caller that already read
+    :func:`_known_cities` — :func:`split_requested_services` classifies every
+    part of an enumeration against the SAME set and would otherwise repeat
+    that DISTINCT once per part on the busiest path in the funnel.
     """
-    cities = _known_cities()
+    if cities is None:
+        cities = _known_cities()
     if not cities:
         return list(tokens), []
     folded = {c.casefold(): c for c in cities}
@@ -292,6 +368,146 @@ def _parse_query(raw: str) -> tuple[list[str], list[str]]:
     tokens = _query_tokens(raw)
     service_tokens, named_cities = _split_known_cities(tokens)
     return [t[:_STEM_LEN] for t in service_tokens], named_cities
+
+
+def _trim_filler_edges(part: str) -> str:
+    """Drop leading/trailing filler words from an enumeration part (DRF-1312).
+
+    The part is quoted back at the user, so «и ещё маникюр» has to come back as
+    «маникюр» — the surviving substring is still their own wording, just
+    without the connective that only ever joined it to the previous part.
+
+    Edges only, and never the middle: the words between the first and last
+    content word are the service's own name, and «Массаж на дому» must not
+    become «Массаж дому» because «на» is in the filler list.
+    """
+    words = list(re.finditer(r"\w+", part, re.UNICODE))
+    content = [m for m in words if m.group(0).casefold() not in _FILLER_TOKENS]
+    if not content or len(content) == len(words):
+        # All filler (nothing to keep — the caller drops it anyway) or no
+        # filler at all: either way the string is already what it should be.
+        return part
+    return part[content[0].start() : content[-1].end()]
+
+
+def split_requested_services(raw: str) -> list[str]:
+    """Split an ENUMERATION of services into the parts that name a service.
+
+    DRF-1312. «массаж классика, и маникюр» → ``["массаж классика", "маникюр"]``.
+    Parts are returned in the caller's OWN spelling, because a caller that
+    reports one back to the user must quote what they wrote, not a stem.
+
+    Empty for anything that is not an enumeration — text with no separator in
+    it («спортивный массаж») has no part that could have been dropped
+    silently, which is the only thing this function exists to find. Answering
+    ``[]`` there rather than ``[raw]`` also keeps the ONE query it costs
+    (:func:`_known_cities`) off the single-service turn, the busiest in the
+    funnel.
+
+    A part survives only if it still has a content token after greeting
+    stripping, filler removal (:func:`_content_tokens`) and city recognition
+    (:func:`_split_known_cities`). That drops the two kinds of part that name
+    no service and must never be reported as a missing one:
+
+    * a lead-in clause — «давай будет несколько», «и ещё» — all filler;
+    * a place — «в пензе» in «массаж, в пензе» — a city, not a service.
+
+    So a single-service query with a city («массаж, пенза») yields ONE part,
+    not two, and callers keying off ``len(parts) >= 2`` do not mistake it for
+    a composite request.
+
+    ### What this is safe to run on
+
+    Only on text a caller is willing to QUOTE BACK. The filler list is short
+    and literal by design (see the constants block), so an arbitrary
+    conversational turn can always carry glue this does not know — and a part
+    that is really glue would be reported as a service we do not offer, which
+    is a confident lie and strictly worse than DRF-1312's original silence.
+
+    Its two uses respect that line:
+
+    * ``apps.orchestrator.concierge.generate_direct_show_masters_reply`` runs
+      it on the RAW turn only to COUNT parts, never to label one — a
+      miscounted turn costs an LLM call, not an untruth;
+    * the coverage report runs it on the MODEL's ``specialization`` argument,
+      which is already normalized to service wording, and only as the fallback
+      for a model that did not fill ``services``.
+    """
+    chunks: list[str] = []
+    for chunk in _SERVICE_SPLIT_RE.split(raw or ""):
+        part = _trim_filler_edges(chunk.strip().strip("«»\"'.!?-—–…").strip())
+        if part:
+            chunks.append(part)
+    if len(chunks) < 2:
+        return []
+    cities = _known_cities()
+    parts: list[str] = []
+    for part in chunks:
+        service_tokens, _named = _split_known_cities(_content_tokens(part), cities)
+        if service_tokens:
+            parts.append(part)
+        if len(parts) >= _MAX_SERVICE_PARTS:
+            break
+    return parts
+
+
+def service_coverage(
+    names: list[str],
+    *,
+    city: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Split requested service names into ``(available, missing)`` — by CATALOG.
+
+    DRF-1312. The live failure: «массаж классика, и маникюр» returned five
+    massage masters under «Вот мастера, которые могут подойти» while no salon
+    in the contour offers a single nail service. Half the request was answered
+    and the other half disappeared without a word.
+
+    ``available`` / ``missing`` is that missing half, made explicit. A name is
+    ``available`` when :func:`_bookable_qs` — the SAME predicate that produced
+    the cards — finds at least one bookable master for that name ALONE. Not
+    «the model thinks we do it», not a category lookup (the mirror stores a
+    category UUID it cannot resolve, so categories are not available to us at
+    all): the catalog answers, one EXISTS per name.
+
+    This is the AYLA-DEC-0045 / OD-9 line drawn in code. Turning a sentence
+    into service names is language understanding and may come from the model;
+    deciding whether a named service exists is a fact and may not. So the
+    caller supplies the names and this function supplies the verdicts.
+
+    ``city`` scopes the verdict exactly as it scopes the answer: if the cards
+    were city-filtered, «we don't have it» must mean «not in that city», and
+    the caller's wording must say so.
+
+    A name that carries no service token («в пензе», «и ещё») lands in
+    NEITHER list — it made no claim, so there is nothing to confirm or deny.
+    Names are de-duplicated case-insensitively and capped at
+    ``_MAX_SERVICE_PARTS``.
+    """
+    available: list[str] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+    for raw in list(names)[:_MAX_SERVICE_PARTS]:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        # _content_tokens, NOT _parse_query: the latter falls back to the raw
+        # words for an all-filler input («хочу»), which is right for a query
+        # that still has to be searched with something and wrong here — a name
+        # that reduces to nothing must make no claim, or «хочу» ends up quoted
+        # back as a service we do not offer.
+        service_tokens, _named_cities = _split_known_cities(_content_tokens(name))
+        if not service_tokens:
+            continue
+        if _bookable_qs(city=city, specialization=name).exists():
+            available.append(name)
+        else:
+            missing.append(name)
+    return available, missing
 
 
 class PageMeta(NamedTuple):

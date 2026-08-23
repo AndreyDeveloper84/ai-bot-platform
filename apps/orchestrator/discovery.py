@@ -40,6 +40,8 @@ from apps.marketplace.discovery import (
     discover_salons,
     discover_services,
     get_salon,
+    service_coverage,
+    split_requested_services,
 )
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.orchestrator.llm.templates import get_fallback
@@ -119,6 +121,32 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
             "specialization": {
                 "type": "string",
                 "description": "Specialization / service substring (optional), e.g. 'маникюр'.",
+            },
+            # DRF-1312. The user says «массаж и маникюр»; the answer used to be
+            # five massage masters and silence about the nails, because the
+            # request reached the catalog as ONE substring and a half of it
+            # that matches nothing simply scores zero.
+            #
+            # The model is asked to name the parts because splitting a
+            # sentence into services is language understanding. It is NOT
+            # asked whether we offer them: the platform checks each name
+            # against the catalog itself (AYLA-DEC-0045 / OD-9 — the model is
+            # not the authority on what exists) and states the missing ones
+            # verbatim in the reply.
+            "services": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": _MAX_MASTER_CARDS,
+                "description": (
+                    "EVERY distinct service the user named, one per element, in "
+                    "their own words — e.g. ['массаж классика', 'маникюр'] for "
+                    "«давай будет несколько: массаж классика, и маникюр». Always "
+                    "fill this when more than one service is named: the platform "
+                    "checks each against the catalog separately and tells the "
+                    "user which ones nobody offers. Do NOT judge availability "
+                    "yourself and do NOT drop a service you think is missing. "
+                    "Fill `specialization` as well."
+                ),
             },
             "limit": {
                 "type": "integer",
@@ -366,11 +394,42 @@ def render_no_match(city: str | None = None, specialization: str | None = None) 
     return DiscoveryReply(text=text[:_MAX_REPLY_CHARS])
 
 
+def render_missing_services(missing: list[str], city: str | None = None) -> str:
+    """The one sentence that says a named service is not in the catalog (DRF-1312).
+
+    The single wording point for the half of a composite request nobody can
+    serve, so the deterministic renderer below and any future caller cannot
+    phrase the same fact two ways.
+
+    Quotes the user's OWN words back — ``missing`` carries the spelling they
+    used (see ``apps.marketplace.discovery.service_coverage``) — because the
+    sentence is a refusal and a refusal has to be recognisable as an answer to
+    what was asked, not to a stem we reduced it to.
+
+    Scoped to ``city`` when the search was, for the same reason
+    :func:`render_no_match` distinguishes the two: «такого нет» about a
+    city-filtered search is a claim about that city, and saying it unqualified
+    would deny a service that may exist one city over.
+    """
+    quoted = ", ".join(f"«{name.strip()[:_MAX_ECHOED_QUERY_CHARS]}»" for name in missing if name)
+    if not quoted:
+        return ""
+    plural = len(missing) > 1
+    place = (city or "").strip()[:_MAX_ECHOED_QUERY_CHARS]
+    if place:
+        subject = "таких услуг" if plural else "такой услуги"
+        return f"{quoted} в городе {place} — {subject} у наших мастеров сейчас нет."
+    subject = "таких услуг" if plural else "такой услуги"
+    return f"{quoted} — {subject} у наших мастеров сейчас нет."
+
+
 def _render_master_cards(
     cards: list[MasterCard],
     *,
     city: str | None = None,
     specialization: str | None = None,
+    available_services: list[str] | None = None,
+    missing_services: list[str] | None = None,
 ) -> DiscoveryReply:
     """Render discovered masters as a reply + a one-button-per-card keyboard.
 
@@ -384,11 +443,38 @@ def _render_master_cards(
     used ONLY for the empty case, so the refusal can name what was searched for
     (DRF-1283 — see :func:`render_no_match`). Callers that have the query
     should pass it; callers that don't get the generic line.
+
+    ### Partial coverage (DRF-1312)
+
+    ``missing_services`` are the parts of a COMPOSITE request that the catalog
+    cannot serve, already verified against it (``service_coverage``); they are
+    stated in the reply instead of vanishing. That statement goes FIRST, ahead
+    of the cards, for two reasons: the ``_MAX_REPLY_CHARS`` clip below eats the
+    tail, and the only line that must never be lost is the one that says what
+    we cannot do; and it must be read BEFORE the list, or a list that answers
+    half the request reads as an answer to all of it — the exact impression
+    DRF-1312 was filed about.
+
+    The header then binds the list to the half we CAN serve, naming it from
+    ``available_services`` when the caller knows those names. «Вот мастера,
+    которые могут подойти» under a request half of which was just refused
+    would be the same silent overclaim in a longer message.
     """
     if not cards:
         return render_no_match(city=city, specialization=specialization)
 
-    lines = ["Вот мастера, которые могут подойти:"]
+    missing_line = render_missing_services(missing_services or [], city)
+    lines: list[str] = []
+    if missing_line:
+        available = [name.strip() for name in (available_services or []) if name and name.strip()]
+        if available:
+            named = ", ".join(f"«{name[:_MAX_ECHOED_QUERY_CHARS]}»" for name in available)
+            header = f"А вот по запросу {named} — мастера, которые могут подойти:"
+        else:
+            header = "А вот по остальной части запроса — мастера, которые могут подойти:"
+        lines = [missing_line, "", header]
+    else:
+        lines = ["Вот мастера, которые могут подойти:"]
     buttons: list[dict[str, str]] = []
     for card in cards:
         # The rating domain is 1..5, so a stored 0.00 is not a rating at all
@@ -851,6 +937,41 @@ def render_no_criteria_clarification() -> DiscoveryReply:
     return _render_ask_clarification(NO_CRITERIA_QUESTION, [])
 
 
+def requested_services(args: dict[str, Any], specialization: str | None) -> list[str]:
+    """The distinct services ONE ``show_masters`` call asked for (DRF-1312).
+
+    Empty unless the call is COMPOSITE — two or more services. A single-service
+    request needs nothing from this: either the catalog has it (the cards ARE
+    the answer) or it does not (the zero-result path already names it and says
+    so, DRF-1283). The half-answered request is the only one that lied.
+
+    Two sources, in order:
+
+    1. ``services`` — the model's own split, which is what the tool spec asks
+       for. Splitting a sentence into service names is language understanding
+       and this is where it belongs.
+    2. ``specialization`` — split here, as the fallback for a model that
+       filled only the substring. Safe to split because it is already
+       normalized to service wording;
+       ``apps.marketplace.discovery.split_requested_services`` documents why
+       the user's raw turn is NOT.
+
+    Note what neither source decides: whether we OFFER any of them. That is
+    ``service_coverage``'s answer, off the catalog (AYLA-DEC-0045 / OD-9).
+    """
+    raw = args.get("services")
+    if isinstance(raw, list):
+        names = [str(item).strip() for item in raw if str(item or "").strip()]
+        if len(names) >= 2:
+            return names[:_MAX_MASTER_CARDS]
+        if names:
+            # The model named exactly one service. Not composite — nothing
+            # here can be half-answered, so spend no EXISTS on it.
+            return []
+    parts = split_requested_services(specialization or "")
+    return parts if len(parts) >= 2 else []
+
+
 def generate_discovery_reply(
     message_text: str,
     *,
@@ -898,11 +1019,23 @@ def generate_discovery_reply(
                 limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
                 resolve_service=True,
             )
+            # DRF-1312 — a composite request is checked service by service, so
+            # the half nobody offers is stated rather than dropped.
+            available, missing = service_coverage(
+                requested_services(args, specialization), city=city
+            )
             logger.info(
-                "orchestrator.discovery.show_masters count=%d trace=%s", len(cards), trace_id
+                "orchestrator.discovery.show_masters count=%d missing=%d trace=%s",
+                len(cards),
+                len(missing),
+                trace_id,
             )
             return _render_master_cards(
-                cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+                cards[:_MAX_MASTER_CARDS],
+                city=city,
+                specialization=specialization,
+                available_services=available,
+                missing_services=missing,
             )
 
     text = (result.text or "").strip()
