@@ -23,6 +23,16 @@ intent type):
   food_correction before nutrition_anketa — the anketa FSM claims any
   text while active, so the ``cb:food:*`` family must win first).
 
+- **The diary READ is deterministic too (DRF-1302)** —
+  :func:`_try_handle_diary_request` claims «что я ел сегодня» / «мой
+  дневник» here rather than leaving them to the model. Not because the
+  model could not classify them, but because the chips this feature ships
+  carry plain text as their callback (tap == typed message on this path):
+  a chip only executes if a matcher on THIS side owns the string. The
+  model tool ``show_my_records``
+  (:mod:`apps.orchestrator.personal_surface`) still covers every phrasing
+  the trigger list deliberately does not.
+
 - **Free text goes to the model as tools** — :data:`NUTRITION_TOOL_SPECS`
   registers four concierge tools (``health_screening``, ``log_water``,
   ``clarify_food_entry``, ``start_nutrition_anketa``). The reasons
