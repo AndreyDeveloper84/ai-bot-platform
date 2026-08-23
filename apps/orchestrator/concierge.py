@@ -16,10 +16,11 @@ The nationwide (tenant-less) concierge DM now runs on
   handler-recorded id for history exclusion; assistant turns persist here.
 - **Tool dispatch** — DRF-241 hook. The dispatcher is pure validation +
   argument normalisation (no I/O, matching ai-core's "handlers are
-  side-effect-free" contract); the sanctioned marketplace carve-out
-  (:func:`apps.marketplace.discovery.discover_masters`) executes in the
-  wrapper's SYNC scope after ``asyncio.run`` returns, so no sync-ORM call
-  ever lands inside the event loop.
+  side-effect-free" contract); the sanctioned marketplace carve-outs
+  (:func:`apps.marketplace.discovery.discover_masters` and, since DRF-1304,
+  ``discover_salons`` / ``discover_services``) execute in the wrapper's SYNC
+  scope after ``asyncio.run`` returns, so no sync-ORM call ever lands inside
+  the event loop.
 - **Prompt** — :func:`build_concierge_system_prompt` composes the frozen
   ``AYLA_MARKETPLACE_VOICE`` with the current-date grounding block
   (DRF-988), the boundary rules (no-sales, helpful
@@ -66,11 +67,15 @@ from apps.orchestrator.discovery import (
     _MAX_MASTER_CARDS,
     _MAX_REPLY_CHARS,
     ASK_CLARIFICATION_TOOL_SPEC,
+    CATALOG_TOOL_ACTIONS,
     SHOW_MASTERS_TOOL_SPEC,
+    SHOW_SALONS_TOOL_SPEC,
+    SHOW_SERVICES_TOOL_SPEC,
     DiscoveryReply,
     _discovery_voice_fields,
     _render_ask_clarification,
     _render_master_cards,
+    execute_catalog_tool,
     has_discovery_criteria,
     render_no_criteria_clarification,
     requested_services,
@@ -483,7 +488,9 @@ class GlobalConversationStore:
 
 
 _KNOWN_TOOLS = frozenset(
-    {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]} | NUTRITION_TOOL_ACTIONS
+    {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]}
+    | NUTRITION_TOOL_ACTIONS
+    | CATALOG_TOOL_ACTIONS
 )
 
 
@@ -663,6 +670,10 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         # DRF-1268 — selection only. The skill executes in the wrapper's
         # sync scope after asyncio.run returns (same shape as show_masters).
         return ToolResult(action_type=name, action_data={"arguments": args})
+    if name in CATALOG_TOOL_ACTIONS:
+        # DRF-1304 — same selection-only shape: the marketplace read and the
+        # deterministic render run in the wrapper's sync scope.
+        return ToolResult(action_type=name, action_data={"arguments": args})
     return ToolResult(
         action_type=ActionType.SHOW_MASTERS,
         action_data={"arguments": args},
@@ -714,8 +725,12 @@ def build_concierge_system_prompt(
         f"{voice['domain']}-мастера и записаться — конкретный салон выбирается "
         "только в момент записи.",
         "Это разговор-знакомство (discovery): отвечай тепло и кратко, "
-        "задавай уточняющие вопросы про услугу, город и предпочтения. НЕ "
-        "называй конкретный салон, цену или адрес — этих данных пока нет.",
+        "задавай уточняющие вопросы про услугу, город и предпочтения. "
+        # DRF-1304 — salons/prices/addresses exist now, behind the tools.
+        # The boundary that survives is the older half of this sentence:
+        # never INVENT them. Naming them from a tool result is the job.
+        "Салон, цену или адрес называй ТОЛЬКО из ответов инструментов — "
+        "ничего не выдумывай; нет данных в ответе — честно скажи, что нет.",
         # DRF-1102 — the tool exists now (see tool_definitions); without this
         # line the model has no reason to prefer it over the plain-text habit
         # the rest of this prompt otherwise establishes.
@@ -735,6 +750,15 @@ def build_concierge_system_prompt(
         "отдельным элементом, словами клиента. Не решай сам, есть ли услуга "
         "у мастеров, и не выбрасывай ту, которой, по-твоему, нет: платформа "
         "проверит каждую по каталогу и сама скажет клиенту про отсутствующие.",
+        # DRF-1304 — the salon/service tools exist now (tool_definitions).
+        "Инструменты каталога:\n"
+        "- Вопрос про салоны или адреса («какие салоны у вас есть», «где вы "
+        "находитесь», «куда можно прийти») — вызывай show_salons (город "
+        "необязателен).\n"
+        "- Вопрос про услуги, цены, длительность («какие услуги в салоне», "
+        "«что есть по лицу», «сколько стоит массаж») — вызывай show_services "
+        "с фильтром: салон, город или запрос.\n"
+        "- Подбор конкретного мастера — show_masters, как раньше.",
         # DRF-1268 — the nutrition tools exist now (tool_definitions). The
         # load-bearing registry order of apps/skills/apps.py is restated
         # here as model-facing priority: the reasons for that order do not
@@ -911,6 +935,8 @@ def generate_concierge_reply(
         ),
         tool_definitions=[
             SHOW_MASTERS_TOOL_SPEC,
+            SHOW_SALONS_TOOL_SPEC,
+            SHOW_SERVICES_TOOL_SPEC,
             ASK_CLARIFICATION_TOOL_SPEC,
             *NUTRITION_TOOL_SPECS,
         ],
@@ -1142,6 +1168,31 @@ def generate_concierge_reply(
         # Parser refused the phrase the model passed (or the skill
         # declined): fall back to whatever text the model produced
         # alongside the call, else the safe line.
+        text = (dto.content or "").strip()
+        if text:
+            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+
+    if dto.action_type in CATALOG_TOOL_ACTIONS:
+        # DRF-1304 — salons / services selected by the model as tools. The
+        # deterministic reply is rendered from real mirror data (or an honest
+        # «нет такого» when the mirror has none); no extra LLM pass is spent
+        # rephrasing catalog rows, so the turn's cost does not grow.
+        args = (dto.action_data or {}).get("arguments", {})
+        catalog_reply = execute_catalog_tool(
+            dto.action_type, args if isinstance(args, dict) else {}
+        )
+        if catalog_reply is not None:
+            # No re-clamp to _MAX_REPLY_CHARS here: the renderer already bounds
+            # this text by the catalog budget, and 600 would cut a real card
+            # list mid-word while its chips stayed (see _MAX_CATALOG_REPLY_CHARS).
+            return DiscoveryReply(
+                text=catalog_reply.text,
+                action_data=catalog_reply.action_data,
+                persisted=True,
+            )
+        # Unknown tool name is unreachable (_KNOWN_TOOLS gates dispatch), but
+        # degrade exactly like the nutrition branch if it ever happens.
         text = (dto.content or "").strip()
         if text:
             return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
