@@ -129,7 +129,10 @@ from apps.persona.memory_surface import render_current_personal_context
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
+    CATALOG_CALLBACK_PREFIXES,
+    CATALOG_STALE_CARD_TEXT,
     DiscoveryReply,
+    execute_catalog_callback,
 )
 from apps.orchestrator.handoff import (
     BOOKING_CALLBACK_PREFIXES,
@@ -746,6 +749,16 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         bot_user, event.text, conversation
     ):
         reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
+    elif event.text.startswith(CATALOG_CALLBACK_PREFIXES):
+        # DRF-1304 — a catalog chip tap. Sits with the other callback branches
+        # and BEFORE the concierge below for the same reason they do: the text
+        # is an id this bot rendered, not something a person said, and the
+        # model must never be handed a raw «cb:…» string to interpret.
+        # execute_catalog_callback returns a reply for every catalog callback
+        # — stale and malformed refs included — so this branch cannot fall
+        # through once the prefix matched.
+        reply = execute_catalog_callback(event.text) or DiscoveryReply(text=CATALOG_STALE_CARD_TEXT)
+        assistant_action_type = "catalog_card"
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
     elif event.text.startswith(BOOKING_CALLBACK_PREFIXES):

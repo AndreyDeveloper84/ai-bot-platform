@@ -79,6 +79,11 @@ class ServiceCard:
     canonical-template coverage is 0 of 58 rows), and a missing value must
     render as "not told", never as an invented number. A ``price_from`` of 0
     is kept as stored; renderers decide how (not) to show it.
+
+    ``has_bookable_master`` answers «is there anyone to book with for this
+    service» — false is a NORMAL state (a salon may list a service none of its
+    masters is mapped to). It gates the tap chip, not the line: the service is
+    still real and still shown, it just leads nowhere yet.
     """
 
     tenant_id: UUID
@@ -88,3 +93,4 @@ class ServiceCard:
     duration_min: int | None
     salon_name: str
     city: str
+    has_bookable_master: bool = False

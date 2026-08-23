@@ -20,7 +20,7 @@ from typing import NamedTuple
 from uuid import UUID
 
 from django.core.paginator import Paginator
-from django.db.models import Case, F, IntegerField, Max, Q, QuerySet, Value, When
+from django.db.models import Case, Exists, F, IntegerField, Max, OuterRef, Q, QuerySet, Value, When
 from django.db.models.expressions import CombinedExpression
 from django.db.models.functions import Coalesce
 
@@ -464,6 +464,7 @@ def _bookable_qs(
     *,
     city: str | None = None,
     specialization: str | None = None,
+    tenant_id: UUID | None = None,
 ) -> QuerySet[CatalogMaster]:
     """Cross-tenant queryset of bookable masters, optionally filtered.
 
@@ -512,6 +513,13 @@ def _bookable_qs(
     )
     if city:
         qs = qs.filter(tenant__city__iexact=city)
+
+    # DRF-1304 - a chip tap addresses a salon by the id the bot itself
+    # rendered, never by the name substring the model-called tool matches on:
+    # two salons whose names contain one another would resolve the same tap
+    # to different places on different days.
+    if tenant_id:
+        qs = qs.filter(tenant_id=tenant_id)
 
     # Whitespace-only is "no filter supplied", not "a filter we failed to
     # parse" — the two must not collapse together. Blank conveys no request, so
@@ -662,13 +670,20 @@ def get_master(master_id: UUID) -> MasterCard | None:
 _SALON_SERVICE_SAMPLES = 3
 
 
-def _bookable_tenants(*, city: str | None = None) -> dict[UUID, Tenant]:
+def _bookable_tenants(
+    *, city: str | None = None, tenant_id: UUID | None = None
+) -> dict[UUID, Tenant]:
     """Active tenants having at least one bookable master, keyed by id.
 
     ``order_by()`` clears the master ordering before DISTINCT — Postgres
     rejects SELECT DISTINCT whose ORDER BY columns are not in the select list.
     """
-    tenant_ids = _bookable_qs(city=city).order_by().values_list("tenant_id", flat=True).distinct()
+    tenant_ids = (
+        _bookable_qs(city=city, tenant_id=tenant_id)
+        .order_by()
+        .values_list("tenant_id", flat=True)
+        .distinct()
+    )
     return {t.id: t for t in Tenant.objects.filter(id__in=tenant_ids)}
 
 
@@ -686,24 +701,30 @@ def _master_address(master: CatalogMaster) -> str:
     return str(raw.get("address") or "").strip()
 
 
-def discover_salons(*, city: str | None = None, limit: int = _DEFAULT_LIMIT) -> list[SalonCard]:
+def discover_salons(
+    *,
+    city: str | None = None,
+    tenant_id: UUID | None = None,
+    limit: int = _DEFAULT_LIMIT,
+) -> list[SalonCard]:
     """Return salons (tenants with bookable masters) as public DTOs.
 
     Optional ``city`` (exact, case-insensitive, on the tenant) narrows the
-    result — same semantics as :func:`discover_masters`. Each card carries
+    result — same semantics as :func:`discover_masters`; ``tenant_id`` narrows
+    it to one salon (the chip-tap read — see :func:`get_salon`). Each card carries
     the salon's address (first non-empty one among its bookable masters —
     "" when none of them has one), its bookable-master count, and a count +
     short sample of its active services («что там делают»). Three bounded
     queries total: masters, tenants, service names.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
-    masters = list(_bookable_qs(city=city))
+    masters = list(_bookable_qs(city=city, tenant_id=tenant_id))
     if not masters:
         return []
     masters_by_tenant: dict[UUID, list[CatalogMaster]] = {}
     for master in masters:
         masters_by_tenant.setdefault(master.tenant_id, []).append(master)
-    tenants = _bookable_tenants(city=city)
+    tenants = _bookable_tenants(city=city, tenant_id=tenant_id)
     service_rows = (
         CatalogService.all_tenants.filter(tenant_id__in=tenants, is_active=True)
         .order_by("name")
@@ -736,9 +757,21 @@ def discover_salons(*, city: str | None = None, limit: int = _DEFAULT_LIMIT) -> 
     return cards
 
 
+def get_salon(tenant_id: UUID) -> SalonCard | None:
+    """Return one salon's public card by tenant id, or ``None`` (DRF-1304).
+
+    The read behind a salon chip's tap. ``None`` means the salon stopped being
+    a salon between the render and the tap — went inactive, or its last
+    bookable master did. The caller says so; it must not fall back to a name
+    search, which could land the tap on a different salon.
+    """
+    return next(iter(discover_salons(tenant_id=tenant_id, limit=1)), None)
+
+
 def discover_services(
     *,
     salon: str | None = None,
+    tenant_id: UUID | None = None,
     city: str | None = None,
     query: str | None = None,
     limit: int = _DEFAULT_LIMIT,
@@ -746,6 +779,8 @@ def discover_services(
     """Return active services of salons on the platform, as public DTOs.
 
     Filters (all optional, AND-ed): ``salon`` — substring of the tenant name;
+    ``tenant_id`` — that one salon, exactly (the chip-tap read: the button
+    carries the id, so the follow-up must not re-run a name match);
     ``city`` — exact, case-insensitive, on the tenant; ``query`` — free text
     matched against service names through the same stem machinery as master
     discovery (:func:`_parse_query`): tokens OR-ed, ranked by how many stems
@@ -768,6 +803,8 @@ def discover_services(
     salon = (salon or "").strip()
     city = (city or "").strip()
     query = (query or "").strip()
+    if tenant_id:
+        qs = qs.filter(tenant_id=tenant_id)
     if salon:
         qs = qs.filter(tenant__name__icontains=salon)
     if city:
@@ -797,6 +834,14 @@ def discover_services(
                 score = term if score is None else score + term
             qs = qs.filter(any_stem).annotate(match_score=score)
             order = ("-match_score", "name", "id")
+    # DRF-1304 — «is there anyone to book with for this service» decides
+    # whether the renderer may put a chip on the line. Nobody performing it is
+    # a normal state (a salon lists a service its masters are not mapped to),
+    # and a chip leading there would spend the user's trust on a dead end.
+    # ``.order_by()`` because an EXISTS subquery has nothing to sort.
+    performs_it = _bookable_qs().order_by().filter(services_offered__service_id=OuterRef("pk"))
+    qs = qs.annotate(has_bookable_master=Exists(performs_it))
+
     rows = qs.order_by(*order)[:limit]
     return [
         ServiceCard(
@@ -807,8 +852,45 @@ def discover_services(
             duration_min=service.duration_min,
             salon_name=service.tenant.name,
             city=service.tenant.city,
+            has_bookable_master=service.has_bookable_master,
         )
         for service in rows
+    ]
+
+
+def discover_masters_for_service(
+    service_id: UUID, *, limit: int = _DEFAULT_LIMIT
+) -> list[MasterCard]:
+    """Return the bookable masters who perform ONE service (DRF-1304).
+
+    The read behind a service chip's tap. Each card is stamped with that
+    service (id + name), so the booking button the card carries enters booking
+    WITH the service context — the same DRF-962 seam ``resolve_service`` fills
+    on the query path, except here nothing is inferred from text: the user
+    tapped the service itself.
+
+    Empty list when the service is gone or inactive, its salon went inactive,
+    or nobody bookable performs it any more. All of those mean «no one to book
+    with», and the caller must say that rather than invent a master.
+    """
+    limit = max(1, min(limit, _MAX_LIMIT))
+    service = (
+        CatalogService.all_tenants.select_related("tenant")
+        .filter(id=service_id, is_active=True, tenant__is_active=True)
+        .first()
+    )
+    if service is None:
+        return []
+    # tenant_id from the SERVICE, not from the caller: an edge may only bind a
+    # master to a service of their own tenant (see _service_row_q).
+    masters = list(
+        _bookable_qs(tenant_id=service.tenant_id).filter(services_offered__service_id=service.id)[
+            :limit
+        ]
+    )
+    return [
+        replace(_to_card(master), service_id=service.id, service_name=service.name)
+        for master in masters
     ]
 
 

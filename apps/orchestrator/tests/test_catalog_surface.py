@@ -6,6 +6,13 @@ two questions the live owner asked on 23.08: «какие салоны у нас
 deterministic executor/renderers (real mirror data or an honest «нет»), and
 the concierge wiring end-to-end — one LLM pass, no rephrasing pass, so the
 turn's cost does not grow.
+
+Since the owner's 23.08 call (docs/REPLY_CONCIERGE_SURFACE.md — «показывать
+кнопками, а не абзацем»), the cards also carry chips, and the chips have their
+own contract: a chip may exist ONLY where the tap really executes. That is what
+``TestCatalogChips`` pins — the callback shape, the by-id reads behind each tap,
+and the two cases that must NOT get a chip (a salon with no services, a service
+nobody bookable performs).
 """
 
 from __future__ import annotations
@@ -21,10 +28,15 @@ from apps.llm.protocol import CompletionResult, ToolCall
 from apps.orchestrator import concierge, discovery
 from apps.orchestrator.concierge import _dispatch_tool, generate_concierge_reply
 from apps.orchestrator.discovery import (
+    CALLBACK_CATALOG_MASTERS_PREFIX,
+    CALLBACK_CATALOG_SERVICES_PREFIX,
+    CALLBACK_DISCOVER_BOOK_PREFIX,
+    CATALOG_STALE_CARD_TEXT,
     CATALOG_TOOL_ACTIONS,
     NO_SERVICE_CRITERIA_QUESTION,
     SHOW_SALONS_TOOL_SPEC,
     SHOW_SERVICES_TOOL_SPEC,
+    execute_catalog_callback,
     execute_catalog_tool,
     has_service_criteria,
 )
@@ -67,6 +79,25 @@ def _service(tenant, name: str, *, price: str | None = None, duration: int | Non
         price_from=Decimal(price) if price is not None else None,
         duration_min=duration,
     )
+
+
+def _offer(tenant, service):
+    """Bind the salon's master to the service — the MasterService edge whose
+    EXISTENCE is the statement «this master performs this service» (see the
+    model). Without it a service is listed but not bookable, which is a normal
+    mirror state and the reason a service chip is conditional."""
+    from apps.catalog.models import CatalogMaster, MasterService
+
+    master = CatalogMaster.all_tenants.filter(tenant=tenant).first()
+    return MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+
+
+def _buttons(reply):
+    """The chips of a reply, in the channel-agnostic [{label, callback}] shape
+    the MAX handler reads (``_build_attachments``, envelope form)."""
+    if reply.action_data is None:
+        return []
+    return reply.action_data["attachments"][0]["payload"]["buttons"]
 
 
 def _bot_user_and_conversation(prefix: str):
@@ -153,8 +184,11 @@ class TestExecuteCatalogTool:
         assert "Безадресный" in reply.text
         # An empty address must not leak as «None».
         assert "None" not in reply.text
-        # No keyboards on this path (DRF-1220) — tools, not buttons.
-        assert reply.action_data is None
+        # Owner's call 23.08: a chip per salon that has something to show.
+        # BodyFormula has no services here, so it gets a line and no chip —
+        # the tap would open «услуги пока не загружены».
+        assert [b["label"] for b in _buttons(reply)] == ["Безадресный"]
+        assert _buttons(reply)[0]["callback"] == f"{CALLBACK_CATALOG_SERVICES_PREFIX}{t2.id}"
 
     def test_show_salons_empty_is_honest(self):
         reply = execute_catalog_tool("show_salons", {"city": "Сочи"})
@@ -304,3 +338,133 @@ class TestConciergeCatalogTurn:
         # tools — the boundary that survives is «never invent».
         assert "этих данных пока нет" not in prompt
         assert "не выдумывай" in prompt
+
+
+# --------------------------------------------------------------------------- #
+# Acceptance: chips (owner's call 23.08) — every chip must really execute      #
+# --------------------------------------------------------------------------- #
+
+
+class TestCatalogChips:
+    """The rule these tests exist for: «чип обязан вести к тому, что
+    действительно исполнится. Кнопка, ведущая в „я вас не понял", хуже
+    отсутствия кнопки — человек уже потратил на неё доверие»."""
+
+    def test_salon_chip_carries_the_tenant_id_not_the_name(self):
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        _service(tenant, "Массаж спины")
+
+        reply = execute_catalog_tool("show_salons", {"city": "Пенза"})
+
+        assert _buttons(reply) == [
+            {
+                "label": "BodyFormula",
+                "callback": f"{CALLBACK_CATALOG_SERVICES_PREFIX}{tenant.id}",
+            }
+        ]
+
+    def test_salon_tap_opens_exactly_that_salon(self):
+        # Names that contain one another are why the callback carries an id: a
+        # name substring would answer this tap with both salons' services.
+        formula = _salon("s1", "Формула", city="Пенза")
+        formula_tela = _salon("s2", "Формула тела", city="Пенза")
+        _service(formula, "Стрижка")
+        _service(formula_tela, "Массаж спины")
+
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{formula.id}")
+
+        assert reply is not None
+        assert "Стрижка" in reply.text
+        assert "Массаж спины" not in reply.text
+
+    def test_service_chip_only_where_someone_can_perform_it(self):
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        bookable = _service(tenant, "Массаж спины", price="1700", duration=45)
+        _service(tenant, "Никем не оказывается")
+        _offer(tenant, bookable)
+
+        reply = execute_catalog_tool("show_services", {"salon": "bodyformula"})
+
+        # Both services are REAL and both are shown — only the chip differs.
+        assert "Массаж спины" in reply.text
+        assert "Никем не оказывается" in reply.text
+        assert _buttons(reply) == [
+            {
+                "label": "Массаж спины",
+                "callback": f"{CALLBACK_CATALOG_MASTERS_PREFIX}{bookable.id}",
+            }
+        ]
+
+    def test_service_tap_shows_masters_ready_to_book_that_service(self):
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        service = _service(tenant, "Массаж спины", price="1700", duration=45)
+        _offer(tenant, service)
+
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_MASTERS_PREFIX}{service.id}")
+
+        assert reply is not None
+        assert "Мастер BodyFormula" in reply.text
+        # The booking button carries the service the user TAPPED (DRF-962), so
+        # the next step is not the stale-context dead end.
+        callback = _buttons(reply)[0]["callback"]
+        assert callback.startswith(CALLBACK_DISCOVER_BOOK_PREFIX)
+        assert callback.endswith(f":{service.id}")
+
+    def test_whole_chain_salon_to_service_to_master_is_tappable(self):
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        service = _service(tenant, "Массаж спины")
+        _offer(tenant, service)
+
+        salons = execute_catalog_tool("show_salons", {})
+        services = execute_catalog_callback(_buttons(salons)[0]["callback"])
+        masters = execute_catalog_callback(_buttons(services)[0]["callback"])
+
+        assert "Массаж спины" in services.text
+        assert "Мастер BodyFormula" in masters.text
+        assert _buttons(masters)[0]["callback"].startswith(CALLBACK_DISCOVER_BOOK_PREFIX)
+
+    def test_vanished_salon_answers_instead_of_falling_through(self):
+        import uuid
+
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{uuid.uuid4()}")
+
+        assert reply is not None
+        assert reply.text == CATALOG_STALE_CARD_TEXT
+
+    def test_malformed_ref_answers_instead_of_raising(self):
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_SERVICES_PREFIX}не-uuid")
+
+        assert reply is not None
+        assert reply.text == CATALOG_STALE_CARD_TEXT
+
+    def test_service_whose_masters_left_is_honest(self):
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        service = _service(tenant, "Массаж спины")
+        # Chip rendered while the edge existed; the edge is gone by the tap.
+
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_MASTERS_PREFIX}{service.id}")
+
+        assert reply is not None
+        assert "не к кому" in reply.text
+        assert _buttons(reply) == []
+
+    def test_salon_with_an_empty_catalog_says_so_on_tap(self):
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{tenant.id}")
+
+        assert reply is not None
+        assert "не загружены" in reply.text
+
+    def test_foreign_callback_is_left_to_the_ladder(self):
+        # Not a catalog callback — the caller must keep matching its own
+        # branches rather than receive an answer meant for someone else.
+        assert execute_catalog_callback("cb:visit:card:abc") is None
+        assert execute_catalog_callback("какие салоны у вас есть") is None
+
+    def test_no_chips_means_no_empty_keyboard(self):
+        # An inline_keyboard attachment with an empty button list renders as a
+        # broken message, not as a message without buttons.
+        reply = execute_catalog_tool("show_salons", {"city": "Сочи"})
+
+        assert reply.action_data is None

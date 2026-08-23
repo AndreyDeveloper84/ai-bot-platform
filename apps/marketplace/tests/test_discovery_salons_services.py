@@ -19,8 +19,13 @@ from decimal import Decimal
 import pytest
 from django.conf import settings
 
-from apps.catalog.models import CatalogMaster, CatalogService
-from apps.marketplace.discovery import discover_salons, discover_services
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.marketplace.discovery import (
+    discover_masters_for_service,
+    discover_salons,
+    discover_services,
+    get_salon,
+)
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
@@ -68,6 +73,11 @@ def _service(
         duration_min=duration,
         **defaults,
     )
+
+
+def _offer(tenant: Tenant, master: CatalogMaster, service: CatalogService) -> MasterService:
+    """The edge whose EXISTENCE means «this master performs this service»."""
+    return MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
 
 
 class TestDiscoverSalons:
@@ -267,3 +277,120 @@ class TestDiscoverServicesMatching:
         cards = discover_services(query="спортивный массаж")
 
         assert cards[0].name == "Спортивный массаж"
+
+
+class TestByIdReads:
+    """The reads behind a chip tap (DRF-1304). A tapped button carries an id
+    the bot itself rendered, so these must resolve by id — a name match could
+    land the same tap on a different salon as the catalog grows."""
+
+    def test_get_salon_returns_that_salon(self, penza, moscow) -> None:
+        _master(penza, "Анна", raw={"address": "Пенза, ул. Леонова, 15а"})
+        _master(moscow, "Борис")
+        _service(penza, "Массаж спины")
+
+        card = get_salon(penza.id)
+
+        assert card is not None
+        assert card.name == "BodyFormula"
+        assert card.address == "Пенза, ул. Леонова, 15а"
+        assert card.service_count == 1
+
+    def test_get_salon_is_none_when_it_stopped_being_a_salon(self, penza) -> None:
+        _master(penza, "Анна", invite_status=CatalogMaster.InviteStatus.PENDING)
+
+        assert get_salon(penza.id) is None
+
+    def test_services_by_tenant_id_ignore_name_collisions(self, penza, moscow) -> None:
+        # «Формула» is a substring of «Формула тела»: the name filter answers
+        # such a tap with both salons, the id filter with exactly one.
+        moscow.name = "BodyFormula тела"
+        moscow.save()
+        _master(penza, "Анна")
+        _master(moscow, "Борис")
+        _service(penza, "Массаж спины")
+        _service(moscow, "Массаж ног")
+
+        assert {c.name for c in discover_services(salon="BodyFormula")} == {
+            "Массаж спины",
+            "Массаж ног",
+        }
+        assert {c.name for c in discover_services(tenant_id=penza.id)} == {"Массаж спины"}
+
+    def test_has_bookable_master_flags_what_can_be_booked(self, penza) -> None:
+        anna = _master(penza, "Анна")
+        offered = _service(penza, "Массаж спины")
+        _service(penza, "Никем не оказывается")
+        _offer(penza, anna, offered)
+
+        by_name = {c.name: c for c in discover_services(tenant_id=penza.id)}
+
+        assert by_name["Массаж спины"].has_bookable_master is True
+        # A listed service nobody performs is a normal mirror state, not an
+        # error: it is still returned, just flagged.
+        assert by_name["Никем не оказывается"].has_bookable_master is False
+
+    def test_has_bookable_master_is_false_when_the_master_is_not_bookable(self, penza) -> None:
+        pending = _master(
+            penza, "Ждёт приглашения", invite_status=CatalogMaster.InviteStatus.PENDING
+        )
+        _master(penza, "Анна")  # bookable, but offers nothing
+        service = _service(penza, "Массаж спины")
+        _offer(penza, pending, service)
+
+        cards = discover_services(tenant_id=penza.id)
+
+        assert [c.has_bookable_master for c in cards] == [False]
+
+    def test_masters_for_service_stamp_the_service(self, penza) -> None:
+        anna = _master(penza, "Анна")
+        service = _service(penza, "Массаж спины")
+        _offer(penza, anna, service)
+
+        cards = discover_masters_for_service(service.id)
+
+        assert [c.name for c in cards] == ["Анна"]
+        assert cards[0].service_id == service.id
+        assert cards[0].service_name == "Массаж спины"
+
+    def test_masters_for_service_excludes_the_unbookable(self, penza) -> None:
+        anna = _master(penza, "Анна")
+        pending = _master(penza, "Ждёт", invite_status=CatalogMaster.InviteStatus.PENDING)
+        inactive = _master(penza, "Ушла", is_active=False)
+        service = _service(penza, "Массаж спины")
+        for master in (anna, pending, inactive):
+            _offer(penza, master, service)
+
+        assert [c.name for c in discover_masters_for_service(service.id)] == ["Анна"]
+
+    def test_masters_for_service_empty_when_nobody_offers_it(self, penza) -> None:
+        _master(penza, "Анна")
+        service = _service(penza, "Массаж спины")
+
+        assert discover_masters_for_service(service.id) == []
+
+    def test_masters_for_service_empty_when_service_is_gone(self, penza) -> None:
+        anna = _master(penza, "Анна")
+        service = _service(penza, "Массаж спины")
+        _offer(penza, anna, service)
+        service.is_active = False
+        service.save()
+
+        assert discover_masters_for_service(service.id) == []
+
+    def test_masters_for_service_empty_when_the_salon_went_inactive(self, penza) -> None:
+        anna = _master(penza, "Анна")
+        service = _service(penza, "Массаж спины")
+        _offer(penza, anna, service)
+        penza.is_active = False
+        penza.save()
+
+        assert discover_masters_for_service(service.id) == []
+
+    def test_masters_for_service_does_not_cross_tenants(self, penza, moscow) -> None:
+        anna = _master(penza, "Анна")
+        _master(moscow, "Борис")
+        service = _service(penza, "Массаж спины")
+        _offer(penza, anna, service)
+
+        assert [c.name for c in discover_masters_for_service(service.id)] == ["Анна"]
