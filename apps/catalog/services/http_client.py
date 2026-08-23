@@ -109,12 +109,19 @@ class CatalogSpecialistDTO:
     feed's queryset already filters to those, but the mapping stays
     explicit for forward-compat. Platform-owned fields (invite_status,
     photo_url, archived_at…) never ride here — sync must not touch them.
+
+    ``tenant`` is the owning salon as Ayla states it (DRF-1313). It exists so
+    the upsert can check the scope it asked for instead of trusting that the
+    ``?tenant=`` filter was honoured — the same guard the edge DTO already
+    carries. ``None`` when the upstream predates the field, which the guard
+    treats as "cannot verify", not as "mismatch".
     """
 
     ayla_master_id: str
     user_id: str | None
     name: str
     external_updated_at: datetime
+    tenant: str | None = None
     bio: str = ""
     experience: str = ""
     rating: Decimal | None = None
@@ -250,25 +257,36 @@ class CatalogHttpClient:
         )
         return [_parse_salon_service(row) for row in rows]
 
-    def fetch_specialists(self) -> list[CatalogSpecialistDTO]:
-        """Specialists (→ ``CatalogMaster``) — S3B masters mirror.
+    def fetch_specialists(self, *, tenant_id: str) -> list[CatalogSpecialistDTO]:
+        """Specialists for one tenant (→ ``CatalogMaster``) — S3B masters mirror.
 
-        NOTE (pilot scope): the endpoint has no ``?tenant=`` filter (the
-        public queryset is active+available only, tenant-blind), so the
-        pull is the full active list and each syncing tenant upserts the
-        same set. Correct for the single-salon pilot; the multi-tenant
-        rollout needs the upstream filter (reported to the orchestrator).
+        ``tenant_id`` is the salon's Ayla Tenant UUID, same as
+        :meth:`fetch_salon_services` and :meth:`fetch_specialist_services`.
+
+        The ``?tenant=`` filter landed upstream in DRF-1313. Before it, this
+        pull was the full active roster of the platform and every syncing
+        tenant upserted the same set: on 2026-08-23 the five masters of four
+        newly loaded salons all landed under whichever tenant synced first,
+        and three of five salons could not be booked at all. Sending the
+        filter is therefore not an optimisation — it is what makes the mirror
+        mean anything with more than one salon on the platform.
+
+        The rows carry their own ``tenant``; :func:`upsert_specialists`
+        re-checks it rather than trusting that the filter was honoured.
         """
-        rows = self._fetch_all("internal/specialists/", params={})
+        rows = self._fetch_all(
+            "internal/specialists/",
+            params={"tenant": tenant_id},
+        )
         return [_parse_specialist(row) for row in rows]
 
     def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
         """Bookable master↔service edges for one tenant (→ ``MasterService``).
 
-        Unlike ``/internal/specialists/`` this endpoint DOES support the
-        ``?tenant=`` filter (contract §2), so the pull is properly scoped and
-        the returned list is the tenant's edge snapshot — which is what makes
-        sync reconciliation possible (DRF-945).
+        The ``?tenant=`` filter (contract §2) scopes the pull, so the returned
+        list is the tenant's edge snapshot — which is what makes sync
+        reconciliation possible (DRF-945). ``/internal/specialists/`` takes the
+        same filter since DRF-1313; this handle simply had it first.
 
         Returns an :class:`EdgeSnapshot` rather than a bare list because the
         caller deletes rows on absence and therefore needs to know whether
@@ -516,6 +534,7 @@ def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
         external_updated_at=(
             _parse_dt(row["updated_at"]) if row.get("updated_at") else datetime.now(timezone.utc)
         ),
+        tenant=str(row["tenant"]) if row.get("tenant") else None,
         bio=row.get("bio") or "",
         experience=str(experience_years) if experience_years is not None else "",
         rating=_parse_decimal(row.get("rating")),
