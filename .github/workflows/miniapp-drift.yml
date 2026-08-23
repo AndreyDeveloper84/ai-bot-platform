@@ -88,16 +88,24 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # `dev` is the branch the pilot deploys from, so that is what the live
+      # site must be compared against. A scheduled run would otherwise check
+      # out the default branch — `main`, 885 commits behind — and diff the
+      # pilot against ancient sources.
+      #
+      # Resolving this with a `git checkout dev` step instead was tried and is
+      # wrong: it replaces the whole working tree, including
+      # tools/ci/miniapp_bundle_drift.py, which on a pull_request run does not
+      # exist on `dev` yet. The checkout action's `ref` selects the commit
+      # without ever discarding the code being run.
       - uses: actions/checkout@v4
+        with:
+          ref: >-
+            ${{ (github.event_name == 'push' || github.event_name == 'pull_request')
+                && github.ref || 'dev' }}
 
-      # `dev` is the branch the pilot deploys from. A scheduled run checks out
-      # the default branch by default, which here is `main` — 885 commits
-      # behind — and would compare the live site against ancient sources.
-      - name: Check out dev (the branch the pilot serves)
-        run: |
-          git fetch --depth=1 origin dev
-          git checkout FETCH_HEAD
-          echo "::notice::comparing against dev @ $(git rev-parse --short HEAD)"
+      - name: Show what is being compared
+        run: echo "::notice::comparing the pilot against $(git rev-parse --short HEAD)"
 
       # Node is needed only for the stylesheet half of the check: the JS
       # sourcemap carries its own sources, but extracted CSS has no sourcemap,
