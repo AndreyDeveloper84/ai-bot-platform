@@ -197,6 +197,12 @@ LOCAL_APPS = [
     # Data layer + basic CRUD; SLA beat, PII scan, founder flow,
     # frontend Mini-App tabs all in follow-up PRs.
     "apps.internal_chat",
+    # DRF-1285 - proactive nutrition layer: exactly two bot-initiated
+    # messages (daily report, water reminder) plus the chat off-switch.
+    # No models, so no migrations; per-user preferences live in
+    # ``BotUser.context["nutrition_proactive"]``. Both beat tasks no-op
+    # while ``NUTRITION_PROACTIVE_ENABLED`` is False (the default).
+    "apps.nutrition_proactive",
 ]
 
 INSTALLED_APPS = [
@@ -1227,7 +1233,66 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.llm.tasks.probe_llm_availability",
         "schedule": crontab(minute="*/5"),
     },
+    # DRF-1285 - proactive nutrition layer. BOTH entries no-op while
+    # NUTRITION_PROACTIVE_ENABLED is False (the default), and even once
+    # enabled they only log while NUTRITION_PROACTIVE_DRY_RUN is True
+    # (also the default). They are listed here in advance for the same
+    # reason as workers.reap_pel above: enabling the feature is then an
+    # env change, not a deploy. Nothing starts writing to people from a
+    # deploy alone.
+    #
+    # Hourly on the hour. The task cannot know a recipient's chosen hour
+    # without localising per row, so the cadence is the finest one the
+    # chosen-hour setting can express, and the per-row local-hour match
+    # discards the other 23 ticks. 14 candidate rows on the pilot makes
+    # that cheap; the BATCH_LIMIT in selection.py bounds the future.
+    "nutrition_proactive.send_daily_reports": {
+        "task": "nutrition_proactive.send_daily_reports",
+        "schedule": crontab(minute="5"),
+    },
+    # Every four hours at :20 UTC. Six ticks a day; for a Moscow-local
+    # recipient they land at 03:20 / 07:20 / 11:20 / 15:20 / 19:20 / 23:20,
+    # and the quiet-hours gate silences the first two and the last. Three
+    # waking ticks remain, which is exactly MAX_WATER_REMINDERS_PER_DAY --
+    # so the cadence and the quota agree instead of one silently shadowing
+    # the other. A recipient in a different timezone gets a different split
+    # of the same six ticks, and the quota is what bounds them there.
+    # Offset from :00 and from the report's :05 so the two beats never
+    # contend for the worker pool on the same second.
+    "nutrition_proactive.send_water_reminders": {
+        "task": "nutrition_proactive.send_water_reminders",
+        "schedule": crontab(minute="20", hour="*/4"),
+    },
 }
+
+# DRF-1285 - the two switches in front of every bot-initiated nutrition
+# message. Both are closed by default and both must be opened, in order,
+# before a single message reaches a real person.
+#
+# NUTRITION_PROACTIVE_ENABLED: master switch. False - both beat tasks
+#   return immediately without touching the database or Ayla. This is
+#   what makes the beat entries above safe to ship ahead of the decision
+#   to run them.
+# NUTRITION_PROACTIVE_DRY_RUN: the safety inside the switch. True - the
+#   tasks run the full selection, the full Ayla read and the full
+#   proportional-threshold arithmetic, log exactly whom they would have
+#   written to and why, and send nothing. Auto-disable state (the
+#   ignored-streak shutoff) is still persisted, because that is a
+#   suppression, never a send.
+#
+# Sequencing is deliberate: ENABLED=True + DRY_RUN=True first, read the
+# ``nutrition_proactive.*.dry_run`` log lines against the expected
+# recipient list, and only then DRY_RUN=False. Flipping both at once
+# skips the only step that can catch a selection bug before a stranger
+# gets a message about their calorie intake.
+NUTRITION_PROACTIVE_ENABLED = os.environ.get("NUTRITION_PROACTIVE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "true").lower() not in (
+    "false",
+    "0",
+)
 
 # Sprint 7 / L7 (DRF-585) — Anthropic daily-token cost cap. Counter
 # stored in Redis as `anthropic_tokens:<YYYY-MM-DD>` (TTL 24h, natural
