@@ -215,13 +215,17 @@ def vet_outbound(text: str) -> tuple[str, str | None]:
     semantics this module already applies to a failed send. That is the
     point: a blocked message and a failed one leave identical state, so
     no reader has to remember which branch bumps what.
-    """
-    from apps.orchestrator.safety.outbound import evaluate_outbound
 
-    verdict = evaluate_outbound(text)
-    if verdict.blocked:
-        return "", "outbound_safety_" + ("_".join(verdict.categories) or "hit")
-    return text, None
+    The implementation moved to
+    :func:`apps.notifications.proactive.vet_outbound` in DRF-1307, when
+    the master-deactivation cascade became the third caller that needed
+    it. This name stays as the module's own entry point so the reasoning
+    above keeps living next to the beat it argues about.
+    """
+
+    from apps.notifications.proactive import vet_outbound as _shared_vet_outbound
+
+    return _shared_vet_outbound(text)
 
 
 # ── B11 conservative blockers (P0 PRE_PILOT, founder sequence #3) ──────────
@@ -383,30 +387,21 @@ def _consent_blocker(bot_user: Any) -> str | None:
     ``consent_unproven`` row is a data-provenance gap left by grants
     predating #1074, which stamped ``consent_at`` and the record
     atomically. A ``consent_withdrawn`` row is somebody who said no.
+
+    **The implementation moved to
+    :func:`apps.notifications.proactive.consent_blocker` in DRF-1307.**
+    The master-deactivation cascade needed the same four conditions and
+    a second copy of them would have been the third in this repo — the
+    two that already existed (here and in
+    :mod:`apps.nutrition_proactive.selection`) had drifted apart, and
+    the older one still writes to people who withdrew. This name stays
+    as the beat's own entry point; the reasoning above is why each
+    condition is in the shared gate.
     """
-    if getattr(bot_user, "proactive_messages_opt_out", False):
-        return "opt_out"
 
-    if getattr(bot_user, "deleted_at", None) is not None:
-        return "deleted"
+    from apps.notifications.proactive import consent_blocker
 
-    if getattr(bot_user, "consent_at", None) is None:
-        return "no_consent"
-
-    # Local imports: apps.consent imports identity models, and this module
-    # is imported from apps.bookings.tasks at module scope.
-    from apps.consent.models import ConsentRecord
-    from apps.consent.services import has_global_consent
-
-    personal_data = ConsentRecord.ConsentType.PERSONAL_DATA.value
-    if has_global_consent(bot_user, personal_data):
-        return None
-
-    ever = ConsentRecord.all_tenants.filter(
-        bot_user=bot_user,
-        consent_type=personal_data,
-    ).exists()
-    return "consent_withdrawn" if ever else "consent_unproven"
+    return consent_blocker(bot_user)
 
 
 def _payment_failures_blocker(bot_user: Any, tenant: Any) -> str | None:

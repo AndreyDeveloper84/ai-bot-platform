@@ -43,6 +43,7 @@ from apps.admin_api.tests.conftest import (
 from apps.audit.models import AuditLog
 from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
@@ -152,15 +153,51 @@ def _make_mirror_booking(
     )
 
 
-def _make_customer_bot_user(tenant: Tenant, idx: int) -> BotUser:
-    return BotUser.all_tenants.create(
+def _make_customer_bot_user(
+    tenant: Tenant,
+    idx: int,
+    *,
+    consented: bool = True,
+    opted_out: bool = False,
+    deleted: bool = False,
+    withdrawn: bool = False,
+) -> BotUser:
+    """A client the cascade might write to.
+
+    Consenting by DEFAULT (DRF-1307). Before the consent gate landed
+    this helper produced a person with no consent at all and the suite
+    still asserted that two DMs went out — which is exactly the bug the
+    ticket is about, encoded as an expectation. Flipping the default
+    rather than adding an opt-in flag means any future test that wants
+    the *unprotected* shape has to say so out loud.
+
+    ``withdrawn=True`` is the shape that matters most: ``consent_at`` is
+    set — because :func:`apps.consent.services.withdraw` never clears
+    it — and the ``ConsentRecord`` is withdrawn. Four of the pilot's
+    five "consenting" users look exactly like this.
+    """
+    bu = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
         channel_user_id=f"6{idx:03d}",
         display_name=f"Customer {idx}",
         chat_id=f"chat-6{idx:03d}",
         phone="+79991234567",
+        proactive_messages_opt_out=opted_out,
+        deleted_at=datetime.now(tz=timezone.utc) if deleted else None,
     )
+    if consented or withdrawn:
+        bu.consent_at = datetime.now(tz=timezone.utc)
+        bu.save(update_fields=["consent_at"])
+        ConsentRecord.all_tenants.create(
+            tenant=tenant,
+            bot_user=bu,
+            consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value,
+            granted=True,
+            source="test",
+            withdrawn_at=datetime.now(tz=timezone.utc) if withdrawn else None,
+        )
+    return bu
 
 
 # =========================================================================
