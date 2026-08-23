@@ -49,7 +49,8 @@ Tier-B FSM · broader wellness (mood/sleep/body/symptom) + real advice · R-1(a)
 ### W4 (coord / CI / photo / food-backend) — branch `feat/w4/*` or `stabilization/w4/*`, PR→dev
 1. **food_scanner skill backend (`feat/w4/food-scanner-backend`) — #1 pilot-critical.** NUTRITION_ENABLED flag; 152-ФЗ consent gate (#956/Q-BACK-5); miniapp_api endpoint (coord W1 stub contract); server-side EXIF GPS strip (#957); call Ayla `/nutrition/internal/{scan,profile,food-log,summary}`; `display_numbers` from `health_flags.eating_disorder` per ED-safety contract (Q-BACK-6); `/дневник` handler; daily-note via `/summary?with_comment`. DoD: end-to-end W1→miniapp_api→skill→Ayla→back; ED-mode hides numbers; W2 review (waiver into apps/skills/food_scanner) + Code Reviewer.
 2. G10 PII AST-lint contract — coord with W2 #842.
-3. Block A residuals (A3/A6/A7/A11) — stabilization, lower.
+3. Block A residuals (A3/A6/A7) — stabilization, lower.
+4. **A11 — re-scoped + status corrected (orchestrator 2026-06-03).** New scope: enforce G1–G10 ADR-0009 import-edges via the `tools/lint/` AST-linter (**Option B**), NOT import-linter (rejected — see #968). **Status: NOT DONE / scheduled.** A11 never shipped; any prior "enforced" / `.importlinter.passing` framing was a planned-as-done error. Owner W4. Existing violations are ticket-tracked (#925/#927/#928/#968), remediation Phase 2.2.
 - Anti-touch: Ayla repo (call its endpoints, don't edit), W1 frontend, W2 skill internals except food_scanner waiver.
 
 ### Gamma (eventbus / contracts) — branch `stabilization/gamma/*`, PR→dev
