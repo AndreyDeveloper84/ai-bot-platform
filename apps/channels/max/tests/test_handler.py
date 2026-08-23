@@ -461,9 +461,13 @@ class TestKeyboardPassThrough:
         # DRF-963: booking entry is a bot callback, not a Mini App link.
         assert buttons[0][0]["type"] == "callback"
         assert buttons[0][0]["payload"] == "cb:menu:book"
-        # Third button is the surviving Mini App link to /profile.
+        # Third button is the surviving Mini App link to the profile screen.
+        # DRF-1326: was ``/profile``, which is not a route — the client
+        # screen is ``/customer/profile``. The base stays a bare domain and
+        # the whole path comes from ``MINIAPP_ROUTES``; existence is enforced
+        # against App.tsx in apps/skills/welcome/tests/test_miniapp_routes.py.
         assert buttons[2][0]["type"] == "link"
-        assert buttons[2][0]["url"] == "https://miniapp-dev.example/profile"
+        assert buttons[2][0]["url"] == "https://miniapp-dev.example/customer/profile"
         # The «❓ Помощь» callback — second-to-last (the #85 «Начать»
         # ack button is appended last).
         assert buttons[-2][0]["type"] == "callback"
