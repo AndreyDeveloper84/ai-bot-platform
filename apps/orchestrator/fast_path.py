@@ -367,8 +367,8 @@ def decide(text: str, *, extra_stems: ExtraStems = ()) -> ClaimDecision:
         return ClaimDecision(True, "show_masters")
 
     # The only unexplained words still accepted are places we can actually
-    # book in. Deliberately last: it is the one DB read on this path, and a
-    # turn that reaches it has already passed everything free.
+    # book in. Deliberately last: it is a DB read, and a turn that reaches it
+    # has already passed everything free.
     unexplained = _drop_known_cities(residue)
     if not unexplained:
         return ClaimDecision(True, "show_masters")
@@ -407,7 +407,10 @@ def _split_requested_services(text: str) -> list[str]:
     """The enumerated service parts of ``text`` — ``[]`` when it is not one.
 
     Thin wrapper so a catalog hiccup degrades the way this module degrades
-    everywhere else: not-claimed, i.e. the concierge answers.
+    everywhere else: not-claimed, i.e. the concierge answers. That is what the
+    two-element placeholder on the failure path means — «treat this as a
+    composite», which is the only answer here that cannot produce a confident
+    half-answer.
     """
     try:
         from apps.marketplace.discovery import split_requested_services
