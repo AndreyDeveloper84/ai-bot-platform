@@ -536,6 +536,26 @@ FAST_PATH_TOOL_CLAIMS: tuple[ToolClaim, ...] = (
         ),
     ),
     ToolClaim(
+        tool="show_my_records",
+        claimed=False,
+        why=(
+            "A question about the person's OWN data — «что я ел сегодня», "
+            "«что ты про меня помнишь» — names no service at all, so this "
+            "branch has nothing to claim it by. The near-miss is «покажи мои "
+            "записи»: «записи» shares a stem with «записаться», and a branch "
+            "that claimed it would answer «here are masters» to «what have I "
+            "eaten». The stem is not in this module's vocabulary, so the turn "
+            "is unaccounted for and goes to the model (DRF-1302 / DRF-1305)."
+        ),
+        sample_turns=(
+            "что я ел сегодня",
+            "мой дневник питания",
+            "сколько я выпил воды",
+            "что ты про меня помнишь",
+            "покажи мои записи",
+        ),
+    ),
+    ToolClaim(
         tool="ask_clarification",
         claimed=False,
         why=(

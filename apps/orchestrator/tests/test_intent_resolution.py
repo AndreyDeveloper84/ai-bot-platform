@@ -310,8 +310,13 @@ def _client_returning(payload: str) -> Mock:
         choices=[SimpleNamespace(message=SimpleNamespace(content=payload))],
         usage=SimpleNamespace(prompt_tokens=100, completion_tokens=50),
     )
-    client = Mock()
-    client.create = AsyncMock(return_value=response)
+    # Форма клиента копирует RouterLLMClient (AsyncOpenAI-shaped):
+    # вызов идёт через chat.completions.create, а не через create.
+    # Голый Mock() принимал любой путь и потому пропустил DRF-1310.
+    client = Mock(spec=["chat", "last_provider", "last_model"])
+    client.chat = SimpleNamespace(
+        completions=SimpleNamespace(create=AsyncMock(return_value=response))
+    )
     client.last_provider = "openai"
     client.last_model = "gpt-4o-mini"
     return client
@@ -347,8 +352,10 @@ class TestResolveIntent:
         assert contract is None
 
     def test_llm_error_yields_none(self):
-        client = Mock()
-        client.create = AsyncMock(side_effect=RuntimeError("provider down"))
+        client = Mock(spec=["chat"])
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=AsyncMock(side_effect=RuntimeError("provider down")))
+        )
         contract, usage = resolve_intent(
             USER_TEXT, message_id=MESSAGE_ID, trace_id=TRACE_ID, llm_client=client
         )
@@ -424,3 +431,38 @@ class TestResolveAndLog:
         assert not [
             r for r in caplog.records if r.msg.startswith("orchestrator.intent_resolution.ok")
         ]
+
+
+class TestResolverMatchesRealClient:
+    """DRF-1310 — сторож против расхождения подделки с настоящим клиентом.
+
+    Резолвер три часа падал на живом пилоте с
+    ``'RouterLLMClient' object has no attribute 'create'``, а тесты были
+    зелёными: подделкой был голый ``Mock()``, который принимает **любой**
+    путь вызова. Такая подделка не может поймать неверный путь по
+    построению.
+
+    Эти два теста смотрят на настоящий класс, а не на его копию.
+    """
+
+    def test_router_client_exposes_the_path_resolver_calls(self):
+        from apps.orchestrator.concierge import RouterLLMClient
+
+        client = RouterLLMClient(skill="concierge")
+        assert callable(client.chat.completions.create), (
+            "Резолвер зовёт llm_client.chat.completions.create — "
+            "у настоящего клиента этого пути нет"
+        )
+
+    def test_router_client_has_no_flat_create(self):
+        """Обратная половина: плоского ``create`` быть не должно.
+
+        Без неё сторож пропустит откат резолвера на прежний вызов.
+        """
+        from apps.orchestrator.concierge import RouterLLMClient
+
+        client = RouterLLMClient(skill="concierge")
+        assert not hasattr(client, "create"), (
+            "У клиента появился плоский create — проверьте, какой путь "
+            "зовёт резолвер, и обновите оба теста разом"
+        )

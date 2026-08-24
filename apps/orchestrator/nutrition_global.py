@@ -23,6 +23,16 @@ intent type):
   food_correction before nutrition_anketa — the anketa FSM claims any
   text while active, so the ``cb:food:*`` family must win first).
 
+- **The diary READ is deterministic too (DRF-1302)** —
+  :func:`_try_handle_diary_request` claims «что я ел сегодня» / «мой
+  дневник» here rather than leaving them to the model. Not because the
+  model could not classify them, but because the chips this feature ships
+  carry plain text as their callback (tap == typed message on this path):
+  a chip only executes if a matcher on THIS side owns the string. The
+  model tool ``show_my_records``
+  (:mod:`apps.orchestrator.personal_surface`) still covers every phrasing
+  the trigger list deliberately does not.
+
 - **Free text goes to the model as tools** — :data:`NUTRITION_TOOL_SPECS`
   registers four concierge tools (``health_screening``, ``log_water``,
   ``clarify_food_entry``, ``start_nutrition_anketa``). The reasons
@@ -326,7 +336,20 @@ def try_handle_structured_nutrition_turn(
     if not is_structured_nutrition_turn(
         text=text, has_attachments=has_attachments, conversation=conversation
     ):
-        return None
+        # DRF-1302 — the diary READ. Claimed here, not by the model, for one
+        # reason: a chip must lead to something that runs. «📔 Мой дневник»
+        # and «📋 Пройти анкету» carry plain text as their callback (tap ==
+        # typed message on this path), so the tap only executes if a
+        # deterministic matcher owns that text. The model tool
+        # (``show_my_records``) still covers every phrasing this list does
+        # not -- same two-layer shape memory commands already use.
+        #
+        # Placed AFTER the structured check so an active anketa FSM keeps
+        # first claim on the turn: mid-anketa, «что я ел» is an answer to the
+        # question on screen before it is a request for the diary.
+        return _try_handle_diary_request(
+            text=text, has_attachments=has_attachments, bot_user=bot_user, trace_id=trace_id
+        )
 
     context = _build_context(
         message_text=text,
@@ -371,3 +394,37 @@ def try_handle_structured_nutrition_turn(
             trace_id,
         )
         return None
+
+
+def _try_handle_diary_request(
+    *, text: str, has_attachments: bool, bot_user: Any, trace_id: str
+) -> SkillResult | None:
+    """«что я ел сегодня» → the diary, deterministically. ``None`` otherwise.
+
+    A photo turn is never a diary READ even when the caption says so: the
+    scanner owns the bytes, and answering «вот твой день» while dropping the
+    photo the person just sent is the worse of the two mistakes.
+
+    Never raises -- the caller's ladder continues to the concierge on any
+    failure, exactly as it does for a skill that blows up.
+    """
+
+    if has_attachments:
+        return None
+    try:
+        from apps.orchestrator.personal_surface import looks_like_diary_request, render_diary
+
+        period = looks_like_diary_request(text)
+        if period is None:
+            return None
+        reply = render_diary(bot_user, period=period)
+    except Exception:  # noqa: BLE001 — the diary must never break the global turn
+        logger.exception("orchestrator.nutrition_global.diary_failed trace=%s", trace_id)
+        return None
+    logger.info("orchestrator.nutrition_global.diary_shown period=%s trace=%s", period, trace_id)
+    return SkillResult(
+        reply_text=reply.text,
+        action_type="nutrition_diary_shown",
+        action_data=reply.action_data,
+        meta={"reply_kind": "nutrition_diary"},
+    )

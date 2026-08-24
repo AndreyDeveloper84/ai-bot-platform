@@ -41,6 +41,10 @@ _MAX_PAGE_SIZE = 50
 
 # Query tokens shorter than this are dropped — a one-character ILIKE
 # ``%а%`` matches essentially every service name and adds no signal.
+#
+# Two is NOT the line at which a token starts carrying signal; it is only the
+# line below which it carries none at all. What earns a SHORT token the right
+# to be a stem is decided by ``_SHORT_WORD_LEN`` below (DRF-1352).
 _MIN_TOKEN_LEN = 2
 
 # Upper bound on tokens per query. Each one becomes an ILIKE against the same
@@ -159,6 +163,81 @@ _CITY_MAX_SUFFIX = 2
 # «расслабиться» — for the same reason and with the same limits as everywhere
 # else in this module, and NOT a morphological analyser.
 _GOAL_MIN_PREFIX = 4
+
+# ─── DRF-1352: what earns a SHORT token the right to be a stem ───────────
+#
+# Live pilot 24.08. «маникюр» answered honestly — no such service in the
+# contour — while «найди мне мастера по маникюру» returned ALL SEVEN bookable
+# masters, and so did the bare «по». The stems were ``['найди', 'по',
+# 'маникю']``: «по» cleared ``_MIN_TOKEN_LEN`` and went into the OR-chain as
+# ``name ILIKE '%по%'``, which matches «под-мышек», «по-верхности»,
+# «по-ясницы», «по-сле» — i.e. a large, arbitrary slice of any Russian
+# catalog. The polite phrasing got a CONFIDENTLY WRONG answer where the blunt
+# one got the right one, which is the worst shape a defect can take: the
+# person cannot tell, and cannot guess that being terse would help.
+#
+# ### Why this is not «add «по» to the filler list»
+#
+# Behind «по» stand «за», «из», «до», «от», «об», «ко», «при», «для», «под»,
+# and every one of them would arrive as its own ticket. Worse, a list is the
+# wrong SHAPE of answer here: it says which words are bad, when the question
+# is which words are good.
+#
+# ### The rule, and why the threshold is what it is
+#
+# ``_STEM_LEN`` is the whole reason substring matching is needed: a stem is a
+# six-character PREFIX of an inflected word («массажистов» → «массаж»), and a
+# prefix can only be found INSIDE the stored name. But a token shorter than
+# the cut was never cut — it IS the whole word the person typed. For such a
+# token substring matching buys nothing (there is no suffix to tolerate) and
+# costs everything (it matches word interiors, which is exactly the defect).
+#
+# So a short token is judged as a WORD, and this module already knows how to
+# judge one — ``_known_cities`` and ``_known_goals`` both read their
+# recognition vocabulary from the live catalog rather than from a list
+# somebody maintains. The same answer applies:
+#
+#   **A token below ``_SHORT_WORD_LEN`` is a stem only if the curated catalog
+#   uses it as a whole word, and it then matches at WORD boundaries.**
+#
+# «лак» is a word of «Гель-лак», «спа» of «СПА-уход», «LPG» of «LPG-массаж» —
+# they stay searchable, and none of them had to be foreseen. «по», «за», «из»,
+# «до» are words of no service name, so they are not stems, and no preposition
+# had to be foreseen either. When a salon adds «СПА» tomorrow, «спа» becomes
+# searchable the same day and nobody edits this file.
+#
+# Both halves are load-bearing and neither is safe alone:
+#
+# * Attestation alone would be one service name away from re-opening the
+#   defect — «Уход ЗА кожей» makes «за» a word of the catalog, and the
+#   substring «%за%» then matches «задней поверхности», «загар», «затылок»:
+#   the same blowout one preposition along.
+# * Word matching alone would not stop it either, because the master's
+#   free-text ``specialization`` is matched too, and «Мастер ПО массажу» is
+#   how that field is written. Attestation keeps «по» out of the query
+#   entirely; word matching keeps an attested short word from becoming a
+#   substring licence.
+#
+# The vocabulary is read from CURATED service names only, never from
+# ``specialization`` — free text a master typed would attest exactly the
+# function words this exists to exclude.
+#
+# ### Why four, and not two or six
+#
+# Four is already this module's line for «carries evidence on its own»:
+# ``_CITY_MIN_PREFIX`` and ``_GOAL_MIN_PREFIX`` are both 4, and both say so in
+# as many words. The service-name search is the only one of the three matching
+# modes that kept 2 — that discrepancy, not the missing preposition, is the
+# defect. Six (``_STEM_LEN``) would be the tidier story but is measurably
+# wrong: «воск» finds «Восковая депиляция» and «лифт» finds «Лифтинг» today,
+# by being real prefixes of longer words, and word-judging them would lose
+# both. At four, only two- and three-character tokens are judged as words, and
+# a two-or-three-character PREFIX is not a search anybody makes on purpose.
+#
+# The cost is one small DISTINCT, paid only when a query actually contains a
+# short token — the same shape and the same order of magnitude as the two
+# vocabulary reads that already run on this path.
+_SHORT_WORD_LEN = 4
 
 # Filler words a booking request carries around the actual service name. The
 # tool spec asks the model for a service substring, but it does sometimes
@@ -337,6 +416,82 @@ def _query_tokens(raw: str) -> list[str]:
     # the end, so a request longer than the cap is far likelier to be
     # «…записаться на спортивный массаж» than to lead with the service name.
     return tokens[-_MAX_TOKENS:]
+
+
+def _catalog_words() -> frozenset[str]:
+    """Every whole word the live, CURATED service names are built from (DRF-1352).
+
+    The attestation vocabulary for :func:`_attested_tokens`, read from the
+    mirror exactly as :func:`_known_cities` reads the cities and
+    :func:`_known_goals` reads the goal labels — so «a word we recognise» can
+    only ever mean «a word some live service is actually named with».
+
+    ``specialization`` is deliberately NOT in here. It is free text a master
+    typed, and it is written «Мастер по массажу» / «Мастер по маникюру» — it
+    would attest precisely the function words this vocabulary exists to keep
+    out, and it is matched by the same stems (see :func:`_bookable_qs`).
+
+    ``DISTINCT`` on the name column, and the tokenizing is the module's own
+    ``\\w+`` so the vocabulary is split the same way a query is. The set is
+    small by nature (the pilot's 94 active services yield a few hundred
+    words), and the caller only asks for it when a query actually carries a
+    short token.
+    """
+    words: set[str] = set()
+    rows = (
+        CatalogService.all_tenants.filter(is_active=True)
+        .order_by()
+        .values_list("name", flat=True)
+        .distinct()
+    )
+    for name in rows:
+        words.update(re.findall(r"\w+", (name or "").casefold(), re.UNICODE))
+    return frozenset(words)
+
+
+def _attested_tokens(tokens: list[str], words: frozenset[str] | None = None) -> list[str]:
+    """``tokens`` minus the short ones the catalog does not use as words.
+
+    The admission half of DRF-1352 — see the ``_SHORT_WORD_LEN`` block for why
+    a short token is judged as a word rather than by its length, and why the
+    length line is four.
+
+    Tokens at or above the line pass untouched: they are prefixes, and judging
+    a prefix as a word would lose «воск» → «Восковая депиляция».
+
+    The catalog read is skipped entirely when there is nothing short to judge,
+    which is the overwhelming majority of queries. ``words`` may be supplied
+    by a caller that already has the vocabulary — :func:`split_requested_services`
+    classifies every part of an enumeration against the SAME set.
+    """
+    if all(len(token) >= _SHORT_WORD_LEN for token in tokens):
+        return list(tokens)
+    if words is None:
+        words = _catalog_words()
+    return [t for t in tokens if len(t) >= _SHORT_WORD_LEN or t in words]
+
+
+def _stem_match_q(field: str, stem: str) -> Q:
+    """«This stem matches this text field» — as a substring, or as a WORD.
+
+    The matching half of DRF-1352. A stem at or above ``_SHORT_WORD_LEN`` is a
+    truncated prefix and must be found INSIDE the stored name, so it keeps the
+    ``icontains`` (ILIKE) it has always had. A shorter stem was never
+    truncated — it is a whole word that :func:`_attested_tokens` already
+    confirmed the catalog uses as one — and it matches only at word
+    boundaries, so attesting «за» through «Уход за кожей» cannot turn
+    ``%за%`` loose on «задней поверхности».
+
+    The pattern is written with ``[^\\w]`` rather than Postgres's ``\\m``/``\\M``
+    so it means the same thing to Django's SQLite ``REGEXP`` (Python ``re``,
+    Unicode-aware) as it does to Postgres ``~*`` (where ``\\w`` inside a
+    bracket expression expands to ``[[:alnum:]_]``). Case folding of Cyrillic
+    under ``~*`` is the same locale property this module's ILIKE matching
+    already depends on everywhere else — no new requirement on the database.
+    """
+    if len(stem) >= _SHORT_WORD_LEN:
+        return Q(**{f"{field}__icontains": stem})
+    return Q(**{f"{field}__iregex": rf"(^|[^\w]){re.escape(stem)}([^\w]|$)"})
 
 
 def _known_cities() -> list[str]:
@@ -558,6 +713,12 @@ def _parse_query(raw: str) -> ParsedQuery:
     """
     tokens = _query_tokens(raw)
     service_tokens, named_cities = _split_known_cities(tokens)
+    # DRF-1352 — before anything is matched OR recognised. A short token the
+    # catalog does not use as a word is not a service word, and it is not a
+    # goal word either: «хочу расслабиться от стресса» carries «от», which
+    # `_token_names_word` can never account for, so leaving it in would break
+    # goal recognition as surely as it breaks the name search.
+    service_tokens = _attested_tokens(service_tokens)
     goal_keys = _match_goal_keys(service_tokens)
     if goal_keys:
         return ParsedQuery(stems=[], cities=named_cities, goals=goal_keys)
@@ -591,7 +752,9 @@ def query_stems(raw: str) -> list[str]:
 
     A surviving city token is harmless to the name filter it would feed: an
     extra term in an OR that matches no service name adds nothing.
-    :func:`parse_stems` strips it properly anyway.
+    :func:`parse_stems` strips it properly anyway. The same holds, since
+    DRF-1352, for an unattested short token: this list can still carry «по»,
+    and :func:`parse_stems` is where it is dropped.
     """
     return [t[:_STEM_LEN] for t in _query_tokens(raw)]
 
@@ -599,11 +762,11 @@ def query_stems(raw: str) -> list[str]:
 def parse_stems(stems: list[str]) -> ParsedQuery:
     """Apply the catalog-aware half of the parse to stems carried on a callback.
 
-    The counterpart of :func:`query_stems`, and the SAME two steps
-    :func:`_parse_query` runs in the same order — city split first, then goal
-    recognition on what is left — so a request read off a button means exactly
-    what it meant when it produced the card. Not a second copy of the rule:
-    both call the same two functions.
+    The counterpart of :func:`query_stems`, and the SAME three steps
+    :func:`_parse_query` runs in the same order — city split, then short-word
+    attestation (DRF-1352), then goal recognition on what is left — so a
+    request read off a button means exactly what it meant when it produced the
+    card. Not a second copy of the rule: both call the same three functions.
 
     Stems are already cut to ``_STEM_LEN``, which is what the goal comparison
     cuts to anyway, so recognition off a stem is identical to recognition off
@@ -613,6 +776,7 @@ def parse_stems(stems: list[str]) -> ParsedQuery:
     if not stems:
         return ParsedQuery(stems=[], cities=[], goals=[])
     service_stems, cities = _split_known_cities(stems)
+    service_stems = _attested_tokens(service_stems)
     goal_keys = _match_goal_keys(service_stems)
     if goal_keys:
         return ParsedQuery(stems=[], cities=cities, goals=goal_keys)
@@ -690,10 +854,17 @@ def split_requested_services(raw: str) -> list[str]:
     if len(chunks) < 2:
         return []
     cities = _known_cities()
+    # DRF-1352 — the attestation vocabulary is read at most ONCE for the whole
+    # enumeration, and only if some part actually carries a short token. A
+    # part that reduces to «по» names no service and must not be reported as
+    # one, for the same reason a lead-in clause must not be.
+    words: frozenset[str] | None = None
     parts: list[str] = []
     for part in chunks:
         service_tokens, _named = _split_known_cities(_content_tokens(part), cities)
-        if service_tokens:
+        if words is None and any(len(t) < _SHORT_WORD_LEN for t in service_tokens):
+            words = _catalog_words()
+        if _attested_tokens(service_tokens, words):
             parts.append(part)
         if len(parts) >= _MAX_SERVICE_PARTS:
             break
@@ -750,7 +921,10 @@ def service_coverage(
         # that reduces to nothing must make no claim, or «хочу» ends up quoted
         # back as a service we do not offer.
         service_tokens, _named_cities = _split_known_cities(_content_tokens(name))
-        if not service_tokens:
+        # DRF-1352, same rule as _parse_query: a short token the catalog does
+        # not use as a word makes no claim, so a name that reduces to one
+        # («по») belongs in neither list.
+        if not _attested_tokens(service_tokens):
             continue
         if _bookable_qs(city=city, specialization=name).exists():
             available.append(name)
@@ -809,7 +983,7 @@ def _service_match_q(stems: list[str]) -> Q:
     """
     any_stem = Q()
     for stem in stems:
-        any_stem |= Q(services_offered__service__name__icontains=stem)
+        any_stem |= _stem_match_q("services_offered__service__name", stem)
     return _service_row_q() & any_stem
 
 
@@ -874,7 +1048,10 @@ def _match_score(stems: list[str]) -> Coalesce:
     total: Case | CombinedExpression | None = None
     for stem in stems:
         term = Case(
-            When(row & Q(services_offered__service__name__icontains=stem), then=Value(1)),
+            When(
+                row & _stem_match_q("services_offered__service__name", stem),
+                then=Value(1),
+            ),
             default=Value(0),
             output_field=IntegerField(),
         )
@@ -1098,7 +1275,7 @@ def _bookable_qs(
 
         specialization_match = Q()
         for stem in stems:
-            specialization_match |= Q(specialization__icontains=stem)
+            specialization_match |= _stem_match_q("specialization", stem)
 
         # No DISTINCT: annotating with an aggregate groups by the master, which
         # collapses the join multiplication DISTINCT used to clean up (a master
@@ -1469,7 +1646,7 @@ def service_rows_match_q(parsed: "ParsedQuery") -> Q:
         return any_goal
     any_stem = Q()
     for stem in parsed.stems:
-        any_stem |= Q(name__icontains=stem)
+        any_stem |= _stem_match_q("name", stem)
     return any_stem
 
 
@@ -1483,7 +1660,7 @@ def service_rows_score(parsed: "ParsedQuery") -> Case | CombinedExpression | Non
     score: Case | CombinedExpression | None = None
     for stem in parsed.stems:
         term = Case(
-            When(Q(name__icontains=stem), then=Value(1)),
+            When(_stem_match_q("name", stem), then=Value(1)),
             default=Value(0),
             output_field=IntegerField(),
         )
@@ -1555,7 +1732,7 @@ def discover_services(
             # sum ranks — MAX-over-rows is the master-side requirement only.
             score: Case | CombinedExpression | None = None
             for stem in stems:
-                cond = Q(name__icontains=stem)
+                cond = _stem_match_q("name", stem)
                 any_stem |= cond
                 term = Case(
                     When(cond, then=Value(1)),

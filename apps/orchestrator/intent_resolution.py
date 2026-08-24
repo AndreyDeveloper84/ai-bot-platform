@@ -573,7 +573,7 @@ def resolve_intent(
     try:
         model = getattr(settings, "INTENT_RESOLUTION_MODEL", "gpt-4o-mini")
         response = asyncio.run(
-            llm_client.create(
+            llm_client.chat.completions.create(
                 model=model,
                 messages=build_resolution_messages(text, message_id=message_id),
             )
