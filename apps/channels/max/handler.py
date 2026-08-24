@@ -142,6 +142,7 @@ from apps.orchestrator.handoff import (
     matches_human_handoff_request,
     route_booking_callback,
     route_global_human_handoff,
+    try_continue_booking,
 )
 from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
 from apps.orchestrator.nutrition_global import try_handle_structured_nutrition_turn
@@ -687,6 +688,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      confirm / cancel route back into tenant T's skill pipeline — before
     #      this they fell through to the concierge as raw text (the «2026 год»
     #      refusal instead of the next booking step).
+    #   2.6. Typed continuation of a booking already in flight (DRF-968 /
+    #      DRF-1101). Until now ONLY taps continued a booking: free text fell
+    #      through to the concierge, which has no booking tool and answers
+    #      with the master list — the funnel visibly restarting. Claims a turn
+    #      only when it can account for it completely (a service THIS master
+    #      delivers, or a date / part of day), so everything else keeps
+    #      today's routing. Sits inside the else branch, above 2.7, because
+    #      2.7 claims service names and would eat the answer to «напишите
+    #      название услуги» — that IS the DRF-968 loop.
     #   2.7. New-booking intent (DRF-1102) — a turn that PARSES as exactly
     #      «покажи мастеров по услуге» (claims_direct_show_masters, DRF-1328)
     #      shows masters straight away, deterministically. Until 24.08 the
@@ -857,8 +867,33 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # услуге» — everything else is the concierge's, including the
             # capabilities nobody has built yet
             # (``apps.orchestrator.fast_path``).
+            # DRF-968 / DRF-1101 — a TYPED turn that continues a booking
+            # already in flight. Deliberately ABOVE the fast path: the answer
+            # to «напишите название услуги» is a service name, and the fast
+            # path claims service names — which is exactly how the ask-the-
+            # service question came back as the master list it had just been
+            # asked from (DRF-968's loop). Below the memory branches for the
+            # same reason the fast path is: a forget-phrase or a pending
+            # memory answer is not a booking turn, whatever words it uses.
+            #
+            # Returns None for anything it cannot fully account for, so a
+            # turn it does not claim reaches the concierge byte-identically.
+            booking_reply: DiscoveryReply | None = None
+            if ask_reply is None:
+                booking_reply = try_continue_booking(
+                    global_bot_user=bot_user,
+                    conversation=conversation,
+                    text=event.text,
+                    chat_id=event.chat_id,
+                    trace_id=trace_id,
+                )
+
             direct_reply: DiscoveryReply | None = None
-            if ask_reply is None and claims_direct_show_masters(event.text):
+            if (
+                ask_reply is None
+                and booking_reply is None
+                and claims_direct_show_masters(event.text)
+            ):
                 direct_reply = generate_direct_show_masters_reply(
                     event.text,
                     trace_id=str(trace_id) if trace_id else None,
@@ -868,6 +903,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
 
             if ask_reply is not None:
                 reply = ask_reply
+            elif booking_reply is not None:
+                reply = booking_reply
+                assistant_action_type = "booking_continued"
             elif direct_reply is not None:
                 reply = direct_reply
                 assistant_action_type = "discovery_show_masters_direct"
