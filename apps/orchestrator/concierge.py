@@ -1215,15 +1215,15 @@ def generate_concierge_reply(
     invariant that used to hold only by accident: what the transcript says the
     bot said is what the bot said.
 
-    ``persisted=True`` means "the store already wrote this turn", and for a
-    prose answer it did — ai-core saves the model's text. But every
-    DETERMINISTIC branch below (the card render, the catalog tables, a
-    nutrition confirmation, the DRF-1354 handoff) returns text the model never
-    produced, while the row ai-core wrote for that pass carried the model's
-    EMPTY tool-selection content. So the reply went to the user and a blank
-    row went to the transcript — which is also the LLM history the next turn
-    reads. The bot could not see what it had just shown, which is one way a
-    conversation walks backwards.
+    ``persisted=True`` USED to mean only "the store wrote something for this
+    turn", which for a prose answer was the reply and for everything else was
+    not. Every DETERMINISTIC branch below (the card render, the catalog
+    tables, a nutrition confirmation, the DRF-1354 handoff) returns text the
+    model never produced, while the row ai-core wrote for that pass carried
+    the model's EMPTY tool-selection content. So the reply went to the user
+    and a blank row went to the transcript — which is also the LLM history the
+    next turn reads. The bot could not see what it had just shown, which is
+    one way a conversation walks backwards.
 
     Since DRF-1354 the store writes nothing at all
     (:meth:`GlobalConversationStore.save_message` explains what that removes)
