@@ -70,6 +70,21 @@ CALLBACK_BOOK_PICK_SLOT_PREFIX = "cb:book:pick_slot:"
 # ``cb:book:pick_date:<master_id>:<YYYY-MM-DD>``.
 CALLBACK_BOOK_PICK_DATE_PREFIX = "cb:book:pick_date:"
 
+# DRF-1325 — part-of-day pick. Sits between date pick and slot pick for the
+# same reason the date picker sits between master pick and slot pick: a bare
+# list of every free time of a day IS a calendar, and people ask for «вечер»,
+# not for 19:00. Payload carries master + date + part + service so the tap is
+# self-contained like every other booking callback. The ``part`` segment is
+# one of ``apps.orchestrator.time_preference.PART_ORDER`` — or ``any``, the
+# «Точное время» escape hatch back to the full list.
+# Format: ``cb:book:pick_part:<master_id>:<YYYY-MM-DD>:<part>:<service_id>``.
+CALLBACK_BOOK_PICK_PART_PREFIX = "cb:book:pick_part:"
+
+# DRF-1325 — «Выбрать дату»: expand the three day chips into the full list of
+# the master's free days. Format:
+# ``cb:book:more_dates:<master_id>:<service_id>``.
+CALLBACK_BOOK_MORE_DATES_PREFIX = "cb:book:more_dates:"
+
 
 # Button labels — Russian per the salon brand voice (see
 # ``apps.skills.booking.prompts`` for tone alignment).

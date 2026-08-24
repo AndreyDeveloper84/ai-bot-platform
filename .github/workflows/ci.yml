@@ -222,6 +222,17 @@ jobs:
       - name: Import-boundary guard (AST lint)
         run: uv run python tools/lint/import_boundaries.py apps/
 
+      # Consent-column direct-read guard (DRF-1314). `BotUser.consent_at`
+      # is a denormalised stamp that `consent.services.withdraw()`
+      # deliberately never clears, so it answers "ever consented", not
+      # "may we write to them". Reads outside the shared gate, the two
+      # stamping sites and the operator census are refused. See
+      # `tools/lint/consent_column_guard.py` for what is + is not
+      # detected — notably it cannot catch a surface with NO gate, which
+      # is what DRF-1301 and DRF-1307 actually were.
+      - name: Consent-column direct-read guard (AST lint)
+        run: uv run python tools/lint/consent_column_guard.py apps/
+
       - name: Django manage.py check
         run: uv run python manage.py check
 

@@ -985,6 +985,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                         )
 
+    # DRF-1325 — the time half of «хочу на массаж завтра вечером». On
+    # 2026-08-23 it was dropped without a word and the booking landed five
+    # days out at 11:30. Runs on every turn of this surface, right before the
+    # reply is persisted, so it sees the FINAL reply and cannot change which
+    # branch produced it.
+    reply = _remember_time_preference(conversation, bot_user, event.text, reply)
+
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     # W5: the AIConcierge store already persisted concierge turns
     # (reply.persisted=True) — skip here to avoid a double row; every other
@@ -1048,24 +1055,119 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         record_explicit_green_facts(bot_user, event.text)
 
 
+def _remember_time_preference(conversation, bot_user, text: str, reply):
+    """Parse «завтра вечером», store it, and say it was heard (DRF-1325).
+
+    Two separate jobs, deliberately not merged:
+
+    **Storing** happens on every turn that names a time. The preference is
+    read back inside ``tenant_scope(T)`` by the booking flow
+    (``apps.orchestrator.handoff.carry_time_preference``), which is what
+    turns «завтра вечером» into tomorrow's evening slots instead of a bare
+    calendar. It is stored even when this turn's reply says nothing about
+    time — the next tap is where it pays off.
+
+    **Acknowledging** happens only on a reply that offers masters to book
+    AND has not been persisted yet. The second condition is not cosmetic: a
+    concierge turn is written to the Message table by its own store before
+    control returns here, so prefixing its text would send one thing and
+    record another — and the replay fixtures read the record. On that path
+    the request is instead read back one tap later, by the picker itself
+    («Вы просили завтра вечером — вот что есть:»).
+
+    Best-effort throughout: a preference is a hint, and no hint is worth a
+    turn.
+    """
+    try:
+        from apps.orchestrator.time_preference import (
+            describe,
+            local_today,
+            parse_time_preference,
+            save_time_preference,
+        )
+
+        # Weekday words need to know what day it is; the global bot has no
+        # tenant, so this falls back to Europe/Moscow — the same default
+        # Tenant.timezone carries and the zone all nine pilot masters use.
+        today = local_today(getattr(bot_user, "tenant", None))
+        pref = parse_time_preference(text, weekday_today=today.weekday())
+        if pref is None:
+            return reply
+        save_time_preference(conversation, pref)
+
+        if reply.persisted or not _offers_booking(reply):
+            return reply
+        heard = describe(pref, None, today)
+        day = pref.day_offset
+        if day is not None:
+            from datetime import timedelta
+
+            heard = describe(pref, (today + timedelta(days=day)).isoformat(), today)
+        if not heard:
+            return reply
+        return DiscoveryReply(
+            text=f"{_TIME_HEARD_LINE.format(heard=heard)}\n\n{reply.text}",
+            action_data=reply.action_data,
+            persisted=reply.persisted,
+        )
+    except Exception:  # noqa: BLE001 — a hint must never break a turn
+        logger.exception("channels.max.global.time_pref_failed")
+        return reply
+
+
+# Deliberately not «записываю на завтра вечером»: nothing is booked yet and
+# no time has been checked. It states what was heard and what will be done
+# with it — which is exactly as much as this layer knows.
+_TIME_HEARD_LINE = "Поняла: {heard}. Подберу время под это."
+
+
+def _offers_booking(reply) -> bool:
+    """True when the reply carries at least one «записаться» button."""
+    data = getattr(reply, "action_data", None)
+    if not isinstance(data, dict):
+        return False
+    for attachment in data.get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        payload = attachment.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        for button in payload.get("buttons") or []:
+            if isinstance(button, dict) and str(button.get("callback") or "").startswith(
+                CALLBACK_DISCOVER_BOOK_PREFIX
+            ):
+                return True
+    return False
+
+
 def _discovery_handoff_reply(
     event: CanonicalEvent, global_bot_user, trace_id: str | uuid.UUID | None
 ) -> DiscoveryReply:
-    """Parse the ``cb:discover:book:{tenant_id}:{master_id}[:{service_id}]``
+    """Parse the ``cb:discover:book:{tenant}:{master}[:{service}[:{query}]]``
     callback and route into tenant T's booking flow via the handoff layer
-    (#1020, service context DRF-962).
+    (#1020, service context DRF-962, query context DRF-1324).
 
-    All ids are UUIDs (no ``:`` inside), so colon splits are unambiguous. The
-    service part is optional: cards rendered before DRF-962 — or for a query
-    where no single service matched — carry only two ids, and the handoff
-    layer answers those with an ask-the-service reply instead of a doomed
-    booking dispatch. Malformed payloads degrade to a graceful reply.
+    All ids are UUIDs (no ``:`` inside) and the query ref is base64url (whose
+    alphabet has no ``:`` either), so colon splits stay unambiguous.
+
+    Both trailing segments are optional and POSITIONAL. The service part is
+    absent on cards rendered before DRF-962 and on a query where no single
+    service matched; the query part is absent on cards rendered before
+    DRF-1324 and on a query with nothing to carry. A serviceless card that
+    DOES carry a query sends an EMPTY third segment («…:{master}::{ref}»), so
+    the fourth position always means the same thing.
+
+    Every degradation here is one-way: a malformed id loses the whole tap
+    (generic reply), a malformed service or query segment loses only itself
+    and the handoff answers with the ask-the-service menu — narrowed if the
+    query survived, whole if it did not. Nothing about a bad segment can send
+    the user to a service they did not ask for.
     """
     payload = event.text[len(CALLBACK_DISCOVER_BOOK_PREFIX) :]
     try:
         parts = payload.split(":")
-        if len(parts) not in (2, 3):
-            raise ValueError(f"expected 2 or 3 ids, got {len(parts)}")
+        if len(parts) not in (2, 3, 4):
+            raise ValueError(f"expected 2 to 4 segments, got {len(parts)}")
         tenant_id = uuid.UUID(parts[0])
         master_id = uuid.UUID(parts[1])
     except (ValueError, AttributeError):
@@ -1078,17 +1180,20 @@ def _discovery_handoff_reply(
     # throw away two valid ids — degrade to the serviceless handoff (which
     # asks for the service) instead of the generic error.
     service_id: uuid.UUID | None = None
-    if len(parts) == 3:
+    if len(parts) >= 3 and parts[2]:
         try:
             service_id = uuid.UUID(parts[2])
         except (ValueError, AttributeError):
             logger.warning("channels.max.global.handoff.bad_service_part payload=%r", payload)
+
+    query_ref = parts[3] if len(parts) == 4 else ""
 
     return handoff_to_booking(
         global_bot_user=global_bot_user,
         tenant_id=tenant_id,
         master_id=master_id,
         service_id=service_id,
+        query_ref=query_ref,
         chat_id=event.chat_id,
         trace_id=trace_id,
     )

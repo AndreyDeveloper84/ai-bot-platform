@@ -61,9 +61,14 @@ Per tenant, in 1Password under `ai-bot-platform / tenants / {slug}`, then into
 
 - `MAX_BOT_TOKEN` — the tenant's MAX bot access token.
 - `MAX_WEBHOOK_SECRET` — webhook auth secret (the `X-Max-Bot-Api-Secret` value).
-- `MAX_MINIAPP_URL` — Mini App URL for the welcome keyboard fallback (and
-  `MAX_BOT_WEB_APP` if the bot has a registered Mini App username for native
-  `open_app`).
+- `MAX_MINIAPP_URL` — Mini App **origin** for the welcome keyboard fallback:
+  scheme + host, no path and no trailing `/customer` (DRF-1326 — the whole
+  client path comes from `MINIAPP_ROUTES` in `apps/skills/welcome/skill.py`,
+  so a base with a path doubles the prefix). On the pilot the customer
+  screens answer on `proapp`, not `miniapp`.
+  (And `MAX_BOT_WEB_APP` if the bot has a registered Mini App username for
+  native `open_app` — that one is an app identifier on the MAX side, not a
+  URL.)
 - `MAX_BOT_TENANT_SLUG` (single-bot) **or** add `secret=slug` to
   `CHANNEL_TOKEN_TO_TENANT_SLUG` (multi-bot ingress).
 

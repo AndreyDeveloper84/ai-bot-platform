@@ -4,10 +4,10 @@ import { parseStartRoute } from "./max-sdk";
 
 describe("parseStartRoute", () => {
   it("maps pre-existing slugs", () => {
-    expect(parseStartRoute("open_catalog")).toBe("/catalog");
-    expect(parseStartRoute("open_visits")).toBe("/my-visits");
-    expect(parseStartRoute("open_profile")).toBe("/me");
-    expect(parseStartRoute("catalog")).toBe("/catalog");
+    expect(parseStartRoute("open_catalog")).toBe("/customer/catalog");
+    expect(parseStartRoute("open_visits")).toBe("/customer/records");
+    expect(parseStartRoute("open_profile")).toBe("/customer/profile");
+    expect(parseStartRoute("catalog")).toBe("/customer/catalog");
   });
 
   // DRF-1167: S5 first-action slugs emitted by the welcome skill must
@@ -28,6 +28,6 @@ describe("parseStartRoute", () => {
   });
 
   it("still accepts the legacy querystring form", () => {
-    expect(parseStartRoute("route=visits&ref=ig")).toBe("/my-visits");
+    expect(parseStartRoute("route=visits&ref=ig")).toBe("/customer/records");
   });
 });

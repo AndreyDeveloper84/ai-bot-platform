@@ -42,11 +42,13 @@ def _dto(
     reviews_count: int = 42,
     status: str = "active",
     is_available: bool = True,
+    tenant: str | None = None,
 ) -> CatalogSpecialistDTO:
     return CatalogSpecialistDTO(
         ayla_master_id=ayla_master_id or str(uuid.uuid4()),
         user_id=user_id or str(uuid.uuid4()),
         name=name,
+        tenant=tenant,
         external_updated_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
         bio=bio,
         experience=str(experience_years) if experience_years is not None else "",
@@ -158,6 +160,84 @@ class TestTenantIsolation:
         m = CatalogMaster.all_tenants.get(id=mid)
         assert m.tenant_id == tenant.id
         assert m.name == "В салоне А"
+
+    def test_pk_collision_names_the_cause(self, tenant: Tenant, tenant_b: Tenant) -> None:
+        """DRF-1313 — the collision above is not hypothetical any more.
+
+        A tenant-blind pull left five pilot masters under the wrong salon, and
+        because ``CatalogMaster.id`` is the global PK those rows now hold the
+        ids hostage: the *corrected* sync still cannot create each master under
+        its real salon while the wrong salon owns the row. Every beat fails
+        here until someone removes it — so the failure has to say so, not
+        surface as a bare duplicate-key string.
+
+        This is the seam between the code fix and the data cleanup. The upsert
+        deliberately does not re-parent or delete: whose row that is, is an
+        owner decision.
+        """
+        mid = str(uuid.uuid4())
+        upsert_specialists(tenant, [_dto(mid, name="В салоне А")])
+
+        res = upsert_specialists(tenant_b, [_dto(mid, name="В салоне Б")])
+
+        assert res.errors[0]["reason"] == "held_by_other_tenant"
+        assert res.errors[0]["ayla_master_id"] == mid
+        assert CatalogMaster.all_tenants.get(id=mid).tenant_id == tenant.id
+
+
+class TestCrossTenantGuard:
+    """DRF-1313 — the payload's own tenant is re-checked before any write.
+
+    ``fetch_specialists`` sends ``?tenant=`` now, so in principle the feed is
+    already scoped. In practice the whole defect was a filter that did not
+    apply and said nothing about it, so the mirror verifies rather than trusts
+    — the same guard the edge upsert has carried since DRF-945.
+    """
+
+    def test_foreign_tenant_payload_is_skipped_not_written(
+        self, tenant: Tenant, tenant_b: Tenant
+    ) -> None:
+        mid = str(uuid.uuid4())
+        res = upsert_specialists(
+            tenant,
+            [_dto(mid, name="Чужой мастер", tenant=str(tenant_b.id))],
+        )
+
+        assert (res.created, res.updated, res.skipped) == (0, 0, 1)
+        assert res.errors == []
+        assert not CatalogMaster.all_tenants.filter(id=mid).exists()
+
+    def test_matching_tenant_payload_is_written(self, tenant: Tenant) -> None:
+        mid = str(uuid.uuid4())
+        res = upsert_specialists(tenant, [_dto(mid, tenant=str(tenant.id))])
+
+        assert (res.created, res.skipped) == (1, 0)
+        assert CatalogMaster.all_tenants.get(id=mid).tenant_id == tenant.id
+
+    def test_absent_tenant_payload_is_written(self, tenant: Tenant) -> None:
+        """No ``tenant`` on the row means *unverifiable*, not *foreign*.
+
+        An Ayla deployed before the field exists must keep mirroring. Treating
+        a missing value as a mismatch would turn a deploy-order skew into an
+        outage — and the ordering (Ayla first, bot second) exists precisely so
+        this window is survivable.
+        """
+        mid = str(uuid.uuid4())
+        res = upsert_specialists(tenant, [_dto(mid, tenant=None)])
+
+        assert (res.created, res.skipped) == (1, 0)
+        assert CatalogMaster.all_tenants.get(id=mid).tenant_id == tenant.id
+
+    def test_foreign_row_does_not_abort_the_batch(self, tenant: Tenant, tenant_b: Tenant) -> None:
+        """One bad row must not cost the salon its other masters."""
+        good = _dto(str(uuid.uuid4()), tenant=str(tenant.id))
+        foreign = _dto(str(uuid.uuid4()), tenant=str(tenant_b.id))
+
+        res = upsert_specialists(tenant, [foreign, good])
+
+        assert (res.created, res.skipped) == (1, 1)
+        assert CatalogMaster.all_tenants.get(id=good.ayla_master_id)
+        assert not CatalogMaster.all_tenants.filter(id=foreign.ayla_master_id).exists()
 
 
 class TestErrorIsolation:

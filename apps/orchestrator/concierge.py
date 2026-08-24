@@ -56,7 +56,11 @@ from apps.conversations.services import (
 from apps.identity.services.global_tenant import get_global_bot_tenant
 from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
-from apps.marketplace.discovery import discover_masters
+from apps.marketplace.discovery import (
+    discover_masters,
+    service_coverage,
+    split_requested_services,
+)
 from apps.observability.ai_metrics import record_ai_request
 from apps.observability.models import AIRequestMetric
 from apps.orchestrator.discovery import (
@@ -74,6 +78,7 @@ from apps.orchestrator.discovery import (
     execute_catalog_tool,
     has_discovery_criteria,
     render_no_criteria_clarification,
+    requested_services,
 )
 from apps.orchestrator.llm.templates import get_fallback
 from apps.orchestrator.nutrition_global import (
@@ -743,6 +748,19 @@ def build_concierge_system_prompt(
         "Если нужно уточнение — вызывай инструмент ask_clarification с "
         "вариантами ответа, а НЕ пиши уточняющий вопрос обычным текстом: "
         "так клиент отвечает одним тапом, а не гадает формулировку.",
+        # DRF-1312 — the tool takes a `services` array now, and the model is
+        # the only party that can split «массаж и маникюр» into two names.
+        # Without this line it keeps folding a composite request into one
+        # `specialization` substring, the half nobody offers scores zero in
+        # the ranking, and the answer silently covers half the question.
+        # The second sentence is a boundary, not politeness: dropping a
+        # service the model believes is missing would make it the authority
+        # on what the catalog holds (AYLA-DEC-0045 / OD-9).
+        "Если клиент назвал НЕСКОЛЬКО услуг («массаж и маникюр»), перечисли "
+        "их ВСЕ в параметре services инструмента show_masters — каждую "
+        "отдельным элементом, словами клиента. Не решай сам, есть ли услуга "
+        "у мастеров, и не выбрасывай ту, которой, по-твоему, нет: платформа "
+        "проверит каждую по каталогу и сама скажет клиенту про отсутствующие.",
         # DRF-1304 — the salon/service tools exist now (tool_definitions).
         "Инструменты каталога:\n"
         "- Вопрос про салоны или адреса («какие салоны у вас есть», «где вы "
@@ -814,7 +832,13 @@ def _max_llm_passes() -> int:
         return 2
 
 
-def _build_tool_result_message(user_text: str, cards: list[Any], args: dict[str, Any]) -> str:
+def _build_tool_result_message(
+    user_text: str,
+    cards: list[Any],
+    args: dict[str, Any],
+    *,
+    missing: list[str] | None = None,
+) -> str:
     """Second-pass input: the executed ``show_masters`` result as plain text.
 
     Deliberately a plain user-role message, NOT the OpenAI/Anthropic
@@ -846,6 +870,18 @@ def _build_tool_result_message(user_text: str, cards: list[Any], args: dict[str,
         if getattr(card, "city", ""):
             parts.append(str(card.city))
         lines.append("- " + ", ".join(parts))
+    if missing:
+        # DRF-1312 — the services the CATALOG says nobody offers, verified by
+        # `service_coverage`, not by the model. Stated as a fact it may not
+        # revise: with cards present the reply is rendered deterministically
+        # and never reaches here, so this is the zero-result composite («и
+        # массажа, и маникюра нет»), where the model still does the phrasing
+        # and needs to know WHICH parts were checked.
+        quoted = ", ".join(f"«{str(name)}»" for name in missing)
+        lines.append(
+            f"Проверено по каталогу: {quoted} — этого нет ни у одного мастера. "
+            "Скажи об этом прямо и не предлагай эту услугу."
+        )
     if not cards:
         lines.append("(по этому запросу никого не нашлось)")
         # DRF-1283 — the refusal is a distinct instruction, not a clause
@@ -1045,6 +1081,13 @@ def generate_concierge_reply(
         limit = args.get("limit")
         city = args.get("city") or None
         specialization = args.get("specialization") or None
+        # DRF-1312 — the services the turn asked for, model-split. A model
+        # that fills `services` but leaves `specialization` empty has still
+        # named a service, and treating that as «no criteria» would answer a
+        # perfectly clear composite request with «какая услуга нужна?».
+        requested = requested_services(args if isinstance(args, dict) else {}, specialization)
+        if not specialization and requested:
+            specialization = ", ".join(requested)
         if not has_discovery_criteria(city, specialization):
             # Criteria-less call → continue discovery, never the catalogue
             # (BOT-003 §9 / prohibition #22 — see has_discovery_criteria).
@@ -1061,12 +1104,47 @@ def generate_concierge_reply(
             limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
             resolve_service=True,
         )
+        # DRF-1312 — which of the requested services the CATALOG can serve.
+        # Names come from the model, verdicts come from the catalog: the model
+        # is not the authority on what exists (AYLA-DEC-0045 / OD-9).
+        available, missing = service_coverage(requested, city=city)
         logger.info(
-            "orchestrator.concierge.show_masters count=%d trace=%s pass=%d",
+            "orchestrator.concierge.show_masters count=%d missing=%d trace=%s pass=%d",
             len(cards),
+            len(missing),
             trace_id,
             pass_index,
         )
+        if cards and missing:
+            # Half the request has masters and half has nobody. This is the
+            # DRF-1312 turn, and it is answered DETERMINISTICALLY rather than
+            # handed to the follow-up pass: the sentence «маникюра у наших
+            # мастеров нет» is the whole point of the fix, and a prompt that
+            # asks a model to include it is a request, not a guarantee. The
+            # renderer states it, then the cards for the half we can serve.
+            #
+            # The pass is not spent, so this is also cheaper than the prose
+            # path it replaces — the model's warmth is worth less here than
+            # the user not walking into a salon that cannot do their nails.
+            logger.info(
+                "orchestrator.concierge.show_masters.partial_coverage "
+                "available=%d missing=%d trace=%s",
+                len(available),
+                len(missing),
+                trace_id,
+            )
+            rendered = _render_master_cards(
+                cards[:_MAX_MASTER_CARDS],
+                city=city,
+                specialization=specialization,
+                available_services=available,
+                missing_services=missing,
+            )
+            return DiscoveryReply(
+                text=rendered.text,
+                action_data=rendered.action_data,
+                persisted=True,
+            )
         if pass_index >= max_passes:
             # Pass budget exhausted with the model still asking for the tool:
             # the deterministic card render — byte-identical to the
@@ -1087,7 +1165,7 @@ def generate_concierge_reply(
             )
         pending_cards = cards
         pending_args = args
-        current_text = _build_tool_result_message(message_text, cards, args)
+        current_text = _build_tool_result_message(message_text, cards, args, missing=missing)
 
     if dto.action_type in NUTRITION_TOOL_ACTIONS:
         # DRF-1268 — a nutrition skill selected by the model as a tool.
@@ -1237,6 +1315,29 @@ def generate_direct_show_masters_reply(
     because that landed, not because zero results became less bad.
 
     The branch itself stays — a hit still answers here, without a model.
+
+    ### Declining a COMPOSITE request (DRF-1312)
+
+    ``None`` also when the turn enumerates two or more services («массаж
+    классика, и маникюр»). This branch forwards the RAW turn to the catalog as
+    one substring, and since DRF-1283 that substring is OR-matched and ranked
+    — so a part nobody offers scores zero and vanishes, and five massage
+    masters go out under «Вот мастера, которые могут подойти» as the answer to
+    a request half of which cannot be served. That was the live turn of 23.08.
+
+    Answering it here would mean splitting the user's own sentence into
+    service names, and the only tools this layer has for that are a literal
+    filler list and a separator regex. They are enough to COUNT the parts —
+    miscounting costs an LLM call — but not to QUOTE one back as a service we
+    do not offer, which is what an honest partial answer has to do. Get that
+    wrong and the bot announces that «давай будет несколько» is not on the
+    menu: a confident lie, strictly worse than the silence being fixed.
+
+    So the model splits (``show_masters.services``), the catalog rules on each
+    part (``service_coverage``), and the concierge renders the partial answer
+    deterministically. Same shape as the zero-result decline above: the
+    deterministic layer answers what it can be right about and hands over the
+    rest.
     """
     started = time.monotonic()
     if not has_discovery_criteria(None, message_text):
@@ -1254,6 +1355,14 @@ def generate_direct_show_masters_reply(
             fallback_triggered=True,
         )
         return reply
+    if len(split_requested_services(message_text)) >= 2:
+        # Composite → the concierge, which can split it and check each part.
+        # No metric row, same reason as the zero-result decline below: this
+        # path did not answer the inbound message.
+        logger.info(
+            "orchestrator.concierge.direct_show_masters.composite_to_llm trace=%s", trace_id
+        )
+        return None
     cards = discover_masters(
         specialization=message_text,
         limit=_MAX_MASTER_CARDS,

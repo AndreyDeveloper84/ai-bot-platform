@@ -207,7 +207,7 @@ class TestConfigGap:
 class TestFetchSpecialists:
     def test_parses_specialist_rows(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            assert str(request.url).endswith("/api/v1/internal/specialists/")
+            assert request.url.path == "/api/v1/internal/specialists/"
             return httpx.Response(
                 200,
                 json={
@@ -225,6 +225,7 @@ class TestFetchSpecialists:
                             "rating": "4.90",
                             "reviews_count": 42,
                             "is_available": True,
+                            "tenant": _TID,
                             "address": "Пенза, Московская 1",
                         }
                     ],
@@ -238,7 +239,7 @@ class TestFetchSpecialists:
             token="t",  # noqa: S106
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
-        rows = client.fetch_specialists()
+        rows = client.fetch_specialists(tenant_id=_TID)
 
         assert len(rows) == 1
         dto = rows[0]
@@ -249,7 +250,68 @@ class TestFetchSpecialists:
         assert str(dto.rating) == "4.90"
         assert dto.review_count == 42
         assert dto.is_active is True
+        assert dto.tenant == _TID
         assert dto.raw["address"] == "Пенза, Московская 1"
+
+    def test_sends_the_tenant_filter(self) -> None:
+        """DRF-1313: the pull must be scoped, and the wire is the only place
+        that can be checked. Without ``?tenant=`` Ayla answers with every
+        active master on the platform and the first tenant to sync claims all
+        of them.
+        """
+        seen: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.params.get("tenant"))
+            return httpx.Response(
+                200,
+                json={"count": 0, "next": None, "previous": None, "results": []},
+            )
+
+        from apps.catalog.services.http_client import CatalogHttpClient
+
+        client = CatalogHttpClient(
+            base_url=_BASE,
+            token="t",  # noqa: S106
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        client.fetch_specialists(tenant_id=_TID)
+
+        assert seen == [_TID]
+
+    def test_tenant_absent_from_payload_parses_as_none(self) -> None:
+        """An Ayla that predates the ``tenant`` field must not crash the parse.
+
+        The cross-tenant guard downstream reads this as "unverifiable" rather
+        than "mismatch", which is what keeps the two deploys orderable.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 1,
+                    "next": None,
+                    "previous": None,
+                    "results": [
+                        {
+                            "id": "9d3f0000-0000-4000-8000-0000000000dd",
+                            "display_name": "Old Ayla",
+                            "status": "active",
+                            "is_available": True,
+                        }
+                    ],
+                },
+            )
+
+        from apps.catalog.services.http_client import CatalogHttpClient
+
+        client = CatalogHttpClient(
+            base_url=_BASE,
+            token="t",  # noqa: S106
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        assert client.fetch_specialists(tenant_id=_TID)[0].tenant is None
 
     def test_missing_updated_at_uses_now(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -280,7 +342,7 @@ class TestFetchSpecialists:
             token="t",  # noqa: S106
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
-        rows = client.fetch_specialists()
+        rows = client.fetch_specialists(tenant_id=_TID)
         assert rows[0].external_updated_at is not None
         assert rows[0].experience == ""
         assert rows[0].rating is None
