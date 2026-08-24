@@ -101,6 +101,7 @@ from django.conf import settings
 
 from apps.channels.max.global_onboarding import needs_onboarding, run_onboarding_turn
 from apps.channels.max.outbound import (
+    edit_message_or_send,
     make_inline_keyboard_attachment_rows,
     send_message,
 )
@@ -142,8 +143,12 @@ from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CATALOG_CALLBACK_PREFIXES,
     CATALOG_STALE_CARD_TEXT,
+    CLARIFY_CALLBACK_PREFIX,
+    CLARIFY_STALE_TEXT,
+    ClarifyOutcome,
     DiscoveryReply,
     execute_catalog_callback,
+    execute_clarify_callback,
 )
 from apps.orchestrator.handoff import (
     BOOKING_CALLBACK_PREFIXES,
@@ -263,6 +268,66 @@ def _last_user_content(
         )
         return None
     return row if isinstance(row, str) and row.strip() else None
+
+
+def _last_clarification_offer(conversation: Any) -> tuple[str, list[str]]:
+    """The question + options of the most recent multi-select on this dialog.
+
+    ``("", [])`` when there is none, which every caller treats as "the question
+    is gone" rather than guessing.
+
+    **Why the Message row and not the tapped keyboard.** MAX echoes the
+    original message back on a callback (``message.body`` — the parser reads
+    ``mid`` from it), and it is tempting to read the labels straight off the
+    keyboard the person tapped. The repo's own callback fixture
+    (``apps/channels/max/tests/test_parser.py:165``) has ``attachments: []`` on
+    a body that demonstrably carried an inline keyboard, so that echo is not
+    something to build on without a live capture proving otherwise. The
+    assistant turn, by contrast, is written by us, on this path, every time.
+
+    **Why this needs no new table.** ``Message.action_data`` has existed since
+    Sprint 3 and the renderer already puts the offer there
+    (``discovery.render_multiselect_clarification``). Until DRF-1362 the global
+    sibling of ``record_message`` simply did not forward the field — the fix
+    was to stop dropping it, not to invent a place to keep it.
+
+    Best-effort: a read failure degrades to "no offer", so a database hiccup
+    costs the multi-select and never the turn.
+    """
+    conversation_id = getattr(conversation, "id", None)
+    if conversation_id is None:
+        return "", []
+    try:
+        from apps.conversations.models import Message
+
+        rows = (
+            Message.all_tenants.filter(conversation_id=conversation_id, role="assistant")
+            .order_by("-created_at")
+            .values_list("content", "action_data")[:_CLARIFY_LOOKBACK]
+        )
+        for content, action_data in rows:
+            if not isinstance(action_data, dict):
+                continue
+            block = action_data.get("clarification")
+            if not isinstance(block, dict):
+                continue
+            options = [str(o) for o in (block.get("options") or []) if str(o).strip()]
+            if options:
+                return (content if isinstance(content, str) else ""), options
+    except Exception:  # noqa: BLE001 — a tap must never break the turn
+        logger.exception(
+            "channels.max.global.clarify_offer_probe_failed conversation=%s",
+            conversation_id,
+        )
+    return "", []
+
+
+#: How far back to look for the offer a tap answers. A tap normally answers the
+#: message directly above it, but a redraw writes an assistant row of its own,
+#: so the original can sit several rows up after a few toggles. Bounded so a
+#: stale tap from far up the dialog reads as stale instead of silently
+#: re-opening a question the conversation has long moved past.
+_CLARIFY_LOOKBACK = 12
 
 
 def _build_attachments(action_data: dict[str, Any] | None) -> list[dict[str, Any]] | None:
@@ -734,8 +799,38 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # still recorded, so the next turn keeps the grounding that matters.
     is_catalog_callback = event.text.startswith(CATALOG_CALLBACK_PREFIXES)
 
+    # DRF-1362 — a multi-select tap, resolved ONCE here so the offer is read
+    # from the database once no matter which way the tap goes.
+    #
+    # «Продолжить» is the one clarify tap that is not a redraw: it IS the
+    # person's answer, so it re-enters the turn as ordinary text and every
+    # branch below sees «маникюр, стрижка» rather than a `cb:` payload. That
+    # is the established move on this surface — ``resolve_tap_text`` just
+    # above does the same thing for the same reason — and it is what makes
+    # submit a RE-RESOLUTION: the accumulated choice is answered by the same
+    # machinery that answers anything a person says, not by a second parallel
+    # path that could disagree with it.
+    #
+    # Toggles and «Ни один вариант» keep their payload and are answered by the
+    # branch below. A payload that matched the prefix but decoded to nothing
+    # is NOT allowed to fall through — a raw `cb:clarify:…` string reaching
+    # the concierge is precisely the DRF-988 defect.
+    clarify_outcome = None
+    if event.text.startswith(CLARIFY_CALLBACK_PREFIX):
+        _clarify_question, _clarify_options = _last_clarification_offer(conversation)
+        clarify_outcome = execute_clarify_callback(event.text, _clarify_options, _clarify_question)
+        if clarify_outcome is not None and clarify_outcome.submit_text:
+            event = replace(event, text=clarify_outcome.submit_text)
+            clarify_outcome = None
+        elif clarify_outcome is None:
+            clarify_outcome = ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_STALE_TEXT))
+
+    # A submitted answer no longer starts with the prefix, so it is persisted
+    # as the user turn it now is; a redraw tap still does not reach history.
+    is_clarify_redraw_tap = event.text.startswith(CLARIFY_CALLBACK_PREFIX)
+
     # Persist + remember the inbound turn (sentinel-scoped, current_tenant()=None).
-    if is_booking_callback or is_catalog_callback:
+    if is_booking_callback or is_catalog_callback or is_clarify_redraw_tap:
         user_msg = None
     else:
         user_msg = record_global_message(
@@ -830,6 +925,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      still processed as a memory command, not hijacked into cards.
     #   3. A normal tenant-less discovery turn (which may itself surface cards).
     assistant_action_type = ""
+    # DRF-1362 — set only by the multi-select branch: this reply REPLACES the
+    # message the tap came from instead of following it.
+    clarify_redraw = False
     was_memory_command = False
     concierge_turn_ran = False
     safety = evaluate_inbound(event.text)
@@ -895,6 +993,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         bot_user, event.text, conversation
     ):
         reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
+    elif clarify_outcome is not None:
+        # DRF-1362 — a multi-select redraw or its close. Sits with the other
+        # callback branches and BEFORE the concierge for the same reason they
+        # do: the text is an id this bot rendered, not something a person said.
+        # Already resolved above; this branch only places it in the ladder.
+        reply = clarify_outcome.reply or DiscoveryReply(text=CLARIFY_STALE_TEXT)
+        clarify_redraw = clarify_outcome.redraw
+        assistant_action_type = "clarification"
     elif event.text.startswith(CATALOG_CALLBACK_PREFIXES):
         # DRF-1304 — a catalog chip tap. Sits with the other callback branches
         # and BEFORE the concierge below for the same reason they do: the text
@@ -1223,6 +1329,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # transcript has to end up holding what the person actually read.
             reply = DiscoveryReply(text=guarded.text, action_data=None, persisted=False)
             assistant_action_type = OUTBOUND_ACTION_TYPE
+            # DRF-1362 — and it is never an in-place edit either. ``outbound.py``
+            # 's rule is that a blocked reply is REPLACED, not edited; quietly
+            # rewriting the multi-select message the person was looking at,
+            # keyboard stripped, is an edited reply by another name. A new
+            # message is also the only form in which «тут нужен человек» reads
+            # as the turn stopping rather than the question changing.
+            clarify_redraw = False
 
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     # W5: the AIConcierge store already persisted concierge turns
@@ -1235,6 +1348,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             content=reply.text,
             rendered_text=reply.text,
             action_type=assistant_action_type,
+            # DRF-1362 — the offer a clarification made has to outlive the
+            # message that made it: the tap answering it arrives a turn later
+            # and needs the options by name. Passed for every branch, not just
+            # this one, because the field was always meant to be written here
+            # (``record_message`` has written it since Sprint 3) and a keyboard
+            # that cannot be reconstructed afterwards is a gap on every path.
+            action_data=reply.action_data,
             trace_id=trace_id,
         )
     short_term.append(conversation.id, role="assistant", content=reply.text)
@@ -1246,6 +1366,25 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             bot_user=bot_user,
             trace_id=trace_id,
             is_global=True,
+            attachments=_build_attachments(reply.action_data),
+        )
+    elif clarify_redraw and event.channel_message_id:
+        # DRF-1362 — the whole point of the ticket: two taps update ONE
+        # message instead of stacking three near-identical ones.
+        # ``channel_message_id`` is the mid of the message the tapped keyboard
+        # hung under (``parser.py`` fills it from ``message.body.mid`` on a
+        # callback), so this rewrites exactly the screen the person is looking
+        # at — the same move ``legacy_maxbot/handlers/health_screening.py:265``
+        # has made on this channel since Phase 3.2A.
+        #
+        # ``edit_message_or_send`` falls back to a new message on ANY refusal,
+        # and MAX refuses edits routinely — an old message, a deleted one, or
+        # simply the second edit inside the same half-second. The tap is
+        # answered either way; only the polish is lost.
+        edit_message_or_send(
+            chat_id=event.chat_id,
+            message_id=event.channel_message_id,
+            text=reply.text,
             attachments=_build_attachments(reply.action_data),
         )
     else:

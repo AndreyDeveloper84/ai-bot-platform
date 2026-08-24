@@ -293,3 +293,89 @@ class TestMultiselectRender:
     def test_a_sixth_option_never_reaches_the_keyboard(self):
         reply = render_multiselect_clarification("Что?", [f"o{i}" for i in range(9)], mask=0)
         assert len(reply.action_data["button_rows"]) == 5 + 2
+
+
+class TestModeSurvivesTheConciergeDispatch:
+    """The wire from the model's tool call to the rendered reply.
+
+    Before DRF-1362 the contract, the normaliser and the reader could all be
+    right while the live turn still got a DERIVED mode, because the two links
+    in between dropped the field: ``_dispatch_tool`` never read it off the
+    arguments and the render call never passed it on. Both are one line, and
+    both are the reason the ticket existed.
+    """
+
+    @staticmethod
+    def _tc(name: str, arguments: str):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
+
+    def test_dispatch_carries_the_models_mode_through(self):
+        from apps.orchestrator.concierge import _dispatch_tool
+
+        result = _dispatch_tool(
+            self._tc(
+                "ask_clarification",
+                '{"question": "Что нужно?", "options": ["A", "B"], "mode": "choose_many"}',
+            ),
+            None,
+        )
+        assert result.action_data["mode"] == "choose_many"
+        assert result.action_data["options"] == ["A", "B"]
+
+    def test_dispatch_leaves_mode_absent_when_the_model_omits_it(self):
+        from apps.orchestrator.concierge import _dispatch_tool
+
+        result = _dispatch_tool(
+            self._tc("ask_clarification", '{"question": "Что нужно?", "options": ["A"]}'),
+            None,
+        )
+        assert result.action_data["mode"] is None
+        # …and the renderer then derives it, which is the pre-DRF-1362 meaning.
+        rendered = discovery._render_ask_clarification(
+            result.action_data["question"],
+            result.action_data["options"],
+            result.action_data["mode"],
+        )
+        assert clarification_mode_of(rendered.action_data) == CLARIFICATION_MODE_CONFIRM_ONE
+
+    def test_an_unrecognised_mode_from_the_model_never_escapes_the_enum(self):
+        """The dispatcher passes the string through unvalidated on purpose;
+        the renderer is where an untrusted value stops."""
+        from apps.orchestrator.concierge import _dispatch_tool
+
+        result = _dispatch_tool(
+            self._tc(
+                "ask_clarification",
+                '{"question": "Что?", "options": ["A"], "mode": "pick_whatever"}',
+            ),
+            None,
+        )
+        assert result.action_data["mode"] == "pick_whatever"
+        rendered = discovery._render_ask_clarification(
+            result.action_data["question"],
+            result.action_data["options"],
+            result.action_data["mode"],
+        )
+        assert clarification_mode_of(rendered.action_data) in CLARIFICATION_MODES
+
+    def test_free_survives_end_to_end(self):
+        """The case the whole contract exists for: options ARE offered, and
+        typing something else is still a valid answer. Indistinguishable from
+        confirm_one without the mode."""
+        from apps.orchestrator.concierge import _dispatch_tool
+
+        result = _dispatch_tool(
+            self._tc(
+                "ask_clarification",
+                '{"question": "Например?", "options": ["A", "B"], "mode": "free"}',
+            ),
+            None,
+        )
+        rendered = discovery._render_ask_clarification(
+            result.action_data["question"],
+            result.action_data["options"],
+            result.action_data["mode"],
+        )
+        assert clarification_mode_of(rendered.action_data) == CLARIFICATION_MODE_FREE

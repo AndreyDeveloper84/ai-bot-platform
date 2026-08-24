@@ -815,6 +815,13 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
             action_data={
                 "question": args.get("question", ""),
                 "options": args.get("options") or [],
+                # DRF-1362 — how the user is meant to answer. Carried raw and
+                # unvalidated on purpose: this dispatcher does pure argument
+                # normalisation, and deciding what an unrecognised mode string
+                # means is the renderer's job (``normalize_clarification_mode``,
+                # which never lets one escape the enum). Absent when the model
+                # does not fill it, which is the pre-DRF-1362 shape exactly.
+                "mode": args.get("mode"),
             },
         )
     if name in NUTRITION_TOOL_ACTIONS:
@@ -1683,7 +1690,11 @@ def _concierge_turn(
             # question. Same safe fallback as an LLM error — never send an
             # empty clarification.
             return DiscoveryReply(text=get_fallback("ru"), persisted=True)
-        rendered = _render_ask_clarification(question, list(data.get("options") or []))
+        rendered = _render_ask_clarification(
+            question,
+            list(data.get("options") or []),
+            data.get("mode"),
+        )
         return DiscoveryReply(
             text=rendered.text,
             action_data=rendered.action_data,

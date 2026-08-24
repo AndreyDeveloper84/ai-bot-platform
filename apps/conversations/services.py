@@ -540,6 +540,7 @@ def record_global_message(
     content: str,
     rendered_text: str = "",
     action_type: str = "",
+    action_data: dict[str, Any] | None = None,
     trace_id: uuid.UUID | str | None = None,
     tokens_in: int = 0,
     tokens_out: int = 0,
@@ -556,6 +557,16 @@ def record_global_message(
     (e.g. ``"safety_pre_check"``) is distinguishable in the Message table on the
     global path too — without it, a global safety reply would be indistinguishable
     from a discovery turn (#1053 de-drift, CR).
+
+    ``action_data`` mirrors it for the same reason, and closes the rest of that
+    same drift (DRF-1362). ``Message.action_data`` has existed on the model
+    since Sprint 3 and :func:`record_message` has always written it; the global
+    sibling simply never offered the argument, so every assistant turn on the
+    nationwide bot has been stored with its structured payload dropped — the
+    keyboard a reply carried was reconstructible from nothing afterwards. That
+    is what a multi-select needs: the options it offered have to survive until
+    the tap that answers them. Defaults to ``None``, i.e. exactly the old
+    behaviour for every caller that does not pass it.
     """
 
     from apps.identity.services.global_tenant import get_global_bot_tenant
@@ -584,6 +595,7 @@ def record_global_message(
             content=content,
             rendered_text=rendered_text,
             action_type=action_type,
+            action_data=action_data,
             trace_id=trace_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,

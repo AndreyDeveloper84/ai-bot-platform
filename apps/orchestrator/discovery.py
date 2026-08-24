@@ -1280,6 +1280,115 @@ def selected_clarification_options(options: list[str], mask: int) -> list[str]:
     return [opt for i, opt in enumerate(options[:_MAX_CLARIFICATION_OPTIONS]) if mask & (1 << i)]
 
 
+#: Said when a multi-select tap arrives but the question behind it is gone —
+#: the assistant message was pruned, or the tap is from an old screen whose
+#: options nobody can name any more. Same shape as the stale catalog chip:
+#: state what happened, offer the one move that always works.
+#: Drawn above a redrawn multi-select keyboard when the original question's
+#: wording could not be recovered. Deliberately generic — inventing a
+#: paraphrase of a question we no longer hold would put words in the bot's
+#: mouth that it never said the first time.
+_MULTISELECT_REDRAW_QUESTION = "Выберите всё, что подходит, и нажмите «Продолжить»:"
+
+CLARIFY_STALE_TEXT = (
+    "Этот вопрос уже неактуален — я потеряла варианты, которые предлагала. "
+    "Напишите, что нужно, своими словами — подберу заново."
+)
+
+#: Said when the user closes a multi-select without choosing anything. NOT a
+#: dead end and NOT «ничего не найдено»: nothing was asked for yet, so the
+#: honest next move is to invite the answer in their own words.
+CLARIFY_NONE_TEXT = "Поняла, ни один вариант не подошёл. Расскажите своими словами, что ищете?"
+
+
+@dataclass(frozen=True)
+class ClarifyOutcome:
+    """What a ``cb:clarify:*`` tap resolves to.
+
+    Exactly one of the two is set, and that is the whole decision the caller
+    has to make:
+
+    * ``reply`` — draw this. A toggle redraw (same screen, new marks) or a
+      terminal line. ``redraw`` says whether it should REPLACE the message the
+      tap came from rather than follow it.
+    * ``submit_text`` — the accumulated answer, phrased as the user would have
+      typed it. The caller re-enters its normal turn with this as the text,
+      which is what "submit -> повторное разрешение" means: the selection is
+      resolved by the same machinery that resolves anything a person says, not
+      by a second parallel path that could disagree with it.
+    """
+
+    reply: DiscoveryReply | None = None
+    submit_text: str = ""
+    redraw: bool = False
+
+
+def execute_clarify_callback(
+    callback_text: str,
+    options: list[str],
+    question: str = "",
+) -> ClarifyOutcome | None:
+    """Resolve a multi-select tap against the options that were offered.
+
+    ``None`` when ``callback_text`` is not a clarify tap at all, so the
+    caller's prefix ladder keeps matching — same contract as
+    :func:`execute_catalog_callback`.
+
+    ``options`` is the list the ORIGINAL question offered and ``question`` is
+    its wording, both recovered by the caller from the assistant turn the tap
+    belongs to. Empty ``options`` means the question is gone: every tap then
+    degrades to :data:`CLARIFY_STALE_TEXT` rather than to a keyboard with no
+    labels or an answer assembled from nothing.
+
+    ``question`` is carried through rather than paraphrased because the
+    wording is the model's. A redraw that re-worded the question on every tap
+    would read as the bot changing its mind mid-answer; :data:`_MULTISELECT_
+    REDRAW_QUESTION` is the fallback only when the original is unrecoverable.
+
+    Deterministic: no model call, no database read. A tap costs the redraw and
+    nothing else.
+    """
+    tap = parse_clarify_callback(callback_text)
+    if tap is None:
+        return None
+
+    if not options:
+        # The mask is meaningless without the labels it indexes.
+        logger.info("orchestrator.discovery.clarify_tap kind=%s outcome=stale", tap.kind)
+        return ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_STALE_TEXT))
+
+    if tap.kind == "none":
+        logger.info("orchestrator.discovery.clarify_tap kind=none outcome=closed")
+        return ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_NONE_TEXT), redraw=True)
+
+    if tap.kind == "toggle":
+        assert tap.index is not None  # parse_clarify_callback guarantees it
+        mask = apply_clarify_toggle(tap.mask, tap.index)
+        logger.info(
+            "orchestrator.discovery.clarify_tap kind=toggle selected=%d",
+            len(selected_clarification_options(options, mask)),
+        )
+        return ClarifyOutcome(
+            reply=render_multiselect_clarification(
+                (question or "").strip() or _MULTISELECT_REDRAW_QUESTION,
+                options,
+                mask=mask,
+            ),
+            redraw=True,
+        )
+
+    chosen = selected_clarification_options(options, tap.mask)
+    if not chosen:
+        # «Продолжить» with nothing ticked is the same intent as «Ни один
+        # вариант» — answering it with an empty submitted text would send a
+        # blank turn into the concierge.
+        logger.info("orchestrator.discovery.clarify_tap kind=submit outcome=empty")
+        return ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_NONE_TEXT), redraw=True)
+
+    logger.info("orchestrator.discovery.clarify_tap kind=submit selected=%d", len(chosen))
+    return ClarifyOutcome(submit_text=", ".join(chosen))
+
+
 def render_multiselect_clarification(
     question: str,
     options: list[str],
