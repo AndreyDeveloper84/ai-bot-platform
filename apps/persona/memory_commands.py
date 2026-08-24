@@ -67,8 +67,11 @@ _SHOW_TRIGGERS = (
     "что ты обо мне помнишь",
     "что ты помнишь обо мне",
     "что ты про меня знаешь",
+    "что ты про меня помнишь",
+    "что ты обо мне запомнила",
     "какие данные обо мне",
     "что ты запомнила",
+    "покажи мою память",
 )
 
 # «forget everything» — checked BEFORE «forget {field}» so «всё» is not treated
@@ -126,10 +129,19 @@ _DOMAIN_LABELS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class MemoryCommandResult:
-    """A memory-command reply. ``action_type`` tags the assistant turn."""
+    """A memory-command reply. ``action_type`` tags the assistant turn.
+
+    ``action_data`` (DRF-1305) carries the channel-agnostic chip list in the
+    flat ``{"buttons": [{label, callback}]}`` shape the MAX handler's
+    ``_build_attachments`` reads. It exists because the owner ruling that
+    produced this module -- «запоминать молча и показывать в списке» -- is a
+    ruling about a list the person can ACT on, and until now the show reply
+    was text the person had to know how to answer.
+    """
 
     text: str
     action_type: str = ""
+    action_data: dict | None = None
 
 
 def _normalise(text: str) -> str:
@@ -191,6 +203,94 @@ def _summary_line(facts: list, declared_phrases: dict[str, str] | None = None) -
     if not phrases:
         return "Я пока ничего о тебе не запомнила."
     return "Помню, что ты " + "; ".join(phrases) + "."
+
+
+#: Cap on «Забыть: X» chips. Past three the list stops being a list the
+#: person reads and becomes a wall of buttons they scroll past.
+MAX_FORGET_CHIPS = 3
+
+
+def _user_id_of(bot_user) -> uuid.UUID | None:
+    """The Ayla canonical id memory is keyed on, or ``None``.
+
+    Every memory read takes ``ayla_user_id``, NOT ``BotUser.id`` -- the two
+    are different identifiers and confusing them reads another person's row.
+    """
+
+    raw = getattr(bot_user, "ayla_user_id", None)
+    if raw is None:
+        return None
+    if isinstance(raw, uuid.UUID):
+        return raw
+    try:
+        return uuid.UUID(str(raw))
+    except (ValueError, AttributeError, TypeError):
+        # An unparseable id is «no memory identity», never a crash: this runs
+        # after the turn's idempotency key is claimed.
+        logger.warning("persona.memory_commands.bad_ayla_user_id")
+        return None
+
+
+def render_memory_summary(bot_user, *, user_id: uuid.UUID | None = None) -> str:
+    """The «помню, что ты …» line, as a PUBLIC entry point (DRF-1305).
+
+    The concierge tool (:func:`apps.orchestrator.personal_surface.render_memory`)
+    calls this so the model-routed answer and the deterministic
+    «покажи что знаешь» answer are the SAME sentence about the same person.
+    Two renderers would have been two answers, and the person would have had
+    no way to tell which one the system actually uses.
+
+    Empty memory returns the honest line, never a placeholder fact.
+    """
+
+    resolved = user_id or _user_id_of(bot_user)
+    if resolved is None:
+        return _summary_line([], None)
+    return _summary_line(
+        read_current_view(resolved).green_facts,
+        _declared_phrases_for_show(bot_user),
+    )
+
+
+def memory_show_chips(bot_user, *, user_id: uuid.UUID | None = None) -> list[dict[str, str]]:
+    """«Забыть: {домен}» chips for the memory list -- at most three.
+
+    Each callback is the literal text «забудь {домен}», which
+    :func:`handle_memory_command` branch 3 already claims: the label is the
+    domain word whose stem lives in ``_KEY_KEYWORDS``, so the tap performs a
+    real domain forget, not a clarify prompt. The chip contract on this path
+    is that a tap IS a typed message, so no new callback plumbing exists to
+    drift out of sync with the matcher.
+
+    Built from LOCAL fact keys only. An Ayla-side declared pref with no local
+    row would give a chip whose tap lands on «мне пока нечего о тебе забывать»
+    -- branch 3 reads ``read_green_entries`` and stops when it is empty -- and
+    a chip that answers the wrong thing is worse than no chip.
+
+    No «Забыть всё» chip: that command is deliberately two-step
+    (policy §5.9 anti-misclick), and putting the first step one tap away is
+    the misclick the two steps exist to prevent.
+
+    No «Исправить» chip either: there is no correction COMMAND to put behind
+    one. Correction here is implicit -- a new explicit statement supersedes
+    the old fact through ``record_explicit_green_facts`` -- so the honest
+    affordance is a sentence telling the person to say the new value, which
+    :mod:`apps.orchestrator.personal_surface` prints instead.
+    """
+
+    resolved = user_id or _user_id_of(bot_user)
+    if resolved is None:
+        return []
+    keys: list[str] = []
+    for fact in read_current_view(resolved).green_facts:
+        content = fact.content if isinstance(fact.content, dict) else {}
+        key = content.get("key")
+        if isinstance(key, str) and key in _DOMAIN_LABELS and key not in keys:
+            keys.append(key)
+    return [
+        {"label": f"Забыть: {_DOMAIN_LABELS[key]}", "callback": f"забудь {_DOMAIN_LABELS[key]}"}
+        for key in keys[:MAX_FORGET_CHIPS]
+    ]
 
 
 def _declared_phrases_for_show(bot_user) -> dict[str, str]:
@@ -330,11 +430,16 @@ def handle_memory_command(
     #    ruling 2026-08-23). No internal analytics, no proposals, no
     #    confidence scores — only what the person can correct or forget.
     if any(trigger in norm for trigger in _SHOW_TRIGGERS):
+        # DRF-1305: the list the owner asked for is a list the person can act
+        # on. The chips come from the same read as the text, so a domain named
+        # in the sentence is a domain the button can really forget.
+        chips = memory_show_chips(bot_user, user_id=user_id)
         return MemoryCommandResult(
             text=_summary_line(
                 read_current_view(user_id).green_facts,
                 _declared_phrases_for_show(bot_user),
-            )
+            ),
+            action_data={"buttons": chips} if chips else None,
         )
 
     return None

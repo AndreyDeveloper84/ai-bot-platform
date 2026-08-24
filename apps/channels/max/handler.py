@@ -932,7 +932,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     bot_user=bot_user,
                 )
                 if cmd is not None:
-                    mem_reply = DiscoveryReply(text=cmd.text)
+                    # DRF-1305 — the show reply now carries «Забыть: {домен}»
+                    # chips. Dropping action_data here would have rendered the
+                    # list without the buttons that make it actionable, which
+                    # is the state the owner ruling was opened against.
+                    mem_reply = DiscoveryReply(text=cmd.text, action_data=cmd.action_data)
                     assistant_action_type = cmd.action_type
             except Exception:  # noqa: BLE001 — memory commands must never break the turn
                 logger.exception(
