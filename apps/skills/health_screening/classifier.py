@@ -154,7 +154,7 @@ _NOT_PAIN: tuple[re.Pattern[str], ...] = (
     # untouched: only these complements are masked.
     re.compile(
         r"напряж[её]нн\w*\s+(?:график\w*|недел\w*|день|дня|дн[ий]\w*"
-        r"|месяц\w*|период\w*|работ\w*|разговор\w*|график)",
+        r"|месяц\w*|период\w*|работ\w*|разговор\w*)",
         re.IGNORECASE,
     ),
     # «больно ли?» / «а это больно?» / «не колет ли лазер?» — a question
@@ -188,6 +188,11 @@ def _mask_not_pain(text: str) -> str:
 
 # Verbal prefixes a pain stem may carry. CLOSED — this is what lets
 # «прострел» and «заболела» match while «футбол» / «баскетбол» do not.
+#
+# Multi-letter only, on purpose. A one-letter prefix («о», «у», «с»)
+# buys nothing — no phrasing in the corpus needs one — and each of them
+# re-opens the middle of a word to the stem: «о» + «бол» would make
+# «оболочка» a pain report, which is the very rule this fix replaces.
 _STEM_PREFIXES: tuple[str, ...] = (
     "про",
     "за",
@@ -199,10 +204,7 @@ _STEM_PREFIXES: tuple[str, ...] = (
     "по",
     "пере",
     "об",
-    "о",
-    "у",
     "вы",
-    "с",
     "из",
 )
 
