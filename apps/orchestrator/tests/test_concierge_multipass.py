@@ -142,7 +142,15 @@ class TestMultiPassTurn:
 
         assert reply.text == "В четверг у Анны свободны окна с 10:00."
         assert reply.persisted is True
-        assert reply.action_data is None
+        # DRF-1354: the prose is the model's, but the booking keyboard rides
+        # with it. This assertion used to read `action_data is None` — that
+        # was the defect, not the contract: DRF-1266 swapped the card render
+        # for prose and took the only booking affordance with it.
+        assert reply.action_data is not None
+        assert (
+            reply.action_data["attachments"][0]["payload"]["buttons"][0]["callback"]
+            == "cb:discover:book:t1:m1"
+        )
         assert discover.call_count == 1
         assert provider.complete.await_count == 2
 
