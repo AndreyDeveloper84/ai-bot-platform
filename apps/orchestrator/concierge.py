@@ -503,11 +503,6 @@ class GlobalConversationStore:
 #: Nutrition specs stay LAST and in their own order: that order is
 #: load-bearing (``apps.orchestrator.nutrition_global`` — screening is read
 #: first by the model).
-# Cap on a tool argument written to the turn log. Both values are bounded by
-# the model's own output, not by anything upstream, and a log line is not the
-# place to find that out.
-_MAX_LOGGED_ARG_CHARS = 64
-
 CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_MASTERS_TOOL_SPEC,
     SHOW_SALONS_TOOL_SPEC,
@@ -515,6 +510,11 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     ASK_CLARIFICATION_TOOL_SPEC,
     *NUTRITION_TOOL_SPECS,
 ]
+
+# Cap on a tool argument written to the turn log. Both values are bounded by
+# the model's own output, not by anything upstream, and a log line is not the
+# place to find that out.
+_MAX_LOGGED_ARG_CHARS = 64
 
 _KNOWN_TOOLS = frozenset(
     {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]}
