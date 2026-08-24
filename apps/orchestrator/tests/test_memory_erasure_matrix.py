@@ -17,7 +17,9 @@ The upstream backend is represented by :class:`_FakeAyla`, which mirrors the
 real backend semantics exactly:
 
   PATCH  users/internal_personal_context_api.py:115-118 → ``setattr(ctx, field, value)``
-  DELETE users/personal_data_api.py:152 → ``UserPersonalContext...delete()``
+  DELETE users/personal_data_api.py:157 → ``erase_personal_context()``, which
+         resets every declared field to its model default and stamps
+         ``data_sources[*] = "erased"`` (backend #251 / DRF-1366).
 
 The backend half of the same proof (real view code, real ORM) lives in
 ``beautygo_backend`` at ``users/tests/test_memory_erasure_matrix.py``.
@@ -37,6 +39,7 @@ from apps.identity.models import MemoryEntry
 from apps.identity.services import resolve_or_create_global_bot_user
 from apps.identity.services.memory_key_policy import read_current_view
 from apps.identity.services.memory_reader import read_green_entries
+from apps.identity.services.personal_context import GateStatus, get_declared_prefs
 from apps.integrations.ayla.personal_context_client import DeclaredContext
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
@@ -244,38 +247,54 @@ class TestBotLocalMemory:
 
 
 class TestBackendDeclaredContext:
-    def test_forget_all_clears_only_three_of_twelve_fields(self, settings, ayla):
-        """GAP — the bridge's clear set is three fields; the row has twelve."""
+    def test_forget_all_erases_all_twelve_fields(self, settings, ayla):
+        """FIXED (was GAP) — the bridge asks for the erasure instead of
+        naming fields. DRF-1367.
+
+        The inverted cell of «the clear set is three fields; the row has
+        twelve». The bot no longer names any field: it calls the ONE verb
+        the owning side grew for this (``DELETE …/personal-data/`` →
+        ``users.personal_context_erasure.erase_personal_context``), which
+        derives the list from ``UserPersonalContext._meta.concrete_fields``.
+        A thirteenth field added upstream is erased with no edit here — that
+        is the whole point of the fix, and the reason this assertion checks
+        the WHOLE mapping rather than a list of names.
+        """
         bu = _bot_user("erase-decl-1")
         _consents(bu, settings)
 
         _forget_all(bu)
 
-        assert ayla.patched_fields == [
-            "diet_type",
-            "preferred_districts",
-            "preferred_time_slots",
-        ]
-        assert ayla.context["diet_type"] == ""
-        assert ayla.context["preferred_districts"] == []
-        assert ayla.context["preferred_time_slots"] == []
-        # Everything else is untouched — nothing else is even addressed.
-        assert ayla.context["price_range_min"] == "1000.00"
-        assert ayla.context["price_range_max"] == "3500.00"
-        assert ayla.context["favorite_masters"] == ["7f1d0f2e-0000-4000-8000-000000000001"]
-        assert ayla.context["busy_days"] == ["mon"]
-        assert ayla.context["skin_sensitivities"] == ["ретинол"]
-        assert ayla.context["workplace_district"] == "Тверская"
-        assert ayla.context["home_district"] == "Сокол"
-        assert ayla.context["min_rating_preference"] == 4.5
-        assert ayla.context["prefers_flexible_cancellation"] is True
+        assert ayla.patched_fields == []  # ни одного поля не перечислено
+        assert ("delete", str(bu.ayla_user_id)) in ayla.calls
+        assert ayla.deleted is True
+        # Not «these twelve are empty» — NOTHING is left, whatever was there.
+        assert ayla.context == {}
 
-    def test_the_remnant_is_still_in_the_prompt(self, settings, ayla):
-        """GAP, P0 — the criterion: does it reach the prompt again? It does.
+    def test_no_remnant_reaches_the_prompt(self, settings, ayla):
+        """FIXED (was GAP, P0) — the owner's criterion (OD_MEMORY.md §4):
+        a remnant matters only if it can reach the prompt pipeline again.
 
-        The person said «забудь всё» and got «Готово — я забыла всё». The very
-        next turn's system prompt still names their budget, their favourite
-        master, their districts near home and work, and their days off.
+        The inverted cell of «the remnant is still in the prompt». Checked
+        through BOTH prompt assemblers, because their blind spots do not
+        overlap and neither one alone can prove «the prompt is empty»:
+
+          ``ayla_ai_core.build_memory_block`` (the MAX prompt, via
+          ``build_concierge_memory_block``) renders the computed fields —
+          budget, favourite masters, districts, days off, rating — but has
+          NO branch for ``skin_sensitivities``.
+
+          ``ai.personal_context_hint.format_personal_context_hint`` (the
+          backend AI chat) renders six of the twelve, including exactly the
+          ``skin_sensitivities`` the other one drops, and none of the
+          computed ones. It lives in the backend repo; the cell that pins
+          it is ``users/tests/test_memory_erasure_matrix.py::
+          TestBackendPromptConsumer``.
+
+        So the assertion below covers both: the MAX block through the real
+        function, and the shared INPUT both renderers read — a field that is
+        not on the row cannot be rendered by any consumer of the row,
+        present or future.
         """
         bu = _bot_user("erase-decl-2")
         _consents(bu, settings)
@@ -285,19 +304,27 @@ class TestBackendDeclaredContext:
 
         _forget_all(bu)
 
+        # Renderer 1 — the MAX system prompt, the function the handler calls.
         block = build_concierge_memory_block(bu)
-        assert block != ""
-        assert "Любимые мастера" in block
-        assert "Бюджет" in block
-        assert "Ищет рядом с работой" in block
-        assert "Ищет рядом с домом" in block
-        assert "Избегает" in block
-        assert "Минимальный рейтинг" in block
-        assert "Предпочитает гибкую отмену" in block
-        # These three DID go — the bridge's clear set works, as far as it goes.
-        assert "Диета" not in block
-        assert "Предпочитает районы" not in block
-        assert "Обычно выбирает время" not in block
+        assert block == ""
+        for phrase in (
+            "Любимые мастера",
+            "Бюджет",
+            "Ищет рядом с работой",
+            "Ищет рядом с домом",
+            "Избегает",
+            "Минимальный рейтинг",
+            "Предпочитает гибкую отмену",
+            "Диета",
+            "Предпочитает районы",
+            "Обычно выбирает время",
+        ):
+            assert phrase not in block
+
+        # Renderer 2 (and any future one) — the row they all read is empty.
+        declared = get_declared_prefs(bu)
+        assert declared.status is GateStatus.OK
+        assert not any((declared.context.context or {}).values())
 
     def test_skin_sensitivities_never_reach_the_max_prompt(self, settings, ayla):
         """Refutation of a plausible fear: ``ayla_ai_core.build_memory_block``
@@ -328,6 +355,132 @@ class TestBackendDeclaredContext:
         assert ayla.patched_fields == []  # наверх не ушло ничего
         # The statement wrote 3000 upstream; the forget leaves it there.
         assert ayla.context["price_range_max"] == "3000.00"
+        # And — the negative of DRF-1367 — a DOMAIN forget is still a domain
+        # forget. It must NEVER reach for the whole-profile erasure verb.
+        assert ayla.deleted is False
+        assert [c[0] for c in ayla.calls] == []
+
+    def test_domain_forget_clears_its_domain_and_only_its_domain(self, settings, ayla):
+        """Negative control for DRF-1367 — «забудь это» was not widened.
+
+        «Забудь про питание» names one domain on purpose; naming fields is
+        the right shape THERE, and only there. The eleven other fields must
+        survive it.
+        """
+        bu = _bot_user("erase-decl-10")
+        _consents(bu, settings)
+        assert record_explicit_green_facts(bu, "я веган") == 1
+        ayla.calls.clear()
+
+        res = handle_memory_command(
+            user_id=bu.ayla_user_id, text="забудь всё про моё питание", bot_user=bu
+        )
+
+        assert res is not None and "питание" in res.text
+        assert ayla.deleted is False
+        assert ayla.patched_fields == ["diet_type"]
+        assert ayla.context["diet_type"] == ""
+        assert ayla.context["price_range_max"] == "3500.00"
+        assert ayla.context["favorite_masters"] == ["7f1d0f2e-0000-4000-8000-000000000001"]
+        assert ayla.context["home_district"] == "Сокол"
+        block = build_concierge_memory_block(bu)
+        assert "Диета" not in block
+        assert "Любимые мастера" in block
+        assert "Ищет рядом с домом" in block
+
+    def test_forget_all_clears_the_price_the_contract_cannot_clear(self, settings, ayla):
+        """FIXED — the field PATCH could not empty on ANY encoding.
+
+        ``null`` is rejected by the contract's ``value`` JSONField and ``""``
+        blows up the Decimal column (backend cell
+        ``test_price_cannot_be_cleared_through_the_contract_at_all``). That
+        is not a contract defect to route around — it is the reason erasure
+        became a separate operation. Through the verb the price goes.
+        """
+        bu = _bot_user("erase-decl-6")
+        _consents(bu, settings)
+        assert record_explicit_green_facts(bu, "комфортно до 3000 рублей") == 1
+        assert ayla.context["price_range_max"] == "3000.00"
+
+        _forget_all(bu)
+
+        assert "price_range_min" not in ayla.context
+        assert "price_range_max" not in ayla.context
+        assert "Бюджет" not in build_concierge_memory_block(bu)
+
+    def test_a_refused_erasure_is_not_reported_as_done(self, settings, ayla, monkeypatch):
+        """The failure direction. An erasure that did not happen must not be
+        announced as one.
+
+        Before DRF-1367 the reply was unconditional: the bridge swallowed
+        every failure (best-effort, which is correct for a WRITE that heals
+        on the next statement — PATCH is idempotent LWW) and the person heard
+        «я забыла всё» either way. An erasure does not heal on the next
+        statement, and the person disproves the claim on the very next turn.
+        """
+        from apps.integrations.ayla.personal_context_client import (
+            PersonalContextTransportError,
+        )
+
+        bu = _bot_user("erase-decl-7")
+        _consents(bu, settings)
+
+        def _boom(**_kw):
+            raise PersonalContextTransportError("http_500")
+
+        monkeypatch.setattr(ayla, "delete_personal_data", _boom)
+
+        reply = _forget_all(bu)
+
+        assert "забыла всё, что о тебе знала" not in reply
+        assert "предпочтения" in reply
+        assert ayla.deleted is False
+        # Bot-local memory IS gone — the local half succeeded, and the reply
+        # claims exactly that much and no more.
+        assert read_current_view(bu.ayla_user_id).green_facts == []
+
+    def test_an_unlinked_user_is_not_told_a_profile_was_erased(self, settings, ayla):
+        """No ``ayla_user_id`` → no subject to address upstream.
+
+        ``privacy.delete_personal_data`` already refuses to report this green
+        (DRF-956 / T-05 ruling §4+§6); the chat verb now agrees with it.
+        """
+        bu = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="erase-decl-8", ayla_user_id=None
+        )
+        assert bu.ayla_user_id is None
+
+        first = handle_memory_command(user_id=uuid.uuid4(), text="забудь всё", bot_user=bu)
+        assert first is not None
+        reply = handle_memory_command(
+            user_id=uuid.uuid4(),
+            text="удалить",
+            last_assistant_text=FORGET_ALL_PROMPT,
+            bot_user=bu,
+        )
+
+        assert reply is not None
+        assert "забыла всё, что о тебе знала" not in reply.text
+        assert ayla.calls == []
+
+    def test_the_erasure_is_the_terminal_state_not_a_write_of_empties(self, settings, ayla):
+        """Why the verb and not twelve empty PATCH values.
+
+        A PATCH stamps ``data_sources[field] = "explicit"`` per NAMED field —
+        the mechanism that keeps nightly inference off a value the subject
+        owns (DRF-1366). It only ever covered the fields that were named. The
+        erasure verb stamps ``"erased"`` on EVERY declared field upstream, so
+        the protection now covers the whole row instead of three of twelve.
+        This cell pins the bot half: not one field is named on the wire.
+        """
+        bu = _bot_user("erase-decl-9")
+        _consents(bu, settings)
+        record_explicit_green_facts(bu, "я веган")
+        ayla.calls.clear()
+
+        _forget_all(bu)
+
+        assert [c[0] for c in ayla.calls] == ["delete"]
 
     def test_account_delete_does_wipe_the_backend_row(self, settings, ayla):
         """Refutation — the audit left account-delete completeness open for the

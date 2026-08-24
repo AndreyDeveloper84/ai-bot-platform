@@ -274,9 +274,23 @@ class PersonalContextHttpClient:
         """C5.2: ``DELETE /internal/users/{id}/personal-data/``.
 
         Idempotent server-side per C5 (repeat → 200/204), so transport
-        retries are safe. NOTE: the literal delete path follows the
-        export path's symmetry — it is the one contract point awaiting
-        W2 confirmation (escalated 2026-07-18).
+        retries are safe. The path was confirmed upstream by backend #251
+        (``users/internal_users_urls.py:85`` →
+        ``InternalPersonalDataDeleteView``); the 2026-07-18 escalation about
+        it is closed.
+
+        Since DRF-1367 this is also the ONE erasure verb behind
+        «забудь всё», not just the account-delete cascade: upstream it
+        resets every declared field to its model default and stamps
+        ``data_sources[*] = "erased"``, deriving the field list from the
+        model rather than from a caller's enumeration.
+
+        404 (``PersonalContextNotFoundError``) means the subject is not
+        addressable — either unknown or already soft-deleted upstream, which
+        the C5.2 view collapses into one status. Callers treat it as an
+        idempotent success; note that «already soft-deleted» leaves the
+        context row in place upstream (backend matrix cell
+        ``test_...delete_after_account_delete``), a gap owned by the backend.
         """
         self._send_with_retry("DELETE", f"internal/users/{ayla_user_id}/personal-data/")
 

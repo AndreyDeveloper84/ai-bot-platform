@@ -34,6 +34,7 @@ from apps.integrations.ayla.personal_context_client import (
     DeclaredContext,
     PersonalContextError,
     PersonalContextHttpClient,
+    PersonalContextNotFoundError,
 )
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,64 @@ def skip(
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.skip_failed")
+        return GatedResult(status=GateStatus.ERROR)
+    finally:
+        if owns:
+            client.close()
+
+
+def erase_declared_prefs(
+    bot_user,
+    *,
+    client: PersonalContextHttpClient | None = None,
+) -> GatedResult:
+    """The ONE erase verb: ``DELETE /internal/users/{id}/personal-data/``.
+
+    DRF-1367. Ayla owns the declared preferences (OD_MEMORY.md §1), so
+    "forget everything" is a request to the owner to erase what it owns —
+    not a list of fields the bridge happens to know about. Upstream
+    (``users/personal_context_erasure.py``, merged in backend #251) derives
+    the field list from ``UserPersonalContext._meta.concrete_fields`` and
+    leaves a tombstone with ``data_sources[*] = "erased"``, which nightly
+    inference refuses to overwrite. A field added upstream tomorrow is
+    erased from the day it lands, with no edit here.
+
+    **Not consent-gated, deliberately.** Every other function in this module
+    reads or writes personal data and therefore checks ``memory_green``
+    first. This one destroys it. Gating an erasure on a consent would mean
+    that withdrawing consent — the very act that makes the stored values
+    unlawful to hold — is also what makes them impossible to erase. The
+    account-delete cascade already calls this same endpoint ungated
+    (``apps.identity.services.privacy.delete_personal_data``, step 1); this
+    is the same rule applied to the chat verb.
+
+    The linkage is still required: without an ``ayla_user_id`` there is no
+    subject to address, and reporting success would be a false "deleted"
+    (the DRF-956 / T-05 ruling privacy.py cites).
+
+    ``BLOCKED_CONSENT`` therefore means «unlinked» only. ``OK`` means the
+    row upstream is a tombstone — including the idempotent 404 case, where
+    it is already gone.
+    """
+    ayla_user_id = _resolve_ayla_user_id(bot_user)
+    if ayla_user_id is None:
+        logger.info(
+            "identity.personal_context.erase_unaddressable reason=unlinked bot_user=%s",
+            getattr(bot_user, "id", "?"),
+        )
+        return GatedResult(status=GateStatus.BLOCKED_CONSENT)
+    owns = client is None
+    client = client or PersonalContextHttpClient()
+    try:
+        client.delete_personal_data(ayla_user_id=str(ayla_user_id))
+        return GatedResult(status=GateStatus.OK)
+    except PersonalContextNotFoundError:
+        # Already gone upstream (or never existed) — the erasure contract is
+        # idempotent, so "nothing to erase" is the goal state, not a failure.
+        logger.info("identity.personal_context.erase_already_gone bot_user=%s", bot_user.id)
+        return GatedResult(status=GateStatus.OK)
+    except PersonalContextError:
+        logger.exception("identity.personal_context.erase_failed")
         return GatedResult(status=GateStatus.ERROR)
     finally:
         if owns:

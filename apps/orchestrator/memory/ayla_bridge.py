@@ -1,7 +1,8 @@
 """Bridge: bot-side user-stated memory facts → Ayla declared prefs (DRF-1261).
 
 The missing writer between «человек сказал» in the bot and the fields of
-``users_userpersonalcontext``. The transport (``PersonalContextHttpClient``,
+``users_userpersonalcontext`` — and, since DRF-1367, the caller of the one
+erasure verb that empties the same row (:func:`erase_declared_profile`). The transport (``PersonalContextHttpClient``,
 PATCH batch LWW idempotent) and the consent-gated service
 (``apps.identity.services.personal_context``) already existed — this module
 is the mapping + orchestration that calls them.
@@ -25,10 +26,13 @@ is the mapping + orchestration that calls them.
     Stored bot-side only; logged here on every attempt.
   - ``skin_sensitivities``: field exists in Ayla, but the owner ruling
     (DRF-1290) forbids activating it as green memory — never written.
-  - Clearing ``price_range_min/max``: the contract's ``value`` JSONField
-    rejects null and empty-string would break the Decimal column — a
-    forget of the budget key CANNOT clear Ayla-side values. Logged as a
-    contract gap; contract extension proposed in the report.
+  - Clearing ``price_range_min/max`` on a DOMAIN forget («забудь про
+    бюджет»): the contract's ``value`` JSONField rejects null and
+    empty-string would break the Decimal column — no honest clear value
+    exists on the PATCH contract. This is why the owning side grew an
+    erasure verb rather than another field list; the whole-profile
+    «забудь всё» goes through it (:func:`erase_declared_profile`) and
+    clears the price with the rest.
 
 # Consent
 
@@ -49,6 +53,7 @@ from typing import Any, Iterable
 
 from apps.identity.services.personal_context import (
     GateStatus,
+    erase_declared_prefs,
     get_declared_prefs,
     patch_declared_prefs,
 )
@@ -56,9 +61,14 @@ from apps.persona.memory_extract import GreenFactCandidate
 
 logger = logging.getLogger(__name__)
 
-# Fields this bridge writes — and therefore the only ones «забудь» may clear.
-# favorite_masters is Ayla-engine-owned (rebook>=3 semantics) and price has no
-# clear encoding (see module docstring) — neither is touched on forget.
+# Fields this bridge writes — and therefore the only ones a DOMAIN forget
+# («забудь про питание») may clear. favorite_masters is Ayla-engine-owned
+# (rebook>=3 semantics) and price has no clear encoding (see the module
+# docstring) — neither is touched on a domain forget.
+#
+# This table is NOT the «забудь всё» path and must never become it: naming
+# fields is exactly the defect DRF-1367 describes (three named against twelve
+# on the row). Whole-profile erasure goes through :func:`erase_declared_profile`.
 _CLEARABLE_FIELDS: dict[str, list[tuple[str, Any]]] = {
     "diet": [("diet_type", "")],
     "preferred_time_slots": [("preferred_time_slots", [])],
@@ -209,3 +219,44 @@ def clear_declared_fields(
         logger.info("orchestrator.memory_bridge.clear_blocked reason=%s", result.status.value)
         return 0
     return len(updates)
+
+
+def erase_declared_profile(bot_user: Any, *, client: Any = None) -> bool:
+    """«Забудь всё» → ask Ayla to erase the profile it owns. Erased?
+
+    DRF-1367. The bridge does not own the declared preferences (OD_MEMORY.md
+    §1) and therefore cannot honestly empty them by listing the ones it knows
+    how to write: the person's budget, favourite master, home and work
+    districts, days off and minimum rating are on the same row and were never
+    in :data:`_CLEARABLE_FIELDS`. Enumeration also cannot express a cleared
+    price at all — ``null`` is rejected by the contract serializer and ``""``
+    breaks the Decimal column, which is precisely why the owning side grew an
+    erasure verb instead of another field list.
+
+    So this asks for the operation instead of performing it: one call, the
+    whole profile, the field list derived upstream from the model. A field
+    added to ``UserPersonalContext`` next month is erased on the day it lands
+    without a line changing here.
+
+    Returns ``True`` when the profile upstream is a tombstone (including the
+    idempotent «already gone» case), ``False`` when the erasure did not
+    happen — the caller decides what to tell the person, but MUST NOT claim
+    that everything was forgotten on ``False``.
+
+    Not best-effort-silent like the write path: a failed write heals on the
+    next statement (PATCH is idempotent LWW), while a failed erasure leaves
+    the person believing a legal request was honoured when it was not.
+    """
+
+    result = erase_declared_prefs(bot_user, client=client)
+    if result.status is GateStatus.OK:
+        logger.info("orchestrator.memory_bridge.erased bot_user=%s", getattr(bot_user, "id", "?"))
+        return True
+    # DRF-1311: `reason` is load-bearing — «never linked to Ayla» and «Ayla
+    # answered 500» need different responses from an operator.
+    logger.warning(
+        "orchestrator.memory_bridge.erase_failed reason=%s bot_user=%s",
+        result.status.value,
+        getattr(bot_user, "id", "?"),
+    )
+    return False
