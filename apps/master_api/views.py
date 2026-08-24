@@ -356,6 +356,7 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
       * ``invite_token = None`` (one-shot consumption)
       * ``invite_status = ACCEPTED``
       * ``mode = INVITE`` (this master now has login access)
+      * ``is_active = True`` unless the row is archived (DRF-1080)
       * ``linked_bot_user = current bot_user``
       * Audit row + event ``master.onboarding_accepted``
     """
@@ -391,6 +392,20 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         # can't match on the wire token. We trust the linkage: the
         # SAME BotUser arriving with ANY token after accepting is a
         # retry. Spec says "return same shape (200), do not error".
+        #
+        # DRF-1080 — repair on retry, not only on first accept. Every
+        # master who accepted before this fix landed is already past the
+        # branch below and would stay at 403 ``master_inactive`` forever:
+        # the token is consumed, so there is no second first-accept. The
+        # same ``archived_at`` guard applies — see the comment at the
+        # fresh-accept write.
+        if not existing.is_active and existing.archived_at is None:
+            existing.is_active = True
+            existing.save(update_fields=["is_active"])
+            logger.info(
+                "master_api.onboarding.accept.reactivated_on_retry master_id=%s",
+                existing.id,
+            )
         new_token, exp = issue_master_session_token(
             master_id=existing.id,
             tenant_id=existing.tenant_id,
@@ -423,12 +438,36 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
             master.mode = CatalogMaster.Mode.INVITE
             master.invite_token = None  # one-shot consumption
+            # DRF-1080 — activate on accept.
+            #
+            # ``master_invite_create`` writes the row with
+            # ``is_active=False`` (apps/admin_api/views_invite.py:499) and
+            # deliberately so: an invited master who has not answered yet
+            # must not appear in the booking surface. Nothing flipped it
+            # back, so accepting produced a master whom ``resolve_role``
+            # reports as a master while ``require_master_init_data``
+            # answers 403 ``master_inactive`` on every master endpoint
+            # (apps/master_api/auth.py:369). A person holding a valid
+            # one-shot token is active by definition — the same reasoning
+            # and the same write as the code path in
+            # ``apps.identity.services.staff_invites._link_master``.
+            #
+            # Guarded on ``archived_at``: deactivation writes
+            # ``is_active=False`` **together with** ``archived_at``
+            # (apps/admin_api/services/master_deactivation.py:1073-1076),
+            # so the pair distinguishes "never activated" from "taken out
+            # of service". Flipping an archived master back would put them
+            # into ``_MasterManager.bookable()`` again — a revoked master
+            # silently back on sale.
+            if master.archived_at is None:
+                master.is_active = True
             master.save(
                 update_fields=[
                     "linked_bot_user",
                     "invite_status",
                     "mode",
                     "invite_token",
+                    "is_active",
                 ]
             )
 

@@ -64,6 +64,7 @@ import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
+import { AdminStaffAccessScreen } from "./screens/admin/AdminStaffAccessScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
 import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
@@ -188,6 +189,16 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route
         path="/admin/team/invite"
         element={<AdminInviteMasterScreen me={me} />}
+      />
+      {/*
+        DRF-1061 block 2.4 — access codes. Sits beside `/admin/team/invite`
+        rather than inside it: that screen CREATES a catalog master, this
+        one GRANTS ACCESS to a person who already exists. The backend keeps
+        the two endpoints apart for the same reason.
+      */}
+      <Route
+        path="/admin/team/access"
+        element={<AdminStaffAccessScreen me={me} />}
       />
       <Route
         path="/admin/team/:masterId/deactivate"

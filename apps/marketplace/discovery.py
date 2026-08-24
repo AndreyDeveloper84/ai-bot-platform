@@ -406,6 +406,20 @@ def _split_known_cities(
     return service_tokens, named
 
 
+def strip_known_cities(tokens: list[str]) -> list[str]:
+    """``tokens`` minus the ones naming a city with bookable masters (DRF-1328).
+
+    The public half of :func:`_split_known_cities`, for the pre-LLM claim
+    parser (``apps.orchestrator.fast_path``): it needs to know whether the one
+    word it could not otherwise account for in «покажи массажистов в пензе» is
+    a place we serve, and «recognised city» must mean the same thing there as
+    it does inside discovery — the LIVE set, not a gazetteer. Re-deriving it
+    there would be a second definition to keep in step.
+    """
+    service_tokens, _named = _split_known_cities(list(tokens))
+    return service_tokens
+
+
 class ParsedQuery(NamedTuple):
     """What one discovery query asked for, in the three shapes we can match.
 

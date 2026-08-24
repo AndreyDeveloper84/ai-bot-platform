@@ -93,6 +93,12 @@ from __future__ import annotations
 
 import re
 
+# DRF-981 — the seed service vocabulary, read WITHOUT ``extra_stems`` so
+# no catalog query happens. ``apps.skills.menu.matching`` is pure regex
+# with no Django imports of its own, so this keeps the module-level
+# promise in the docstring above.
+from apps.skills.menu.matching import mentions_service
+
 
 def _normalize(text: str) -> str:
     """Lower-case, fold «ё»→«е», collapse internal whitespace.
@@ -723,6 +729,139 @@ def booking_mutation_flow(text: str) -> str | None:
     if _looks_like_cancel(normalized):
         return "cancel"
     return None
+
+
+# ─── DRF-981 — a booking REQUEST phrased as a question ────────────────
+#
+# «Можно на маникюр?» is a person asking to be booked, and it was
+# answered out of the knowledge base. The cause is one rule about the
+# SHAPE of the sentence: FAQ's keyword fallback treats a bare «?» as a
+# question signal (``apps.skills.faq.skill._QUESTION_SIGNALS``), and FAQ
+# is registered BEFORE booking (``apps/skills/apps.py``, where that order
+# is documented as load-bearing). So EVERY booking phrasing that ends in
+# a question mark went to FAQ — «Можно записаться на маникюр?» included,
+# even though «записаться» is a booking keyword one skill further down.
+#
+# The predicate below states what the turn ASKS FOR instead. Same
+# construction as DRF-1055 and DRF-1060 in this module, for the same
+# reasons:
+#
+#   * CLOSED classes of word forms, never an open ``\w+`` slot;
+#   * the rejection window stated DIRECTLY and running BEFORE any
+#     positive test, so a rejection is visible in the code and testable;
+#   * a False is the cheap direction — the turn keeps the routing it has
+#     today, which is FAQ.
+#
+# The expensive direction here is the OPPOSITE of the cancel detector's.
+# There a false positive offers to drop a visit; here it only sends a
+# salon question through booking instead of the knowledge base —
+# annoying, not destructive. It is still a REGRESSION of a working path,
+# and DRF-981 was parked once already because «риск регресса FAQ выше
+# выигрыша», so the info window below is deliberately generous and every
+# phrase in it is pinned by a test.
+
+# Window 1 — the turn is a question ABOUT the salon: its prices, rules,
+# safety or logistics. None of those ask to be booked and all of them
+# are FAQ's by right. Runs FIRST and rejects outright.
+_BOOKING_ASK_INFO = re.compile(
+    # price / duration / catalog questions
+    r"сколько|цен[аыуе]\b|\bстоит\b|стоимост|прайс|\bдорого\b"
+    r"|почему|зачем|\bчто\s+так|\bчто\s+вход|чем\s+отлич|разниц"
+    r"|\bчто\s+за\b|\bкак\s+(?:часто|долго|делают|это|проходит|записаться"
+    r"|добраться|доехать|найти|ухаживать)"
+    r"|расскаж|опиши|опишите"
+    # policy / safety / logistics
+    r"|правил|услови|противопоказ|безопасн|вредн|опасн"
+    r"|беременн|кормл|аллерг|\bдет(?:ям|ск\w*)\b|\bребен(?:ок|ка|ком)\b"
+    r"|адрес|парков|\bметро\b|график\s+работ|\bработаете\b"
+    r"|отзыв|акци|скидк|промокод|сертификат|подарочн"
+    r"|оплат|\bкартой\b|наличн|рассрочк|чаевы"
+    r"|\bзаранее\b|\bсо?\s+сво(?:им|ей|ими)\b|\bс\s+собой\b"
+    # a mutation or a lookup — owned by is_cancel_request /
+    # booking_mutation_flow / is_personal_booking_lookup, never here
+    r"|перенес|перенос|отмен|\bмо[яию]\s+запис|\bмои\s+запис",
+    re.IGNORECASE,
+)
+
+# Window 2 — the frames that ASK FOR an appointment. CLOSED list. A bare
+# «можно» qualifies only together with an attend complement; the
+# availability frames («есть окошко», «свободно») name their own object.
+_BOOKING_ASK_FRAME = re.compile(
+    r"\b(?:а\s+)?можн[оа]\b(?:\s+ли)?(?:\s+(?:мне|нам|меня|нас|я))?\s*"
+    r"(?:запис\w*|забронир\w*|брониров\w*|прийти|придти|подойти|приехать"
+    r"|попасть|прид(?:у|ем)|на\b|к\b|во?\b)"
+    r"|\bесть\s+(?:ли\s+)?(?:окошк\w*|окно|свободн\w*|мест[оа]\b|местечк\w*)"
+    r"|\bсвободн\w*\s+(?:ли\s+)?(?:есть|окошк\w*|мест\w*|врем\w*|слот\w*)"
+    r"|\bесть\s+возможност"
+    r"|\b(?:получится|успею|успеем|реально|возможно)\s+"
+    r"(?:ли\s+)?(?:запис\w*|прийти|подойти|попасть|приехать)",
+    re.IGNORECASE,
+)
+
+# Window 3 — what the frame has to be asking about. At least one of the
+# three must be present, so «можно к вам?» does not qualify on the frame
+# alone.
+_BOOKING_ASK_VERB = re.compile(
+    r"запиш|записаться|записать|записыва|забронир|брониров",
+    re.IGNORECASE,
+)
+
+# A temporal complement — the same closed day / date / weekday classes
+# the cancel detector's ``_REFUSAL_TAIL`` uses, kept separate because
+# this one also accepts a bare clock time («можно на 15:00?»).
+_BOOKING_ASK_WHEN = re.compile(
+    r"\b(?:сегодня|завтра|послезавтра|сейчас)\b"
+    # «в пятницу» and «на пятницу» both name the day; the cancel
+    # detector only ever sees the first, this one sees both.
+    r"|\b(?:в(?:о)?|на)\s+(?:понедельник|вторник|среду|четверг|пятницу"
+    r"|субботу|воскресенье)\b"
+    r"|\bна\s+(?:этой|следующей)\s+неделе\b"
+    r"|\bна\s+выходн\w+\b"
+    r"|\b\d{1,2}[:.]\d{2}\b"
+    r"|\b\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля"
+    r"|августа|сентября|октября|ноября|декабря)\b"
+    r"|\b(?:утром|днем|вечером|попозже|пораньше)\b",
+    re.IGNORECASE,
+)
+
+
+def is_booking_request(text: str) -> bool:
+    """True when ``text`` asks to BE BOOKED, however it is punctuated.
+
+    DRF-981. Consumed in exactly two places and nowhere else:
+
+    * ``apps.skills.faq.skill.FaqSkill.matches`` yields the turn — the
+      same shape as the E2E-BOT-02A yield for personal lookups directly
+      above it;
+    * ``apps.skills.booking.skill.BookingSkill.matches`` claims it.
+
+    Both sides read ONE function on purpose. A yield rule and a claim
+    rule written separately can drift, and the turn FAQ steps out of
+    would then land in the menu fallback — a worse answer than the FAQ
+    reply it replaced.
+
+    Conservative: a False means "not provably a booking request" and the
+    turn keeps exactly the routing it has today. Nothing here touches
+    the tenant catalog or the network — ``mentions_service`` is called
+    WITHOUT ``extra_stems``, so it reads the seed vocabulary only and
+    costs no query. No model is called either: a matcher that waits on
+    an LLM is not a fast path any more.
+    """
+
+    normalized = _normalize(text)
+    if not normalized:
+        return False
+    if _BOOKING_ASK_INFO.search(normalized):
+        return False
+    if not _BOOKING_ASK_FRAME.search(normalized):
+        return False
+    if _BOOKING_ASK_VERB.search(normalized):
+        return True
+    if _BOOKING_ASK_WHEN.search(normalized):
+        return True
+    # Seed vocabulary only — see the docstring. «Можно на маникюр?» is
+    # this branch: no create verb, no date, a named service.
+    return mentions_service(normalized)
 
 
 # D-10 review (Wave-1 follow-up, finding #2) — selection-shaped turn

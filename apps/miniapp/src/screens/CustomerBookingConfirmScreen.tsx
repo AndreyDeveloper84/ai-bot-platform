@@ -420,7 +420,7 @@ export function CustomerBookingConfirmScreen() {
             checked={paymentChoice === "onsite"}
             onChange={() => setPaymentChoice("onsite")}
           />
-          <span>
+          <span className="customer-confirm__payment-text">
             <span className="customer-confirm__payment-label">
               Оплатить на месте
             </span>
@@ -436,7 +436,7 @@ export function CustomerBookingConfirmScreen() {
             checked={paymentChoice === "online"}
             onChange={() => setPaymentChoice("online")}
           />
-          <span>
+          <span className="customer-confirm__payment-text">
             <span className="customer-confirm__payment-label">
               Оплатить онлайн
             </span>

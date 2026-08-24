@@ -300,6 +300,125 @@ def parse_time_preference(text: str, *, weekday_today: int | None = None) -> Tim
 
 
 # ---------------------------------------------------------------------------
+# Dates a person spells out — «16 августа 2026», «16.08.2026» (DRF-1101)
+# ---------------------------------------------------------------------------
+#
+# ``parse_time_preference`` above reads RELATIVE time: «завтра», «в субботу»,
+# «вечером». That is what people say before the bot has asked. Once the day
+# chips are on screen a second dialect appears, and the pilot dialogue
+# DRF-1101 is filed about is written entirely in it:
+#
+#     09:03:30  16.08.2016          ← a typo in the year
+#     09:03:49  16 августа 2026     ← the same day, spelled out
+#
+# Kept separate from ``parse_time_preference`` on purpose. That function has
+# three callers and returns an OFFSET from a day it never has to know; this
+# one returns a calendar date and therefore needs ``today`` to disambiguate a
+# missing year. Folding them together would have forced ``today`` on every
+# caller of the older one — including the render-time ones that deliberately
+# do not have a tenant yet.
+
+_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+
+# Day-first, dot-separated: «16.08», «16.08.26», «16.08.2026». Only the dot is
+# accepted as a separator. «/» and «-» would turn «1-2» and «1/2» into the
+# first of February, and a booking chat is full of small numbers.
+_DOTTED_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b")
+
+# «16 августа», «16 авг 2026». The month stems are the ones the chip captions
+# already use (``_RU_MONTHS_SHORT``), so the two vocabularies cannot drift.
+_NAMED_DATE_RE = re.compile(
+    r"\b(\d{1,2})\s+(янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)\w*(?:\s+(\d{4}))?",
+    re.IGNORECASE,
+)
+_MONTH_STEM_TO_NUMBER: dict[str, int] = {
+    "янв": 1,
+    "фев": 2,
+    "мар": 3,
+    "апр": 4,
+    "май": 5,
+    "мая": 5,
+    "июн": 6,
+    "июл": 7,
+    "авг": 8,
+    "сен": 9,
+    "окт": 10,
+    "ноя": 11,
+    "дек": 12,
+}
+
+_TWO_DIGIT_YEAR_BASE = 2000
+_MAX_MONTH = 12
+_TWO_DIGIT_YEAR_LIMIT = 100
+
+
+def _build_date(year: int, month: int, day: int) -> date_cls | None:
+    """A real calendar date, or ``None`` for «31 февраля» and friends."""
+    try:
+        return date_cls(year, month, day)
+    except ValueError:
+        return None
+
+
+def _next_occurrence(month: int, day: int, today: date_cls) -> date_cls | None:
+    """This year's ``day.month`` when it is still ahead, else next year's."""
+    candidate = _build_date(today.year, month, day)
+    if candidate is not None and candidate >= today:
+        return candidate
+    return _build_date(today.year + 1, month, day)
+
+
+def parse_explicit_date(text: str, *, today: date_cls) -> date_cls | None:
+    """The calendar date a person spelled out, or ``None``.
+
+    ``today`` is the SALON's local today (:func:`local_today`) and is used for
+    one thing: a date written without a year («16 августа») means the next such
+    day — this year if it is still ahead, next year otherwise. Nobody booking a
+    massage means the one that already happened.
+
+    A date WITH a year is returned exactly as written, past or not. «16.08.2016»
+    is the typo the ticket's dialogue opens with, and the caller has to be able
+    to tell a typo from a day the master simply is not working. Deciding that
+    here would hide it.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    match = _ISO_DATE_RE.search(raw)
+    if match is not None:
+        year, month, day = (int(part) for part in match.groups())
+        return _build_date(year, month, day)
+
+    match = _NAMED_DATE_RE.search(raw)
+    if match is not None:
+        day = int(match.group(1))
+        month = _MONTH_STEM_TO_NUMBER[match.group(2).lower()]
+        raw_year = match.group(3)
+        if raw_year is not None:
+            return _build_date(int(raw_year), month, day)
+        return _next_occurrence(month, day, today)
+
+    match = _DOTTED_DATE_RE.search(raw)
+    if match is not None:
+        day, month = int(match.group(1)), int(match.group(2))
+        if month > _MAX_MONTH:
+            # «17.30» is a time somebody wrote with a dot, not the 17th of
+            # month 30. Refusing beats guessing: the caller's fallback is the
+            # day chips, which cannot be wrong.
+            return None
+        raw_year = match.group(3)
+        if raw_year is not None:
+            year = int(raw_year)
+            if year < _TWO_DIGIT_YEAR_LIMIT:  # «16.08.26»
+                year += _TWO_DIGIT_YEAR_BASE
+            return _build_date(year, month, day)
+        return _next_occurrence(month, day, today)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Turning a preference into a calendar date — tenant-local, once
 # ---------------------------------------------------------------------------
 

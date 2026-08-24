@@ -91,6 +91,7 @@ from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.lookup import (
     booking_mutation_flow,
+    is_booking_request,
     is_cancel_request,
     is_personal_booking_lookup,
     looks_like_flow_selection,
@@ -391,6 +392,16 @@ class BookingSkill:
         # («не смогу в среду, можно в четверг?»), so this claim cannot
         # turn a move into a drop.
         if is_cancel_request(context.message_text):
+            return True
+
+        # DRF-981 — the booking request phrased as a question. FAQ yields
+        # it (``apps.skills.faq.skill.FaqSkill.matches``) reading the
+        # SAME predicate, so the turn it steps out of cannot fall
+        # through to the menu fallback. Two of these phrasings
+        # («Можно записаться на маникюр?») already carry a
+        # _BOOKING_KEYWORDS root and would be claimed by the line below
+        # — they never reached it, because FAQ is registered first.
+        if is_booking_request(context.message_text):
             return True
 
         return _legacy_keyword_match(context.message_text)

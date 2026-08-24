@@ -39,6 +39,7 @@ from apps.llm.router import reset_router_cache
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.lookup import (
     booking_mutation_flow,
+    is_booking_request,
     is_cancel_request,
     is_personal_booking_lookup,
 )
@@ -312,6 +313,94 @@ MUTATION_PHRASES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
+# DRF-981 — the booking request phrased as a question.
+#
+# State on 2026-08-24 before this patch (VERIFIED by running the real
+# first-match-wins registry order): EVERY phrase in the positive tuple
+# below routed to `faq`. Not because anything decided they were
+# questions about the salon — because FAQ's keyword fallback counts a
+# bare «?» as a question signal and FAQ is registered ahead of booking.
+# «Можно записаться на маникюр?» went to the knowledge base even though
+# «записаться» is a _BOOKING_KEYWORDS root one skill further down: the
+# turn never got there.
+#
+# The negatives matter as much as the positives and are the reason this
+# ticket was parked once already («риск регресса FAQ выше выигрыша»):
+# a price question, a policy question or a safety question that starts
+# with «можно ли» must keep reaching the knowledge base.
+#
+# ADD to these tuples — never trim them.
+# ---------------------------------------------------------------------------
+
+BOOKING_ASK_PHRASES: tuple[str, ...] = (
+    # ── verbatim from the ticket ──
+    "Можно на маникюр?",
+    # ── the same request, punctuated and inflected the way people type ──
+    "можно на маникюр",
+    "А можно на педикюр в субботу?",
+    "Можно записаться?",
+    "Можно ли записаться на маникюр?",
+    "можно записаться на завтра?",
+    "Можно мне записаться?",
+    "Можно ли записаться сегодня",
+    "Можно к вам завтра?",
+    "Можно на массаж в 15:00?",
+    "Можно прийти сегодня?",
+    "можно на брови?",
+    "Можно на 5 августа?",
+    # ── availability phrasings: same request, no «можно» ──
+    "Есть окошко на маникюр?",
+    "Есть свободное время завтра?",
+    "Есть ли свободные слоты на пятницу?",
+    "Есть возможность записаться на шугаринг?",
+    # ── modal frames ──
+    "Получится записаться на завтра?",
+    "Успею записаться сегодня?",
+    "Реально попасть на маникюр завтра?",
+)
+
+# Every one of these carries «?» and most carry «можно», which is the
+# whole point: the form is the same and the request is not.
+BOOKING_ASK_NEGATIVE_PHRASES: tuple[str, ...] = (
+    # ── named in the brief ──
+    "Сколько стоит маникюр?",
+    "А что такое шугаринг?",
+    # ── price / catalog ──
+    "Что входит в чистку лица?",
+    "Сколько длится массаж?",
+    "Чем отличается шугаринг от воска?",
+    "Расскажите про RF-лифтинг",
+    "Есть скидки?",
+    "Есть ли у вас подарочные сертификаты?",
+    "Можно ли оставить отзыв?",
+    # ── «можно ли» + policy / safety: the shape that would have been
+    #    swallowed by a frame-only rule ──
+    "Как часто можно делать маникюр?",
+    "Можно ли делать маникюр при беременности?",
+    "Можно ли делать эпиляцию при аллергии?",
+    "Можно ли прийти со своим лаком?",
+    "Можно с собой ребёнка?",
+    "Можно оплатить картой?",
+    "Можно в кредит?",
+    # ── logistics ──
+    "Какой у вас адрес?",
+    "Есть парковка?",
+    "Вы работаете в воскресенье?",
+    "Где вы находитесь?",
+    # ── neighbouring intents keep their own owners ──
+    "Как записаться?",
+    "Какие правила отмены?",
+    "Можно ли перенести запись?",
+    "Сколько заранее нужно записываться?",
+    "Покажи мои записи",
+    "Когда я записан?",
+    "Отмени мою запись",
+    "не приду",
+    "привет",
+    "спасибо большое",
+)
+
+# ---------------------------------------------------------------------------
 # DRF-1060 / OD-IR1 — the cancellation corpus.
 #
 # Owner decision OD-IR1 («Pilot routing») requires a regression corpus of
@@ -403,6 +492,17 @@ OD_IR1_CANCEL_CORPUS: tuple[str, ...] = (
     "Отмените запись",
     "отменить запись",
     "удали мою запись",
+    # ── DRF-973 (2026-08-24): the predicate said True for these on
+    #    2026-08-14 and the person still never got a cancellation.
+    #    «больше» starts with the pain stem «бол», the health-screening
+    #    classifier matched it as a SUBSTRING, and health_screening is
+    #    registered FOUR skills ahead of booking — so «я больше не
+    #    приду» was answered with «Где именно болит?». Recognising an
+    #    intent and reaching the skill that serves it are two different
+    #    things, and only the routing matrix below can tell them apart.
+    "больше не приду",
+    "я больше не приду",
+    "больше не приду, спасибо",
 )
 
 # The negatives matter MORE here than for the read-only lookup, and the
@@ -460,6 +560,16 @@ CANCEL_NEGATIVE_PHRASES: tuple[str, ...] = (
     "я приду",
     "точно приду",
     "приду завтра",
+    # ── named in the DRF-1060 brief as negatives; both already behaved
+    #    correctly on 2026-08-24 (VERIFIED) and are pinned here so they
+    #    keep doing so. «приду попозже» is a RESCHEDULE proposal, not a
+    #    drop; «не знаю, приду ли» is an undecided turn that needs a
+    #    clarifying question, and offering to cancel a visit somebody
+    #    has not decided to skip is the false positive this detector is
+    #    shaped to avoid.
+    "приду попозже",
+    "не знаю, приду ли",
+    "не знаю, приду ли завтра",
     # ── neighbouring intents ──
     "покажи мои записи",
     "хочу записаться",
@@ -924,6 +1034,23 @@ class TestSkillMatchers:
     def test_booking_claims_lookups_and_mutations(self, context: SkillContext, phrase: str) -> None:
         assert BookingSkill().matches(_with_text(context, phrase)) is True
 
+    @pytest.mark.parametrize("phrase", BOOKING_ASK_PHRASES)
+    def test_faq_yields_booking_requests(self, context: SkillContext, phrase: str) -> None:
+        """DRF-981 — FAQ steps out of a request to be booked."""
+        assert FAQSkill().matches(_with_text(context, phrase)) is False
+
+    @pytest.mark.parametrize("phrase", BOOKING_ASK_NEGATIVE_PHRASES)
+    def test_booking_does_not_claim_salon_questions(
+        self, context: SkillContext, phrase: str
+    ) -> None:
+        """DRF-981 — the claim added to booking must not widen past it.
+
+        This is the half that guards the regression the ticket was
+        parked for: a price / policy / safety question keeps its owner
+        even though it carries «?» and often «можно ли».
+        """
+        assert is_booking_request(phrase) is False
+
     @pytest.mark.parametrize("phrase", OD_IR1_CANCEL_CORPUS)
     def test_booking_claims_natural_cancellations(self, context: SkillContext, phrase: str) -> None:
         """DRF-1060 — recognising the phrasing is only half of it.
@@ -962,6 +1089,51 @@ class TestRoutingMatrix:
     @pytest.mark.parametrize("phrase", MUTATION_PHRASES)
     def test_mutation_phrases_route_to_booking(self, context: SkillContext, phrase: str) -> None:
         assert _first_matching_skill_name(phrase, context) == "booking"
+
+    @pytest.mark.parametrize("phrase", BOOKING_ASK_PHRASES)
+    def test_booking_requests_route_to_booking(self, context: SkillContext, phrase: str) -> None:
+        """DRF-981 — through the REAL first-match-wins registry order.
+
+        The predicate being True is not enough: eleven skills are
+        registered before booking, and FAQ (the one that used to take
+        these turns) is one of them. Before this patch every phrase here
+        returned ``"faq"``.
+        """
+        assert _first_matching_skill_name(phrase, context) == "booking"
+
+    @pytest.mark.parametrize("phrase", BOOKING_ASK_NEGATIVE_PHRASES)
+    def test_salon_questions_never_route_to_booking(
+        self, context: SkillContext, phrase: str
+    ) -> None:
+        """DRF-981 — the negatives, at the routing level.
+
+        Deliberately NOT «must route to faq»: several of these belong to
+        other owners on purpose («Покажи мои записи» → booking lookup,
+        «Отмени мою запись» → booking cancel, «привет» → menu). The
+        contract this test states is the one the ticket is about — the
+        NEW claim did not take anything that was not asking to be
+        booked.
+        """
+        name = _first_matching_skill_name(phrase, context)
+        if is_personal_booking_lookup(phrase) or is_cancel_request(phrase):
+            # Already booking's by another route — nothing to check here.
+            return
+        assert name != "booking"
+
+    @pytest.mark.parametrize(
+        "phrase",
+        (
+            "Сколько стоит маникюр?",
+            "А что такое шугаринг?",
+            "Что входит в чистку лица?",
+            "Как часто можно делать маникюр?",
+            "Можно ли делать маникюр при беременности?",
+            "Можно ли прийти со своим лаком?",
+        ),
+    )
+    def test_salon_questions_still_route_to_faq(self, context: SkillContext, phrase: str) -> None:
+        """DRF-981 — the FAQ half of the boundary, stated positively."""
+        assert _first_matching_skill_name(phrase, context) == "faq"
 
     @pytest.mark.parametrize("phrase", OD_IR1_CANCEL_CORPUS)
     def test_cancel_corpus_routes_to_booking(self, context: SkillContext, phrase: str) -> None:

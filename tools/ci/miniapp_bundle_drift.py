@@ -72,9 +72,25 @@ DEFAULT_URL = "https://miniapp-dev.gobeauty.site"
 DEFAULT_SRC = Path("apps/miniapp/src")
 TIMEOUT = 30
 
-# Vite rewrites module paths relative to the emitted asset, so every
-# application module arrives as `../../src/<path>`.
-SRC_PREFIX = "../../src/"
+# Vite rewrites module paths relative to the emitted asset, so an application
+# module arrives as some number of `../` followed by `src/<path>`. How many is
+# not a constant: it is the depth of the output directory under
+# `apps/miniapp/`, and the two builds that exist here disagree.
+#
+#   npx vite build                      -> dist/assets/          -> ../../src/
+#   infra/deploy/miniapp-release.sh     -> releases/<id>/assets/ -> ../../../src/
+#
+# Pinning the in-place depth (`../../src/`, the original of this constant) made
+# the guard blind to every bundle the release script publishes -- that is, to
+# every bundle a person has actually been served since 2026-08-23, the day the
+# script landed. Both runs after it went red reporting "could not run", never
+# naming the two merged commits that had in fact not been published. Worse, the
+# script's own closing proof step runs this file, so a correct publish could
+# never finish cleanly either.
+#
+# Depth is therefore matched, not assumed. `node_modules` sits at the same
+# depth and is deliberately not matched: it is pinned by package-lock.json.
+APP_MODULE_PREFIX = re.compile(r"^(?:\.\./)*src/")
 
 BOM = "﻿"
 
@@ -136,12 +152,17 @@ def served_modules(base_url: str) -> tuple[dict[str, str], str, str]:
         if content is None:
             continue
         path = str(raw_path).replace("\\", "/")
-        if not path.startswith(SRC_PREFIX):
+        match = APP_MODULE_PREFIX.match(path)
+        if match is None:
             continue  # node_modules -- pinned by package-lock.json, not by this guard
-        modules[path[len(SRC_PREFIX) :]] = content
+        modules[path[match.end() :]] = content
 
     if not modules:
-        raise CannotCheck(f"{js_name}.map contains no application modules under {SRC_PREFIX}")
+        seen = sorted({str(p).rsplit("/", 1)[0] + "/" for p in source_map.get("sources", [])[:20]})
+        raise CannotCheck(
+            f"{js_name}.map carries no `<../>*src/` module paths; the directories it does "
+            f"carry are {seen} -- this is not a build of apps/miniapp"
+        )
     return modules, js_name, css_name
 
 
