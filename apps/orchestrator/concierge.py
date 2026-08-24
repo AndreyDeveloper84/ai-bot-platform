@@ -1244,6 +1244,34 @@ def generate_concierge_reply(
         extra_system=extra_system,
         trace_id=trace_id,
     )
+    # DRF-1210 — the outbound guard runs HERE, above the transcript write, and
+    # not only at the channel's send.
+    #
+    # The channel guards the send too (that is what covers the deterministic
+    # branches this function never sees), and running twice is free: the
+    # replacement line passes the check, so the second call is a no-op.
+    #
+    # But only this side can keep the invariant this function exists for —
+    # «what the transcript says the bot said is what the bot said». The row
+    # below is the LLM history of the NEXT turn. Written from the blocked
+    # draft, it would hand the model back its own medical claim as an
+    # established fact of the conversation, and the guard would then have to
+    # win again on every subsequent turn to keep it off the screen. Guarding
+    # after the write would stop the sentence reaching the person and still
+    # let it reach the prompt.
+    from apps.orchestrator.safety.gate import guard_outbound
+
+    _guarded = guard_outbound(reply.text, surface="concierge", bot_user=bot_user, trace_id=trace_id)
+    if _guarded.blocked:
+        # action_data goes with the text (the channel drops keyboards on a
+        # block for the same reason). ``persisted`` is preserved so the row
+        # below still gets written — with the replacement.
+        reply = DiscoveryReply(
+            text=_guarded.text,
+            action_data=None,
+            persisted=reply.persisted,
+            outage=reply.outage,
+        )
     if reply.persisted and (reply.text or "").strip():
         try:
             record_global_message(
