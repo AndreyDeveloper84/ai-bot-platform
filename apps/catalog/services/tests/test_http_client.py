@@ -401,8 +401,60 @@ class TestFetchSpecialistServices:
         assert dto.name == "Спортивный массаж"
         assert dto.category_slug == "massage"
         assert dto.is_active is True
-        # Booking-gate fields stay in raw — no fail-open mirror column.
+        # DRF-1353: the resolved booking-gate verdict is now a first-class
+        # field (the gate reads it); ``resolved_duration`` still rides in raw.
+        assert dto.resolved_requires_health_check is True
         assert dto.raw["resolved_requires_health_check"] is True
+        assert "resolved_duration" in dto.raw
+
+    def test_absent_resolved_health_check_is_unknown_not_false(self, httpx_mock: HTTPXMock) -> None:
+        """DRF-1353: an upstream that never sends the key must produce
+        ``None``, not ``False``. ``False`` would open a medical gate for
+        every edge on that upstream in one sync beat."""
+        row = _edge_row()
+        del row["resolved_requires_health_check"]
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={"count": 1, "next": None, "previous": None, "results": [row]},
+        )
+
+        dto = _client().fetch_specialist_services(tenant_id=_TID).edges[0]
+
+        assert dto.resolved_requires_health_check is None
+
+    def test_explicit_false_resolved_health_check_is_false(self, httpx_mock: HTTPXMock) -> None:
+        """An explicit upstream ``False`` is a real answer and must be
+        distinguishable from the absent key above."""
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={
+                "count": 1,
+                "next": None,
+                "previous": None,
+                "results": [_edge_row(resolved_requires_health_check=False)],
+            },
+        )
+
+        dto = _client().fetch_specialist_services(tenant_id=_TID).edges[0]
+
+        assert dto.resolved_requires_health_check is False
+
+    def test_unparseable_resolved_health_check_is_unknown(self, httpx_mock: HTTPXMock) -> None:
+        """Garbage is not a verdict. Anything we cannot read as a boolean
+        becomes unknown, which the booking gate treats as closed."""
+        httpx_mock.add_response(
+            url=f"{_SPEC_SVC_URL}?tenant={_TID}&page_size=100",
+            json={
+                "count": 1,
+                "next": None,
+                "previous": None,
+                "results": [_edge_row(resolved_requires_health_check="maybe")],
+            },
+        )
+
+        dto = _client().fetch_specialist_services(tenant_id=_TID).edges[0]
+
+        assert dto.resolved_requires_health_check is None
 
     def test_tenant_filter_is_sent(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(

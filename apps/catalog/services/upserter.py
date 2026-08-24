@@ -487,6 +487,10 @@ def _upsert_one_master_service(
             master=master,
             service=service,
             ayla_specialist_service_id=dto.ayla_specialist_service_id,
+            # DRF-1353: may be None when upstream does not send the key —
+            # the model's tri-state NULL means "unknown", and the booking
+            # gate keeps such an edge closed.
+            resolved_requires_health_check=dto.resolved_requires_health_check,
         )
         result.created += 1
         return True
@@ -499,9 +503,23 @@ def _upsert_one_master_service(
     # MM4 matrix derives its optimistic-concurrency token from
     # MAX(updated_at) across the tenant's rows. An unconditional save would
     # bump that token every beat and 409 any operator mid-edit.
+    changed: list[str] = []
     if str(existing.ayla_specialist_service_id) != dto.ayla_specialist_service_id:
         existing.ayla_specialist_service_id = dto.ayla_specialist_service_id
-        existing.save(update_fields=["ayla_specialist_service_id", "updated_at"])
+        changed.append("ayla_specialist_service_id")
+    # DRF-1353 — only an EXPLICIT upstream value is written. ``None`` means
+    # the payload did not carry the key, and downgrading a known True/False
+    # to "unknown" on that basis would flip the gate on an upstream hiccup.
+    # A real upstream False does overwrite a stale True: the flag is
+    # escalate-only on Ayla's side, so a False there is a deliberate answer.
+    if (
+        dto.resolved_requires_health_check is not None
+        and existing.resolved_requires_health_check is not dto.resolved_requires_health_check
+    ):
+        existing.resolved_requires_health_check = dto.resolved_requires_health_check
+        changed.append("resolved_requires_health_check")
+    if changed:
+        existing.save(update_fields=[*changed, "updated_at"])
     result.updated += 1
     return True
 

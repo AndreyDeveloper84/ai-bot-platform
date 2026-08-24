@@ -68,6 +68,7 @@ def _dto(
     is_active: bool = True,
     tenant_id: str | None = None,
     omit_tenant: bool = False,
+    resolved_health_check: bool | None = None,
 ) -> CatalogSpecialistServiceDTO:
     return CatalogSpecialistServiceDTO(
         ayla_specialist_service_id=edge_id or str(uuid.uuid4()),
@@ -79,6 +80,7 @@ def _dto(
         name=service.name,
         category_slug="massage",
         is_active=is_active,
+        resolved_requires_health_check=resolved_health_check,
         raw={},
     )
 
@@ -208,6 +210,80 @@ class TestIdempotency:
         upsert_master_services(tenant, [dto])
 
         assert MasterService.all_tenants.get(tenant=tenant).updated_at == before
+
+
+class TestResolvedHealthCheck:
+    """DRF-1353 — the mirrored resolved (master×service) screening verdict.
+
+    ``MasterService.resolved_requires_health_check`` is what the booking gate
+    reads instead of failing closed for every tenant outside a one-entry
+    allowlist. Its tri-state is load-bearing, so the writer has to preserve
+    the difference between "Ayla said no" and "we never heard".
+    """
+
+    def test_verdict_is_mirrored_on_create(self, tenant: Tenant) -> None:
+        m, s = (
+            _master(tenant),
+            _service(tenant, name="\u0418\u043d\u044a\u0435\u043a\u0446\u0438\u0438"),
+        )
+
+        upsert_master_services(tenant, [_dto(m, s, resolved_health_check=True)])
+
+        assert MasterService.all_tenants.get(tenant=tenant).resolved_requires_health_check is True
+
+    def test_absent_verdict_stays_null_on_create(self, tenant: Tenant) -> None:
+        """NULL, not False. The gate reads NULL as "screening required"."""
+        m, s = _master(tenant), _service(tenant, name="\u041c\u0430\u0441\u0441\u0430\u0436")
+
+        upsert_master_services(tenant, [_dto(m, s, resolved_health_check=None)])
+
+        assert MasterService.all_tenants.get(tenant=tenant).resolved_requires_health_check is None
+
+    def test_verdict_change_is_written(self, tenant: Tenant) -> None:
+        m, s = _master(tenant), _service(tenant, name="\u041c\u0430\u0441\u0441\u0430\u0436")
+        edge_id = str(uuid.uuid4())
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=False)])
+
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=True)])
+
+        assert MasterService.all_tenants.get(tenant=tenant).resolved_requires_health_check is True
+
+    def test_absent_verdict_never_downgrades_a_known_one(self, tenant: Tenant) -> None:
+        """A beat whose payload omits the key says nothing. Writing NULL over
+        a known True would flip the gate open the moment upstream hiccups —
+        or, over a known False, dead-end a working salon."""
+        m, s = _master(tenant), _service(tenant, name="\u041c\u0430\u0441\u0441\u0430\u0436")
+        edge_id = str(uuid.uuid4())
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=True)])
+
+        upsert_master_services(tenant, [_dto(m, s, edge_id=edge_id, resolved_health_check=None)])
+
+        assert MasterService.all_tenants.get(tenant=tenant).resolved_requires_health_check is True
+
+    def test_unchanged_verdict_does_not_bump_updated_at(self, tenant: Tenant) -> None:
+        """Same contract as the edge stamp: the MM4 matrix derives its
+        optimistic-concurrency token from MAX(updated_at)."""
+        m, s = _master(tenant), _service(tenant, name="\u041c\u0430\u0441\u0441\u0430\u0436")
+        edge_id = str(uuid.uuid4())
+        dto = _dto(m, s, edge_id=edge_id, resolved_health_check=False)
+        upsert_master_services(tenant, [dto])
+        before = MasterService.all_tenants.get(tenant=tenant).updated_at
+
+        upsert_master_services(tenant, [dto])
+
+        assert MasterService.all_tenants.get(tenant=tenant).updated_at == before
+
+    def test_operator_row_is_still_not_adopted(self, tenant: Tenant) -> None:
+        """An operator-owned pair keeps its NULL verdict: sync must not touch
+        the row at all, so the gate keeps treating it as unproven."""
+        m, s = _master(tenant), _service(tenant, name="\u041c\u0430\u0441\u0441\u0430\u0436")
+        MasterService.all_tenants.create(tenant=tenant, master=m, service=s)
+
+        upsert_master_services(tenant, [_dto(m, s, resolved_health_check=False)])
+
+        row = MasterService.all_tenants.get(tenant=tenant)
+        assert row.ayla_specialist_service_id is None
+        assert row.resolved_requires_health_check is None
 
 
 class TestReconciliation:

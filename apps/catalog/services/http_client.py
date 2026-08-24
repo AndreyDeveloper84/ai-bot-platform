@@ -147,9 +147,15 @@ class CatalogSpecialistServiceDTO:
     * ``user_id`` — Ayla ``User.id``. Deliberately NOT the same as
       ``specialist``; carried for cross-checks only, never as a join key.
 
-    ``resolved_duration`` / ``resolved_requires_health_check`` ride in ``raw``
-    only — they belong to the booking gate (#1034), not to discovery, and
-    mirroring them here would create a fail-open column with no reader.
+    ``resolved_duration`` still rides in ``raw`` only — it belongs to the
+    booking gate, not to discovery.
+
+    ``resolved_requires_health_check`` (DRF-1353) is now a first-class field
+    because the gate finally has a reader for it
+    (``apps.skills.booking.skill._service_requires_health_check``). It is
+    ``bool | None``: ``None`` means the upstream row did not carry the key at
+    all — an older Ayla — and MUST NOT be read as "no screening needed". Only
+    an explicit ``False`` opens the gate; ``None`` keeps it closed.
     """
 
     ayla_specialist_service_id: str
@@ -161,6 +167,7 @@ class CatalogSpecialistServiceDTO:
     name: str = ""
     category_slug: str = ""
     is_active: bool = True
+    resolved_requires_health_check: bool | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -456,6 +463,31 @@ def _parse_int(raw: Any) -> int | None:
     return int(raw)
 
 
+def _parse_optional_bool(raw: Any) -> bool | None:
+    """Tri-state bool for a field whose ABSENCE must not read as ``False``.
+
+    DRF-1353: ``resolved_requires_health_check`` gates a medical screening.
+    A missing key (older Ayla, partial serializer) is "unknown", and the
+    booking gate treats unknown as CLOSED. Coercing it to ``False`` here
+    would silently open the gate for every edge on an upstream that never
+    sends the field — exactly the fail-OPEN regress #1121 warned about.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"true", "1", "yes"}:
+            return True
+        if text in {"false", "0", "no"}:
+            return False
+        return None
+    if isinstance(raw, int):
+        return bool(raw)
+    return None
+
+
 def _parse_goals(raw: Any) -> list[dict[str, str]]:
     """Ayla ``goals`` → mirror shape, defensively (DRF-1308).
 
@@ -521,6 +553,9 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         name=row.get("name") or "",
         category_slug=row.get("category_slug") or "",
         is_active=bool(row.get("is_active", True)),
+        resolved_requires_health_check=_parse_optional_bool(
+            row.get("resolved_requires_health_check")
+        ),
         raw=row,
     )
 
