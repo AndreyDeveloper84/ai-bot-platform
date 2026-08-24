@@ -171,7 +171,13 @@ class TestHappyPath:
         owner_bot_user: BotUser,
         tenant: Tenant,
         patched_send_message,
+        settings,
     ) -> None:
+        # DRF-1079 — the assertion below says «uses configured
+        # SITE_DOMAIN», and until this line nothing configured it: the
+        # test passed against the repository default, i.e. against the
+        # localhost link that reached real invited masters on the pilot.
+        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"
         before = datetime.now(tz=timezone.utc)
         resp = client.post(
             _invite_url(),
@@ -622,7 +628,9 @@ class TestDispatch:
         owner_bot_user: BotUser,
         tenant: Tenant,
         patched_send_message,
+        settings,
     ) -> None:
+        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"  # DRF-1079
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -701,3 +709,123 @@ class TestAtomicity:
 
         assert resp.status_code == 500
         assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == before
+
+
+# --- DRF-1079: the web fallback must never point at localhost -------------
+
+
+@pytest.mark.django_db
+class TestSiteDomainFallback:
+    """The invite link is the one artefact of this endpoint a human uses.
+
+    On the pilot ``SITE_DOMAIN`` was never set, so every invite carried
+    ``http://localhost:5173/onboarding/master?token=...`` — a link that
+    opens nothing on the phone it arrives at, with no error anywhere on
+    our side. These tests pin the two halves of the fix: a real domain
+    produces a real link, an unset one produces no link at all rather
+    than a broken one.
+    """
+
+    def test_configured_domain_is_used(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+        settings,
+    ) -> None:
+        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201, resp.content
+        link = resp.json()["fallback_link"]
+        assert link.startswith("https://api-dev.gobeauty.site/onboarding/master?token=")
+        assert link in patched_send_message.call_args.kwargs["text"]
+
+    def test_bare_host_gets_https(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+        settings,
+    ) -> None:
+        """A value written without a scheme must not become a relative URL."""
+
+        settings.SITE_DOMAIN = "api-dev.gobeauty.site"
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201, resp.content
+        assert resp.json()["fallback_link"].startswith(
+            "https://api-dev.gobeauty.site/onboarding/master?token="
+        )
+
+    def test_loopback_domain_suppresses_the_link(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+        settings,
+    ) -> None:
+        """The pilot's actual state: SITE_DOMAIN unset, DEBUG off."""
+
+        settings.SITE_DOMAIN = ""
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201, resp.content
+        assert resp.json()["fallback_link"] == ""
+
+        text = patched_send_message.call_args.kwargs["text"]
+        assert "localhost" not in text
+        # The deeplink still goes — the invite is degraded, not cancelled.
+        assert "max://bot/" in text
+        # And no orphan heading left behind by the removed block.
+        assert "веб-версию" not in text
+
+    def test_debug_keeps_the_localhost_link(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+        patched_send_message,
+        settings,
+    ) -> None:
+        """Local dev is the one place the Vite URL is the right answer."""
+
+        settings.DEBUG = True
+        settings.SITE_DOMAIN = ""
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201, resp.content
+        assert resp.json()["fallback_link"].startswith(
+            "http://localhost:5173/onboarding/master?token="
+        )
+
+    def test_system_check_flags_the_unset_domain(self, settings) -> None:
+        """`manage.py check` / `migrate` is where the deploy sees it."""
+
+        from apps.admin_api.checks import check_site_domain
+
+        settings.SITE_DOMAIN = ""
+        warnings = check_site_domain(None)
+        assert [w.id for w in warnings] == ["admin_api.W001"]
+
+        settings.SITE_DOMAIN = "https://api-dev.gobeauty.site"
+        assert check_site_domain(None) == []
