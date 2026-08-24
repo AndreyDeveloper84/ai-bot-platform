@@ -511,6 +511,11 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     *NUTRITION_TOOL_SPECS,
 ]
 
+# Cap on a tool argument written to the turn log. Both values are bounded by
+# the model's own output, not by anything upstream, and a log line is not the
+# place to find that out.
+_MAX_LOGGED_ARG_CHARS = 64
+
 _KNOWN_TOOLS = frozenset(
     {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]}
     | NUTRITION_TOOL_ACTIONS
@@ -1105,10 +1110,19 @@ def generate_concierge_reply(
         # Names come from the model, verdicts come from the catalog: the model
         # is not the authority on what exists (AYLA-DEC-0045 / OD-9).
         available, missing = service_coverage(requested, city=city)
+        # DRF-968 asked for the ARGUMENTS, not just the count: the live
+        # 09.08 dialogue («Кавитация» answered about классический массаж) had
+        # to be diagnosed by inference, because the only evidence a tool call
+        # left behind was «count=4». City and specialization are what the
+        # model chose to search for, and the difference between them and what
+        # the person just typed is the whole of a sticky-intent bug.
         logger.info(
-            "orchestrator.concierge.show_masters count=%d missing=%d trace=%s pass=%d",
+            "orchestrator.concierge.show_masters count=%d missing=%d "
+            "city=%r spec=%r trace=%s pass=%d",
             len(cards),
             len(missing),
+            (city or "")[:_MAX_LOGGED_ARG_CHARS],
+            (specialization or "")[:_MAX_LOGGED_ARG_CHARS],
             trace_id,
             pass_index,
         )
