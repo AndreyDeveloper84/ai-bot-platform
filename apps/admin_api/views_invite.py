@@ -81,6 +81,7 @@ import logging
 import uuid
 from datetime import timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.db import transaction
@@ -106,6 +107,13 @@ INVITE_TTL_DAYS = 7
 
 DEFAULT_SITE_DOMAIN = "http://localhost:5173"
 """Used when settings.SITE_DOMAIN is unset — Vite dev default."""
+
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1")
+"""Hosts that mean «this developer machine» and nobody else's.
+
+A web fallback pointing at one of these is not a degraded link, it is a
+dead end on every device except the one that generated it.
+"""
 
 ALLOWED_CONTACT_METHODS = {"max_username", "max_phone"}
 """``email`` deferred to a follow-up PR (needs SMTP backend)."""
@@ -146,11 +154,46 @@ def _site_domain() -> str:
     return host.rstrip("/")
 
 
+def _site_domain_is_loopback() -> bool:
+    """True when the configured domain only resolves on the dev machine."""
+
+    host = urlsplit(_site_domain()).hostname or ""
+    return host.lower() in LOOPBACK_HOSTS
+
+
 def _bot_slug(tenant_slug: str) -> str:
     return getattr(settings, "MASTER_BOT_USERNAME", "") or f"{tenant_slug}_bot"
 
 
 def _fallback_link(token: uuid.UUID) -> str:
+    """Web fallback URL, or ``""`` when it would point at localhost.
+
+    DRF-1079 — on the pilot ``SITE_DOMAIN`` is not set at all, so the
+    repository default (``http://localhost:5173``,
+    ``config/settings/base.py:537``) is what got embedded into every
+    invite DM and every API response. That link opens nothing on the
+    phone of the person it was sent to.
+
+    Returning an empty string rather than the localhost URL is the
+    point of the fix: a missing fallback is a visible gap, a fallback
+    to localhost is a working-looking link that wastes the invited
+    master's attempt and tells nobody. The ERROR line names the exact
+    variable to set, because the failure is otherwise silent — it lives
+    in a DM the platform team never sees.
+
+    In DEBUG the localhost link is the correct answer and is returned
+    unchanged; the whole guard is off there.
+    """
+
+    if not settings.DEBUG and _site_domain_is_loopback():
+        logger.error(
+            "admin_api.invite.site_domain_unset — web fallback suppressed: "
+            "SITE_DOMAIN resolves to %s. Set SITE_DOMAIN to the Mini App "
+            "origin (pilot: https://api-dev.gobeauty.site) or invited "
+            "masters get a link that opens nothing.",
+            _site_domain(),
+        )
+        return ""
     return f"{_site_domain()}/onboarding/master?token={token}"
 
 
@@ -331,15 +374,20 @@ def _dispatch_max_dm(
     chat_id = contact_value.lstrip("@")
     deeplink = _deeplink(tenant_slug, token)
     web_url = _fallback_link(token)
-    text = (
-        f"Здравствуйте, {master_name}!\n\n"
-        f"Салон «{salon_name}» приглашает вас как мастера. "
-        f"Откройте ссылку в MAX, чтобы продолжить:\n"
-        f"{deeplink}\n\n"
-        f"Не открывается в MAX? Используйте веб-версию:\n"
-        f"{web_url}\n\n"
-        f"Ссылка действительна 7 дней."
-    )
+    parts = [
+        f"Здравствуйте, {master_name}!\n\n",
+        f"Салон «{salon_name}» приглашает вас как мастера. ",
+        "Откройте ссылку в MAX, чтобы продолжить:\n",
+        f"{deeplink}\n\n",
+    ]
+    # DRF-1079 — the web-fallback block only when there IS a fallback.
+    # `_fallback_link` returns "" when the configured domain is loopback,
+    # and «Используйте веб-версию:» followed by nothing reads as a
+    # delivery bug rather than as the misconfiguration it is.
+    if web_url:
+        parts.append(f"Не открывается в MAX? Используйте веб-версию:\n{web_url}\n\n")
+    parts.append("Ссылка действительна 7 дней.")
+    text = "".join(parts)
 
     try:
         max_outbound.send_message(chat_id=chat_id, text=text)
