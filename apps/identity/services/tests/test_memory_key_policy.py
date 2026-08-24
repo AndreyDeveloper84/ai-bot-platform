@@ -14,6 +14,7 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
+from ayla_ai_core import INFERRED_MARK, MEMORY_INFERRED_HEADER
 from django.utils import timezone
 
 from apps.identity.models import MemoryEntry, UserPersonalContext
@@ -204,3 +205,41 @@ class TestLegacyConflictDeterminism:
         one = read_current_view(upc.user_id)
         two = read_current_view(upc.user_id)
         assert [f.content for f in one.green_facts] == [f.content for f in two.green_facts]
+
+
+class TestProvenanceReachesThePrompt:
+    """P0-3 — «сказал человек» против «вывела система», в реальном тексте промпта.
+
+    Проверяем не наличие поля, а различимость в том, что уходит модели:
+    путь DB row → read_current_view → memory_block → build_memory_block.
+    """
+
+    def test_inferred_row_is_marked_in_the_block(self, monkeypatch) -> None:
+        upc = _upc()
+        _green(upc, source=MemoryEntry.SOURCE_INFERRED)
+        block = _block_for(upc.user_id, monkeypatch)
+        assert "Диета: vegan" in block
+        assert INFERRED_MARK in block
+        assert MEMORY_INFERRED_HEADER in block
+
+    def test_explicit_row_is_not_marked_as_a_guess(self, monkeypatch) -> None:
+        upc = _upc()
+        _green(upc, source=MemoryEntry.SOURCE_EXPLICIT)
+        block = _block_for(upc.user_id, monkeypatch)
+        assert "Диета: vegan" in block
+        assert INFERRED_MARK not in block
+        assert MEMORY_INFERRED_HEADER not in block
+
+    def test_the_two_blocks_are_not_the_same_text(self, monkeypatch) -> None:
+        """Сам факт различимости: один и тот же факт из двух источников."""
+        stated_upc, inferred_upc = _upc(), _upc()
+        _green(stated_upc, source=MemoryEntry.SOURCE_EXPLICIT)
+        _green(inferred_upc, source=MemoryEntry.SOURCE_INFERRED)
+        assert _block_for(stated_upc.user_id, monkeypatch) != _block_for(
+            inferred_upc.user_id, monkeypatch
+        )
+
+    def test_signal_row_counts_as_derived(self, monkeypatch) -> None:
+        upc = _upc()
+        _green(upc, source=MemoryEntry.SOURCE_SIGNAL)
+        assert INFERRED_MARK in _block_for(upc.user_id, monkeypatch)

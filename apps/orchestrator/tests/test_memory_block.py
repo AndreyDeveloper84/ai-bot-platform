@@ -11,7 +11,7 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
-from ayla_ai_core import MEMORY_BLOCK_HEADER
+from ayla_ai_core import INFERRED_MARK, MEMORY_BLOCK_HEADER, MEMORY_INFERRED_HEADER
 
 from apps.orchestrator import memory_block
 from apps.orchestrator.memory_block import build_concierge_memory_block
@@ -191,3 +191,141 @@ class TestInferredKeyTypeSafety:
         )
         with pytest.raises(TypeError):
             build_concierge_memory_block(SimpleNamespace(ayla_user_id=uuid4()))
+
+
+class TestDeclaredProvenance:
+    """P0-3 — бэкендный вывод (`busy_days`, любимые мастера) не должен
+    приходить модели в том же виде, что сказанное человеком."""
+
+    def _ok(self, monkeypatch, context: dict, raw: dict | None = None) -> None:
+        declared = (
+            SimpleNamespace(context=context, raw=raw)
+            if raw is not None
+            else (SimpleNamespace(context=context))
+        )
+        monkeypatch.setattr(
+            memory_block,
+            "get_declared_prefs",
+            lambda bot_user: _gated(memory_block.GateStatus.OK, declared),
+        )
+
+    def test_backend_inferred_field_is_marked_stated_one_is_not(self, monkeypatch) -> None:
+        self._ok(
+            monkeypatch,
+            {"diet_type": "vegan", "busy_days": ["tue"]},
+            raw={"data_sources": {"diet_type": "explicit", "busy_days": "inferred"}},
+        )
+        block = build_concierge_memory_block(object())
+        assert "- Диета: vegan" in block
+        assert f"- {INFERRED_MARK} Избегает: вторник" in block
+        assert MEMORY_INFERRED_HEADER in block
+
+    def test_unknown_backend_source_is_treated_as_derived(self, monkeypatch) -> None:
+        """`behavioral`/`transactional`/что угодно незнакомое — не цитата."""
+        self._ok(
+            monkeypatch,
+            {"busy_days": ["tue"]},
+            raw={"data_sources": {"busy_days": "behavioral"}},
+        )
+        assert INFERRED_MARK in build_concierge_memory_block(object())
+
+    def test_field_absent_from_data_sources_stays_stated(self, monkeypatch) -> None:
+        """Legacy-строки без штампа писал человек через мобильное приложение."""
+        self._ok(
+            monkeypatch,
+            {"diet_type": "vegan"},
+            raw={"data_sources": {"busy_days": "inferred"}},
+        )
+        block = build_concierge_memory_block(object())
+        assert "- Диета: vegan" in block
+        assert INFERRED_MARK not in block
+
+    def test_without_backend_data_sources_block_is_unchanged(self, monkeypatch) -> None:
+        """Отрицательный: пока бэкенд не отдаёт поле — вывод прежний, до байта.
+
+        Бот и бэкенд деплоятся независимо; порядок деплоя не имеет права
+        превратить каждый заявленный факт в «догадку».
+        """
+        ctx = {"diet_type": "vegan", "busy_days": ["tue"], "preferred_time_slots": ["evening"]}
+        self._ok(monkeypatch, ctx)
+        no_field = build_concierge_memory_block(object())
+        self._ok(monkeypatch, ctx, raw={"meta": {"filled_fields": 3}})
+        wrong_shape = build_concierge_memory_block(object())
+        self._ok(monkeypatch, ctx, raw={"data_sources": dict.fromkeys(ctx, "explicit")})
+        all_stated = build_concierge_memory_block(object())
+
+        assert INFERRED_MARK not in no_field
+        assert MEMORY_INFERRED_HEADER not in no_field
+        assert no_field == wrong_shape == all_stated
+
+
+class TestLocalProvenance:
+    """Тот же водораздел для локального MemoryEntry."""
+
+    def _view(self, monkeypatch, source: str):
+        from apps.identity.services.memory_reader import GreenFact, PersonalContextView
+
+        monkeypatch.setattr(
+            memory_block,
+            "get_declared_prefs",
+            lambda bot_user: _gated(memory_block.GateStatus.OK, SimpleNamespace(context={})),
+        )
+        monkeypatch.setattr("apps.consent.memory.can_store_green_memory", lambda bot_user: True)
+        view = PersonalContextView(
+            summary="",
+            green_facts=[
+                GreenFact(
+                    kind="lifestyle",
+                    content={"key": "diet", "value": "vegan"},
+                    source=source,
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            "apps.identity.services.memory_key_policy.read_current_view", lambda user_id: view
+        )
+        return build_concierge_memory_block(SimpleNamespace(ayla_user_id=uuid4()))
+
+    def test_user_stated_fact_is_not_marked_as_a_guess(self, monkeypatch) -> None:
+        block = self._view(monkeypatch, "explicit")
+        assert "Диета: vegan" in block
+        assert INFERRED_MARK not in block
+
+    def test_derived_fact_is_marked(self, monkeypatch) -> None:
+        block = self._view(monkeypatch, "inferred")
+        assert f"{INFERRED_MARK} кажется, Диета: vegan" in block
+
+    def test_the_two_are_not_the_same_text(self, monkeypatch) -> None:
+        assert self._view(monkeypatch, "explicit") != self._view(monkeypatch, "inferred")
+
+    def test_multi_key_list_mixing_a_guess_is_labelled_a_guess(self, monkeypatch) -> None:
+        """Одна отрендеренная строка — одно происхождение; смесь честнее пометить."""
+        from apps.identity.services.memory_reader import GreenFact, PersonalContextView
+
+        monkeypatch.setattr(
+            memory_block,
+            "get_declared_prefs",
+            lambda bot_user: _gated(memory_block.GateStatus.OK, SimpleNamespace(context={})),
+        )
+        monkeypatch.setattr("apps.consent.memory.can_store_green_memory", lambda bot_user: True)
+        view = PersonalContextView(
+            summary="",
+            green_facts=[
+                GreenFact(
+                    kind="preference",
+                    content={"key": "preferred_districts", "value": "Центр"},
+                    source="explicit",
+                ),
+                GreenFact(
+                    kind="preference",
+                    content={"key": "preferred_districts", "value": "Арбеково"},
+                    source="inferred",
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            "apps.identity.services.memory_key_policy.read_current_view", lambda user_id: view
+        )
+        block = build_concierge_memory_block(SimpleNamespace(ayla_user_id=uuid4()))
+        assert "Центр" in block and "Арбеково" in block
+        assert INFERRED_MARK in block

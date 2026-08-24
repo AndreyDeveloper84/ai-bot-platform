@@ -33,10 +33,23 @@ from apps.identity.models import MemoryEntry, UserPersonalContext
 
 @dataclass(frozen=True)
 class GreenFact:
-    """One surfaced green memory fact (decrypted content)."""
+    """One surfaced green memory fact (decrypted content).
+
+    ``source`` mirrors :attr:`MemoryEntry.source` — ``explicit`` (the person
+    said it), ``inferred`` (Ayla derived it from conversation) or ``signal``
+    (derived from observable events). It rides along because consumers that
+    render facts into the prompt MUST be able to tell a quote from a guess
+    (P0-3, ``OD_C04_GROUNDED_WHY.md`` §1); collapsing it here is exactly how
+    the origin used to get lost.
+
+    The default is deliberately NOT ``explicit``: when the origin is unknown
+    the safe reading is «we cannot claim the person said this», because the
+    failure mode of the other default is presenting a guess as a quote.
+    """
 
     kind: str
     content: dict[str, Any]
+    source: str = MemoryEntry.SOURCE_INFERRED
 
 
 @dataclass(frozen=True)

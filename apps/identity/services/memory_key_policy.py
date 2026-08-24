@@ -122,7 +122,9 @@ def read_current_view(user_id: uuid.UUID) -> PersonalContextView:
 
     Same read gate (green-only, forgotten users invisible) and the same
     view shape; ``green_facts`` are collapsed by :func:`select_current_facts`
-    so consumers never surface mutually exclusive values of one key.
+    so consumers never surface mutually exclusive values of one key, and each
+    carries its :attr:`MemoryEntry.source` so the prompt can tell a quote from
+    a guess (P0-3).
     """
 
     upc = get_personal_context(user_id)
@@ -130,7 +132,14 @@ def read_current_view(user_id: uuid.UUID) -> PersonalContextView:
         return PersonalContextView()
 
     facts = [
-        GreenFact(kind=entry.kind, content=entry.content if isinstance(entry.content, dict) else {})
+        GreenFact(
+            kind=entry.kind,
+            content=entry.content if isinstance(entry.content, dict) else {},
+            # The resolver already reads `source` to pick a winner (`_currency`)
+            # and used to throw it away right here — the single point where the
+            # bot lost «who said this» (P0-3). Carry it to the consumer.
+            source=entry.source,
+        )
         for entry in select_current_facts(read_green_entries(user_id))
     ]
     summary = (upc.summary or "").strip() or None
