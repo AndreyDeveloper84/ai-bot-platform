@@ -20,6 +20,8 @@ The salon fixture is synthetic — no hardcoded formula-tela, no real master.
 
 from __future__ import annotations
 
+import uuid
+
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -158,9 +160,22 @@ def test_live_turn_returns_a_master_not_the_fallback(
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
     # DRF-962: the callback must carry tenant + master + the resolved service —
     # a two-id payload dead-ends on the booking skill's stale-context guard.
+    #
+    # DRF-1324 added a FOURTH segment: the request that surfaced these masters,
+    # so the ask-the-service menu behind an unresolved tap can be narrowed by
+    # it. The count is asserted against the new contract rather than loosened
+    # to «at least three» — the segment is positional, and a payload that
+    # silently grew a fifth one would be a defect this test should catch. The
+    # ref is checked by decoding it back, not by its shape: what matters is
+    # that the query survived the round trip.
     callback = buttons[0]["callback"]
     assert callback.startswith("cb:discover:book:")
-    assert len(callback.removeprefix("cb:discover:book:").split(":")) == 3
+    parts = callback.removeprefix("cb:discover:book:").split(":")
+    assert len(parts) == 4
+    assert uuid.UUID(parts[2])  # the resolved service still rides position 3
+    # Parametrized over both tool-argument shapes, so the stem list differs;
+    # what must hold either way is that the request survived the round trip.
+    assert discovery.decode_query_ref(parts[3])[0] == "спорти"
 
 
 def test_master_is_reachable_without_any_specialization_text(

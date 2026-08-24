@@ -27,6 +27,8 @@ the prompt is unchanged (happy-path intact).
 
 from __future__ import annotations
 
+import base64
+
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ from apps.marketplace.discovery import (
     discover_salons,
     discover_services,
     get_salon,
+    query_stems,
     service_coverage,
     split_requested_services,
 )
@@ -423,6 +426,119 @@ def render_missing_services(missing: list[str], city: str | None = None) -> str:
     return f"{quoted} — {subject} у наших мастеров сейчас нет."
 
 
+# ─── DRF-1324: the card's button carries the REQUEST, not just the ids ─────
+#
+# Live pilot 23.08, the first booking ever made through the bot. «запиши на
+# лимфодренаж» surfaced the three masters who really do perform lymphatic
+# drainage — the master search was right. The tap then asked «Выберите услугу
+# мастера Сазонова Инна» and offered the first TEN of her nineteen services in
+# alphabetical order: «Биоэнергетический массаж детский» second, the two
+# lymphatic-drainage services sixth and seventh. The booking that came out of
+# that tap was for the children's massage.
+#
+# The request died at the callback boundary. ``cb:discover:book:{T}:{M}``
+# carries who, and — since DRF-962 — sometimes what, but never WHY this master
+# was on the list, so the menu behind the tap could not be the menu of the
+# request. Everything else about the turn was correct.
+#
+# The fix is the grammar the module already believes in: a button carries what
+# it means (``_render_salon_cards``: «a chip tap addresses a salon by the id
+# the bot itself rendered, never by the name substring»). Re-deriving the
+# query from the conversation at tap time would break that rule and would be
+# wrong the moment the user types something else between the render and the
+# tap; the callback is the only place the query is provably the one that
+# produced this very card.
+#
+# ### What rides, and what does NOT
+#
+# The STEMS, and only the stems — ``apps.marketplace.discovery.query_stems``,
+# the pure half of the parse. City recognition and goal recognition both read
+# the catalog, so they run at the TAP
+# (``apps.marketplace.discovery.parse_stems``), inside the handoff, which is
+# already querying anyway.
+#
+# That split is not an optimisation, it is the layering: rendering a card must
+# stay a pure function of the DTOs it is handed. Three suites render cards
+# with no database at all; a renderer that queried broke every one of them,
+# and marking them ``django_db`` would have buried the error rather than
+# answered it.
+#
+# ### Encoding
+#
+# ``base64url`` of the stem list:
+#
+# * ASCII out — every existing ``cb:`` payload is hex, so a Cyrillic payload
+#   would be the first one on the wire and is not something to find out about
+#   on a live pilot;
+# * no ``:`` in the base64url alphabet (``A-Za-z0-9-_``), so the colon split
+#   the handler does stays unambiguous;
+# * stems, not the raw turn, so the segment stays short — each is ≤ 6
+#   characters and there are at most five.
+#
+# Padding is stripped and restored: ``=`` is the one character MAX rejects in
+# an ``open_app`` payload (``apps/channels/max/outbound.py``), and while this
+# is a ``callback`` payload, spending nothing to stay inside the stricter rule
+# is cheaper than discovering the difference in production.
+_QUERY_REF_SEP = ","
+
+# A query ref longer than this is dropped and the tap degrades to the
+# unfiltered menu — the pre-DRF-1324 behaviour. MAX documents no callback
+# payload limit we can rely on, and the two UUIDs already spend ~90
+# characters, so the ceiling is deliberately generous enough for a real query
+# (five six-character stems encode to 44) and still far short of anything that
+# could truncate a payload silently.
+_MAX_QUERY_REF_CHARS = 96
+
+# Upper bound on stems read back OUT of a ref. ``_MAX_TOKENS`` bounds what the
+# tokenizer produces, but a decoder must bound what it accepts on its own — a
+# hand-written payload is not obliged to have come from the encoder.
+_MAX_QUERY_REF_STEMS = 5
+
+
+def encode_query_ref(raw: str | None) -> str:
+    """Encode a discovery query for a booking callback, or ``""``. PURE.
+
+    No catalog read — see the block above for why that matters. ``""`` for a
+    query with nothing to carry and for one that would not fit; both mean «the
+    menu behind this tap cannot be narrowed», which the handoff answers with
+    the full list exactly as it did before DRF-1324.
+
+    Duplicate stems are dropped (``dict.fromkeys`` keeps the order): «массаж
+    массаж» would otherwise spend two of the five slots on one term.
+    """
+    if not raw or not raw.strip():
+        return ""
+    stems = list(dict.fromkeys(query_stems(raw)))
+    if not stems:
+        return ""
+    payload = _QUERY_REF_SEP.join(stems)
+    ref = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    return ref if len(ref) <= _MAX_QUERY_REF_CHARS else ""
+
+
+def decode_query_ref(ref: str) -> list[str]:
+    """The stems :func:`encode_query_ref` wrote; ``[]`` on anything unexpected.
+
+    A forged, truncated or stale ref decodes to ``[]``, which the handoff
+    reads as «do not narrow». Degrading to the full service menu is the honest
+    failure here: it is the answer this surface gave until today, and it can
+    only ever show the user more of their own master's real services — never
+    fewer, and never a service someone else performs.
+
+    The caller turns these stems into a request with
+    ``apps.marketplace.discovery.parse_stems``, which is where the catalog
+    gets a say.
+    """
+    ref = (ref or "").strip()
+    if not ref or len(ref) > _MAX_QUERY_REF_CHARS:
+        return []
+    try:
+        payload = base64.urlsafe_b64decode(ref + "=" * (-len(ref) % 4)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return []
+    return [p for p in payload.split(_QUERY_REF_SEP) if p][:_MAX_QUERY_REF_STEMS]
+
+
 def _render_master_cards(
     cards: list[MasterCard],
     *,
@@ -433,35 +549,45 @@ def _render_master_cards(
 ) -> DiscoveryReply:
     """Render discovered masters as a reply + a one-button-per-card keyboard.
 
-    PUBLIC fields only (the DTO carries nothing else). Each button's callback
-    is ``cb:discover:book:{tenant_id}:{master_id}`` — the handoff seam
-    (#1020) — extended with ``:{service_id}`` when discovery resolved the
-    queried service unambiguously (DRF-962), so the tap enters booking with
-    the service context instead of the stale-context dead-end.
+        PUBLIC fields only (the DTO carries nothing else). Each button's callback
+        is ``cb:discover:book:{tenant_id}:{master_id}`` — the handoff seam
+        (#1020) — extended with ``:{service_id}`` when discovery resolved the
+        queried service unambiguously (DRF-962), so the tap enters booking with
+        the service context instead of the stale-context dead-end, and with a
+        fourth ``:{query_ref}`` segment (DRF-1324) carrying the REQUEST, so the
+        ask-the-service menu behind an unresolved tap is the menu of that request
+        rather than the master's whole roster in alphabetical order.
 
-    ``city`` / ``specialization`` are the query that produced ``cards`` and are
-    used ONLY for the empty case, so the refusal can name what was searched for
-    (DRF-1283 — see :func:`render_no_match`). Callers that have the query
-    should pass it; callers that don't get the generic line.
+    The SAME ref goes on every button — whichever master is tapped,
+        the menu behind them is narrowed by the request that put them all on this
+        list — and building it stays PURE (:func:`encode_query_ref`), so this
+        function remains a function of the DTOs it is handed and nothing else.
 
-    ### Partial coverage (DRF-1312)
+        ``city`` / ``specialization`` are the query that produced ``cards`` and are
+        used ONLY for the empty case, so the refusal can name what was searched for
+        (DRF-1283 — see :func:`render_no_match`). Callers that have the query
+        should pass it; callers that don't get the generic line.
 
-    ``missing_services`` are the parts of a COMPOSITE request that the catalog
-    cannot serve, already verified against it (``service_coverage``); they are
-    stated in the reply instead of vanishing. That statement goes FIRST, ahead
-    of the cards, for two reasons: the ``_MAX_REPLY_CHARS`` clip below eats the
-    tail, and the only line that must never be lost is the one that says what
-    we cannot do; and it must be read BEFORE the list, or a list that answers
-    half the request reads as an answer to all of it — the exact impression
-    DRF-1312 was filed about.
+        ### Partial coverage (DRF-1312)
 
-    The header then binds the list to the half we CAN serve, naming it from
-    ``available_services`` when the caller knows those names. «Вот мастера,
-    которые могут подойти» under a request half of which was just refused
-    would be the same silent overclaim in a longer message.
+        ``missing_services`` are the parts of a COMPOSITE request that the catalog
+        cannot serve, already verified against it (``service_coverage``); they are
+        stated in the reply instead of vanishing. That statement goes FIRST, ahead
+        of the cards, for two reasons: the ``_MAX_REPLY_CHARS`` clip below eats the
+        tail, and the only line that must never be lost is the one that says what
+        we cannot do; and it must be read BEFORE the list, or a list that answers
+        half the request reads as an answer to all of it — the exact impression
+        DRF-1312 was filed about.
+
+        The header then binds the list to the half we CAN serve, naming it from
+        ``available_services`` when the caller knows those names. «Вот мастера,
+        которые могут подойти» under a request half of which was just refused
+        would be the same silent overclaim in a longer message.
     """
     if not cards:
         return render_no_match(city=city, specialization=specialization)
+
+    query_ref = encode_query_ref(specialization)
 
     missing_line = render_missing_services(missing_services or [], city)
     lines: list[str] = []
@@ -501,13 +627,19 @@ def _render_master_cards(
         # The id still rides the callback below regardless of the name.
         service = f" · {card.service_name}" if card.service_name else ""
         lines.append(f"• {card.name}{spec}{service}{rating}{city}")
-        service_suffix = f":{card.service_id}" if card.service_id is not None else ""
+        # The service segment stays positional, so a query ref without a
+        # resolved service rides behind an EMPTY one — «::ref», not «:ref» —
+        # or the handler would read the ref as a malformed service id and the
+        # tap would lose both.
+        service_part = str(card.service_id) if card.service_id is not None else ""
+        suffix = f":{service_part}" if (service_part or query_ref) else ""
+        if query_ref:
+            suffix += f":{query_ref}"
         buttons.append(
             {
                 "label": f"Записаться к {card.name}",
                 "callback": (
-                    f"{CALLBACK_DISCOVER_BOOK_PREFIX}"
-                    f"{card.tenant_id}:{card.master_id}{service_suffix}"
+                    f"{CALLBACK_DISCOVER_BOOK_PREFIX}{card.tenant_id}:{card.master_id}{suffix}"
                 ),
             }
         )

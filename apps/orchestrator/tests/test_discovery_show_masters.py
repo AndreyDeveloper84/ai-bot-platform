@@ -61,9 +61,16 @@ def test_show_masters_tool_renders_cards_and_handoff_buttons(monkeypatch) -> Non
 
 
 def test_show_masters_resolved_service_rides_the_callback(monkeypatch) -> None:
-    """DRF-962: a card with an unambiguously matched service renders a 3-id
-    callback (tenant:master:service) and surfaces the service on the card
-    line, so the tap enters booking with the service context."""
+    """DRF-962: a card with an unambiguously matched service renders a callback
+    carrying tenant:master:service and surfaces the service on the card line,
+    so the tap enters booking with the service context.
+
+    DRF-1324 appended a FOURTH segment — the request that surfaced these
+    masters, so the ask-the-service menu behind an unresolved tap can be
+    narrowed by it. The three ids are still asserted positionally and exactly;
+    the ref is asserted by decoding it back rather than by its spelling, since
+    its encoding is not the contract — surviving the round trip is.
+    """
     tid, mid, sid = uuid4(), uuid4(), uuid4()
     seen_kwargs: dict = {}
 
@@ -89,7 +96,9 @@ def test_show_masters_resolved_service_rides_the_callback(monkeypatch) -> None:
     assert "Спортивный массаж" in reply.text
     assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
-    assert buttons[0]["callback"] == f"cb:discover:book:{tid}:{mid}:{sid}"
+    ids, _, ref = buttons[0]["callback"].rpartition(":")
+    assert ids == f"cb:discover:book:{tid}:{mid}:{sid}"
+    assert discovery.decode_query_ref(ref) == ["спорти", "массаж"]
 
 
 def test_show_masters_no_results_graceful(monkeypatch) -> None:
