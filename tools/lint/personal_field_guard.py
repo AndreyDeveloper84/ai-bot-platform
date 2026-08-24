@@ -584,6 +584,13 @@ def _load_registry(apps_root: Path) -> Registry:
     import importlib.util
 
     path = apps_root / "identity" / "personal_fields.py"
+    if not path.is_file():
+        raise LookupError(
+            f"personal_field_guard: the registry is gone from {path}. Deleting it "
+            "does not make the guard pass — it makes it fail, which is the point: "
+            "without the declarations there is nothing to hold a new personal "
+            "field to. Restore the file from git history."
+        )
     spec = importlib.util.spec_from_file_location("_ayla_personal_fields", path)
     if spec is None or spec.loader is None:  # pragma: no cover — unreachable in tree
         raise LookupError(f"personal_field_guard: cannot load registry at {path}")

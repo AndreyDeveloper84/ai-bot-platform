@@ -467,6 +467,12 @@ class TestTheRealTree:
         assert len(models) >= 5, sorted(models)
         assert len(memory_keys) >= 5, sorted(memory_keys)
 
+    def test_deleting_the_registry_fails_loudly(self, tmp_path: Path) -> None:
+        """Removing the declarations must break the guard, not satisfy it."""
+        (tmp_path / "identity").mkdir(parents=True)
+        with pytest.raises(LookupError, match="the registry is gone"):
+            guard._load_registry(tmp_path)
+
     def test_every_debt_entry_says_which_ruling_it_breaks(self) -> None:
         """Named debt, not a one-line baseline — that is the whole point."""
         registry = guard._load_registry(_PROJECT_ROOT / "apps")
