@@ -27,6 +27,16 @@ whole point of a parity guard is that adding a channel without adding it here
 is exactly the failure that produced DRF-1300. :class:`TestEveryLiveHandlerIsGated`
 is the structural backstop for the channel after next: it fails if any live
 channel handler module stops routing through ``evaluate_inbound``.
+
+### DRF-1210 — the same backstop, facing the other way
+
+The inbound rule caught the channel that forgot to read the PERSON. Nothing
+caught the channel that never read the ASSISTANT: ``evaluate_outbound``
+shipped with DRF-1061, was wired to four surfaces where the bot speaks
+first, and was on none of the three where a client is waiting for an
+answer. :class:`TestEveryLiveHandlerChecksItsOwnReply` is the mirror rule —
+same scan, same brain-caller set, the other direction — so the channel
+after next cannot ship half-gated either.
 """
 
 from __future__ import annotations
@@ -412,4 +422,68 @@ class TestEveryLiveHandlerIsGated:
             f"module(s) calling orchestrate_turn with no inbound safety gate: {ungated}. "
             "Every surface where the bot talks to a person must run "
             "apps.orchestrator.safety.gate.evaluate_inbound before the brain (DRF-1300)."
+        )
+
+
+class TestEveryLiveHandlerChecksItsOwnReply:
+    """DRF-1210, the mirror of the class above.
+
+    ``evaluate_inbound`` reads what the person said; nothing on the client
+    path read what the bot was about to say. That is not a second copy of
+    the DRF-1300 bug — it is the same bug with the arrow reversed, and it
+    lasted longer precisely because the class above only ever looked one
+    way.
+
+    The rule: **if a module calls the brain, it checks what came back.**
+    The brain-caller set is deliberately the SAME one — ``orchestrate_turn``
+    is the single normalized entry into the live brains, the seam is
+    contractually side-effect-free and so cannot check on the caller's
+    behalf, and a module that calls it is by definition a module that hands
+    model output to a person.
+
+    Why the inbound gate does not already cover it, and why tightening it
+    would be the wrong fix: ``gate.py`` short-circuits ``HANDOFF`` and
+    ``BLOCK`` and lets ``CLARIFY`` through on purpose (gate.py:16-20). The
+    outbound class — a confident medical claim, a promise made on the
+    salon's behalf — arrives as an innocuous ``CLARIFY`` question. Making
+    the inbound gate catch it means sending beauty queries to crisis
+    screening.
+
+    Same source-level posture as its sibling, for the same reason: a
+    channel nobody has written yet has no fixtures here to drive. The only
+    thing assertable about it on the day it lands is that it consults both
+    halves of the gate.
+    """
+
+    def test_every_brain_caller_checks_its_reply(self):
+        import pathlib
+
+        apps_root = pathlib.Path(max_handler.__file__).resolve().parents[3]
+        brain_callers = []
+        for path in sorted(apps_root.rglob("*.py")):
+            if "tests" in path.parts or path.name.startswith("test_"):
+                continue
+            body = path.read_text(encoding="utf-8")
+            if "orchestrate_turn(" in body and "def orchestrate_turn" not in body:
+                brain_callers.append((path, body))
+
+        # Guard the guard: an empty scan would make this pass vacuously.
+        assert len(brain_callers) >= 2, (
+            f"expected the live brain callers, found {[str(p) for p, _ in brain_callers]}"
+        )
+
+        # ``guard_outbound`` is the channel-facing wrapper (it adds the single
+        # PII-safe emit); ``evaluate_outbound`` is the check itself. Either
+        # name satisfies the rule — what matters is that the module consults
+        # the outbound half at all, not which door it comes in by.
+        unchecked = [
+            str(path.relative_to(apps_root))
+            for path, body in brain_callers
+            if "guard_outbound" not in body and "evaluate_outbound" not in body
+        ]
+        assert unchecked == [], (
+            f"module(s) calling orchestrate_turn without checking the reply: {unchecked}. "
+            "Every surface where the bot talks to a person must run "
+            "apps.orchestrator.safety.gate.guard_outbound over the drafted reply "
+            "before it is sent (DRF-1210)."
         )
