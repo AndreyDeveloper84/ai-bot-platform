@@ -74,6 +74,38 @@ def _strict(settings):
     settings.STRICT_TENANT_REFUSE = True
 
 
+@pytest.fixture(autouse=True)
+def _penza_is_a_place_we_serve():
+    """One bookable master in Пенза (DRF-1328).
+
+    ``_BOOKING_TURN`` names a city, and since DRF-1328 the deterministic
+    branch claims a turn only when it can account for EVERY word — a city
+    counts as accounted for exactly when the marketplace has someone bookable
+    there (``apps.marketplace.discovery.strip_known_cities``, live data by
+    DRF-1283's design: «recognised» can only ever mean «a place this
+    marketplace can serve»).
+
+    In a contour with no masters at all, «пензе» is an unknown word and the
+    turn goes to the model — which is the CORRECT outcome there, since an
+    empty catalog can answer nothing. But this file is about what happens
+    when the branch runs, so it has to be a contour where it can.
+    """
+    from datetime import datetime, timezone
+
+    from apps.catalog.models import CatalogMaster
+    from apps.tenancy.models import Tenant
+
+    tenant = Tenant.objects.create(slug="salon-penza-1283", name="SPAtrium", city="Пенза")
+    CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        name="Архипкин Денис",
+        specialization="массаж",
+        is_active=True,
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        external_updated_at=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+    )
+
+
 @pytest.fixture
 def spy_concierge(monkeypatch):
     """The concierge LLM turn, as the handler reaches it (via the turn seam)."""
@@ -104,7 +136,8 @@ def _run(text: str, *, mid: str = "z-1") -> None:
     max_handler.handle_global_max_event(_msg(text, mid=mid), trace_id=str(uuid.uuid4()))
 
 
-# A turn `looks_like_booking_request` accepts — it names a service — so the
+# A turn the claim parser accepts — it names a service and nothing else
+# («пензе» is a city we serve, see `_penza_is_a_place_we_serve`) — so the
 # deterministic branch is the one that runs first.
 _BOOKING_TURN = "покажи массажистов в пензе"
 

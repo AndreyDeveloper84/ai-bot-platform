@@ -462,6 +462,27 @@ class TestCatalogChips:
         assert execute_catalog_callback("cb:visit:card:abc") is None
         assert execute_catalog_callback("какие салоны у вас есть") is None
 
+    def test_city_is_not_printed_twice(self):
+        # Live pilot 23.08: every mirrored address already opens with the city
+        # («Пенза, ул. Карпинского, 33А»), so gluing city + address printed
+        # «SPAtrium — Пенза, Пенза, ул. Карпинского, 33А».
+        tenant = _salon("s1", "SPAtrium", city="Пенза", address="Пенза, ул. Карпинского, 33А")
+        _service(tenant, "Массаж спины")
+
+        reply = execute_catalog_tool("show_salons", {"city": "Пенза"})
+
+        assert "• SPAtrium — Пенза, ул. Карпинского, 33А" in reply.text
+        assert "Пенза, Пенза" not in reply.text
+
+    def test_address_from_another_city_still_shows_both(self):
+        # Mirror drift: then the city and the address really are two facts.
+        tenant = _salon("s1", "Выездной", city="Пенза", address="Москва, Тверская, 1")
+        _service(tenant, "Массаж спины")
+
+        reply = execute_catalog_tool("show_salons", {})
+
+        assert "• Выездной — Пенза, Москва, Тверская, 1" in reply.text
+
     def test_five_real_salons_render_whole(self):
         # Real Penza rows (docs/catalog/MARKET_PENZA.md) are long: at the
         # model's 600-char prose budget this list came out cut mid-word, with

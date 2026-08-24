@@ -493,6 +493,19 @@ MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
 # ``open_app`` button type so the Mini App opens INSIDE the MAX client.
 # When unset, the fallback ``link`` button opens MAX_MINIAPP_URL in the
 # user's external browser — degraded UX but always works.
+#
+# MAX_MINIAPP_URL is the Mini App **origin and nothing else** — scheme +
+# host, no path (DRF-1326). The whole client path lives in
+# ``apps/skills/welcome/skill.py::MINIAPP_ROUTES``; appending ``/customer``
+# here would produce ``/customer/customer/wellness``. On the pilot the
+# client screens are served from ``proapp``, not ``miniapp``.
+#
+# Both empty is a supported state, not a broken one: every Mini App button
+# is then dropped and the welcome screen ships only bot-native callbacks.
+# Filling either variable is what turns those buttons on, so the routes
+# they carry have to be right *before* it happens — which is why
+# ``apps/skills/welcome/tests/test_miniapp_routes.py`` checks each one
+# against the Mini App route table rather than waiting for a live tap.
 MAX_BOT_WEB_APP = os.environ.get("MAX_BOT_WEB_APP", "")
 MAX_MINIAPP_URL = os.environ.get("MAX_MINIAPP_URL", "")
 

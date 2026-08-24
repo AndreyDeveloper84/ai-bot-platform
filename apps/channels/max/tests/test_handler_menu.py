@@ -154,7 +154,7 @@ class TestWidenedBookingCoverage:
 
     @pytest.mark.parametrize(
         "text",
-        ["Хочу массаж", "Мне бы маникюр", "есть свободное время на этой неделе"],
+        ["Хочу массаж", "Мне бы маникюр"],
     )
     def test_service_phrasing_reaches_booking(
         self, tenant, sent, fake_redis, settings, mark_welcomed, booking_spy, text
@@ -178,6 +178,58 @@ class TestWidenedBookingCoverage:
             message_text=text,
         )
         assert BookingSkill().matches(probe) is False
+
+    def test_availability_phrasing_is_now_booking_s_own(
+        self, tenant, sent, fake_redis, settings, mark_welcomed, booking_spy
+    ):
+        """DRF-981 — «есть свободное время на этой неделе» moved one skill up.
+
+        SPLIT OUT of the parametrised test above, where it asserted the
+        opposite half: that booking's own matcher DECLINES it and
+        MenuSkill is the reason the turn arrives. That tripwire did its
+        job — it fired on this change — so the change is recorded here
+        rather than the tripwire loosened. It still guards the two
+        phrases it was written for.
+
+        Nothing is lost by the move, and that is what this test states:
+
+        * the DESTINATION is unchanged — booking claims the turn and
+          answers it, exactly as before;
+        * MenuSkill coverage is not reduced — it is registered LAST
+          before echo and still owns every turn booking declines, and
+          forwarding to booking was all it did with this one;
+        * what the move buys is the punctuated variant. «Есть свободное
+          время на этой неделе?» never reached MenuSkill at all: a bare
+          «?» is an ``_QUESTION_SIGNALS`` match and FAQ is registered
+          eight skills earlier. That is DRF-981, and a rule living in
+          the last-before-echo fallback cannot fix it.
+        """
+        settings.STRICT_TENANT_SCOPE = "strict"
+        text = "есть свободное время на этой неделе"
+        with tenant_scope(tenant), trace_id_scope(str(uuid4())):
+            mark_welcomed(user_id=31001, chat_id=41001)
+            max_handler.handle_max_event(_payload(text=text))
+
+        assert booking_spy == [text], "booking skill did not claim the turn"
+        assert sent[0]["text"] == _BOOKING_SENTINEL
+
+        from apps.skills.base import SkillContext
+        from apps.skills.booking.skill import BookingSkill
+
+        probe = SkillContext(
+            conversation=MagicMock(skill_state={}),
+            bot_user=MagicMock(),
+            message_text=text,
+        )
+        assert BookingSkill().matches(probe) is True
+        # The half that matters: the question-marked form routes the same
+        # way. Before DRF-981 it went to the knowledge base.
+        probe_q = SkillContext(
+            conversation=MagicMock(skill_state={}),
+            bot_user=MagicMock(),
+            message_text=text + "?",
+        )
+        assert BookingSkill().matches(probe_q) is True
 
     def test_small_talk_still_does_not_reach_booking(
         self, tenant, sent, fake_redis, settings, mark_welcomed, booking_spy

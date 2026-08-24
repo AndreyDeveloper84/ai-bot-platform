@@ -56,7 +56,7 @@ from apps.events.services import emit
 from apps.events.vocabulary import SKILL_DISPATCHED
 from apps.llm.protocol import LLMError
 from apps.skills.base import SkillContext, SkillResult
-from apps.skills.booking.lookup import is_personal_booking_lookup
+from apps.skills.booking.lookup import is_booking_request, is_personal_booking_lookup
 from apps.skills.faq.prompts import BrandVoiceConfig, build_faq_prompt
 from apps.skills.faq.tools import (
     SEARCH_KB_TOOL_SPEC,
@@ -133,6 +133,15 @@ class FAQSkill:
         # read-only show_my_bookings tool. Yield them here so the
         # first-match-wins registry order stops intercepting them.
         if is_personal_booking_lookup(context.message_text):
+            return False
+        # DRF-981 — the same yield, one intent over. «Можно на маникюр?»
+        # is a request to be booked; the only reason it landed here is
+        # that _QUESTION_SIGNALS below counts a bare «?» as a question,
+        # and this skill is registered ahead of booking. The predicate
+        # rejects every price / policy / safety question by name before
+        # it tests anything positive, so «Сколько стоит маникюр?» and
+        # «А что такое шугаринг?» still belong to the knowledge base.
+        if is_booking_request(context.message_text):
             return False
         return _legacy_keyword_match(context.message_text)
 

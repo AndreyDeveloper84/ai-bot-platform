@@ -1354,3 +1354,54 @@ export const rejectAvailabilityRequest = (
     `/api/v1/admin/availability-requests/${requestId}/reject/`,
     { rejection_reason },
   );
+
+// --- Staff access codes (DRF-1061 block 2.4) -----------------------------
+//
+// `POST /api/v1/admin/staff/invite/` — apps/admin_api/views_staff_invite.py.
+//
+// This is NOT `masters/invite/`, and the distinction is the whole point of
+// the endpoint existing separately:
+//
+//   masters/invite/   CREATES a catalog master — a person who is not in the
+//                     salon yet, with services, a card, a profile.
+//   staff/invite/     GRANTS ACCESS to a person who already exists — a
+//                     TenantStaff row, or a link from an existing catalog
+//                     master to their MAX account.
+//
+// Before this client existed the only way to make an employee was a
+// management command on the pilot host, i.e. somebody with SSH.
+
+/** Roles an access code can grant. Mirrors `StaffInvite.Role`. */
+export type StaffInviteRole = "owner" | "admin" | "receptionist" | "master";
+
+export interface StaffInvitePayload {
+  role: StaffInviteRole;
+  /** Required for `role: "master"` — the EXISTING catalog row to link. */
+  master_id?: string;
+  /** Free-form label for the issuer's own records. Server caps at 200. */
+  note?: string;
+}
+
+export interface StaffInviteResponse {
+  invite_id: string;
+  role: StaffInviteRole;
+  /** Plaintext, formatted `AYLA-XXXX`. Returned exactly once — see below. */
+  code: string;
+  expires_at: string;
+  /**
+   * The server says this out loud rather than leaving it to be inferred:
+   * only the code's hash is stored, so nothing — not this client, not the
+   * admin API, not the database — can produce it again. A UI that treats
+   * the code as re-readable is wrong, and the field exists so it cannot
+   * claim it was not told.
+   */
+  code_is_shown_once: boolean;
+}
+
+export const issueStaffInvite = (
+  payload: StaffInvitePayload,
+): Promise<StaffInviteResponse> =>
+  request("/api/v1/admin/staff/invite/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });

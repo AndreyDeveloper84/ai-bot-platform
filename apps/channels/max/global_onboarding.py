@@ -28,8 +28,13 @@ discovery bot:
 
 * the initial welcome → :data:`GLOBAL_WELCOME_TEXT` + a single «Начать» button
   that routes into the shared S2 consent flow;
-* the S5 first-action prompt → :data:`GLOBAL_S5_TEXT` («напиши услугу и город»),
-  the marketplace call-to-action, with the wellness grid dropped.
+* the S5 first-action prompt → :data:`GLOBAL_S5_TEXT` + the C01 Quick Actions
+  (:mod:`apps.channels.max.quick_actions`), with the wellness grid dropped.
+
+Обе копии переписаны в DRF-1348 (решение владельца 24.08): need/outcome-first,
+без города и каталожной подачи. Экран C01 несёт три goal-like чипа и один
+вторичный вход; тап по любому из них — обычное сообщение человека, а не
+команда (см. модуль ``quick_actions``).
 
 The S2 consent texts themselves are marketplace-neutral («Я буду помнить о тебе
 только то, что поможет рекомендовать точнее…») and pass through unchanged.
@@ -49,6 +54,7 @@ import logging
 import uuid
 from typing import Any
 
+from apps.channels.max.quick_actions import render_first_contact
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.tenancy.context import current_tenant
 
@@ -67,22 +73,44 @@ logger = logging.getLogger(__name__)
 _PASSTHROUGH_CALLBACK_PREFIXES = ("cb:discover:", "cb:catalog:")
 
 
-# Marketplace-framed welcome. WelcomeSkill.WELCOME_TEXT names the «Формула тела»
-# salon and a wellness menu — wrong for the nationwide discovery bot. Neutral
-# «подобрать мастера по всей стране».
+# Need/outcome-first welcome (DRF-1348, решение владельца 24.08 дословно:
+# «GLOBAL welcome copy обязательно переписать: need/outcome-first, без города
+# и каталожной подачи»).
+#
+# Было — «Помогу подобрать мастера по всей стране и записаться — маникюр,
+# массаж, стрижка и не только». Это каталог: человеку предлагают выбрать
+# позицию из списка раньше, чем спросили, что его беспокоит. Утверждённый
+# макет C01 (v1.0 APPROVED) даёт другую первую реплику, и она здесь дословно.
+#
+# WelcomeSkill.WELCOME_TEXT по-прежнему не подходит, но по другой причине —
+# он называет салон «Формула тела» и wellness-меню.
 GLOBAL_WELCOME_TEXT = (
     "Привет! Я Ayla 👋\n\n"
-    "Помогу подобрать мастера по всей стране и записаться — "
-    "маникюр, массаж, стрижка и не только.\n\n"
+    "Расскажи, чего тебе хочется или что сейчас беспокоит.\n"
+    "Я помогу разобраться и предложу подходящий следующий шаг.\n\n"
     "Начнём?"
 )
 
-# Marketplace-framed S5 first action. WelcomeSkill's S5 is a wellness grid
-# («сфотографировать еду / вода / цель») — after consent a discovery-bot user
-# must land on «кого ищешь», not a food diary.
+# Экран C01 — то, что человек видит сразу после согласия.
+#
+# Было — «Напиши услугу и город, например "маникюр в Пензе"». Города на
+# первом экране больше нет: он спрашивается тогда, когда нужен для поиска
+# исполнителя, а не как обязательное поле анкеты (решение владельца 24.08).
+# Wellness-грид сюда по-прежнему не возвращается (см. :86 ниже по истории
+# файла): человек маркетплейса не должен попадать в дневник еды.
+#
+# Приветствие здесь не повторяется: «Привет! Я Ayla 👋» человек прочитал
+# ходом раньше, на экране согласия. На макете эти два экрана — один пузырь,
+# потому что макет шага согласия не содержит (известное расхождение,
+# зафиксировано в теле DRF-1348); в пилоте между ними стоит 152-ФЗ.
+#
+# Строка «Можно написать своими словами или выбрать пример:» и сами чипы
+# добавляются рендером (``quick_actions.render_first_contact``), а не текстом
+# этой константы — чтобы состояние **No Quick Actions** убирало подсказку
+# вместе с чипами, а не оставляло обещание примеров без примеров.
 GLOBAL_S5_TEXT = (
-    "Отлично! С чего начнём?\n"
-    "Напиши услугу и город — например, «маникюр в Пензе» или «массаж завтра»."
+    "Расскажи, чего тебе хочется или что сейчас беспокоит.\n"
+    "Я помогу разобраться и предложу подходящий следующий шаг."
 )
 
 # Single «Начать» button on the marketplace welcome — routes into the SHARED S2
@@ -93,16 +121,36 @@ _START_BUTTON: list[dict[str, str]] = [{"label": "▶️ Начать", "callbac
 # reply_kind values (WelcomeSkill.meta["reply_kind"]) whose TEXT we replace with a
 # marketplace surface. Everything else (S2 consent prompt, S2a details, refusal,
 # ask/food/water prompts) passes through verbatim.
-# DRF-1202 added two more greeting states to WelcomeSkill (Returning User /
-# User with an Active Task). Their texts are marketplace-neutral, but the
-# marketplace surface — «подобрать мастера по всей стране» + the single
-# «Начать» button that carries the 152-ФЗ consent flow — is owned here, so
-# they are swapped like the other welcome kinds. Behaviour on this path is
-# therefore unchanged by DRF-1202.
 _WELCOME_KINDS = frozenset(
     {
         "welcome",
         "welcome_s1_multitenant",
+    }
+)
+
+# «Возврат к диалогу» (макет C01, ДОПОЛНИТЕЛЬНЫЕ СОСТОЯНИЯ).
+#
+# DRF-1202 добавил в WelcomeSkill два состояния возврата — Returning User и
+# User with an Active Task, — и их тексты («С возвращением! 👋 С чем помочь
+# сегодня?» / «Мы кое-что не закончили — продолжим?») ровно то, что макет
+# называет возвратом к диалогу.
+#
+# До сих пор этот путь их **выбрасывал**: они лежали в ``_WELCOME_KINDS``, и
+# вернувшийся человек — уже поздоровавшийся, уже давший согласие — получал
+# полное первое приветствие с кнопкой «▶️ Начать», ведущей в согласие,
+# которое у него уже есть. Единственное состояние возврата на пилоте было
+# неотличимо от первого контакта.
+#
+# Теперь текст WelcomeSkill проходит как есть (он маркетплейс-нейтрален), а
+# клавиатура — та же, что на C01: возврат на верхний уровень, макет для него
+# чипы предписывает («КОГДА ПОКАЗЫВАТЬ: всегда при начале нового диалога или
+# при возврате на верхний уровень»).
+#
+# **Пока согласия нет — поведение прежнее.** «▶️ Начать» на этом пути
+# единственный вход в 152-ФЗ; заменить его чипами у несогласившегося значило
+# бы отобрать у него согласие вместе с кнопкой.
+_RETURN_KINDS = frozenset(
+    {
         "welcome_returning",
         "welcome_active_task",
     }
@@ -285,7 +333,7 @@ def run_onboarding_turn(
     if _is_consent_grant_turn(result):
         _record_consent_journal(bot_user)
 
-    return _to_discovery_reply(result)
+    return _to_discovery_reply(result, bot_user)
 
 
 def _is_consent_grant_turn(result: Any) -> bool:
@@ -293,23 +341,84 @@ def _is_consent_grant_turn(result: Any) -> bool:
     return (getattr(result, "meta", None) or {}).get("reply_kind", "") == _S5_KIND
 
 
-def _to_discovery_reply(result: Any) -> DiscoveryReply:
+def _consent_captured(bot_user: Any) -> bool:
+    """True когда 152-ФЗ согласие у этого пользователя есть СЕЙЧАС.
+
+    Читается журнал, а не столбец ``consent_at``. Столбец —
+    денормализованная отметка, которую ``apps.consent.services.withdraw``
+    никогда не снимает (DRF-1314), то есть он отвечает «когда-либо давал»,
+    а вопрос этого экрана другой: **нужен ли человеку вход в согласие
+    сегодня**. Отозвавшему нужен — и «▶️ Начать» обязан вернуться на место.
+
+    ``consent_blocker`` (то, на что указывает страж столбца) здесь тоже не
+    подходит по смыслу: он отвечает «можно ли писать первым» и учитывает
+    ``proactive_messages_opt_out``. Человек, отказавшийся от проактивных
+    сообщений, согласие 152-ФЗ не отзывал, и показывать ему экран согласия
+    заново было бы неверно. Нужен ровно активный грант PERSONAL_DATA —
+    тот самый, который записывает :func:`_record_consent_journal` ходом
+    выше по этому же файлу.
+
+    Best-effort: чтение — запрос к базе, а сбой не должен рушить ход.
+    Деградация — в сторону «согласия нет», то есть в прежнее поведение с
+    кнопкой «▶️ Начать»: лишний раз предложить согласие безопаснее, чем
+    молча решить, что оно есть.
+    """
+    try:
+        from apps.consent.models import ConsentRecord
+        from apps.consent.services import has_global_consent
+
+        return has_global_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
+    except Exception:  # noqa: BLE001 — consent probe must never break the turn
+        logger.exception(
+            "global_onboarding.consent_probe_failed bot_user=%s",
+            getattr(bot_user, "id", None),
+        )
+        return False
+
+
+def _consent_entry_reply() -> DiscoveryReply:
+    """Приветствие с единственным входом в 152-ФЗ («▶️ Начать»)."""
+    return DiscoveryReply(
+        text=GLOBAL_WELCOME_TEXT,
+        action_data={"buttons": _START_BUTTON, "button_columns": 1},
+    )
+
+
+def _to_discovery_reply(result: Any, bot_user: Any = None) -> DiscoveryReply:
     """Wrap a WelcomeSkill :class:`SkillResult` into a :class:`DiscoveryReply`.
 
     Swaps the marketplace text surfaces; otherwise passes ``reply_text`` +
     ``action_data`` through unchanged so ``_build_attachments`` renders the same
     keyboard it would on the per-tenant path.
+
+    ### DRF-1348 — экран C01 наконец несёт кнопки
+
+    До 24.08 ветка S5 возвращала ``DiscoveryReply(text=…)`` **без**
+    ``action_data``, поэтому ``_build_attachments`` не рисовал ничего:
+    замысел был сбросить wellness-грид WelcomeSkill, но вместе с гридом
+    ушли все кнопки, а маркетплейсных на их место не поставили. Владелец
+    прошёл от ``/start`` и не увидел ни одного чипа ровно поэтому.
+
+    Wellness-грид не возвращается. Вместо него — Quick Actions макета C01:
+    три goal-like чипа и вторичный вход, четыре кнопки при потолке в пять
+    (BOT-001 AC-4.2 / DRF-1200).
     """
     reply_kind = (getattr(result, "meta", None) or {}).get("reply_kind", "")
 
     if reply_kind in _WELCOME_KINDS:
-        return DiscoveryReply(
-            text=GLOBAL_WELCOME_TEXT,
-            action_data={"buttons": _START_BUTTON, "button_columns": 1},
-        )
+        return _consent_entry_reply()
+
+    if reply_kind in _RETURN_KINDS:
+        # «Возврат к диалогу». Без согласия — прежнее поведение: «Начать»
+        # здесь единственный вход в 152-ФЗ (см. :data:`_RETURN_KINDS`).
+        if not _consent_captured(bot_user):
+            return _consent_entry_reply()
+        text, action_data = render_first_contact(result.reply_text)
+        return DiscoveryReply(text=text, action_data=action_data)
+
     if reply_kind == _S5_KIND:
-        # Marketplace CTA; drop the wellness first-action grid entirely.
-        return DiscoveryReply(text=GLOBAL_S5_TEXT)
+        text, action_data = render_first_contact(GLOBAL_S5_TEXT)
+        return DiscoveryReply(text=text, action_data=action_data)
 
     # S2 consent prompt / S2a details / refusal / ask-food-water prompts →
     # verbatim (their texts are already marketplace-neutral).

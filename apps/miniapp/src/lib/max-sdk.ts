@@ -103,10 +103,20 @@ export function getStartPayload(): string {
  *   MAX history during the F2 rollout window.
  */
 const _ROUTE_MAP: Record<string, string> = {
-  // Flat slug — current.
-  open_catalog: "/catalog",
-  open_visits: "/my-visits",
-  open_profile: "/me",
+  // Flat slug — current. Every target is the canonical /customer/* screen
+  // and matches MINIAPP_ROUTES in apps/skills/welcome/skill.py exactly
+  // (DRF-1326): the producer's link-button fallback builds these same
+  // paths directly, so a slug and its link must not name different
+  // screens. tests/test_miniapp_routes.py fails the build if they drift.
+  //
+  // Before DRF-1326 these three pointed at the legacy pre-reskin screens
+  // (/catalog, /my-visits, /me) while the link fallback pointed at the
+  // /customer/* ones — same button, two destinations depending on config.
+  // The legacy routes stay mounted in App.tsx for reschedule flows and
+  // old bot DMs; they are simply no longer what the welcome menu opens.
+  open_catalog: "/customer/catalog",
+  open_visits: "/customer/records",
+  open_profile: "/customer/profile",
   // S5 first-action grid (welcome skill) — DRF-1167 fix. Each slug mirrors
   // the payload emitted by apps/skills/welcome/skill.py::_s5_first_action_buttons.
   open_food_scan: "/customer/food-scanner/capture",
@@ -117,9 +127,12 @@ const _ROUTE_MAP: Record<string, string> = {
   // "Dashboard empty state".
   open_home: "/customer/main",
   // Legacy querystring inner-values — kept for cold-start back-compat.
-  catalog: "/catalog",
-  visits: "/my-visits",
-  profile: "/me",
+  // Same destinations as the flat slugs above: a stale `route=visits`
+  // payload should land on today's records screen, not on a screen the
+  // menu no longer opens.
+  catalog: "/customer/catalog",
+  visits: "/customer/records",
+  profile: "/customer/profile",
 };
 
 /**

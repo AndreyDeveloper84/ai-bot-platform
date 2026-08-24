@@ -83,6 +83,34 @@ def spy_direct_show_masters(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _penza_is_a_place_we_serve():
+    """One bookable master in Пенза (DRF-1328).
+
+    «маникюр в Пензе» names a city, and since DRF-1328 the deterministic
+    branch claims a turn only when it can account for EVERY word. A city is
+    accounted for exactly when the marketplace has someone bookable there
+    (``apps.marketplace.discovery.strip_known_cities`` — live data, by
+    DRF-1283's design). With no masters anywhere, «пензе» is an unknown word
+    and the turn goes to the model instead; this file is about onboarding, so
+    it needs the contour where the branch can run.
+    """
+    from datetime import datetime, timezone
+
+    from apps.catalog.models import CatalogMaster
+    from apps.tenancy.models import Tenant
+
+    tenant = Tenant.objects.create(slug="salon-penza-1328-onb", name="SPAtrium", city="Пенза")
+    CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        name="Архипкин Денис",
+        specialization="массаж",
+        is_active=True,
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        external_updated_at=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _onboarding_on(settings):
     settings.GLOBAL_BOT_ONBOARDING = True
     # Make the tenant-less invariant load-bearing: TenantScopedManager reads
@@ -261,8 +289,15 @@ class TestRunOnboardingTurn:
 
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
 
-        assert reply.text == GLOBAL_S5_TEXT
-        assert reply.action_data is None  # wellness grid dropped
+        assert reply.text.startswith(GLOBAL_S5_TEXT)  # DRF-1348: + подсказка и чипы
+        # Wellness-грид по-прежнему сброшен — но экран больше не пустой:
+        # DRF-1348 поставил на его место Quick Actions макета C01. Проверка
+        # изменилась с «кнопок нет вовсе» на «нет ИМЕННО wellness-кнопок»,
+        # потому что «нет вовсе» и было тем дефектом (DRF-1348: владелец
+        # прошёл от /start и чипов не увидел).
+        callbacks = {b["callback"] for b in reply.action_data["buttons"]}
+        assert not any(c.startswith(("cb:welcome:", "cb:food:", "cb:water:")) for c in callbacks)
+        assert all(c.startswith("cb:qa:") for c in callbacks)
         bot_user.refresh_from_db()
         assert bot_user.consent_at is not None
 
@@ -357,7 +392,7 @@ class TestRunOnboardingTurn:
 
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes_via_s2a")
 
-        assert reply.text == GLOBAL_S5_TEXT
+        assert reply.text.startswith(GLOBAL_S5_TEXT)  # DRF-1348: + подсказка и чипы
         assert _granted_types(bot_user) == {
             ConsentRecord.ConsentType.PERSONAL_DATA.value,
             ConsentRecord.ConsentType.MEMORY_GREEN.value,
@@ -448,7 +483,7 @@ class TestHandlerIntegration:
             _callback_payload(payload="cb:welcome:consent_yes", user_id=uid, callback_id="c2"),
             trace_id=str(uuid.uuid4()),
         )
-        assert mock_send[-1]["text"] == GLOBAL_S5_TEXT
+        assert mock_send[-1]["text"].startswith(GLOBAL_S5_TEXT)  # DRF-1348
         spy_discovery.assert_not_called()
         spy_direct_show_masters.assert_not_called()
 
