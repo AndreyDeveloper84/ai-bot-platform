@@ -439,6 +439,32 @@ class MasterService(models.Model):
         ),
     )
 
+    # DRF-1353 — the RESOLVED (master×service) health-check flag, mirrored
+    # from Ayla's ``SpecialistService.resolved_requires_health_check``
+    # (escalate-only OR across template floor → salon service → specialist,
+    # Ayla ``services/models.py``). This is the source #1034/#1121 called
+    # missing and the booking gate's fail-closed stub was standing in for.
+    #
+    # TRI-STATE, and the NULL is load-bearing:
+    #   True  → this master×service needs a human health check → gate closed.
+    #   False → Ayla explicitly says no screening → gate open.
+    #   NULL  → never synced (operator-owned MM4 row, pre-migration row, or an
+    #           upstream that does not send the key) → UNKNOWN → gate stays
+    #           closed, exactly as before this column existed.
+    # A non-null default would have made every pre-existing row read as
+    # "no screening needed" the moment the migration ran — a fail-OPEN
+    # backfill of a medical gate. Hence null=True with no default.
+    resolved_requires_health_check = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Mirrored Ayla SpecialistService.resolved_requires_health_check. "
+            "NULL = unknown (never synced); the booking health-check gate "
+            "treats NULL as 'screening required'."
+        ),
+    )
+
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 

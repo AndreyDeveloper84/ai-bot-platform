@@ -656,24 +656,36 @@ NUTRITION_SERVICE_TOKEN = (
 # production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
-# DRF-1005 — Controlled Pilot: per-tenant kill-switch for the booking
-# health-check gate.
+# DRF-1005 — Controlled Pilot: per-tenant fallback for the booking
+# health-check gate. DEMOTED by DRF-1353 — read the note below before
+# adding a tenant here.
 #
-# Under ``BOOKING_VIA_AYLA_REST`` the gate fails CLOSED unconditionally
+# Originally this was the ONLY way through the gate: under
+# ``BOOKING_VIA_AYLA_REST`` it failed CLOSED unconditionally
 # (#1034 / #1121) because the resolved (master×service)
-# requires-health-check source does not exist yet — which makes automatic
-# booking impossible for ANY tenant. Owner decision 2026-08-12 (variant 3):
-# an explicit, empty-by-default allowlist of tenant UUIDs for which the
-# gate is disabled, with an audit record on every gate-disabled
-# evaluation.
+# requires-health-check source was believed not to exist, which made
+# automatic booking impossible for every tenant. Owner decision
+# 2026-08-12 (variant 3): an explicit, empty-by-default allowlist of
+# tenant UUIDs, with an audit record on every gate-disabled evaluation.
 #
-# Empty/unset = gate closed for every tenant (behaviour unchanged).
+# DRF-1353 found that source: it exists on Ayla
+# (``SpecialistService.resolved_requires_health_check``, escalate-only OR
+# across template floor → salon service → specialist) and is served by
+# ``/internal/catalog/specialist-services/``. It is now mirrored onto
+# ``MasterService.resolved_requires_health_check`` and the gate reads it
+# FIRST. This allowlist only decides edges whose resolved flag is
+# UNKNOWN — operator-owned MM4 rows, or a tenant catalog sync has not
+# reached. It can never override an explicit "screening required".
+#
+# Adding a tenant here is therefore no longer the way to unblock a salon:
+# run catalog sync for it. Reach for the allowlist only when the edges
+# genuinely cannot be mirrored.
+#
+# Empty/unset = gate closed for every unknown edge (behaviour unchanged).
 # Parsing reuses the strict T-02 allowlist parser: malformed input raises
 # ImproperlyConfigured at settings load — a process must not boot with a
 # half-parsed allowlist whose operator believes a tenant is listed when
-# it is not. Controlled Pilot ONLY; the canonical resolved
-# (master×service) ``resolved_requires_health_check`` source replaces
-# this setting.
+# it is not.
 try:
     BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS = _parse_ingest_tenant_allowlist(
         os.environ.get("BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", ""),

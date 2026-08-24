@@ -23,11 +23,21 @@ is the second.
 
 ### Health-check gate
 
-Services with ``CatalogService.requires_health_check=True`` can't be
-booked through the bot without a clinician sign-off. The skill looks
-up the service in :mod:`apps.catalog` BEFORE the confirm call and, if
-the gate fires, returns ``should_handoff=True`` with reason
-``booking_health_check_required``.
+A master×service pair Ayla marks as needing a health check can't be
+booked through the bot without a human in the loop. The skill resolves
+the verdict BEFORE the confirm call and, if the gate fires, returns
+``should_handoff=True`` with reason ``booking_health_check_required``.
+
+The source depends on the path (see ``_service_requires_health_check``):
+the legacy YClients path reads ``CatalogService.requires_health_check``;
+the Ayla REST path reads the RESOLVED per-edge
+``MasterService.resolved_requires_health_check`` (DRF-1353), mirrored
+from Ayla's escalate-only OR of template floor → salon service →
+specialist. Unknown → gate closed.
+
+Scope, stated plainly: this is the conversational channel's routing
+policy, not a platform-wide interlock. No other booking entry point
+reads the flag.
 
 ### Deterministic callback short-circuits
 
@@ -67,6 +77,7 @@ from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -891,7 +902,12 @@ class BookingSkill:
         # Health-check gate — only relevant for confirm_booking.
         if tool_name == CONFIRM_BOOKING_TOOL_SPEC["name"]:
             service_id = _coerce_id(first_call.arguments.get("service_id"))
-            if service_id is not None and _service_requires_health_check(tenant, service_id):
+            # DRF-1353: the resolved verdict is per (master × service), so the
+            # master the LLM grounded must travel with the service id.
+            gate_master_id = _coerce_id(first_call.arguments.get("master_id"))
+            if service_id is not None and _service_requires_health_check(
+                tenant, service_id, gate_master_id
+            ):
                 # DRF-1005: this branch used to hand off without a single
                 # log line — log the policy decision, and use the policy
                 # text (consultation), not the failure fallback.
@@ -1231,7 +1247,60 @@ def _health_check_gate_disabled_for_tenant() -> bool:
     return str(tenant.id).lower() in allowed
 
 
-def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
+def _resolved_health_check_for_edge(
+    tenant: Any,
+    master_id: int | str | None,
+    service_id: int | str,
+) -> bool | None:
+    """Ayla's RESOLVED (master×service) screening verdict, or ``None``.
+
+    DRF-1353. Reads ``MasterService.resolved_requires_health_check`` — the
+    mirror of Ayla's ``SpecialistService.resolved_requires_health_check``,
+    an escalate-only OR across the canonical template floor, the salon
+    service, and the specialist override. That OR is why the service-level
+    ``CatalogService.requires_health_check`` alone is NOT a safe read: it
+    carries exactly one of the three inputs, and 102 of Ayla's 1223
+    canonical service templates set the floor.
+
+    ``None`` means UNKNOWN and is returned for every path where we cannot
+    prove a verdict: no master in hand, an id that is not a UUID, no edge
+    row (operator-owned MM4 pair, or catalog sync has not reached this
+    tenant), or a row whose column was never synced. The caller keeps the
+    gate CLOSED on ``None`` — absence of evidence is not evidence of
+    safety for a medical check.
+    """
+    if master_id is None:
+        return None
+    try:
+        from apps.catalog.models import MasterService
+    except ImportError:  # pragma: no cover — catalog always available
+        return None
+    try:
+        return (
+            MasterService.all_tenants.filter(
+                tenant=tenant,
+                master_id=str(master_id),
+                service__ayla_service_id=str(service_id),
+            )
+            .values_list("resolved_requires_health_check", flat=True)
+            .first()
+        )
+    except (DjangoValidationError, ValueError, TypeError):
+        # Non-UUID ids reach the UUID columns as a validation error. That is
+        # an unresolvable edge, not a permissive one.
+        logger.info(
+            "booking.health_gate.unresolvable_edge master=%s service=%s",
+            master_id,
+            service_id,
+        )
+        return None
+
+
+def _service_requires_health_check(
+    tenant: Any,
+    service_id: int | str,
+    master_id: int | str | None = None,
+) -> bool:
     """Whether booking ``service_id`` must route through a human health check.
 
     **flag-OFF (legacy YClients path):** the catalog mirror is the source
@@ -1239,25 +1308,40 @@ def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
     service row (e.g. catalog isn't synced yet) we DEFAULT to ``False`` —
     better UX to attempt the booking than to dead-end every flow.
 
-    **flag-ON (Ayla REST path): FAIL CLOSED by default (#1034 / #1121).**
-    The correct source is the RESOLVED (master×service) requires-health-check
-    that S3B PR-2 populates on the catalog mirror (``CatalogMaster`` /
-    ``MasterService``). Until that source exists we must NOT trust the
-    service-level ``CatalogService.requires_health_check``: a service flagged
-    ``False`` can still need screening for a specific master, so trusting it
-    is a fail-OPEN risk (#1121).
+    **flag-ON (Ayla REST path), DRF-1353.** The resolved (master×service)
+    source that #1034/#1121 called missing now exists and is mirrored:
+    ``MasterService.resolved_requires_health_check``. Precedence:
 
-    **DRF-1005 Controlled Pilot exception:** tenants explicitly listed in
-    ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` bypass the gate
-    (owner decision 2026-08-12, variant 3 — the pilot tenant's catalog
-    has zero ``requires_health_check=True`` rows, so the blanket
-    fail-closed stub only broke the booking funnel). Every bypass is
-    logged and audited (``booking.health_check_gate_disabled``). This is
-    a TEMPORARY measure: the canonical path remains the resolved
-    (master×service) ``resolved_requires_health_check`` read, and this
-    allowlist must be retired when it lands.
+    1. **The resolved verdict wins, in both directions.** ``True`` gates,
+       ``False`` opens. It wins over the DRF-1005 allowlist too — an
+       allowlisted tenant must not be able to book a service Ayla says
+       needs screening. That ordering is a tightening, not a loosening:
+       before DRF-1353 the single allowlisted pilot tenant was the one
+       tenant for which the gate could never fire at all.
+    2. **Unknown (``None``) falls back to the DRF-1005 allowlist**, which
+       keeps its original job: unblock a pilot tenant whose edges are not
+       mirrored (operator-owned MM4 rows, sync not yet run).
+    3. **Otherwise fail closed** — unchanged from #1034.
+
+    Note what this gate is and is not. No other booking entry point in this
+    codebase consults it — ``apps/booking/services/create.py``,
+    ``apps/admin_api/views_booking_create.py`` and the miniapp all create
+    bookings without reading the flag — and Ayla's ``appointments`` app does
+    not enforce it server-side either. It is the conversational channel's
+    routing policy ("hand this one to a human"), not a system-wide safety
+    interlock.
     """
     if _booking_via_ayla():
+        resolved = _resolved_health_check_for_edge(tenant, master_id, service_id)
+        if resolved is not None:
+            logger.info(
+                "booking.health_gate.resolved tenant=%s master=%s service=%s gated=%s",
+                getattr(tenant, "id", "?"),
+                master_id,
+                service_id,
+                resolved,
+            )
+            return bool(resolved)
         if _health_check_gate_disabled_for_tenant():
             # DRF-1005: owner-mandated audit trail — disabling a medical
             # screening check must be traceable, never invisible.
@@ -1272,10 +1356,12 @@ def _service_requires_health_check(tenant: Any, service_id: int | str) -> bool:
                 payload={
                     "tenant_id": str(getattr(tenant, "id", "")),
                     "service_id": str(service_id),
+                    "master_id": str(master_id or ""),
+                    "reason": "resolved_flag_unknown",
                 },
             )
             return False
-        # No resolved (master×service) source yet → fail closed. See #1034.
+        # Edge not mirrored and tenant not allowlisted → fail closed. See #1034.
         return True
 
     try:
@@ -1547,7 +1633,7 @@ def _handle_pick_slot_callback(
 
     # Health-check gate — same rule as the LLM confirm path: gated
     # services route to a human instead of rendering a preview.
-    if _service_requires_health_check(tenant, service_id):
+    if _service_requires_health_check(tenant, service_id, master_id):
         # DRF-1005: log the policy decision (this branch used to hand off
         # silently) and use the policy text, not the failure fallback.
         logger.info(
