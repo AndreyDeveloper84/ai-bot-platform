@@ -441,11 +441,16 @@ class GlobalConversationStore:
 
     def __init__(self, *, user_message_id: Any = None) -> None:
         self._user_message_id = user_message_id
-        # DRF-1354 — whether a REAL assistant turn was written here. See
-        # :meth:`save_message` for the empty rows, and
-        # :func:`generate_concierge_reply` for who writes the reply when this
-        # stays False.
-        self.assistant_recorded = False
+        # DRF-1354 — telemetry of the passes, accumulated for the ONE row
+        # :func:`generate_concierge_reply` writes at the end of the turn.
+        # Summed, not overwritten: a multi-pass turn really did spend all of
+        # those tokens, and the row used to carry only the last pass's.
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.latency_ms = 0
+        #: The last non-empty ``action_type`` any pass selected — the tool
+        #: this turn used, kept so the row stays as queryable as before.
+        self.action_type = ""
 
     def resolve_active_conversation(self, bot_user: Any) -> Any:
         return resolve_active_global_conversation(bot_user)
@@ -464,44 +469,46 @@ class GlobalConversationStore:
         tokens_out: int = 0,
         latency_ms: int | None = None,
     ) -> Any:
+        """Record NOTHING; accumulate telemetry and return a marker.
+
+        DRF-1354 — one concierge turn now writes exactly one assistant row,
+        and :func:`generate_concierge_reply` writes it, because only that
+        function knows what was actually sent.
+
+        This method used to write one row per ai-core pass (its orchestrator
+        saves an assistant message after every completion). That produced the
+        pilot trace of 24.08 verbatim:
+
+        * a pass that SELECTS a tool carries no text, so it wrote a **blank**
+          row — four of them stand in that trace, one before each answer, and
+          they were also read back by :meth:`load_recent_history`, which takes
+          the last N ROWS, so half of a ten-row window went to rows ai-core
+          then drops from the prompt anyway;
+        * a pass that produced prose AND a tool call wrote that prose — even
+          when the branch went on to answer deterministically and the sentence
+          was never sent;
+        * and every deterministic answer (cards, catalog, nutrition, the
+          DRF-1354 handoff) was text no pass ever produced, so no row held it.
+
+        The result was a transcript that did not say what the bot said, and
+        the transcript is the LLM history of the next turn.
+
+        Nothing is lost by not writing here. Per-CALL cost and latency live in
+        ``AIRequestMetric`` (DRF-1211, one row per LLM call); the tool
+        selection is in the ``orchestrator.concierge.*`` log line; and the
+        totals ride onto the single row through the counters above.
+
+        The user role is unchanged: persisted upstream by the channel handler,
+        so the marker carries the handler's id for history exclusion.
+        """
         if role == "user":
-            # Persisted upstream by the channel handler — return the marker
-            # so AIConcierge can exclude this turn from LLM history.
             return SimpleNamespace(id=self._user_message_id)
-        if not (content or "").strip():
-            # DRF-1354 — the empty bot messages. ai-core saves an assistant row
-            # after EVERY pass (its orchestrator step 10), and a pass that
-            # selects a tool carries no text — so a multi-pass turn wrote a
-            # blank row, then the real one. Four of them stand in the pilot
-            # trace of 24.08, one before each answer; six in the session.
-            #
-            # They are not merely cosmetic. They are read back by
-            # :meth:`load_recent_history`, which takes the last N ROWS — so
-            # half of a ten-row window was spent on rows ai-core then drops
-            # from the prompt anyway (its `_compose_messages` skips a
-            # content-less assistant turn). The model was reasoning over
-            # roughly half the conversation it appeared to have.
-            #
-            # Nothing is lost by not writing them: the tool selection is in
-            # the `orchestrator.concierge.*` log line and the tokens are in
-            # `AIRequestMetric` (one row per LLM call, DRF-1211), both of
-            # which existed before this and neither of which reads here.
-            logger.debug(
-                "orchestrator.concierge.blank_assistant_turn_not_recorded action=%s",
-                action_type or "",
-            )
-            return SimpleNamespace(id=None)
-        self.assistant_recorded = True
-        return record_global_message(
-            conversation,
-            role=role,
-            content=content,
-            rendered_text=content,
-            action_type=action_type or "",
-            tokens_in=tokens_in or 0,
-            tokens_out=tokens_out or 0,
-            latency_ms=latency_ms,
-        )
+        self.tokens_in += tokens_in or 0
+        self.tokens_out += tokens_out or 0
+        self.latency_ms += latency_ms or 0
+        if action_type:
+            self.action_type = action_type
+        return SimpleNamespace(id=None)
 
     def load_recent_history(
         self,
@@ -1197,7 +1204,7 @@ def generate_concierge_reply(
     extra_system: str = "",
     trace_id: str | None = None,
 ) -> DiscoveryReply:
-    """One concierge turn, with the assistant row guaranteed to BE the reply.
+    """One concierge turn, writing exactly one assistant row: the reply.
 
     The turn itself is :func:`_concierge_turn`. This wrapper owns one
     invariant that used to hold only by accident: what the transcript says the
@@ -1213,9 +1220,12 @@ def generate_concierge_reply(
     reads. The bot could not see what it had just shown, which is one way a
     conversation walks backwards.
 
-    Since DRF-1354 the store declines blank rows
-    (:meth:`GlobalConversationStore.save_message`), so "nothing was recorded"
-    is a reliable signal, and the real text is written here instead.
+    Since DRF-1354 the store writes nothing at all
+    (:meth:`GlobalConversationStore.save_message` explains what that removes)
+    and the row is written HERE, from the reply, with the turn's accumulated
+    token and latency totals. ``persisted=True`` therefore means what it says
+    on every branch, not only on the prose one.
+
     Best-effort: a transcript write must never cost the reply.
     """
     store = GlobalConversationStore(user_message_id=user_message_id)
@@ -1229,13 +1239,17 @@ def generate_concierge_reply(
         extra_system=extra_system,
         trace_id=trace_id,
     )
-    if reply.persisted and not store.assistant_recorded and (reply.text or "").strip():
+    if reply.persisted and (reply.text or "").strip():
         try:
             record_global_message(
                 conversation,
                 role="assistant",
                 content=reply.text,
                 rendered_text=reply.text,
+                action_type=store.action_type,
+                tokens_in=store.tokens_in,
+                tokens_out=store.tokens_out,
+                latency_ms=store.latency_ms or None,
                 trace_id=trace_id,
             )
         except Exception as exc:  # noqa: BLE001 — never cost the turn

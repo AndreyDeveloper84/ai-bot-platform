@@ -365,3 +365,69 @@ class TestTheDayIsAlreadyStoredWhenTheHandoffReadsIt:
 
         assert seen["pref"] is not None
         assert seen["pref"].day_offset == 1
+
+
+@pytest.mark.django_db(transaction=True)
+class TestOneRowPerTurn:
+    def test_discarded_model_prose_does_not_stay_in_the_row(self, monkeypatch) -> None:
+        """A pass can carry prose AND a tool call. When the branch then answers
+        deterministically, that sentence was never sent — so it must not be
+        what the transcript (and the next turn's history) says the bot said."""
+        provider = AsyncMock()
+        chatty = CompletionResult(
+            text="Секунду, посмотрю кто есть.",
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="show_masters",
+                    arguments={"city": "Пенза", "specialization": "массаж"},
+                )
+            ],
+            prompt_tokens=10,
+            completion_tokens=5,
+            model="gpt-4o-mini",
+            provider="openai",
+            finish_reason="tool_calls",
+        )
+        provider.complete.return_value = chatty
+        monkeypatch.setattr(concierge, "get_router", lambda: _router_returning(provider))
+        monkeypatch.setattr(concierge, "discover_masters", lambda **kw: [_card()])
+        monkeypatch.setattr(concierge, "service_coverage", lambda *a, **kw: ([], []))
+        bot_user, conversation = _bot_user_and_conversation()
+
+        reply = generate_concierge_reply(
+            "хочу массаж в пензе",
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=TRACE_ID,
+        )
+
+        rows = _rows(conversation)
+        assert [r.content for r in rows] == [reply.text]
+        assert "Секунду" not in rows[0].content
+
+    def test_token_totals_of_every_pass_ride_the_single_row(self, monkeypatch) -> None:
+        """One row per turn must not mean one PASS's cost per turn: the row
+        carried the last pass's tokens before, which under-reported every
+        multi-pass turn in the transcript."""
+        provider = AsyncMock()
+        provider.complete.side_effect = [
+            _tool_result("show_masters", {"city": "Пенза", "specialization": "массаж"}),
+            _text_result("Вот кто есть."),
+        ]
+        monkeypatch.setattr(concierge, "get_router", lambda: _router_returning(provider))
+        monkeypatch.setattr(concierge, "discover_masters", lambda **kw: [_card()])
+        monkeypatch.setattr(concierge, "service_coverage", lambda *a, **kw: ([], []))
+        bot_user, conversation = _bot_user_and_conversation()
+
+        generate_concierge_reply(
+            "хочу массаж в пензе",
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=TRACE_ID,
+        )
+
+        rows = _rows(conversation)
+        assert len(rows) == 1
+        # 10 + 20 in, 5 + 8 out — the two _tool_result / _text_result passes.
+        assert (rows[0].tokens_in, rows[0].tokens_out) == (30, 13)

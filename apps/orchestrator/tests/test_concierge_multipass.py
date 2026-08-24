@@ -414,8 +414,15 @@ class TestSecondPassOutboundContract:
         # Same shape as a first-pass plain-text reply: the handler cannot
         # tell (and must not need to tell) which pass produced the text.
         assert second_pass_reply.persisted is True
-        assert second_pass_reply.action_data is None
         assert second_pass_reply.text == "Ответ второго прохода."
+        # DRF-1354: the keyboard rides with the prose now. That is not a
+        # different SHAPE — action_data is the same optional field a
+        # first-pass card reply fills, and the handler renders it through the
+        # same `_build_attachments`. What changed is that the masters the
+        # second pass just described are bookable again.
+        assert second_pass_reply.action_data is not None
+        buttons = second_pass_reply.action_data["attachments"][0]["payload"]["buttons"]
+        assert buttons[0]["callback"] == "cb:discover:book:t1:m1"
 
     def test_second_pass_text_capped_like_first_pass(self, monkeypatch) -> None:
         """The _MAX_REPLY_CHARS cap applies to the second pass's text too —
