@@ -105,6 +105,79 @@ _CREATED_ADVANCED_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 
+# ── DRF-1110 / DRF-1103: the references a late ``booking.created`` may fill ──
+#
+# ``service_id`` and ``specialist_id`` are the only two columns on the proxy
+# that are neither state nor schedule: they are opaque references to what was
+# booked and with whom, and they never change over an appointment's life. No
+# event after ``booking.created`` repeats them — that is stated on the model
+# and is true of all seven handlers in this file — so ``booking.created`` is
+# the ONLY event that can ever supply them.
+#
+# That matters because of who usually gets there first. The mirror row for a
+# booking made in the dialog is written by ``execute_confirm``
+# (``apps.skills.booking.tools._upsert_remote_booking_proxy``) before Ayla's
+# event arrives, already CONFIRMED — so the first ``booking.created`` we see
+# for it lands on an «advanced» row and the #1147 guard below returns without
+# applying anything. Whatever that first writer could not fill stayed NULL
+# for the life of the row, and the day board rendered a visit with no service
+# name on it: DRF-1103, six of six bot bookings on the pilot.
+#
+# Refusing to roll a state machine backwards is right. Throwing away a
+# reference the row does not have is not the same thing, and this is the
+# difference:
+#
+#   * a state field can be stale — CONFIRMED must not become «created» again;
+#   * a reference cannot. There is one service on the appointment, Ayla owns
+#     it, and NULL is not an earlier value of it — it is the absence of one.
+#
+# So this fills a hole and never paints over anything: a column that already
+# holds a value is left exactly as it is, including when it disagrees with
+# the event. Deciding WHICH value wins would be a reconciliation policy, and
+# this is not the place to invent one (the sweep DRF-1111 is).
+_CREATED_REFERENCE_FIELDS: Final[tuple[str, ...]] = ("service_id", "specialist_id")
+
+
+def _backfill_created_references(
+    *,
+    proxy: RemoteBookingProxy,
+    appointment_id: UUID,
+    service_uuid: UUID | None,
+    specialist_uuid: UUID | None,
+    envelope: Any,
+) -> list[str]:
+    """Fill NULL reference columns from a ``booking.created`` payload.
+
+    Returns the field names actually written, for the log line.
+
+    Each column is updated on its own statement, with ``__isnull=True`` in the
+    WHERE clause rather than in Python. The read that produced ``proxy`` and
+    the write are separate round trips, so a concurrent writer can fill the
+    column in between; putting the emptiness test in the predicate makes the
+    database settle it, and the loser of that race writes nothing instead of
+    overwriting the winner. One statement per column so that a column somebody
+    else just filled cannot block the other one.
+    """
+    filled: list[str] = []
+    for field, value in (("service_id", service_uuid), ("specialist_id", specialist_uuid)):
+        if value is None or getattr(proxy, field) is not None:
+            continue
+        updated = RemoteBookingProxy.all_tenants.filter(
+            appointment_id=appointment_id, **{f"{field}__isnull": True}
+        ).update(**{field: value})
+        if updated:
+            filled.append(field)
+    if filled:
+        logger.info(
+            "eventbus.consumer.booking.created.references_backfilled "
+            "appointment_id=%s fields=%s event_id=%s",
+            appointment_id,
+            ",".join(filled),
+            envelope.event_id,
+        )
+    return filled
+
+
 # Proxy states in which a ``booking.created`` must announce NOTHING.
 # A stale creation event arriving after the appointment was cancelled,
 # completed or marked no-show would otherwise page the salon with «🆕
@@ -670,6 +743,17 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
                 appointment_id,
                 proxy.status,
                 envelope.event_id,
+            )
+            # DRF-1110: «do not roll the state back» is also not «throw
+            # away what the row never had». Runs BEFORE the announcement so
+            # the salon's «🆕 запись» and the day board cannot name two
+            # different services for the same appointment.
+            _backfill_created_references(
+                proxy=proxy,
+                appointment_id=appointment_id,
+                service_uuid=service_uuid,
+                specialist_uuid=specialist_uuid,
+                envelope=envelope,
             )
             # DRF-1069: «do not roll the state back» is not «say
             # nothing». The overwhelmingly common way to reach this
