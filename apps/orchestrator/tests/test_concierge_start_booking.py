@@ -191,6 +191,7 @@ class TestStartBookingTool:
         assert "Архипкин Денис" in reply.text
         assert "Денис Кузнецов" in reply.text
         # …closable with one tap, on the same callback grammar as the cards.
+        assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert [b["callback"] for b in buttons] == [
             "cb:discover:book:t1:m1",
@@ -246,6 +247,7 @@ class TestProseKeepsTheKeyboard:
         )
 
         assert reply.text == "В Пензе массаж делают Архипкин Денис и Сазонова Инна."
+        assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
         assert buttons[0]["label"] == "Записаться к Архипкин Денис"
         assert buttons[0]["callback"].startswith("cb:discover:book:t1:m1")
