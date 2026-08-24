@@ -290,7 +290,14 @@ class TestRunOnboardingTurn:
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
 
         assert reply.text.startswith(GLOBAL_S5_TEXT)  # DRF-1348: + подсказка и чипы
-        assert reply.action_data is None  # wellness grid dropped
+        # Wellness-грид по-прежнему сброшен — но экран больше не пустой:
+        # DRF-1348 поставил на его место Quick Actions макета C01. Проверка
+        # изменилась с «кнопок нет вовсе» на «нет ИМЕННО wellness-кнопок»,
+        # потому что «нет вовсе» и было тем дефектом (DRF-1348: владелец
+        # прошёл от /start и чипов не увидел).
+        callbacks = {b["callback"] for b in reply.action_data["buttons"]}
+        assert not any(c.startswith(("cb:welcome:", "cb:food:", "cb:water:")) for c in callbacks)
+        assert all(c.startswith("cb:qa:") for c in callbacks)
         bot_user.refresh_from_db()
         assert bot_user.consent_at is not None
 
