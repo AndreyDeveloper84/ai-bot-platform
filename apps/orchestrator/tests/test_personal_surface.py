@@ -30,6 +30,8 @@ a person ate.
 
 from __future__ import annotations
 
+from typing import Any
+
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -88,8 +90,8 @@ def _conversation(bot_user):
     return resolve_active_global_conversation(bot_user)
 
 
-def _summary(**over) -> SummaryResponse:
-    payload = dict(
+def _summary(**over: Any) -> SummaryResponse:
+    payload: dict[str, Any] = dict(
         date="2026-08-23",
         calories_total=1210.0,
         calories_goal=1994,
@@ -103,14 +105,14 @@ def _summary(**over) -> SummaryResponse:
     return SummaryResponse(**payload)
 
 
-def _water(**over) -> WaterTodayResponse:
-    payload = dict(total_ml=900, norm_ml=2400, entries=[{"id": "w1"}], raw={})
+def _water(**over: Any) -> WaterTodayResponse:
+    payload: dict[str, Any] = dict(total_ml=900, norm_ml=2400, entries=[{"id": "w1"}], raw={})
     payload.update(over)
     return WaterTodayResponse(**payload)
 
 
-def _profile(**over) -> ProfileResponse:
-    payload = dict(
+def _profile(**over: Any) -> ProfileResponse:
+    payload: dict[str, Any] = dict(
         gender="female",
         age=31,
         height_cm=168,
