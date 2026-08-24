@@ -168,7 +168,11 @@ from apps.orchestrator.memory.personal_context import record_explicit_green_fact
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
-from apps.orchestrator.safety.gate import evaluate_inbound
+from apps.orchestrator.safety.gate import (
+    OUTBOUND_ACTION_TYPE,
+    evaluate_inbound,
+    guard_outbound,
+)
 from apps.orchestrator.turn_seam import (
     SURFACE_GLOBAL,
     SURFACE_PER_TENANT,
@@ -417,6 +421,14 @@ def _dispatch_skill_handoff(
     create_admin_task(conversation, task_type=AdminTask.TaskType.HANDOFF, reason=reason)
 
     handoff_text = skill_result.reply_text or _HANDOFF_FALLBACK_TEXT
+    # DRF-1210 — an escalation line is still a line a person reads, and the
+    # skills that set one are free to compose it from model output. Guarded
+    # like every other outbound on this surface; the AdminTask above is
+    # already created either way, so a block loses the sentence, not the
+    # escalation.
+    _guarded = guard_outbound(handoff_text, surface="max", trace_id=trace_id)
+    if _guarded.blocked:
+        handoff_text = _guarded.text
     record_message(
         conversation,
         role="assistant",
@@ -1187,6 +1199,31 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # branch produced it.
     reply = _remember_time_preference(conversation, bot_user, event.text, reply)
 
+    # DRF-1210 — the last thing between the assistant and a person on the ONLY
+    # surface where the person is a client. Every branch above lands here: the
+    # concierge's prose, the deterministic renders, the memory answers, the
+    # nutrition cards. Deliberately AFTER the branch has been chosen, for the
+    # same reason ``_remember_time_preference`` is — this must see the FINAL
+    # reply and must not be able to change which branch produced it.
+    #
+    # The one exemption is the inbound gate's own canned crisis reply. Its copy
+    # is founder-approved and it is the sole live self-harm response
+    # (``gate.py``: «change it only via a new founder sign-off»); a regex
+    # deciding on its own to replace a helpline number with «спросите
+    # администратора салона» is the one failure here that could cost more than
+    # it saves. Nothing else is exempt — including the contour's own canned
+    # lines, which a test pins clean rather than a whitelist excuses.
+    if assistant_action_type != "safety_pre_check":
+        guarded = guard_outbound(reply.text, surface="max", bot_user=bot_user, trace_id=trace_id)
+        if guarded.blocked:
+            # The keyboard goes with the text. ``outbound.py``'s rule is that
+            # the reply is REPLACED, not edited, and master cards left hanging
+            # under «тут нужен человек» would be an edited reply by another
+            # name. ``persisted=False``: whatever the producer wrote, the
+            # transcript has to end up holding what the person actually read.
+            reply = DiscoveryReply(text=guarded.text, action_data=None, persisted=False)
+            assistant_action_type = OUTBOUND_ACTION_TYPE
+
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     # W5: the AIConcierge store already persisted concierge turns
     # (reply.persisted=True) — skip here to avoid a double row; every other
@@ -1563,6 +1600,17 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     action_type = skill_result.action_type if skill_result is not None else ""
     action_data = skill_result.action_data if skill_result is not None else None
     closing = skill_result is not None and skill_result.should_close_conversation
+
+    # DRF-1210 — the per-tenant client path gets the same outbound guard as the
+    # global one. It is a different brain (skill registry, not the concierge)
+    # but the same person on the other end, and a KB-driven answer is model
+    # text like any other. No crisis exemption is needed here: the inbound
+    # short-circuit above returns before reaching this line.
+    _guarded = guard_outbound(reply_text, surface="max", bot_user=bot_user, trace_id=trace_id)
+    if _guarded.blocked:
+        reply_text = _guarded.text
+        action_type = OUTBOUND_ACTION_TYPE
+        action_data = None
 
     # Persist the assistant turn BEFORE sending — if send fails, we
     # still have the intended reply on record. The send failure causes

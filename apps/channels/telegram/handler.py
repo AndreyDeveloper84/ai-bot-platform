@@ -100,7 +100,11 @@ from apps.conversations.services import record_message, resolve_active_conversat
 from apps.events.services import emit
 from apps.identity.services import resolve_or_create_bot_user
 from apps.orchestrator.memory import short_term
-from apps.orchestrator.safety.gate import evaluate_inbound
+from apps.orchestrator.safety.gate import (
+    OUTBOUND_ACTION_TYPE,
+    evaluate_inbound,
+    guard_outbound,
+)
 from apps.orchestrator.turn_seam import (
     SURFACE_PER_TENANT,
     TurnContext,
@@ -290,6 +294,18 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     action_type = skill_result.action_type if skill_result is not None else ""
     action_data = skill_result.action_data if skill_result is not None else None
     closing = skill_result is not None and skill_result.should_close_conversation
+
+    # DRF-1210 — the outbound half of the DRF-1300 lesson. Telegram was added to
+    # the INBOUND gate after it shipped without one; leaving it out of the
+    # outbound one would reproduce the same shape a second time, and the
+    # structural guard in ``apps/channels/tests/test_handler_safety_parity.py``
+    # would say so. No crisis exemption: the inbound short-circuit returns
+    # before this line.
+    _guarded = guard_outbound(reply_text, surface="telegram", bot_user=bot_user)
+    if _guarded.blocked:
+        reply_text = _guarded.text
+        action_type = OUTBOUND_ACTION_TYPE
+        action_data = None
 
     if not closing:
         record_message(
