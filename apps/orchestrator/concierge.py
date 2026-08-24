@@ -827,10 +827,52 @@ _BOOKING_NO_MASTER = (
 _BOOKING_WHICH_ONE = "Уточните, к кому именно — напишите фамилию или нажмите кнопку:"
 
 
+def _remember_when_before_handoff(
+    conversation: Any,
+    bot_user: Any,
+    text: str,
+) -> None:
+    """Store the «на завтра» of THIS turn before the handoff reads it.
+
+    DRF-1325 already parses and stores a time preference, and
+    :func:`apps.orchestrator.handoff.carry_time_preference` already copies it
+    across the tenant boundary so the booking flow opens on the day the person
+    named. But the storing happens in the MAX handler AFTER the reply is
+    built — written for the tap path, where the person says «завтра» on one
+    turn and taps a card on the next.
+
+    ``start_booking`` collapses those two turns into one. «запиши к Архипкину
+    Денису на завтра» names the master and the day in the same sentence, so by
+    the handler's turn the handoff has already run and read an empty
+    preference: the person would get a bare calendar after naming the day.
+
+    Same parser, same store, same key — only earlier. The handler's later
+    write then sets the identical value.
+
+    Best-effort by contract, like every other reader of this module: losing
+    the hint costs the day chips, never the booking.
+    """
+    try:
+        from apps.orchestrator.time_preference import (
+            local_today,
+            parse_time_preference,
+            save_time_preference,
+        )
+
+        today = local_today(getattr(bot_user, "tenant", None))
+        pref = parse_time_preference(text, weekday_today=today.weekday())
+        if pref is not None:
+            save_time_preference(conversation, pref)
+    except Exception:  # noqa: BLE001 — a hint must never break a booking turn
+        logger.warning("orchestrator.concierge.start_booking.time_pref_failed", exc_info=True)
+
+
 def _execute_start_booking(
     args: dict[str, Any],
     *,
     bot_user: Any,
+    conversation: Any,
+    message_text: str,
     trace_id: str | None,
 ) -> DiscoveryReply | None:
     """Resolve the named master and enter booking. SYNC scope only (DRF-1354).
@@ -890,6 +932,9 @@ def _execute_start_booking(
             persisted=True,
         )
     card = cards[0]
+    # The day the person named is in THIS sentence, and the handoff is about to
+    # read it (see :func:`_remember_when_before_handoff`).
+    _remember_when_before_handoff(conversation, bot_user, message_text)
     reply = handoff_to_booking(
         global_bot_user=bot_user,
         tenant_id=card.tenant_id,
@@ -1487,6 +1532,8 @@ def _concierge_turn(
         booking_reply = _execute_start_booking(
             args if isinstance(args, dict) else {},
             bot_user=bot_user,
+            conversation=conversation,
+            message_text=message_text,
             trace_id=trace_id,
         )
         if booking_reply is not None:

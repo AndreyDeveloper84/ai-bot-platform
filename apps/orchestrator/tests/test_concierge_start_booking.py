@@ -325,3 +325,41 @@ class TestTranscriptHoldsWhatWasSent:
         )
 
         assert [r.content for r in _rows(conversation)] == ["Выберите дату:"]
+
+
+@pytest.mark.django_db(transaction=True)
+class TestTheDayIsAlreadyStoredWhenTheHandoffReadsIt:
+    def test_na_zavtra_lands_in_the_same_turn(self, monkeypatch) -> None:
+        """«запиши к Архипкину Денису НА ЗАВТРА» names the master and the day
+        in one sentence, so the tap path's assumption breaks: DRF-1325 stores
+        the preference in the MAX handler AFTER the reply is built, which for
+        this turn is after the handoff already read it. Without the earlier
+        write the person names a day and gets a bare calendar."""
+        from apps.orchestrator.time_preference import load_time_preference
+
+        seen: dict = {}
+
+        def _handoff(**kwargs):
+            # Read at the moment the handoff runs, not afterwards — the
+            # ordering is the whole assertion.
+            conv = kwargs["global_bot_user"]
+            del conv
+            seen["pref"] = load_time_preference(conversation)
+            return DiscoveryReply(text="Свободные окна на завтра:")
+
+        provider = AsyncMock()
+        provider.complete.return_value = _tool_result("start_booking", {"master": "Архипкин Денис"})
+        monkeypatch.setattr(concierge, "get_router", lambda: _router_returning(provider))
+        monkeypatch.setattr(concierge, "find_masters_by_name", lambda *a, **kw: [_card()])
+        monkeypatch.setattr(concierge, "handoff_to_booking", _handoff)
+        bot_user, conversation = _bot_user_and_conversation()
+
+        generate_concierge_reply(
+            "запиши к Архипкину Денису на завтра",
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=TRACE_ID,
+        )
+
+        assert seen["pref"] is not None
+        assert seen["pref"].day_offset == 1
