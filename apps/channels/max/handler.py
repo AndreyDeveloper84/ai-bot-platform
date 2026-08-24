@@ -838,6 +838,27 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             except Exception:  # noqa: BLE001
                 logger.exception("channels.max.global.memory_ask_failed bot_user=%s", bot_user.id)
                 ask_reply = None
+            # DRF-968 / DRF-1101 — a TYPED turn that continues a booking
+            # already in flight. Deliberately ABOVE the fast path: the answer
+            # to «напишите название услуги» is a service name, and the fast
+            # path claims service names — which is exactly how the ask-the-
+            # service question came back as the master list it had just been
+            # asked from (DRF-968's loop). Below the memory branches for the
+            # same reason the fast path is: a forget-phrase or a pending
+            # memory answer is not a booking turn, whatever words it uses.
+            #
+            # Returns None for anything it cannot fully account for, so a
+            # turn it does not claim reaches the concierge byte-identically.
+            booking_reply: DiscoveryReply | None = None
+            if ask_reply is None:
+                booking_reply = try_continue_booking(
+                    global_bot_user=bot_user,
+                    conversation=conversation,
+                    text=event.text,
+                    chat_id=event.chat_id,
+                    trace_id=trace_id,
+                )
+
             # DRF-1102 — the deterministic branch: answer a general
             # booking/service request without the concierge LLM. It is faster
             # and cheaper than a model turn, and when it finds masters it is
@@ -867,27 +888,6 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # услуге» — everything else is the concierge's, including the
             # capabilities nobody has built yet
             # (``apps.orchestrator.fast_path``).
-            # DRF-968 / DRF-1101 — a TYPED turn that continues a booking
-            # already in flight. Deliberately ABOVE the fast path: the answer
-            # to «напишите название услуги» is a service name, and the fast
-            # path claims service names — which is exactly how the ask-the-
-            # service question came back as the master list it had just been
-            # asked from (DRF-968's loop). Below the memory branches for the
-            # same reason the fast path is: a forget-phrase or a pending
-            # memory answer is not a booking turn, whatever words it uses.
-            #
-            # Returns None for anything it cannot fully account for, so a
-            # turn it does not claim reaches the concierge byte-identically.
-            booking_reply: DiscoveryReply | None = None
-            if ask_reply is None:
-                booking_reply = try_continue_booking(
-                    global_bot_user=bot_user,
-                    conversation=conversation,
-                    text=event.text,
-                    chat_id=event.chat_id,
-                    trace_id=trace_id,
-                )
-
             direct_reply: DiscoveryReply | None = None
             if (
                 ask_reply is None
