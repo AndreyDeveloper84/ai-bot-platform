@@ -144,12 +144,23 @@ dependencies = [
 #     - `apps/orchestrator/tests/test_apps_boot_log.py::test_boot_log_emits_version`
 #       reads the live version via importlib.metadata — no manual edit needed.
 #
-# Current: v0.9.0 — memory context builder: exports ``build_memory_block``
-# from the package root (S3.5 concierge memory injection, W5). Snapshot-tested
-# upstream; additive against the v0.8.x allow-list.
+# Current: v0.9.0 + feat/memory-provenance — memory context builder: exports
+# ``build_memory_block`` from the package root (S3.5 concierge memory
+# injection, W5), plus the P0-3 fact-provenance surface
+# (``sources=``, ``SOURCE_STATED``/``SOURCE_INFERRED``, ``INFERRED_MARK``,
+# ``MEMORY_INFERRED_HEADER``) that lets the prompt tell a quote from a
+# derivation. Snapshot-tested upstream; additive against the v0.8.x
+# allow-list (new kwarg is keyword-only with a None default; callers that
+# omit it get byte-identical output).
+#
+# ⚠ RE-PIN BEFORE MERGE: this SHA is the ayla-ai-core PR branch head, not a
+# main commit. ayla-ai-core#<provenance PR> merges FIRST; then replace the
+# SHA below (and the two in uv.lock) with the resulting main SHA and rerun
+# `uv lock --check`. The version string stays 0.9.0, so
+# `tests/smoke/test_ayla_import.py::test_package_version_pinned` needs no edit.
 # CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@f773e7dcbd27f03befd11dd3aee6fb6f9327d535",
+    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@2c51a482bab3cfa5ac4795f8258dd5a5b6d8b567",
 ]
 
 dev = [
