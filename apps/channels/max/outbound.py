@@ -192,6 +192,16 @@ def send_message(
 # with `legacy_maxbot/menu_state.py:51` using the same call to strip a
 # keyboard off an older menu. The SDK there wraps exactly this REST call.
 #
+# The verb and path below are not read off the docs alone — MAX's own router
+# was asked, unauthenticated, 2026-08-24:
+#
+#     PUT   /messages          -> 401 {"code": "verify.token"}
+#     PATCH /messages          -> 404 {"code": "method.not.found"}
+#     PUT   /nonexistent-route -> 404 {"code": "method.not.found"}
+#
+# The route resolves before the auth gate and resolves per-method, so a 401
+# on PUT /messages means this exact endpoint exists and PATCH is not it.
+#
 # Two facts about failure that the send path does not have to know:
 #
 # 1. **MAX answers a refused edit with HTTP 200.** The body is MAX's
