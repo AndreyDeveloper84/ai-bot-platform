@@ -8,12 +8,23 @@ Read/surfacing only — this module never writes and never touches yellow/red
 (the reader already scopes to green + summary). Returns ``None`` when there is
 nothing to surface, so the caller injects nothing and the happy-path prompt is
 unchanged.
+
+Происхождение (P0-3, ``OD_C04_GROUNDED_WHY.md`` §1): этот блок — вторая
+prompt-поверхность памяти (первая — ai-core memory block), и она прямо велит
+модели говорить «помню, что ты…». Значит выведенный факт здесь опаснее, чем
+где-либо ещё: он превращается в приписанную человеку реплику. Локальный стор
+держит ОБА происхождения — извлечённое из речи (``source='explicit'``) и
+выведенное (``inferred``/``signal``) — поэтому выведенное уходит отдельным
+предложением с явным запретом ссылаться на него как на слова клиента.
+
+Когда выведенных фактов нет, абзац байт-в-байт прежний.
 """
 
 from __future__ import annotations
 
 import uuid
 
+from apps.identity.models import MemoryEntry
 from apps.identity.services.memory_key_policy import read_current_view
 from apps.identity.services.memory_reader import GreenFact, PersonalContextView
 
@@ -179,22 +190,40 @@ def render_personal_context(view: PersonalContextView) -> str | None:
         return None
 
     parts: list[str] = []
+    derived: list[str] = []
     if view.summary:
+        # Происхождение summary не хранится ни в каком виде — оставляем его
+        # там, где оно было. Это осознанный долг, а не недосмотр: тащить
+        # сюда «неизвестно» без источника было бы догадкой о догадке.
         parts.append(view.summary.strip())
     for fact in view.green_facts:
         phrase = _render_fact(fact)
-        if phrase:
+        if not phrase:
+            continue
+        if fact.source == MemoryEntry.SOURCE_EXPLICIT:
             parts.append(phrase)
+        else:
+            derived.append(phrase)
 
-    if not parts:
+    if not parts and not derived:
         return None
 
-    body = "; ".join(parts)
-    return (
-        "Что ты уже знаешь об этом клиенте (используй естественно и только когда "
-        "уместно — например «помню, что ты…»; НЕ перечисляй списком и НЕ "
-        f"придумывай ничего сверх этого): {body}."
-    )
+    if parts:
+        block = (
+            "Что ты уже знаешь об этом клиенте (используй естественно и только когда "
+            "уместно — например «помню, что ты…»; НЕ перечисляй списком и НЕ "
+            f"придумывай ничего сверх этого): {'; '.join(parts)}."
+        )
+    else:
+        block = ""
+    if derived:
+        if block:
+            block += " "
+        block += (
+            "Это мы вывели сами, клиент этого НЕ говорил — можешь учитывать, но НЕ "
+            f"ссылайся на это как на его слова: {'; '.join(derived)}."
+        )
+    return block
 
 
 def render_current_personal_context(user_id: uuid.UUID) -> str | None:

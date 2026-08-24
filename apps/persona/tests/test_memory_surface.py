@@ -52,3 +52,83 @@ class TestRenderPersonalContext:
         assert out is not None
         assert "Ищет маникюр" in out
         assert "вегетарианского питания" in out
+
+
+class TestProvenanceInTheSurfacedParagraph:
+    """P0-3 — эта поверхность велит модели говорить «помню, что ты…».
+    Выведенный факт, попавший сюда без пометки, становится репликой,
+    приписанной человеку (`OD_C04_GROUNDED_WHY.md` §1)."""
+
+    _STATED_LEAD = "Что ты уже знаешь об этом клиенте"
+    _DERIVED_LEAD = "Это мы вывели сами, клиент этого НЕ говорил"
+
+    def _view(self, source: str) -> PersonalContextView:
+        return PersonalContextView(
+            green_facts=[
+                GreenFact(
+                    kind="lifestyle",
+                    content={"key": "diet", "value": "vegan"},
+                    source=source,
+                )
+            ]
+        )
+
+    def test_stated_and_derived_are_not_the_same_paragraph(self) -> None:
+        stated = render_personal_context(self._view("explicit"))
+        derived = render_personal_context(self._view("inferred"))
+        assert stated != derived
+        assert "веганск" in stated and "веганск" in derived
+
+    def test_derived_fact_carries_the_prohibition(self) -> None:
+        out = render_personal_context(self._view("inferred"))
+        assert self._DERIVED_LEAD in out
+        # И не попадает в «что ты знаешь» — там его цитировать разрешено.
+        assert self._STATED_LEAD not in out
+
+    def test_stated_fact_is_unchanged(self) -> None:
+        out = render_personal_context(self._view("explicit"))
+        assert self._STATED_LEAD in out
+        assert self._DERIVED_LEAD not in out
+
+    def test_signal_counts_as_derived(self) -> None:
+        assert self._DERIVED_LEAD in render_personal_context(self._view("signal"))
+
+    def test_mixed_view_splits_the_two(self) -> None:
+        view = PersonalContextView(
+            summary="любит тишину",
+            green_facts=[
+                GreenFact(
+                    kind="lifestyle",
+                    content={"key": "diet", "value": "vegan"},
+                    source="explicit",
+                ),
+                GreenFact(
+                    kind="preference",
+                    content={"key": "preferred_time_slots", "value": "evening"},
+                    source="inferred",
+                ),
+            ],
+        )
+        out = render_personal_context(view)
+        stated, _, derived = out.partition(self._DERIVED_LEAD)
+        assert "веганск" in stated and "веганск" not in derived
+        assert "любит тишину" in stated
+
+    def test_all_stated_paragraph_is_byte_identical_to_the_old_one(self) -> None:
+        """Отрицательный: то, что уже помечено верно, не изменилось."""
+        view = PersonalContextView(
+            summary="любит тишину",
+            green_facts=[
+                GreenFact(
+                    kind="lifestyle",
+                    content={"key": "diet", "value": "vegan"},
+                    source="explicit",
+                )
+            ],
+        )
+        assert render_personal_context(view) == (
+            "Что ты уже знаешь об этом клиенте (используй естественно и только когда "
+            "уместно — например «помню, что ты…»; НЕ перечисляй списком и НЕ "
+            "придумывай ничего сверх этого): любит тишину; придерживается веганского "
+            "питания."
+        )
