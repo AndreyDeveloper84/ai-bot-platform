@@ -484,6 +484,26 @@ FAST_PATH_TOOL_CLAIMS: tuple[ToolClaim, ...] = (
         ),
     ),
     ToolClaim(
+        tool="start_booking",
+        claimed=False,
+        why=(
+            "DRF-1354. A turn that NAMES a master is not a service search, and "
+            "this parser cannot tell a name from an unknown word — nor should "
+            "it try: deciding that «Архипкину» is a person is language "
+            "understanding. Every sample below therefore contains at least one "
+            "word this module does not know, so the turn is unaccounted for "
+            "and goes to the model, which has the tool. The one that would "
+            "otherwise be claimed («запиши меня на массаж») names no master "
+            "and correctly stays with show_masters."
+        ),
+        sample_turns=(
+            "запиши к архипкину денису на завтра",
+            "запиши к денису",
+            "давай к денису на массаж",
+            "даю знать",
+        ),
+    ),
+    ToolClaim(
         tool="show_salons",
         claimed=False,
         why=(

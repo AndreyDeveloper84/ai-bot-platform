@@ -1196,6 +1196,133 @@ def get_master(master_id: UUID) -> MasterCard | None:
     return _to_card(master) if master is not None else None
 
 
+# ─── DRF-1354: finding a master the client named BY NAME ────────────────
+#
+# Every reader above answers «who does X?». The live pilot of 24.08 asked the
+# other question four times in ninety seconds — «запиши к Архипкину Денису
+# на завтра» — and nothing in this module could answer it: `specialization`
+# matches SERVICES and the master's free-text specialization, never their name.
+# So a turn that had already named the person was answered with a list of
+# people, including them.
+#
+# It lives HERE and not in the concierge because ``CatalogMaster.all_tenants``
+# is the sole sanctioned cross-tenant carve-out (MKT1) and this module is where
+# it is allowed to happen. A name filter written anywhere else would be a
+# second carve-out.
+
+#: A name token shorter than this is not a name («к», «на»). Two, not three:
+#: «Ян» and «Лю» are real given names on this contour's feed.
+_MIN_NAME_TOKEN_LEN = 2
+
+#: Beyond four tokens the caller is passing a sentence, not a name. Every token
+#: is AND-ed below, so an extra word can only make the search find nobody — and
+#: «никого не нашлось» about a master who is right there is the failure this
+#: function exists to remove.
+_MAX_NAME_TOKENS = 4
+
+#: Shortest prefix a name token is ever reduced to. Russian names inflect on
+#: the ENDING («к Архипкину», «к Денису», «у Сазоновой») while the mirror
+#: stores the nominative, so a spoken token is matched by its stem. Two
+#: characters is the longest Russian case ending in play here; five is the
+#: floor, so «Инна» and «Денис» are never cut at all.
+_NAME_STEM_MIN = 5
+
+
+def _name_stem(token: str) -> str:
+    """The prefix of ``token`` that survives Russian case inflection.
+
+    «архипкину» → «архипкин», «денису» → «денис», «инна» → «инна». Chops at
+    most two characters and never below :data:`_NAME_STEM_MIN`, so it can only
+    ever WIDEN a match — a widened match becomes a disambiguation question
+    with real names in it, while a missed one becomes «такого мастера нет»
+    about someone who is on the list.
+    """
+    if len(token) <= _NAME_STEM_MIN:
+        return token
+    return token[: max(_NAME_STEM_MIN, len(token) - 2)]
+
+
+def _name_tokens(raw: str) -> list[str]:
+    """Word runs of ``raw`` that can plausibly be part of a person's name.
+
+    Fillers are dropped through the SAME list the service search uses
+    (:data:`_FILLER_TOKENS`) — «запиши к Денису» must reduce to «денису», or the
+    AND below finds nobody. Known city names go too (:func:`strip_known_cities`):
+    a model that fills ``master`` with «Денис Пенза» has named one person and
+    one place, and the place is already the ``city`` argument's job.
+
+    Empty means «this is not a name», and the caller must NOT fall back to an
+    unfiltered read: matching nobody is honest, matching everybody would answer
+    «запиши к нему» with the whole directory.
+    """
+    without_greeting = _GREETING_RE.sub(" ", (raw or "").casefold())
+    words = [
+        t
+        for t in re.findall(r"\w+", without_greeting, re.UNICODE)
+        if len(t) >= _MIN_NAME_TOKEN_LEN and t not in _FILLER_TOKENS
+    ]
+    return strip_known_cities(words)[:_MAX_NAME_TOKENS]
+
+
+def find_masters_by_name(
+    name: str,
+    *,
+    city: str | None = None,
+    service: str | None = None,
+    limit: int = _DEFAULT_LIMIT,
+) -> list[MasterCard]:
+    """Bookable masters whose NAME contains every token of ``name``.
+
+    ``[]`` when the query tokenizes to nothing or matches nobody — never the
+    unfiltered directory (see :func:`_name_tokens`).
+
+    Tokens are AND-ed as substrings, so word ORDER does not matter: «Архипкин
+    Денис» and «Денис Архипкин» find the same person, and a bare «Денис»
+    finds every Денис — which is the POINT: several results is the answer
+    «which one did you mean», and the caller asks it with their names in hand
+    instead of redrawing the catalog.
+
+    Substring and not word-boundary on purpose: Russian names inflect in the
+    turn («к Денису», «к Архипкину») while the mirror stores the nominative,
+    so the STORED name is matched against a prefix of the spoken one. That is
+    why the token is trimmed to its stem below rather than compared whole: an
+    inflected «денису» would never be a substring of «Денис».
+
+    ``city`` narrows only when it LEAVES someone: an exact ``tenant.city``
+    match is the model's guess about a field the person never typed, and a
+    wrong guess here would report the named master as missing. ``service``,
+    when given, stamps the one service that matched it (same rule and same
+    deliverability gate as :func:`discover_masters`), so the booking handoff
+    starts with the service context instead of asking for it again.
+    """
+    tokens = _name_tokens(name)
+    if not tokens:
+        return []
+    qs = _bookable_qs()
+    for token in tokens:
+        # Match on the STEM of the spoken token so an inflected form still
+        # finds the nominative in the mirror (:func:`_name_stem`).
+        qs = qs.filter(name__icontains=_name_stem(token))
+    masters = list(qs[: max(1, min(limit, _MAX_LIMIT))])
+    if city and city.strip() and len(masters) > 1:
+        folded = city.strip().casefold()
+        in_city = [m for m in masters if (m.tenant.city or "").casefold() == folded]
+        if in_city:
+            masters = in_city
+    cards = [_to_card(master) for master in masters]
+    if service and service.strip():
+        matched = _matched_services([master.id for master in masters], _parse_query(service))
+        cards = [
+            (
+                replace(card, service_id=pair[0], service_name=pair[1])
+                if (pair := matched.get(card.master_id)) is not None
+                else card
+            )
+            for card in cards
+        ]
+    return cards
+
+
 # ─── DRF-1304: salons & services on the discovery surface ────────────────────
 #
 # The concierge could show masters (``show_masters``) but had no tool for the
