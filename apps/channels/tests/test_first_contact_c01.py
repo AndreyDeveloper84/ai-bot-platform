@@ -203,17 +203,11 @@ class TestCopyIsNeedFirst:
         assert city_word not in GLOBAL_WELCOME_TEXT.lower()
         assert city_word not in GLOBAL_S5_TEXT.lower()
 
-    def test_forbidden_phrasing_is_not_used(self):
-        """«Не знаю, с чего начать» — решение владельца отложено.
-
-        Не использовать и не запрещать: реестр и DRF-1179 противоречат
-        макету. Здесь пришпилено только «не использовать» — запрет как
-        правило не вводится (см. docs/OPEN_DECISIONS.md).
-        """
-        surfaces = [GLOBAL_WELCOME_TEXT, GLOBAL_S5_TEXT] + [
-            a.text for a in FIRST_CONTACT_QUICK_ACTIONS
-        ]
-        assert not any("с чего начать" in s.lower() for s in surfaces)
+    # Про «Не знаю, с чего начать» здесь НЕТ проверки, и это решение, а не
+    # пропуск. Владелец 24.08 отложил вопрос: «не использовать и не
+    # запрещать» — реестр и DRF-1179 противоречат макету, надо сверять.
+    # Тест, падающий на этой формулировке, был бы запретом, то есть
+    # решением за владельца. Сегодня она просто не используется.
 
 
 # --------------------------------------------------------------------------- #
