@@ -215,9 +215,10 @@ def test_a_bare_preposition_is_not_a_service_query(contour: Tenant) -> None:
 def test_the_rule_is_the_class_and_not_the_word(contour: Tenant, phrase: str, dropped: str) -> None:
     """Every function word goes the same way, and none is named in the code.
 
-    ``grep -c 'по\\b'`` over ``discovery.py`` is the real assertion here: the
-    fix adds no word to any list, so «за», «из», «до», «от», «об», «ко» need
-    no follow-up ticket.
+    None of these four words is mentioned anywhere in ``discovery.py`` — the
+    fix adds no word to any list — so «за», «от», «об», «ко», «при», «под»
+    need no follow-up ticket either. That is the difference between fixing a
+    class and fixing a word.
     """
     assert dropped not in parse_query(phrase).stems
 
