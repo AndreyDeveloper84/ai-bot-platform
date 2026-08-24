@@ -131,7 +131,15 @@ def read_personal_context(user_id: uuid.UUID) -> PersonalContextView:
         return PersonalContextView()
 
     facts = [
-        GreenFact(kind=entry.kind, content=entry.content if isinstance(entry.content, dict) else {})
+        GreenFact(
+            kind=entry.kind,
+            content=entry.content if isinstance(entry.content, dict) else {},
+            # Today's two callers are write-path dedup, not prompt paths, so
+            # nothing renders this. Populated anyway so the two readers agree:
+            # a future prompt consumer picking this one up would otherwise get
+            # the conservative default and label every fact a guess.
+            source=entry.source,
+        )
         for entry in read_green_entries(user_id)
     ]
     summary = (upc.summary or "").strip() or None
