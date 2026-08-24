@@ -73,25 +73,32 @@ class TestProvenanceInTheSurfacedParagraph:
             ]
         )
 
+    def _render(self, source: str) -> str:
+        """Render, asserting a paragraph came back — «нечего показать» is its
+        own outcome and would silently pass every `in` check below."""
+        out = render_personal_context(self._view(source))
+        assert out is not None
+        return out
+
     def test_stated_and_derived_are_not_the_same_paragraph(self) -> None:
-        stated = render_personal_context(self._view("explicit"))
-        derived = render_personal_context(self._view("inferred"))
+        stated = self._render("explicit")
+        derived = self._render("inferred")
         assert stated != derived
         assert "веганск" in stated and "веганск" in derived
 
     def test_derived_fact_carries_the_prohibition(self) -> None:
-        out = render_personal_context(self._view("inferred"))
+        out = self._render("inferred")
         assert self._DERIVED_LEAD in out
         # И не попадает в «что ты знаешь» — там его цитировать разрешено.
         assert self._STATED_LEAD not in out
 
     def test_stated_fact_is_unchanged(self) -> None:
-        out = render_personal_context(self._view("explicit"))
+        out = self._render("explicit")
         assert self._STATED_LEAD in out
         assert self._DERIVED_LEAD not in out
 
     def test_signal_counts_as_derived(self) -> None:
-        assert self._DERIVED_LEAD in render_personal_context(self._view("signal"))
+        assert self._DERIVED_LEAD in self._render("signal")
 
     def test_mixed_view_splits_the_two(self) -> None:
         view = PersonalContextView(
@@ -110,6 +117,7 @@ class TestProvenanceInTheSurfacedParagraph:
             ],
         )
         out = render_personal_context(view)
+        assert out is not None
         stated, _, derived = out.partition(self._DERIVED_LEAD)
         assert "веганск" in stated and "веганск" not in derived
         assert "любит тишину" in stated
