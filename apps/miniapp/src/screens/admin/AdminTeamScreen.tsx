@@ -315,6 +315,25 @@ export function AdminTeamScreen({ me }: Props) {
         )}
       </header>
 
+      {/*
+        DRF-1061 block 2.4. Deliberately a separate, quieter control rather
+        than a second primary button: adding a NEW master to the catalog and
+        giving an EXISTING person access are different jobs, and the roster
+        screen is where somebody realises they need the second one.
+      */}
+      {(me.is_owner || me.is_admin) && (
+        <button
+          type="button"
+          className="admin-flow-back"
+          onClick={() => {
+            hapticSelection();
+            navigate("/admin/team/access");
+          }}
+        >
+          Выдать доступ тому, кто уже в салоне
+        </button>
+      )}
+
       <div
         role="tablist"
         aria-label="Фильтр команды"

@@ -5928,3 +5928,142 @@ a {
   color: var(--c-text-secondary);
   font-style: italic;
 }
+
+/* DRF-1061 block 2.4 — staff access codes (`/admin/team/access`).
+
+   The code is returned once and only its hash is stored, so the screen has
+   to make it hard to lose by accident: it is set large, in a monospace
+   face, with generous letter-spacing — the reader is usually about to read
+   it aloud or retype it, and `AYLA-8KQ2` in a proportional font invites a
+   wrong character. */
+.staff-access__lead {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  line-height: 1.4;
+}
+
+.staff-access__once {
+  margin: 0;
+  font-weight: 600;
+}
+
+.staff-access__once-detail {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+}
+
+.staff-access__code {
+  margin: var(--s-4) 0 var(--s-3);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: var(--font-size-500);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-align: center;
+  /* Selectable on purpose: the copy button is a convenience, and a webview
+     that refuses the clipboard must still leave a way to get the code. */
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.staff-access__meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--s-1) var(--s-3);
+  margin: var(--s-4) 0 0;
+  font-size: var(--font-size-200);
+}
+
+.staff-access__meta dt {
+  color: var(--c-text-secondary);
+}
+
+.staff-access__meta dd {
+  margin: 0;
+}
+
+.staff-access__how {
+  margin: var(--s-3) 0 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  line-height: 1.4;
+}
+
+.staff-access__message {
+  margin: var(--s-3) 0 0;
+  padding: var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.staff-access__roles {
+  border: 0;
+  padding: 0;
+  margin: var(--s-3) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.staff-access__legend {
+  padding: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.staff-access__role {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  min-height: 44px;
+  padding: var(--s-1) 0;
+  cursor: pointer;
+}
+
+.staff-access__role input[type="radio"] {
+  /* The label starts on the first line, so the control is nudged onto it
+     rather than centred against a two-line block. */
+  margin-top: 2px;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  accent-color: var(--c-accent);
+}
+
+.staff-access__role-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.staff-access__role-label {
+  font-size: var(--font-size-300);
+}
+
+.staff-access__role-effect {
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+.staff-access__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-top: var(--s-4);
+}
+
+.staff-access__field-title {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.staff-access__field-note {
+  font-size: var(--font-size-100);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
