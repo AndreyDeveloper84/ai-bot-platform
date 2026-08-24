@@ -210,8 +210,8 @@ _GOAL_MIN_PREFIX = 4
 #
 # * Attestation alone would be one service name away from re-opening the
 #   defect — «Уход ЗА кожей» makes «за» a word of the catalog, and the
-#   substring «%за%» then matches «задней», «зоны», «загар»: the same blowout
-#   one preposition along.
+#   substring «%за%» then matches «задней поверхности», «загар», «затылок»:
+#   the same blowout one preposition along.
 # * Word matching alone would not stop it either, because the master's
 #   free-text ``specialization`` is matched too, and «Мастер ПО массажу» is
 #   how that field is written. Attestation keeps «по» out of the query
@@ -480,7 +480,7 @@ def _stem_match_q(field: str, stem: str) -> Q:
     truncated — it is a whole word that :func:`_attested_tokens` already
     confirmed the catalog uses as one — and it matches only at word
     boundaries, so attesting «за» through «Уход за кожей» cannot turn
-    ``%за%`` loose on «задней», «зоны» and «загар».
+    ``%за%`` loose on «задней поверхности».
 
     The pattern is written with ``[^\\w]`` rather than Postgres's ``\\m``/``\\M``
     so it means the same thing to Django's SQLite ``REGEXP`` (Python ``re``,
