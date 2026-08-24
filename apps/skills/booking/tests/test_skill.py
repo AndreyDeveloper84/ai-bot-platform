@@ -497,16 +497,23 @@ class TestDatePickCallback:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert result.should_handoff is False
-        # Slot-cards short-circuit renders the keyboard.
-        assert result.reply_text == "Выберите время:"
+        # DRF-1325: the date tap now asks «утро / день / вечер» first — a bare
+        # list of every free time of a day IS the calendar this ticket is
+        # about. The one exception is this fixture's shape: a single slot at
+        # 14:00 means only ONE part has anything, and a one-button question is
+        # not a question, so the times are rendered straight away. The keyboard
+        # is therefore unchanged; only the sentence above it names the day and
+        # the part it belongs to.
+        assert result.reply_text == "22 сен (Вт), днём — выберите время:"
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
         assert "cb:book:pick_slot:11:22:2026-09-22T14:00:00" in [b["callback"] for b in buttons]
-        # Synthetic show_slots tool_call recorded with date_from + service_id.
-        assert len(result.tool_calls_made) == 1
-        tc = result.tool_calls_made[0]
-        assert tc.name == "show_slots"
-        assert tc.arguments == {"master_id": 11, "date_from": "2026-09-22", "service_id": 22}
+        # No synthetic show_slots tool_call any more: the part picker reads the
+        # day's times directly, the same way the date picker has always read
+        # the dates list — neither is an LLM-grounded artefact. The audit row
+        # is written explicitly instead (see _render_part_picker).
+        assert result.tool_calls_made == []
+        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
 
     def test_malformed_payload_handoffs_softly(self, context: SkillContext, tenant: Tenant) -> None:
         ctx = SkillContext(
@@ -544,7 +551,10 @@ class TestDatePickCallback:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert result.should_handoff is False
-        assert result.reply_text == "Выберите время:"
+        # DRF-1325 renamed the prompt (see TestDatePickCallback above); the
+        # property this test exists for — no 14-day fan-out once the user has
+        # named a day — is unchanged and still asserted below.
+        assert result.reply_text == "22 сен (Вт), днём — выберите время:"
         assert client.dates_calls == []
         assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
 
@@ -1337,8 +1347,15 @@ class TestCreateFlowServiceContext:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(ctx)
         assert result.should_handoff is False
-        assert len(result.tool_calls_made) == 1
-        assert result.tool_calls_made[0].arguments["service_id"] == 22
+        # DRF-1325: the date tap no longer synthesises a show_slots ToolCall,
+        # so "the service id survived the tap" is now read off the call the
+        # flow actually makes — and off the slot buttons, which is where the
+        # id has to be for the NEXT tap to work.
+        assert result.tool_calls_made == []
+        assert client.times_calls == [{"staff_id": 11, "date": "2026-09-22", "service_ids": [22]}]
+        assert result.action_data is not None
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert all(":22:" in b["callback"] for b in buttons)
 
     def test_service_id_survives_slot_pick_pending(
         self, context: SkillContext, tenant: Tenant
