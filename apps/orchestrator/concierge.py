@@ -1036,7 +1036,12 @@ def generate_concierge_reply(
                     action_data=rendered.action_data,
                     persisted=True,
                 )
-            return DiscoveryReply(text=get_fallback("ru"))
+            # DRF-1348 — единственная точка, где ход потерян не потому, что
+            # модель плохо ответила, а потому, что до неё не дошли. Канал
+            # рисует по этому флагу состояние «AI недоступна» с «Повторить»
+            # (макет C01), вместо обещания «отвечу через минуту», которое
+            # никто не выполнит: к этому ходу никто не вернётся.
+            return DiscoveryReply(text=get_fallback("ru"), outage=True)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         # DRF-1286 — a forced-tool retry happened inside this pass: two
         # LLM calls were billed and one answer was thrown away. Give the

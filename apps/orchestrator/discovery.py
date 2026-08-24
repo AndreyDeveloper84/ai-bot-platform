@@ -277,11 +277,25 @@ class DiscoveryReply:
     by the producer (the AIConcierge store in
     :mod:`apps.orchestrator.concierge`) — the handler must NOT record it
     again. Legacy producers leave it False.
+
+    ``outage`` (DRF-1348): True when this reply exists ONLY because the model
+    could not be reached — the LLM call itself raised and the turn degraded to
+    the safe line. Set in exactly one place
+    (:func:`apps.orchestrator.concierge.generate_concierge_reply`, the
+    ``llm_error`` return) and nowhere else: the other producers of the same
+    safe line — a blank clarification, an unknown tool name — are the model
+    ANSWERING badly, which is a different fact and must not offer «Повторить»
+    for a turn that was, in fact, taken.
+
+    Читается каналом, чтобы нарисовать состояние «AI недоступна» из макета C01
+    вместо молчаливого «отвечу через минуту», который ничего не отвечает.
+    Legacy producers leave it False, так что для них ничего не меняется.
     """
 
     text: str
     action_data: dict[str, Any] | None = None
     persisted: bool = False
+    outage: bool = False
 
 
 def _discovery_voice_fields() -> dict[str, str]:
