@@ -83,6 +83,34 @@ def spy_direct_show_masters(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _penza_is_a_place_we_serve():
+    """One bookable master in Пенза (DRF-1328).
+
+    «маникюр в Пензе» names a city, and since DRF-1328 the deterministic
+    branch claims a turn only when it can account for EVERY word. A city is
+    accounted for exactly when the marketplace has someone bookable there
+    (``apps.marketplace.discovery.strip_known_cities`` — live data, by
+    DRF-1283's design). With no masters anywhere, «пензе» is an unknown word
+    and the turn goes to the model instead; this file is about onboarding, so
+    it needs the contour where the branch can run.
+    """
+    from datetime import datetime, timezone
+
+    from apps.catalog.models import CatalogMaster
+    from apps.tenancy.models import Tenant
+
+    tenant = Tenant.objects.create(slug="salon-penza-1328-onb", name="SPAtrium", city="Пенза")
+    CatalogMaster.all_tenants.create(
+        tenant=tenant,
+        name="Архипкин Денис",
+        specialization="массаж",
+        is_active=True,
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        external_updated_at=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _onboarding_on(settings):
     settings.GLOBAL_BOT_ONBOARDING = True
     # Make the tenant-less invariant load-bearing: TenantScopedManager reads

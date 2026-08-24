@@ -127,6 +127,7 @@ from apps.identity.services import (
 from apps.persona.memory_commands import handle_memory_command
 from apps.persona.memory_surface import render_current_personal_context
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
+from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CATALOG_CALLBACK_PREFIXES,
@@ -165,7 +166,6 @@ from apps.orchestrator.turn_seam import (
     turn_reply_to_skill_result,
 )
 from apps.skills.booking.lookup import is_personal_booking_lookup
-from apps.skills.menu.matching import looks_like_booking_request
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
 logger = logging.getLogger(__name__)
@@ -687,10 +687,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      confirm / cancel route back into tenant T's skill pipeline — before
     #      this they fell through to the concierge as raw text (the «2026 год»
     #      refusal instead of the next booking step).
-    #   2.7. New-booking intent (DRF-1102) — a general «запиши меня на
-    #      массаж»-shaped turn (looks_like_booking_request, the same signal
-    #      apps/skills/menu already uses as its last-resort booking
-    #      catch-all) shows masters straight away, deterministically. Sits
+    #   2.7. New-booking intent (DRF-1102) — a turn that PARSES as exactly
+    #      «покажи мастеров по услуге» (claims_direct_show_masters, DRF-1328)
+    #      shows masters straight away, deterministically. Until 24.08 the
+    #      test was merely «does the text mention a service», which claimed
+    #      «Найди мне САЛОНЫ массажа» and answered it with masters; the
+    #      default is inverted now — a turn this branch cannot fully account
+    #      for belongs to the concierge and its tools. Sits
     #      AFTER the memory-command / pending-answer checks inside the else
     #      branch below (not a top-level elif here) so a forget-phrase that
     #      happens to name a service — «забудь что я люблю массаж» — is
@@ -844,8 +847,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # (tool result comes back as an ordinary message, capped by
             # CONCIERGE_MAX_LLM_PASSES), which is what makes the fallthrough
             # safe now.
+            #
+            # DRF-1328 — and it no longer claims every turn that merely
+            # MENTIONS a service. «Найди мне САЛОНЫ массажа» did exactly
+            # that on 24.08 and came back as master cards, twice, while
+            # ``show_salons`` (DRF-1304, shipped the day before) sat unused
+            # because the model never got the turn. The gate now parses the
+            # turn and takes it only when it is exactly «покажи мастеров по
+            # услуге» — everything else is the concierge's, including the
+            # capabilities nobody has built yet
+            # (``apps.orchestrator.fast_path``).
             direct_reply: DiscoveryReply | None = None
-            if ask_reply is None and looks_like_booking_request(event.text):
+            if ask_reply is None and claims_direct_show_masters(event.text):
                 direct_reply = generate_direct_show_masters_reply(
                     event.text,
                     trace_id=str(trace_id) if trace_id else None,

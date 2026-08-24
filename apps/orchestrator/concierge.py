@@ -59,7 +59,6 @@ from apps.llm.router import get_router
 from apps.marketplace.discovery import (
     discover_masters,
     service_coverage,
-    split_requested_services,
 )
 from apps.observability.ai_metrics import record_ai_request
 from apps.observability.models import AIRequestMetric
@@ -80,6 +79,7 @@ from apps.orchestrator.discovery import (
     render_no_criteria_clarification,
     requested_services,
 )
+from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.llm.templates import get_fallback
 from apps.orchestrator.nutrition_global import (
     NUTRITION_TOOL_ACTIONS,
@@ -486,6 +486,30 @@ class GlobalConversationStore:
         # Last N (DESC) reversed → chronological, per the Protocol contract.
         return list(reversed(qs[:limit]))
 
+
+#: Every tool the concierge is armed with, in declaration order (DRF-1328).
+#:
+#: Lifted out of :func:`generate_concierge_reply` so the roster has ONE name
+#: that other code can point at. Two things read it:
+#:
+#: * the concierge itself, as ``tool_definitions`` — unchanged behaviour;
+#: * ``apps/orchestrator/tests/test_fast_path_claim.py``, which fails when a
+#:   tool listed here has no entry in
+#:   ``apps.orchestrator.fast_path.FAST_PATH_TOOL_CLAIMS``. That guard is why
+#:   this is a module constant and not an inline literal: an inline list can
+#:   grow without anything noticing, and it did — twice in two days
+#:   (DRF-1312, DRF-1328).
+#:
+#: Nutrition specs stay LAST and in their own order: that order is
+#: load-bearing (``apps.orchestrator.nutrition_global`` — screening is read
+#: first by the model).
+CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
+    SHOW_MASTERS_TOOL_SPEC,
+    SHOW_SALONS_TOOL_SPEC,
+    SHOW_SERVICES_TOOL_SPEC,
+    ASK_CLARIFICATION_TOOL_SPEC,
+    *NUTRITION_TOOL_SPECS,
+]
 
 _KNOWN_TOOLS = frozenset(
     {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]}
@@ -933,13 +957,7 @@ def generate_concierge_reply(
             summary_text="",
             tenant_id=GLOBAL_TENANT_ID,
         ),
-        tool_definitions=[
-            SHOW_MASTERS_TOOL_SPEC,
-            SHOW_SALONS_TOOL_SPEC,
-            SHOW_SERVICES_TOOL_SPEC,
-            ASK_CLARIFICATION_TOOL_SPEC,
-            *NUTRITION_TOOL_SPECS,
-        ],
+        tool_definitions=CONCIERGE_TOOL_SPECS,
         tool_dispatcher=_dispatch_tool,
     )
 
@@ -1314,13 +1332,23 @@ def generate_direct_show_masters_reply(
             fallback_triggered=True,
         )
         return reply
-    if len(split_requested_services(message_text)) >= 2:
-        # Composite → the concierge, which can split it and check each part.
+    if not claims_direct_show_masters(message_text):
+        # DRF-1328 — the inverted default. This branch answers a turn only
+        # when it PARSES as exactly «покажи мастеров по услуге»; anything it
+        # cannot account for belongs to the concierge, which has the salon,
+        # service, screening and clarification tools this layer does not.
+        #
+        # The DRF-1312 composite decline is now one clause of that parse
+        # (``apps.orchestrator.fast_path``, reason ``composite_request``)
+        # rather than a hand-added exception — same outcome, one rule.
+        #
+        # Checked HERE and not only at the handler gate on purpose: the gate
+        # can be bypassed by any future caller, and the decision about who
+        # owns the turn must not depend on which door it came through.
+        #
         # No metric row, same reason as the zero-result decline below: this
         # path did not answer the inbound message.
-        logger.info(
-            "orchestrator.concierge.direct_show_masters.composite_to_llm trace=%s", trace_id
-        )
+        logger.info("orchestrator.concierge.direct_show_masters.not_claimed trace=%s", trace_id)
         return None
     cards = discover_masters(
         specialization=message_text,
