@@ -73,11 +73,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
-from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -1276,24 +1276,26 @@ def _resolved_health_check_for_edge(
     except ImportError:  # pragma: no cover — catalog always available
         return None
     try:
-        return (
-            MasterService.all_tenants.filter(
-                tenant=tenant,
-                master_id=str(master_id),
-                service__ayla_service_id=str(service_id),
-            )
-            .values_list("resolved_requires_health_check", flat=True)
-            .first()
-        )
-    except (DjangoValidationError, ValueError, TypeError):
-        # Non-UUID ids reach the UUID columns as a validation error. That is
-        # an unresolvable edge, not a permissive one.
+        master_key = uuid.UUID(str(master_id))
+        service_key = uuid.UUID(str(service_id))
+    except (ValueError, AttributeError, TypeError):
+        # A stray legacy int (or anything else that is not an Ayla id) cannot
+        # name an edge. Unresolvable, therefore unknown — never permissive.
         logger.info(
             "booking.health_gate.unresolvable_edge master=%s service=%s",
             master_id,
             service_id,
         )
         return None
+    return (
+        MasterService.all_tenants.filter(
+            tenant=tenant,
+            master_id=master_key,
+            service__ayla_service_id=service_key,
+        )
+        .values_list("resolved_requires_health_check", flat=True)
+        .first()
+    )
 
 
 def _service_requires_health_check(

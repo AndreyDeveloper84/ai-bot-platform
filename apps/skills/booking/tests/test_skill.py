@@ -1984,11 +1984,17 @@ class TestE0RegressionGuards:
 class TestServiceRequiresHealthCheck:
     """Direct coverage for ``_service_requires_health_check``.
 
-    #1034 / #1121: under ``BOOKING_VIA_AYLA_REST`` the helper FAILS CLOSED
-    unconditionally (``True`` → human handoff). The resolved (master×service)
-    health-check source lands with S3B PR-2; until then the service-level
-    ``CatalogService.requires_health_check`` is NOT trusted (a service-level
-    ``False`` is a fail-OPEN risk for a specific master). The flag-OFF (int
+    #1034 / #1121: under ``BOOKING_VIA_AYLA_REST`` the helper fails CLOSED
+    whenever it cannot prove a verdict. Every case below calls it WITHOUT a
+    master, which is exactly the unprovable case — the resolved verdict is
+    per (master×service), so no master means no verdict, and the
+    service-level ``CatalogService.requires_health_check`` is still NOT
+    trusted as a stand-in (it carries one of three inputs to Ayla's
+    escalate-only OR, so a service-level ``False`` remains a fail-OPEN risk
+    for a specific master).
+
+    DRF-1353 added the provable case; it lives in
+    ``TestResolvedHealthCheckGate`` below. The flag-OFF (int
     ``external_id``) path is unchanged (lenient default).
     """
 
@@ -2102,6 +2108,291 @@ class TestServiceRequiresHealthCheck:
         with override_settings(BOOKING_VIA_AYLA_REST=False):
             with tenant_scope(tenant):
                 assert _service_requires_health_check(tenant, 22) is False
+
+
+# ---------------------------------------------------------------------------
+# DRF-1353 — resolved (master×service) health-check verdict
+# ---------------------------------------------------------------------------
+
+
+class TestResolvedHealthCheckGate:
+    """The gate reads Ayla's resolved per-edge verdict, mirrored on
+    ``MasterService.resolved_requires_health_check``.
+
+    Four salons of the pilot's five could not book at all because the gate
+    fell through to a one-tenant allowlist. The verdict is the real source:
+    ``True`` gates, ``False`` opens, ``NULL``/absent stays unprovable and
+    therefore closed.
+    """
+
+    _MASTER = "11111111-1111-4111-8111-111111111111"
+    _SERVICE = "22222222-2222-4222-8222-222222222222"
+    _OTHER_MASTER = "44444444-4444-4444-8444-444444444444"
+
+    def _edge(self, tenant: Tenant, *, resolved: bool | None, with_row: bool = True) -> None:
+        """Mirror one master×service edge with the given resolved verdict."""
+        import uuid as _uuid
+
+        from django.utils import timezone as dj_timezone
+
+        from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+
+        with tenant_scope(tenant):
+            master = CatalogMaster.objects.create(
+                id=_uuid.UUID(self._MASTER),
+                tenant=tenant,
+                external_updated_at=dj_timezone.now(),
+                name="Ольга",
+            )
+            service = CatalogService.objects.create(
+                tenant=tenant,
+                external_id=22,
+                external_updated_at=dj_timezone.now(),
+                slug="svc-22",
+                name="Массаж головы",
+                # Deliberately False: the salon layer says "no screening" in
+                # all five pilot tenants. The gate must not read this column.
+                requires_health_check=False,
+                ayla_service_id=_uuid.UUID(self._SERVICE),
+            )
+            if with_row:
+                MasterService.objects.create(
+                    tenant=tenant,
+                    master=master,
+                    service=service,
+                    ayla_specialist_service_id=_uuid.uuid4(),
+                    resolved_requires_health_check=resolved,
+                )
+
+    def test_resolved_false_opens_the_gate_without_any_allowlist(self, tenant: Tenant) -> None:
+        """The four blocked salons: Ayla says no screening → booking proceeds,
+        with an EMPTY allowlist."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=False)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._SERVICE, self._MASTER) is False
+
+    def test_resolved_true_gates_even_for_an_allowlisted_tenant(self, tenant: Tenant) -> None:
+        """The negative case, and the tightening: a service that genuinely
+        needs screening still routes to a human on the ONE tenant the old
+        allowlist made unreachable by the gate."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=True)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._SERVICE, self._MASTER) is True
+
+    def test_resolved_true_writes_no_gate_disabled_audit(self, tenant: Tenant) -> None:
+        """A gate that FIRED is not a gate that was disabled — the DRF-1005
+        audit row must not appear for it, or the audit trail stops meaning
+        anything."""
+        from apps.audit.models import AuditLog
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=True)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with tenant_scope(tenant):
+                _service_requires_health_check(tenant, self._SERVICE, self._MASTER)
+        assert not AuditLog.all_tenants.filter(action="booking.health_check_gate_disabled").exists()
+
+    def test_null_column_stays_unprovable_and_closed(self, tenant: Tenant) -> None:
+        """An edge row that was never synced (operator-owned MM4 row, or a
+        row written before the column existed) proves nothing."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=None)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._SERVICE, self._MASTER) is True
+
+    def test_null_column_still_falls_back_to_the_allowlist(self, tenant: Tenant) -> None:
+        """Unknown keeps DRF-1005's original job intact — the allowlist is
+        demoted, not deleted."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=None)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._SERVICE, self._MASTER) is False
+
+    def test_no_edge_row_fails_closed(self, tenant: Tenant) -> None:
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=False, with_row=False)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._SERVICE, self._MASTER) is True
+
+    def test_other_master_on_the_same_service_is_not_borrowed(self, tenant: Tenant) -> None:
+        """The verdict is per EDGE. A permissive verdict for one master must
+        never answer for another — that is the fail-OPEN risk #1121 named."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=False)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with tenant_scope(tenant):
+                assert (
+                    _service_requires_health_check(tenant, self._SERVICE, self._OTHER_MASTER)
+                    is True
+                )
+
+    def test_non_uuid_ids_fail_closed_without_raising(self, tenant: Tenant) -> None:
+        """A stray legacy int reaching the UUID columns is an unresolvable
+        edge, not a permissive one — and must not blow up the customer turn."""
+        from apps.skills.booking.skill import _service_requires_health_check
+
+        self._edge(tenant, resolved=False)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, 22, 11) is True
+
+    def test_foreign_tenant_edge_is_not_read(self, tenant: Tenant) -> None:
+        """The lookup is tenant-pinned: another tenant's permissive verdict
+        for the same ids can never open this tenant's gate."""
+        from apps.skills.booking.skill import _service_requires_health_check
+        from apps.tenancy.models import Tenant as TenantModel
+
+        other = TenantModel.objects.create(name="Other", slug="other-tenant")
+        self._edge(other, resolved=False)
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with tenant_scope(tenant):
+                assert _service_requires_health_check(tenant, self._SERVICE, self._MASTER) is True
+
+    def test_pick_slot_reaches_confirmation_on_resolved_false(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """End-to-end on the exact path that failed on the pilot: tap a time
+        → confirmation card, not a handoff, with an empty allowlist."""
+        from apps.booking.models import PendingBookingAction
+        from apps.handoff.models import AdminTask
+
+        self._edge(tenant, resolved=False)
+        client = FakeYClients()
+        client.services_rows = [_service(self._SERVICE)]
+        client.staff_rows = [_staff(self._MASTER, "Ольга")]
+        client.times = [
+            AvailableTime(time="14:00", datetime="2026-09-22T14:00:00", seance_length_s=3600)
+        ]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=(f"cb:book:pick_slot:{self._MASTER}:{self._SERVICE}:2026-09-22T14:00:00"),
+        )
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset(),
+        ):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=client,
+                ),
+                _patch_provider_complete([]) as mock_complete,
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        mock_complete.assert_not_called()
+        assert result.should_handoff is False
+        assert PendingBookingAction.all_tenants.count() == 1
+        assert AdminTask.all_tenants.count() == 0
+
+    def test_pick_slot_handoffs_on_resolved_true(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The negative, end-to-end: a genuinely gated edge still answers
+        "нужна консультация" and leaves no pending booking."""
+        from apps.booking.models import PendingBookingAction
+
+        self._edge(tenant, resolved=True)
+        client = FakeYClients()
+        client.services_rows = [_service(self._SERVICE)]
+        client.staff_rows = [_staff(self._MASTER, "Ольга")]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text=(f"cb:book:pick_slot:{self._MASTER}:{self._SERVICE}:2026-09-22T14:00:00"),
+        )
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=client,
+                ),
+                _patch_provider_complete([]),
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(ctx)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_health_check_required"
+        assert client.times_calls == []
+        assert PendingBookingAction.all_tenants.count() == 0
+
+    def test_confirm_path_passes_the_grounded_master(
+        self, context: SkillContext, tenant: Tenant
+    ) -> None:
+        """The LLM confirm path must resolve the same verdict as pick_slot;
+        before DRF-1353 it only ever had the service id."""
+        self._edge(tenant, resolved=True)
+        client = FakeYClients()
+        client.services_rows = [_service(self._SERVICE)]
+        client.staff_rows = [_staff(self._MASTER, "Ольга")]
+        tc = ToolCall(
+            id="c1",
+            name="confirm_booking",
+            arguments={
+                "master_id": self._MASTER,
+                "service_id": self._SERVICE,
+                "slot_datetime": "2026-09-22T14:00:00",
+            },
+        )
+        with override_settings(
+            BOOKING_VIA_AYLA_REST=True,
+            BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS=frozenset({str(tenant.id)}),
+        ):
+            with (
+                patch(
+                    "apps.skills.booking.provider.get_booking_provider",
+                    return_value=client,
+                ),
+                _patch_provider_complete([_completion(tool_calls=[tc])]),
+            ):
+                with tenant_scope(tenant):
+                    result = BookingSkill().handle(context)
+        assert result.should_handoff is True
+        assert result.handoff_reason == "booking_health_check_required"
 
 
 # ---------------------------------------------------------------------------
