@@ -142,7 +142,15 @@ class TestMultiPassTurn:
 
         assert reply.text == "В четверг у Анны свободны окна с 10:00."
         assert reply.persisted is True
-        assert reply.action_data is None
+        # DRF-1354: the prose is the model's, but the booking keyboard rides
+        # with it. This assertion used to read `action_data is None` — that
+        # was the defect, not the contract: DRF-1266 swapped the card render
+        # for prose and took the only booking affordance with it.
+        assert reply.action_data is not None
+        assert (
+            reply.action_data["attachments"][0]["payload"]["buttons"][0]["callback"]
+            == "cb:discover:book:t1:m1"
+        )
         assert discover.call_count == 1
         assert provider.complete.await_count == 2
 
@@ -406,8 +414,15 @@ class TestSecondPassOutboundContract:
         # Same shape as a first-pass plain-text reply: the handler cannot
         # tell (and must not need to tell) which pass produced the text.
         assert second_pass_reply.persisted is True
-        assert second_pass_reply.action_data is None
         assert second_pass_reply.text == "Ответ второго прохода."
+        # DRF-1354: the keyboard rides with the prose now. That is not a
+        # different SHAPE — action_data is the same optional field a
+        # first-pass card reply fills, and the handler renders it through the
+        # same `_build_attachments`. What changed is that the masters the
+        # second pass just described are bookable again.
+        assert second_pass_reply.action_data is not None
+        buttons = second_pass_reply.action_data["attachments"][0]["payload"]["buttons"]
+        assert buttons[0]["callback"] == "cb:discover:book:t1:m1"
 
     def test_second_pass_text_capped_like_first_pass(self, monkeypatch) -> None:
         """The _MAX_REPLY_CHARS cap applies to the second pass's text too —

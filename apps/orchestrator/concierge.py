@@ -58,6 +58,7 @@ from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
 from apps.marketplace.discovery import (
     discover_masters,
+    find_masters_by_name,
     service_coverage,
 )
 from apps.observability.ai_metrics import record_ai_request
@@ -74,12 +75,14 @@ from apps.orchestrator.discovery import (
     _discovery_voice_fields,
     _render_ask_clarification,
     _render_master_cards,
+    encode_query_ref,
     execute_catalog_tool,
     has_discovery_criteria,
     render_no_criteria_clarification,
     requested_services,
 )
 from apps.orchestrator.fast_path import claims_direct_show_masters
+from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.llm.templates import get_fallback
 from apps.orchestrator.nutrition_global import (
     NUTRITION_TOOL_ACTIONS,
@@ -438,6 +441,16 @@ class GlobalConversationStore:
 
     def __init__(self, *, user_message_id: Any = None) -> None:
         self._user_message_id = user_message_id
+        # DRF-1354 — telemetry of the passes, accumulated for the ONE row
+        # :func:`generate_concierge_reply` writes at the end of the turn.
+        # Summed, not overwritten: a multi-pass turn really did spend all of
+        # those tokens, and the row used to carry only the last pass's.
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.latency_ms = 0
+        #: The last non-empty ``action_type`` any pass selected — the tool
+        #: this turn used, kept so the row stays as queryable as before.
+        self.action_type = ""
 
     def resolve_active_conversation(self, bot_user: Any) -> Any:
         return resolve_active_global_conversation(bot_user)
@@ -456,20 +469,46 @@ class GlobalConversationStore:
         tokens_out: int = 0,
         latency_ms: int | None = None,
     ) -> Any:
+        """Record NOTHING; accumulate telemetry and return a marker.
+
+        DRF-1354 — one concierge turn now writes exactly one assistant row,
+        and :func:`generate_concierge_reply` writes it, because only that
+        function knows what was actually sent.
+
+        This method used to write one row per ai-core pass (its orchestrator
+        saves an assistant message after every completion). That produced the
+        pilot trace of 24.08 verbatim:
+
+        * a pass that SELECTS a tool carries no text, so it wrote a **blank**
+          row — four of them stand in that trace, one before each answer, and
+          they were also read back by :meth:`load_recent_history`, which takes
+          the last N ROWS, so half of a ten-row window went to rows ai-core
+          then drops from the prompt anyway;
+        * a pass that produced prose AND a tool call wrote that prose — even
+          when the branch went on to answer deterministically and the sentence
+          was never sent;
+        * and every deterministic answer (cards, catalog, nutrition, the
+          DRF-1354 handoff) was text no pass ever produced, so no row held it.
+
+        The result was a transcript that did not say what the bot said, and
+        the transcript is the LLM history of the next turn.
+
+        Nothing is lost by not writing here. Per-CALL cost and latency live in
+        ``AIRequestMetric`` (DRF-1211, one row per LLM call); the tool
+        selection is in the ``orchestrator.concierge.*`` log line; and the
+        totals ride onto the single row through the counters above.
+
+        The user role is unchanged: persisted upstream by the channel handler,
+        so the marker carries the handler's id for history exclusion.
+        """
         if role == "user":
-            # Persisted upstream by the channel handler — return the marker
-            # so AIConcierge can exclude this turn from LLM history.
             return SimpleNamespace(id=self._user_message_id)
-        return record_global_message(
-            conversation,
-            role=role,
-            content=content,
-            rendered_text=content,
-            action_type=action_type or "",
-            tokens_in=tokens_in or 0,
-            tokens_out=tokens_out or 0,
-            latency_ms=latency_ms,
-        )
+        self.tokens_in += tokens_in or 0
+        self.tokens_out += tokens_out or 0
+        self.latency_ms += latency_ms or 0
+        if action_type:
+            self.action_type = action_type
+        return SimpleNamespace(id=None)
 
     def load_recent_history(
         self,
@@ -485,6 +524,77 @@ class GlobalConversationStore:
             qs = qs.exclude(id=exclude_id)
         # Last N (DESC) reversed → chronological, per the Protocol contract.
         return list(reversed(qs[:limit]))
+
+
+# ── DRF-1354: the tool that STARTS a booking ───────────────────────────
+#
+# Live pilot, 24.08 07:52–07:53. The owner wrote «запиши к Архипкину Денису на
+# завтра» — intent, person and day in one sentence — and got a list of three
+# masters ending «Если хочешь записаться к Архипкину Денису на завтра, дай
+# знать!». He answered «даю знать», verbatim, and got the same sentence back.
+# Four turns, zero bookings.
+#
+# Nothing in that trace malfunctioned. The concierge's roster was
+# show_masters / show_salons / show_services / ask_clarification plus the
+# nutrition skills: every one of them SHOWS something. Booking was reachable
+# only by tapping ``cb:discover:book:…`` on a master card — so a model asked to
+# «предложи записаться» could only ever describe the act. The bot was not
+# refusing to book; it had no verb for it.
+#
+# ``start_booking`` is that verb. It resolves the NAMED master through the
+# marketplace carve-out (``find_masters_by_name`` — the catalog rules on who
+# exists, never the model) and hands the turn to the SAME entrypoint the card
+# button uses (``apps.orchestrator.handoff.handoff_to_booking``). Nothing about
+# booking is reimplemented here, and the tap path is untouched: this adds a
+# second door into one room.
+#
+# The description is written against the observed failure, not against the
+# happy path — «дай знать» and a bare «запиши» after a name has been said are
+# named in it, because those are the turns that died.
+START_BOOKING_TOOL_SPEC: dict[str, Any] = {
+    "name": "start_booking",
+    "description": (
+        "Начать запись к КОНКРЕТНОМУ мастеру, которого назвал клиент: "
+        "платформа найдёт мастера и покажет его свободные даты. Вызывай, как "
+        "только в разговоре прозвучало имя мастера и желание записаться — "
+        "«запиши к Архипкину Денису на завтра», «давай к Денису», а также "
+        "«запиши», «давай», «даю знать», «да» ПОСЛЕ того как имя уже "
+        "прозвучало (в том числе если его назвал ты сам). Имя бери из всей "
+        "истории разговора, а не только из последней фразы. Никогда не "
+        "отвечай на такой запрос словами «дай знать» и не показывай список "
+        "мастеров заново — запись начинает этот инструмент, а не текст."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "master": {
+                "type": "string",
+                "description": (
+                    "Имя мастера так, как оно прозвучало в разговоре — "
+                    "«Архипкин Денис», «Денис», «Татьяна Паламарчук». Только "
+                    "имя: без «запиши к», без города и без услуги."
+                ),
+            },
+            "service": {
+                "type": "string",
+                "description": (
+                    "Услуга, если она известна из разговора («массаж», "
+                    "«маникюр»). Оставь пустым, если клиент её не называл — "
+                    "платформа спросит сама, вариантами."
+                ),
+            },
+            "city": {
+                "type": "string",
+                "description": "Город, если он известен (необязательно).",
+            },
+        },
+        "required": ["master"],
+    },
+}
+
+#: action_type of the booking-start tool — the concierge executes it in the
+#: wrapper's SYNC scope, same carve-out shape as the catalog tools.
+START_BOOKING_ACTION = START_BOOKING_TOOL_SPEC["name"]
 
 
 #: Every tool the concierge is armed with, in declaration order (DRF-1328).
@@ -505,6 +615,7 @@ class GlobalConversationStore:
 #: first by the model).
 CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_MASTERS_TOOL_SPEC,
+    START_BOOKING_TOOL_SPEC,
     SHOW_SALONS_TOOL_SPEC,
     SHOW_SERVICES_TOOL_SPEC,
     ASK_CLARIFICATION_TOOL_SPEC,
@@ -517,7 +628,11 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
 _MAX_LOGGED_ARG_CHARS = 64
 
 _KNOWN_TOOLS = frozenset(
-    {SHOW_MASTERS_TOOL_SPEC["name"], ASK_CLARIFICATION_TOOL_SPEC["name"]}
+    {
+        SHOW_MASTERS_TOOL_SPEC["name"],
+        START_BOOKING_TOOL_SPEC["name"],
+        ASK_CLARIFICATION_TOOL_SPEC["name"],
+    }
     | NUTRITION_TOOL_ACTIONS
     | CATALOG_TOOL_ACTIONS
 )
@@ -703,10 +818,145 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         # DRF-1304 — same selection-only shape: the marketplace read and the
         # deterministic render run in the wrapper's sync scope.
         return ToolResult(action_type=name, action_data={"arguments": args})
+    if name == START_BOOKING_ACTION:
+        # DRF-1354 — selection only, like every carve-out above. The name
+        # resolution and the handoff dispatch are I/O and run after
+        # ``asyncio.run`` returns (see :func:`_execute_start_booking`).
+        return ToolResult(action_type=name, action_data={"arguments": args})
     return ToolResult(
         action_type=ActionType.SHOW_MASTERS,
         action_data={"arguments": args},
     )
+
+
+# Wording for the two outcomes of ``start_booking`` that are NOT a handoff.
+# Both are answers, not refusals: one says who we could not find, the other
+# asks the ONE question that is still open, with the names in it.
+_BOOKING_NO_MASTER = (
+    "Не нашла мастера с таким именем — {name}. Проверьте написание или "
+    "назовите услугу, и я покажу, кто её делает."
+)
+_BOOKING_WHICH_ONE = "Уточните, к кому именно — напишите фамилию или нажмите кнопку:"
+
+
+def _remember_when_before_handoff(
+    conversation: Any,
+    bot_user: Any,
+    text: str,
+) -> None:
+    """Store the «на завтра» of THIS turn before the handoff reads it.
+
+    DRF-1325 already parses and stores a time preference, and
+    :func:`apps.orchestrator.handoff.carry_time_preference` already copies it
+    across the tenant boundary so the booking flow opens on the day the person
+    named. But the storing happens in the MAX handler AFTER the reply is
+    built — written for the tap path, where the person says «завтра» on one
+    turn and taps a card on the next.
+
+    ``start_booking`` collapses those two turns into one. «запиши к Архипкину
+    Денису на завтра» names the master and the day in the same sentence, so by
+    the handler's turn the handoff has already run and read an empty
+    preference: the person would get a bare calendar after naming the day.
+
+    Same parser, same store, same key — only earlier. The handler's later
+    write then sets the identical value.
+
+    Best-effort by contract, like every other reader of this module: losing
+    the hint costs the day chips, never the booking.
+    """
+    try:
+        from apps.orchestrator.time_preference import (
+            local_today,
+            parse_time_preference,
+            save_time_preference,
+        )
+
+        today = local_today(getattr(bot_user, "tenant", None))
+        pref = parse_time_preference(text, weekday_today=today.weekday())
+        if pref is not None:
+            save_time_preference(conversation, pref)
+    except Exception:  # noqa: BLE001 — a hint must never break a booking turn
+        logger.warning("orchestrator.concierge.start_booking.time_pref_failed", exc_info=True)
+
+
+def _execute_start_booking(
+    args: dict[str, Any],
+    *,
+    bot_user: Any,
+    conversation: Any,
+    message_text: str,
+    trace_id: str | None,
+) -> DiscoveryReply | None:
+    """Resolve the named master and enter booking. SYNC scope only (DRF-1354).
+
+    Three outcomes, and only one of them is a question:
+
+    * **nobody** — say so, naming what was looked for. ``None`` is NOT returned
+      here: a miss is a real answer, and falling back to the model's own prose
+      would put us back in the «дай знать» loop the ticket is about.
+    * **several** — the disambiguation the ticket asks for by name: «запиши к
+      Денису» with two Денисов must be closeable in ONE word. The reply carries
+      their names as text (type the surname) AND the ordinary
+      ``cb:discover:book:…`` keyboard (tap once) — the same callback grammar the
+      master cards have emitted since #1020, so nothing new can go stale.
+    * **exactly one** — hand off. ``handoff_to_booking`` is called, not copied:
+      it owns tenant scoping, the service-context guard (DRF-962), the
+      time-preference carry (DRF-1325) and the escalation path, and a second
+      implementation of any of those would drift within the week.
+
+    ``None`` means only «the model named nobody» — the caller degrades to
+    whatever prose came alongside the call.
+    """
+    master_query = str(args.get("master") or "").strip()
+    if not master_query:
+        logger.info("orchestrator.concierge.start_booking.no_master trace=%s", trace_id)
+        return None
+    service = str(args.get("service") or "").strip()
+    city = str(args.get("city") or "").strip() or None
+    cards = find_masters_by_name(
+        master_query, city=city, service=service or None, limit=_MAX_MASTER_CARDS
+    )
+    logger.info(
+        "orchestrator.concierge.start_booking master=%r city=%r service=%r matched=%d trace=%s",
+        master_query[:40],
+        city,
+        service[:40],
+        len(cards),
+        trace_id,
+    )
+    if not cards:
+        return DiscoveryReply(
+            text=_BOOKING_NO_MASTER.format(name=master_query[:60])[:_MAX_REPLY_CHARS],
+            persisted=True,
+        )
+    if len(cards) > 1:
+        # Reuse the card renderer for the KEYBOARD only — its callbacks are the
+        # handoff seam, and rebuilding them here would be a second copy of the
+        # one contract that must never drift. The text is this function's own:
+        # «Вот мастера, которые могут подойти» is a search result, and this is a
+        # question about a name the person already gave.
+        rendered = _render_master_cards(cards, city=city, specialization=service or None)
+        lines = [_BOOKING_WHICH_ONE]
+        lines.extend(f"• {card.name}" for card in cards)
+        return DiscoveryReply(
+            text="\n".join(lines)[:_MAX_REPLY_CHARS],
+            action_data=rendered.action_data,
+            persisted=True,
+        )
+    card = cards[0]
+    # The day the person named is in THIS sentence, and the handoff is about to
+    # read it (see :func:`_remember_when_before_handoff`).
+    _remember_when_before_handoff(conversation, bot_user, message_text)
+    reply = handoff_to_booking(
+        global_bot_user=bot_user,
+        tenant_id=card.tenant_id,
+        master_id=card.master_id,
+        service_id=card.service_id,
+        query_ref=encode_query_ref(service) if service else "",
+        chat_id=str(getattr(bot_user, "chat_id", "") or ""),
+        trace_id=trace_id,
+    )
+    return DiscoveryReply(text=reply.text, action_data=reply.action_data, persisted=True)
 
 
 def build_concierge_system_prompt(
@@ -779,6 +1029,20 @@ def build_concierge_system_prompt(
         "отдельным элементом, словами клиента. Не решай сам, есть ли услуга "
         "у мастеров, и не выбрасывай ту, которой, по-твоему, нет: платформа "
         "проверит каждую по каталогу и сама скажет клиенту про отсутствующие.",
+        # DRF-1354 — the booking verb. Without this line the model has the
+        # tool but keeps the habit the rest of the prompt taught it: describe
+        # the next step and wait. The pilot trace of 24.08 is that habit — the
+        # bot asked the owner to «дать знать» three times running, and
+        # once more after he did, in those words.
+        "Запись начинает ИНСТРУМЕНТ start_booking, а не текст. Как только в "
+        "разговоре есть имя мастера и желание записаться — вызывай "
+        "start_booking с этим именем. Это относится и к коротким ответам "
+        "(«запиши», «давай», «даю знать», «да») после того, как имя "
+        "уже прозвучало: имя ищи по всей истории разговора, включая свои "
+        "собственные реплики. НИКОГДА не пиши «дай знать» или «напиши, "
+        "если хочешь записаться» — это тупик: клиент уже сказал, чего "
+        "хочет. Не показывай список мастеров второй раз, если нужный "
+        "мастер в нём уже был.",
         # DRF-1304 — the salon/service tools exist now (tool_definitions).
         "Инструменты каталога:\n"
         "- Вопрос про салоны или адреса («какие салоны у вас есть», «где вы "
@@ -787,7 +1051,10 @@ def build_concierge_system_prompt(
         "- Вопрос про услуги, цены, длительность («какие услуги в салоне», "
         "«что есть по лицу», «сколько стоит массаж») — вызывай show_services "
         "с фильтром: салон, город или запрос.\n"
-        "- Подбор конкретного мастера — show_masters, как раньше.",
+        "- Подбор конкретного мастера — show_masters, как раньше.\n"
+        "- Клиент назвал мастера по имени и хочет записаться — "
+        "start_booking, а не show_masters: show_masters ищет по услуге и "
+        "снова покажет список, в котором этот мастер уже был.",
         # DRF-1268 — the nutrition tools exist now (tool_definitions). The
         # load-bearing registry order of apps/skills/apps.py is restated
         # here as model-facing priority: the reasons for that order do not
@@ -915,6 +1182,19 @@ def _build_tool_result_message(
         "выдумывай. Инструмент show_masters повторно не вызывай — данных "
         "достаточно."
     )
+    # DRF-1354 — «предложи записаться» above used to be a promise
+    # with nothing behind it: the roster had no booking verb, so the model
+    # invented one out of words («дай знать»), and the person who did
+    # exactly that got the same sentence back. Two things changed and both
+    # belong in the instruction the model reads: under each card there is now
+    # a real button, and if the person answers with a NAME the next turn has
+    # a tool for it.
+    lines.append(
+        "Под списком клиенту уже показаны кнопки «Записаться к …» — можешь "
+        "прямо позвать нажать на нужную. Не проси «дать знать» и не обещай "
+        "записать сам: если клиент назовёт мастера, запись начнёт "
+        "инструмент start_booking на следующем ходу."
+    )
     return "\n".join(lines)
 
 
@@ -924,6 +1204,72 @@ def generate_concierge_reply(
     bot_user: Any,
     conversation: Any,
     user_message_id: Any = None,
+    memory_block: str = "",
+    nutrition_block: str = "",
+    extra_system: str = "",
+    trace_id: str | None = None,
+) -> DiscoveryReply:
+    """One concierge turn, writing exactly one assistant row: the reply.
+
+    The turn itself is :func:`_concierge_turn`. This wrapper owns one
+    invariant that used to hold only by accident: what the transcript says the
+    bot said is what the bot said.
+
+    ``persisted=True`` USED to mean only "the store wrote something for this
+    turn", which for a prose answer was the reply and for everything else was
+    not. Every DETERMINISTIC branch below (the card render, the catalog
+    tables, a nutrition confirmation, the DRF-1354 handoff) returns text the
+    model never produced, while the row ai-core wrote for that pass carried
+    the model's EMPTY tool-selection content. So the reply went to the user
+    and a blank row went to the transcript — which is also the LLM history the
+    next turn reads. The bot could not see what it had just shown, which is
+    one way a conversation walks backwards.
+
+    Since DRF-1354 the store writes nothing at all
+    (:meth:`GlobalConversationStore.save_message` explains what that removes)
+    and the row is written HERE, from the reply, with the turn's accumulated
+    token and latency totals. ``persisted=True`` therefore means what it says
+    on every branch, not only on the prose one.
+
+    Best-effort: a transcript write must never cost the reply.
+    """
+    store = GlobalConversationStore(user_message_id=user_message_id)
+    reply = _concierge_turn(
+        message_text,
+        store=store,
+        bot_user=bot_user,
+        conversation=conversation,
+        memory_block=memory_block,
+        nutrition_block=nutrition_block,
+        extra_system=extra_system,
+        trace_id=trace_id,
+    )
+    if reply.persisted and (reply.text or "").strip():
+        try:
+            record_global_message(
+                conversation,
+                role="assistant",
+                content=reply.text,
+                rendered_text=reply.text,
+                action_type=store.action_type,
+                tokens_in=store.tokens_in,
+                tokens_out=store.tokens_out,
+                latency_ms=store.latency_ms or None,
+                trace_id=trace_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — never cost the turn
+            logger.warning(
+                "orchestrator.concierge.reply_record_failed trace=%s err=%s", trace_id, exc
+            )
+    return reply
+
+
+def _concierge_turn(
+    message_text: str,
+    *,
+    store: "GlobalConversationStore",
+    bot_user: Any,
+    conversation: Any,
     memory_block: str = "",
     nutrition_block: str = "",
     extra_system: str = "",
@@ -955,7 +1301,7 @@ def generate_concierge_reply(
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
     concierge = AIConcierge(
         openai_client=llm_client,
-        store=GlobalConversationStore(user_message_id=user_message_id),
+        store=store,
         context_builder=lambda: ConciergeContext(
             candidates=[],
             candidate_ids=frozenset(),
@@ -1210,6 +1556,29 @@ def generate_concierge_reply(
             return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
         return DiscoveryReply(text=get_fallback("ru"), persisted=True)
 
+    if dto.action_type == START_BOOKING_ACTION:
+        # DRF-1354 — the model named a master and asked to book. Resolution
+        # + handoff are I/O, so they run HERE, in the wrapper's sync scope,
+        # after ``asyncio.run`` has returned — the same rule every other
+        # carve-out in this module follows.
+        args = (dto.action_data or {}).get("arguments", {})
+        booking_reply = _execute_start_booking(
+            args if isinstance(args, dict) else {},
+            bot_user=bot_user,
+            conversation=conversation,
+            message_text=message_text,
+            trace_id=trace_id,
+        )
+        if booking_reply is not None:
+            return booking_reply
+        # The call named nobody (a model that emitted ``start_booking`` with an
+        # empty ``master``). Keep whatever it said alongside the call rather
+        # than replacing a possibly fine sentence with the generic line.
+        text = (dto.content or "").strip()
+        if text:
+            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+
     if dto.action_type in CATALOG_TOOL_ACTIONS:
         # DRF-1304 — salons / services selected by the model as tools. The
         # deterministic reply is rendered from real mirror data (or an honest
@@ -1255,7 +1624,26 @@ def generate_concierge_reply(
     text = (dto.content or "").strip()
     if not text:
         return DiscoveryReply(text=get_fallback("ru"), persisted=True)
-    return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+    # DRF-1354 — the multi-pass prose reply carried NO keyboard. DRF-1266
+    # feeds the executed ``show_masters`` result back so the model can phrase
+    # it warmly, and the deterministic card render — the only thing that ever
+    # attached ``cb:discover:book:`` buttons — is skipped on that path. The
+    # pilot trace of 24.08 is what that looks like from the outside: a tidy
+    # paragraph naming three masters, no buttons under it, and an invitation
+    # to let the bot know. The person had nothing to tap, and nothing they
+    # could say worked either.
+    #
+    # Only the KEYBOARD is taken from the renderer; the model keeps the words.
+    # Same cards, same callbacks, same order — the tap path is identical to
+    # the pre-DRF-1266 reply.
+    action_data = None
+    if pending_cards:
+        action_data = _render_master_cards(
+            pending_cards[:_MAX_MASTER_CARDS],
+            city=pending_args.get("city"),
+            specialization=pending_args.get("specialization"),
+        ).action_data
+    return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], action_data=action_data, persisted=True)
 
 
 def generate_direct_show_masters_reply(

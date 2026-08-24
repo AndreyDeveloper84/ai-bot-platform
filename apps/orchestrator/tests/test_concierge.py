@@ -118,7 +118,15 @@ class TestGlobalConversationStore:
             chat_id="w5-store-chat",
         )
 
-    def test_user_save_is_marker_assistant_persists(self) -> None:
+    def test_no_pass_writes_a_row_of_its_own(self) -> None:
+        """DRF-1354 — the store records NOTHING now.
+
+        It used to write one row per ai-core pass, which is where the pilot's
+        empty bot messages came from (a tool-selection pass carries no text)
+        and why a deterministic answer was never in the transcript at all.
+        The single row is written by ``generate_concierge_reply``, from the
+        reply — see :class:`TestOneRowPerTurn` below.
+        """
         from apps.conversations.models import Message
 
         bot_user = self._bot_user()
@@ -129,33 +137,45 @@ class TestGlobalConversationStore:
         # The channel handler persists user turns upstream — the store only
         # returns the marker so the turn can be excluded from LLM history.
         assert marker.id == 123
-        assert Message.all_tenants.filter(conversation=conversation).count() == 0
 
         store.save_message(
             conversation,
             role="assistant",
-            content="ответ",
-            action_type="",
+            content="",
+            action_type="show_masters",
             tokens_in=3,
             tokens_out=4,
+            latency_ms=11,
             # record_global_message carries no such kwargs — adapter drops them.
             action_data={"transient": True},
             tool_call={"transient": True},
         )
-        rows = list(Message.all_tenants.filter(conversation=conversation))
-        assert len(rows) == 1
-        assert rows[0].role == "assistant"
-        assert rows[0].content == "ответ"
-        assert rows[0].tokens_in == 3
-        assert rows[0].tokens_out == 4
+        store.save_message(
+            conversation,
+            role="assistant",
+            content="ответ",
+            tokens_in=5,
+            tokens_out=6,
+            latency_ms=9,
+        )
+
+        assert Message.all_tenants.filter(conversation=conversation).count() == 0
+        # …but the cost of BOTH passes is kept for the row that will be
+        # written. Summed, not overwritten: the turn really spent it.
+        assert (store.tokens_in, store.tokens_out, store.latency_ms) == (8, 10, 20)
+        assert store.action_type == "show_masters"
 
     def test_load_recent_history_excludes_and_limits(self) -> None:
+        from apps.conversations.services import record_global_message
+
         bot_user = self._bot_user()
         store = GlobalConversationStore()
         conversation = store.resolve_active_conversation(bot_user)
-        store.save_message(conversation, role="assistant", content="один")
-        store.save_message(conversation, role="assistant", content="два")
-        last = store.save_message(conversation, role="assistant", content="три")
+        for text in ("один", "два"):
+            record_global_message(conversation, role="assistant", content=text, rendered_text=text)
+        last = record_global_message(
+            conversation, role="assistant", content="три", rendered_text="три"
+        )
 
         history = store.load_recent_history(conversation, exclude_id=last.id, limit=10)
         assert {m.content for m in history} == {"один", "два"}
