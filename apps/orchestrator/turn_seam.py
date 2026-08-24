@@ -86,6 +86,10 @@ class TurnReply:
     should_close_conversation: bool = False
     assistant_persisted: bool = False
     meta: dict[str, Any] | None = None
+    # DRF-1348 — mirrors DiscoveryReply.outage: the model could not be
+    # reached at all. Carried, never interpreted: the seam has no opinion
+    # about what a surface should draw for it.
+    outage: bool = False
 
 
 def orchestrate_turn(context: TurnContext) -> TurnReply:
@@ -185,6 +189,7 @@ def _global_legacy_adapter(context: TurnContext) -> TurnReply:
         reply_text=reply.text,
         action_data=reply.action_data,
         assistant_persisted=reply.persisted,
+        outage=reply.outage,
     )
 
 

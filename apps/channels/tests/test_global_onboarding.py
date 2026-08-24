@@ -289,7 +289,7 @@ class TestRunOnboardingTurn:
 
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
 
-        assert reply.text == GLOBAL_S5_TEXT
+        assert reply.text.startswith(GLOBAL_S5_TEXT)  # DRF-1348: + подсказка и чипы
         assert reply.action_data is None  # wellness grid dropped
         bot_user.refresh_from_db()
         assert bot_user.consent_at is not None
@@ -385,7 +385,7 @@ class TestRunOnboardingTurn:
 
         reply = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes_via_s2a")
 
-        assert reply.text == GLOBAL_S5_TEXT
+        assert reply.text.startswith(GLOBAL_S5_TEXT)  # DRF-1348: + подсказка и чипы
         assert _granted_types(bot_user) == {
             ConsentRecord.ConsentType.PERSONAL_DATA.value,
             ConsentRecord.ConsentType.MEMORY_GREEN.value,
@@ -476,7 +476,7 @@ class TestHandlerIntegration:
             _callback_payload(payload="cb:welcome:consent_yes", user_id=uid, callback_id="c2"),
             trace_id=str(uuid.uuid4()),
         )
-        assert mock_send[-1]["text"] == GLOBAL_S5_TEXT
+        assert mock_send[-1]["text"].startswith(GLOBAL_S5_TEXT)  # DRF-1348
         spy_discovery.assert_not_called()
         spy_direct_show_masters.assert_not_called()
 

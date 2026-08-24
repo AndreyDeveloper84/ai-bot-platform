@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from django.conf import settings
@@ -104,6 +105,15 @@ from apps.channels.max.outbound import (
     send_message,
 )
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
+from apps.channels.max.quick_actions import (
+    AI_UNAVAILABLE_TEXT,
+    RETRY_CALLBACK,
+    STALE_TAP_TEXT,
+    ai_unavailable_action_data,
+    first_contact_action_data,
+    is_stale_tap,
+    resolve_tap_text,
+)
 from apps.channels.max.photo import (
     PhotoDownloadError,
     PhotoTooLargeError,
@@ -203,6 +213,51 @@ def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
             content = item.get("content")
             return content if isinstance(content, str) else None
     return None
+
+
+def _last_user_content(
+    history: list[dict[str, Any]] | None,
+    conversation: Any = None,
+) -> str | None:
+    """Последняя реплика САМОГО человека, или None.
+
+    Что подставляет «Повторить» с экрана «AI недоступна» (DRF-1348): повтор —
+    это «отправь то же самое ещё раз», а не «спроси модель заново», поэтому
+    подставляется не запрос к модели, а то, что человек написал.
+
+    Короткая память читается первой (она уже в руках вызывающего, лишнего
+    чтения нет), таблица сообщений — запасной путь: у короткой памяти TTL, а
+    сбой был как раз тем, из-за чего человек ждал и вернулся к кнопке позже.
+    Best-effort: сбой чтения даёт None, и вызывающий отвечает честно вместо
+    того, чтобы повторить пустоту.
+
+    Тап по самой кнопке сюда попасть не может: подстановка стоит ДО записи
+    входящего хода, поэтому ``cb:retry:last`` в истории не оказывается.
+    """
+    for item in reversed(history or []):
+        if item.get("role") == "user":
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+    conversation_id = getattr(conversation, "id", None)
+    if conversation_id is None:
+        return None
+    try:
+        from apps.conversations.models import Message
+
+        row = (
+            Message.all_tenants.filter(conversation_id=conversation_id, role="user")
+            .order_by("-created_at")
+            .values_list("content", flat=True)
+            .first()
+        )
+    except Exception:  # noqa: BLE001 — a retry must never break the turn
+        logger.exception(
+            "channels.max.global.retry_history_probe_failed conversation=%s",
+            conversation_id,
+        )
+        return None
+    return row if isinstance(row, str) and row.strip() else None
 
 
 def _build_attachments(action_data: dict[str, Any] | None) -> list[dict[str, Any]] | None:
@@ -588,6 +643,22 @@ def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = No
 def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Inner tenant-less discovery pipeline — parse-already-done. Side-effects only."""
 
+    # DRF-1348 — состояние C01.4 Transient («индикатор набора») из макета.
+    #
+    # Эти две строки уже пять месяцев стоят на АРЕНДАТОРСКОМ пути
+    # (``_handle_max_event_inner``), а на глобальном — том самом, по которому
+    # работает пилот, — их не было никогда: при переносе обработчика их просто
+    # не продублировали. Поэтому «прочитано / печатает…» видел кто угодно,
+    # кроме клиента маркетплейса, у которого ход самый длинный (консьерж +
+    # инструменты). Fire-and-forget: сбой логируется внутри send_chat_action и
+    # не всплывает. Стоит первой строкой, до любой тяжёлой работы, — ровно как
+    # на соседнем пути.
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="mark_seen")
+        send_chat_action(chat_id=event.chat_id, action="typing_on")
+
     bot_user = resolve_or_create_global_bot_user(
         channel=event.channel,
         channel_user_id=event.channel_user_id,
@@ -598,6 +669,43 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
 
     # Prior short-term history (before this turn) feeds the discovery prompt.
     history = short_term.recall(conversation.id)
+
+    # DRF-1348 / DRF-1051 — тап становится сообщением ДО всего остального.
+    #
+    # Макет C01, блок ВАЖНО: «Нажатие на Quick Action вставляет текст в
+    # composer и отправляет его по тому же pipeline, что и свободный текст.
+    # Нет отдельных команд и сценариев». На MAX буквально «вставить в
+    # composer» нельзя — payload кнопки приходит тем же полем, что и
+    # набранный текст, — поэтому «тот же pipeline» строится подстановкой
+    # здесь, ВЫШЕ и записи сообщения, и первой развилки лестницы. Ниже по
+    # течению тап отличить не от чего: истории, safety, быстрой ветке и
+    # консьержу достаётся ровно та строка, которую человек мог набрать сам.
+    #
+    # Три семейства, и только три (см. ``quick_actions.resolve_tap_text``):
+    # чипы C01, главное меню (DRF-1051 — сегодня его тап уезжает в модель
+    # сырым payload'ом) и «Повторить». Колбэки, несущие id — ``cb:discover:``,
+    # ``cb:catalog:``, ``cb:book:``, ``cb:welcome:``, ``cb:visit:`` — сюда не
+    # попадают: у них свои ветки ниже, и подставлять им текст было бы
+    # выдумыванием реплики за человека.
+    #
+    # Побочно закрывает класс DRF-990 для этих кнопок: в историю глобального
+    # диалога ложится фраза, а не «cb:…», который модель охотно толкует.
+    stale_tap = False
+    tap_text = resolve_tap_text(
+        event.text,
+        last_user_text=(
+            _last_user_content(history, conversation)
+            if (event.text or "").strip() == RETRY_CALLBACK
+            else None
+        ),
+    )
+    if tap_text is not None:
+        event = replace(event, text=tap_text)
+    elif is_stale_tap(event.text):
+        # Кнопка была настоящая, но фразы за ней уже нет (снятый чип, повтор
+        # без истории). Отдать её payload модели нельзя — это и есть дефект
+        # DRF-1051; выдумать за человека фразу — хуже.
+        stale_tap = True
 
     # DRF-988 — post-handoff booking taps are NOT chat text: they route into
     # tenant T's booking pipeline (branch 2.5 below) and must not pollute the
@@ -722,6 +830,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # whole-message, so no other branch's phrases can reach it.
         reply = DiscoveryReply(text=_opt_out_reply)
         assistant_action_type = "proactive_opt_out"
+    elif stale_tap:
+        # DRF-1348 — тап, который нечем подставить. Стоит здесь, а не среди
+        # прочих колбэковых веток, по правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``:
+        # тап по кнопке, которую бот сам нарисовал, обязан дойти до ответа, а
+        # не быть проглоченным приветствием или отданным модели сырым.
+        reply = DiscoveryReply(text=STALE_TAP_TEXT, action_data=first_contact_action_data())
+        assistant_action_type = "stale_tap"
     elif matches_human_handoff_request(event.text):
         reply = route_global_human_handoff(
             global_bot_user=bot_user,
@@ -978,21 +1093,50 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             extra_system=personal_context_block or "",
                         )
                     )
-                    reply = DiscoveryReply(
-                        text=turn_reply.reply_text,
-                        action_data=turn_reply.action_data,
-                        persisted=turn_reply.assistant_persisted,
-                    )
-                    concierge_turn_ran = True
-                    # W5 (S3.5): organically weave ONE memory question when the Ayla
-                    # anti-spam engine allows asking. Best-effort.
-                    try:
-                        reply = maybe_weave_question(conversation, bot_user, reply)
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "channels.max.global.memory_ask_weave_failed bot_user=%s",
+                    if turn_reply.outage:
+                        # DRF-1348 — состояние «AI недоступна» из макета C01.
+                        # До сих пор сюда приходила строка «короткий
+                        # технический сбой — отвечу через минуту», которая
+                        # обещает то, чего не будет: ход потерян, и никто к
+                        # нему не вернётся, пока человек не напишет сам. Здесь
+                        # это заменено на правду плюс кнопка, которая делает
+                        # обещанное — отправляет ту же реплику ещё раз.
+                        #
+                        # Флаг ставится ровно там, где не дошли до модели
+                        # (DiscoveryReply.outage), а не там, где модель плохо
+                        # ответила: предлагать «Повторить» для взятого хода
+                        # значило бы врать вторым способом.
+                        logger.info(
+                            "channels.max.global.ai_unavailable bot_user=%s trace=%s",
                             bot_user.id,
+                            trace_id,
                         )
+                        reply = DiscoveryReply(
+                            text=AI_UNAVAILABLE_TEXT,
+                            action_data=ai_unavailable_action_data(),
+                            persisted=turn_reply.assistant_persisted,
+                        )
+                        assistant_action_type = "ai_unavailable"
+                        # Ни разбор намерения (DRF-1273), ни вплетение вопроса
+                        # памяти (W5) на этом ходу не нужны: первое — ещё один
+                        # вызов той же недоступной модели, второе — вопрос
+                        # поверх извинения. Ход не состоялся.
+                    else:
+                        reply = DiscoveryReply(
+                            text=turn_reply.reply_text,
+                            action_data=turn_reply.action_data,
+                            persisted=turn_reply.assistant_persisted,
+                        )
+                        concierge_turn_ran = True
+                        # W5 (S3.5): organically weave ONE memory question when the Ayla
+                        # anti-spam engine allows asking. Best-effort.
+                        try:
+                            reply = maybe_weave_question(conversation, bot_user, reply)
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "channels.max.global.memory_ask_weave_failed bot_user=%s",
+                                bot_user.id,
+                            )
 
     # DRF-1325 — the time half of «хочу на массаж завтра вечером». On
     # 2026-08-23 it was dropped without a word and the booking landed five
