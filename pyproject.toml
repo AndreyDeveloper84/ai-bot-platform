@@ -160,7 +160,7 @@ dependencies = [
 # `tests/smoke/test_ayla_import.py::test_package_version_pinned` needs no edit.
 # CHANGELOG: https://github.com/AndreyDeveloper84/ayla-ai-core/blob/main/CHANGELOG.md
 ai-core = [
-    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@2c51a482bab3cfa5ac4795f8258dd5a5b6d8b567",
+    "ayla-ai-core[django] @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@2adf54b199101182b9d7be8f17e4ba9ea2255a3e",
 ]
 
 dev = [
