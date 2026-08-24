@@ -189,7 +189,11 @@ def _global_legacy_adapter(context: TurnContext) -> TurnReply:
         reply_text=reply.text,
         action_data=reply.action_data,
         assistant_persisted=reply.persisted,
-        outage=reply.outage,
+        # getattr, а не атрибут: шов — переносчик, и он не вправе требовать
+        # от мозга поля, которого у прежних производителей ответа не было.
+        # Умолчание False означает «сбоя связи не заявлено» — ровно то же
+        # поведение, что до DRF-1348.
+        outage=bool(getattr(reply, "outage", False)),
     )
 
 
