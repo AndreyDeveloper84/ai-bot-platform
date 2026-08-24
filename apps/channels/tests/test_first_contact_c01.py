@@ -525,6 +525,27 @@ class TestAiUnavailable:
 
         assert recovered.call_args.args[0] == "Беспокоят отёки"
 
+    def test_retry_falls_back_to_the_message_table_when_short_term_expired(
+        self, sent, fake_redis, concierge
+    ):
+        """У короткой памяти TTL, а сбой — ровно та причина, по которой
+        человек подождал и вернулся к кнопке позже. Тогда «Повторить»
+        обязано брать реплику из таблицы сообщений, а не сдаваться."""
+        from apps.conversations.services import record_global_message
+
+        _, conversation = _welcomed_user(62005)
+        record_global_message(conversation, role="user", content="Хочу выглядеть свежее")
+        record_global_message(conversation, role="assistant", content=AI_UNAVAILABLE_TEXT)
+        # В короткую память эти строки НЕ кладутся (``record_global_message``
+        # её не трогает) — то есть путь через таблицу здесь настоящий, а не
+        # смоделированный.
+
+        max_handler.handle_global_max_event(
+            _tap(payload=RETRY_CALLBACK, user_id=62005, callback_id="retry-3")
+        )
+
+        assert concierge.call_args.args[0] == "Хочу выглядеть свежее"
+
     def test_retry_without_history_says_so_instead_of_repeating_nothing(
         self, sent, fake_redis, concierge
     ):
