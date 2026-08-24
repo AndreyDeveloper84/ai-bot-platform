@@ -8,6 +8,7 @@ real LLM calls.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -163,7 +164,6 @@ class TestMatches:
             "Поведай про лазер",
             "Что входит в комплекс",
             "Есть ли у вас прессотерапия",
-            "Можно ли записаться сегодня",
         ],
     )
     def test_imperative_phrasings_match(self, tenant: Tenant, text: str) -> None:
@@ -174,6 +174,37 @@ class TestMatches:
         conv = Conversation.all_tenants.create(tenant=tenant, bot_user=bu)
         ctx = SkillContext(conversation=conv, bot_user=bu, message_text=text)
         assert FAQSkill().matches(ctx) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # MOVED here from the list above, where it asserted the
+            # OPPOSITE. DRF-981: «Можно ли записаться сегодня» is not an
+            # imperative info-request, it is a person asking to be
+            # booked. It joined the 2026-05-19 cutover-smoke list
+            # because it fell through to ECHO, and FAQ was the nearest
+            # skill that would say anything at all. Booking claims it
+            # now, so the reason it was parked here is gone. The phrase
+            # is kept and its assertion inverted rather than deleted —
+            # the turn still has to have a destination, and this test
+            # says which one it is.
+            "Можно ли записаться сегодня",
+            "Можно на маникюр?",
+            "Есть окошко на маникюр?",
+        ],
+    )
+    def test_booking_requests_are_yielded_to_booking(self, tenant: Tenant, text: str) -> None:
+        """DRF-981 — a booking request phrased as a question is not FAQ."""
+        # A sha256 digest, not builtin ``hash()`` — DRF-1158: ``hash()``
+        # is salt-randomised per process, so the id changes between
+        # workers and the row it lands in is not reproducible.
+        suffix = hashlib.sha256(text.encode()).hexdigest()[:8]
+        bu = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id=f"br-{suffix}"
+        )
+        conv = Conversation.all_tenants.create(tenant=tenant, bot_user=bu)
+        ctx = SkillContext(conversation=conv, bot_user=bu, message_text=text)
+        assert FAQSkill().matches(ctx) is False
 
 
 # ---------------------------------------------------------------------------
