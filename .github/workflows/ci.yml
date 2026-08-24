@@ -246,6 +246,22 @@ jobs:
       - name: Mini App style contract
         run: uv run python tools/lint/miniapp_style_contract.py apps/miniapp
 
+      # Personal-field owner guard (DRF-1365). The memory audit of
+      # 2026-08-24 returned «C — multiple competing memory systems»: six
+      # stores holding facts about the same person, none of them designed
+      # as a memory, all of them grown one field at a time. This lint
+      # refuses the next one: every slot that is keyed to a person and
+      # read back to shape what Ayla says must declare its origin, its
+      # owner and whether it follows the person between salons — in
+      # `apps/identity/personal_fields.py`. The crossing claim is checked
+      # against the store's own tenancy, and the owner's ruling of
+      # 2026-08-24 («сказал сам — переходит; узнали о нём — нет») is
+      # enforced. Today's exceptions are named individually in
+      # POLICY_DEBT and can only shrink. See the script docstring for the
+      # criterion and for what it deliberately does NOT detect.
+      - name: Personal-field owner guard (AST lint)
+        run: uv run python tools/lint/personal_field_guard.py apps/
+
       - name: Django manage.py check
         run: uv run python manage.py check
 

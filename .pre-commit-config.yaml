@@ -115,3 +115,21 @@ repos:
         # as the two guards above.
         files: ^apps/.*\.py$
         pass_filenames: false
+
+      # Personal-field owner guard (DRF-1365). Six memory stores grew one
+      # silent field at a time; the audit of 2026-08-24 found no conflict
+      # policy for city, price, favourite master or goal across them. This
+      # lint fails when a slot keyed to a person appears with nobody
+      # declared to own it, and when a declared slot crosses salons
+      # carrying something the salon observed rather than the person
+      # said. Declarations live in `apps/identity/personal_fields.py`;
+      # today's exceptions are named individually and ratchet down.
+      - id: personal-field-guard
+        name: Personal-field owner guard (AST lint)
+        entry: python tools/lint/personal_field_guard.py apps/
+        language: system
+        # Whole-`apps/` scan (own globbing) — `pass_filenames` off, same
+        # as the three guards above. A full scan is also what makes the
+        # stale-declaration check accurate.
+        files: ^apps/.*\.py$
+        pass_filenames: false
