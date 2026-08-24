@@ -2,7 +2,16 @@
  *
  * Per docs/design/handoffs/2026-05-18-customer-first-time-handoff.md §12.
  * Header → identity card → favorites (read-only) → 4 preference toggles
- * → birthday + allergies → Save → privacy section with 2-step delete.
+ * → birthday → Save → privacy section with 2-step delete.
+ *
+ * DRF-1371 removed the free-text contraindications textarea and the
+ * caption under it that promised the value would be passed to the master.
+ * Nothing on the master side ever read it, so the promise was untrue, and
+ * the text is a special category under 152-ФЗ ст. 10. Owner decision
+ * 2026-08-25: the master must not see contraindications at all. The exact
+ * strings are asserted absent by
+ * apps/identity/tests/test_drf1371_allergies_removed.py — do not restore
+ * them, in a comment or otherwise.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -187,22 +196,6 @@ export function ProfileScreen() {
               }))
             }
           />
-        </label>
-        <label className="profile-field">
-          <span className="profile-field__label">Аллергии и противопоказания</span>
-          <textarea
-            className="profile-input profile-input--multiline"
-            rows={3}
-            value={d.preferences.allergies}
-            placeholder="Расскажите о важном, что нужно знать мастеру"
-            onChange={(e) =>
-              setDraft((dr) => ({
-                ...dr,
-                preferences: { ...dr.preferences, allergies: e.target.value },
-              }))
-            }
-          />
-          <span className="profile-field__hint">Передадим мастеру для вашей безопасности</span>
         </label>
       </section>
 

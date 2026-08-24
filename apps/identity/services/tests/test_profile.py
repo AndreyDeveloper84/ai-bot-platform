@@ -62,7 +62,6 @@ class TestSoftDeleteUser:
             tenant=bot_user.tenant,
             bot_user=bot_user,
             birthday_date="1990-01-01",
-            allergies="цветочная пыльца",
         )
         before = timezone.now()
 

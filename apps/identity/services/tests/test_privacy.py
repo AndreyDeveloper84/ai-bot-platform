@@ -757,14 +757,14 @@ class TestProfilePiiErase:
         assert sibling.client_name == ""
 
     def test_erases_preferences(self, tenant, bot_user) -> None:
-        """allergies is free-text health data; the sheet promises «настройки»."""
+        """birthday_date is a direct identifier; the sheet promises «настройки»."""
         from apps.identity.models import UserPreferences
 
         UserPreferences.all_tenants.create(
             bot_user=bot_user,
             tenant=tenant,
-            allergies="аллергия на латекс",
             birthday_date=date(1990, 5, 17),
+            notify_promo=True,
         )
         _with_pii(bot_user)
 
@@ -775,8 +775,8 @@ class TestProfilePiiErase:
         from apps.identity.services.profile import get_profile
 
         snap = get_profile(bot_user)
-        assert snap.preferences["allergies"] == ""
         assert snap.preferences["birthday_date"] is None
+        assert snap.preferences["notify_promo"] is False
 
     def test_does_not_touch_another_person(self, tenant, bot_user) -> None:
         stranger = _with_pii(
@@ -1279,7 +1279,7 @@ class TestBlankChannelIdentityFailsClosed:
         victim = self._blank_key_user("blank-victim-p")
         actor = self._blank_key_user("blank-actor-p")
         UserPreferences.all_tenants.create(
-            bot_user=victim, tenant=victim.tenant, allergies="латекс"
+            bot_user=victim, tenant=victim.tenant, birthday_date=date(1990, 5, 17)
         )
 
         delete_personal_data(actor)

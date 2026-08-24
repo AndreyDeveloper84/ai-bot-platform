@@ -276,20 +276,6 @@ PERSONAL_FIELDS: tuple[PersonalField, ...] = (
             "a derived-age source as well as a greeting trigger."
         ),
     ),
-    PersonalField(
-        site="identity.UserPreferences.allergies",
-        origin="USER_STATED",
-        owner="BOT",
-        crosses_salons=False,
-        why=(
-            "Free-text contraindications, shown to the master before each "
-            "booking. This is health text living in a plain column, outside "
-            "MemoryEntry's zone/consent/TTL machinery entirely — it is not "
-            "red-zoned, not consent-gated at write, and not reachable by "
-            "forget-all. Flagged here rather than moved: relocating an "
-            "existing field is not this change."
-        ),
-    ),
     # -----------------------------------------------------------------
     # identity.ClientProfile — the computed RFM/LTV/risk snapshot.
     # Every field here is derived from booking facts, which is why the

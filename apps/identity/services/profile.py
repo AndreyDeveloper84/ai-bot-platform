@@ -101,7 +101,6 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
             "notify_promo": prefs.notify_promo,
             "notify_birthday": prefs.notify_birthday,
             "birthday_date": prefs.birthday_date.isoformat() if prefs.birthday_date else None,
-            "allergies": prefs.allergies,
         },
         favorite_master_name=None,
         favorite_service_name=None,
@@ -115,7 +114,6 @@ _EDITABLE_PREF_FIELDS = {
     "notify_promo",
     "notify_birthday",
     "birthday_date",
-    "allergies",
 }
 
 
@@ -160,10 +158,6 @@ def update_profile(bot_user: BotUser, payload: dict[str, Any]) -> ProfileSnapsho
         if key == "birthday_date":
             parsed = _parse_date(value)
             prefs.birthday_date = parsed
-        elif key == "allergies":
-            if not isinstance(value, str):
-                raise ProfileUpdateError("allergies must be a string")
-            prefs.allergies = value.strip()[:2000]
         else:  # boolean toggle
             if not isinstance(value, bool):
                 raise ProfileUpdateError(f"{key} must be a boolean")

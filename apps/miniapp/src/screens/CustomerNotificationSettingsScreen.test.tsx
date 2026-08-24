@@ -43,7 +43,6 @@ const PROFILE: Profile = {
     notify_promo: false,
     notify_birthday: true,
     birthday_date: null,
-    allergies: "",
   },
   favorites: { master_name: null, service_name: null },
 };

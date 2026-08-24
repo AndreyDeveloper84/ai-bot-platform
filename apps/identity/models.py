@@ -277,8 +277,19 @@ class UserPreferences(models.Model):
     retention / promo / birthday templates.
 
     Per ``docs/design/handoffs/2026-05-18-customer-first-time-handoff.md``
-    §12 F4 — 4 toggles + birthday + allergies. Favorites are computed
-    elsewhere (top-master-by-bookings) and surfaced read-only on F4.
+    §12 F4 — 4 toggles + birthday. Favorites are computed elsewhere
+    (top-master-by-bookings) and surfaced read-only on F4.
+
+    ### No health text here (DRF-1371)
+
+    An ``allergies`` free-text column lived on this model until 2026-08.
+    It was a special category under 152-ФЗ ст. 10 sitting outside
+    ``MemoryEntry``'s zone / consent / TTL machinery, and its help text
+    promised the value reached the master — which no code ever did. The
+    owner ruled on 2026-08-25 that the master must not see
+    contraindications at all, so the column was removed rather than
+    perimeter-fixed. ``ConsentType.HEALTH`` stays declared: showing
+    contraindications to a master would be a new, gated feature.
 
     ### Why a separate model and not BotUser.context JSONB
 
@@ -330,12 +341,6 @@ class UserPreferences(models.Model):
         blank=True,
         help_text="Optional birthday for the birthday greeting flow. Year "
         "is preserved for age-conditional offers but never displayed back.",
-    )
-    allergies = models.TextField(
-        blank=True,
-        default="",
-        help_text="Free-text contraindications / allergies surfaced to the "
-        "master before each booking. Read by the booking confirm view.",
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
