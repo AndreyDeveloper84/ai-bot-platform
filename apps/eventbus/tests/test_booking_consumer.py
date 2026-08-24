@@ -2056,3 +2056,177 @@ def test_confirmed_without_proxy_does_not_commit_dedupe(settings):
     assert result.outcome == DispatchOutcome.HANDLER_EXCEPTION
     assert isinstance(result.exception, BookingConfirmedPendingProxyError)
     assert not IngestDedupe.objects.filter(event_id=env.event_id).exists()
+
+
+# ─── DRF-1110 / DRF-1103 — the service the day board could not name ────────
+#
+# Pilot, 2026-08-22: of 23 mirrored bookings all 17 from ``mobile_app``
+# carried a service and all 6 from ``automation`` — bookings made in the bot
+# dialog — carried none. The salon opened the day board and could not tell
+# what the customer was coming for.
+#
+# There are two halves to that, and only the second one lives in this file:
+#
+#   1. the dialog writer had no service to write, because Ayla's appointment
+#      response does not expose ``salon_service``. Closed on the REST side in
+#      ``apps.skills.booking.provider._mirror_raw`` (3d0bcb9, 23.08) by
+#      keeping the id the bot itself asked with;
+#   2. Ayla's ``booking.created`` DOES carry ``service_id``, and the consumer
+#      threw it away — the #1147 guard returned before applying any field, so
+#      a row the dialog had already inserted as CONFIRMED could never be
+#      repaired by anything, ever.
+#
+# (2) is what these tests pin, and it is the durable half: it is the only
+# path by which a mirror row missing a reference can ever get one back.
+
+
+def _dialog_written_proxy(
+    tenant: Tenant, bot_user: BotUser, **overrides: Any
+) -> RemoteBookingProxy:
+    """The row ``execute_confirm`` writes before Ayla's event arrives.
+
+    CONFIRMED from the first instant (that is what the dialog knows) and
+    missing the references the response never carried — the exact shape the
+    pilot's six bot bookings had.
+    """
+    defaults: dict[str, Any] = {
+        "tenant": tenant,
+        "bot_user": bot_user,
+        "start_at": dt.datetime(2026, 5, 22, 12, 0, tzinfo=dt.timezone.utc),
+        "end_at": dt.datetime(2026, 5, 22, 13, 0, tzinfo=dt.timezone.utc),
+        "status": RemoteBookingProxy.Status.CONFIRMED,
+        "source": RemoteBookingProxy.Source.AUTOMATION,
+        "service_id": None,
+        "specialist_id": None,
+    }
+    defaults.update(overrides)
+    return RemoteBookingProxy.all_tenants.create(appointment_id=UUID(APPOINTMENT_ID), **defaults)
+
+
+class TestLateCreatedFillsTheReferences:
+    def test_the_pilot_sequence_now_ends_with_a_named_service(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """Dialog writes CONFIRMED with no service, Ayla's booking.created
+        lands on an «advanced» row — and the service is filled, not lost."""
+        _dialog_written_proxy(tenant, bot_user_linked)
+
+        handle_booking_created(
+            _envelope(event_name="booking.created", data=_booking_created_data())
+        )
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert str(proxy.service_id) == "3d5f7e1c-8a2d-4e6f-b9c0-1d2e3f4a5b6c"
+        assert str(proxy.specialist_id) == "7c2d8e1f-0a5c-4c3a-9e1b-4d52f8eb3a17"
+
+    def test_the_state_machine_is_still_not_rolled_back(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """#1147 is why the guard exists and it survives intact: filling a
+        hole must not become a licence to reapply the payload."""
+        _dialog_written_proxy(
+            tenant,
+            bot_user_linked,
+            status=RemoteBookingProxy.Status.CANCELLED,
+            last_synced_event_id="01J9EARLIEREVENT0000000001",
+        )
+
+        handle_booking_created(
+            _envelope(
+                event_name="booking.created",
+                data=_booking_created_data(status="confirmed", source="mobile_app"),
+            )
+        )
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        # Filled…
+        assert proxy.service_id is not None
+        # …and nothing else moved: not the status, not the forensic ordering,
+        # not the schedule window, not the source.
+        assert proxy.status == RemoteBookingProxy.Status.CANCELLED
+        assert proxy.last_synced_event_id == "01J9EARLIEREVENT0000000001"
+        assert proxy.start_at == dt.datetime(2026, 5, 22, 12, 0, tzinfo=dt.timezone.utc)
+        assert proxy.source == RemoteBookingProxy.Source.AUTOMATION
+
+    def test_a_reference_that_is_already_there_is_never_repainted(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """Fill a hole, never paint over. Which of two disagreeing values
+        wins is a reconciliation policy, and it is not decided here."""
+        ours = UUID("11111111-2222-4333-8444-555555555555")
+        _dialog_written_proxy(tenant, bot_user_linked, service_id=ours, specialist_id=ours)
+
+        handle_booking_created(
+            _envelope(event_name="booking.created", data=_booking_created_data())
+        )
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.service_id == ours
+        assert proxy.specialist_id == ours
+
+    def test_one_missing_reference_does_not_block_the_other(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """The columns are filled on separate statements precisely so that a
+        specialist somebody else already wrote cannot keep the service NULL."""
+        spec = UUID("11111111-2222-4333-8444-555555555555")
+        _dialog_written_proxy(tenant, bot_user_linked, specialist_id=spec)
+
+        handle_booking_created(
+            _envelope(event_name="booking.created", data=_booking_created_data())
+        )
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert str(proxy.service_id) == "3d5f7e1c-8a2d-4e6f-b9c0-1d2e3f4a5b6c"
+        assert proxy.specialist_id == spec
+
+    def test_an_event_without_a_service_leaves_the_hole_alone(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """Absent means «no news», not «it is gone» — the same rule the REST
+        writer follows. Nothing to fill is not something to blank."""
+        _dialog_written_proxy(tenant, bot_user_linked)
+        data = _booking_created_data()
+        data.pop("service_id")
+
+        handle_booking_created(_envelope(event_name="booking.created", data=data))
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.service_id is None
+
+    def test_a_replay_is_still_skipped_before_anything_is_touched(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """The event_id short-circuit sits ABOVE the backfill and stays
+        there: a row whose last event IS this event has already been through
+        the full update path."""
+        _dialog_written_proxy(
+            tenant, bot_user_linked, last_synced_event_id="01J9HXKM8Z2T4V6R8Q1P3D5F7E"
+        )
+
+        handle_booking_created(
+            _envelope(event_name="booking.created", data=_booking_created_data())
+        )
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.service_id is None
+
+    def test_a_row_that_has_not_advanced_still_takes_the_whole_payload(
+        self, tenant: Tenant, bot_user_linked: BotUser
+    ) -> None:
+        """Regression guard on the branch this change did NOT touch: a
+        pending_payment row is not «advanced», so it still gets the full
+        update, backfill or no backfill."""
+        _dialog_written_proxy(
+            tenant, bot_user_linked, status=RemoteBookingProxy.Status.PENDING_PAYMENT
+        )
+
+        handle_booking_created(
+            _envelope(event_name="booking.created", data=_booking_created_data())
+        )
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.status == RemoteBookingProxy.Status.CONFIRMED
+        assert proxy.last_synced_event_id == "01J9HXKM8Z2T4V6R8Q1P3D5F7E"
+        assert str(proxy.service_id) == "3d5f7e1c-8a2d-4e6f-b9c0-1d2e3f4a5b6c"
+        assert proxy.source == "mobile_app"
