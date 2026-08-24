@@ -154,7 +154,7 @@ dependencies = [
 # omit it get byte-identical output).
 #
 # ⚠ RE-PIN BEFORE MERGE: this SHA is the ayla-ai-core PR branch head, not a
-# main commit. ayla-ai-core#<provenance PR> merges FIRST; then replace the
+# main commit. AndreyDeveloper84/ayla-ai-core#16 merges FIRST; then replace the
 # SHA below (and the two in uv.lock) with the resulting main SHA and rerun
 # `uv lock --check`. The version string stays 0.9.0, so
 # `tests/smoke/test_ayla_import.py::test_package_version_pinned` needs no edit.
