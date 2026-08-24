@@ -233,6 +233,19 @@ jobs:
       - name: Consent-column direct-read guard (AST lint)
         run: uv run python tools/lint/consent_column_guard.py apps/
 
+      # Mini App style contract (DRF-1066). A class name written in a
+      # screen and never given a rule renders as nothing: on 2026-08-14
+      # that turned the booking payment block into
+      # «Оплатить на местеНаличными или картой в салоне» and nobody saw
+      # it until a person did. It cannot be caught by vitest -- that
+      # suite runs with `css: false`, so a stylesheet read inside a test
+      # comes back empty and every assertion over it passes vacuously.
+      # Runs in this job rather than the `miniapp` one because it is a
+      # text lint and needs no Node. Accepted debt is baselined in the
+      # script and can only shrink.
+      - name: Mini App style contract
+        run: uv run python tools/lint/miniapp_style_contract.py apps/miniapp
+
       - name: Django manage.py check
         run: uv run python manage.py check
 

@@ -29,6 +29,7 @@ from django.conf import settings
 from apps.events.services import emit
 from apps.marketplace.discovery import (
     parse_stems,
+    query_stems,
     service_rows_match_q,
     service_rows_score,
 )
@@ -36,6 +37,7 @@ from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
     decode_query_ref,
+    encode_query_ref,
 )
 
 logger = logging.getLogger(__name__)
@@ -420,6 +422,19 @@ def handoff_to_booking(
                 len(rows),
                 trace_id,
             )
+            # DRF-968 — remember WHO the question is about, so the answer to
+            # it can be an answer instead of a fresh search. Only under the
+            # pilot flag: with it off nothing this master offers can be
+            # grounded (see the block above), so there is no continuation to
+            # park and a typed name is better served by the concierge.
+            if flag_on:
+                remember_pending_service(
+                    global_bot_user,
+                    tenant_id=tenant_id,
+                    master_id=master_id,
+                    master_name=master_name,
+                    query_ref=query_ref,
+                )
             return _ask_service_reply(
                 tenant_id=tenant_id,
                 master_id=master_id,
@@ -441,6 +456,19 @@ def handoff_to_booking(
             return DiscoveryReply(text=_UNAVAILABLE_REPLY)
 
         carry_time_preference(global_bot_user, conversation)
+
+        # DRF-1101 — from here on the person is INSIDE the booking flow, and
+        # the next thing they say may well be «16 августа 2026» rather than a
+        # tap. Park who and what, so a typed answer reaches the same picker
+        # the chip would have.
+        remember_pending_schedule(
+            global_bot_user,
+            tenant_id=tenant_id,
+            master_id=master_id,
+            master_name=master_name,
+            native_master_id=native_master_id,
+            native_service_id=native_service_id,
+        )
 
         emit(
             "marketplace.handoff.entered",
@@ -562,6 +590,452 @@ def carry_time_preference(global_bot_user, conversation) -> None:
         logger.exception("marketplace.handoff.time_pref_carry_failed")
 
 
+# ─── Typed continuation of a live booking (DRF-968 / DRF-1101) ─────────────
+#
+# Everything above continues a booking on a TAP. This block is the other
+# half: the person types instead, and until now that always started over.
+# See :mod:`apps.orchestrator.booking_context` for the measurement.
+#
+# ### The rule both branches obey
+#
+# A turn is claimed only when this layer can account for it COMPLETELY — the
+# same default DRF-1328 inverted for the deterministic fast path. A pending
+# booking is not a licence to swallow whatever the person says next: «а
+# сколько это стоит?» типed under a service question must still reach the
+# concierge and its tools. So «service» claims a turn only when the text
+# matches a service THIS master can actually deliver, and «schedule» only
+# when it parses as a date or a part of the day. Everything else falls
+# through, byte-for-byte as today.
+
+
+def _global_conversation(global_bot_user):
+    """The sentinel-scoped conversation this user's booking context lives on.
+
+    Same resolver and the same ``create_if_missing=False`` as
+    :func:`carry_time_preference`, and for the same reason: the caller may be
+    inside ``tenant_scope(T)``, where the per-tenant resolver would look in
+    the wrong place, and reading a hint must never create a row.
+    """
+    from apps.conversations.services import resolve_active_global_conversation
+
+    try:
+        return resolve_active_global_conversation(global_bot_user, create_if_missing=False)
+    except Exception:  # noqa: BLE001 — a hint must never break a booking turn
+        logger.exception("marketplace.handoff.global_conversation_failed")
+        return None
+
+
+def remember_pending_service(
+    global_bot_user,
+    *,
+    tenant_id: uuid.UUID,
+    master_id: uuid.UUID,
+    master_name: str,
+    query_ref: str,
+) -> None:
+    """Park «we asked THIS master's service question» (DRF-968)."""
+    from apps.orchestrator.booking_context import (
+        AWAITING_SERVICE,
+        BookingContext,
+        save_booking_context,
+    )
+
+    save_booking_context(
+        _global_conversation(global_bot_user),
+        BookingContext(
+            awaiting=AWAITING_SERVICE,
+            tenant_id=str(tenant_id),
+            master_id=str(master_id),
+            master_name=master_name,
+            query_ref=query_ref,
+        ),
+    )
+
+
+def remember_pending_schedule(
+    global_bot_user,
+    *,
+    tenant_id: uuid.UUID,
+    master_id: uuid.UUID,
+    master_name: str,
+    native_master_id: str,
+    native_service_id: str,
+) -> None:
+    """Park «master and service are settled, we are on the WHEN» (DRF-1101)."""
+    from apps.orchestrator.booking_context import (
+        AWAITING_SCHEDULE,
+        BookingContext,
+        save_booking_context,
+    )
+
+    save_booking_context(
+        _global_conversation(global_bot_user),
+        BookingContext(
+            awaiting=AWAITING_SCHEDULE,
+            tenant_id=str(tenant_id),
+            master_id=str(master_id),
+            master_name=master_name,
+            native_master_id=native_master_id,
+            native_service_id=native_service_id,
+        ),
+    )
+
+
+def forget_pending_booking(global_bot_user) -> None:
+    """Drop the context — the booking reached its own end (confirm / cancel)."""
+    from apps.orchestrator.booking_context import save_booking_context
+
+    save_booking_context(_global_conversation(global_bot_user), None)
+
+
+# How many matching rows are read before the menu is cut to the keyboard
+# budget. The extra rows are never rendered — they exist so the residue check
+# below sees every service the words could have meant, instead of deciding
+# «this word means nothing here» from a truncated page.
+_SERVICE_MATCH_SCAN_LIMIT = 50
+
+
+def _groundable_service_rows(master, parsed) -> list[tuple[uuid.UUID, str, int]]:
+    """This master's deliverable services matching ``parsed``, best first.
+
+    The SAME three conditions and the SAME predicate the ask-the-service menu
+    is built from (``handoff_to_booking``): active, offered by this master,
+    non-NULL ``ayla_service_id``. Written once as a helper because the two
+    lists must never disagree — a row this function returns is a row the menu
+    would have shown, so a typed name and a tapped chip resolve identically.
+
+    Third element is how many of the query's stems the name carries. A goal
+    query reports ``0`` for every row, and that is the design rather than a
+    gap: ``service_rows_score`` returns ``None`` for goals because carrying a
+    goal is not a matter of degree, and the caller reads a score of nought as
+    «offer the choice» — which is the right answer to «хочу расслабиться».
+
+    ### Why the counting happens in Python
+
+    ``name__icontains`` case-folds ASCII only on SQLite. «класси» therefore
+    does NOT match «Классический массаж» locally, while on PostgreSQL — CI
+    and the pilot — it does. A decision as sharp as «exactly one service
+    carries every word, book it» must not depend on which database is
+    underneath, so the SQL side keeps only the job it can do identically
+    (selecting candidate rows through the SAME predicate the menu uses) and
+    the counting is done over the names already in hand, with Python's
+    Unicode-aware fold. No extra query, and no dialect in the verdict.
+
+    Caller must already be inside ``tenant_scope(tenant)``.
+    """
+    from apps.catalog.models import CatalogService
+
+    if parsed.is_empty:
+        return []
+    rows = (
+        CatalogService.objects.filter(
+            masters_offering__master=master,
+            is_active=True,
+            ayla_service_id__isnull=False,
+        )
+        .filter(service_rows_match_q(parsed))
+        .order_by("name")
+        .values_list("id", "name")[:_SERVICE_MATCH_SCAN_LIMIT]
+    )
+    scored = [
+        (pk, name, sum(1 for stem in parsed.stems if stem in name.lower())) for pk, name in rows
+    ]
+    # Best first, ties by the stable name order the query already produced.
+    scored.sort(key=lambda row: (-row[2], row[1]))
+    return scored
+
+
+def _unexplained_stems(stems, rows) -> list[str]:
+    """Words the person typed that NO service of this master could explain.
+
+    The same shape of test ``apps.orchestrator.fast_path`` applies before it
+    claims a turn: a word this layer cannot account for is not noise, it is a
+    refusal. «сколько», «стоит», «давай» carry the turn out of here and into
+    the concierge, which is the layer that owns them.
+
+    Case-folded against the names already read, so no extra query.
+    """
+    if not stems:
+        return []
+    names = [name.lower() for _, name, _ in rows]
+    return [stem for stem in stems if not any(stem in name for name in names)]
+
+
+def _continue_pending_service(
+    *,
+    global_bot_user,
+    ctx,
+    text: str,
+    chat_id: str,
+    trace_id: str | uuid.UUID | None,
+) -> DiscoveryReply | None:
+    """The answer to «напишите название услуги», consumed (DRF-968).
+
+    ``None`` means «not mine», and it is the load-bearing half of this
+    function. A pending question is not a licence to read every following
+    turn as its answer:
+
+    * **A word this master's roster cannot explain gives the turn back.**
+      «а сколько это стоит?» shares a stem with nothing bookable, so it
+      reaches the concierge and its tools — the same residue rule
+      ``apps.orchestrator.fast_path`` uses to decide it is not the one to
+      answer. Claiming it would trade the DRF-968 loop for a stickier one.
+    * **A service this master does not offer gives the turn back too.** That
+      is the live «Кавитация» turn from the DRF-962 acceptance, and the
+      concierge answers it well (the masters who DO offer it). «У мастера X
+      такого нет» plus a menu of what he does instead would be a narrower,
+      worse reply.
+
+    What is left is the answer the question asked for, and it resolves the
+    way the catalog says: exactly one service carrying every word the person
+    typed goes straight to booking; several — «классический массаж» is two
+    rows in the pilot catalog (DRF-970) — come back as a choice narrowed to
+    those, never as the roster and never as the master list.
+    """
+    from apps.catalog.models import CatalogMaster
+    from apps.tenancy.context import tenant_scope
+    from apps.tenancy.models import Tenant
+
+    tenant = Tenant.objects.filter(id=ctx.tenant_id).first()
+    if tenant is None:
+        return None
+
+    parsed = parse_stems(query_stems(text))
+    with tenant_scope(tenant):
+        master = CatalogMaster.objects.filter(id=ctx.master_id).first()
+        if master is None:
+            return None
+        rows = _groundable_service_rows(master, parsed)
+
+    if not rows:
+        logger.info(
+            "marketplace.handoff.pending_service_no_match master=%s trace=%s",
+            ctx.master_id,
+            trace_id,
+        )
+        return None
+
+    residue = _unexplained_stems(parsed.stems, rows)
+    if residue:
+        logger.info(
+            "marketplace.handoff.pending_service_residue master=%s residue=%s trace=%s",
+            ctx.master_id,
+            ",".join(residue),
+            trace_id,
+        )
+        return None
+
+    exact = [row for row in rows if parsed.stems and row[2] == len(parsed.stems)]
+    if len(exact) == 1:
+        service_pk = exact[0][0]
+        logger.info(
+            "marketplace.handoff.pending_service_resolved master=%s service=%s trace=%s",
+            ctx.master_id,
+            service_pk,
+            trace_id,
+        )
+        emit(
+            "marketplace.handoff.typed_service_resolved",
+            payload={
+                "tenant_id": str(ctx.tenant_id),
+                "master_id": str(ctx.master_id),
+                "service_id": str(service_pk),
+            },
+        )
+        # Re-enter the ONE entrypoint. Not a private shortcut into booking:
+        # the service still has to pass the same tenant-scoped existence /
+        # edge / deliverability checks a tapped chip passes, and a typed name
+        # that survives them earns exactly the tap's outcome.
+        return handoff_to_booking(
+            global_bot_user=global_bot_user,
+            tenant_id=uuid.UUID(ctx.tenant_id),
+            master_id=uuid.UUID(ctx.master_id),
+            service_id=service_pk,
+            query_ref=ctx.query_ref,
+            chat_id=chat_id,
+            trace_id=trace_id,
+        )
+
+    # Not one. The person named a family, not a service. Ask again, with the
+    # choice narrowed to what they just said instead of the roster — and with
+    # the pending state re-armed under the NEW words, so the next answer is
+    # read against the question that was actually asked.
+    menu = exact or rows
+    truncated = len(menu) > _ASK_SERVICE_BUTTON_LIMIT
+    shown: list[tuple[uuid.UUID, str]] = [
+        (pk, name) for pk, name, _ in menu[:_ASK_SERVICE_BUTTON_LIMIT]
+    ]
+    logger.info(
+        "marketplace.handoff.pending_service_ambiguous master=%s rows=%d trace=%s",
+        ctx.master_id,
+        len(shown),
+        trace_id,
+    )
+    remember_pending_service(
+        global_bot_user,
+        tenant_id=uuid.UUID(ctx.tenant_id),
+        master_id=uuid.UUID(ctx.master_id),
+        master_name=ctx.master_name,
+        query_ref=encode_query_ref(text),
+    )
+    return _ask_service_reply(
+        tenant_id=uuid.UUID(ctx.tenant_id),
+        master_id=uuid.UUID(ctx.master_id),
+        master_name=ctx.master_name,
+        rows=shown,
+        truncated=truncated,
+        not_offered_name=None,
+        filtered=True,
+    )
+
+
+# Cap on the verbatim fragment stored as «what you asked for». The spoken
+# path stores matched words, so nothing upstream bounds a typed sentence.
+_MAX_SAID_CHARS = 60
+
+# The typo the DRF-1101 dialogue opens with, answered deterministically
+# instead of by whatever the model feels like saying. It names the date back
+# so the person can see WHICH date was read out of what they typed.
+_PAST_DATE_LINE = "Дата {date} уже прошла."
+
+
+def _continue_pending_schedule(
+    *,
+    global_bot_user,
+    ctx,
+    text: str,
+    chat_id: str,
+    trace_id: str | uuid.UUID | None,
+) -> DiscoveryReply | None:
+    """A typed day / time mid-booking, routed to the picker (DRF-1101).
+
+    The whole continuation is: store the request the way a spoken one is
+    stored (``save_time_preference``) and re-enter the master pick. From
+    there nothing is new — ``_render_date_picker`` already honours a stored
+    preference (DRF-1325), either jumping straight to that day's parts or
+    saying in one line that the master has nothing on it and putting the
+    chips back. No date is asserted free anywhere: the day list still comes
+    from the schedule read, and ``create``'s 409 still owns the last word.
+
+    ``None`` for a turn that names no time — it belongs to the concierge.
+    """
+    from apps.orchestrator.time_preference import (
+        TimePreference,
+        local_today,
+        parse_explicit_date,
+        parse_time_preference,
+        save_time_preference,
+    )
+    from apps.tenancy.models import Tenant
+
+    if not ctx.native_master_id or not ctx.native_service_id:
+        return None
+    tenant = Tenant.objects.filter(id=ctx.tenant_id).first()
+    if tenant is None:
+        return None
+
+    today = local_today(tenant)
+    spoken = parse_time_preference(text, weekday_today=today.weekday())
+    explicit = parse_explicit_date(text, today=today)
+    if explicit is None and spoken is None:
+        return None
+
+    prefix = ""
+    if explicit is not None:
+        if explicit < today:
+            # A year typo, not a request. Say so and put the days back — the
+            # ONE thing that must not happen is the turn ending up in
+            # discovery, which is how this ticket's dialogue reached a reset.
+            prefix = _PAST_DATE_LINE.format(date=explicit.strftime("%d.%m.%Y"))
+            pref = spoken if (spoken is not None and spoken.day_offset is None) else None
+        else:
+            pref = TimePreference(
+                day_offset=(explicit - today).days,
+                part=spoken.part if spoken is not None else None,
+                said=text.strip()[:_MAX_SAID_CHARS],
+            )
+    else:
+        pref = spoken
+
+    if pref is not None:
+        save_time_preference(_global_conversation(global_bot_user), pref)
+
+    logger.info(
+        "marketplace.handoff.pending_schedule_continued master=%s past=%s trace=%s",
+        ctx.master_id,
+        bool(prefix),
+        trace_id,
+    )
+    emit(
+        "marketplace.handoff.typed_schedule_continued",
+        payload={
+            "tenant_id": str(ctx.tenant_id),
+            "master_id": str(ctx.master_id),
+            "past_date": bool(prefix),
+        },
+    )
+    reply = route_booking_callback(
+        global_bot_user=global_bot_user,
+        callback_text=(
+            f"{_CALLBACK_BOOK_PICK_MASTER}{ctx.native_master_id}:{ctx.native_service_id}"
+        ),
+        chat_id=chat_id,
+        trace_id=trace_id,
+    )
+    if not prefix:
+        return reply
+    return DiscoveryReply(
+        text=f"{prefix}\n\n{reply.text}",
+        action_data=reply.action_data,
+        persisted=reply.persisted,
+    )
+
+
+def try_continue_booking(
+    *,
+    global_bot_user,
+    conversation,
+    text: str,
+    chat_id: str = "",
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply | None:
+    """Continue a live booking from a TYPED turn, or ``None`` to stand aside.
+
+    The single entrypoint the global MAX handler calls. Best-effort: a
+    failure here degrades to the turn the pilot has today, which is the
+    defect — bad, but never worse than losing the reply outright.
+    """
+    from apps.orchestrator.booking_context import (
+        AWAITING_SCHEDULE,
+        AWAITING_SERVICE,
+        load_booking_context,
+    )
+
+    try:
+        ctx = load_booking_context(conversation)
+        if ctx is None:
+            return None
+        if ctx.awaiting == AWAITING_SERVICE:
+            return _continue_pending_service(
+                global_bot_user=global_bot_user,
+                ctx=ctx,
+                text=text,
+                chat_id=chat_id,
+                trace_id=trace_id,
+            )
+        if ctx.awaiting == AWAITING_SCHEDULE:
+            return _continue_pending_schedule(
+                global_bot_user=global_bot_user,
+                ctx=ctx,
+                text=text,
+                chat_id=chat_id,
+                trace_id=trace_id,
+            )
+    except Exception:  # noqa: BLE001 — a continuation must never cost the turn
+        logger.exception("marketplace.handoff.continue_failed")
+    return None
+
+
 def _resolve_booking_callback_tenant(callback_text: str):
     """Resolve tenant T for a post-handoff ``cb:book:*`` tap, or None.
 
@@ -634,6 +1108,21 @@ def route_booking_callback(
     from apps.skills.base import SkillContext
     from apps.skills.registry import dispatch as skill_dispatch
     from apps.tenancy.context import tenant_scope
+
+    # DRF-1101 — the typed-continuation window is measured from the last sign
+    # of life, and a tap is one. confirm / cancel are the funnel's own ends:
+    # past them a typed date means a NEW request, and continuing the finished
+    # booking would be the stale-context dead-end wearing this fix's clothes.
+    #
+    # Both run BEFORE the tenant is resolved, because neither depends on it
+    # and a confirm tap whose token no longer resolves is still a funnel that
+    # ended.
+    from apps.orchestrator.booking_context import touch_booking_context
+
+    if callback_text.startswith(("cb:book:confirm:", "cb:book:cancel:")):
+        forget_pending_booking(global_bot_user)
+    else:
+        touch_booking_context(_global_conversation(global_bot_user))
 
     tenant = _resolve_booking_callback_tenant(callback_text)
     if tenant is None:

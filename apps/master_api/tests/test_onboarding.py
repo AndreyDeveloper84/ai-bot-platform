@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
+from datetime import timezone as dt_timezone
 
 from django.test import Client
 from django.urls import reverse
@@ -235,6 +237,129 @@ class TestOnboardingAccept:
         assert resp1.status_code == 200
         assert resp2.status_code == 200, resp2.content
         assert resp1.json()["master_id"] == resp2.json()["master_id"]
+
+    def test_inactive_invited_master_becomes_active(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """DRF-1080 — production rows arrive at ``is_active=False``.
+
+        ``master_invite_create`` writes the row inactive on purpose
+        (apps/admin_api/views_invite.py:499) and nothing flipped it back,
+        so the accepted master hit 403 ``master_inactive`` on every
+        master endpoint. The fixture default is ``is_active=True``, which
+        is exactly why the suite never saw this.
+        """
+
+        master = make_master(tenant, is_active=False)
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(master.invite_token)},
+            header=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content
+
+        master.refresh_from_db()
+        assert master.is_active is True
+        assert master.linked_bot_user_id == bot_user.id
+
+    def test_gate_lets_the_freshly_accepted_master_in(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """The point of the fix: the next master call is no longer 403.
+
+        Asserting on the column alone would keep passing if the gate
+        ever grew a second condition, so the test walks the actual door
+        the invited master walks through.
+        """
+
+        master = make_master(tenant, is_active=False)
+        accept = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(master.invite_token)},
+            header=init_data_header("12345"),
+        )
+        assert accept.status_code == 200, accept.content
+
+        me = client.get(
+            reverse("master_api:me"),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert me.status_code == 200, me.content
+
+    def test_archived_master_is_not_reactivated(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Deactivation writes ``is_active=False`` AND ``archived_at``.
+
+        Flipping the flag back for an archived row would return a master
+        the salon took out of service to ``_MasterManager.bookable()``.
+        The accept still succeeds — the token was valid — but the row
+        stays inactive and the gate keeps answering 403.
+        """
+
+        now = datetime.now(tz=dt_timezone.utc)
+        master = make_master(tenant, is_active=False, archived_at=now)
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(master.invite_token)},
+            header=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content
+
+        master.refresh_from_db()
+        assert master.is_active is False
+        assert master.archived_at is not None
+
+        me = client.get(
+            reverse("master_api:me"),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert me.status_code == 403
+        assert me.json()["error"] == "master_inactive"
+
+    def test_retry_repairs_a_master_stuck_from_before_the_fix(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Anyone who accepted before this fix has no second first-accept.
+
+        Their token is consumed and the row is already ACCEPTED, so the
+        idempotency branch is the only one they can ever reach again.
+        Without the repair there they stay at 403 for good.
+        """
+
+        master = make_master(
+            tenant,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            invite_token=None,
+            expires_in_days=None,
+            linked_bot_user=bot_user,
+            is_active=False,
+        )
+        resp = _post_json(
+            client,
+            "master_api:onboarding_accept",
+            body={"token": str(uuid.uuid4())},
+            header=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content
+
+        master.refresh_from_db()
+        assert master.is_active is True
 
     def test_wrong_recipient_blocked(
         self,
