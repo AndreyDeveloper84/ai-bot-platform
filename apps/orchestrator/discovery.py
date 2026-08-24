@@ -228,6 +228,34 @@ SHOW_SERVICES_TOOL_SPEC: dict[str, Any] = {
 #: data rendered as-is, no second model pass spent on rephrasing them.
 CATALOG_TOOL_ACTIONS = frozenset({SHOW_SALONS_TOOL_SPEC["name"], SHOW_SERVICES_TOOL_SPEC["name"]})
 
+#: The three shapes a clarification turn can take (DRF-1362, owner decision of
+#: 22.08 «P0 ADAPTERS»). The owner's decisions call these "existing
+#: conversational states"; they were not. A repo-wide search for
+#: ``CONFIRM_ONE`` / ``CHOOSE_MANY`` / ``FREE_CLARIFICATION`` over ``apps/``,
+#: ``docs/`` and ``tests/`` returned nothing — the only clarification
+#: instrument that existed was :data:`ASK_CLARIFICATION_TOOL_SPEC` below, and
+#: it carried no mode at all.
+#:
+#: Why the mode must be *stated* rather than guessed: from the consumer's
+#: side, "confirm one of these" and "here are some ideas, or say your own"
+#: render identically today — a question plus N buttons. The difference is
+#: entirely about what a tap MEANS and whether typing something else is an
+#: equally valid answer, and that knowledge lives in the model. Without the
+#: metadata a consumer cannot tell them apart even though it already draws
+#: both, so the two screens of C02 / C03 have nothing to branch on.
+#:
+#: Deliberately separable from the multi-select rendering below: the mode is
+#: useful on its own, on the clarification turns that already ship.
+CLARIFICATION_MODE_CONFIRM_ONE = "confirm_one"
+CLARIFICATION_MODE_CHOOSE_MANY = "choose_many"
+CLARIFICATION_MODE_FREE = "free"
+
+CLARIFICATION_MODES = (
+    CLARIFICATION_MODE_CONFIRM_ONE,
+    CLARIFICATION_MODE_CHOOSE_MANY,
+    CLARIFICATION_MODE_FREE,
+)
+
 # OpenAI-shaped function spec (DRF-1102) — lets the concierge ask a clarifying
 # question AS A TOOL CALL, with tappable options, instead of the only other
 # option it has today: plain assistant text. Plain text doesn't move the
@@ -256,6 +284,22 @@ ASK_CLARIFICATION_TOOL_SPEC: dict[str, Any] = {
                 "description": "Up to 5 short tappable answer options (optional).",
                 "maxItems": 5,
             },
+            # DRF-1362. Optional and last, so a model that ignores it behaves
+            # exactly as it does today — `normalize_clarification_mode` then
+            # derives the mode from the options, which is what every existing
+            # clarification in the pilot already means.
+            "mode": {
+                "type": "string",
+                "enum": list(CLARIFICATION_MODES),
+                "description": (
+                    "How the user is meant to answer. 'confirm_one' — pick "
+                    "exactly one of the options (the default when options are "
+                    "given). 'choose_many' — several options can apply at once "
+                    "and the user confirms when done. 'free' — the options are "
+                    "only examples; answering in the user's own words is "
+                    "expected and equally valid."
+                ),
+            },
         },
         "required": ["question"],
     },
@@ -265,6 +309,12 @@ ASK_CLARIFICATION_TOOL_SPEC: dict[str, Any] = {
 # model-generated, unlike the catalog-bounded master names `_render_master_cards`
 # renders, so nothing upstream already bounds their length.
 _MAX_OPTION_LABEL_CHARS = 40
+
+#: Hard ceiling on tappable options, mirroring the tool spec's ``maxItems``.
+#: Deliberately NOT raised here: the sibling five-button limit from DRF-1200
+#: sits right beside it, and lifting one without the other is how a keyboard
+#: silently loses its tail.
+_MAX_CLARIFICATION_OPTIONS = 5
 
 
 @dataclass(frozen=True)
@@ -1024,7 +1074,66 @@ def execute_catalog_tool(name: str, args: dict[str, Any]) -> DiscoveryReply | No
     return None
 
 
-def _render_ask_clarification(question: str, options: list[str]) -> DiscoveryReply:
+def normalize_clarification_mode(raw: Any, options: list[str]) -> str:
+    """The clarification mode a call means, given what the model actually said.
+
+    Never raises and never returns something outside :data:`CLARIFICATION_MODES`
+    — a model-supplied string is untrusted input, and a clarification is the
+    turn we reach precisely when things are already unclear.
+
+    Two derivations when ``raw`` is missing or unrecognised, both chosen to
+    reproduce today's behaviour exactly rather than to be clever:
+
+    * **no options → ``free``.** The renderer already sends a bare question
+      and the user has nothing to tap, so free text is the only answer that
+      can exist. Naming it does not change the turn.
+    * **options → ``confirm_one``.** Every clarification the pilot ships
+      today is a pick-one; the buttons carry their own text as the callback,
+      i.e. one tap == one typed answer, which IS confirm-one semantics.
+
+    ``choose_many`` is therefore never inferred. Multi-select changes what a
+    tap does, so it must be asked for explicitly — deriving it from a list of
+    options would silently rewrite the meaning of clarifications that work.
+    """
+    if isinstance(raw, str):
+        candidate = raw.strip().lower()
+        if candidate in CLARIFICATION_MODES:
+            return candidate
+    return CLARIFICATION_MODE_CONFIRM_ONE if options else CLARIFICATION_MODE_FREE
+
+
+def clarification_mode_of(action_data: dict[str, Any] | None) -> str | None:
+    """Read the mode back off a rendered clarification, for consumers.
+
+    ``None`` when this ``action_data`` is not a *tappable* clarification (a
+    card keyboard, a booking reply, ``None``, or the option-less question) —
+    so a consumer can branch on "is this a clarification, and which kind" in
+    one call without having to know the envelope's shape.
+
+    This is the half of DRF-1362 §1 that makes the mode worth carrying: the
+    channel receives a keyboard either way, and this is the only thing that
+    tells it whether a typed answer is expected alongside the buttons.
+
+    An option-less clarification deliberately carries NO block and reads back
+    as ``None``. It has no keyboard, so there is nothing for the mode to
+    disambiguate — free text is the only answer that can exist — and giving
+    it an ``action_data`` where it had ``None`` would change every such turn
+    already in the pilot for no gain.
+    """
+    if not isinstance(action_data, dict):
+        return None
+    block = action_data.get("clarification")
+    if not isinstance(block, dict):
+        return None
+    mode = block.get("mode")
+    return mode if isinstance(mode, str) and mode in CLARIFICATION_MODES else None
+
+
+def _render_ask_clarification(
+    question: str,
+    options: list[str],
+    mode: Any = None,
+) -> DiscoveryReply:
     """Render an ``ask_clarification`` tool call as reply text + a tap keyboard.
 
     Each option becomes a button whose callback is the option's OWN text —
@@ -1037,13 +1146,301 @@ def _render_ask_clarification(question: str, options: list[str]) -> DiscoveryRep
     sync (unlike the legacy ``cb:ai:answer:{conv}:{idx}`` scheme).
 
     No options → plain question text, no keyboard: the user answers freely.
+
+    ``mode`` (DRF-1362) is metadata ONLY. It rides in
+    ``action_data["clarification"]["mode"]`` — a key no channel renderer
+    reads, since ``apps.channels.max.handler._build_attachments`` looks at
+    ``attachments`` / ``buttons`` / ``button_rows`` and nothing else. That is
+    the point: the wire bytes of every clarification already in the pilot are
+    unchanged by this argument, whatever it says. Adding a mode must not
+    quietly rewrite turns that work.
+
+    The option-less branch keeps ``action_data=None`` for the same reason,
+    one step stricter: with no keyboard there is nothing to disambiguate, and
+    a bare question that used to carry ``None`` must keep carrying ``None``.
     """
     text = (question or "Уточните, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
     cleaned = [str(opt).strip() for opt in options if str(opt).strip()]
     if not cleaned:
         return DiscoveryReply(text=text)
-    buttons = [{"label": opt[:_MAX_OPTION_LABEL_CHARS], "callback": opt} for opt in cleaned[:5]]
-    action_data = {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]}
+    resolved = normalize_clarification_mode(mode, cleaned)
+    shown = cleaned[:_MAX_CLARIFICATION_OPTIONS]
+    buttons = [{"label": opt[:_MAX_OPTION_LABEL_CHARS], "callback": opt} for opt in shown]
+    action_data = {
+        "attachments": [{"type": "inline_keyboard", "payload": {"buttons": buttons}}],
+        "clarification": {"mode": resolved, "options": shown},
+    }
+    return DiscoveryReply(text=text, action_data=action_data)
+
+
+# ─── choose_many: one purchase across two screens ─────────────────────────
+
+
+#: Multi-select callback grammar (DRF-1362). Flat slugs, digits only after the
+#: verb — no ``=``, ``&`` or ``?``, which MAX rejects outright on ``open_app``
+#: payloads (`apps/channels/max/outbound.py::_button_to_max`, Guard 3) and
+#: which there is no reason to risk here either.
+#:
+#:     cb:clarify:tg:{mask}:{index}   toggle option {index}
+#:     cb:clarify:ok:{mask}           «Продолжить» — submit the accumulated set
+#:     cb:clarify:no                  «Ни один вариант» — close with nothing
+#:
+#: ``{mask}`` is the CURRENT selection encoded as a bitmask (bit *i* set ==
+#: option *i* chosen), carried in the payload of every button in the keyboard
+#: and rewritten on each redraw.
+#:
+#: Carrying the selection in the keyboard rather than in a server-side record
+#: is the one design decision here worth defending. The legacy screen this is
+#: modelled on kept its selection in FSM state
+#: (`legacy_maxbot/handlers/health_screening.py:259-264`,
+#: ``context.update_data(chronic_selected=…)``) because it had an FSM to keep
+#: it in. This path has none, and inventing per-conversation pending-question
+#: state would reintroduce exactly what ``_render_ask_clarification`` above
+#: says it avoided: a record that has to stay in sync with a message. The
+#: keyboard IS the state — it is redrawn on every tap anyway, it cannot go
+#: stale relative to the message it hangs under, and a tap on a keyboard from
+#: three messages ago carries that keyboard's own mask, not a newer one.
+#:
+#: Five options cap the mask at 31, so the longest payload is
+#: ``cb:clarify:tg:31:4`` — 18 bytes.
+CLARIFY_CALLBACK_PREFIX = "cb:clarify:"
+CLARIFY_TOGGLE_PREFIX = "cb:clarify:tg:"
+CLARIFY_SUBMIT_PREFIX = "cb:clarify:ok:"
+CLARIFY_NONE_CALLBACK = "cb:clarify:no"
+
+#: Selected / unselected marks. Prefixed, not appended: MAX truncates a long
+#: button label at the tail, so a trailing mark is the first thing lost.
+CLARIFY_MARK_ON = "☑ "
+CLARIFY_MARK_OFF = "☐ "
+
+CLARIFY_SUBMIT_LABEL = "Продолжить"
+CLARIFY_NONE_LABEL = "Ни один вариант"
+
+
+@dataclass(frozen=True)
+class ClarifyTap:
+    """A decoded ``cb:clarify:*`` tap.
+
+    ``kind`` is one of ``"toggle"`` / ``"submit"`` / ``"none"``. ``mask`` is
+    the selection the tapped keyboard was carrying (0 for ``"none"``);
+    ``index`` is the toggled option and is None for the other two.
+    """
+
+    kind: str
+    mask: int = 0
+    index: int | None = None
+
+
+def parse_clarify_callback(callback_text: str) -> ClarifyTap | None:
+    """Decode a multi-select tap, or ``None`` if this is not one.
+
+    Returns ``None`` — never raises — for anything malformed, so a caller's
+    prefix ladder keeps matching and a garbled payload degrades to "not a
+    clarify tap" rather than to a 500. Out-of-range masks and indices are
+    malformed: they can only come from a hand-edited payload, and clamping
+    them would silently select an option the user never saw.
+    """
+    if not isinstance(callback_text, str):
+        return None
+    if callback_text == CLARIFY_NONE_CALLBACK:
+        return ClarifyTap(kind="none")
+    if callback_text.startswith(CLARIFY_TOGGLE_PREFIX):
+        rest = callback_text[len(CLARIFY_TOGGLE_PREFIX) :]
+        parts = rest.split(":")
+        if len(parts) != 2 or not all(p.isdigit() for p in parts):
+            return None
+        mask, index = int(parts[0]), int(parts[1])
+        if not (0 <= index < _MAX_CLARIFICATION_OPTIONS):
+            return None
+        if not (0 <= mask < (1 << _MAX_CLARIFICATION_OPTIONS)):
+            return None
+        return ClarifyTap(kind="toggle", mask=mask, index=index)
+    if callback_text.startswith(CLARIFY_SUBMIT_PREFIX):
+        rest = callback_text[len(CLARIFY_SUBMIT_PREFIX) :]
+        if not rest.isdigit():
+            return None
+        mask = int(rest)
+        if not (0 <= mask < (1 << _MAX_CLARIFICATION_OPTIONS)):
+            return None
+        return ClarifyTap(kind="submit", mask=mask)
+    return None
+
+
+def apply_clarify_toggle(mask: int, index: int) -> int:
+    """Flip option ``index`` in ``mask``. Pure; the whole of "toggle" logic."""
+    return mask ^ (1 << index)
+
+
+def selected_clarification_options(options: list[str], mask: int) -> list[str]:
+    """The chosen options, in the order they were offered.
+
+    Order matters: it is the order the user read them in, and the submitted
+    answer is a sentence assembled from these.
+    """
+    return [opt for i, opt in enumerate(options[:_MAX_CLARIFICATION_OPTIONS]) if mask & (1 << i)]
+
+
+#: Said when a multi-select tap arrives but the question behind it is gone —
+#: the assistant message was pruned, or the tap is from an old screen whose
+#: options nobody can name any more. Same shape as the stale catalog chip:
+#: state what happened, offer the one move that always works.
+#: Drawn above a redrawn multi-select keyboard when the original question's
+#: wording could not be recovered. Deliberately generic — inventing a
+#: paraphrase of a question we no longer hold would put words in the bot's
+#: mouth that it never said the first time.
+_MULTISELECT_REDRAW_QUESTION = "Выберите всё, что подходит, и нажмите «Продолжить»:"
+
+CLARIFY_STALE_TEXT = (
+    "Этот вопрос уже неактуален — я потеряла варианты, которые предлагала. "
+    "Напишите, что нужно, своими словами — подберу заново."
+)
+
+#: Said when the user closes a multi-select without choosing anything. NOT a
+#: dead end and NOT «ничего не найдено»: nothing was asked for yet, so the
+#: honest next move is to invite the answer in their own words.
+CLARIFY_NONE_TEXT = "Поняла, ни один вариант не подошёл. Расскажите своими словами, что ищете?"
+
+
+@dataclass(frozen=True)
+class ClarifyOutcome:
+    """What a ``cb:clarify:*`` tap resolves to.
+
+    Exactly one of the two is set, and that is the whole decision the caller
+    has to make:
+
+    * ``reply`` — draw this. A toggle redraw (same screen, new marks) or a
+      terminal line. ``redraw`` says whether it should REPLACE the message the
+      tap came from rather than follow it.
+    * ``submit_text`` — the accumulated answer, phrased as the user would have
+      typed it. The caller re-enters its normal turn with this as the text,
+      which is what "submit -> повторное разрешение" means: the selection is
+      resolved by the same machinery that resolves anything a person says, not
+      by a second parallel path that could disagree with it.
+    """
+
+    reply: DiscoveryReply | None = None
+    submit_text: str = ""
+    redraw: bool = False
+
+
+def execute_clarify_callback(
+    callback_text: str,
+    options: list[str],
+    question: str = "",
+) -> ClarifyOutcome | None:
+    """Resolve a multi-select tap against the options that were offered.
+
+    ``None`` when ``callback_text`` is not a clarify tap at all, so the
+    caller's prefix ladder keeps matching — same contract as
+    :func:`execute_catalog_callback`.
+
+    ``options`` is the list the ORIGINAL question offered and ``question`` is
+    its wording, both recovered by the caller from the assistant turn the tap
+    belongs to. Empty ``options`` means the question is gone: every tap then
+    degrades to :data:`CLARIFY_STALE_TEXT` rather than to a keyboard with no
+    labels or an answer assembled from nothing.
+
+    ``question`` is carried through rather than paraphrased because the
+    wording is the model's. A redraw that re-worded the question on every tap
+    would read as the bot changing its mind mid-answer; :data:`_MULTISELECT_
+    REDRAW_QUESTION` is the fallback only when the original is unrecoverable.
+
+    Deterministic: no model call, no database read. A tap costs the redraw and
+    nothing else.
+    """
+    tap = parse_clarify_callback(callback_text)
+    if tap is None:
+        return None
+
+    if not options:
+        # The mask is meaningless without the labels it indexes.
+        logger.info("orchestrator.discovery.clarify_tap kind=%s outcome=stale", tap.kind)
+        return ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_STALE_TEXT))
+
+    if tap.kind == "none":
+        logger.info("orchestrator.discovery.clarify_tap kind=none outcome=closed")
+        return ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_NONE_TEXT), redraw=True)
+
+    if tap.kind == "toggle":
+        assert tap.index is not None  # parse_clarify_callback guarantees it
+        mask = apply_clarify_toggle(tap.mask, tap.index)
+        logger.info(
+            "orchestrator.discovery.clarify_tap kind=toggle selected=%d",
+            len(selected_clarification_options(options, mask)),
+        )
+        return ClarifyOutcome(
+            reply=render_multiselect_clarification(
+                (question or "").strip() or _MULTISELECT_REDRAW_QUESTION,
+                options,
+                mask=mask,
+            ),
+            redraw=True,
+        )
+
+    chosen = selected_clarification_options(options, tap.mask)
+    if not chosen:
+        # «Продолжить» with nothing ticked is the same intent as «Ни один
+        # вариант» — answering it with an empty submitted text would send a
+        # blank turn into the concierge.
+        logger.info("orchestrator.discovery.clarify_tap kind=submit outcome=empty")
+        return ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_NONE_TEXT), redraw=True)
+
+    logger.info("orchestrator.discovery.clarify_tap kind=submit selected=%d", len(chosen))
+    return ClarifyOutcome(submit_text=", ".join(chosen))
+
+
+def render_multiselect_clarification(
+    question: str,
+    options: list[str],
+    *,
+    mask: int = 0,
+) -> DiscoveryReply:
+    """Draw the ``choose_many`` screen at a given selection state.
+
+    One option per row, each carrying its mark and the mask the NEXT tap
+    would start from, then «Продолжить» and «Ни один вариант». Redrawing
+    this with a new ``mask`` and pushing it through
+    ``apps.channels.max.outbound.edit_message_or_send`` is what makes two
+    taps update one message instead of stacking three — the same shape as
+    `legacy_maxbot/handlers/health_screening.py:265-280`, which has done it
+    on this channel since Phase 3.2A.
+
+    **What goes on the button and what goes in the text** (for the C02
+    handoff): a MAX button is one line capped at
+    :data:`_MAX_OPTION_LABEL_CHARS` = 40 characters, and two of those are
+    spent on the mark. So the button carries the normalised option and
+    NOTHING else — no second line, no descriptive icon. Anything the mock
+    puts under the option's title belongs in ``question`` instead, which is
+    a 4000-character message body. That is a redraw of the design, not a
+    loss of it.
+
+    Falls back to a plain question with no keyboard when there are no
+    options, matching :func:`_render_ask_clarification` — a multi-select
+    over an empty set is a bare question, not an empty keyboard.
+    """
+    text = (question or "Уточните, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
+    cleaned = [str(opt).strip() for opt in options if str(opt).strip()]
+    shown = cleaned[:_MAX_CLARIFICATION_OPTIONS]
+    if not shown:
+        return DiscoveryReply(text=text)
+
+    rows: list[list[dict[str, str]]] = []
+    for i, opt in enumerate(shown):
+        chosen = bool(mask & (1 << i))
+        mark = CLARIFY_MARK_ON if chosen else CLARIFY_MARK_OFF
+        label = f"{mark}{opt}"[:_MAX_OPTION_LABEL_CHARS]
+        rows.append([{"label": label, "callback": f"{CLARIFY_TOGGLE_PREFIX}{mask}:{i}"}])
+    rows.append([{"label": CLARIFY_SUBMIT_LABEL, "callback": f"{CLARIFY_SUBMIT_PREFIX}{mask}"}])
+    rows.append([{"label": CLARIFY_NONE_LABEL, "callback": CLARIFY_NONE_CALLBACK}])
+
+    action_data = {
+        "button_rows": rows,
+        "clarification": {
+            "mode": CLARIFICATION_MODE_CHOOSE_MANY,
+            "options": shown,
+            "mask": mask,
+        },
+    }
     return DiscoveryReply(text=text, action_data=action_data)
 
 
