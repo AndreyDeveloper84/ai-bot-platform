@@ -124,6 +124,15 @@ python manage.py max_subscribe_webhook \
 # default update_types: message_created, message_callback, bot_started.
 ```
 
+> **If the contour declares `MAX_BOTS`, pass `--bot <slug>`.** The form above
+> takes the credentials from `MAX_BOT_TOKEN` / `MAX_WEBHOOK_SECRET`, which name
+> exactly one bot. A MAX subscription is scoped by the token, and every bot on
+> this deployment posts to the *same* ingress URL — so on a multi-bot contour
+> the command above subscribes the legacy bot no matter which one you meant,
+> and prints `POST … → 200` either way. `--bot salon` takes both the token and
+> the secret from that bot's registry entry, which is also the only way to be
+> sure the pair matches. See `apps/channels/bot_registry` and DRF-1092.
+
 Tenant resolution is by **secret, not URL path.** There is a single ingress
 endpoint, `/api/v1/ingress/max/` (no per-tenant slug in the path). MAX sends
 the `X-Max-Bot-Api-Secret` header on every webhook; `apps/ingress/views.py`

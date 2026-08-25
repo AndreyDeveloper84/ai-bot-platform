@@ -102,6 +102,14 @@ DELETE+re-POSTs; always sends `message_created, message_callback, bot_started`.
 Tenant is resolved by the **secret**, not the URL — single endpoint
 `/api/v1/ingress/max/`, secret → slug via the map in Step 1.
 
+> **Multi-bot contour: pass `--bot <slug>`.** The subscription is scoped by the
+> `Authorization` token, and the form above always uses `MAX_BOT_TOKEN` — the
+> legacy/client bot. Since every bot posts to that same single endpoint, running
+> it while meaning the salon bot subscribes the client bot and still prints
+> `POST … → 200`. The salon bot then receives nothing and there is no other
+> signal. `--bot salon` resolves both token and secret from one registry entry.
+> DRF-1092.
+
 ## Step 4 — confirm the DM consumer (#1010) is actually running ⚠️
 
 The MAX **DM** path needs `python -m apps.workers.consumer` draining the
