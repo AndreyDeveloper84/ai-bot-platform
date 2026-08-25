@@ -162,3 +162,98 @@ class TestSpecificityOrdering:
         result = parse_beverage("минералка")
         assert isinstance(result, BeverageMatch)
         assert result.slug == "voda_mineralnaya"
+
+
+# ---------------------------------------------------------------------------
+# DRF-1404 — an alias is a WORD, not a substring.
+#
+# ``parse_beverage`` matched aliases with a bare ``alias in normalized``.
+# This is the same defect class as DRF-973 in ``health_screening``, but
+# it is the expensive member of the family: water is the only one of the
+# three that CORRUPTS DATA rather than a reply. ``WaterSkill.matches()``
+# returns True on any match and ``handle()`` calls
+# ``get_nutrition_client().add_water(...)`` — so «это моя вина» did not
+# merely answer oddly, it wrote 150 ml of WINE into the user's Ayla
+# beverage diary, where it stays.
+#
+# State on 2026-08-25 before the patch (VERIFIED by running the
+# pre-patch ``parse_beverage`` over NOT_BEVERAGE_PHRASES): all 15
+# returned a BeverageMatch.
+#
+# ADD to these tuples — never trim them. BEVERAGE_PHRASES is the half
+# that keeps the fix honest: a patch that stops a false log by losing a
+# real one has moved the bug, not fixed it.
+# ---------------------------------------------------------------------------
+
+NOT_BEVERAGE_PHRASES: tuple[str, ...] = (
+    # ── «вина» — the data-corrupting one. Homograph: the genitive of
+    #    «вино» and the nominative of «вина» (guilt) are spelled alike,
+    #    so a word boundary alone cannot separate them. ──
+    "это моя вина",
+    "моя вина, извините",
+    "не моя вина",
+    # ── the same homograph in the other two overlapping cases ──
+    "признать вину",
+    "по вине водителя",
+    "чувство вины",
+    # ── «вино» inside a longer word ──
+    "я виновата",
+    "он невиновен",
+    # ── «чай» inside a longer word ──
+    "случайно проспала",
+    "случайно нажала",
+    "случайность",
+    "чайник сломался",
+    "чайная ложка сахара",
+    "чайхана",
+    # ── «мята» inside a longer word ──
+    "кофта помятая",
+    "помятая упаковка",
+    "измятая юбка",
+    # ── «молоко» inside a longer word ──
+    "молокозавод",
+)
+
+
+BEVERAGE_PHRASES: tuple[str, ...] = (
+    # Everything the substring rule caught that a whole-word rule must
+    # keep catching — including the inflections the old rule caught only
+    # by accident of the stem being a prefix.
+    "чай",
+    "выпила чаю",
+    "стакан чая",
+    "выпил чайку",
+    "зелёный чай",
+    "чашка кофе",
+    "кофе с молоком",
+    "стакан воды",
+    "выпила воды",
+    "бутылка воды",
+    "минералка",
+    "бокал вина",
+    "2 бокала вина",
+    "выпила вина",
+    "стакан молока",
+    "бутылка пива",
+    "выпил пива",
+    "кружка компота",
+    "ромашка",
+    "чай с мятой",
+    "капучино",
+    "латте",
+    "американо",
+)
+
+
+class TestDrf1404NotBeverage:
+    @pytest.mark.parametrize("text", NOT_BEVERAGE_PHRASES)
+    def test_everyday_phrases_are_not_a_drink(self, text: str) -> None:
+        assert parse_beverage(text) is None
+
+
+class TestDrf1404BeverageSurvives:
+    """The half that makes the fix honest."""
+
+    @pytest.mark.parametrize("text", BEVERAGE_PHRASES)
+    def test_real_drinks_still_parse(self, text: str) -> None:
+        assert isinstance(parse_beverage(text), BeverageMatch)
