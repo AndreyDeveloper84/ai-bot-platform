@@ -18,6 +18,31 @@ user-stated → 1.0 (asserted); inferred facts → 0.6 (softened «кажетс�
 Constitution Art. VII probabilistic phrasing for hypotheses). Both honour
 the ai-core thresholds (>=0.8 assert, <0.4 clarify).
 
+Provenance policy (P0-3, ``OD_C04_GROUNDED_WHY.md`` §1) — SEPARATE from
+confidence, and do not conflate the two. Confidence answers «насколько
+уверены» and only picks the «кажется» hedge; provenance answers «кто это
+сказал». They are not derived from each other, and the pair the adapter
+used to produce was the wrong way round in BOTH directions:
+
+* backend-derived ``busy_days`` / ``favorite_masters`` (nightly inference,
+  ``users/personal_context_inference.py``) arrived через declared prefs and
+  were asserted flatly, as if the person had said them;
+* a locally EXTRACTED user statement («не ем морепродукты», written with
+  ``source='explicit'``) was hedged «кажется», because the adapter judged
+  by STORE, not by origin.
+
+So both sides now emit a per-field origin and pass it to ai-core:
+
+* declared prefs → backend ``data_sources`` (``explicit`` = the person typed
+  it, anything else = derived). Absent from the payload → the old, all-stated
+  behaviour, byte for byte: a bot deploy must not turn every declared fact
+  into a «догадка» just because the backend has not shipped the field yet.
+* local ``MemoryEntry`` → :attr:`MemoryEntry.source` (``explicit`` = stated,
+  ``inferred``/``signal`` = derived).
+
+One border, two values. Not a trust model — that is a separate owner
+decision (audit §24 P0-3, «confidence is an ephemeral display parameter»).
+
 Fail-closed on every error: memory surfacing must never break the turn.
 
 Concierge Mode rollback (runbook §7, W5): ``CONCIERGE_MEMORY_ENABLED=false``
@@ -30,8 +55,9 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-from ayla_ai_core import build_memory_block
+from ayla_ai_core import SOURCE_INFERRED, SOURCE_STATED, build_memory_block
 
+from apps.identity.models import MemoryEntry
 from apps.identity.services.memory_key_policy import CARDINALITY_MULTI, key_cardinality
 from apps.identity.services.personal_context import GateStatus, get_declared_prefs
 
@@ -60,6 +86,12 @@ _DIET_TYPE_VOCAB = frozenset(
 
 _DECLARED_CONFIDENCE = 1.0
 _INFERRED_CONFIDENCE = 0.6
+
+# Backend `UserPersonalContext.data_sources` value that means «the person
+# typed this». Everything else the backend can stamp — `inferred` (nightly
+# booking-history inference), `behavioral`, `transactional`, `conversational`
+# — is a derivation, and so is any value we do not recognise.
+_BACKEND_STATED_SOURCE = "explicit"
 
 
 def concierge_memory_enabled() -> bool:
@@ -90,23 +122,59 @@ def build_concierge_memory_block(bot_user: Any) -> str:
 
     facts: dict[str, Any] = {}
     confidences: dict[str, float] = {}
+    sources: dict[str, str] = {}
+    declared_origins = _declared_origins(declared.context)
     for key, value in (declared.context.context or {}).items():
         if key == "preferred_time_slots" and isinstance(value, list):
             value = [_SLOT_DISPLAY.get(s, s) for s in value]
         facts[key] = value
         confidences[key] = _DECLARED_CONFIDENCE
+        if declared_origins is not None:
+            sources[key] = (
+                SOURCE_STATED
+                if declared_origins.get(key, _BACKEND_STATED_SOURCE) == _BACKEND_STATED_SOURCE
+                else SOURCE_INFERRED
+            )
 
-    _merge_inferred(bot_user, facts, confidences)
+    _merge_inferred(bot_user, facts, confidences, sources)
 
     try:
-        return build_memory_block(facts, confidences=confidences)
+        return build_memory_block(facts, confidences=confidences, sources=sources)
     except Exception:  # noqa: BLE001 — surfacing must never break the turn
         logger.exception("orchestrator.memory_block.build_failed")
         return ""
 
 
-def _merge_inferred(bot_user: Any, facts: dict, confidences: dict) -> None:
-    """Merge bot-side inferred green MemoryEntry facts (own consent basis).
+def _declared_origins(context: Any) -> dict[str, str] | None:
+    """Backend per-field ``data_sources``, or None when it is not on the wire.
+
+    None is load-bearing, not «empty»: it means the backend has not shipped
+    the field yet, and the declared side must then render EXACTLY as before
+    (everything unmarked). Marking every declared fact «догадка» because a
+    deploy landed out of order would be a worse lie than the one we are
+    fixing — the bot PR and the backend PR are independently deployable and
+    this is the seam that makes that safe.
+
+    Read off ``DeclaredContext.raw`` (the verbatim payload the client keeps
+    for forward-compat) rather than a new DTO field: the HTTP client is not
+    this task's territory and ``raw`` is exactly the documented escape hatch.
+    """
+    raw = getattr(context, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+    origins = raw.get("data_sources")
+    if not isinstance(origins, dict):
+        return None
+    return {k: v for k, v in origins.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _merge_inferred(bot_user: Any, facts: dict, confidences: dict, sources: dict) -> None:
+    """Merge bot-side green MemoryEntry facts (own consent basis).
+
+    Despite the name this store holds BOTH origins — the deterministic
+    extractor writes ``source='explicit'`` for what the person said, the
+    inferred writer writes ``source='inferred'`` — and the two must not
+    reach the model looking alike (P0-3). Hence ``sources``.
 
     Declared values win on key conflicts (user-stated beats inferred).
     Live rows are pre-resolved by the key policy (single-value keys
@@ -157,14 +225,21 @@ def _merge_inferred(bot_user: Any, facts: dict, confidences: dict) -> None:
             value = _SLOT_DISPLAY.get(value, value)
         if not (isinstance(key, str) and value not in (None, "", [])):
             continue
+        origin = SOURCE_STATED if fact.source == MemoryEntry.SOURCE_EXPLICIT else SOURCE_INFERRED
         if key_cardinality(raw_key) == CARDINALITY_MULTI:
             # Multi-value keys accrete into a list — but never onto a
             # declared value (declared wins on key conflicts).
             if key not in facts:
                 facts[key] = [value]
                 confidences[key] = _INFERRED_CONFIDENCE
+                sources[key] = origin
             elif confidences.get(key) == _INFERRED_CONFIDENCE and isinstance(facts[key], list):
                 facts[key].append(value)
+                # One rendered line, one origin: a list that mixes a quote
+                # with a guess cannot honestly be labelled a quote.
+                if origin == SOURCE_INFERRED:
+                    sources[key] = SOURCE_INFERRED
         elif key not in facts:
             facts[key] = value
             confidences[key] = _INFERRED_CONFIDENCE
+            sources[key] = origin

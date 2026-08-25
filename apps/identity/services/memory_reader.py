@@ -33,10 +33,23 @@ from apps.identity.models import MemoryEntry, UserPersonalContext
 
 @dataclass(frozen=True)
 class GreenFact:
-    """One surfaced green memory fact (decrypted content)."""
+    """One surfaced green memory fact (decrypted content).
+
+    ``source`` mirrors :attr:`MemoryEntry.source` — ``explicit`` (the person
+    said it), ``inferred`` (Ayla derived it from conversation) or ``signal``
+    (derived from observable events). It rides along because consumers that
+    render facts into the prompt MUST be able to tell a quote from a guess
+    (P0-3, ``OD_C04_GROUNDED_WHY.md`` §1); collapsing it here is exactly how
+    the origin used to get lost.
+
+    The default is deliberately NOT ``explicit``: when the origin is unknown
+    the safe reading is «we cannot claim the person said this», because the
+    failure mode of the other default is presenting a guess as a quote.
+    """
 
     kind: str
     content: dict[str, Any]
+    source: str = MemoryEntry.SOURCE_INFERRED
 
 
 @dataclass(frozen=True)
@@ -118,7 +131,15 @@ def read_personal_context(user_id: uuid.UUID) -> PersonalContextView:
         return PersonalContextView()
 
     facts = [
-        GreenFact(kind=entry.kind, content=entry.content if isinstance(entry.content, dict) else {})
+        GreenFact(
+            kind=entry.kind,
+            content=entry.content if isinstance(entry.content, dict) else {},
+            # Today's two callers are write-path dedup, not prompt paths, so
+            # nothing renders this. Populated anyway so the two readers agree:
+            # a future prompt consumer picking this one up would otherwise get
+            # the conservative default and label every fact a guess.
+            source=entry.source,
+        )
         for entry in read_green_entries(user_id)
     ]
     summary = (upc.summary or "").strip() or None
