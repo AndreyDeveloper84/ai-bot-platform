@@ -739,6 +739,21 @@ def build_draft_from_tool_choice(
     return None
 
 
+def _trace_entry_tool(entry: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Пара (tool, arguments) из записи трассы — или None для malformed.
+
+    Трасса приходит извне (шов, legacy-производители ответа), поэтому типы
+    доказываются здесь явной проверкой, а не предполагаются:
+    ``build_draft_from_tool_choice`` принимает уже валидные ``str``/``dict``.
+    """
+
+    tool = entry.get("tool")
+    arguments = entry.get("arguments")
+    if not isinstance(tool, str) or not isinstance(arguments, dict):
+        return None
+    return tool, arguments
+
+
 def _draft_from_tool_trace(tool_trace: Any, *, user_text: str) -> dict[str, Any] | None:
     """Драфт по всей трассе: первый инструмент — primary, остальные —
     secondary_intents (только продуктовые типы, UNKNOWN вторичным не
@@ -749,16 +764,17 @@ def _draft_from_tool_trace(tool_trace: Any, *, user_text: str) -> dict[str, Any]
     entries = [e for e in tool_trace if isinstance(e, dict)]
     if not entries:
         return None
-    first = entries[0]
-    draft = build_draft_from_tool_choice(
-        first.get("tool"), first.get("arguments"), user_text=user_text
-    )
+    first = _trace_entry_tool(entries[0])
+    if first is None:
+        return None
+    draft = build_draft_from_tool_choice(first[0], first[1], user_text=user_text)
     if draft is None:
         return None
     for position, entry in enumerate(entries[1:], start=2):
-        sec = build_draft_from_tool_choice(
-            entry.get("tool"), entry.get("arguments"), user_text=user_text
-        )
+        parsed = _trace_entry_tool(entry)
+        if parsed is None:
+            continue
+        sec = build_draft_from_tool_choice(parsed[0], parsed[1], user_text=user_text)
         if sec is None or sec["intent_type"] not in PRODUCT_INTENT_TYPES:
             continue
         refs = [_evidence_id_for(draft, item["fragment"]) for item in sec["evidence"]]
