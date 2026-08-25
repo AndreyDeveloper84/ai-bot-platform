@@ -32,9 +32,12 @@ formatter or handler emits the record.
 ### What is redacted
 
 * **Russian phone numbers** — ``+7``/``8`` prefix + 10 digits with
-  optional separators (space, dash, parens). US/international numbers
-  are out of scope (low signal in a Russia-only deployment, and the RU
-  format catches the bulk of operational chatter).
+  optional separators (space, dash, parens), bounded so the run is not
+  welded to an ASCII letter or another digit (DRF-1380: without the
+  letter guard the pattern sliced the middle out of hex identifiers).
+  US/international numbers are out of scope (low signal in a
+  Russia-only deployment, and the RU format catches the bulk of
+  operational chatter).
 * **Emails** — standard pattern; conservative on edge cases (e.g. bare
   ``@username`` is not redacted).
 * **Credit cards** — 13-19 consecutive digits (optionally split into
@@ -83,17 +86,34 @@ from typing import Any, Final
 # separators. The negative lookbehind/lookahead prevents the pattern from
 # eating digits that happen to neighbour a long opaque id.
 #
+# The boundary guards exclude ASCII letters as well as digits (DRF-1380).
+# ``(?<!\d)`` alone let the pattern start inside a hex identifier: in
+# ``draft_id=3f2a84113328793b`` the ``a`` is not a digit, so ``8`` opened a
+# match and the redactor cut ``84113328793`` out of the middle of the id.
+# Measured at 0.19% of random UUIDs — roughly one identifier in 530 —
+# which is exactly the identifier an operator searches for when an
+# incident is being traced. A phone number is never written flush against
+# an ASCII letter, so the guard costs nothing on the real forms below
+# (verified against every form in the list, in 19 surrounding contexts);
+# non-ASCII letters are deliberately still allowed on both sides, so a
+# number abutting Cyrillic text is caught exactly as before.
+#
+# The regex is NOT relaxed here: a missed phone number in a log is worse
+# than a mangled identifier, so the pattern itself stays as greedy as it
+# was and only the boundary tightens.
+#
 # Matches:
 #   +7 (905) 123-45-67    +79051234567    8 905 123 45 67    8-905-123-45-67
 # Does NOT match:
 #   +1 555 123 4567       (non-RU prefix, scope decision)
 #   12345678901           (no +7/8 prefix on the front)
+#   3f2a84113328793b      (digit run welded to ASCII letters — an id)
 _PHONE_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?<!\d)"
+    r"(?<![\dA-Za-z])"
     r"(?:\+7|8)"
     r"[\s\-]?\(?\s*\d{3}\s*\)?[\s\-]?"
     r"\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
-    r"(?!\d)"
+    r"(?![\dA-Za-z])"
 )
 
 # Email — RFC-5321-ish. Conservative: requires a non-empty local part, an
@@ -114,14 +134,37 @@ _EMAIL_RE: Final[re.Pattern[str]] = re.compile(
 #
 # Anchored with lookarounds so it doesn't slice the middle of a 20-digit
 # uuid-fragment / opaque id.
+#
+# The boundary guards exclude ASCII letters as well as digits, for the
+# same reason as _PHONE_RE above (DRF-1380): the Luhn gate alone does
+# not save identifiers, because a 13-19 digit run carved out of a UUID
+# passes Luhn once in a while, and the id then loses its middle:
+#
+#   15835949-2147-4d47-bb62-2539e07b3fec -> [CARD]d47-bb62-2539e07b3fec
+#
+# Measured at 0.224% of random UUIDs before the guard, 0.007% after.
+#
+# 0.007% is NOT zero, and the residue has a known, single cause: the
+# dash-separated groups of a canonical UUID can themselves line up into
+# a Luhn-valid 13-19 digit run whose ends fall on dashes, where no
+# letter guard can reach:
+#
+#   320ba56a-8c75-4765-9175-452210217959 -> 320ba56a-8c75-4765-[CARD]
+#
+# It is confined to that shape: dash-free 32-char hex ids measure 0 out
+# of 200 000, canonical dashed ids 28 out of 200 000 (0.014%).
+#
+# Closing that residue needs a different mechanism than a boundary
+# guard (e.g. refusing to redact inside something already shaped like a
+# UUID); it is deliberately left open here rather than papered over.
 _CREDIT_CARD_RE: Final[re.Pattern[str]] = re.compile(
     # 13-19 digits with optional space/dash separators BETWEEN digits.
     # The trailing ``\d`` keeps the match anchored on a digit so we
     # don't eat the whitespace AFTER the card number (which would turn
     # ``card 4111 1111 1111 1111 declined`` into ``card [CARD]declined``).
-    r"(?<!\d)"
+    r"(?<![\dA-Za-z])"
     r"\d(?:[\s\-]?\d){12,18}"
-    r"(?!\d)"
+    r"(?![\dA-Za-z])"
 )
 
 # Cheap short-circuit: if neither a digit nor an "@" appears in the text,

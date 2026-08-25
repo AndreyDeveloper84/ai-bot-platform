@@ -70,8 +70,19 @@ class TestSessionToken:
             tenant_id=uuid.uuid4(),
             bot_user_id=uuid.uuid4(),
         )
-        # Flip a character mid-token.
-        tampered = token[:-3] + ("0" if token[-1] != "0" else "1") + token[-2:]
+        # Flip a character mid-token. The replacement is chosen against
+        # the character actually being overwritten (``token[-3]``), not
+        # against a different one.
+        tampered = token[:-3] + ("0" if token[-3] != "0" else "1") + token[-2:]
+        # DRF-1379: assert the tampering actually happened before
+        # demanding a rejection. Without this the test silently relies
+        # on a substitution it never verified: a no-op replacement
+        # leaves the signature valid, BadSignature is not raised, and
+        # the red reads as "signature verification is broken" — the
+        # scariest possible failure — when in fact nothing was forged.
+        # This assertion survives any future change to the tampering
+        # form; fixing the index alone would not.
+        assert tampered != token, "tampering was a no-op — nothing was forged to reject"
         with pytest.raises(BadSignature):
             decode_master_session_token(tampered)
 
