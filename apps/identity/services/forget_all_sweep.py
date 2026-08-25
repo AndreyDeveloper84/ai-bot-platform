@@ -98,6 +98,8 @@ from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from apps.audit.services import write_audit
+from apps.conversations.erasure import anonymize_dialogue, shell_ids_for_person
+from apps.conversations.models import ArchivedMessage, Conversation
 from apps.identity.models import MemoryEntry, UserPersonalContext
 from apps.identity.services.memory_deleter import soft_delete_green_entries
 
@@ -117,12 +119,19 @@ class ForgetAllSweepResult:
     entries_deleted: int = 0
     context_fields_cleared: int = 0
     tombstoned: bool = False
+    conversations_anonymized: int = 0
+    messages_archived: int = 0
 
     @property
     def changed(self) -> bool:
         """Did this sweep move any state? Drives the audit row."""
 
-        return bool(self.entries_deleted or self.context_fields_cleared or self.tombstoned)
+        return bool(
+            self.entries_deleted
+            or self.context_fields_cleared
+            or self.tombstoned
+            or self.conversations_anonymized
+        )
 
 
 def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
@@ -187,11 +196,28 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
                 updated_at=now,
             )
 
+    # The dialogue (DRF-1369 / OD_MEMORY.md §4). Not deleted — anonymised:
+    # the body moves to ``ArchivedMessage`` redacted, the columns every prompt
+    # path reads are blanked, and both Redis stores of raw dialogue PII go.
+    #
+    # The cutoff is ``forget_all_requested_at``, NOT «now». «Забудь всё» is not
+    # the end of the dialogue: the person keeps talking, and the turns they take
+    # after the request are theirs again. A «now» cutoff would have this hourly
+    # sweep blanking their live conversation every hour forever — and would make
+    # the re-run this module is built around destructive instead of idempotent.
+    dialogue = anonymize_dialogue(
+        shell_ids_for_person(ayla_user_id=user_id),
+        through=upc.forget_all_requested_at,
+        reason=ArchivedMessage.Reason.FORGET_ALL,
+    )
+
     result = ForgetAllSweepResult(
         user_id=user_id,
         entries_deleted=entries_deleted,
         context_fields_cleared=len(populated),
         tombstoned=tombstoned,
+        conversations_anonymized=dialogue.conversations,
+        messages_archived=dialogue.messages_archived,
     )
 
     if result.changed:
@@ -206,14 +232,19 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
                 # carry the summary paragraph we just erased (C5 §6.2).
                 "context_fields_cleared": populated,
                 "tombstoned": result.tombstoned,
+                "conversations_anonymized": result.conversations_anonymized,
+                "messages_archived": result.messages_archived,
             },
         )
         logger.info(
-            "identity.forget_all_sweep.user user_id=%s entries=%d fields=%d tombstoned=%s",
+            "identity.forget_all_sweep.user user_id=%s entries=%d fields=%d "
+            "tombstoned=%s conversations=%d messages=%d",
             user_id,
             result.entries_deleted,
             result.context_fields_cleared,
             result.tombstoned,
+            result.conversations_anonymized,
+            result.messages_archived,
         )
     return result
 
@@ -221,12 +252,14 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
 def pending_forget_all_user_ids(limit: int = SWEEP_BATCH_SIZE) -> list[uuid.UUID]:
     """Forgotten users whose erasure is not finished. Oldest request first.
 
-    «Not finished» is two conditions ORed, and both are needed:
+    «Not finished» is three conditions ORed, and each is needed:
 
     * ``soft_deleted_at IS NULL`` — the request has never been swept.
     * a live green row exists — the request WAS swept, and something was
       written afterwards. See the module docstring: the write path does not
       honour the forget-all gate, so this is reachable without a bug.
+    * a pre-request conversation whose anonymisation cutoff has not reached
+      the request — the dialogue half did not finish (DRF-1369).
 
     Ordered by ``forget_all_requested_at`` so that under a backlog the person
     who has been waiting longest is erased first — the ordering a regulator
@@ -239,10 +272,29 @@ def pending_forget_all_user_ids(limit: int = SWEEP_BATCH_SIZE) -> list[uuid.UUID
         soft_deleted_at__isnull=True,
         delete_requested_at__isnull=True,
     )
+    # DRF-1369 — a third way the erasure can be unfinished. The dialogue half
+    # writes to Redis before it writes to Postgres (see
+    # ``erasure._clear_redis_stores``), so a Redis outage leaves the cutoff
+    # unmoved. Without this term the sweep would tick the user off after the
+    # memory half succeeded and never come back for the переписка — the
+    # «success reported for work not done» shape the cascade already refuses
+    # elsewhere.
+    unanonymized_dialogue = Conversation.all_tenants.filter(
+        bot_user__ayla_user_id=OuterRef("user_id"),
+        created_at__lte=OuterRef("forget_all_requested_at"),
+    ).filter(
+        Q(anonymized_through__isnull=True)
+        | Q(anonymized_through__lt=OuterRef("forget_all_requested_at"))
+    )
     qs = (
         UserPersonalContext.objects.filter(forget_all_requested_at__isnull=False)
-        .annotate(has_live_green=Exists(live_green))
-        .filter(Q(soft_deleted_at__isnull=True) | Q(has_live_green=True))
+        .annotate(
+            has_live_green=Exists(live_green),
+            has_live_dialogue=Exists(unanonymized_dialogue),
+        )
+        .filter(
+            Q(soft_deleted_at__isnull=True) | Q(has_live_green=True) | Q(has_live_dialogue=True)
+        )
         .order_by("forget_all_requested_at")
         .values_list("user_id", flat=True)
     )

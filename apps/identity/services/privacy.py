@@ -13,7 +13,9 @@ Implements the bot-side half of ``PILOT_CONTRACTS_2026-08-15`` §6:
   bot ``MemoryEntry`` erasure (immediate green soft-delete +
   ``forget_all`` UPC tombstone), consent withdraw cascade
   (:func:`apps.consent.services.withdraw_personal_data_for_bot_users` —
-  keyed on local identity, see below), and bot-side profile PII erasure.
+  keyed on local identity, see below), bot-side profile PII erasure, the
+  staff-assistant dialogue, and — DRF-1369 — the customer's own dialogue,
+  which is **anonymised rather than deleted** per ``OD_MEMORY.md`` §4.
 
 ### Contract obligations honoured
 
@@ -657,6 +659,34 @@ def delete_personal_data(
     except Exception:  # noqa: BLE001 — per-step isolation, reported below
         logger.exception("identity.privacy.staff_assistant_erase_failed")
         steps.append(DeleteStep("staff_assistant_erase", False))
+
+    # Step 6 — the customer's own dialogue (DRF-1369). Step 5 erases the
+    # EMPLOYEE surface; the customer's own words were the surface nothing in
+    # this cascade touched, and they reached a prompt: the master's AI draft is
+    # assembled straight out of these rows. Per the owner (OD_MEMORY.md §4)
+    # they are anonymised, not deleted — the body moves to ArchivedMessage
+    # (redacted, retained for the named term) and the columns every prompt
+    # path reads are blanked. The Redis window and the PII-tokeniser reverse
+    # map go with them; the window held the raw sentence each erased fact was
+    # extracted from, and its only lifetime until now was a 24h TTL.
+    #
+    # Ours alone and keyed on the same shell set as steps 4-5, so it runs
+    # unconditionally.
+    from apps.conversations.erasure import anonymize_dialogue
+    from apps.conversations.models import ArchivedMessage
+
+    try:
+        anonymize_dialogue(
+            _person_shell_ids(bot_user, link),
+            through=timezone.now(),
+            reason=ArchivedMessage.Reason.ACCOUNT_DELETE,
+        )
+        steps.append(
+            DeleteStep("dialogue_anonymize", True, "own_row_only" if link.conflict else "")
+        )
+    except Exception:  # noqa: BLE001 — per-step isolation, reported below
+        logger.exception("identity.privacy.dialogue_anonymize_failed")
+        steps.append(DeleteStep("dialogue_anonymize", False))
 
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).

@@ -334,11 +334,25 @@ def _recent_history(conversation: Conversation, limit: int = MAX_HISTORY_MESSAGE
     served and discarded).
     """
 
-    rows = list(
-        Message.all_tenants.filter(conversation_id=conversation.id)
-        .exclude(role=Message.Role.SYSTEM)
-        .order_by("-created_at")[:limit]
+    qs = Message.all_tenants.filter(conversation_id=conversation.id).exclude(
+        role=Message.Role.SYSTEM
     )
+    # DRF-1369 / OD_MEMORY.md §4. This function is the route the audit did
+    # not find: it is the only production path that reads the customer's own
+    # turns and hands them to an LLM. (The audit named the concierge; that
+    # method has no production caller, and the MAX prompt's history comes out
+    # of Redis.)
+    #
+    # The bodies of anonymised turns are already empty — the anonymiser moves
+    # them out of the column rather than flagging them, which is what makes
+    # the guarantee survive a reader nobody has written yet. This filter is
+    # the second lock on the same door: the row does not even reach the
+    # assembler, so a future edit to `_build_prompt_messages` that starts
+    # rendering something other than `content` cannot reopen the route.
+    anonymized_through = getattr(conversation, "anonymized_through", None)
+    if anonymized_through is not None:
+        qs = qs.filter(created_at__gt=anonymized_through)
+    rows = list(qs.order_by("-created_at")[:limit])
     rows.reverse()
     return rows
 
