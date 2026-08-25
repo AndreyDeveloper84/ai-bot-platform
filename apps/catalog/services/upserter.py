@@ -317,12 +317,25 @@ def upsert_master_services(
     N edges fail to resolve would delete N live relations.
     """
     from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+    from apps.catalog.provenance import MasterServiceSource, master_service_write
 
     result = UpsertResult()
     seen_ayla_ids: set[str] = set()
     protected_ayla_ids: set[str] = set()
 
-    with tenant_scope(tenant), transaction.atomic():
+    # DRF-975 — declare the writer. Without this the model gate refuses every
+    # INSERT below. Wrapping the whole beat (rather than each row) is correct:
+    # one beat is one act by one writer, and the per-row audit rows the gate
+    # emits already carry the individual edge ids.
+    #
+    # ``actor_id`` stays None on purpose. Sync has no human actor, and
+    # inventing one would make ``created_by_actor_id`` unusable as the answer
+    # to "did a person do this?" — which is the question DRF-975 asks.
+    with (
+        master_service_write(MasterServiceSource.CATALOG_SYNC),
+        tenant_scope(tenant),
+        transaction.atomic(),
+    ):
         for dto in dtos:
             try:
                 with transaction.atomic():

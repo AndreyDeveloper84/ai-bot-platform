@@ -354,6 +354,42 @@ class CatalogMaster(_MirrorBase):
         return f"CatalogMaster[{self.name}@{self.external_id}]"
 
 
+class MasterServiceQuerySet(models.QuerySet):
+    """QuerySet that closes the one hole ``pre_save`` cannot see.
+
+    ``bulk_create`` does not send ``pre_save``/``post_save`` — Django says so
+    explicitly. So the signal in :mod:`apps.catalog.signals` covers ``.save()``,
+    ``.create()``, ``.get_or_create()``, ``.update_or_create()`` and
+    ``loaddata``, and this override covers the remaining one. That matters
+    here and not in theory: the invite seeder (``views_invite._seed_services``)
+    is a ``bulk_create``, and a bulk insert is the exact shape of the
+    2026-07-22 incident.
+
+    Both managers below are built from this class, so ``.objects`` and
+    ``.all_tenants`` are equally covered — an escape hatch that skipped the
+    check would be the first thing found and used.
+    """
+
+    def bulk_create(self, objs, *args, **kwargs):  # type: ignore[no-untyped-def]
+        from apps.catalog.provenance import require_master_service_write
+        from apps.catalog.signals import audit_master_service_created, stamp_provenance
+
+        objs = list(objs)
+        if not objs:
+            # Nothing is being written, so nothing needs an author. Refusing
+            # here would make "clear the list and call anyway" crash callers
+            # for no forensic gain.
+            return super().bulk_create(objs, *args, **kwargs)
+
+        ctx = require_master_service_write("bulk_create")
+        for obj in objs:
+            stamp_provenance(obj, ctx)
+        created = super().bulk_create(objs, *args, **kwargs)
+        for obj in created:
+            audit_master_service_created(obj, ctx)
+        return created
+
+
 class MasterService(models.Model):
     """Master ↔ Service M2M (which services this master performs).
 
@@ -413,6 +449,15 @@ class MasterService(models.Model):
         on_delete=models.CASCADE,
         related_name="masters_offering",
     )
+    # DEAD SINCE 0002 (DRF-975 finding). No writer has ever populated this —
+    # not the MM4 matrix, not the invite seeder, not sync, not the dev seed.
+    # It is also the wrong type: actors in this platform are
+    # ``identity.BotUser``, not ``auth.User``, so it could not have held the
+    # MM4 operator even if someone had tried. Its permanent NULL is why the
+    # 232 pilot rows looked authorless — they are not special, *every* row is
+    # NULL here. ``created_by_actor_id`` below is the field that actually
+    # carries the who. Left in place rather than dropped: removing a column is
+    # a separate, independently reviewable migration.
     created_by = models.ForeignKey(
         "auth.User",
         on_delete=models.SET_NULL,
@@ -420,6 +465,45 @@ class MasterService(models.Model):
         blank=True,
         related_name="+",
     )
+
+    # DRF-975 — mandatory write provenance. Both columns are stamped by the
+    # ``pre_save`` signal / ``bulk_create`` override from the
+    # ``apps.catalog.provenance`` context; neither is a caller kwarg.
+    #
+    # NULLABLE, and the NULL is load-bearing exactly like
+    # ``resolved_requires_health_check`` above: NULL means "written before
+    # this column existed — author unrecoverable". Every row created after the
+    # migration is non-NULL by construction, because the write is refused
+    # otherwise. Backfilling the pre-existing NULLs to some sentinel is a
+    # product decision about the 232 pilot rows, NOT a schema decision, and is
+    # deliberately not made here (see DRF-975 report / DRF-967).
+    #
+    # Why store it on the row at all when AuditLog already has it: AuditLog is
+    # swept at ``AUDIT_LOG_RETENTION_DAYS`` (default 90). An edge outlives its
+    # audit row by years. After the sweep, this column is the only surviving
+    # answer to "who created this relation".
+    source = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text=(
+            "Which writer created this edge (apps.catalog.provenance."
+            "MasterServiceSource). NULL = created before DRF-975 shipped; "
+            "author unrecoverable."
+        ),
+    )
+    created_by_actor_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text=(
+            "identity.BotUser.id of the human who caused this edge, when there "
+            "was one. NULL for machine writers (catalog sync) and for rows "
+            "predating DRF-975. Not an FK on purpose: this is a forensic "
+            "stamp that must survive the BotUser row being deleted."
+        ),
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -465,8 +549,9 @@ class MasterService(models.Model):
         ),
     )
 
-    objects = TenantScopedManager()
-    all_tenants = models.Manager()
+    # DRF-975 — both managers carry the provenance-checking ``bulk_create``.
+    objects = TenantScopedManager.from_queryset(MasterServiceQuerySet)()  # type: ignore[misc]
+    all_tenants = models.Manager.from_queryset(MasterServiceQuerySet)()  # type: ignore[misc]
 
     class Meta:
         verbose_name = "Catalog: master-service mapping"

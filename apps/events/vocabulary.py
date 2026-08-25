@@ -139,6 +139,28 @@ STAFF_ACCESS_REVOKED = "staff.access_revoked"
 #      occurred_at: <iso>}
 MASTER_SERVICES_CHANGED = "master.services_changed"
 
+# --- Per-edge MasterService write provenance (DRF-975) -------------------
+# Emitted by ``apps.catalog.signals`` for EVERY create/delete of a
+# ``catalog.MasterService`` row, from any writer, because the enforcement
+# point is the model itself rather than a view. That is the difference from
+# ``master.services_changed`` above, which is the MM4 matrix's own bundled
+# per-master diff and stays: one is the operator-facing story, the other is
+# the forensic record that a row exists and who made it.
+#
+# 232 rows appeared on the formula-tela pilot on 2026-07-22 with no audit
+# trace at all, because every audit call site lived in a view and the writer
+# was a hand-run script. These two verbs cannot be skipped that way.
+#
+# Payload contracts:
+#   master.service_edge_created / master.service_edge_deleted:
+#     {master_service_id, master_id, service_id, tenant_id,
+#      ayla_specialist_service_id: <uuid|null>,   # sync-ownership discriminator
+#      source: <MasterServiceSource value|null>,
+#      reason?: <str>,                            # manual_script writes
+#      deleted_under_source?: <str|null>}         # delete only; null = CASCADE
+MASTER_SERVICE_EDGE_CREATED = "master.service_edge_created"
+MASTER_SERVICE_EDGE_DELETED = "master.service_edge_deleted"
+
 # --- Admin master deactivation cascade (master-management MM5 / PR Tier1.1) --
 # Emitted from apps.admin_api.services.master_deactivation. Payload contracts:
 #   master.deactivation_started (low-volume; preview endpoint):
@@ -342,6 +364,8 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         STAFF_INVITE_ISSUED,
         STAFF_ACCESS_REVOKED,
         MASTER_SERVICES_CHANGED,
+        MASTER_SERVICE_EDGE_CREATED,
+        MASTER_SERVICE_EDGE_DELETED,
         INTERNAL_CHAT_THREAD_CREATED,
         INTERNAL_CHAT_MESSAGE_SENT,
         INTERNAL_CHAT_THREAD_STATUS_CHANGED,
