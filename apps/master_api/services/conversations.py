@@ -110,6 +110,7 @@ from django.utils import timezone as dj_timezone
 from apps.booking.models import BookingRequest
 from apps.catalog.models import CatalogMaster
 from apps.conversations.models import AiDraft, Conversation, Message
+from apps.master_api.pii import redact_contacts
 
 logger = logging.getLogger(__name__)
 
@@ -496,7 +497,11 @@ def _redact_for_master(
     first, last_initial = _split_name(client_name)
 
     if last_message is not None:
-        body = _truncate(last_message.rendered_text or last_message.content)
+        # DRF-1039 / OD-W2-2: the excerpt is text the CUSTOMER wrote, so it
+        # can carry their own number. Redact before truncating — truncating
+        # first can slice a phone and leave a four-digit tail in the
+        # excerpt, which is the exact thing the owner decision forbids.
+        body = _truncate(redact_contacts(last_message.rendered_text or last_message.content))
         last_msg_iso = last_message.created_at.isoformat() if last_message.created_at else None
     else:
         body = ""

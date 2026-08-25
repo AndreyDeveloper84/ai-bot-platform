@@ -58,6 +58,7 @@ from apps.catalog.models import CatalogMaster
 from apps.conversations.models import AiDraft, Conversation, Message
 from apps.conversations.services import record_message
 from apps.events.services import emit
+from apps.master_api.pii import redact_contacts
 from apps.events.vocabulary import (
     CONVERSATION_MARKED_READ_BY_MASTER,
     CONVERSATION_MASTER_REPLIED,
@@ -383,7 +384,10 @@ def _redact_for_master(
         MessageItem(
             message_id=str(m.id),
             role=m.role,
-            content=(m.rendered_text or m.content or ""),
+            # DRF-1039 / OD-W2-2 — a message body is customer-authored
+            # text; a number typed into the chat reaches the master just
+            # as surely as a `phone` field would.
+            content=redact_contacts(m.rendered_text or m.content or ""),
             sent_at=m.created_at.isoformat() if m.created_at else "",
             composed_by_master=_attribution_from_message(m)[0],
             composed_by_master_id=_attribution_from_message(m)[1],
@@ -435,7 +439,11 @@ def _redact_for_master(
         visit_count=visit_count,
         messages=msg_items,
         ai_draft_id=str(active_draft.id) if active_draft is not None else None,
-        ai_draft_content=active_draft.content if active_draft is not None else None,
+        # The draft is LLM output over the conversation — it can quote a
+        # number the customer typed. Same boundary applies.
+        ai_draft_content=(
+            redact_contacts(active_draft.content) if active_draft is not None else None
+        ),
         ai_draft_created_at=(
             active_draft.created_at.isoformat()
             if active_draft is not None and active_draft.created_at

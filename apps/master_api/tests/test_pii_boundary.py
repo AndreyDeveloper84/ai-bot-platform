@@ -367,6 +367,141 @@ class TestRosterRegression:
             )
 
 
+class TestCustomerTypedContactsAreRedacted:
+    """The half of the boundary a field-level gate cannot see.
+
+    Everything above checks the *shape* of the response: which keys
+    exist, which columns are SELECTed. None of that fires when the
+    number arrives inside a value the customer typed themselves —
+    «мой номер +7 999 777 55 44, перезвоните». The payload then carries
+    no forbidden key at all; it carries ``last_message_excerpt``, and
+    the master reads the number off the screen exactly as if there had
+    been a ``phone`` field.
+
+    OD-W2-2 says «телефон клиента исполнителю не передаётся ни в каком
+    виде». A number the customer typed is a form.
+
+    The formats below are the ones a person actually types. The bare
+    ten digits matter in particular: ``apps/observability/pii_filter.py``
+    requires a literal ``+7``/``8`` prefix and would sail past it.
+    """
+
+    TYPED_FORMS = [
+        "+79997775544",
+        "8 999 777 55 44",
+        "+7 (999) 777-55-44",
+        "9997775544",
+        "8-999-777-55-44",
+    ]
+
+    @pytest.mark.parametrize("typed", TYPED_FORMS)
+    def test_list_excerpt_carries_no_typed_number(
+        self,
+        client: Client,
+        tenant: Tenant,
+        seeded_surface: Conversation,
+        typed: str,
+    ) -> None:
+        Message.all_tenants.create(
+            tenant=tenant,
+            conversation=seeded_surface,
+            role=Message.Role.USER,
+            content=f"Мой номер {typed}, перезвоните пожалуйста",
+        )
+        resp = client.get(
+            reverse("master_api:conversations_list"),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content[:400]
+        _assert_no_customer_phone(
+            resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
+        )
+
+    @pytest.mark.parametrize("typed", TYPED_FORMS)
+    def test_detail_message_body_carries_no_typed_number(
+        self,
+        client: Client,
+        tenant: Tenant,
+        seeded_surface: Conversation,
+        typed: str,
+    ) -> None:
+        Message.all_tenants.create(
+            tenant=tenant,
+            conversation=seeded_surface,
+            role=Message.Role.USER,
+            content=f"Мой номер {typed}, перезвоните пожалуйста",
+        )
+        resp = client.get(
+            reverse("master_api:conversation_detail", args=[CONVERSATION_ID]),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content[:400]
+        _assert_no_customer_phone(
+            resp.content.decode("utf-8"), where="conversation_detail", body=resp.json()
+        )
+
+    def test_truncation_cannot_leave_a_four_digit_tail(
+        self,
+        client: Client,
+        tenant: Tenant,
+        seeded_surface: Conversation,
+    ) -> None:
+        """Redaction must run BEFORE the 100-char excerpt truncation.
+
+        Truncating first and redacting the excerpt afterwards leaves the
+        head of a sliced number in the excerpt — and a four-digit head is
+        a phone under OD-W2-2 just as a four-digit tail is. The number is
+        placed so the cut lands inside it.
+        """
+
+        from apps.master_api.services.conversations import EXCERPT_MAX_LEN
+
+        padding = "а" * (EXCERPT_MAX_LEN - 6)
+        Message.all_tenants.create(
+            tenant=tenant,
+            conversation=seeded_surface,
+            role=Message.Role.USER,
+            content=f"{padding} {CUSTOMER_PHONE} хвост",
+        )
+        resp = client.get(
+            reverse("master_api:conversations_list"),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert resp.status_code == 200, resp.content[:400]
+        _assert_no_customer_phone(
+            resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
+        )
+
+    def test_redaction_leaves_canonical_uuids_alone(self) -> None:
+        """The UUID trap in ``apps/replay/redactor.py``, not repeated here.
+
+        That module's ``OTP_RE`` is ``(?<![\\w\\d])\\d{4}(?![\\w\\d])``.
+        Its boundaries are on ``\\w``; a UUID's separator is ``-``, which
+        is not ``\\w``. So an all-digit 4-char group inside a canonical
+        UUID satisfies both lookarounds and gets replaced — measured at
+        ~43% of random UUIDs. ``redact_contacts`` consumes UUIDs as a
+        unit before the phone branch can see them.
+        """
+
+        from apps.master_api.pii import redact_contacts
+
+        mangled = [u for u in (str(uuid.uuid4()) for _ in range(2000)) if redact_contacts(u) != u]
+        assert mangled == [], f"redaction bit into canonical UUIDs: {mangled[:5]}"
+
+    def test_redaction_keeps_the_text_useful(self) -> None:
+        """A master still needs times, dates and prices out of the chat.
+
+        Redaction that eats every 4-digit run would make the excerpt
+        useless and push masters to open something else to read the
+        message — which is how a PII gate gets routed around.
+        """
+
+        from apps.master_api.pii import redact_contacts
+
+        kept = "Запишите на 14:00 25.08.2026, услуга за 1500 рублей, код 1234"
+        assert redact_contacts(kept) == kept
+
+
 class TestSelfPiiExemption:
     """The master's own masked phone — allowed, and only where documented."""
 
