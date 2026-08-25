@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.conf import settings
@@ -306,6 +307,36 @@ class AylaYClientsAdapter:
             rows = self._client.get_user_appointments(external_user_id=self._external_user_id)
         return [_to_yc_user_record(r) for r in rows]
 
+    def get_specialist_service_price(
+        self,
+        *,
+        staff_id: int | str,
+        service_id: int | str,
+    ) -> Decimal | None:
+        """Price of the master+service edge — what a NEW booking would cost.
+
+        DRF-1067. Ayla creates the appointment at ``SpecialistService.price``
+        (the price of the concrete pair «мастер + услуга»), while the catalog
+        mirror the quote reads carries ``SalonService.base_price``. The two
+        agree on the pilot today but diverge the moment a salon sets
+        per-master prices — quoting the base then shows the customer one
+        price and books them at another. When a specific master is chosen,
+        the quote must come from the edge.
+
+        ``None`` means "no edge price known" (no active row, or an
+        unparseable value): the caller falls back to the mirror's base price
+        — the behaviour before this change. Errors are translated like every
+        other read so the caller can degrade instead of crashing the quote.
+        """
+        with _translate_errors():
+            rows = self._client.get_specialist_service_edges(
+                specialist_id=str(staff_id),
+                service_id=str(service_id),
+            )
+        if not rows:
+            return None
+        return _parse_edge_price(rows[0].get("price"))
+
 
 # ─── error translation ───────────────────────────────────────────────────────
 
@@ -447,6 +478,22 @@ def _first_id(ids: list[int] | list[str] | None) -> str | None:
         return None
     first = ids[0]
     return str(first) if first is not None else None
+
+
+def _parse_edge_price(value: Any) -> Decimal | None:
+    """Money as ``Decimal``, never float arithmetic; unparseable → ``None``.
+
+    ``None`` (absent), never ``0``: a silent zero would quote "бесплатно"
+    for a service the salon charges for. Converting through ``str`` keeps a
+    numeric wire value (the records views bypass DRF serializers, so a JSON
+    number can arrive where the schema declares a string) exact.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
 
 def _mirror_raw(

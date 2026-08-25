@@ -453,6 +453,21 @@ class AylaBookingClient(Protocol):
         external_user_id: str,
     ) -> list[AylaUserRecord]: ...
 
+    def get_specialist_service_edges(
+        self,
+        *,
+        specialist_id: str,
+        service_id: str,
+    ) -> list[dict[str, Any]]:
+        """Active bookable edge rows for ONE (specialist, salon service) pair.
+
+        DRF-1067 widened this Protocol with the narrow read that already
+        existed on the concrete client: the quote path needs the edge's own
+        ``price`` (what Ayla stamps onto a new appointment) and the catalog
+        reads drop it. Raw dicts, not a DTO — the edge payload is a catalog
+        row, and the two consumers (quote, repeat) pick single fields off it.
+        """
+
     # NOTE: ``get_appointment_version`` (DRF-1233) is deliberately NOT a
     # member of this Protocol. This seam exists for the booking skill's
     # provider-selector, and the canonical version read belongs to the
@@ -1119,9 +1134,9 @@ class AylaBookingHTTPClient:
         Narrow on purpose. ``get_services`` already reads the same endpoint,
         but it walks the whole tenant catalog, needs an active tenant scope,
         and keeps only the ids — the row's own ``price`` (the amount Ayla
-        stamps onto a new appointment) is dropped. Repeat needs that price
-        and works on the tenant-less global path, so it asks for the single
-        row instead of filtering a catalog.
+        stamps onto a new appointment) is dropped. The quote (DRF-1067) and
+        repeat need that price and work on the tenant-less global path, so
+        they ask for the single row instead of filtering a catalog.
 
         No tenant filter: ``(specialist, salon_service)`` is unique upstream
         (``specialistservice_specialist_salon_uniq``), so the pair already
