@@ -355,12 +355,22 @@ class DiscoveryReply:
     Читается каналом, чтобы нарисовать состояние «AI недоступна» из макета C01
     вместо молчаливого «отвечу через минуту», который ничего не отвечает.
     Legacy producers leave it False, так что для них ничего не меняется.
+
+    ``tool_trace`` (DRF-1385): упорядоченная трасса выбора инструментов
+    консьержем за этот ход — ``({"tool": имя, "arguments": {...}}, ...)``.
+    Консьерж уже классифицировал намерение, выбирая инструмент; трасса
+    проносится наружу, чтобы послерепликовый резолвер намерений
+    (``apps.orchestrator.intent_resolution``) записал ЭТОТ выбор в Output
+    Contract 0.5 детерминированно, без второго вызова модели. Чисто
+    текстовый ответ — ``None`` (пустая трасса). Legacy producers leave it
+    None — обратная совместимость frozen dataclass.
     """
 
     text: str
     action_data: dict[str, Any] | None = None
     persisted: bool = False
     outage: bool = False
+    tool_trace: tuple[dict[str, Any], ...] | None = None
 
 
 def _discovery_voice_fields() -> dict[str, str]:

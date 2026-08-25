@@ -32,6 +32,15 @@ Design constraints:
   pattern).
 
 Rollback without redeploy: ``INTENT_RESOLUTION_LIVE_ENABLED=0``.
+
+DRF-1385 adds a THIRD path next to «no contract» and «LLM pass»: the
+concierge already classified the intent by CHOOSING A TOOL, so when
+``INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED`` is on (default OFF) and
+the turn carried a tool trace out of the concierge, the contract is
+built DETERMINISTICALLY from that choice (:func:`build_draft_from_tool_choice`
++ the same :func:`_validate_and_build` gate) — zero new model calls.
+Any gap (unmappable tool, rejected draft, exception) falls back to the
+LLM pass below; the resolver stays strictly post-reply either way.
 """
 
 from __future__ import annotations
@@ -237,6 +246,15 @@ def resolution_enabled() -> bool:
     """Live switch. ``INTENT_RESOLUTION_LIVE_ENABLED`` setting, default on."""
 
     return bool(getattr(settings, "INTENT_RESOLUTION_LIVE_ENABLED", True))
+
+
+def tool_choice_resolution_enabled() -> bool:
+    """DRF-1385 switch. ``INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED``,
+    default OFF — the deterministic path is opt-in; the LLM pass stays
+    the default until the flag is flipped in the environment.
+    """
+
+    return bool(getattr(settings, "INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED", False))
 
 
 def _coerce_slots(raw_slots: Any, evidence_ids: set[str]) -> dict[str, Any]:
@@ -533,6 +551,245 @@ def _validate_and_build(
     }
 
 
+# ── DRF-1385: детерминированный контракт из выбора инструмента ─────────
+#
+# Консьерж УЖЕ классифицировал намерение, выбрав инструмент; имена
+# инструментов здесь — строковые литералы, а не импорт из concierge:
+# отложенный импорт в ``resolve_and_log_turn_intent`` держит этот модуль
+# свободным от графа зависимостей ai-core (см. комментарий там же), и
+# нарушать это ради константы нельзя.
+_SHOW_MASTERS_TOOL = "show_masters"
+_START_BOOKING_TOOL = "start_booking"
+_ASK_CLARIFICATION_TOOL = "ask_clarification"
+_CATALOG_TOOLS = frozenset({"show_salons", "show_services"})
+_CONTEXT_TOOLS = frozenset(
+    {"health_screening", "log_water", "clarify_food_entry", "start_nutrition_anketa"}
+)
+
+
+def _verbatim_fragment(value: str, user_text: str) -> str | None:
+    """Дословный фрагмент ИСХОДНОГО текста для значения из arguments.
+
+    Сравнение — через существующий :func:`_normalize` (NFKC + casefold +
+    схлопывание пробелов): значение, отличающееся от слов пользователя
+    только регистром или пробелами, — всё ещё «его собственные слова».
+    Возвращается фрагмент исходного текста (а не значение аргумента);
+    ``None`` — значения в тексте нет, и выдумывать его нельзя.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if _normalize(value) not in _normalize(user_text):
+        return None
+    if value in user_text:
+        return value
+    nf_text = unicodedata.normalize("NFKC", user_text)
+    nf_value = unicodedata.normalize("NFKC", value.strip())
+    match = re.search(re.escape(nf_value), nf_text, flags=re.IGNORECASE)
+    if match:
+        return nf_text[match.start() : match.end()]
+    # Различие только в пробельной разметке: нормализованная форма
+    # значения — подстрока нормализованного текста (проверено выше), так
+    # что анти-фантазийный гейт это значение пропустит.
+    return value.strip()
+
+
+def _evidence_id_for(draft: dict[str, Any], fragment: str) -> str:
+    """evidence_id фрагмента внутри драфта (один фрагмент — один id)."""
+
+    for item in draft["evidence"]:
+        if item["fragment"] == fragment:
+            return item["evidence_id"]
+    evidence_id = f"ev-{len(draft['evidence']) + 1}"
+    # message_id перезаписывается рантаймом в _validate_and_build (канон:
+    # id сообщения выдаёт канал, никогда не составитель драфта).
+    draft["evidence"].append({"evidence_id": evidence_id, "message_id": "", "fragment": fragment})
+    return evidence_id
+
+
+def _add_slot(draft: dict[str, Any], name: str, value: Any, user_text: str) -> bool:
+    """Слот из значения аргумента — ТОЛЬКО с дословным raw из текста.
+
+    Значения в тексте нет → слот не создаётся (выдуманного raw_value
+    быть не должно никогда); вызывающий код решает, что это значит для
+    missing/unmet.
+    """
+
+    if not isinstance(value, str) or not value.strip():
+        return False
+    fragment = _verbatim_fragment(value.strip(), user_text)
+    if fragment is None:
+        return False
+    draft["slots"][name] = {
+        "raw_value": fragment,
+        "normalized_value": value.strip(),
+        "entity_ref": None,
+        "confirmation_status": "filled",
+        "evidence_refs": [_evidence_id_for(draft, fragment)],
+    }
+    return True
+
+
+def _ensure_evidence(draft: dict[str, Any], user_text: str) -> None:
+    """Ни одно значение не нашлось дословно → evidence = весь текст.
+
+    Сообщение — подстрока самого себя и по построению является основанием
+    классификации; для ``resolved`` контракт требует непустой evidence.
+    """
+
+    if not draft["evidence"] and user_text.strip():
+        _evidence_id_for(draft, user_text)
+
+
+def _base_draft(intent_type: str, status: str, confidence: float) -> dict[str, Any]:
+    """Драфт той же формы, что выдаёт LLM (16 полей до нормализации)."""
+
+    return {
+        "intent_id": str(uuid.uuid4()),
+        "intent_type": intent_type,
+        "status": status,
+        "confidence": confidence,
+        "slots": {},
+        "missing_required_slots": [],
+        "evidence": [],
+        "requires_clarification": False,
+        "clarification_question": None,
+        "safety_flags": [],
+        "unmet_slot_requirements": [],
+        "contract_version": CONTRACT_VERSION,
+        "status_reason": None,
+        "clarification_reason": None,
+        "clarification_effect": None,
+        "secondary_intents": [],
+    }
+
+
+def build_draft_from_tool_choice(
+    tool: str, arguments: dict, *, user_text: str
+) -> dict[str, Any] | None:
+    """Драфт Output Contract 0.5 из выбора инструмента консьержем (DRF-1385).
+
+    Таблица отображения зафиксирована в брифе задачи; ``None`` — честного
+    отображения нет (``show_my_records``, неизвестный инструмент, malformed
+    arguments, ``ask_clarification`` без вопроса — внутренний degrade
+    диспетчера, а не выбор модели), и вызывающий код падает обратно в
+    нынешний LLM-проход. Драфт НЕ валидируется здесь: он прогоняется
+    через существующий :func:`_validate_and_build`, как драфт модели.
+    """
+
+    if not isinstance(tool, str) or not isinstance(arguments, dict):
+        return None
+
+    if tool == _SHOW_MASTERS_TOOL:
+        draft = _base_draft("FIND_SPECIALIST", "resolved", 0.9)
+        _add_slot(draft, "service_category", arguments.get("specialization"), user_text)
+        _add_slot(draft, "provider_name", arguments.get("master"), user_text)
+        _ensure_evidence(draft, user_text)
+        if not ({"provider_name", "service_category"} & draft["slots"].keys()):
+            # any_of FIND_SPECIALIST не выполнен — фиксируем, а не угадываем.
+            draft["unmet_slot_requirements"].append(
+                {
+                    "requirement_id": "find_specialist_any_of",
+                    "requirement_type": "any_of",
+                    "candidate_slots": ["provider_name", "service_category"],
+                    "minimum_present": 1,
+                }
+            )
+        return draft
+
+    if tool in _CATALOG_TOOLS:
+        draft = _base_draft("DISCOVER_SERVICE", "resolved", 0.9)
+        _ensure_evidence(draft, user_text)
+        return draft
+
+    if tool == _START_BOOKING_TOOL:
+        draft = _base_draft("BOOK_APPOINTMENT", "resolved", 0.9)
+        _add_slot(draft, "provider_name", arguments.get("master"), user_text)
+        _add_slot(draft, "service_interest", arguments.get("service"), user_text)
+        _ensure_evidence(draft, user_text)
+        draft["missing_required_slots"] = ["service_ref", "time_slot"]
+        return draft
+
+    if tool == _ASK_CLARIFICATION_TOOL:
+        question = arguments.get("question")
+        if not isinstance(question, str) or not question.strip():
+            return None
+        draft = _base_draft("UNKNOWN", "needs_clarification", 0.4)
+        draft["requires_clarification"] = True
+        draft["clarification_question"] = question.strip()
+        draft["clarification_reason"] = "intent_low_confidence"
+        draft["clarification_effect"] = "blocks_current_action"
+        draft["status_reason"] = "low_confidence"
+        _ensure_evidence(draft, user_text)
+        return draft
+
+    if tool in _CONTEXT_TOOLS:
+        draft = _base_draft("PROVIDE_CONTEXT", "resolved", 0.9)
+        # Факт — дословная фраза пользователя из аргументов инструмента
+        # (symptom_text / drink_text / food_text); у анкеты аргументов нет.
+        fact = next(
+            (v for v in arguments.values() if isinstance(v, str) and v.strip()),
+            None,
+        )
+        if fact is None or not _add_slot(draft, "context_fact", fact, user_text):
+            draft["missing_required_slots"] = ["context_fact"]
+        _ensure_evidence(draft, user_text)
+        return draft
+
+    return None
+
+
+def _trace_entry_tool(entry: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Пара (tool, arguments) из записи трассы — или None для malformed.
+
+    Трасса приходит извне (шов, legacy-производители ответа), поэтому типы
+    доказываются здесь явной проверкой, а не предполагаются:
+    ``build_draft_from_tool_choice`` принимает уже валидные ``str``/``dict``.
+    """
+
+    tool = entry.get("tool")
+    arguments = entry.get("arguments")
+    if not isinstance(tool, str) or not isinstance(arguments, dict):
+        return None
+    return tool, arguments
+
+
+def _draft_from_tool_trace(tool_trace: Any, *, user_text: str) -> dict[str, Any] | None:
+    """Драфт по всей трассе: первый инструмент — primary, остальные —
+    secondary_intents (только продуктовые типы, UNKNOWN вторичным не
+    бывает). Отображение берётся по ПЕРВОМУ инструменту — это решение,
+    определившее ход.
+    """
+
+    entries = [e for e in tool_trace if isinstance(e, dict)]
+    if not entries:
+        return None
+    first = _trace_entry_tool(entries[0])
+    if first is None:
+        return None
+    draft = build_draft_from_tool_choice(first[0], first[1], user_text=user_text)
+    if draft is None:
+        return None
+    for position, entry in enumerate(entries[1:], start=2):
+        parsed = _trace_entry_tool(entry)
+        if parsed is None:
+            continue
+        sec = build_draft_from_tool_choice(parsed[0], parsed[1], user_text=user_text)
+        if sec is None or sec["intent_type"] not in PRODUCT_INTENT_TYPES:
+            continue
+        refs = [_evidence_id_for(draft, item["fragment"]) for item in sec["evidence"]]
+        if not refs:
+            continue
+        draft["secondary_intents"].append(
+            {
+                "intent_type": sec["intent_type"],
+                "evidence_refs": refs,
+                "message_position": position,
+            }
+        )
+    return draft
+
+
 def build_resolution_messages(text: str, *, message_id: str) -> list[dict[str, str]]:
     """Compose the resolver call: schema prompt + the raw user message."""
 
@@ -608,6 +865,7 @@ def resolve_and_log_turn_intent(
     conversation: Any,
     user_message_id: Any,
     trace_id: str,
+    tool_trace: Any = None,
 ) -> dict[str, Any] | None:
     """Resolve one free-text turn and serialise the contract into the turn log.
 
@@ -616,17 +874,66 @@ def resolve_and_log_turn_intent(
     ``orchestrator.intent_resolution.ok`` carries the full serialized
     contract — that IS the DRF-1273 deliverable: «в логе хода лежит
     сериализованный Output Contract 0.5».
+
+    DRF-1385: ``tool_trace`` — упорядоченная трасса выбора инструментов
+    консьержем (``[{"tool": ..., "arguments": {...}}]``). Когда флаг
+    ``INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED`` включён и трасса
+    непуста, контракт строится детерминированно по ПЕРВОМУ инструменту —
+    без единого вызова модели; любой пробел (отображения нет, валидация
+    отвергла, исключение) откатывает ход в нынешний LLM-проход ниже.
     """
 
     if not resolution_enabled():
         return None
+
+    message_id = str(user_message_id) if user_message_id is not None else f"trace:{trace_id}"
+
+    if tool_trace and tool_choice_resolution_enabled():
+        deterministic_started = time.monotonic()
+        contract = None
+        try:
+            draft = _draft_from_tool_trace(tool_trace, user_text=text)
+            if draft is not None:
+                contract = _validate_and_build(
+                    draft, user_text=text, message_id=message_id, trace_id=trace_id
+                )
+        except Exception as exc:  # noqa: BLE001 — resolver must never break the turn
+            logger.warning(
+                "orchestrator.intent_resolution.tool_choice_failed trace=%s err=%s",
+                trace_id,
+                exc,
+            )
+            contract = None
+        if contract is not None:
+            latency_ms = int((time.monotonic() - deterministic_started) * 1000)
+            _record_resolution_metric(
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+                text=text,
+                outcome="success",
+                latency_ms=latency_ms,
+                # Вызова модели не было: tokens/cost — None («no LLM call»),
+                # клиент не создаётся вообще.
+                usage=None,
+                llm_client=None,
+            )
+            # Формат записи сохранён (на неё смотрят мониторы); маркер
+            # source=tool_choice добавлен ПОСЛЕ contract и только здесь.
+            logger.info(
+                "orchestrator.intent_resolution.ok trace=%s contract=%s source=tool_choice",
+                trace_id,
+                json.dumps(contract, ensure_ascii=False, sort_keys=True),
+            )
+            return contract
+        # Драфта нет или валидация его отвергла — НИЧЕГО не терять:
+        # дальше нынешний LLM-проход без изменений.
 
     # Deferred import: concierge pulls ayla_ai_core at module import time;
     # keeping it out of this module's top level lets the validator unit
     # tests run without the ai-core dependency graph.
     from apps.orchestrator.concierge import CONCIERGE_SKILL, RouterLLMClient
 
-    message_id = str(user_message_id) if user_message_id is not None else f"trace:{trace_id}"
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
 
     started = time.monotonic()

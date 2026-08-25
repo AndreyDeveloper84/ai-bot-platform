@@ -1942,3 +1942,12 @@ ORCHESTRATOR_SHADOW_SURFACES = os.environ.get("ORCHESTRATOR_SHADOW_SURFACES", "g
 # or above this, new shadow jobs are dropped (logged) and legacy turns
 # continue untouched.
 ORCHESTRATOR_SHADOW_MAX_BACKLOG = int(os.environ.get("ORCHESTRATOR_SHADOW_MAX_BACKLOG", "500"))
+
+# DRF-1385 — детерминированный разбор намерения по выбору инструмента
+# консьержем. Умолчание ВЫКЛ: резолвер (DRF-1273) делает свой послерепликовый
+# LLM-проход, как сейчас. При включении и непустой трассе инструментов
+# Output Contract 0.5 строится из уже сделанного выбора — ноль новых вызовов
+# модели; любой пробел откатывает ход в LLM-проход.
+INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED = (
+    os.environ.get("INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED", "false").lower() == "true"
+)

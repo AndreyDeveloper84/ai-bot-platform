@@ -39,7 +39,7 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -848,6 +848,30 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
     )
 
 
+def _tool_trace_entry(dto: Any) -> dict[str, Any]:
+    """One element of the DRF-1385 tool trace: the tool's name + arguments.
+
+    The concierge already CLASSIFIES the intent by picking a tool; the trace
+    carries that choice out of the turn so the post-reply resolver
+    (``apps.orchestrator.intent_resolution``) can record it deterministically
+    instead of paying a second model call to re-derive it.
+
+    ``ask_clarification`` keeps its payload (question/options/mode) directly
+    in ``action_data``; every other tool nests it under ``"arguments"`` —
+    the shapes :func:`_dispatch_tool` returns. The internal dispatcher
+    degrade (unknown tool / malformed arguments — ``action_data`` holds only
+    ``"reason"``) is traced as-is: it is NOT the model's choice, and the
+    resolver's mapping table honestly has no row for it (LLM fallback).
+    """
+
+    data = dto.action_data if isinstance(dto.action_data, dict) else {}
+    if dto.action_type == ActionType.ASK_CLARIFICATION:
+        arguments = data
+    else:
+        arguments = data.get("arguments") or {}
+    return {"tool": str(dto.action_type), "arguments": arguments}
+
+
 # Wording for the two outcomes of ``start_booking`` that are NOT a handoff.
 # Both are answers, not refusals: one says who we could not find, the other
 # asks the ONE question that is still open, with the names in it.
@@ -1347,12 +1371,15 @@ def generate_concierge_reply(
     if _guarded.blocked:
         # action_data goes with the text (the channel drops keyboards on a
         # block for the same reason). ``persisted`` is preserved so the row
-        # below still gets written — with the replacement.
+        # below still gets written — with the replacement. ``tool_trace``
+        # (DRF-1385) is preserved too: it records which TOOL the model
+        # chose, a fact the text replacement does not undo.
         reply = DiscoveryReply(
             text=_guarded.text,
             action_data=None,
             persisted=reply.persisted,
             outage=reply.outage,
+            tool_trace=reply.tool_trace,
         )
     if reply.persisted and (reply.text or "").strip():
         try:
@@ -1447,6 +1474,19 @@ def _concierge_turn(
     # still say WHAT was searched for (DRF-1283 / render_no_match).
     pending_args: dict[str, Any] = {}
     dto: Any = None
+    # DRF-1385 — the ordered trace of tools the model picked this turn, one
+    # element per pass that ended in a tool call. The concierge classified
+    # the intent BY choosing; the post-reply resolver reads THIS choice
+    # instead of re-deriving it with a second model call.
+    tool_trace: list[dict[str, Any]] = []
+
+    def _reply(**kwargs: Any) -> DiscoveryReply:
+        # Every return AFTER the passes ran carries the accumulated trace.
+        # A text-only turn (no tool was ever picked) and a turn that never
+        # reached the model (the outage fallback) both leave it None —
+        # an empty trace is spelled None, never an empty tuple.
+        return DiscoveryReply(tool_trace=tuple(tool_trace) or None, **kwargs)
+
     while pass_index < max_passes:
         pass_index += 1
         llm_call_index += 1
@@ -1487,7 +1527,7 @@ def _concierge_turn(
                     city=pending_args.get("city"),
                     specialization=pending_args.get("specialization"),
                 )
-                return DiscoveryReply(
+                return _reply(
                     text=rendered.text,
                     action_data=rendered.action_data,
                     persisted=True,
@@ -1497,7 +1537,7 @@ def _concierge_turn(
             # рисует по этому флагу состояние «AI недоступна» с «Повторить»
             # (макет C01), вместо обещания «отвечу через минуту», которое
             # никто не выполнит: к этому ходу никто не вернётся.
-            return DiscoveryReply(text=get_fallback("ru"), outage=True)
+            return _reply(text=get_fallback("ru"), outage=True)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         # DRF-1286 — a forced-tool retry happened inside this pass: two
         # LLM calls were billed and one answer was thrown away. Give the
@@ -1537,6 +1577,11 @@ def _concierge_turn(
             llm_client=llm_client,
         )
 
+        # DRF-1385 — a pass that ended in a tool call leaves a trace element;
+        # a prose pass (action_type is None) leaves none.
+        if dto.action_type:
+            tool_trace.append(_tool_trace_entry(dto))
+
         if dto.action_type != ActionType.SHOW_MASTERS:
             break
 
@@ -1556,7 +1601,7 @@ def _concierge_turn(
             # (BOT-003 §9 / prohibition #22 — see has_discovery_criteria).
             logger.info("orchestrator.concierge.show_masters.no_criteria trace=%s", trace_id)
             rendered = render_no_criteria_clarification()
-            return DiscoveryReply(
+            return _reply(
                 text=rendered.text,
                 action_data=rendered.action_data,
                 persisted=True,
@@ -1612,7 +1657,7 @@ def _concierge_turn(
                 available_services=available,
                 missing_services=missing,
             )
-            return DiscoveryReply(
+            return _reply(
                 text=rendered.text,
                 action_data=rendered.action_data,
                 persisted=True,
@@ -1630,7 +1675,7 @@ def _concierge_turn(
             rendered = _render_master_cards(
                 cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
             )
-            return DiscoveryReply(
+            return _reply(
                 text=rendered.text,
                 action_data=rendered.action_data,
                 persisted=True,
@@ -1653,7 +1698,7 @@ def _concierge_turn(
             trace_id=trace_id or "",
         )
         if result is not None and result.reply_text:
-            return DiscoveryReply(
+            return _reply(
                 text=result.reply_text[:_MAX_REPLY_CHARS],
                 action_data=result.action_data,
                 persisted=True,
@@ -1663,8 +1708,8 @@ def _concierge_turn(
         # alongside the call, else the safe line.
         text = (dto.content or "").strip()
         if text:
-            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_fallback("ru"), persisted=True)
 
     if dto.action_type in PERSONAL_TOOL_ACTIONS:
         # DRF-1302/1305 — the person's own diary + memory. Deterministic
@@ -1675,7 +1720,7 @@ def _concierge_turn(
             dto.action_type, args if isinstance(args, dict) else {}, bot_user=bot_user
         )
         if personal_reply is not None:
-            return DiscoveryReply(
+            return _reply(
                 text=personal_reply.text,
                 action_data=personal_reply.action_data,
                 persisted=True,
@@ -1683,8 +1728,8 @@ def _concierge_turn(
         # Unreachable (_KNOWN_TOOLS gates dispatch); degrade like its siblings.
         text = (dto.content or "").strip()
         if text:
-            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_fallback("ru"), persisted=True)
 
     if dto.action_type == START_BOOKING_ACTION:
         # DRF-1354 — the model named a master and asked to book. Resolution
@@ -1700,14 +1745,17 @@ def _concierge_turn(
             trace_id=trace_id,
         )
         if booking_reply is not None:
-            return booking_reply
+            # DRF-1385 — the reply comes from the handoff helper, which knows
+            # nothing about the trace; attach it at the boundary like every
+            # other post-pass return.
+            return replace(booking_reply, tool_trace=tuple(tool_trace) or None)
         # The call named nobody (a model that emitted ``start_booking`` with an
         # empty ``master``). Keep whatever it said alongside the call rather
         # than replacing a possibly fine sentence with the generic line.
         text = (dto.content or "").strip()
         if text:
-            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_fallback("ru"), persisted=True)
 
     if dto.action_type in CATALOG_TOOL_ACTIONS:
         # DRF-1304 — salons / services selected by the model as tools. The
@@ -1727,7 +1775,7 @@ def _concierge_turn(
             # No re-clamp to _MAX_REPLY_CHARS here: the renderer already bounds
             # this text by the catalog budget, and 600 would cut a real card
             # list mid-word while its chips stayed (see _MAX_CATALOG_REPLY_CHARS).
-            return DiscoveryReply(
+            return _reply(
                 text=catalog_reply.text,
                 action_data=catalog_reply.action_data,
                 persisted=True,
@@ -1736,8 +1784,8 @@ def _concierge_turn(
         # degrade exactly like the nutrition branch if it ever happens.
         text = (dto.content or "").strip()
         if text:
-            return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_fallback("ru"), persisted=True)
 
     if dto.action_type == ActionType.ASK_CLARIFICATION:
         data = dto.action_data or {}
@@ -1748,13 +1796,13 @@ def _concierge_turn(
             # "reason") or a genuine ask_clarification call with a blank
             # question. Same safe fallback as an LLM error — never send an
             # empty clarification.
-            return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+            return _reply(text=get_fallback("ru"), persisted=True)
         rendered = _render_ask_clarification(
             question,
             list(data.get("options") or []),
             data.get("mode"),
         )
-        return DiscoveryReply(
+        return _reply(
             text=rendered.text,
             action_data=rendered.action_data,
             persisted=True,
@@ -1762,7 +1810,7 @@ def _concierge_turn(
 
     text = (dto.content or "").strip()
     if not text:
-        return DiscoveryReply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_fallback("ru"), persisted=True)
     # DRF-1354 — the multi-pass prose reply carried NO keyboard. DRF-1266
     # feeds the executed ``show_masters`` result back so the model can phrase
     # it warmly, and the deterministic card render — the only thing that ever
@@ -1782,7 +1830,7 @@ def _concierge_turn(
             city=pending_args.get("city"),
             specialization=pending_args.get("specialization"),
         ).action_data
-    return DiscoveryReply(text=text[:_MAX_REPLY_CHARS], action_data=action_data, persisted=True)
+    return _reply(text=text[:_MAX_REPLY_CHARS], action_data=action_data, persisted=True)
 
 
 def generate_direct_show_masters_reply(
