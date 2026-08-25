@@ -59,6 +59,9 @@ def service(tenant: Tenant) -> CatalogService:
         external_updated_at=_ts(),
         slug="svc-1",
         name="Service",
+        # Needed by the sync writer test below: the upserter resolves a
+        # salon-service DTO through this column, not through external_id.
+        ayla_service_id=uuid.uuid4(),
     )
 
 
@@ -80,9 +83,7 @@ def service(tenant: Tenant) -> CatalogService:
             id="instance_save",
         ),
         pytest.param(
-            lambda t, m, s: MasterService.all_tenants.get_or_create(
-                tenant=t, master=m, service=s
-            ),
+            lambda t, m, s: MasterService.all_tenants.get_or_create(tenant=t, master=m, service=s),
             id="get_or_create",
         ),
         pytest.param(
@@ -114,8 +115,7 @@ def test_unprovenanced_write_is_refused(
         write(tenant, master, service)
 
     assert MasterService.all_tenants.count() == 0, (
-        "the row was created despite the gate refusing -- the INSERT was not "
-        "rolled back"
+        "the row was created despite the gate refusing -- the INSERT was not rolled back"
     )
 
 
@@ -230,8 +230,7 @@ def test_bulk_create_audits_every_row(tenant, master, service):
     assert rows.count() == 2, "a bulk act must not collapse into one audit row"
     assert {r.payload["source"] for r in rows} == {MasterServiceSource.INVITE_SEED.value}
     assert (
-        MasterService.all_tenants.filter(source=MasterServiceSource.INVITE_SEED.value).count()
-        == 2
+        MasterService.all_tenants.filter(source=MasterServiceSource.INVITE_SEED.value).count() == 2
     )
 
 
@@ -245,9 +244,7 @@ def test_nested_context_innermost_wins(tenant, master, service):
 
     with master_service_write(MasterServiceSource.TEST_FIXTURE):
         with master_service_write(MasterServiceSource.MM4_MATRIX):
-            edge = MasterService.all_tenants.create(
-                tenant=tenant, master=master, service=service
-            )
+            edge = MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
         assert current_master_service_write().source is MasterServiceSource.TEST_FIXTURE
 
     assert edge.source == MasterServiceSource.MM4_MATRIX.value
@@ -344,9 +341,7 @@ def test_unrelated_model_writes_are_unaffected(no_master_service_provenance, db)
     CatalogService.all_tenants.create(
         tenant=t, external_id=9, external_updated_at=_ts(), slug="s9", name="S9"
     )
-    CatalogMaster.all_tenants.create(
-        tenant=t, external_id=9, external_updated_at=_ts(), name="M9"
-    )
+    CatalogMaster.all_tenants.create(tenant=t, external_id=9, external_updated_at=_ts(), name="M9")
 
 
 # ---------------------------------------------------------------------------
@@ -372,3 +367,83 @@ def test_context_is_reset_even_on_exception():
             raise RuntimeError("boom")
     # The ambient suite fixture must be back, not the one we just left.
     assert current_master_service_write().source is MasterServiceSource.TEST_FIXTURE
+
+
+# ---------------------------------------------------------------------------
+# 6. Per-writer coverage.
+#
+# The suite-wide TEST_FIXTURE context (config.pytest_master_service_provenance)
+# would let a production writer that FORGOT to declare itself still pass its
+# own tests -- its rows would just be stamped "test_fixture". These tests
+# assert the SPECIFIC source, so a missing context in a real writer fails
+# here. That is the price of not rewriting sixty fixtures across five
+# concurrent worktrees, and this is how it is paid.
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_sync_declares_itself(tenant, master, service):
+    from apps.catalog.services.http_client import CatalogSpecialistServiceDTO
+    from apps.catalog.services.upserter import upsert_master_services
+
+    edge_id = str(uuid.uuid4())
+    dto = CatalogSpecialistServiceDTO(
+        ayla_specialist_service_id=edge_id,
+        salon_service=str(service.ayla_service_id),
+        specialist=str(master.id),
+        external_updated_at=_ts(),
+        tenant=str(tenant.id),
+        user_id=str(uuid.uuid4()),
+        name=service.name,
+        is_active=True,
+    )
+
+    upsert_master_services(tenant, [dto])
+
+    edge = MasterService.all_tenants.get(ayla_specialist_service_id=edge_id)
+    assert edge.source == MasterServiceSource.CATALOG_SYNC.value
+    # Sync has no human actor, and inventing one would make this column
+    # useless as the answer to "did a person do this?".
+    assert edge.created_by_actor_id is None
+
+    row = AuditLog.all_tenants.get(action=MASTER_SERVICE_EDGE_CREATED)
+    assert row.payload["ayla_specialist_service_id"] == edge_id
+
+
+def test_django_admin_declares_itself(tenant, master, service):
+    """The admin was a fully writable ModelAdmin with no audit call at all.
+
+    It is the path an operator with a superuser account reaches without
+    writing a line of code -- the same forensic hole as the 2026-07-22 script,
+    behind a form.
+    """
+
+    from django.contrib.admin.sites import AdminSite
+
+    from apps.catalog.admin import MasterServiceAdmin
+
+    class _Req:
+        class user:  # noqa: N801 - stand-in for auth.User
+            username = "operator"
+
+    admin_obj = MasterServiceAdmin(MasterService, AdminSite())
+    edge = MasterService(tenant=tenant, master=master, service=service)
+    admin_obj.save_model(_Req(), edge, form=None, change=False)
+
+    edge.refresh_from_db()
+    assert edge.source == MasterServiceSource.DJANGO_ADMIN.value
+
+    row = AuditLog.all_tenants.get(action=MASTER_SERVICE_EDGE_CREATED)
+    assert "operator" in row.payload["reason"]
+
+
+def test_django_admin_cannot_hand_edit_provenance():
+    """``source`` must not be typeable, or an admin can relabel a hand-made
+    row as ``catalog_sync`` and undo the entire mechanism."""
+
+    from django.contrib.admin.sites import AdminSite
+
+    from apps.catalog.admin import MasterServiceAdmin
+
+    admin_obj = MasterServiceAdmin(MasterService, AdminSite())
+    assert "source" in admin_obj.readonly_fields
+    assert "created_by_actor_id" in admin_obj.readonly_fields

@@ -106,6 +106,12 @@ class MasterServiceSource(StrEnum):
     #: ``reason`` is not, and :func:`master_service_write` refuses that.
     MANUAL_SCRIPT = "manual_script"
 
+    #: The Django admin (``apps.catalog.admin.MasterServiceAdmin``). Before
+    #: DRF-975 this was a fully writable ``ModelAdmin`` with no audit call at
+    #: all -- the second unaudited path, and the one an operator with a
+    #: superuser account reaches without writing any code.
+    DJANGO_ADMIN = "django_admin"
+
     #: ``cleanup_orphan_master_services`` — a delete-only writer. It creates
     #: nothing; the value exists so the ``master.service_edge_deleted`` rows a
     #: cleanup run emits say *which* run removed the edge, instead of being
