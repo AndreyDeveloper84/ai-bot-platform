@@ -86,6 +86,10 @@ class TurnReply:
     should_close_conversation: bool = False
     assistant_persisted: bool = False
     meta: dict[str, Any] | None = None
+    # DRF-1209 — the per-tenant skill's self-reported confidence, carried
+    # 1:1 so the channel handler can enforce the confidence floor (pipeline
+    # step 10.5) on the live path. None = the skill computed no score.
+    confidence: float | None = None
     # DRF-1348 — mirrors DiscoveryReply.outage: the model could not be
     # reached at all. Carried, never interpreted: the seam has no opinion
     # about what a surface should draw for it.
@@ -162,6 +166,7 @@ def _per_tenant_legacy_adapter(context: TurnContext) -> TurnReply:
         new_state=result.new_state,
         should_close_conversation=result.should_close_conversation,
         meta=result.meta,
+        confidence=result.confidence,
     )
 
 
@@ -221,4 +226,5 @@ def turn_reply_to_skill_result(reply: TurnReply) -> Any:
         # SkillResult.meta is a required dict on dev (default_factory=dict);
         # TurnReply keeps None as "no meta" — normalise at the boundary.
         meta=reply.meta or {},
+        confidence=reply.confidence,
     )

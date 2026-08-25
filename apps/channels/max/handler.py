@@ -463,11 +463,64 @@ def _deliver_crisis_reply(
         raise
 
 
+def _confidence_floor_reason(skill_result: Any) -> str:
+    """Diagnostic slug when a skill's confidence is below the configured
+    threshold; empty string otherwise (DRF-1209 — pipeline step 10.5 ported
+    to the live per-tenant path).
+
+    Ported 1:1 from the DEPRECATED ``apps.orchestrator.pipeline`` helper of
+    the same name: per-skill threshold via
+    ``settings.SKILL_CONFIDENCE_HANDOFF_THRESHOLD`` (explicit ``None``
+    disables enforcement for that skill), falling back to the global
+    ``settings.AI_CONFIDENCE_HANDOFF_THRESHOLD``; the skill name comes from
+    ``meta["skill"]`` with fallback to ``action_type``; ``confidence=None``
+    (deterministic skills) skips enforcement. The returned slug keeps the
+    pipeline's contract format
+    ``pipeline_confidence_floor(confidence=X, threshold=Y)`` — ops queries
+    may already match on it.
+
+    The whole check is gated by ``SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED``
+    (default OFF): flag off → always ``""`` → byte-identical behaviour.
+    """
+    if skill_result is None:
+        return ""
+    if not getattr(settings, "SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED", False):
+        return ""
+    confidence = getattr(skill_result, "confidence", None)
+    if confidence is None:
+        return ""
+
+    meta = getattr(skill_result, "meta", {}) or {}
+    skill_name = meta.get("skill") or getattr(skill_result, "action_type", "") or ""
+
+    per_skill = getattr(settings, "SKILL_CONFIDENCE_HANDOFF_THRESHOLD", {}) or {}
+    if skill_name in per_skill:
+        threshold = per_skill[skill_name]
+        if threshold is None:
+            # Explicit disable for this skill.
+            return ""
+    else:
+        threshold = getattr(settings, "AI_CONFIDENCE_HANDOFF_THRESHOLD", 0.5)
+
+    try:
+        threshold_f = float(threshold)
+    except (TypeError, ValueError):
+        return ""
+
+    if confidence >= threshold_f:
+        return ""
+
+    return f"pipeline_confidence_floor(confidence={confidence:.2f}, threshold={threshold_f:.2f})"
+
+
 def _dispatch_skill_handoff(
     conversation: Any,
     skill_result: Any,
     chat_id: str,
     trace_id: str | uuid.UUID | None,
+    *,
+    reason_override: str | None = None,
+    handoff_text_override: str | None = None,
 ) -> None:
     """Escalate to a human when a skill returns ``should_handoff`` (#1047).
 
@@ -481,6 +534,12 @@ def _dispatch_skill_handoff(
     at ``state == HUMAN_HANDOFF``) mutes every subsequent turn until an operator
     resolves the task.
 
+    DRF-1209: the keyword-only overrides let the confidence-floor enforcement
+    (pipeline step 10.5) feed THIS SAME escalation path instead of building a
+    parallel one — ``reason_override`` carries the pipeline-format diagnostic
+    slug, ``handoff_text_override`` forces the canned line when the skill never
+    asked for handoff (its own answer must not reach the user).
+
     Requires ``current_tenant()`` — the consumer enters ``tenant_scope`` before
     dispatching to this handler (module contract), which ``create_admin_task``
     needs.
@@ -488,10 +547,18 @@ def _dispatch_skill_handoff(
     from apps.handoff.models import AdminTask
     from apps.handoff.services import create_admin_task
 
-    reason = skill_result.handoff_reason or "skill_requested_handoff"
+    reason = (
+        reason_override
+        if reason_override is not None
+        else (skill_result.handoff_reason or "skill_requested_handoff")
+    )
     create_admin_task(conversation, task_type=AdminTask.TaskType.HANDOFF, reason=reason)
 
-    handoff_text = skill_result.reply_text or _HANDOFF_FALLBACK_TEXT
+    handoff_text = (
+        handoff_text_override
+        if handoff_text_override is not None
+        else (skill_result.reply_text or _HANDOFF_FALLBACK_TEXT)
+    )
     # DRF-1210 — an escalation line is still a line a person reads, and the
     # skills that set one are free to compose it from model output. Guarded
     # like every other outbound on this surface; the AdminTask above is
@@ -1725,8 +1792,37 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # would otherwise be silently dropped here (the exact silent-drop this ticket
     # fixes). Re-escalation of an already-handed-off turn can't happen because the
     # mute result carries should_handoff=False.
-    if skill_result is not None and skill_result.should_handoff:
-        _dispatch_skill_handoff(conversation, skill_result, event.chat_id, trace_id)
+    # DRF-1209 — pipeline step 10.5 on the live path: even a skill that forgot
+    # to set should_handoff is escalated when its confidence is below the
+    # threshold. The floor FEEDS the same _dispatch_skill_handoff path (no
+    # parallel AdminTask mechanics); gated by SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED
+    # (default off → floor_reason is always "" and nothing below changes).
+    confidence_floor_reason = _confidence_floor_reason(skill_result)
+    if skill_result is not None and (skill_result.should_handoff or confidence_floor_reason):
+        if not confidence_floor_reason:
+            _dispatch_skill_handoff(conversation, skill_result, event.chat_id, trace_id)
+        else:
+            # Pipeline reason contract: the skill's own slug first, the floor
+            # diagnostic appended ("a | b"); floor-only escalation carries just
+            # the diagnostic. When the skill never asked for handoff its own
+            # answer must NOT reach the user — force the canned handoff line.
+            skill_reason = skill_result.handoff_reason or (
+                "skill_requested_handoff" if skill_result.should_handoff else ""
+            )
+            _dispatch_skill_handoff(
+                conversation,
+                skill_result,
+                event.chat_id,
+                trace_id,
+                reason_override=(
+                    f"{skill_reason} | {confidence_floor_reason}"
+                    if skill_reason
+                    else confidence_floor_reason
+                ),
+                handoff_text_override=(
+                    None if skill_result.should_handoff else _HANDOFF_FALLBACK_TEXT
+                ),
+            )
         return
 
     # Silent path (Sprint 3 / D3): conversation is mid-handoff. Dispatcher
