@@ -45,6 +45,16 @@ from apps.integrations.ayla.nutrition_client import (
     get_nutrition_client,
     reset_nutrition_client,
 )
+from apps.integrations.ayla.wellness_context_client import (
+    OutcomeState,
+    WellnessContext,
+    WellnessContextAuthError,
+    WellnessContextClientError,
+    WellnessContextConfigError,
+    WellnessContextError,
+    WellnessContextHttpClient,
+    WellnessContextUnavailableError,
+)
 
 __all__ = [
     "AylaBookingClient",
@@ -68,12 +78,20 @@ __all__ = [
     "NutritionAPIError",
     "NutritionClient",
     "NutritionUnavailableError",
+    "OutcomeState",
     "ProfileResponse",
     "RepeatIntentUnusableError",
     "ScanResponse",
     "SummaryResponse",
     "WaterEntryResponse",
     "WaterTodayResponse",
+    "WellnessContext",
+    "WellnessContextAuthError",
+    "WellnessContextClientError",
+    "WellnessContextConfigError",
+    "WellnessContextError",
+    "WellnessContextHttpClient",
+    "WellnessContextUnavailableError",
     "external_user_id_for",
     "get_ayla_booking_client",
     "get_nutrition_client",
