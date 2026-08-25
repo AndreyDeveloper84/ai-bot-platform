@@ -53,7 +53,7 @@ from apps.identity.models import (
     UserPersonalContext,
     UserPreferences,
 )
-from apps.identity.services import memory_reader
+from apps.identity.services import memory_key_policy, memory_reader
 from apps.identity.services.forget_all_sweep import (
     pending_forget_all_user_ids,
     sweep_forget_all,
@@ -111,6 +111,16 @@ def _yellow(upc) -> MemoryEntry:
     )
 
 
+#: Every module that holds its own reference to the gate. `memory_key_policy`
+#: does `from memory_reader import get_personal_context` at import time, so
+#: patching the definition module alone leaves ITS copy live — and a test that
+#: made that mistake would watch `build_concierge_memory_block` return "" and
+#: conclude the sweep worked, when in fact the gate it thought it had removed
+#: was still standing. Found by running the demonstration rather than by
+#: reading the test.
+_GATE_HOLDERS = (memory_reader, memory_key_policy)
+
+
 def _open_the_gate(monkeypatch) -> None:
     """Switch the read gate OFF — the Linear proof's «отключи гейт».
 
@@ -119,10 +129,45 @@ def _open_the_gate(monkeypatch) -> None:
     back; after it, the tombstones — not the gate — are what keep it away.
     """
 
-    monkeypatch.setattr(
-        memory_reader,
-        "get_personal_context",
-        lambda user_id: UserPersonalContext.objects.filter(user_id=user_id).first(),
+    ungated = lambda user_id: UserPersonalContext.objects.filter(  # noqa: E731
+        user_id=user_id
+    ).first()
+    for module in _GATE_HOLDERS:
+        monkeypatch.setattr(module, "get_personal_context", ungated)
+
+
+def test_the_gate_holder_list_is_complete():
+    """If a third module binds the gate, this test says so before a proof lies.
+
+    The list above is the reason every «gate off» assertion below means what it
+    says. A module that imports the gate and is not in ``_GATE_HOLDERS`` would
+    silently keep gating during those tests.
+    """
+
+    import ast
+    import pathlib
+
+    holders = {module.__name__ for module in _GATE_HOLDERS}
+    found = set()
+    root = pathlib.Path(memory_reader.__file__).parents[3]
+    for path in (root / "apps").rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and any(
+                alias.name == "get_personal_context" for alias in node.names
+            ):
+                found.add(
+                    str(path.relative_to(root).with_suffix("")).replace("\\", ".").replace("/", ".")
+                )
+    # privacy.py binds it too, but the export is not a prompt path and its
+    # tests assert the gated behaviour on purpose — see export_coverage
+    # KNOWN_LIMITS. Anything else appearing here needs a decision.
+    unexpected = found - holders - {"apps.identity.services.privacy"}
+    assert not unexpected, (
+        "these modules bind the read gate and are not in _GATE_HOLDERS, so the "
+        f"«gate off» proofs below do not actually reach them: {sorted(unexpected)}"
     )
 
 
@@ -160,10 +205,13 @@ class TestTheDefectThisClosed:
         upc.refresh_from_db()
         assert upc.summary == _SUMMARY
 
-        # The gate is doing all of the work, and only the gate.
+        # The gate is doing all of the work, and only the gate. Switch it off
+        # and BOTH renderers hand the memory straight back to the prompt —
+        # which is what makes their emptiness after the sweep mean something.
         assert read_green_entries(upc.user_id) == []
         _open_the_gate(monkeypatch)
         assert len(read_green_entries(upc.user_id)) == 1
+        assert "vegan" in _block_for(upc.user_id, monkeypatch)
         assert read_personal_context(upc.user_id).summary == _SUMMARY
 
     def test_the_sweep_turns_the_intent_into_tombstones(self):
