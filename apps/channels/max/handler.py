@@ -1408,6 +1408,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 conversation=conversation,
                 user_message_id=user_msg.id if user_msg is not None else None,
                 trace_id=str(trace_id) if trace_id else "",
+                # DRF-1385 — трасса выбора инструментов ЭТОГО хода, пронесённая
+                # консьержем через шов (TurnReply). Берётся из turn_reply, а не
+                # из reply: reply выше пересобирается (weave/guard), а трасса
+                # описывает выбор МОДЕЛИ, который эти пересборки не отменяют.
+                # getattr — как в шве: прежние производители поля не знают.
+                tool_trace=getattr(turn_reply, "tool_trace", None),
             )
         except Exception:  # noqa: BLE001 — resolution must never break the turn
             logger.exception(

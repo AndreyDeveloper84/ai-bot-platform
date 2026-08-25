@@ -90,6 +90,12 @@ class TurnReply:
     # reached at all. Carried, never interpreted: the seam has no opinion
     # about what a surface should draw for it.
     outage: bool = False
+    # DRF-1385 — mirrors DiscoveryReply.tool_trace: the concierge's ordered
+    # tool-choice trace for the turn (``({"tool": name, "arguments": {...}},
+    # ...)``), so the post-reply intent resolver can record THAT choice
+    # deterministically instead of paying a second model call. Carried,
+    # never interpreted: None means a text-only turn or a legacy producer.
+    tool_trace: tuple[dict[str, Any], ...] | None = None
 
 
 def orchestrate_turn(context: TurnContext) -> TurnReply:
@@ -194,6 +200,9 @@ def _global_legacy_adapter(context: TurnContext) -> TurnReply:
         # Умолчание False означает «сбоя связи не заявлено» — ровно то же
         # поведение, что до DRF-1348.
         outage=bool(getattr(reply, "outage", False)),
+        # getattr по той же причине, что и outage выше: шов — переносчик,
+        # и прежние производители ответа поля tool_trace не знают (DRF-1385).
+        tool_trace=getattr(reply, "tool_trace", None),
     )
 
 
