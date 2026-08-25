@@ -715,6 +715,15 @@ def _emit_domain_booking_created_pair(
     # retry forever, silently losing attribution/billable, the very data
     # DRF-1140 exists to deliver. A partially-emitted appointment is now
     # completed on the next pass instead of being mistaken for a done one.
+    #
+    # ACCEPTED RISK (окно DRF-1299, согласовано с главным окном 25.08):
+    # the exists()→emit() check-then-insert is not atomic, and the ingest
+    # dispatcher runs a ThreadPoolExecutor, so two workers racing the same
+    # appointment's redelivery can both pass exists() and emit a duplicate
+    # domain event. Left unfixed deliberately: DomainEvent is an audit log
+    # where a rare, visible duplicate is harmless, while atomicity would
+    # cost a unique constraint over a JSON payload field. Do not "fix"
+    # this without re-opening that decision.
     if DomainEvent.objects.filter(
         event_name=V.BOOKING_CREATED, data__booking_id=booking_id
     ).exists():
