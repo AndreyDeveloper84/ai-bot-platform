@@ -2204,6 +2204,184 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     return JsonResponse(payload)
 
 
+# --- /customer/wellness/water — hydration write path (DRF-1402) ------------
+
+# Ayla's water entry accepts an arbitrary volume; the Mini App quick
+# action only ever sends whole glasses, but a bad/hostile client could
+# send anything. Bound it before it reaches Ayla — a 20-litre "glass"
+# would corrupt the customer's day for good.
+_WATER_ML_MIN = 1
+_WATER_ML_MAX = 5000
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_wellness_water(request: HttpRequest) -> HttpResponse:
+    """Log a water entry onto Ayla — the write half of ``wellness/today``.
+
+    Body: ``{"ml": int, "ts"?: ISO-8601, "beverage_slug"?: str,
+    "idempotency_key"?: str}``. Only ``ml`` is required.
+
+    ``ts`` matters: the Mini App buffers taps in a localStorage queue
+    when offline (Tau §11.8) and flushes them later, so the flush time
+    is NOT the drink time. A glass tapped at 23:50 and flushed at 00:05
+    belongs to yesterday; omitting ``ts`` would silently move it.
+
+    ``idempotency_key`` matters for the same reason: the queue retries
+    after an ambiguous failure (request sent, response lost), and
+    without the key that retry double-counts the glass. The frontend
+    mints one key per queued entry and reuses it across retries; it is
+    forwarded to Ayla as ``X-Idempotency-Key``.
+
+    Response mirrors the ``wellness/today`` units so the dashboard can
+    apply the write without a re-read — millilitres from Ayla plus the
+    same ml→glasses conversion (``_ml_to_glasses``) the read endpoint
+    uses. Two different glass definitions across the two endpoints
+    would show the customer a number that jumps on refresh.
+
+    Failure mapping mirrors :func:`customer_goal_select`: 400 —
+    malformed body or Ayla 4xx; 502 — Ayla outage/circuit-open.
+    """
+    import asyncio
+    import json
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+
+    content_type = (request.content_type or "").split(";")[0].strip().lower()
+    if content_type != "application/json" or not request.body:
+        return _error("malformed", "expected a JSON body", 400)
+    try:
+        body = json.loads(request.body)
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    if not isinstance(body, dict):
+        return _error("malformed", "body must be a JSON object", 400)
+
+    raw_ml = body.get("ml")
+    # bool is an int subclass — `True` must not silently log 1 ml.
+    if isinstance(raw_ml, bool) or not isinstance(raw_ml, int):
+        return _error("malformed", "ml must be an integer", 400)
+    if not (_WATER_ML_MIN <= raw_ml <= _WATER_ML_MAX):
+        return _error(
+            "malformed",
+            f"ml must be between {_WATER_ML_MIN} and {_WATER_ML_MAX}",
+            400,
+        )
+
+    ts = body.get("ts")
+    if ts is not None:
+        if not isinstance(ts, str) or parse_datetime(ts) is None:
+            return _error("malformed", "ts must be an ISO 8601 datetime", 400)
+
+    beverage_slug = body.get("beverage_slug")
+    if beverage_slug is not None and not isinstance(beverage_slug, str):
+        return _error("malformed", "beverage_slug must be a string", 400)
+
+    idempotency_key = body.get("idempotency_key")
+    if idempotency_key is not None:
+        if not isinstance(idempotency_key, str) or len(idempotency_key) > 200:
+            return _error("malformed", "idempotency_key must be a string (max 200)", 400)
+        # Header value — reject anything that could split the request.
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", idempotency_key):
+            return _error("malformed", "idempotency_key has invalid characters", 400)
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    try:
+        entry = asyncio.run(
+            get_nutrition_client().add_water(
+                external_user_id=external_id,
+                ml=raw_ml,
+                beverage_slug=beverage_slug or None,
+                ts=ts,
+                idempotency_key=idempotency_key or None,
+            )
+        )
+    except NutritionUnavailableError as exc:
+        logger.warning("wellness_water.unavailable ext=%s err=%s", external_id, exc)
+        return _error("ayla_unavailable", "ayla nutrition unavailable", 502)
+    except NutritionAPIError as exc:
+        # Ayla rejected the entry (4xx). Forward as a client error so the
+        # offline queue drops it instead of retrying forever.
+        logger.warning("wellness_water.rejected ext=%s err=%s", external_id, exc)
+        return JsonResponse(
+            {
+                "error": "ayla_bad_request",
+                "detail": "ayla rejected the water entry",
+                "ayla_error": str(exc),
+            },
+            status=400,
+        )
+
+    payload = {
+        "entry_id": entry.entry_id,
+        "ml": entry.ml,
+        "water_ml": entry.water_ml,
+        "today_total_ml": entry.today_total_ml,
+        "today_norm_ml": entry.today_norm_ml,
+        "water_glasses_eaten": _ml_to_glasses(entry.today_total_ml),
+        "water_glasses_target": (
+            _ml_to_glasses(entry.today_norm_ml) or _WATER_GLASSES_TARGET_DEFAULT
+        ),
+    }
+    return JsonResponse(payload, status=201)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+@require_init_data
+def customer_wellness_water_undo(request: HttpRequest, entry_id: str) -> HttpResponse:
+    """Undo a water entry — the way back when the customer mis-tapped.
+
+    204 when Ayla soft-deleted the entry; 404 when it refused (restore
+    window expired, or the id was never ours).
+
+    DIVERGENCE from :func:`card_delete`, which maps an upstream 404 to
+    an idempotent 204: a closed restore window means the glass is STILL
+    COUNTED. Answering 204 would tell the customer it was removed while
+    Ayla keeps it — the exact «pretend it worked» defect this endpoint
+    exists to end. A card, by contrast, is genuinely gone on 404.
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+    from apps.integrations.ayla.nutrition_client import (
+        NutritionAPIError,
+        NutritionUnavailableError,
+    )
+
+    entry_id = (entry_id or "").strip()
+    if not entry_id:
+        return _error("malformed", "entry_id is required", 400)
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_id = external_user_id_for(bot_user)
+
+    try:
+        undone = asyncio.run(
+            get_nutrition_client().undo_water(
+                external_user_id=external_id,
+                entry_id=entry_id,
+            )
+        )
+    except NutritionUnavailableError as exc:
+        logger.warning("wellness_water_undo.unavailable ext=%s err=%s", external_id, exc)
+        return _error("ayla_unavailable", "ayla nutrition unavailable", 502)
+    except NutritionAPIError as exc:
+        logger.warning("wellness_water_undo.rejected ext=%s err=%s", external_id, exc)
+        return _error("ayla_bad_request", "ayla rejected the undo", 400)
+
+    if not undone:
+        return _error("not_undoable", "entry cannot be undone anymore", 404)
+    return HttpResponse(status=204)
+
+
 # --- /customer/recent-activity — dashboard rollup --------------------------
 
 # Russian short weekday names (Mon=0 … Sun=6) for the date_human label.

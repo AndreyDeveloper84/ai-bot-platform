@@ -9,14 +9,21 @@
  *
  * # Contracts
  *
- * Frontend Tier 1 Priority 2 Phase B ships against STUBS only. W4 owns
- * the matching backend endpoints (per TL Phase A Q1 verdict):
+ *   - `GET    /api/v1/customer/wellness/today`  → `WellnessToday`   STUB
+ *   - `GET    /api/v1/customer/recent-activity` → `RecentActivity`  STUB
+ *   - `POST   /api/v1/customer/wellness/water`  → log a glass       WIRED
+ *   - `DELETE /api/v1/customer/wellness/water/{entry_id}`           WIRED
  *
- *   - `GET /api/v1/customer/wellness/today`     → `WellnessToday`
- *   - `GET /api/v1/customer/recent-activity`    → `RecentActivity`
+ * The two READS are still served from stubs here even though their
+ * backends exist (`apps/miniapp_api/views.py::customer_wellness_today`
+ * / `::customer_recent_activity`). Wiring them is a follow-up, not this
+ * change. Until then they are fenced by `guardProd` — see below.
  *
- * WIRING NOTE: replace stub function bodies with real `request(...)`
- * calls when W4 ships per TL Q1. Function signatures DO NOT change.
+ * The WRITE path is real (DRF-1402): `flushWaterQueue` posts to Ayla
+ * through `apps/miniapp_api` and the offline queue drains ONLY on
+ * accepted writes. It used to `writeWaterQueue([])` unconditionally —
+ * the customer saw «+1 ждёт синхронизации», then the record vanished
+ * and nothing had ever been sent.
  *
  * Stub variants for dev QA (matching the Phase B catalog stub pattern
  * in `customer-booking.ts::pickStubVariant`):
@@ -41,6 +48,8 @@
  * static template selection (see §11.10 implementation note in spec),
  * NEVER concatenated into LLM prompts.
  */
+
+import { ApiError, request } from "./api";
 
 // ---------------------------------------------------------------------------
 // Contract types — verbatim per Tau §6 (Backend data needs).
@@ -137,6 +146,41 @@ export interface RecentActivity {
     food_days_logged: number;
     active_days_count: number;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Production honesty guard — same precedent as `customer-profile.ts:215`
+// and `food-scanner.ts:180`.
+//
+// The pilot rule (`lib/feature-flags.ts:9-12`): NOTHING fake in prod. A
+// stub that ships to a real customer would show them «Анна», 1240 kcal
+// they never ate and a massage they never booked. Until the reads are
+// wired, a prod-mode call must fail loudly → `StateError` renders.
+//
+// NOTE: the dashboard is ALSO hidden in prod by `STUB_SURFACES_ENABLED`
+// (`CustomerWellnessDashboardScreen.tsx:109`). That gate is a screen-
+// level decision that can be lifted at any time; this guard is a
+// module-level one that must not depend on it. Two locks, one door.
+// ---------------------------------------------------------------------------
+
+class StubNotWiredError extends Error {
+  constructor() {
+    super(
+      "Дашборд ещё не подключён. Загрузка временно недоступна. Попробуй позже.",
+    );
+    this.name = "StubNotWiredError";
+  }
+}
+
+function guardProd(endpoint: string): void {
+  if (!import.meta.env.DEV) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[customer-wellness] ${endpoint} called in production with no wire-up. ` +
+        "See docs/screens/customer-main-wellness-dashboard.md §6.",
+    );
+    throw new StubNotWiredError();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -277,12 +321,13 @@ const ACTIVITY_STUB: Record<StubVariant, RecentActivity> = import.meta.env.DEV
 /**
  * Fetch today's pulse + targets + greeting context.
  *
- * WIRING NOTE — STUB MODE: returns hardcoded sample data matching
- * Tau §6 contract. Replace stub body with a real
- * `GET /api/v1/customer/wellness/today` call after W4 ships per TL Q1.
- * Function signature does NOT change.
+ * STUB MODE — dev only. The backend
+ * (`GET /api/v1/customer/wellness/today`) already composes this from
+ * Ayla; swapping this body for `request("/wellness/today")` is the
+ * follow-up. Signature does NOT change.
  */
 export async function getWellnessToday(): Promise<WellnessToday> {
+  guardProd("GET /api/v1/customer/wellness/today");
   const variant = pickStubVariant();
   // Simulate realistic network latency for skeleton testing (~300ms).
   await new Promise<void>((resolve) => setTimeout(resolve, 300));
@@ -292,10 +337,12 @@ export async function getWellnessToday(): Promise<WellnessToday> {
 /**
  * Fetch next booking + this-week count + weekly progress aggregate.
  *
- * WIRING NOTE — STUB MODE: same pattern as getWellnessToday.
- * Replace with `GET /api/v1/customer/recent-activity` when W4 ships.
+ * STUB MODE — dev only, same pattern as getWellnessToday. Backend
+ * `GET /api/v1/customer/recent-activity` exists; wiring is the
+ * follow-up.
  */
 export async function getRecentActivity(): Promise<RecentActivity> {
+  guardProd("GET /api/v1/customer/recent-activity");
   const variant = pickStubVariant();
   await new Promise<void>((resolve) => setTimeout(resolve, 350));
   return ACTIVITY_STUB[variant];
@@ -309,10 +356,36 @@ const WATER_QUEUE_KEY = "max:wellness_water_offline_queue";
 const WATER_QUEUE_TTL_MS = 24 * 60 * 60 * 1000; // 24h per spec
 
 export interface QueuedWaterLog {
-  /** ms epoch — used for TTL pruning + ordering. */
+  /** ms epoch — the TAP time. Drives TTL pruning, ordering, AND the
+   *  `ts` sent to Ayla so a late flush lands on the right day. */
   ts: number;
   /** ml — defaults to 250 per quick action spec. */
   volume_ml: number;
+  /**
+   * Idempotency key, minted once at enqueue and reused on every retry.
+   * A retry after an ambiguous failure (request delivered, response
+   * lost) must not double-count the glass.
+   *
+   * Optional for backward compatibility: entries already sitting in a
+   * customer's localStorage from a previous build have no key. Those
+   * fall back to a deterministic key derived from ts + volume.
+   */
+  key?: string;
+}
+
+/** Stable key for an entry, including pre-DRF-1402 queued ones. */
+function idempotencyKeyFor(entry: QueuedWaterLog): string {
+  return entry.key ?? `water-${entry.ts}-${entry.volume_ml}`;
+}
+
+function mintQueueKey(ts: number): string {
+  // crypto.randomUUID is present in the MAX webview (recent Chromium)
+  // but not in every test/SSR environment — degrade, never throw.
+  const rnd =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2, 12);
+  return `water-${ts}-${rnd}`;
 }
 
 /**
@@ -324,7 +397,8 @@ export interface QueuedWaterLog {
  */
 export function enqueueWaterLog(volume_ml = 250): number {
   const queue = readWaterQueue();
-  queue.push({ ts: Date.now(), volume_ml });
+  const ts = Date.now();
+  queue.push({ ts, volume_ml, key: mintQueueKey(ts) });
   writeWaterQueue(queue);
   return queue.length;
 }
@@ -373,20 +447,135 @@ function writeWaterQueue(queue: QueuedWaterLog[]): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Water write path — POST / DELETE against Ayla via apps/miniapp_api.
+// ---------------------------------------------------------------------------
+
+/** Response of `POST /wellness/water` (see `views.py::customer_wellness_water`). */
+export interface WaterLogResult {
+  entry_id: string;
+  ml: number;
+  water_ml: number;
+  today_total_ml: number;
+  today_norm_ml: number;
+  water_glasses_eaten: number;
+  water_glasses_target: number;
+}
+
 /**
- * Auto-flush the queue. Called on reconnect (online event listener).
- * Real flush implementation posts to `POST /api/v1/customer/wellness/water`
- * per entry; STUB MODE just clears (W4 wires the real endpoint).
+ * Post one water entry. `ts` is the TAP time (not now) — a queue
+ * flushed after midnight must not move yesterday's glass into today.
+ */
+export async function postWaterLog(entry: QueuedWaterLog): Promise<WaterLogResult> {
+  return request<WaterLogResult>("/wellness/water", {
+    method: "POST",
+    body: JSON.stringify({
+      ml: entry.volume_ml,
+      ts: new Date(entry.ts).toISOString(),
+      idempotency_key: idempotencyKeyFor(entry),
+    }),
+  });
+}
+
+/**
+ * Undo a logged glass — the way back when the customer mis-tapped.
+ *
+ * Returns `true` when Ayla removed it, `false` when the restore window
+ * has closed (404) and the glass therefore STAYS counted. Anything else
+ * (outage, 5xx) throws: a caller must never be told «removed» on the
+ * strength of a failed request. That confusion is exactly the bug this
+ * whole change exists to remove.
+ */
+export async function undoWaterLog(entryId: string): Promise<boolean> {
+  try {
+    await request<void>(`/wellness/water/${encodeURIComponent(entryId)}`, {
+      method: "DELETE",
+    });
+    return true;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return false;
+    throw err;
+  }
+}
+
+/**
+ * Is this failure worth retrying, or will the server refuse forever?
+ *
+ * A 4xx (bar 408/429) means the entry itself is unacceptable — keeping
+ * it would poison the queue: every later flush would stop on it and the
+ * glasses queued behind it would never reach Ayla. Anything else
+ * (offline, timeout, 5xx, 502 from our own proxy) is transient.
+ */
+function isPermanentRejection(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false; // network / parse — retry
+  if (err.status === 408 || err.status === 429) return false;
+  return err.status >= 400 && err.status < 500;
+}
+
+/** Guards against two overlapping flushes double-posting the same entry. */
+let flushInFlight: Promise<number> | null = null;
+
+/**
+ * Flush the offline queue to Ayla. Called on reconnect (online event
+ * listener) and right after an online tap.
+ *
+ * Returns the number of entries Ayla accepted.
+ *
+ * ## The invariant
+ *
+ * An entry leaves the queue ONLY when the server accepted it (or
+ * permanently refused it). This function used to clear the queue
+ * unconditionally without sending anything — the customer's glass was
+ * silently destroyed while the UI said «синхронизация».
+ *
+ * ## Partial success
+ *
+ * Entries are sent oldest-first. On the first RETRYABLE failure we stop
+ * and keep that entry plus everything after it: if the network just
+ * dropped, the remaining posts would fail anyway, and stopping
+ * preserves chronological order for the next attempt. Entries already
+ * accepted stay accepted — they are not re-sent. A PERMANENT rejection
+ * drops just that one entry and the loop continues.
  */
 export async function flushWaterQueue(): Promise<number> {
-  const queue = readWaterQueue();
-  if (queue.length === 0) return 0;
-  // STUB: pretend each POST succeeds.
-  // Replace with real `request("/wellness/water", { method: "POST", body: ... })`
-  // loop once W4 ships endpoint.
-  await new Promise<void>((resolve) => setTimeout(resolve, 100));
-  writeWaterQueue([]);
-  return queue.length;
+  if (flushInFlight) return flushInFlight;
+  flushInFlight = (async () => {
+    const queue = readWaterQueue();
+    if (queue.length === 0) return 0;
+
+    const remaining: QueuedWaterLog[] = [];
+    let synced = 0;
+
+    for (const [i, entry] of queue.entries()) {
+      try {
+        await postWaterLog(entry);
+        synced += 1;
+      } catch (err) {
+        if (isPermanentRejection(err)) {
+          // eslint-disable-next-line no-console
+          console.warn("[customer-wellness] water entry refused, dropping", err);
+          continue;
+        }
+        // Retryable — this entry and every later one stay queued.
+        remaining.push(...queue.slice(i));
+        break;
+      }
+    }
+
+    // Re-read before writing: a tap during the awaits appended to the
+    // SAME storage key, and blind-writing `remaining` would erase it —
+    // the very class of bug this function is being fixed for.
+    const appended = readWaterQueue().filter(
+      (e) => !queue.some((sent) => sent.ts === e.ts && sent.key === e.key),
+    );
+    writeWaterQueue([...remaining, ...appended]);
+    return synced;
+  })();
+  try {
+    return await flushInFlight;
+  } finally {
+    flushInFlight = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
