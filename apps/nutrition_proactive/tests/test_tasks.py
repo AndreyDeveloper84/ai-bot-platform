@@ -644,14 +644,21 @@ class TestConsentGate:
 
         The regression guarded against is a fourth copy of the gate.
         Three things have to hold: the name this module calls **is** the
-        shared function, its whole vocabulary is declared here, and the
-        call actually happens on the live path — the last checked by
-        replacing it and watching ``check_common`` change its answer.
+        shared function, its whole reachable vocabulary is declared here,
+        and the call actually happens on the live path — the last checked
+        by replacing it and watching ``check_common`` change its answer.
+
+        This module calls the gate without ``required_consents``, so the
+        vocabulary it must declare is the default call's
+        (:data:`~apps.notifications.proactive.DEFAULT_BLOCK_REASONS`),
+        not every slug the parametric gate can return (DRF-1338 added
+        ``no_health_consent``, reachable only when a caller asks for the
+        HEALTH basis — this surface never does).
         """
         from apps.notifications import proactive
 
         assert selection.consent_blocker is proactive.consent_blocker
-        assert set(proactive.BLOCK_REASONS) <= set(selection.BLOCK_REASONS)
+        assert set(proactive.DEFAULT_BLOCK_REASONS) <= set(selection.BLOCK_REASONS)
 
         user = make_user(tenant)
         assert selection.check_common(user) is None

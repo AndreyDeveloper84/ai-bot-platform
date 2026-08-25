@@ -61,11 +61,27 @@ veto a future edit can skip.
   person stays reachable and, without this check, stays a recipient.
   One such row exists on the pilot today.
 * ``consent_at IS NULL`` — never consented under 152-ФЗ.
-* an active ``ConsentRecord`` for ``PERSONAL_DATA``. ``consent_at`` is a
+* an active ``ConsentRecord`` for every type in ``required_consents`` —
+  by default just ``PERSONAL_DATA``. ``consent_at`` is a
   denormalised stamp and :func:`apps.consent.services.withdraw` never
   clears it — it stamps ``withdrawn_at`` on the record and leaves the
   ``BotUser`` column alone. Gating on ``consent_at`` alone keeps
   messaging somebody who explicitly withdrew.
+
+### The fourth condition is parametric (DRF-1338)
+
+``required_consents`` names the consent types that must ALL be active
+before the bot may write first. The default — ``(PERSONAL_DATA,)`` — is
+the historical gate: every existing caller keeps its exact behavior and
+slugs without an edit. A caller handling health-class data (special
+category, 152-ФЗ ст. 10) passes both ``PERSONAL_DATA`` and ``HEALTH`` —
+the same two-key standard :mod:`apps.orchestrator.nutrition_context`
+already applies to *reading* that data. A missing ``PERSONAL_DATA`` still
+reports ``consent_withdrawn`` / ``consent_unproven``; a missing
+additional type reports ``no_<type>_consent`` (``no_health_consent``),
+its own slug, so a dry run tells "never gave the 152-ФЗ baseline" apart
+from "never gave health". The types are asked in the order given, so the
+caller decides which gap is reported first.
 
 Reads use :func:`~apps.consent.services.has_global_consent`, not
 :func:`~apps.consent.services.has_consent`. The tenant-scoped reader
@@ -104,15 +120,40 @@ BLOCK_REASONS = (
     "no_consent",
     "consent_withdrawn",
     "consent_unproven",
+    # DRF-1338: missing HEALTH when a caller requires it. Distinct from
+    # "no_consent" so a dry run tells "no 152-ФЗ baseline" apart from
+    # "no health consent".
+    "no_health_consent",
+)
+
+#: The subset of :data:`BLOCK_REASONS` reachable by a call that leaves
+#: ``required_consents`` at its default. Callers that never pass the
+#: argument (DRF-1314's delegation, DRF-1301's follow-ups) can only ever
+#: see these; their dry-run vocabularies are expected to cover this set,
+#: not the whole of :data:`BLOCK_REASONS`.
+DEFAULT_BLOCK_REASONS = (
+    "opt_out",
+    "deleted",
+    "no_consent",
+    "consent_withdrawn",
+    "consent_unproven",
 )
 
 
-def consent_blocker(bot_user: Any) -> str | None:
+def consent_blocker(
+    bot_user: Any,
+    required_consents: tuple[str, ...] | None = None,
+) -> str | None:
     """May we write to this person unprompted at all?
 
     Returns a reason slug when we may not, ``None`` when we may. Each
     condition gets its own slug so a dry run tells the operator *which*
     one fired rather than a single undifferentiated "blocked".
+
+    ``required_consents`` is the explicit set of ``ConsentRecord`` types
+    that must all be active; ``None`` means the historical default,
+    ``(PERSONAL_DATA,)``, so existing callers change nothing. Types are
+    evaluated in the order given; the first missing one decides the slug.
 
     Accepts anything with the four attributes — the argument is typed
     ``Any`` so callers holding a lazily-loaded FK, a deferred row, or a
@@ -134,14 +175,23 @@ def consent_blocker(bot_user: Any) -> str | None:
     from apps.consent.services import has_global_consent
 
     personal_data = ConsentRecord.ConsentType.PERSONAL_DATA.value
-    if has_global_consent(bot_user, personal_data):
-        return None
+    if required_consents is None:
+        required_consents = (personal_data,)
 
-    ever = ConsentRecord.all_tenants.filter(
-        bot_user=bot_user,
-        consent_type=personal_data,
-    ).exists()
-    return "consent_withdrawn" if ever else "consent_unproven"
+    for consent_type in required_consents:
+        if has_global_consent(bot_user, consent_type):
+            continue
+        if consent_type == personal_data:
+            ever = ConsentRecord.all_tenants.filter(
+                bot_user=bot_user,
+                consent_type=personal_data,
+            ).exists()
+            return "consent_withdrawn" if ever else "consent_unproven"
+        # One slug per additional type, so a dry run names the missing
+        # basis. BLOCK_REASONS gets a row per ConsentType a caller has
+        # asked about; a caller needing a new type adds one.
+        return "no_" + consent_type + "_consent"
+    return None
 
 
 def vet_outbound(text: str) -> tuple[str, str | None]:
@@ -168,4 +218,4 @@ def vet_outbound(text: str) -> tuple[str, str | None]:
     return text, None
 
 
-__all__ = ["BLOCK_REASONS", "consent_blocker", "vet_outbound"]
+__all__ = ["BLOCK_REASONS", "DEFAULT_BLOCK_REASONS", "consent_blocker", "vet_outbound"]
