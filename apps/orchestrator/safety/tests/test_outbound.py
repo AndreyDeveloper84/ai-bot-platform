@@ -97,6 +97,61 @@ class TestContactDetails:
         assert verdict.allowed
 
 
+class TestPartialPhoneNumbers:
+    """The four-digit tail is still a phone (DRF-1039 / OD-W2-2, DRF-1209).
+
+    The live leak this comes from: a truncated excerpt left the last four
+    digits of a customer's number readable, and the owner decision allows
+    no "identifier" exception for a partial number. But a bare four-digit
+    group is also a price, a year, a duration — so the tail only counts
+    when the sentence itself says it is a phone.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Записала вас, ваш номер 4567.",
+            "Подтверждение придёт на номер 45-67.",
+            "Перезвоните мне, тел. 1234.",
+            "Телефон: 1234.",
+            "Номер телефона клиентки 1234.",
+            "Телефон клиентки 1234.",
+            "Номер клиентки заканчивается на 4567.",
+            "Помню последние 4 цифры: 4567.",
+        ],
+    )
+    def test_a_marked_tail_is_stopped(self, text):
+        verdict = evaluate_outbound(text)
+
+        assert verdict.blocked
+        assert "contact" in verdict.categories
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # digits that are not phones — the class that decides whether
+            # this guard survives a real pilot
+            "Стоимость процедуры 1500 ₽, оплата на месте.",
+            "Салон открыт с 9 до 21 ежедневно.",
+            "В 2024 году салон открыл второй филиал.",
+            "Сегодня вы записали 1 200 ккал, это ниже вашей нормы.",
+            "Курс из 10 сеансов обычно берут, чтобы эффект держался.",
+            # numbers that are not phones even next to the word «номер»
+            "Ваш номер заказа 1234 сохранён.",
+            "Номер записи 1234 уточните у администратора.",
+            # a one-time code is not a phone tail
+            "Код подтверждения 4521 введите в приложении.",
+            # a four-digit group inside an identifier is not a phone either
+            "Идентификатор c4202567-6706-417c-affe-1234567890ab.",
+        ],
+    )
+    def test_digits_without_a_phone_marker_pass(self, text):
+        verdict = evaluate_outbound(text)
+
+        assert verdict.allowed
+        assert verdict.text == text
+
+
 class TestBehaviour:
     def test_the_reply_is_replaced_not_edited(self):
         """Cutting a sentence can invert what is left of the paragraph."""
