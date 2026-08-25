@@ -44,6 +44,7 @@ import {
 } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
+import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
   getMasterSchedule,
   getPendingAvailability,
@@ -105,8 +106,12 @@ const COPY = {
   conflictTapHint: "уточнить у админа",
   conflictBanner: "⚠ Конфликт расписания — посмотрите",
   emptyDay: "Свободный день. Отдыхайте.",
-  emptyWeek:
-    "Расписание ещё не составлено. Карина добавит вас на смены.",
+  // The admin is named by the salon, never by a hardcoded first name — see
+  // lib/salonOwnerHint.ts. `MasterScheduleResponse` carries no salon, so both
+  // call sites pass the neutral default; the parameter is here so that wiring a
+  // real name later is a one-line change at each call site.
+  emptyWeek: (ownerHint: string) =>
+    `Расписание ещё не составлено. ${ownerHint} добавит вас на смены.`,
   pendingBanner: (start: string, end: string) =>
     `У вас запрос на выходной ${start}—${end}, ждёт одобрения`,
   unavailableSheet: {
@@ -122,7 +127,8 @@ const COPY = {
     commentLabel: "Комментарий (необязательно)",
     cancel: "Отменить",
     submit: "Запросить",
-    success: "Запрос отправлен. Карина увидит и подтвердит.",
+    success: (ownerHint: string) =>
+      `Запрос отправлен. ${ownerHint} увидит и подтвердит.`,
     error: "Не получилось отправить запрос. Попробуйте снова.",
   },
   weekClientsLabel: (n: number) =>
@@ -346,7 +352,7 @@ export function MasterScheduleScreen() {
       hapticImpact("heavy");
       setSnackbar({
         visible: true,
-        message: COPY.unavailableSheet.success,
+        message: COPY.unavailableSheet.success(DEFAULT_SALON_OWNER_HINT),
       });
       setSheet(EMPTY_SHEET);
       // Refresh pending list + schedule (in case backend already created
@@ -919,7 +925,9 @@ function WeekView({
   if (!anyWorking) {
     return (
       <section className="master-dashboard__section">
-        <p className="master-dashboard__empty-line">{COPY.emptyWeek}</p>
+        <p className="master-dashboard__empty-line">
+          {COPY.emptyWeek(DEFAULT_SALON_OWNER_HINT)}
+        </p>
       </section>
     );
   }
