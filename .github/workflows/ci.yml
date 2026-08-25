@@ -8,6 +8,12 @@ name: ci
 # «45m21s against a 45m ceiling» came from — not a slow suite, two runs
 # elbowing each other.
 #
+# (The «45m ceiling» named just above is HISTORY. DRF-1381 raised it to
+# 60 on a measurement of the job itself — see the block over
+# `timeout-minutes` below. The observation recorded here still stands:
+# the duplication was real, and moving it out of the trigger is what
+# fixed it.)
+#
 # Grouping the two events together cannot fix this: whichever run lost the
 # race would report `cancelled` on the PR, which reads as «somebody skipped
 # it» (DRF-1373). The duplication has to die at the trigger instead.
@@ -153,6 +159,20 @@ jobs:
     # median job passes ~50 min, the margin computed above is spent and
     # this number is stale again. Re-measure from the jobs API. Do not
     # assume.
+    #
+    # AND HOW THIS NUMBER GETS FALSIFIED. No soak was run to "prove" 60,
+    # deliberately: with p99.9 = 52.3 min a soak can only report the zero
+    # it was built to report — that is staging a test, not running one —
+    # while costing ~700 runner-minutes against PRs queued to merge. The
+    # evidence is collected by OBSERVATION of real traffic instead, which
+    # is also the better sample: real runs carry different diffs, load and
+    # contention. The claim is therefore refutable, and here is the line:
+    #
+    #   IF ANY RUN IS CANCELLED AT THE 60-MIN CEILING WITHIN THE NEXT 20
+    #   RUNS, THIS NUMBER IS WRONG.
+    #
+    # That would mean the fit above understated the tail. Recompute it
+    # from fresh jobs-API data — do not simply nudge the ceiling upward.
     timeout-minutes: 60
 
     services:
