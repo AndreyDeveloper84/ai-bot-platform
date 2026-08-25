@@ -294,7 +294,9 @@ export interface Preferences {
   notify_promo: boolean;
   notify_birthday: boolean;
   birthday_date: string | null; // ISO 8601 yyyy-mm-dd
-  allergies: string;
+  // DRF-1371 removed the free-text contraindications member. The column is
+  // gone, GET /me no longer sends it, and PATCH /me now answers 400 for it —
+  // re-adding it here would only let a screen write a field the API rejects.
 }
 
 export interface Profile {

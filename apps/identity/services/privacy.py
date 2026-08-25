@@ -301,10 +301,10 @@ def _erase_bot_user_pii(bot_user: BotUser, link: _PersonLink) -> None:
 
     ``UserPreferences`` goes too, matching what the legacy confirmed path
     (:func:`apps.identity.services.profile.soft_delete_user`) already did:
-    ``allergies`` is free-text health data and ``birthday_date`` is a
-    direct identifier, and the delete sheet promises the customer that
-    their «персональные настройки» are removed. ``get_profile`` recreates
-    a default row on the next read, so nothing downstream breaks.
+    ``birthday_date`` is a direct identifier, and the delete sheet
+    promises the customer that their «персональные настройки» are removed.
+    ``get_profile`` recreates a default row on the next read, so nothing
+    downstream breaks.
     """
     from apps.identity.models import UserPreferences
 
