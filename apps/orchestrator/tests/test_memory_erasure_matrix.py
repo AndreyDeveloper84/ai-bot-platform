@@ -509,15 +509,43 @@ class TestBackendDeclaredContext:
 
 
 class TestDialogueHistory:
-    def test_forget_all_does_not_touch_the_short_term_window(self, settings, ayla, monkeypatch):
-        """GAP, P0 — the window IS the LLM history (handler.py:672) and holds
-        the raw sentence the fact was extracted from. Nothing clears it:
-        ``short_term.clear`` has no production caller anywhere in ``apps/``.
+    """FIXED (was four GAP cells, P0) — DRF-1369.
+
+    The audit read this section as «the concierge reads the переписка». It does
+    not: ``concierge.load_recent_history`` has no production caller and the MAX
+    prompt's history comes out of Redis. The route that DID exist is the
+    master's AI draft, assembled straight out of ``Message`` rows.
+
+    The owner's ruling (``OD_MEMORY.md`` §4) is anonymise, not delete, with a
+    **guarantee** of unreachability from the prompt pipeline. So these cells are
+    inverted in three directions at once: the window is empty, the rows are
+    empty, and the archive still reads. The standing guarantee against a reader
+    written next month is a separate file —
+    ``apps/conversations/tests/test_dialogue_reader_registry.py``.
+    """
+
+    @staticmethod
+    def _fake_redis(monkeypatch):
+        """Patch BOTH per-conversation Redis stores the anonymiser deletes."""
+        from apps.llm import pii_tokenizer
+
+        fake = _FakeRedis()
+        monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
+        monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+        return fake
+
+    def test_forget_all_empties_the_short_term_window(self, settings, ayla, monkeypatch):
+        """FIXED (was GAP, P0) — the window IS the LLM history and it held the
+        raw sentence the fact was extracted from.
+
+        Its only lifetime used to be the 24h TTL, which is not a protection:
+        сутки — это сутки, and a person told «удалить» hears «сейчас».
+        ``short_term.clear`` was written for exactly this and called by nothing;
+        «забудь всё» now calls it.
         """
         from apps.conversations.services import resolve_active_global_conversation
 
-        fake_redis = _FakeRedis()
-        monkeypatch.setattr(short_term, "_redis_client", lambda: fake_redis)
+        self._fake_redis(monkeypatch)
 
         bu = _bot_user("erase-hist-1")
         _consents(bu, settings)
@@ -527,19 +555,64 @@ class TestDialogueHistory:
 
         _forget_all(bu)
 
-        recalled = short_term.recall(conversation.id)
-        assert [m["content"] for m in recalled] == ["я веган и живу на Арбате"]
+        assert short_term.recall(conversation.id) == []
 
-    def test_account_delete_does_not_touch_customer_messages(self, settings, ayla):
-        """GAP, P0 — ``privacy.delete_personal_data`` has five steps and none of
-        them is the customer's ``Conversation``/``Message``. Step 5 erases
-        ``StaffAssistantMessage`` (the employee surface) only. The customer's
-        own words survive verbatim and are read straight back by
-        ``concierge.load_recent_history`` — no deletion filter exists there.
+    def test_forget_all_anonymizes_the_dialogue_it_leaves_behind(self, settings, ayla, monkeypatch):
+        """The ruling in one cell: the prompt gets nothing, the review gets the words.
+
+        «Обезличить», not «удалить» — the owner keeps this record on purpose
+        («единственная запись того, что бот на самом деле сказал человеку»). So
+        the assertion is two-sided: the column every prompt path reads is empty,
+        and the archive still holds the sentence minus the phone number.
+        """
+        from apps.conversations.erasure import read_anonymized_dialogue
+        from apps.conversations.models import Message
+        from apps.conversations.services import resolve_active_global_conversation
+
+        self._fake_redis(monkeypatch)
+
+        bu = _bot_user("erase-hist-4")
+        _consents(bu, settings)
+        conversation = resolve_active_global_conversation(bu)
+        Message.all_tenants.create(
+            tenant=bu.tenant,
+            conversation=conversation,
+            role="user",
+            content="я веган, телефон 89990001122",
+            rendered_text="я веган, телефон 89990001122",
+        )
+
+        _forget_all(bu)
+
+        rows = list(Message.all_tenants.filter(conversation=conversation))
+        assert rows, "переписку не удаляют — строки остаются"
+        assert all(r.content == "" and r.rendered_text == "" for r in rows)
+
+        conversation.refresh_from_db()
+        assert conversation.anonymized_through is not None
+        assert conversation.anonymized_reason == "forget_all"
+
+        archived = read_anonymized_dialogue(conversation, purpose="matrix_cell")
+        blob = " ".join(a.body for a in archived)
+        assert "веган" in blob  # слова на месте — иначе это удаление
+        assert "89990001122" not in blob  # а прямой идентификатор — нет
+        assert "[PHONE]" in blob
+
+    def test_account_delete_anonymizes_customer_messages(self, settings, ayla, monkeypatch):
+        """FIXED (was GAP, P0) — ``privacy.delete_personal_data`` had five steps
+        and none of them was the customer's own ``Conversation``/``Message``.
+
+        Step 5 erased ``StaffAssistantMessage`` — the EMPLOYEE surface. The
+        customer's own words survived verbatim and were read straight into the
+        master's AI draft prompt (``ai_drafts._recent_history``), which is the
+        route the audit missed while looking at the concierge.
         """
         from apps.conversations.models import Message
         from apps.conversations.services import resolve_active_global_conversation
         from apps.identity.services.privacy import delete_personal_data
+        from apps.master_api.services.ai_drafts import _recent_history
+
+        self._fake_redis(monkeypatch)
 
         bu = _bot_user("erase-hist-2")
         _consents(bu, settings)
@@ -551,25 +624,24 @@ class TestDialogueHistory:
             content="я веган, мой мастер — Анна, телефон 89990001122",
         )
 
-        delete_personal_data(bu, client=ayla)
+        result = delete_personal_data(bu, client=ayla)
 
+        assert {s.step: s.ok for s in result.steps}["dialogue_anonymize"] is True
         rows = list(Message.all_tenants.filter(conversation=conversation))
-        assert len(rows) == 1
-        assert "89990001122" in rows[0].content
-        assert "веган" in rows[0].content
-        # And the prompt-side reader hands it straight back.
-        qs = Message.all_tenants.filter(conversation=conversation).order_by("-created_at")
-        assert "89990001122" in list(qs)[0].content
+        assert len(rows) == 1  # строка на месте
+        assert rows[0].content == ""  # а слов в ней нет
+        # And the prompt-side reader hands back nothing.
+        conversation.refresh_from_db()
+        assert _recent_history(conversation) == []
 
-    def test_account_delete_does_not_touch_the_short_term_window(self, settings, ayla, monkeypatch):
-        """GAP, P0 — same for the Redis window, which is the actual history the
-        MAX prompt is built from.
+    def test_account_delete_empties_the_short_term_window(self, settings, ayla, monkeypatch):
+        """FIXED (was GAP, P0) — same for the Redis window, which is the actual
+        history the MAX prompt is built from.
         """
         from apps.conversations.services import resolve_active_global_conversation
         from apps.identity.services.privacy import delete_personal_data
 
-        fake_redis = _FakeRedis()
-        monkeypatch.setattr(short_term, "_redis_client", lambda: fake_redis)
+        self._fake_redis(monkeypatch)
 
         bu = _bot_user("erase-hist-3")
         _consents(bu, settings)
@@ -578,28 +650,31 @@ class TestDialogueHistory:
 
         delete_personal_data(bu, client=ayla)
 
-        assert short_term.recall(conversation.id) == [
-            {"role": "user", "content": "мой телефон 89990001122"}
-        ]
+        assert short_term.recall(conversation.id) == []
 
-    def test_short_term_clear_has_no_production_caller(self):
-        """GAP — pins the reason the two tests above hold. ``short_term.clear``
-        documents itself as «used by the 152-ФЗ delete-my-data workflow»
-        (short_term.py:180-186); it is wired to nothing. Invert this assertion
-        when the erasure path starts calling it.
+    def test_short_term_clear_has_a_production_caller(self):
+        """FIXED (was GAP) — the docstring said «used by the 152-ФЗ
+        delete-my-data workflow» and nothing called it.
+
+        That gap is the whole reason this ticket did not settle for a read-side
+        filter: an intention written down by someone who meant it, in the right
+        module, is not a guarantee. The inverted cell NAMES the caller rather
+        than counting callers, so unwiring it cannot pass by adding a different
+        one somewhere else.
         """
         import pathlib
         import re
 
         root = pathlib.Path(__file__).resolve().parents[3] / "apps"
-        callers = [
-            str(p)
+        pattern = re.compile(r"short_term" + re.escape(".") + r"clear\s*\(")
+        callers = sorted(
+            p.relative_to(root).as_posix()
             for p in root.rglob("*.py")
             if "tests" not in p.parts
             and p.name != "short_term.py"
-            and re.search(r"short_term\.clear\s*\(", p.read_text(encoding="utf-8"))
-        ]
-        assert callers == []
+            and pattern.search(p.read_text(encoding="utf-8"))
+        )
+        assert callers == ["conversations/erasure.py"]
 
 
 # ---------------------------------------------------------------------------

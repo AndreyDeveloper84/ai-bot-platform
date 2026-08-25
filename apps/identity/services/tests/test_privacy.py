@@ -512,6 +512,9 @@ class TestDelete:
             "consent_withdraw",
             "profile_pii_erase",
             "staff_assistant_erase",
+            # DRF-1369 — the customer's own dialogue. Step 5 covered the
+            # employee surface; this is the one the cascade had no step for.
+            "dialogue_anonymize",
         }
 
 
