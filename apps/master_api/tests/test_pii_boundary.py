@@ -456,7 +456,7 @@ class TestCustomerTypedContactsAreRedacted:
 
         from apps.master_api.services.conversations import EXCERPT_MAX_LEN
 
-        padding = "а" * (EXCERPT_MAX_LEN - 6)
+        padding = "а" * (EXCERPT_MAX_LEN - 12)
         Message.all_tenants.create(
             tenant=tenant,
             conversation=seeded_surface,
