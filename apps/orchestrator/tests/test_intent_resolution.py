@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, create_autospec, patch
 
 import pytest
 from django.test import override_settings
@@ -23,6 +23,7 @@ from django.test import override_settings
 from apps.orchestrator import intent_resolution
 from apps.orchestrator.intent_resolution import (
     _validate_and_build,
+    build_resolution_messages,
     resolve_and_log_turn_intent,
     resolve_intent,
 )
@@ -305,21 +306,45 @@ class TestSoftCoercions:
         assert contract["confidence"] == 1.0
 
 
-def _client_returning(payload: str) -> Mock:
+def _router_client_fake(**create_behaviour: object) -> object:
+    """Подделка клиента, **снятая с настоящего** ``RouterLLMClient``.
+
+    DRF-1310 — сердце сторожа. Резолвер падал на КАЖДОМ живом ходе
+    пилота с ``'RouterLLMClient' object has no attribute 'create'``, а тесты
+    были зелёными: подделкой был голый ``Mock()``, который принимает
+    ЛЮБОЙ путь вызова. Подделка, не совпадающая с настоящим клиентом,
+    СКРЫВАЕТ поломку, а не находит её.
+
+    Ручной ``spec=[...]`` тоже не решает задачу до конца: он закрепляет
+    только верхний уровень и описывает клиент РУКАМИ — вложенный
+    ``chat.completions.create`` оставался голым ``AsyncMock``, который
+    принимает любую сигнатуру. ``create_autospec`` по ЖИВОМУ экземпляру
+    снимает форму целиком, вместе с сигнатурой ``create``: подделка
+    больше НЕ МОЖЕТ обещать того, чего у настоящего клиента нет.
+
+    Цена решения честно: тесты резолвера теперь требуют ai-core (через
+    ``concierge``). Импорт оставлен ОТЛОЖЕННЫМ — чистые тесты валидатора
+    (``TestValidate*``) коллектятся и проходят без него, как и раньше.
+    Связать подделку с настоящим клиентом и одновременно не зависеть
+    от него нельзя — это и есть цена сторожа, и она меньше трёх часов
+    мёртвого контракта на пилоте.
+    """
+
+    from apps.orchestrator.concierge import CONCIERGE_SKILL, RouterLLMClient
+
+    client = create_autospec(RouterLLMClient(skill=CONCIERGE_SKILL), instance=True, spec_set=True)
+    client.chat.completions.create.configure_mock(**create_behaviour)
+    client.last_provider = "openai"
+    client.last_model = "gpt-4o-mini"
+    return client
+
+
+def _client_returning(payload: str) -> object:
     response = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=payload))],
         usage=SimpleNamespace(prompt_tokens=100, completion_tokens=50),
     )
-    # Форма клиента копирует RouterLLMClient (AsyncOpenAI-shaped):
-    # вызов идёт через chat.completions.create, а не через create.
-    # Голый Mock() принимал любой путь и потому пропустил DRF-1310.
-    client = Mock(spec=["chat", "last_provider", "last_model"])
-    client.chat = SimpleNamespace(
-        completions=SimpleNamespace(create=AsyncMock(return_value=response))
-    )
-    client.last_provider = "openai"
-    client.last_model = "gpt-4o-mini"
-    return client
+    return _router_client_fake(return_value=response)
 
 
 class TestResolveIntent:
@@ -352,10 +377,7 @@ class TestResolveIntent:
         assert contract is None
 
     def test_llm_error_yields_none(self):
-        client = Mock(spec=["chat"])
-        client.chat = SimpleNamespace(
-            completions=SimpleNamespace(create=AsyncMock(side_effect=RuntimeError("provider down")))
-        )
+        client = _router_client_fake(side_effect=RuntimeError("provider down"))
         contract, usage = resolve_intent(
             USER_TEXT, message_id=MESSAGE_ID, trace_id=TRACE_ID, llm_client=client
         )
@@ -466,3 +488,45 @@ class TestResolverMatchesRealClient:
             "У клиента появился плоский create — проверьте, какой путь "
             "зовёт резолвер, и обновите оба теста разом"
         )
+
+    # -- Вторая половина сторожа: у самой ПОДДЕЛКИ должны быть зубы -----
+    #
+    # Тесты выше смотрят на настоящий класс. Их одних мало: они останутся
+    # зелёными, даже если подделка снова разъедется с клиентом (именно так
+    # DRF-1310 и дожил до пилота). Эти три проверяют саму подделку — что
+    # она физически не может обещать того, чего у клиента нет.
+
+    def test_fake_refuses_the_call_path_that_broke_the_pilot(self):
+        """Плоский ``create`` на подделке обязан падать так же, как на живом.
+
+        Ровно эта строка три часа роняла каждый ход владельца.
+        """
+
+        client = _router_client_fake(return_value=None)
+        with pytest.raises(AttributeError):
+            client.create(model="m", messages=[])
+
+    def test_fake_enforces_the_real_create_signature(self):
+        """Подделка снята с настоящей сигнатуры, а не с голого AsyncMock.
+
+        Голый ``AsyncMock`` принимает любые аргументы — и пропустил бы
+        опечатку в имени kwarg так же тихо, как пропустил неверный путь.
+        """
+
+        client = _router_client_fake(return_value=None)
+        with pytest.raises(TypeError):
+            client.chat.completions.create(model="m", msgs=[])
+
+    def test_fake_accepts_exactly_what_the_resolver_passes(self):
+        """Обратная полярность: настоящий вызов резолвера обязан проходить.
+
+        Без неё сторож можно «починить» подделкой, которая запрещает всё.
+        """
+
+        client = _router_client_fake(return_value=None)
+        # Сигнатура проверяется в момент вызова; корутину закрываем сами,
+        # чтобы не оставить RuntimeWarning «never awaited».
+        client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=build_resolution_messages("привет", message_id="m1"),
+        ).close()
